@@ -11,6 +11,7 @@ toml==0.10.2
 tqdm==4.67.1
 transformers==4.46.3
 voluptuous==0.15.2
+torch>=2.5.1
 
 # optional dependencies
 # ascii-magic==2.3.0
