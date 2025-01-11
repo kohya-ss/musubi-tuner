@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import shutil
+from typing import List
 
 import accelerate
 import torch
@@ -60,7 +61,7 @@ def get_sanitized_config_or_none(args: argparse.Namespace):
 
 class LossRecorder:
     def __init__(self):
-        self.loss_list: list[float] = []
+        self.loss_list: List[float] = []
         self.loss_total: float = 0.0
 
     def add(self, *, epoch: int, step: int, loss: float) -> None:

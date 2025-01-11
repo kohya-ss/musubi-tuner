@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def encode_prompt(text_encoder: TextEncoder, prompt: Union[str, list[str]]):
+def encode_prompt(text_encoder: TextEncoder, prompt: Union[str, List[str]]):
     data_type = "video"  # video only, image is not supported
     text_inputs = text_encoder.text2tokens(prompt, data_type=data_type)
 
@@ -33,7 +33,7 @@ def encode_prompt(text_encoder: TextEncoder, prompt: Union[str, list[str]]):
 
 
 def encode_and_save_batch(
-    text_encoder: TextEncoder, batch: list[ItemInfo], is_llm: bool, accelerator: Optional[accelerate.Accelerator]
+    text_encoder: TextEncoder, batch: List[ItemInfo], is_llm: bool, accelerator: Optional[accelerate.Accelerator]
 ):
     prompts = [item.caption for item in batch]
     # print(prompts)

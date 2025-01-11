@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import numpy as np
 import torch
@@ -86,7 +86,7 @@ def show_console(
 
 
 def show_datasets(
-    datasets: list[BaseDataset], debug_mode: str, console_width: int, console_back: str, console_num_images: Optional[int]
+    datasets: List[BaseDataset], debug_mode: str, console_width: int, console_back: str, console_num_images: Optional[int]
 ):
     print(f"d: next dataset, q: quit")
 
@@ -119,7 +119,7 @@ def show_datasets(
             batch_index += 1
 
 
-def encode_and_save_batch(vae: AutoencoderKLCausal3D, batch: list[ItemInfo]):
+def encode_and_save_batch(vae: AutoencoderKLCausal3D, batch: List[ItemInfo]):
     contents = torch.stack([torch.from_numpy(item.content) for item in batch])
     if len(contents.shape) == 4:
         contents = contents.unsqueeze(1)  # B, H, W, C -> B, F, H, W, C

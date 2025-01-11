@@ -13,7 +13,7 @@ import random
 import time
 import json
 from multiprocessing import Value
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import accelerate
 import numpy as np
 from packaging.version import Version
@@ -218,7 +218,7 @@ def line_to_prompt_dict(line: str) -> dict:
     return prompt_dict
 
 
-def load_prompts(prompt_file: str) -> list[Dict]:
+def load_prompts(prompt_file: str) -> List[Dict]:
     # read prompts
     if prompt_file.endswith(".txt"):
         with open(prompt_file, "r", encoding="utf-8") as f:
@@ -434,7 +434,7 @@ class NetworkTrainer:
 
         return sample_parameters
 
-    def get_optimizer(self, args, trainable_params: list[torch.nn.Parameter]) -> tuple[str, str, torch.optim.Optimizer]:
+    def get_optimizer(self, args, trainable_params: List[torch.nn.Parameter]) -> Tuple[str, str, torch.optim.Optimizer]:
         # adamw, adamw8bit, adafactor
 
         optimizer_type = args.optimizer_type.lower()

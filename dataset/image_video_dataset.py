@@ -5,7 +5,7 @@ import math
 import os
 import random
 import time
-from typing import Optional, Sequence, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union, List, Dict
 
 import numpy as np
 import torch
@@ -103,7 +103,7 @@ def divisible_by(num: int, divisor: int) -> int:
     return num - num % divisor
 
 
-def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: tuple[int, int]) -> np.ndarray:
+def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: Tuple[int, int]) -> np.ndarray:
     """
     Resize the image to the bucket resolution.
     """
@@ -147,8 +147,8 @@ class ItemInfo:
         self,
         item_key: str,
         caption: str,
-        original_size: tuple[int, int],
-        bucket_size: Optional[Union[tuple[int, int], tuple[int, int, int]]] = None,
+        original_size: Tuple[int, int],
+        bucket_size: Optional[Union[Tuple[int, int], Tuple[int, int, int]]] = None,
         frame_count: Optional[int] = None,
         content: Optional[np.ndarray] = None,
         latent_cache_path: Optional[str] = None,
@@ -272,7 +272,7 @@ class BucketSelector:
         # calculate aspect ratio to find the nearest resolution
         self.aspect_ratios = np.array([w / h for w, h in self.bucket_resolutions])
 
-    def get_bucket_resolution(self, image_size: tuple[int, int]) -> tuple[int, int]:
+    def get_bucket_resolution(self, image_size: Tuple[int, int]) -> Tuple[int, int]:
         """
         return the bucket resolution for the given image size, (width, height)
         """
@@ -294,7 +294,7 @@ def load_video(
     start_frame: Optional[int] = None,
     end_frame: Optional[int] = None,
     bucket_selector: Optional[BucketSelector] = None,
-) -> list[np.ndarray]:
+) -> List[np.ndarray]:
     container = av.open(video_path)
     video = []
     bucket_reso = None
@@ -320,7 +320,7 @@ def load_video(
 
 class BucketBatchManager:
 
-    def __init__(self, bucketed_item_info: dict[tuple[int, int], list[ItemInfo]], batch_size: int):
+    def __init__(self, bucketed_item_info: Dict[Tuple[int, int], List[ItemInfo]], batch_size: int):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
         self.bucket_resos = list(self.buckets.keys())
@@ -402,7 +402,7 @@ class ContentDatasource:
     def is_indexable(self):
         return False
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> Tuple[str, str]:
         """
         Returns caption. May not be called if is_indexable() returns False.
         """
@@ -422,7 +422,7 @@ class ImageDatasource(ContentDatasource):
     def __init__(self):
         super().__init__()
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str]:
+    def get_image_data(self, idx: int) -> Tuple[str, Image.Image, str]:
         """
         Returns image data as a tuple of image path, image, and caption for the given index.
         Key must be unique and valid as a file name.
@@ -449,7 +449,7 @@ class ImageDirectoryDatasource(ImageDatasource):
     def __len__(self):
         return len(self.image_paths)
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str]:
+    def get_image_data(self, idx: int) -> Tuple[str, Image.Image, str]:
         image_path = self.image_paths[idx]
         image = Image.open(image_path).convert("RGB")
 
@@ -457,7 +457,7 @@ class ImageDirectoryDatasource(ImageDatasource):
 
         return image_path, image, caption
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> Tuple[str, str]:
         image_path = self.image_paths[idx]
         caption_path = os.path.splitext(image_path)[0] + self.caption_extension if self.caption_extension else ""
         with open(caption_path, "r", encoding="utf-8") as f:
@@ -517,7 +517,7 @@ class ImageJsonlDatasource(ImageDatasource):
     def __len__(self):
         return len(self.data)
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str]:
+    def get_image_data(self, idx: int) -> Tuple[str, Image.Image, str]:
         data = self.data[idx]
         image_path = data["image_path"]
         image = Image.open(image_path).convert("RGB")
@@ -526,7 +526,7 @@ class ImageJsonlDatasource(ImageDatasource):
 
         return image_path, image, caption
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> Tuple[str, str]:
         data = self.data[idx]
         image_path = data["image_path"]
         caption = data["caption"]
@@ -577,7 +577,7 @@ class VideoDatasource(ContentDatasource):
         start_frame: Optional[int] = None,
         end_frame: Optional[int] = None,
         bucket_selector: Optional[BucketSelector] = None,
-    ) -> tuple[str, list[Image.Image], str]:
+    ) -> Tuple[str, List[Image.Image], str]:
         # this method can resize the video if bucket_selector is given to reduce the memory usage
 
         start_frame = start_frame if start_frame is not None else self.start_frame
@@ -625,7 +625,7 @@ class VideoDirectoryDatasource(VideoDatasource):
         start_frame: Optional[int] = None,
         end_frame: Optional[int] = None,
         bucket_selector: Optional[BucketSelector] = None,
-    ) -> tuple[str, list[Image.Image], str]:
+    ) -> Tuple[str, List[Image.Image], str]:
         video_path = self.video_paths[idx]
         video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)
 
@@ -633,7 +633,7 @@ class VideoDirectoryDatasource(VideoDatasource):
 
         return video_path, video, caption
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> Tuple[str, str]:
         video_path = self.video_paths[idx]
         caption_path = os.path.splitext(video_path)[0] + self.caption_extension if self.caption_extension else ""
         with open(caption_path, "r", encoding="utf-8") as f:
@@ -693,7 +693,7 @@ class VideoJsonlDatasource(VideoDatasource):
         start_frame: Optional[int] = None,
         end_frame: Optional[int] = None,
         bucket_selector: Optional[BucketSelector] = None,
-    ) -> tuple[str, list[Image.Image], str]:
+    ) -> Tuple[str, List[Image.Image], str]:
         data = self.data[idx]
         video_path = data["video_path"]
         video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)
@@ -702,7 +702,7 @@ class VideoJsonlDatasource(VideoDatasource):
 
         return video_path, video, caption
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> Tuple[str, str]:
         data = self.data[idx]
         video_path = data["video_path"]
         caption = data["caption"]
@@ -823,7 +823,7 @@ class BaseDataset(torch.utils.data.Dataset):
         datasource.set_caption_only(True)
         executor = ThreadPoolExecutor(max_workers=num_workers)
 
-        data: list[ItemInfo] = []
+        data: List[ItemInfo] = []
         futures = []
 
         def aggregate_future(consume_all: bool = False):
@@ -921,7 +921,7 @@ class ImageDataset(BaseDataset):
         buckset_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale)
         executor = ThreadPoolExecutor(max_workers=num_workers)
 
-        batches: dict[tuple[int, int], list[ItemInfo]] = {}  # (width, height) -> [ItemInfo]
+        batches: Dict[Tuple[int, int], List[ItemInfo]] = {}  # (width, height) -> [ItemInfo]
         futures = []
 
         def aggregate_future(consume_all: bool = False):
@@ -961,7 +961,7 @@ class ImageDataset(BaseDataset):
 
         for fetch_op in self.datasource:
 
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str]:
+            def fetch_and_resize(op: callable) -> Tuple[Tuple[int, int], str, Image.Image, str]:
                 image_key, image, caption = op()
                 image: Image.Image
                 image_size = image.size
@@ -998,7 +998,7 @@ class ImageDataset(BaseDataset):
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{ARCHITECTURE_HUNYUAN_VIDEO}.safetensors"))
 
         # assign cache files to item info
-        bucketed_item_info: dict[tuple[int, int], list[ItemInfo]] = {}  # (width, height) -> [ItemInfo]
+        bucketed_item_info: Dict[tuple[int, int], List[ItemInfo]] = {}  # (width, height) -> [ItemInfo]
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
 
@@ -1106,7 +1106,7 @@ class VideoDataset(BaseDataset):
         executor = ThreadPoolExecutor(max_workers=num_workers)
 
         # key: (width, height, frame_count), value: [ItemInfo]
-        batches: dict[tuple[int, int, int], list[ItemInfo]] = {}
+        batches: Dict[Tuple[int, int, int], List[ItemInfo]] = {}
         futures = []
 
         def aggregate_future(consume_all: bool = False):
@@ -1184,9 +1184,9 @@ class VideoDataset(BaseDataset):
 
         for operator in self.datasource:
 
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, list[np.ndarray], str]:
+            def fetch_and_resize(op: callable) -> Tuple[Tuple[int, int], str, List[np.ndarray], str]:
                 video_key, video, caption = op()
-                video: list[np.ndarray]
+                video: List[np.ndarray]
                 frame_size = (video[0].shape[1], video[0].shape[0])
 
                 # resize if necessary
@@ -1223,7 +1223,7 @@ class VideoDataset(BaseDataset):
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{ARCHITECTURE_HUNYUAN_VIDEO}.safetensors"))
 
         # assign cache files to item info
-        bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
+        bucketed_item_info: Dict[Tuple[int, int, int], List[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
 
@@ -1274,7 +1274,7 @@ class VideoDataset(BaseDataset):
 class DatasetGroup(torch.utils.data.ConcatDataset):
     def __init__(self, datasets: Sequence[Union[ImageDataset, VideoDataset]]):
         super().__init__(datasets)
-        self.datasets: list[Union[ImageDataset, VideoDataset]] = datasets
+        self.datasets: List[Union[ImageDataset, VideoDataset]] = datasets
         self.num_train_items = 0
         for dataset in self.datasets:
             self.num_train_items += dataset.num_train_items
