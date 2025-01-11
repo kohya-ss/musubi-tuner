@@ -756,11 +756,11 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         if self.attn_mode == "torch" and not self.split_attn:
             # initialize attention mask: bool tensor for sdpa, (b, 1, n, n)
             bs = img.shape[0]
-            attn_mask = torch.zeros((bs, 1, max_seqlen_q, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
+            attn_mask = torch.zeros((bs, 1, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
 
             # set attention mask with total_len
             for i in range(bs):
-                attn_mask[i, :, : total_len[i], : total_len[i]] = True
+                attn_mask[i, :, : total_len[i]] = True
             total_len = None  # means we don't use split_attn
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
