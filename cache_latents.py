@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def show_image(image: Union[List[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]]) -> int:
+def show_image(image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]]) -> int:
     import cv2
 
     imgs = (
@@ -47,7 +47,7 @@ def show_image(image: Union[List[Union[Image.Image, np.ndarray], Union[Image.Ima
 
 
 def show_console(
-    image: Union[List[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]],
+    image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]],
     width: int,
     back: str,
     interactive: bool = False,
