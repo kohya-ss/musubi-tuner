@@ -1053,7 +1053,7 @@ class VideoDataset(BaseDataset):
         frame_extraction: Optional[str] = "head",
         frame_stride: Optional[int] = 1,
         frame_sample: Optional[int] = 1,
-        target_frames: Optional[list[int]] = None,
+        target_frames: Optional[List[int]] = None,
         video_directory: Optional[str] = None,
         video_jsonl_file: Optional[str] = None,
         cache_directory: Optional[str] = None,
