@@ -695,6 +695,20 @@ class NetworkTrainer:
             optimizer_class = transformers.optimization.Adafactor
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
+        elif optimizer_type == "CAME".lower():
+            logger.info(f"use CAME optimizer | {optimizer_kwargs}")
+            try:
+                import came_pytorch
+            except ImportError:
+                raise ImportError("No came-pytorch / came-pytorchがインストールされていないようです")
+            try:
+                optimizer_class = came_pytorch.CAME
+            except AttributeError:
+                raise AttributeError(
+                    "No CAME. Please install came-pytorch. / CAMEが定義されていません。came-pytorchがインストールされていないようです。"
+                )
+            optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+
         elif optimizer_type == "AdamW".lower():
             logger.info(f"use AdamW optimizer | {optimizer_kwargs}")
             optimizer_class = torch.optim.AdamW
