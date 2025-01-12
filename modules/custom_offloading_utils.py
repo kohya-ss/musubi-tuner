@@ -4,6 +4,7 @@ import time
 from typing import Optional
 import torch
 import torch.nn as nn
+from typing import List
 
 
 def clean_memory_on_device(device: torch.device):
@@ -173,7 +174,7 @@ class ModelOffloader(Offloader):
     def __init__(
         self,
         block_type: str,
-        blocks: list[nn.Module],
+        blocks: List[nn.Module],
         num_blocks: int,
         blocks_to_swap: int,
         supports_backward: bool,
@@ -202,7 +203,7 @@ class ModelOffloader(Offloader):
             for handle in self.remove_handles:
                 handle.remove()
 
-    def create_backward_hook(self, blocks: list[nn.Module], block_index: int) -> Optional[callable]:
+    def create_backward_hook(self, blocks: List[nn.Module], block_index: int) -> Optional[callable]:
         # -1 for 0-based index
         num_blocks_propagated = self.num_blocks - block_index - 1
         swapping = num_blocks_propagated > 0 and num_blocks_propagated <= self.blocks_to_swap
@@ -228,7 +229,7 @@ class ModelOffloader(Offloader):
 
         return backward_hook
 
-    def prepare_block_devices_before_forward(self, blocks: list[nn.Module]):
+    def prepare_block_devices_before_forward(self, blocks: List[nn.Module]):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
 
@@ -251,7 +252,7 @@ class ModelOffloader(Offloader):
             return
         self._wait_blocks_move(block_idx)
 
-    def submit_move_blocks_forward(self, blocks: list[nn.Module], block_idx: int):
+    def submit_move_blocks_forward(self, blocks: List[nn.Module], block_idx: int):
         # check if blocks_to_swap is enabled
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return

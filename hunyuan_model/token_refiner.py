@@ -235,7 +235,7 @@ class SingleTokenRefiner(nn.Module):
         else:
             mask_float = mask.float().unsqueeze(-1)  # [b, s1, 1]
             context_aware_representations = (x * mask_float).sum(dim=1) / mask_float.sum(dim=1)
-        context_aware_representations = self.c_embedder(context_aware_representations)
+        context_aware_representations = self.c_embedder(context_aware_representations.to(dtype=x.dtype))
         c = timestep_aware_representations + context_aware_representations
 
         x = self.input_embedder(x)

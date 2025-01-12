@@ -5,7 +5,7 @@ import random
 import sys
 import os
 import time
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import numpy as np
 import torch
@@ -141,7 +141,7 @@ def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, res
 # region Encoding prompt
 
 
-def encode_prompt(prompt: Union[str, list[str]], device: torch.device, num_videos_per_prompt: int, text_encoder: TextEncoder):
+def encode_prompt(prompt: Union[str, List[str]], device: torch.device, num_videos_per_prompt: int, text_encoder: TextEncoder):
     r"""
     Encodes the prompt into text encoder hidden states.
 
