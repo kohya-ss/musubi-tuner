@@ -1112,7 +1112,8 @@ class NetworkTrainer:
         logger.info(f"Load dataset config from {args.dataset_config}")
         user_config = config_utils.load_user_config(args.dataset_config)
         blueprint = blueprint_generator.generate(user_config, args)
-        train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, training=True)
+        train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint["train_dataset_group"], training=True)  
+        val_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint["val_dataset_group"], training=True)
 
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
@@ -1282,6 +1283,90 @@ class NetworkTrainer:
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
         )
+        
+        val_collator = collator_class(current_epoch, current_step, ds_for_collator)  # same as train  
+        val_dataloader = torch.utils.data.DataLoader(  
+            val_dataset_group,  
+            batch_size=1,
+            shuffle=False,  
+            collate_fn=val_collator,  
+            num_workers=args.max_data_loader_n_workers  
+        )
+        
+        def validate(accelerator, transformer, val_dataloader, noise_scheduler, args):
+            unwrapped_transformer = accelerator.unwrap_model(transformer)
+            
+            # Switch to full inference mode so blocks are moved onto GPU:
+            unwrapped_transformer.switch_block_swap_for_inference()
+            
+            try:
+                unwrapped_transformer.eval()
+                torch.manual_seed(42)  # or any stable seed
+                losses = []
+
+                pos_embed_cache = {}  # optional if you want the same logic as train
+
+                for step, batch in enumerate(val_dataloader):
+                    with torch.no_grad(), accelerator.autocast():
+
+                        # 1) Unpack batch
+                        latents, llm_embeds, llm_mask, clip_embeds = batch
+
+                        # 2) Scale latents if needed
+                        latents = latents.to(accelerator.device, dtype=torch.float32)
+                        latents = latents * vae_module.SCALING_FACTOR
+
+                        # 3) Create noise & timesteps
+                        noise = torch.randn_like(latents)
+                        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
+                            args, noise, latents, noise_scheduler, accelerator.device, dtype=unwrapped_transformer.dtype
+                        )
+
+                        # 4) Possibly handle position embeddings
+                        pos_emb_shape = latents.shape[-3:]
+                        if pos_emb_shape not in pos_embed_cache:
+                            freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(unwrapped_transformer, pos_emb_shape)
+                            pos_embed_cache[pos_emb_shape] = (freqs_cos, freqs_sin)
+                        else:
+                            freqs_cos, freqs_sin = pos_embed_cache[pos_emb_shape]
+
+                        # 5) Build guidance vector
+                        bsz = latents.shape[0]
+                        guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device)
+
+                        llm_embeds  = llm_embeds.to(accelerator.device, dtype=unwrapped_transformer.dtype)
+                        llm_mask    = llm_mask.to(accelerator.device)
+                        clip_embeds = clip_embeds.to(accelerator.device, dtype=unwrapped_transformer.dtype)
+
+                        # 6) Forward pass
+                        transformer_pred = unwrapped_transformer(
+                            noisy_model_input,
+                            timesteps,
+                            text_states=llm_embeds,
+                            text_mask=llm_mask,
+                            text_states_2=clip_embeds,
+                            freqs_cos=freqs_cos,
+                            freqs_sin=freqs_sin,
+                            guidance=guidance_vec,
+                            return_dict=False,
+                        )
+
+                        # 7) Compute target & MSE
+                        target = noise - latents
+                        val_loss = torch.nn.functional.mse_loss(transformer_pred, target, reduction="mean")
+
+                        losses.append(val_loss.item())
+
+                # Switch back to train mode if needed
+                unwrapped_transformer.train()
+
+                # done
+                mean_val_loss = float(np.mean(losses))
+                return mean_val_loss
+            
+            finally:
+                # Switch back to training mode so the block swap reverts as needed
+                unwrapped_transformer.switch_block_swap_for_training()
 
         # calculate max_train_steps
         if args.max_train_epochs is not None:
@@ -1603,14 +1688,13 @@ class NetworkTrainer:
                         noisy_model_input.requires_grad_(True)
                         guidance_vec.requires_grad_(True)
 
-                    pos_emb_shape = latents.shape[1:]
+                    pos_emb_shape = latents.shape[2:]  # (frames, height, width)
                     if pos_emb_shape not in pos_embed_cache:
-                        freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(transformer, latents.shape[2:])
-                        # freqs_cos = freqs_cos.to(device=accelerator.device, dtype=dit_dtype)
-                        # freqs_sin = freqs_sin.to(device=accelerator.device, dtype=dit_dtype)
+                        freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(transformer, pos_emb_shape)
                         pos_embed_cache[pos_emb_shape] = (freqs_cos, freqs_sin)
                     else:
                         freqs_cos, freqs_sin = pos_embed_cache[pos_emb_shape]
+
 
                     # call DiT
                     latents = latents.to(device=accelerator.device, dtype=network_dtype)
@@ -1741,6 +1825,11 @@ class NetworkTrainer:
 
             sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()
+            
+            # Do validation
+            val_loss = validate(accelerator, transformer, val_dataloader, noise_scheduler, args)
+            accelerator.print(f"[Epoch {epoch+1}] val_loss={val_loss:0.5f}")
+            accelerator.log({"val_loss": val_loss}, step=global_step)
 
             # end of epoch
 

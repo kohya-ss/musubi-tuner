@@ -139,6 +139,7 @@ class ConfigSanitizer:
             {
                 "general": self.general_schema,
                 "datasets": [self.dataset_schema],
+                "val_datasets": [self.dataset_schema],
             }
         )
         self.argparse_schema = self.__merge_dict(
@@ -182,31 +183,44 @@ class BlueprintGenerator:
 
     def __init__(self, sanitizer: ConfigSanitizer):
         self.sanitizer = sanitizer
-
-    # runtime_params is for parameters which is only configurable on runtime, such as tokenizer
-    def generate(self, user_config: dict, argparse_namespace: argparse.Namespace, **runtime_params) -> Blueprint:
+    
+    def generate(self, user_config, argparse_namespace):
         sanitized_user_config = self.sanitizer.sanitize_user_config(user_config)
-        sanitized_argparse_namespace = self.sanitizer.sanitize_argparse_namespace(argparse_namespace)
+        # store the top-level "general" section
+        self.general_config = sanitized_user_config.get("general", {})
+        
+        # parse training datasets
+        train_dataset_configs = sanitized_user_config.get("datasets", [])
+        train_blueprints = [
+            self.make_dataset_blueprint(cfg) for cfg in train_dataset_configs
+        ]
+        train_dataset_group_blueprint = DatasetGroupBlueprint(train_blueprints)
 
-        argparse_config = {k: v for k, v in vars(sanitized_argparse_namespace).items() if v is not None}
-        general_config = sanitized_user_config.get("general", {})
+        # parse validation datasets
+        val_dataset_configs = sanitized_user_config.get("val_datasets", [])
+        val_blueprints = [
+            self.make_dataset_blueprint(cfg) for cfg in val_dataset_configs
+        ]
+        val_dataset_group_blueprint = DatasetGroupBlueprint(val_blueprints)
 
-        dataset_blueprints = []
-        for dataset_config in sanitized_user_config.get("datasets", []):
-            is_image_dataset = "target_frames" not in dataset_config
-            if is_image_dataset:
-                dataset_params_klass = ImageDatasetParams
-            else:
-                dataset_params_klass = VideoDatasetParams
+        return {
+            "train_dataset_group": train_dataset_group_blueprint,
+            "val_dataset_group": val_dataset_group_blueprint,
+        }
 
-            params = self.generate_params_by_fallbacks(
-                dataset_params_klass, [dataset_config, general_config, argparse_config, runtime_params]
-            )
-            dataset_blueprints.append(DatasetBlueprint(is_image_dataset, params))
+    def make_dataset_blueprint(self, dataset_config):
+        # Decide whether it's an image dataset or video dataset 
+        is_image_dataset = "target_frames" not in dataset_config
+        dataset_params_klass = ImageDatasetParams if is_image_dataset else VideoDatasetParams
+        
+        # Merge from dataset_config + general_config
+        fallback_list = [
+            dataset_config,
+            self.general_config,  # so we get caption_extension
+        ]
+        params = self.generate_params_by_fallbacks(dataset_params_klass, fallback_list)
 
-        dataset_group_blueprint = DatasetGroupBlueprint(dataset_blueprints)
-
-        return Blueprint(dataset_group_blueprint)
+        return DatasetBlueprint(is_image_dataset, params)
 
     @staticmethod
     def generate_params_by_fallbacks(param_klass, fallbacks: Sequence[dict]):

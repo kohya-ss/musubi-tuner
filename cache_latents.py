@@ -167,10 +167,19 @@ def main(args):
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
     blueprint = blueprint_generator.generate(user_config, args)
-    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+    train_dataset_group_blueprint = blueprint["train_dataset_group"]
+    val_dataset_group_blueprint = blueprint["val_dataset_group"]
+    
+    blueprint_dict = blueprint_generator.generate(user_config, args)
+    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
+        blueprint_dict["train_dataset_group"], training=False
+    )
+    val_dataset_group = config_utils.generate_dataset_group_by_blueprint(
+        blueprint_dict["val_dataset_group"], training=False
+    )
 
-    datasets = train_dataset_group.datasets
-
+    all_datasets = train_dataset_group.datasets + val_dataset_group.datasets
+    
     if args.debug_mode is not None:
         show_datasets(datasets, args.debug_mode, args.console_width, args.console_back, args.console_num_images)
         return
@@ -195,7 +204,7 @@ def main(args):
 
     # Encode images
     num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
-    for i, dataset in enumerate(datasets):
+    for i, dataset in enumerate(all_datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_latent_cache_paths = []
         for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
