@@ -1293,80 +1293,101 @@ class NetworkTrainer:
             num_workers=args.max_data_loader_n_workers  
         )
         
-        def validate(accelerator, transformer, val_dataloader, noise_scheduler, args):
-            unwrapped_transformer = accelerator.unwrap_model(transformer)
-            
-            # Switch to full inference mode so blocks are moved onto GPU:
-            unwrapped_transformer.switch_block_swap_for_inference()
-            
-            try:
-                unwrapped_transformer.eval()
-                torch.manual_seed(42)  # or any stable seed
-                losses = []
+        def validate(
+            accelerator,
+            transformer,
+            val_dataloader,
+            noise_scheduler,
+            args,
+        ):
+            # Unwrap and switch to inference mode
+            unwrapped_model = accelerator.unwrap_model(transformer)
+            unwrapped_model.switch_block_swap_for_inference()
+            unwrapped_model.eval()
 
-                pos_embed_cache = {}  # optional if you want the same logic as train
+            fixed_timesteps = [500]
+            fixed_seed = 42
+            losses = []
 
+            losses = []
+            pos_embed_cache = {}
+
+            with torch.no_grad():
                 for step, batch in enumerate(val_dataloader):
-                    with torch.no_grad(), accelerator.autocast():
+                    latents, llm_embeds, llm_mask, clip_embeds = batch
 
-                        # 1) Unpack batch
-                        latents, llm_embeds, llm_mask, clip_embeds = batch
+                    # Put everything on the correct device/dtype
+                    latents = latents.to(accelerator.device, dtype=torch.float32)
+                    latents = latents * vae_module.SCALING_FACTOR
+                    llm_embeds  = llm_embeds.to(accelerator.device, dtype=unwrapped_model.dtype)
+                    llm_mask    = llm_mask.to(accelerator.device)
+                    clip_embeds = clip_embeds.to(accelerator.device, dtype=unwrapped_model.dtype)
 
-                        # 2) Scale latents if needed
-                        latents = latents.to(accelerator.device, dtype=torch.float32)
-                        latents = latents * vae_module.SCALING_FACTOR
+                    # Override RNG inside a local fork_rng context:
+                    with torch.random.fork_rng(devices=[accelerator.device]):
+                        torch.manual_seed(fixed_seed)
+                        # If on CUDA:
+                        if accelerator.device.type == "cuda":
+                            torch.cuda.manual_seed(fixed_seed)
 
-                        # 3) Create noise & timesteps
-                        noise = torch.randn_like(latents)
-                        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-                            args, noise, latents, noise_scheduler, accelerator.device, dtype=unwrapped_transformer.dtype
-                        )
+                        noise = torch.randn_like(latents)  # Now gives stable noise each time.
 
-                        # 4) Possibly handle position embeddings
-                        pos_emb_shape = latents.shape[-3:]
-                        if pos_emb_shape not in pos_embed_cache:
-                            freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(unwrapped_transformer, pos_emb_shape)
-                            pos_embed_cache[pos_emb_shape] = (freqs_cos, freqs_sin)
-                        else:
-                            freqs_cos, freqs_sin = pos_embed_cache[pos_emb_shape]
+                    # Pick a fixed timestep. If you want to cycle through multiple for each batch, 
+                    # just pick one from fixed_timesteps by index, or average the losses across them.
+                    t = fixed_timesteps[0]
+                    timesteps = torch.full(
+                        (latents.size(0),),
+                        t,
+                        device=accelerator.device,
+                        dtype=torch.float32
+                    )
 
-                        # 5) Build guidance vector
-                        bsz = latents.shape[0]
-                        guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device)
+                    # Make "noisy_model_input" deterministically
+                    sigma = get_sigmas(
+                        noise_scheduler,
+                        timesteps,
+                        accelerator.device,
+                        latents.dim(),
+                        latents.dtype
+                    )
+                    noisy_model_input = sigma * noise + (1.0 - sigma) * latents
 
-                        llm_embeds  = llm_embeds.to(accelerator.device, dtype=unwrapped_transformer.dtype)
-                        llm_mask    = llm_mask.to(accelerator.device)
-                        clip_embeds = clip_embeds.to(accelerator.device, dtype=unwrapped_transformer.dtype)
+                    # (Optional) position embeddings
+                    pos_emb_shape = latents.shape[-3:]
+                    if pos_emb_shape not in pos_embed_cache:
+                        freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(unwrapped_model, pos_emb_shape)
+                        pos_embed_cache[pos_emb_shape] = (freqs_cos, freqs_sin)
+                    else:
+                        freqs_cos, freqs_sin = pos_embed_cache[pos_emb_shape]
 
-                        # 6) Forward pass
-                        transformer_pred = unwrapped_transformer(
-                            noisy_model_input,
-                            timesteps,
-                            text_states=llm_embeds,
-                            text_mask=llm_mask,
-                            text_states_2=clip_embeds,
-                            freqs_cos=freqs_cos,
-                            freqs_sin=freqs_sin,
-                            guidance=guidance_vec,
-                            return_dict=False,
-                        )
+                    # Forward pass
+                    guidance_vec = torch.full(
+                        (latents.size(0),),
+                        float(args.guidance_scale),
+                        device=accelerator.device
+                    )
+                    pred = unwrapped_model(
+                        noisy_model_input,
+                        timesteps,
+                        text_states=llm_embeds,
+                        text_mask=llm_mask,
+                        text_states_2=clip_embeds,
+                        freqs_cos=freqs_cos,
+                        freqs_sin=freqs_sin,
+                        guidance=guidance_vec,
+                        return_dict=False,
+                    )
 
-                        # 7) Compute target & MSE
-                        target = noise - latents
-                        val_loss = torch.nn.functional.mse_loss(transformer_pred, target, reduction="mean")
+                    # MSE target
+                    target = noise - latents
+                    val_loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
+                    losses.append(val_loss.item())
 
-                        losses.append(val_loss.item())
+                # Switch back to train mode if necessary
+                unwrapped_model.train()
+                unwrapped_model.switch_block_swap_for_training()
 
-                # Switch back to train mode if needed
-                unwrapped_transformer.train()
-
-                # done
-                mean_val_loss = float(np.mean(losses))
-                return mean_val_loss
-            
-            finally:
-                # Switch back to training mode so the block swap reverts as needed
-                unwrapped_transformer.switch_block_swap_for_training()
+                return float(np.mean(losses))
 
         # calculate max_train_steps
         if args.max_train_epochs is not None:
