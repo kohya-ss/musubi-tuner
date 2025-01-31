@@ -417,6 +417,7 @@ def parse_args():
         default=None,
         help="Save merged model to path. If specified, no inference will be performed.",
     )
+    parser.add_argument("--exclude_single_blocks", action="store_true", help="Exclude single blocks when loading LoRA weights")
 
     # inference
     parser.add_argument("--prompt", type=str, required=True, help="prompt for generation")
@@ -579,6 +580,12 @@ def main():
                     lycoris_net, _ = create_network_from_weights(
                         multiplier=lora_multiplier, file=None, weights_sd=weights_sd, unet=transformer, text_encoder=None, vae=None, for_inference=True
                     )
+
+                # Filter to exclude keys that are part of single_blocks
+                if args.exclude_single_blocks:
+                    filtered_weights = {k: v for k, v in weights_sd.items() if "single_blocks" not in k}
+                    weights_sd = filtered_weights
+
                 else:
                     network = lora.create_network_from_weights_hunyuan_video(
                         lora_multiplier, weights_sd, unet=transformer, for_inference=True
