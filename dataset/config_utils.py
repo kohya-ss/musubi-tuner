@@ -66,7 +66,8 @@ class DatasetGroupBlueprint:
 
 @dataclass
 class Blueprint:
-    dataset_group: DatasetGroupBlueprint
+    train_dataset_group: DatasetGroupBlueprint
+    val_dataset_group: DatasetGroupBlueprint
 
 
 class ConfigSanitizer:
@@ -189,37 +190,37 @@ class BlueprintGenerator:
         sanitized_argparse_namespace = self.sanitizer.sanitize_argparse_namespace(argparse_namespace)
         argparse_config = {k: v for k, v in vars(sanitized_argparse_namespace).items() if v is not None}
         general_config = sanitized_user_config.get("general", {})
-        
-        dataset_blueprints = []
-        # Process training datasets (default is_val remains False)
-        for dataset_config in sanitized_user_config.get("datasets", []):
+
+        # Process training datasets: is_val remains False (default)
+        train_dataset_configs = sanitized_user_config.get("datasets", [])
+        train_blueprints = []
+        for dataset_config in train_dataset_configs:
             is_image_dataset = "target_frames" not in dataset_config
-            if is_image_dataset:
-                dataset_params_klass = ImageDatasetParams
-            else:
-                dataset_params_klass = VideoDatasetParams
+            dataset_params_klass = ImageDatasetParams if is_image_dataset else VideoDatasetParams
             params = self.generate_params_by_fallbacks(
                 dataset_params_klass,
                 [dataset_config, general_config, argparse_config, runtime_params]
             )
-            dataset_blueprints.append(DatasetBlueprint(is_image_dataset, params))
-        
-        # Process validation datasets and mark them as such.
-        for dataset_config in sanitized_user_config.get("val_datasets", []):
+            # is_val defaults to False in the dataclass so nothing special is needed
+            train_blueprints.append(DatasetBlueprint(is_image_dataset, params))
+
+        # Process validation datasets: mark them as validation.
+        val_dataset_configs = sanitized_user_config.get("val_datasets", [])
+        val_blueprints = []
+        for dataset_config in val_dataset_configs:
             is_image_dataset = "target_frames" not in dataset_config
-            if is_image_dataset:
-                dataset_params_klass = ImageDatasetParams
-            else:
-                dataset_params_klass = VideoDatasetParams
+            dataset_params_klass = ImageDatasetParams if is_image_dataset else VideoDatasetParams
             params = self.generate_params_by_fallbacks(
                 dataset_params_klass,
                 [dataset_config, general_config, argparse_config, runtime_params]
             )
-            params.is_val = True   # mark this as a validation dataset
-            dataset_blueprints.append(DatasetBlueprint(is_image_dataset, params))
-        
-        dataset_group_blueprint = DatasetGroupBlueprint(dataset_blueprints)
-        return Blueprint(dataset_group_blueprint)
+            params.is_val = True  # mark as validation
+            val_blueprints.append(DatasetBlueprint(is_image_dataset, params))
+
+        train_dataset_group_blueprint = DatasetGroupBlueprint(train_blueprints)
+        val_dataset_group_blueprint = DatasetGroupBlueprint(val_blueprints)
+
+        return Blueprint(train_dataset_group=train_dataset_group_blueprint, val_dataset_group=val_dataset_group_blueprint)
 
     @staticmethod
     def generate_params_by_fallbacks(param_klass, fallbacks: Sequence[dict]):

@@ -1112,8 +1112,8 @@ class NetworkTrainer:
         logger.info(f"Load dataset config from {args.dataset_config}")
         user_config = config_utils.load_user_config(args.dataset_config)
         blueprint = blueprint_generator.generate(user_config, args)
-        train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint["train_dataset_group"], training=True)  
-        val_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint["val_dataset_group"], training=True)
+        train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.train_dataset_group, training=True)  
+        val_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.val_dataset_group, training=True)
 
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
