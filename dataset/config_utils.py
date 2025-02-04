@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import toml
 import voluptuous
-from voluptuous import Any, ExactSequence, MultipleInvalid, Object, Schema
+from voluptuous import Any, ExactSequence, MultipleInvalid, Object, Schema, Optional as VOptional
 
 from .image_video_dataset import DatasetGroup, ImageDataset, VideoDataset
 
@@ -34,6 +34,7 @@ class BaseDatasetParams:
     num_repeats: int = 1
     cache_directory: Optional[str] = None
     debug_dataset: bool = False
+    is_val: bool = False
 
 
 @dataclass
@@ -135,13 +136,11 @@ class ConfigSanitizer:
         self.general_schema = self.__merge_dict(
             self.DATASET_ASCENDABLE_SCHEMA,
         )
-        self.user_config_validator = Schema(
-            {
-                "general": self.general_schema,
-                "datasets": [self.dataset_schema],
-                "val_datasets": [self.dataset_schema],
-            }
-        )
+        self.user_config_validator = Schema({
+            "general": self.general_schema,
+            "datasets": [self.dataset_schema],
+            "val_datasets": VOptional([self.dataset_schema]),
+        })
         self.argparse_schema = self.__merge_dict(
             self.ARGPARSE_SPECIFIC_SCHEMA,
         )
@@ -183,44 +182,44 @@ class BlueprintGenerator:
 
     def __init__(self, sanitizer: ConfigSanitizer):
         self.sanitizer = sanitizer
-    
-    def generate(self, user_config, argparse_namespace):
+
+    # runtime_params is for parameters which is only configurable on runtime, such as tokenizer
+    def generate(self, user_config: dict, argparse_namespace: argparse.Namespace, **runtime_params) -> Blueprint:
         sanitized_user_config = self.sanitizer.sanitize_user_config(user_config)
-        # store the top-level "general" section
-        self.general_config = sanitized_user_config.get("general", {})
+        sanitized_argparse_namespace = self.sanitizer.sanitize_argparse_namespace(argparse_namespace)
+        argparse_config = {k: v for k, v in vars(sanitized_argparse_namespace).items() if v is not None}
+        general_config = sanitized_user_config.get("general", {})
         
-        # parse training datasets
-        train_dataset_configs = sanitized_user_config.get("datasets", [])
-        train_blueprints = [
-            self.make_dataset_blueprint(cfg) for cfg in train_dataset_configs
-        ]
-        train_dataset_group_blueprint = DatasetGroupBlueprint(train_blueprints)
-
-        # parse validation datasets
-        val_dataset_configs = sanitized_user_config.get("val_datasets", [])
-        val_blueprints = [
-            self.make_dataset_blueprint(cfg) for cfg in val_dataset_configs
-        ]
-        val_dataset_group_blueprint = DatasetGroupBlueprint(val_blueprints)
-
-        return {
-            "train_dataset_group": train_dataset_group_blueprint,
-            "val_dataset_group": val_dataset_group_blueprint,
-        }
-
-    def make_dataset_blueprint(self, dataset_config):
-        # Decide whether it's an image dataset or video dataset 
-        is_image_dataset = "target_frames" not in dataset_config
-        dataset_params_klass = ImageDatasetParams if is_image_dataset else VideoDatasetParams
+        dataset_blueprints = []
+        # Process training datasets (default is_val remains False)
+        for dataset_config in sanitized_user_config.get("datasets", []):
+            is_image_dataset = "target_frames" not in dataset_config
+            if is_image_dataset:
+                dataset_params_klass = ImageDatasetParams
+            else:
+                dataset_params_klass = VideoDatasetParams
+            params = self.generate_params_by_fallbacks(
+                dataset_params_klass,
+                [dataset_config, general_config, argparse_config, runtime_params]
+            )
+            dataset_blueprints.append(DatasetBlueprint(is_image_dataset, params))
         
-        # Merge from dataset_config + general_config
-        fallback_list = [
-            dataset_config,
-            self.general_config,  # so we get caption_extension
-        ]
-        params = self.generate_params_by_fallbacks(dataset_params_klass, fallback_list)
-
-        return DatasetBlueprint(is_image_dataset, params)
+        # Process validation datasets and mark them as such.
+        for dataset_config in sanitized_user_config.get("val_datasets", []):
+            is_image_dataset = "target_frames" not in dataset_config
+            if is_image_dataset:
+                dataset_params_klass = ImageDatasetParams
+            else:
+                dataset_params_klass = VideoDatasetParams
+            params = self.generate_params_by_fallbacks(
+                dataset_params_klass,
+                [dataset_config, general_config, argparse_config, runtime_params]
+            )
+            params.is_val = True   # mark this as a validation dataset
+            dataset_blueprints.append(DatasetBlueprint(is_image_dataset, params))
+        
+        dataset_group_blueprint = DatasetGroupBlueprint(dataset_blueprints)
+        return Blueprint(dataset_group_blueprint)
 
     @staticmethod
     def generate_params_by_fallbacks(param_klass, fallbacks: Sequence[dict]):
