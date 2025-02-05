@@ -63,9 +63,9 @@ def main(args):
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
     blueprint = blueprint_generator.generate(user_config, args)
-    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
-
-    datasets = train_dataset_group.datasets
+    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.train_dataset_group, training=True)
+    val_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.val_dataset_group, training=True)
+    datasets = train_dataset_group.datasets + val_dataset_group.datasets
 
     # define accelerator for fp8 inference
     accelerator = None
