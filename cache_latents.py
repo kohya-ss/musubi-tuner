@@ -167,9 +167,10 @@ def main(args):
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
     blueprint = blueprint_generator.generate(user_config, args)
-    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
-
-    datasets = train_dataset_group.datasets
+    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.train_dataset_group, training=True)
+    val_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.val_dataset_group, training=True)
+    # Combine all datasets so that both training and validation sets are processed:
+    datasets = train_dataset_group.datasets + val_dataset_group.datasets
 
     if args.debug_mode is not None:
         show_datasets(datasets, args.debug_mode, args.console_width, args.console_back, args.console_num_images)
@@ -267,3 +268,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
+    

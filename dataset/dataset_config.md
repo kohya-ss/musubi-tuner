@@ -385,3 +385,86 @@ The metadata with .json file will be supported in the near future.
 
 
 -->
+
+────────────────────────────────────────────────────────────────────────
+UPDATED DOCUMENTATION: INCLUDING A VALIDATION DATASET
+────────────────────────────────────────────────────────────────────────
+
+1. Overview of “val_datasets”  
+   Just like you can have multiple datasets for training under the "[[datasets]]" key, you can also specify validation datasets under "[[val_datasets]]". The syntax and options for each validation dataset are exactly the same as for training. The script will:
+   • Load and cache your validation datasets the same way it does for training.  
+   • Periodically compute a validation loss across these datasets (for example, once per epoch).  
+   • Log the validation loss so you can monitor for over- or under-fitting.  
+
+2. Example TOML Configuration with Validation Datasets
+
+Below is a minimal example that shows both training and validation datasets. Notice that “[[datasets]]” is used for training datasets, while “[[val_datasets]]” is reserved for any validation sets you want to include.
+
+--------------------------------------------------------------------------------
+[general]
+caption_extension = ".txt"
+batch_size        = 1
+enable_bucket     = true
+bucket_no_upscale = false
+
+# PRIMARY TRAIN DATASETS
+[[datasets]]
+resolution       = [640, 480]
+video_directory  = "path/to/training/video"
+cache_directory  = "path/to/cache/training/video"
+frame_extraction = "head"
+target_frames    = [48]
+
+[[datasets]]
+resolution      = [640, 480]
+image_directory = "path/to/training/image"
+cache_directory = "path/to/cache/training/image"
+
+# ... you can add more [[datasets]] blocks if you have more training subsets ...
+
+# VALIDATION DATASETS
+[[val_datasets]]
+resolution       = [640, 480]
+video_directory  = "path/to/validation/video"
+cache_directory  = "path/to/cache/validation/video"
+frame_extraction = "head"
+target_frames    = [48]
+
+[[val_datasets]]
+resolution      = [640, 480]
+image_directory = "path/to/validation/image"
+cache_directory = "path/to/cache/validation/image"
+
+# ... you can add more [[val_datasets]] blocks if you have more validation subsets ...
+--------------------------------------------------------------------------------
+
+Notes on usage:  
+• The script will treat the “[[datasets]]” entries as training data and “[[val_datasets]]” as validation data. Both sets can be a mix of images or videos.  
+• Each dataset or validation dataset must have a unique “cache_directory” to avoid overwriting latents or text-encoder caches.  
+• All of the same parameters (resolution, caption_extension, num_repeats, batch_size, etc.) work in exactly the same way under “val_datasets” as they do under “datasets.”  
+
+3. Running the Script with Validation  
+Once you have listed your training and validation datasets, you can run the training script as normal. For example:
+
+--------------------------------------------------------------------------------
+accelerate launch hv_train_network.py \
+  --dit path/to/DiT/model \
+  --dataset_config path/to/config_with_val.toml \
+  --max_train_epochs 20 \
+  ... other arguments ...
+--------------------------------------------------------------------------------
+
+During training, the script will:  
+• Load and batch the training datasets.  
+• Perform training epochs, computing training loss.  
+• After each epoch (or at a specified interval), it will compute the validation loss using all “val_datasets.”  
+• Log the validation performance (for example, “val_loss=...”) to TensorBoard and/or WandB if logging is enabled.
+
+────────────────────────────────────────────────────────────────────────
+ADDITIONAL TIPS
+────────────────────────────────────────────────────────────────────────
+• If you do not wish to do any validation, simply omit the “[[val_datasets]]” sections.  
+• You can add multiple validation blocks, each pointing to different image or video folders or JSONL metadata.  
+• The script merges all validation datasets into a single DataLoader when it computes validation loss.
+
+With these changes to your config file, you can systematically evaluate your model’s performance after each epoch (or some other schedule) by leveraging the “val_datasets” blocks.
