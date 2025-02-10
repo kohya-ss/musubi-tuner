@@ -1,6 +1,6 @@
 import ast
 import asyncio
-from datetime import datetime
+from datetime import timedelta
 import gc
 import importlib
 import argparse
@@ -144,7 +144,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
                 init_method=(
                     "env://?use_libuv=False" if os.name == "nt" and Version(torch.__version__) >= Version("2.4.0") else None
                 ),
-                timeout=datetime.timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
+                timeout=timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
             )
             if torch.cuda.device_count() > 1
             else None
