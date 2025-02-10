@@ -6,6 +6,8 @@ import sys
 import os
 import time
 from typing import Optional, Union
+import subprocess
+import json
 
 import numpy as np
 import torch
@@ -772,7 +774,30 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
+            temp_video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}_temp.mp4"
+
             save_videos_grid(sample, video_path, fps=args.fps)
+
+            #Consider moving metadata json to seperate function.
+            if args.no_metadata:
+                metadata = None
+            else:
+                metadata = {
+                    "seeds": f"{seeds[i]}",
+                    "prompt": prompt,
+                    "height": f"{height}",
+                    "width": f"{width}",
+                    "video_length": f"{video_length}",
+                    "infer_steps": f"{num_inference_steps}",
+                }
+                metadata_str = json.dumps(metadata)
+            #Either write arbitary tags with compatibility issues, petition a change to the worldwide standard for .mp4, or this.
+            ffmpeg_command = ["ffmpeg", "-i", video_path, "-c:v", "copy"]
+            ffmpeg_command += ["-metadata", f"comment={metadata_str}"]
+            ffmpeg_command += [temp_video_path]
+            subprocess.run(ffmpeg_command)
+            os.remove(video_path)
+            os.rename(temp_video_path, video_path)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images
