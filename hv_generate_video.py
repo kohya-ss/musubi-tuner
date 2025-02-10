@@ -445,9 +445,9 @@ def parse_args():
         "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode"
     )
     parser.add_argument("--split_attn", action="store_true", help="use split attention")
-    parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
+    parser.add_argument("--vae_chunk_size", type=int, default=32, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
-        "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
+        "--vae_spatial_tile_sample_min_size", type=int, default=128, help="spatial tile sample min size for VAE, default 256"
     )
     parser.add_argument("--blocks_to_swap", type=int, default=None, help="number of blocks to swap in the model")
     parser.add_argument("--img_in_txt_in_offloading", action="store_true", help="offload img_in and txt_in to cpu")
