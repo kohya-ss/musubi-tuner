@@ -8,6 +8,7 @@ import time
 from typing import Optional, Union
 import subprocess
 import json
+import shutil
 
 import numpy as np
 import torch
@@ -453,7 +454,8 @@ def parse_args():
     parser.add_argument(
         "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="output type"
     )
-    parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
+    parser.add_argument("--no_metadata", action="store_true", help="do not save metadata to latent file.")
+    parser.add_argument("--add_video_metadata", action="store_true", default=False, help="save metadata to video file using FFmpeg.")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
 
@@ -775,13 +777,9 @@ def main():
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
             temp_video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}_temp.mp4"
-
             save_videos_grid(sample, video_path, fps=args.fps)
-
             #Consider moving metadata json to seperate function.
-            if args.no_metadata:
-                metadata = None
-            else:
+            if args.add_video_metadata:
                 metadata = {
                     "seeds": f"{seeds[i]}",
                     "prompt": prompt,
@@ -791,13 +789,14 @@ def main():
                     "infer_steps": f"{num_inference_steps}",
                 }
                 metadata_str = json.dumps(metadata)
-            #Either write arbitary tags with compatibility issues, petition a change to the worldwide standard for .mp4, or this.
-            ffmpeg_command = ["ffmpeg", "-i", video_path, "-c:v", "copy"]
-            ffmpeg_command += ["-metadata", f"comment={metadata_str}"]
-            ffmpeg_command += [temp_video_path]
-            subprocess.run(ffmpeg_command)
-            os.remove(video_path)
-            os.rename(temp_video_path, video_path)
+                #Either write arbitary tags with compatibility issues, petition a change to the worldwide standard for .mp4, or this.
+                if shutil.which("ffmpeg") is not None:
+                    ffmpeg_command = ["ffmpeg", "-i", video_path, "-c:v", "copy", "-metadata", f"comment={metadata_str}", "-hide_banner", "-loglevel", "error", temp_video_path]
+                    subprocess.run(ffmpeg_command)
+                    os.remove(video_path)
+                    os.rename(temp_video_path, video_path)
+                else:
+                    logger.info("Metadata not written, could not find FFmpeg in path.")
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images
