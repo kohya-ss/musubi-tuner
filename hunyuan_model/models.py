@@ -836,7 +836,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
                     cu_seqlens_kv,
                     max_seqlen_q,
                     max_seqlen_kv,
-                    (freqs_cos, freqs_sin),
+                    freqs_cis,
                 ]
                 if self.blocks_to_swap:
                     self.offloader_single.wait_for_block(block_idx)
