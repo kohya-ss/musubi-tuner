@@ -408,7 +408,6 @@ def decode_latents(args, latents, device):
 
     return image
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="HunyuanVideo inference script")
 
@@ -435,36 +434,36 @@ def parse_args():
     parser.add_argument("--video_length", type=int, default=129, help="video length in frames")
     parser.add_argument("--fps", type=int, default=24, help="video fps")
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps")
-    parser.add_argument("--save_path", type=str, required=True, help="base path to save generated outputs")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation. Missing uses a random seed.")
-    parser.add_argument("--embedded_cfg_scale", type=float, default=6.0, help="Embedded classifier free guidance scale.")
-    parser.add_argument("--video_path", type=str, default=None, help="Path to video for video2video inference")
-    parser.add_argument("--strength", type=float, default=0.8, help="Strength for video2video inference")
+    parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
+    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument("--embedded_cfg_scale", type=float, default=6.0, help="Embeded classifier free guidance scale.")
+    parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
+    parser.add_argument("--strength", type=float, default=0.8, help="strength for video2video inference")
 
     # Flow Matching
     parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers.")
 
-    parser.add_argument("--fp8", action="store_true", help="Use fp8 for DiT model")
-    parser.add_argument("--fp8_llm", action="store_true", help="Use fp8 for Text Encoder 1 (LLM)")
+    parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
+    parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder 1 (LLM)")
     parser.add_argument(
-        "--device", type=str, default=None, help="Device to use for inference. If None, use CUDA if available, otherwise CPU"
+        "--device", type=str, default=None, help="device to use for inference. If None, use CUDA if available, otherwise use CPU"
     )
     parser.add_argument(
-        "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="Attention mode"
+        "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode"
     )
-    parser.add_argument("--split_attn", action="store_true", help="Use split attention")
-    parser.add_argument("--vae_chunk_size", type=int, default=None, help="Chunk size for CausalConv3d in VAE")
+    parser.add_argument("--split_attn", action="store_true", help="use split attention")
+    parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
-        "--vae_spatial_tile_sample_min_size", type=int, default=None, help="Spatial tile sample min size for VAE, default 256"
+        "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
     )
-    parser.add_argument("--blocks_to_swap", type=int, default=None, help="Number of blocks to swap in the model")
-    parser.add_argument("--img_in_txt_in_offloading", action="store_true", help="Offload img_in and txt_in to CPU")
+    parser.add_argument("--blocks_to_swap", type=int, default=None, help="number of blocks to swap in the model")
+    parser.add_argument("--img_in_txt_in_offloading", action="store_true", help="offload img_in and txt_in to cpu")
     parser.add_argument(
-        "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="Output type"
+        "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="output type"
     )
-    parser.add_argument("--no_metadata", action="store_true", help="Do not save metadata")
-    parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="Path to latent for decode. No inference.")
-    parser.add_argument("--lycoris", action="store_true", help="Use lycoris for inference")
+    parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
+    parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
+    parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
 
     # New arguments for multi-prompt and looping
     parser.add_argument("--increment_seed", action="store_true", help="Increment seed for each processed prompt")
@@ -475,6 +474,8 @@ def parse_args():
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
+
+    # update dit_weight based on model_base if not exists
 
     return args
 
