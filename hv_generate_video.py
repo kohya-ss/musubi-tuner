@@ -6,6 +6,9 @@ import sys
 import os
 import time
 from typing import Optional, Union
+import subprocess
+import json
+import shutil
 
 import numpy as np
 import torch
@@ -443,16 +446,17 @@ def parse_args():
         "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode"
     )
     parser.add_argument("--split_attn", action="store_true", help="use split attention")
-    parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
+    parser.add_argument("--vae_chunk_size", type=int, default=32, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
-        "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
+        "--vae_spatial_tile_sample_min_size", type=int, default=128, help="spatial tile sample min size for VAE, default 256"
     )
     parser.add_argument("--blocks_to_swap", type=int, default=None, help="number of blocks to swap in the model")
     parser.add_argument("--img_in_txt_in_offloading", action="store_true", help="offload img_in and txt_in to cpu")
     parser.add_argument(
         "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="output type"
     )
-    parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
+    parser.add_argument("--no_metadata", action="store_true", help="do not save metadata to latent file.")
+    parser.add_argument("--add_video_metadata", action="store_true", default=False, help="save metadata to video file using FFmpeg.")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
 
@@ -773,7 +777,27 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
+            temp_video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}_temp.mp4"
             save_videos_grid(sample, video_path, fps=args.fps)
+            #Consider moving metadata json to seperate function.
+            if args.add_video_metadata:
+                metadata = {
+                    "seeds": f"{seeds[i]}",
+                    "prompt": prompt,
+                    "height": f"{height}",
+                    "width": f"{width}",
+                    "video_length": f"{video_length}",
+                    "infer_steps": f"{num_inference_steps}",
+                }
+                metadata_str = json.dumps(metadata)
+                #Either write arbitary tags with compatibility issues, petition a change to the worldwide standard for .mp4, or this.
+                if shutil.which("ffmpeg") is not None:
+                    ffmpeg_command = ["ffmpeg", "-i", video_path, "-c:v", "copy", "-metadata", f"comment={metadata_str}", "-hide_banner", "-loglevel", "error", temp_video_path]
+                    subprocess.run(ffmpeg_command)
+                    os.remove(video_path)
+                    os.rename(temp_video_path, video_path)
+                else:
+                    logger.info("Metadata not written, could not find FFmpeg in path.")
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images
