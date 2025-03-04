@@ -748,6 +748,7 @@ class BaseDataset(torch.utils.data.Dataset):
         bucket_no_upscale: bool = False,
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
+        is_val: bool = False 
     ):
         self.resolution = resolution
         self.caption_extension = caption_extension
@@ -757,6 +758,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.bucket_no_upscale = bucket_no_upscale
         self.cache_directory = cache_directory
         self.debug_dataset = debug_dataset
+        self.is_val = is_val
         self.seed = None
         self.current_epoch = 0
 
@@ -910,9 +912,10 @@ class ImageDataset(BaseDataset):
         image_jsonl_file: Optional[str] = None,
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
+        is_val: bool = False
     ):
         super(ImageDataset, self).__init__(
-            resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale, cache_directory, debug_dataset
+            resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale, cache_directory, debug_dataset, is_val
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
@@ -1086,9 +1089,10 @@ class VideoDataset(BaseDataset):
         video_jsonl_file: Optional[str] = None,
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
+        is_val: bool = False
     ):
         super(VideoDataset, self).__init__(
-            resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale, cache_directory, debug_dataset
+            resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale, cache_directory, debug_dataset, is_val
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file

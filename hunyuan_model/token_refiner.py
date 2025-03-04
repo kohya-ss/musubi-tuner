@@ -233,8 +233,18 @@ class SingleTokenRefiner(nn.Module):
         if mask is None:
             context_aware_representations = x.mean(dim=1)
         else:
-            mask_float = mask.float().unsqueeze(-1)  # [b, s1, 1]
-            context_aware_representations = (x * mask_float).sum(dim=1) / mask_float.sum(dim=1)
+            if x.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+                # do the operation in a safer fallback type, e.g. float16 (or bf16)
+                safe_x      = x.float()                 # from float8 → float
+                safe_mask   = mask.float().unsqueeze(-1)
+                numerator   = (safe_x * safe_mask).sum(dim=1)
+                denominator = safe_mask.sum(dim=1).clamp_min(1e-8)  # avoid div-by-zero
+                out         = numerator / denominator
+                context_aware_representations = out.to(x.dtype)     # cast back to float8
+            else:
+                # the old logic for other dtypes
+                mask_float = mask.float().unsqueeze(-1)
+                context_aware_representations = (x * mask_float).sum(dim=1) / mask_float.sum(dim=1)
         context_aware_representations = self.c_embedder(context_aware_representations)
         c = timestep_aware_representations + context_aware_representations
 
