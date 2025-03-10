@@ -3,3 +3,5 @@ __pycache__/
 venv/
 logs/
 uv.lock
+*.safetensors
+*.mp4

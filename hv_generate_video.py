@@ -25,7 +25,7 @@ from hunyuan_model.text_encoder import TextEncoder
 from hunyuan_model.text_encoder import PROMPT_TEMPLATE
 from hunyuan_model.vae import load_vae
 from hunyuan_model.models import load_transformer, get_rotary_pos_embed
-from hunyuan_model.fp8_optimization import convert_fp8_linear
+
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
 
@@ -38,6 +38,7 @@ from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 from blissful_tuner.latent_preview import latent_preview
+from blissful_tuner.fp8_optimization import convert_fp8_linear
 import logging
 
 logger = logging.getLogger(__name__)
@@ -208,9 +209,9 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder_dtype = torch.float16
     text_encoder_type = "llm"
     text_len = 256
-    hidden_state_skip_layer = 2
-    apply_final_norm = False
-    reproduce = False
+    hidden_state_skip_layer = args.hidden_state_skip_layer
+    apply_final_norm = args.apply_final_norm
+    reproduce = False if not args.reproduce else True
 
     text_encoder_2_type = "clipL"
     text_len_2 = 77
@@ -234,6 +235,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
 
     # load text encoders
     logger.info(f"loading text encoder: {args.text_encoder1}")
+    logger.info(f"hidden_state_skip_layer: {hidden_state_skip_layer}; apply_final_norm: {apply_final_norm}; Reproducible output: {reproduce}")
     text_encoder = TextEncoder(
         text_encoder_type=text_encoder_type,
         max_length=max_length,
@@ -487,7 +489,9 @@ def parse_args():
         default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
         help="Torch.compile settings"
     )
-
+    parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2.")
+    parser.add_argument("--apply_final_norm", type=bool, default=False, help="Apply final norm for LLM. Default is False.")
+    parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
     args = parser.parse_args()
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
