@@ -6,11 +6,12 @@ Created on Mon Mar 10 16:47:29 2025
 @author: blyss
 """
 import torch
-import cv2
+import av
+from PIL import Image
 import numpy as np
 
 
-def latent_preview(noisy_latents, original_latents, denoising_schedule, current_step):
+def latent_preview(noisy_latents, original_latents, denoising_schedule, current_step, video_fps):
     """
     Function for previewing latents
 
@@ -68,7 +69,7 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
     )
 
     latent_images = []
-    # shape is (batch=1, something, T, H, W)
+    # shape is (B, C, F, H, W)
     for t in range(latents.shape[2]):
         latent = latents[:, :, t, :, :]
         latent = latent[0].permute(1, 2, 0)
@@ -78,7 +79,6 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
             bias=latent_rgb_factors_bias
         )
         latent_images.append(latent_image)
-    # stack into shape (T,H,W,3)
     latent_images = torch.stack(latent_images, dim=0)
 
     # Normalize to [0..1]
@@ -88,37 +88,41 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
         latent_images = (latent_images - latent_images_min) / (latent_images_max - latent_images_min)
     latent_images = latent_images.clamp(0.0, 1.0)
 
-    latent_images_np = latent_images.float().cpu().numpy()  # (T,H,W,3)
+    latent_images_np = latent_images.float().cpu().numpy()
 
     # Convert to uint8 [0..255]
     latent_images_np = (latent_images_np * 255).astype(np.uint8)
 
     # Latents are 1/8 size, 1/4 framerate
     scale_factor = 8
-    fps = 6.0
+    fps = int(video_fps / 4)
 
     T, H, W, C = latent_images_np.shape
     upscaled_width = W * scale_factor
     upscaled_height = H * scale_factor
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # or 'avc1'
-    out = cv2.VideoWriter(
-        'latent_preview.mp4',
-        fourcc,
-        fps,
-        (upscaled_width, upscaled_height)
-    )
+    container = av.open("latent_preview.mp4", mode="w")
+    stream = container.add_stream("libx264", rate=fps)
+    stream.pix_fmt = "yuv420p"
+    stream.width = upscaled_width
+    stream.height = upscaled_height
 
+    # Loop over each frame
     for i in range(T):
-        frame_rgb = latent_images_np[i]  # shape (H,W,3), type uint8, in RGB
-        # Upscale
-        frame_rgb_upscaled = cv2.resize(
-            frame_rgb,
+        # shape = (H, W, 3), in RGB
+        frame_rgb = latent_images_np[i]
+        pil_image = Image.fromarray(frame_rgb)
+        pil_image_upscaled = pil_image.resize(
             (upscaled_width, upscaled_height),
-            interpolation=cv2.INTER_LANCZOS4
+            resample=Image.LANCZOS
         )
-        # Convert to BGR for OpenCV
-        frame_bgr_upscaled = cv2.cvtColor(frame_rgb_upscaled, cv2.COLOR_RGB2BGR)
-        out.write(frame_bgr_upscaled)
 
-    out.release()
+        frame_rgb_upscaled = np.array(pil_image_upscaled)
+        video_frame = av.VideoFrame.from_ndarray(frame_rgb_upscaled, format="rgb24")
+
+        for packet in stream.encode(video_frame):
+            container.mux(packet)
+
+    for packet in stream.encode():
+        container.mux(packet)
+    container.close()

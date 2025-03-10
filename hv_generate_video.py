@@ -19,7 +19,7 @@ from einops import rearrange
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from PIL import Image
-
+import threading
 from hunyuan_model import vae
 from hunyuan_model.text_encoder import TextEncoder
 from hunyuan_model.text_encoder import PROMPT_TEMPLATE
@@ -37,7 +37,7 @@ except:
 from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
-
+from blissful_tuner.latent_preview import latent_preview
 import logging
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
     stream.width = width
     stream.height = height
     stream.pix_fmt = pixel_format
-    stream.bit_rate = 4000000  # 4Mbit/s
+    stream.bit_rate = 16000000  # MEGAbit/s
 
     for frame_array in outputs:
         frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
@@ -806,7 +806,7 @@ def main():
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
 
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
-
+        og_latents = latents
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
         if embedded_guidance_scale is not None:
@@ -888,6 +888,9 @@ def main():
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
                     if progress_bar is not None:
                         progress_bar.update()
+                thread = threading.Thread(target=latent_preview, args=(latents, og_latents, timesteps, i, args.fps), daemon=True)
+                thread.start()
+            thread.join()  # Wait for last thread
 
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
