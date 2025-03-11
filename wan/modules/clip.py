@@ -525,7 +525,7 @@ class CLIPModel:
 
         # init tokenizer
         if tokenizer_path is None:
-            tokenizer_path = "Wan-AI/Wan2.1-I2V-14B-720P"
+            tokenizer_path = os.path.dirname(weight_path)
             subfolder = "xlm-roberta-large"
         else:
             subfolder = None
