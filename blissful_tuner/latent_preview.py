@@ -11,7 +11,7 @@ from PIL import Image
 import numpy as np
 
 
-def latent_preview(noisy_latents, original_latents, denoising_schedule, current_step, video_fps):
+def latent_preview(noisy_latents, original_latents, denoising_schedule, current_step, args):
     """
     Function for previewing latents
 
@@ -95,34 +95,43 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
 
     # Latents are 1/8 size, 1/4 framerate
     scale_factor = 8
-    fps = int(video_fps / 4)
+    fps = int(args.fps / 4)
 
     T, H, W, C = latent_images_np.shape
     upscaled_width = W * scale_factor
     upscaled_height = H * scale_factor
+    if args.video_length > 1 and T > 1:
+        container = av.open("latent_preview.mp4", mode="w")
+        stream = container.add_stream("libx264", rate=fps)
+        stream.pix_fmt = "yuv420p"
+        stream.width = upscaled_width
+        stream.height = upscaled_height
 
-    container = av.open("latent_preview.mp4", mode="w")
-    stream = container.add_stream("libx264", rate=fps)
-    stream.pix_fmt = "yuv420p"
-    stream.width = upscaled_width
-    stream.height = upscaled_height
+        # Loop over each frame
+        for i in range(T):
+            frame_rgb = latent_images_np[i]
+            pil_image = Image.fromarray(frame_rgb)
+            pil_image_upscaled = pil_image.resize(
+                (upscaled_width, upscaled_height),
+                resample=Image.LANCZOS
+            )
 
-    # Loop over each frame
-    for i in range(T):
-        # shape = (H, W, 3), in RGB
-        frame_rgb = latent_images_np[i]
+            frame_rgb_upscaled = np.array(pil_image_upscaled)
+            video_frame = av.VideoFrame.from_ndarray(frame_rgb_upscaled, format="rgb24")
+
+            for packet in stream.encode(video_frame):
+                container.mux(packet)
+
+        for packet in stream.encode():
+            container.mux(packet)
+        container.close()
+    else:  # Single frame so save as image
+        frame_rgb = latent_images_np[0]
+
         pil_image = Image.fromarray(frame_rgb)
         pil_image_upscaled = pil_image.resize(
             (upscaled_width, upscaled_height),
             resample=Image.LANCZOS
         )
 
-        frame_rgb_upscaled = np.array(pil_image_upscaled)
-        video_frame = av.VideoFrame.from_ndarray(frame_rgb_upscaled, format="rgb24")
-
-        for packet in stream.encode(video_frame):
-            container.mux(packet)
-
-    for packet in stream.encode():
-        container.mux(packet)
-    container.close()
+        pil_image_upscaled.save("latent_preview.png")

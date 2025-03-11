@@ -826,7 +826,7 @@ def main():
 
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
         original_latents = latents
-        preview_threads = []
+        last_thread = None
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
         if embedded_guidance_scale is not None:
@@ -909,13 +909,16 @@ def main():
                     if progress_bar is not None:
                         progress_bar.update()
 
-                if (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-                    thread = threading.Thread(target=latent_preview, args=(latents, original_latents, timesteps, i + 1, args.fps), daemon=True)
+                if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
+                    if last_thread is not None:  # Don't spawn more than one preview thread at a time
+                        last_thread.join()
+                        last_thread = None
+                    thread = threading.Thread(target=latent_preview, args=(latents, original_latents, timesteps, i + 1, args), daemon=True)
                     thread.start()
-                    preview_threads.append(thread)  # Keep track of threads
+                    last_thread = thread
 
-            for thread in preview_threads:
-                thread.join()  # Wait for all preview threads
+        if last_thread is not None:
+            last_thread.join()  # Wait for preview thread
 
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
