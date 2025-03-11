@@ -22,7 +22,7 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
     original_latents : torch.tensor
         Latents at step 0, BCFHW
     denoising_schedule : torch.tensor
-        Denoising schedule
+        Denoising schedule e.g timesteps
     current_step : int
         Current step we are on.
 

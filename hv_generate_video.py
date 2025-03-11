@@ -34,6 +34,7 @@ try:
 except:
     pass
 
+from convert_lora import convert_from_diffusers
 from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
@@ -652,6 +653,19 @@ def main():
 
                 logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                 weights_sd = load_file(lora_weight)
+                conversion_needed = False
+                for key, weight in weights_sd.items():
+                    prefix, key_body = key.split(".", 1)
+                    if prefix == "diffusion_model" or prefix == "transformer":
+                        conversion_needed = True
+                        break
+                    elif "lora_unet" in prefix:
+                        conversion_needed = False
+                        break
+
+                if conversion_needed:
+                    logger.info("Converting LoRA from diffusers format")
+                    weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
 
                 # Filter to exclude keys that are part of single_blocks
                 if args.exclude_single_blocks:
