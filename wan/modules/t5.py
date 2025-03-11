@@ -499,7 +499,7 @@ class T5EncoderModel:
         #     self.model.to(self.device)
         # init tokenizer
         if tokenizer_path is None:
-            tokenizer_path = "Wan-AI/Wan2.1-T2V-14B"
+            tokenizer_path = os.path.dirname(weight_path)
             subfolder = "google/umt5-xxl"
         else:
             subfolder = None
