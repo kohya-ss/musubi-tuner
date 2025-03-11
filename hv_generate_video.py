@@ -493,6 +493,7 @@ def parse_args():
     parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2.")
     parser.add_argument("--apply_final_norm", type=bool, default=False, help="Apply final norm for LLM. Default is False.")
     parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
+    parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
     args = parser.parse_args()
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
@@ -824,7 +825,8 @@ def main():
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
 
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
-        og_latents = latents
+        original_latents = latents
+        preview_threads = []
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
         if embedded_guidance_scale is not None:
@@ -906,9 +908,14 @@ def main():
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
                     if progress_bar is not None:
                         progress_bar.update()
-                thread = threading.Thread(target=latent_preview, args=(latents, og_latents, timesteps, i, args.fps), daemon=True)
-                thread.start()
-            thread.join()  # Wait for last thread
+
+                if (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
+                    thread = threading.Thread(target=latent_preview, args=(latents, original_latents, timesteps, i + 1, args.fps), daemon=True)
+                    thread.start()
+                    preview_threads.append(thread)  # Keep track of threads
+
+            for thread in preview_threads:
+                thread.join()  # Wait for all preview threads
 
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
