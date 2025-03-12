@@ -248,10 +248,13 @@ def main():
 
             def merge_lora(transformer):
                 for i, lora_weight in enumerate(args.lora_weight):
-                    if args.lora_multiplier is not None and len(args.lora_multiplier) > i:
-                        lora_multiplier = args.lora_multiplier[i]
+                    if type(args.lora_multiplier) == list:
+                        if args.lora_multiplier is not None and len(args.lora_multiplier) > i:
+                            lora_multiplier = args.lora_multiplier[i]
+                        else:
+                            lora_multiplier = 1.0
                     else:
-                        lora_multiplier = 1.0
+                        lora_multiplier = args.lora_multiplier
 
                     logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                     weights_sd = load_file(lora_weight)
