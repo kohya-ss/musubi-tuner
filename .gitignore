@@ -1,7 +1,8 @@
 __pycache__/
-.venv
-venv/
-logs/
+*venv
+*logs
 uv.lock
 *.safetensors
 *.mp4
+*.png
+settings.json

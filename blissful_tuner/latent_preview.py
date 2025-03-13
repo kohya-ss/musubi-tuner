@@ -11,7 +11,7 @@ from PIL import Image
 import numpy as np
 
 
-def latent_preview(noisy_latents, original_latents, denoising_schedule, current_step, args):
+def latent_preview(noisy_latents, original_latents, timesteps, current_step, args):
     """
     Function for previewing latents
 
@@ -21,22 +21,24 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
         Latents at current timestep, BCFHW
     original_latents : torch.tensor
         Latents at step 0, BCFHW
-    denoising_schedule : torch.tensor
+    timesteps : torch.tensor
         Denoising schedule e.g timesteps
     current_step : int
         Current step we are on.
+    args: args
+        The commandline args.
 
     Returns
     -------
     None.
 
     """
-    denoising_schedule_percent = denoising_schedule / 1000
-    noise_remaining = denoising_schedule_percent[current_step]
-    denoisy_latents = noisy_latents - (original_latents * noise_remaining)
+    timesteps_percent = timesteps / 1000
+    noise_remaining = timesteps_percent[current_step]
+    denoisy_latents = noisy_latents - (original_latents * noise_remaining)  # Subtract original noise remaining
     latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-5)  # Normalize
 
-    # Hard-coded linear transform to approximate latents -> RGB, specific to HunyuanVideo
+    # Hard-coded linear transform to approximate latents -> RGB, specific to HunyuanVideo, other transforms and their bias can be found in ComfyUI's latent_formats.py
     latent_rgb_factors = [
         [-0.0395, -0.0331,  0.0445],
         [ 0.0696,  0.0795,  0.0518],
@@ -97,10 +99,10 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
     scale_factor = 8
     fps = int(args.fps / 4)
 
-    T, H, W, C = latent_images_np.shape
+    F, H, W, C = latent_images_np.shape
     upscaled_width = W * scale_factor
     upscaled_height = H * scale_factor
-    if args.video_length > 1 and T > 1:
+    if args.video_length > 1 and F > 1:  # We have more than one frame so write a video
         container = av.open("latent_preview.mp4", mode="w")
         stream = container.add_stream("libx264", rate=fps)
         stream.pix_fmt = "yuv420p"
@@ -108,7 +110,7 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
         stream.height = upscaled_height
 
         # Loop over each frame
-        for i in range(T):
+        for i in range(F):
             frame_rgb = latent_images_np[i]
             pil_image = Image.fromarray(frame_rgb)
             pil_image_upscaled = pil_image.resize(
@@ -135,3 +137,6 @@ def latent_preview(noisy_latents, original_latents, denoising_schedule, current_
         )
 
         pil_image_upscaled.save("latent_preview.png")
+
+    with open("./previewflag", "w", encoding="utf-8") as previewflag:  # Kludge to tell UI to update preview
+        previewflag.write("Updated")
