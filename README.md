@@ -48,6 +48,14 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 
 ### Recent Updates
 
+- Mar 13, 2025
+    - In the inference script for HunyuanVideo, the `--fp8_fast` option for RTX 40x0 and the `--compile` option to use `torch.compile` have been added. Thanks to Sarania for PR [#137](https://github.com/kohya-ss/musubi-tuner/pull/137).
+        - See [Inference](#inference) for details.
+    - Added `--fp8_scaled` option for fp8 quantization in Wan2.1 training and inference. [PR #141](https://github.com/kohya-ss/musubi-tuner/pull/141) 
+        - This option quantizes the weights to FP8 with appropriate scaling, instead of simple casting to FP8. This reduces VRAM usage while maintaining precision.
+        - See [Advanced Configuration](./docs/advanced_config.md#fp8-quantization) for details.
+        - `fp16` models are now supported for Wan2.1 training and inference. 
+
 - Mar 9, 2025
     - Fixed `--t5` option is required for training even without sampling images for Wan2.1 training.
 
@@ -353,6 +361,8 @@ For additional options, use `python hv_generate_video.py --help`.
 
 Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory consumption but may impact output quality.
 
+`--fp8_fast` option is also available for faster inference on RTX 40x0 GPUs. This option requires `--fp8` option. 
+
 If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 38.
 
 For `--attn_mode`, specify either `flash`, `torch`, `sageattn`, `xformers`, or `sdpa` (same as `torch`). These correspond to FlashAttention, scaled dot product attention, SageAttention, and xformers, respectively. Default is `torch`. SageAttention is effective for VRAM reduction.
@@ -370,6 +380,10 @@ For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both
 By specifying `--video_path`, video2video inference is possible. Specify a video file or a directory containing multiple image files (the image files are sorted by file name and used as frames). An error will occur if the video is shorter than `--video_length`. You can specify the strength with `--strength`. It can be specified from 0 to 1.0, and the larger the value, the greater the change from the original video.
 
 Note that video2video inference is experimental.
+
+`--compile` option enables PyTorch's compile feature (experimental). Requires triton. On Windows, also requires Visual C++ build tools installed and PyTorch>=2.6.0 (Visual C++ build tools is also required). You can pass arguments to the compiler with `--compile_args`.
+
+The `--compile` option takes a long time to run the first time, but speeds up on subsequent runs.
 
 You can save the DiT model after LoRA merge with the `--save_merged_model` option. Specify `--save_merged_model path/to/merged_model.safetensors`. Note that inference will not be performed when this option is specified.
 

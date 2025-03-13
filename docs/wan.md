@@ -33,7 +33,9 @@ Download the VAE from the above page `Wan2.1_VAE.pth` or download `split_files/v
 
 Download the DiT weights from the following page: https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/tree/main/split_files/diffusion_models
 
-Please select the appropriate weights according to T2V, I2V, resolution, model size, etc. fp8 models can be used if `--fp8` is specified.
+Please select the appropriate weights according to T2V, I2V, resolution, model size, etc. 
+
+`fp16` and `bf16` models can be used, and `fp8_e4m3fn` models can be used if `--fp8` (or `--fp8_base`) is specified without specifying `--fp8_scaled`. **Please note that `fp8_scaled` models are not supported.**
 
 (Thanks to Comfy-Org for providing the repackaged weights.)
 <details>
@@ -44,7 +46,9 @@ VAEは上のページから `Wan2.1_VAE.pth` をダウンロードするか、�
 
 DiTの重みを次のページからダウンロードしてください：https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/tree/main/split_files/diffusion_models
 
-T2VやI2V、解像度、モデルサイズなどにより適切な重みを選択してください。`--fp8`指定時はfp8モデルも使用できます。
+T2VやI2V、解像度、モデルサイズなどにより適切な重みを選択してください。
+
+`fp16` および `bf16` モデルを使用できます。また、`--fp8` （または`--fp8_base`）を指定し`--fp8_scaled`を指定をしないときには `fp8_e4m3fn` モデルを使用できます。**`fp8_scaled` モデルはサポートされていませんのでご注意ください。**
 
 （repackaged版の重みを提供してくださっているComfy-Orgに感謝いたします。）
 </details>

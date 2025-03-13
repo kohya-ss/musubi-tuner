@@ -1,4 +1,5 @@
 import argparse
+from typing import Optional
 from PIL import Image
 
 
@@ -16,10 +17,10 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-from utils.safetensors_utils import load_safetensors
+from utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
 from wan.configs import WAN_CONFIGS
 from wan.modules.clip import CLIPModel
-from wan.modules.model import WanModel
+from wan.modules.model import WanModel, detect_wan_sd_dtype, load_wan_model
 from wan.modules.t5 import T5EncoderModel
 from wan.modules.vae import WanVAE
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
@@ -27,9 +28,7 @@ from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 class WanNetworkTrainer(NetworkTrainer):
     def __init__(self):
-        # super().__init__()
-        self.config = None
-        self._i2v_training = False
+        super().__init__()
 
     # region model specific
 
@@ -41,9 +40,21 @@ class WanNetworkTrainer(NetworkTrainer):
     def architecture_full_name(self) -> str:
         return ARCHITECTURE_WAN_FULL
 
-    def assert_model_specific_args(self, args):
+    def handle_model_specific_args(self, args):
         self.config = WAN_CONFIGS[args.task]
         self._i2v_training = "i2v" in args.task
+
+        self.dit_dtype = detect_wan_sd_dtype(args.dit)
+
+        if self.dit_dtype == torch.float16:
+            assert args.mixed_precision in ["fp16", "no"], "DiT weights are in fp16, mixed precision must be fp16 or no"
+        elif self.dit_dtype == torch.bfloat16:
+            assert args.mixed_precision in ["bf16", "no"], "DiT weights are in bf16, mixed precision must be bf16 or no"
+
+        if args.fp8_scaled and self.dit_dtype.itemsize == 1:
+            raise ValueError(
+                "DiT weights is already in fp8 format, cannot scale to fp8. Please use fp16/bf16 weights / DiTの重みはすでにfp8形式です。fp8にスケーリングできません。fp16/bf16の重みを使用してください"
+            )
 
     @property
     def i2v_training(self) -> bool:
@@ -291,41 +302,25 @@ class WanNetworkTrainer(NetworkTrainer):
 
     def load_transformer(
         self,
+        accelerator: Accelerator,
         args: argparse.Namespace,
         dit_path: str,
         attn_mode: str,
         split_attn: bool,
         loading_device: str,
-        dit_weight_dtype: torch.dtype,
+        dit_weight_dtype: Optional[torch.dtype],
     ):
-        with init_empty_weights():
-            logger.info(f"Creating WanModel")
-            model = WanModel(
-                model_type="i2v" if self.i2v_training else "t2v",
-                dim=self.config.dim,
-                eps=self.config.eps,
-                ffn_dim=self.config.ffn_dim,
-                freq_dim=self.config.freq_dim,
-                in_dim=36 if self.i2v_training else 16,  # 36 for I2V, 16 for T2V
-                num_heads=self.config.num_heads,
-                num_layers=self.config.num_layers,
-                out_dim=16,
-                text_len=512,
-                attn_mode=attn_mode,
-                split_attn=split_attn,
-            )
-            model.to(dit_weight_dtype)
-
-        logger.info(f"Loading DiT model from {dit_path}, device={loading_device}, dtype={dit_weight_dtype}")
-        sd = load_safetensors(dit_path, loading_device, disable_mmap=True, dtype=dit_weight_dtype)
-
-        # remove "model.diffusion_model." prefix: 1.3B model has this prefix
-        for key in list(sd.keys()):
-            if key.startswith("model.diffusion_model."):
-                sd[key[22:]] = sd.pop(key)
-
-        info = model.load_state_dict(sd, strict=True, assign=True)
-        logger.info(f"Loaded DiT model from {dit_path}, info={info}")
+        model = load_wan_model(
+            self.config,
+            self.i2v_training,
+            accelerator.device,
+            dit_path,
+            attn_mode,
+            split_attn,
+            loading_device,
+            dit_weight_dtype,
+            args.fp8_scaled,
+        )
         return model
 
     def scale_shift_latents(self, latents):
@@ -387,6 +382,7 @@ class WanNetworkTrainer(NetworkTrainer):
 def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Wan2.1 specific parser setup"""
     parser.add_argument("--task", type=str, default="t2v-14B", choices=list(WAN_CONFIGS.keys()), help="The task to run.")
+    parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--t5", type=str, default=None, help="text encoder (T5) checkpoint path")
     parser.add_argument("--fp8_t5", action="store_true", help="use fp8 for Text Encoder model")
     parser.add_argument(
@@ -406,7 +402,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    args.dit_dtype = "bfloat16"  # Wan2.1 only supports bfloat16
+    args.dit_dtype = None  # automatically detected
     if args.vae_dtype is None:
         args.vae_dtype = "bfloat16"  # make bfloat16 as default for VAE
 

@@ -39,6 +39,14 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 ### 最近の更新
 
+- 2025/03/13
+    - HunyuanVideoの推論スクリプトで、RTX 40x0向けの高速化オプション`--fp8_fast`と、`torch.compile`を使用するオプション`--compile`が追加されました。[PR #137](https://github.com/kohya-ss/musubi-tuner/pull/137) Sarania 氏に感謝いたします。
+        - 詳細は[推論](#推論)を参照してください。
+    - Wan2.1の学習、推論で、fp8量子化を行うオプションを`--fp8_scaled`を追加しました。[PR #141](https://github.com/kohya-ss/musubi-tuner/pull/141) 
+        - 単純なFP8へのキャストではなく、スケーリングを行うことで、VRAM使用量の削減と精度の維持を両立します。
+        - 詳細は[高度な設定](./docs/advanced_config.md#fp8-quantization)を参照してください。
+        - また`fp16`のモデルをWan2.1の学習と推論でサポートしました。
+
 - 2025/03/07
     - Wan 2.1の学習で、サンプル画像生成を行わない場合でも`--t5`オプションが必須になっていたのを修正しました。
 
@@ -286,6 +294,8 @@ python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_
 
 `--fp8`を指定すると、DiTがfp8で推論されます。fp8は大きく消費メモリを削減できますが、品質は低下する可能性があります。
 
+RTX 40x0シリーズのGPUを使用している場合は、`--fp8_fast`オプションを指定することで、高速推論が可能です。このオプションを指定する場合は、`--fp8`も指定してください。
+
 VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大38が指定できます。
 
 `--attn_mode`には`flash`、`torch`、`sageattn`、`xformers`または`sdpa`（`torch`指定時と同じ）のいずれかを指定してください。それぞれFlashAttention、scaled dot product attention、SageAttention、xformersに対応します。デフォルトは`torch`です。SageAttentionはVRAMの削減に有効です。
@@ -303,6 +313,10 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 `--video_path`に読み込む動画を指定すると、video2videoの推論が可能です。動画ファイルを指定するか、複数の画像ファイルが入ったディレクトリを指定してください（画像ファイルはファイル名でソートされ、各フレームとして用いられます）。`--video_length`よりも短い動画を指定するとエラーになります。`--strength`で強度を指定できます。0~1.0で指定でき、大きいほど元の動画からの変化が大きくなります。
 
 なおvideo2video推論の処理は実験的なものです。
+
+`--compile`オプションでPyTorchのコンパイル機能を有効にします（実験的機能）。tritonのインストールが必要です。また、WindowsではVisual C++ build toolsが必要で、かつPyTorch>=2.6.0でのみ動作します。`--compile_args`でコンパイル時の引数を渡すことができます。
+
+`--compile`は初回実行時にかなりの時間がかかりますが、2回目以降は高速化されます。
 
 `--save_merged_model`オプションで、LoRAマージ後のDiTモデルを保存できます。`--save_merged_model path/to/merged_model.safetensors`のように指定してください。なおこのオプションを指定すると推論は行われません。
 

@@ -1,13 +1,25 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
+from accelerate import init_empty_weights
+
+import logging
+
+from utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+from utils.device_utils import clean_memory_on_device
 
 from .attention import flash_attention
 from utils.device_utils import clean_memory_on_device
 from modules.custom_offloading_utils import ModelOffloader
+from modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
 __all__ = ["WanModel"]
 
@@ -602,6 +614,38 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
     def device(self):
         return next(self.parameters()).device
 
+    def fp8_optimization(self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool) -> int:
+        """
+        Optimize the model state_dict with fp8.
+
+        Args:
+            state_dict (dict[str, torch.Tensor]):
+                The state_dict of the model.
+            device (torch.device):
+                The device to calculate the weight.
+            move_to_device (bool):
+                Whether to move the weight to the device after optimization.
+        """
+        TARGET_KEYS = ["blocks"]
+        EXCLUDE_KEYS = [
+            "norm",
+            "patch_embedding",
+            "text_embedding",
+            "time_embedding",
+            "time_projection",
+            "head",
+            "modulation",
+            "img_emb",
+        ]
+
+        # inplace optimization
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
+
+        # apply monkey patching
+        apply_fp8_monkey_patch(self, state_dict)
+
+        return state_dict
+
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
 
@@ -801,3 +845,84 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
+
+
+def detect_wan_sd_dtype(path: str) -> torch.dtype:
+    # get dtype from model weights
+    with MemoryEfficientSafeOpen(path) as f:
+        keys = set(f.keys())
+        key1 = "model.diffusion_model.blocks.0.cross_attn.k.weight"  # 1.3B
+        key2 = "blocks.0.cross_attn.k.weight"  # 14B
+        if key1 in keys:
+            dit_dtype = f.get_tensor(key1).dtype
+        elif key2 in keys:
+            dit_dtype = f.get_tensor(key2).dtype
+        else:
+            raise ValueError(f"Could not find the dtype in the model weights: {path}")
+    logger.info(f"Detected DiT dtype: {dit_dtype}")
+    return dit_dtype
+
+
+def load_wan_model(
+    config: any,
+    i2v: bool,
+    device: Union[str, torch.device],
+    dit_path: str,
+    attn_mode: str,
+    split_attn: bool,
+    loading_device: Union[str, torch.device],
+    dit_weight_dtype: Optional[torch.dtype],
+    fp8_scaled: bool = False,
+) -> WanModel:
+    # dit_weight_dtype is None for fp8_scaled
+    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+
+    device = torch.device(device)
+    loading_device = torch.device(loading_device)
+
+    with init_empty_weights():
+        logger.info(f"Creating WanModel")
+        model = WanModel(
+            model_type="i2v" if i2v else "t2v",
+            dim=config.dim,
+            eps=config.eps,
+            ffn_dim=config.ffn_dim,
+            freq_dim=config.freq_dim,
+            in_dim=36 if i2v else 16,  # 36 for I2V, 16 for T2V
+            num_heads=config.num_heads,
+            num_layers=config.num_layers,
+            out_dim=16,
+            text_len=512,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
+        )
+        if dit_weight_dtype is not None:
+            model.to(dit_weight_dtype)
+
+    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
+    wan_loading_device = torch.device("cpu") if fp8_scaled else loading_device
+    logger.info(f"Loading DiT model from {dit_path}, device={wan_loading_device}, dtype={dit_weight_dtype}")
+
+    # load model weights with the specified dtype or as is
+    sd = load_safetensors(dit_path, wan_loading_device, disable_mmap=True, dtype=dit_weight_dtype)
+
+    # remove "model.diffusion_model." prefix: 1.3B model has this prefix
+    for key in list(sd.keys()):
+        if key.startswith("model.diffusion_model."):
+            sd[key[22:]] = sd.pop(key)
+
+    if fp8_scaled:
+        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
+        logger.info(f"Optimizing model weights to fp8. This may take a while.")
+        sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
+
+        if loading_device.type != "cpu":
+            # make sure all the model weights are on the loading_device
+            logger.info(f"Moving weights to {loading_device}")
+            for key in sd.keys():
+                sd[key] = sd[key].to(loading_device)
+
+    info = model.load_state_dict(sd, strict=True, assign=True)
+    logger.info(f"Loaded DiT model from {dit_path}, info={info}")
+
+    return model

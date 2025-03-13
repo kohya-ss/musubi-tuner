@@ -1,5 +1,6 @@
 import argparse
 from datetime import datetime
+import gc
 import random
 import os
 import time
@@ -14,6 +15,7 @@ from networks import lora_wan
 from utils.safetensors_utils import mem_eff_save_file
 from wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
 import wan
+from wan.modules.model import detect_wan_sd_dtype
 from wan.modules.vae import WanVAE
 
 try:
@@ -97,6 +99,7 @@ def parse_args():
     )
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
+    parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT")
     parser.add_argument("--fp8_t5", action="store_true", help="use fp8 for Text Encoder model")
     parser.add_argument(
         "--device", type=str, default=None, help="device to use for inference. If None, use CUDA if available, otherwise use CPU"
@@ -182,8 +185,23 @@ def main():
     # prepare device and dtype
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
-    dit_dtype = torch.bfloat16
-    dit_weight_dtype = torch.float8_e4m3fn if args.fp8 else dit_dtype
+
+    # set appropriate dtype
+    dit_dtype = detect_wan_sd_dtype(args.dit) if args.dit is not None else torch.bfloat16
+    if dit_dtype.itemsize == 1:
+        # if weight is in fp8, use bfloat16 for DiT (input/output)
+        dit_dtype = torch.bfloat16
+        if args.fp8_scaled:
+            raise ValueError(
+                "DiT weights is already in fp8 format, cannot scale to fp8. Please use fp16/bf16 weights / DiTの重みはすでにfp8形式です。fp8にスケーリングできません。fp16/bf16の重みを使用してください"
+            )
+
+    dit_weight_dtype = dit_dtype  # default
+    if args.fp8_scaled:
+        dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
+    elif args.fp8:
+        dit_weight_dtype = torch.float8_e4m3fn
+
     vae_dtype = str_to_dtype(args.vae_dtype) if args.vae_dtype is not None else dit_dtype
     logger.info(
         f"Using device: {device}, DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}, VAE precision: {vae_dtype}"
@@ -300,7 +318,8 @@ def main():
                 config=cfg,
                 checkpoint_dir=args.ckpt_dir,
                 device=device,
-                dtype=dit_weight_dtype,
+                dit_dtype=dit_dtype,
+                dit_weight_dtype=dit_weight_dtype,
                 dit_path=args.dit,
                 dit_attn_mode=args.attn_mode,
                 t5_path=args.t5,
@@ -311,7 +330,7 @@ def main():
             latents = wan_t2v.generate(
                 accelerator,
                 merge_lora,
-                torch.bfloat16 if merge_lora is not None else None,
+                args.fp8_scaled,
                 prompt,
                 size=size,
                 frame_num=video_length,
@@ -329,7 +348,8 @@ def main():
                 config=cfg,
                 checkpoint_dir=args.ckpt_dir,
                 device=device,
-                dtype=dit_weight_dtype,
+                dit_dtype=dit_dtype,
+                dit_weight_dtype=dit_weight_dtype,
                 dit_path=args.dit,
                 dit_attn_mode=args.attn_mode,
                 t5_path=args.t5,
@@ -347,7 +367,7 @@ def main():
             latents = wan_i2v.generate(
                 accelerator,
                 merge_lora,
-                torch.bfloat16 if merge_lora is not None else None,
+                args.fp8_scaled,
                 prompt,
                 img=image,
                 size=size,
@@ -363,7 +383,9 @@ def main():
             del wan_i2v
             latents = latents.unsqueeze(0)
 
+        # this waits for the block swap to finish
         logger.info(f"wait for 5s to clean memory")
+        gc.collect()
         time.sleep(5.0)
         clean_memory_on_device(device)
 

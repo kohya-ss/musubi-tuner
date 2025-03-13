@@ -17,7 +17,7 @@ from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from utils.safetensors_utils import load_safetensors
 
 # from .distributed.fsdp import shard_model
-from .modules.model import WanModel
+from .modules.model import WanModel, load_wan_model
 from .modules.t5 import T5EncoderModel
 from .utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
@@ -43,7 +43,8 @@ class WanT2V:
         use_usp=False,
         t5_cpu=False,
         device=None,
-        dtype=None,
+        dit_dtype=None,
+        dit_weight_dtype=None,
         dit_path=None,
         dit_attn_mode=None,
         t5_path=None,
@@ -110,7 +111,8 @@ class WanT2V:
 
         self.checkpoint_dir = checkpoint_dir
         self.dit_path = dit_path
-        self.dit_dtype = dtype if dtype is not None else config.param_dtype
+        self.dit_dtype = dit_dtype  # if dtype is not None else config.param_dtype
+        self.dit_weight_dtype = dit_weight_dtype
         self.dit_attn_mode = dit_attn_mode
 
         self.sample_neg_prompt = config.sample_neg_prompt
@@ -119,7 +121,7 @@ class WanT2V:
         self,
         accelerator: Accelerator,
         merge_lora: Optional[callable],
-        dit_loading_dtype: Optional[torch.dtype],
+        fp8_scaled: bool,
         input_prompt,
         size=(1280, 720),
         frame_num=81,
@@ -191,48 +193,50 @@ class WanT2V:
         clean_memory_on_device(self.device)
 
         # load DiT model
-        dit_loading_dtype = dit_loading_dtype if dit_loading_dtype is not None else self.dit_dtype
-        with init_empty_weights():
-            # if self.checkpoint_dir is not None:
-            #     logger.info(f"Creating WanModel from {self.checkpoint_dir}")
-            #     self.model = WanModel.from_pretrained(self.checkpoint_dir)
-            # self.model = WanModel.from_config(config)
-            # else:
-            logger.info(f"Creating WanModel")
-            self.model = WanModel(
-                dim=self.config.dim,
-                eps=self.config.eps,
-                ffn_dim=self.config.ffn_dim,
-                freq_dim=self.config.freq_dim,
-                in_dim=16,
-                num_heads=self.config.num_heads,
-                num_layers=self.config.num_layers,
-                out_dim=16,
-                text_len=512,
-                attn_mode=self.dit_attn_mode,
-            )
-            self.model.to(dit_loading_dtype)
+        loading_device = "cpu"
+        if blocks_to_swap == 0 and merge_lora is None and not fp8_scaled:
+            loading_device = self.device
 
-        # if LoRA is enabled, load the model on CPU with bfloat16
-        loading_device = self.device if (blocks_to_swap == 0 and merge_lora is None) else "cpu"
-        logger.info(f"Loading DiT model from {self.dit_path}, device={loading_device}, dtype={dit_loading_dtype}")
-        sd = load_safetensors(self.dit_path, loading_device, disable_mmap=True, dtype=dit_loading_dtype)
+        loading_weight_dtype = self.dit_weight_dtype
+        if fp8_scaled or merge_lora is not None:
+            loading_weight_dtype = self.dit_dtype  # load as-is
 
-        # remove "model.diffusion_model." prefix: 1.3B model has this prefix
-        for key in list(sd.keys()):
-            if key.startswith("model.diffusion_model."):
-                sd[key[22:]] = sd.pop(key)
-
-        info = self.model.load_state_dict(sd, strict=True, assign=True)
-        logger.info(f"Loaded DiT model from {self.dit_path}, info={info}")
+        # set fp8_scaled to False, because we optimize the model after merging LoRA
+        # TODO state dict based LoRA merge
+        self.model: WanModel = load_wan_model(
+            self.config,
+            False,
+            self.device,
+            self.dit_path,
+            self.dit_attn_mode,
+            False,
+            loading_device,
+            loading_weight_dtype,
+            False,
+        )
 
         if merge_lora is not None:
             # merge LoRA to the model, cast and move to the device
             merge_lora(self.model)
+
+        if fp8_scaled:
+            state_dict = self.model.state_dict()
+            move_to_device = blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+            state_dict = self.model.fp8_optimization(state_dict, self.device, move_to_device)
+            info = self.model.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded FP8 optimized weights: {info}")
             if blocks_to_swap == 0:
-                self.model.to(self.device, self.dit_dtype)
-            else:
-                self.model.to(self.dit_dtype)
+                self.model.to(self.device)  # make sure all parameters are on the right device
+        else:
+            target_dtype = None
+            target_device = None
+            if self.dit_weight_dtype is not None:  # in case of args.fp8 (not fp8_scaled)
+                logger.info(f"Convert model to {self.dit_weight_dtype}")
+                target_dtype = self.dit_weight_dtype
+            if blocks_to_swap == 0:
+                logger.info(f"Move model to device: {self.device}")
+                target_device = self.device
+            self.model.to(target_device, target_dtype)
 
         if blocks_to_swap > 0:
             logger.info(f"Enable swap {blocks_to_swap} blocks to CPU from device: {self.device}")

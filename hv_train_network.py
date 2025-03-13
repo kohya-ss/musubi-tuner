@@ -340,8 +340,7 @@ def should_sample_images(args, steps, epoch=None):
 
 class NetworkTrainer:
     def __init__(self):
-        self._i2v_training = False
-        self.pos_embed_cache = {}
+        self.blocks_to_swap = None
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1011,7 +1010,9 @@ class NetworkTrainer:
     def architecture_full_name(self) -> str:
         return ARCHITECTURE_HUNYUAN_VIDEO_FULL
 
-    def assert_model_specific_args(self, args: argparse.Namespace):
+    def handle_model_specific_args(self, args: argparse.Namespace):
+        self.pos_embed_cache = {}
+
         self._i2v_training = args.dit_in_channels == 32  # may be changed in the future
         if self._i2v_training:
             logger.info("I2V training mode")
@@ -1260,12 +1261,13 @@ class NetworkTrainer:
 
     def load_transformer(
         self,
+        accelerator: Accelerator,
         args: argparse.Namespace,
         dit_path: str,
         attn_mode: str,
         split_attn: bool,
         loading_device: str,
-        dit_weight_dtype: torch.dtype,
+        dit_weight_dtype: Optional[torch.dtype],
     ):
         transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels)
 
@@ -1346,9 +1348,10 @@ class NetworkTrainer:
             raise ValueError("dataset_config is required / dataset_configが必要です")
         if args.dit is None:
             raise ValueError("path to DiT model is required / DiTモデルのパスが必要です")
+        assert not args.fp8_scaled or args.fp8_base, "fp8_scaled requires fp8_base / fp8_scaledはfp8_baseが必要です"
 
         # check model specific arguments
-        self.assert_model_specific_args(args)
+        self.handle_model_specific_args(args)
 
         # show timesteps for debugging
         if args.show_timesteps:
@@ -1389,7 +1392,7 @@ class NetworkTrainer:
 
         # HunyuanVideo: bfloat16 or float16, Wan2.1: bfloat16
         dit_dtype = torch.bfloat16 if args.dit_dtype is None else model_utils.str_to_dtype(args.dit_dtype)
-        dit_weight_dtype = torch.float8_e4m3fn if args.fp8_base else dit_dtype
+        dit_weight_dtype = (None if args.fp8_scaled else torch.float8_e4m3fn) if args.fp8_base else dit_dtype
         logger.info(f"DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}")
 
         # get embedding for sampling images
@@ -1406,6 +1409,7 @@ class NetworkTrainer:
 
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
+        self.blocks_to_swap = blocks_to_swap
         loading_device = "cpu" if blocks_to_swap > 0 else accelerator.device
 
         logger.info(f"Loading DiT model from {args.dit}")
@@ -1423,7 +1427,9 @@ class NetworkTrainer:
             raise ValueError(
                 f"either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
             )
-        transformer = self.load_transformer(args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype)
+        transformer = self.load_transformer(
+            accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
+        )
         transformer.eval()
         transformer.requires_grad_(False)
 
@@ -1565,7 +1571,7 @@ class NetworkTrainer:
             network_dtype = weight_dtype
             network.to(network_dtype)
 
-        if dit_weight_dtype != dit_dtype:
+        if dit_weight_dtype != dit_dtype and dit_weight_dtype is not None:
             logger.info(f"casting model to {dit_weight_dtype}")
             transformer.to(dit_weight_dtype)
 
@@ -2589,6 +2595,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
+
+    args.fp8_scaled = False  # HunyuanVideo does not support this yet
 
     trainer = NetworkTrainer()
     trainer.train(args)

@@ -2,6 +2,14 @@
 
 # Advanced configuration / 高度な設定
 
+## Table of contents / 目次
+
+- [How to specify `network_args`](#how-to-specify-network_args)
+- [LoRA+](#lora)
+- [Select the target modules of LoRA](#select-the-target-modules-of-lora)
+- [Save and view logs in TensorBoard format](#save-and-view-logs-in-tensorboard-format)
+
+
 ## How to specify `network_args` / `network_args`の指定方法
 
 The `--network_args` option is an option for specifying detailed arguments to LoRA. Specify the arguments in the form of `key=value` in `--network_args`.
@@ -149,3 +157,63 @@ Specify the project name with `--log_tracker_name` when using wandb.
 
 wandbを使用する場合は、`--log_tracker_name`でプロジェクト名を指定してください。
 </details>
+
+## FP8 weight optimization for models / モデルの重みのFP8への最適化
+
+The `--fp8_scaled` option is available to quantize the weights of the model to FP8 (E4M3) format with appropriate scaling. This reduces the VRAM usage while maintaining precision. Important weights are kept in FP16/BF16/FP32 format.
+
+The model weights must be in fp16 or bf16. Weights that have been pre-converted to float8_e4m3 cannot be used.
+
+Wan2.1 inference and training are supported.
+
+Specify the `--fp8_scaled` option in addition to the `--fp8` option during inference.
+
+Specify the `--fp8_scaled` option in addition to the `--fp8_base` option during training.
+
+Acknowledgments: This feature is based on the [implementation](https://github.com/Tencent/HunyuanVideo/blob/7df4a45c7e424a3f6cd7d653a7ff1f60cddc1eb1/hyvideo/modules/fp8_optimization.py) of [HunyuanVideo](https://github.com/Tencent/HunyuanVideo). The selection of high-precision modules is based on the [implementation](https://github.com/tdrussell/diffusion-pipe/blob/407c04fdae1c9ab5e67b54d33bef62c3e0a8dbc7/models/wan.py) of [diffusion-pipe](https://github.com/tdrussell/diffusion-pipe). I would like to thank these repositories.
+
+<details>
+<summary>日本語</summary>
+重みを単純にFP8へcastするのではなく、適切なスケーリングでFP8形式に量子化することで、精度を維持しつつVRAM使用量を削減します。また、重要な重みはFP16/BF16/FP32形式で保持します。
+
+モデルの重みは、fp16またはbf16が必要です。あらかじめfloat8_e4m3に変換された重みは使用できません。
+
+Wan2.1の推論、学習のみ対応しています。
+
+推論時は`--fp8`オプションに加えて `--fp8_scaled`オプションを指定してください。
+
+学習時は`--fp8_base`オプションに加えて `--fp8_scaled`オプションを指定してください。
+
+謝辞：この機能は、[HunyuanVideo](https://github.com/Tencent/HunyuanVideo)の[実装](https://github.com/Tencent/HunyuanVideo/blob/7df4a45c7e424a3f6cd7d653a7ff1f60cddc1eb1/hyvideo/modules/fp8_optimization.py)を参考にしました。また、高精度モジュールの選択においては[diffusion-pipe](https://github.com/tdrussell/diffusion-pipe)の[実装](https://github.com/tdrussell/diffusion-pipe/blob/407c04fdae1c9ab5e67b54d33bef62c3e0a8dbc7/models/wan.py)を参考にしました。これらのリポジトリに感謝します。
+
+</details>
+
+### Key features and implementation details / 主な特徴と実装の詳細
+
+- Implements FP8 (E4M3) weight quantization for Linear layers
+- Reduces VRAM requirements by using 8-bit weights for storage (slightly increased compared to existing `--fp8` `--fp8_base` options)
+- Quantizes weights to FP8 format with appropriate scaling instead of simple cast to FP8
+- Maintains computational precision by dequantizing to original precision (FP16/BF16/FP32) during forward pass
+- Preserves important weights in FP16/BF16/FP32 format
+
+The implementation:
+
+1. Quantizes weights to FP8 format with appropriate scaling
+2. Replaces weights by FP8 quantized weights and stores scale factors in model state dict
+3. Applies monkey patching to Linear layers for transparent dequantization during computation
+
+<details>
+<summary>日本語</summary>
+
+- Linear層のFP8（E4M3）重み量子化を実装
+- 8ビットの重みを使用することでVRAM使用量を削減（既存の`--fp8` `--fp8_base` オプションに比べて微増）
+- 単純なFP8へのcastではなく、適切な値でスケールして重みをFP8形式に量子化
+- forward時に元の精度（FP16/BF16/FP32）に逆量子化して計算精度を維持
+- 精度が重要な重みはFP16/BF16/FP32のまま保持
+
+実装:
+
+1. 精度を維持できる適切な倍率で重みをFP8形式に量子化
+2. 重みをFP8量子化重みに置き換え、倍率をモデルのstate dictに保存
+3. Linear層にmonkey patchingすることでモデルを変更せずに逆量子化
+ 
