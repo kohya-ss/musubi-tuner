@@ -494,6 +494,7 @@ def parse_args():
     parser.add_argument("--apply_final_norm", type=bool, default=False, help="Apply final norm for LLM. Default is False.")
     parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
+    parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
     args = parser.parse_args()
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
@@ -722,6 +723,13 @@ def main():
                 dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
                 param.to(dtype=dtype_to_use)
             convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
+
+        if args.fp16_accumulation:
+            logger.info("Enabling FP16 accumulation")
+            if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                torch.backends.cuda.matmul.allow_fp16_accumulation = True
+            else:
+                raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
 
         if args.compile:
             compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
