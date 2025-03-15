@@ -8,7 +8,6 @@ import math
 import os
 import re
 from typing import Dict, List, Optional, Type, Union
-from diffusers import AutoencoderKL
 from transformers import CLIPTextModel
 import numpy as np
 import torch
