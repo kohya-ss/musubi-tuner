@@ -811,7 +811,7 @@ def main():
         for i in range(latent_video_length):
             latents.append(randn_tensor(shape_of_frame, generator=generator, device=device, dtype=dit_dtype))
         latents = torch.cat(latents, dim=2)
-
+        original_latents = latents
         # pad image_latents to match the length of video_latents
         if image_latents is not None:
             zero_latents = torch.zeros_like(latents)
@@ -833,7 +833,6 @@ def main():
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
 
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
-        original_latents = latents
         last_thread = None
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale

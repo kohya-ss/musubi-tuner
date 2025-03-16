@@ -317,7 +317,7 @@ class MainWindow(QMainWindow):
                               f"--flow_shift {self.global_settings.flow_shift} --hidden_state_skip_layer {self.global_settings.hidden_state_skip_layer} "
                               f"--video_size {self.global_settings.resolution_y} {self.global_settings.resolution_x} --fps {self.global_settings.fps} --video_length "
                               f"{self.global_settings.video_length} --infer_steps {self.global_settings.infer_steps} --embedded_cfg_scale {self.global_settings.embedded_guidance} "
-                              f" --attn_mode {attention} --output_type latent --prompt '{self.global_settings.prompt}' --preview_latent_every 2  ")
+                              f" --attn_mode {attention} --output_type latent --prompt '{self.global_settings.prompt}' --preview_latent_every 1 ")
             if self.global_settings.fp8:
                 musubi_command += "--fp8 "
             if self.global_settings.fp8_fast:
