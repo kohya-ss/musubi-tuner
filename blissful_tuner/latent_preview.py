@@ -11,7 +11,7 @@ from PIL import Image
 import numpy as np
 
 
-def latent_preview(noisy_latents, original_latents, timesteps, current_step, args, modeltype="hunyuan"):
+def latent_preview(noisy_latents, original_latents, timesteps, current_step, args, model_type="hunyuan"):
     """
     Function for previewing latents
 
@@ -84,14 +84,14 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
         },
     }
 
-    # Validate modeltype
-    if modeltype not in model_params:
-        raise ValueError(f"Unsupported model type: {modeltype}")
+    # Validate model_type
+    if model_type not in model_params:
+        raise ValueError(f"Unsupported model type: {model_type}")
 
-    frame_axis = model_params[modeltype]["frame_axis"]
-    extract_fn = model_params[modeltype]["extract"]
-    latent_rgb_factors = model_params[modeltype]["rgb_factors"]
-    latent_rgb_factors_bias = model_params[modeltype]["bias"]
+    frame_axis = model_params[model_type]["frame_axis"]
+    extract_fn = model_params[model_type]["extract"]
+    latent_rgb_factors = model_params[model_type]["rgb_factors"]
+    latent_rgb_factors_bias = model_params[model_type]["bias"]
 
     timesteps_percent = timesteps / 1000
     noise_remaining = timesteps_percent[current_step].to(device=noisy_latents.device)
