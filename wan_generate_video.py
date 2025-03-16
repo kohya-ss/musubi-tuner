@@ -38,6 +38,9 @@ except:
 from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
+from blissful_tuner.latent_preview import latent_preview
+
+import threading
 
 import logging
 
@@ -132,7 +135,7 @@ def parse_args() -> argparse.Namespace:
         default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
         help="Torch.compile settings",
     )
-
+    parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
     args = parser.parse_args()
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
@@ -732,10 +735,11 @@ def run_sampling(
     arg_c, arg_null = inputs
 
     latent = noise
+    last_thread = None
     if use_cpu_offload:
         latent = latent.to("cpu")
 
-    for _, t in enumerate(tqdm(timesteps)):
+    for i, t in enumerate(tqdm(timesteps)):
         # latent is on CPU if use_cpu_offload is True
         latent_model_input = [latent.to(device)]
         timestep = torch.stack([t]).to(device)
@@ -758,6 +762,17 @@ def run_sampling(
 
             # update latent
             latent = temp_x0.squeeze(0)
+
+        if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
+            if last_thread is not None:  # Don't spawn more than one preview thread at a time
+                last_thread.join()
+                last_thread = None
+            thread = threading.Thread(target=latent_preview, args=(latent, noise, timesteps, i + 1, args, "wan"), daemon=True)
+            thread.start()
+            last_thread = thread
+
+    if last_thread is not None:
+        last_thread.join()  # Wait for preview thread
 
     return latent
 

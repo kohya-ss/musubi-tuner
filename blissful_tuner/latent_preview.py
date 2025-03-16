@@ -10,49 +10,6 @@ import av
 from PIL import Image
 import numpy as np
 
-rgb_factors = {}
-rgb_factors_bias = {}
-# For HunyuanVideo
-rgb_factors['hunyuan'] = [
-    [-0.0395, -0.0331,  0.0445],
-    [ 0.0696,  0.0795,  0.0518],
-    [ 0.0135, -0.0945, -0.0282],
-    [ 0.0108, -0.0250, -0.0765],
-    [-0.0209,  0.0032,  0.0224],
-    [-0.0804, -0.0254, -0.0639],
-    [-0.0991,  0.0271, -0.0669],
-    [-0.0646, -0.0422, -0.0400],
-    [-0.0696, -0.0595, -0.0894],
-    [-0.0799, -0.0208, -0.0375],
-    [ 0.1166,  0.1627,  0.0962],
-    [ 0.1165,  0.0432,  0.0407],
-    [-0.2315, -0.1920, -0.1355],
-    [-0.0270,  0.0401, -0.0821],
-    [-0.0616, -0.0997, -0.0727],
-    [ 0.0249, -0.0469, -0.1703]
-    ]
-rgb_factors_bias['hunyuan'] = [0.0259, -0.0192, -0.0761]
-
-#For WanVideo
-rgb_factors['wan'] = [
-    [-0.1299, -0.1692,  0.2932],
-    [ 0.0671,  0.0406,  0.0442],
-    [ 0.3568,  0.2548,  0.1747],
-    [ 0.0372,  0.2344,  0.1420],
-    [ 0.0313,  0.0189, -0.0328],
-    [ 0.0296, -0.0956, -0.0665],
-    [-0.3477, -0.4059, -0.2925],
-    [ 0.0166,  0.1902,  0.1975],
-    [-0.0412,  0.0267, -0.1364],
-    [-0.1293,  0.0740,  0.1636],
-    [ 0.0680,  0.3019,  0.1128],
-    [ 0.0032,  0.0581,  0.0639],
-    [-0.1251,  0.0927,  0.1699],
-    [ 0.0060, -0.0633,  0.0005],
-    [ 0.3477,  0.2275,  0.2950],
-    [ 0.1984,  0.0913,  0.1861]
-    ]
-rgb_factors_bias['wan'] = [-0.1835, -0.0868, -0.3360]
 
 def latent_preview(noisy_latents, original_latents, timesteps, current_step, args, modeltype="hunyuan"):
     """
@@ -70,21 +27,76 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
         Current step we are on.
     args: args
         The commandline args.
+    model_type:
+        The type of model we are previewing for
 
     Returns
     -------
     None.
 
     """
-    timesteps_percent = timesteps / 1000
-    noise_remaining = timesteps_percent[current_step]
-    denoisy_latents = noisy_latents - (original_latents * noise_remaining)  # Subtract original noise remaining
-    latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-5)  # Normalize
+    model_params = {
+        "hunyuan": {
+            "rgb_factors": [
+                [-0.0395, -0.0331,  0.0445],
+                [ 0.0696,  0.0795,  0.0518],
+                [ 0.0135, -0.0945, -0.0282],
+                [ 0.0108, -0.0250, -0.0765],
+                [-0.0209,  0.0032,  0.0224],
+                [-0.0804, -0.0254, -0.0639],
+                [-0.0991,  0.0271, -0.0669],
+                [-0.0646, -0.0422, -0.0400],
+                [-0.0696, -0.0595, -0.0894],
+                [-0.0799, -0.0208, -0.0375],
+                [ 0.1166,  0.1627,  0.0962],
+                [ 0.1165,  0.0432,  0.0407],
+                [-0.2315, -0.1920, -0.1355],
+                [-0.0270,  0.0401, -0.0821],
+                [-0.0616, -0.0997, -0.0727],
+                [ 0.0249, -0.0469, -0.1703]
+                ],
+            "bias": [0.0259, -0.0192, -0.0761],
+            "frame_axis": 2,
+            "extract": lambda x, t: x[:, :, t, :, :][0].permute(1, 2, 0),
+        },
+        "wan": {
+            "rgb_factors": [
+                [-0.1299, -0.1692,  0.2932],
+                [ 0.0671,  0.0406,  0.0442],
+                [ 0.3568,  0.2548,  0.1747],
+                [ 0.0372,  0.2344,  0.1420],
+                [ 0.0313,  0.0189, -0.0328],
+                [ 0.0296, -0.0956, -0.0665],
+                [-0.3477, -0.4059, -0.2925],
+                [ 0.0166,  0.1902,  0.1975],
+                [-0.0412,  0.0267, -0.1364],
+                [-0.1293,  0.0740,  0.1636],
+                [ 0.0680,  0.3019,  0.1128],
+                [ 0.0032,  0.0581,  0.0639],
+                [-0.1251,  0.0927,  0.1699],
+                [ 0.0060, -0.0633,  0.0005],
+                [ 0.3477,  0.2275,  0.2950],
+                [ 0.1984,  0.0913,  0.1861]
+                ],
+            "bias": [-0.1835, -0.0868, -0.3360],
+            "frame_axis": 1,
+            "extract": lambda x, t: x[:, t, :, :].permute(1, 2, 0),
+        },
+    }
 
-    # Hard-coded linear transform to approximate latents -> RGB, specific to HunyuanVideo, other transforms and their bias can be found in ComfyUI's latent_formats.py
-    
-    latent_rgb_factors = rgb_factors[modeltype]
-    latent_rgb_factors_bias = rgb_factors_bias[modeltype]
+    # Validate modeltype
+    if modeltype not in model_params:
+        raise ValueError(f"Unsupported model type: {modeltype}")
+
+    frame_axis = model_params[modeltype]["frame_axis"]
+    extract_fn = model_params[modeltype]["extract"]
+    latent_rgb_factors = model_params[modeltype]["rgb_factors"]
+    latent_rgb_factors_bias = model_params[modeltype]["bias"]
+
+    timesteps_percent = timesteps / 1000
+    noise_remaining = timesteps_percent[current_step].to(device=noisy_latents.device)
+    denoisy_latents = noisy_latents - (original_latents.to(device=noisy_latents.device) * noise_remaining)  # Subtract original noise remaining
+    latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-5).to(device=noisy_latents.device)  # Normalize
 
     latent_rgb_factors = torch.tensor(
         latent_rgb_factors,
@@ -97,17 +109,12 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
         dtype=latents.dtype
     )
 
-    latent_images = []
-    # shape is (B, C, F, H, W)
-    for t in range(latents.shape[2]):
-        latent = latents[:, :, t, :, :]
-        latent = latent[0].permute(1, 2, 0)
-        latent_image = torch.nn.functional.linear(
-            latent,
-            latent_rgb_factors,
-            bias=latent_rgb_factors_bias
-        )
-        latent_images.append(latent_image)
+    # Iterate over all the frames inside the latents and put them through the linear transform to rgb
+    latent_images = [
+        torch.nn.functional.linear(extract_fn(latents, t), latent_rgb_factors, bias=latent_rgb_factors_bias)
+        for t in range(latents.shape[frame_axis])
+    ]
+
     latent_images = torch.stack(latent_images, dim=0)
 
     # Normalize to [0..1]
