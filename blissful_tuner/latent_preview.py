@@ -18,9 +18,9 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
     Parameters
     ----------
     noisy_latents : torch.tensor
-        Latents at current timestep, BCFHW
+        Latents at current timestep
     original_latents : torch.tensor
-        Latents at step 0, BCFHW
+        Latents at step 0
     timesteps : torch.tensor
         Denoising schedule e.g timesteps
     current_step : int
@@ -56,7 +56,7 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
                 [ 0.0249, -0.0469, -0.1703]
                 ],
             "bias": [0.0259, -0.0192, -0.0761],
-            "frame_axis": 2,
+            "frame_axis": 2,  # 5 dimensions total, B, C, F, H, W
             "extract": lambda x, t: x[:, :, t, :, :][0].permute(1, 2, 0),
         },
         "wan": {
@@ -79,7 +79,7 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
                 [ 0.1984,  0.0913,  0.1861]
                 ],
             "bias": [-0.1835, -0.0868, -0.3360],
-            "frame_axis": 1,
+            "frame_axis": 1,  # 4 dimensions total, C, F, H, W
             "extract": lambda x, t: x[:, t, :, :].permute(1, 2, 0),
         },
     }
@@ -94,7 +94,7 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
     latent_rgb_factors_bias = model_params[model_type]["bias"]
 
     timesteps_percent = timesteps / 1000
-    noise_remaining = timesteps_percent[current_step].to(device=noisy_latents.device)
+    noise_remaining = timesteps_percent[current_step].to(device=noisy_latents.device)  # Make sure to keep things on same device as original
     denoisy_latents = noisy_latents - (original_latents.to(device=noisy_latents.device) * noise_remaining)  # Subtract original noise remaining
     latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-5).to(device=noisy_latents.device)  # Normalize
 
@@ -129,7 +129,7 @@ def latent_preview(noisy_latents, original_latents, timesteps, current_step, arg
     # Convert to uint8 [0..255]
     latent_images_np = (latent_images_np * 255).astype(np.uint8)
 
-    # Latents are 1/8 size, 1/4 framerate
+    # Latents are 1/8 size, 1/4 framerate, this could be updated later for other scaling if necessary
     scale_factor = 8
     fps = int(args.fps / 4)
 
