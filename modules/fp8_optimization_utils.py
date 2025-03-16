@@ -174,42 +174,81 @@ def optimize_state_dict_with_fp8(
     return state_dict
 
 
-def fp8_linear_forward_patch(self, x):
+def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=None):
     """
     Patched forward method for Linear layers with FP8 weights.
 
     Args:
         self: Linear layer instance
         x (torch.Tensor): Input tensor
-        original_forward: Original forward method
+        use_scaled_mm (bool): Use scaled_mm for FP8 Linear layers, requires SM 8.9+ (RTX 40 series)
+        max_value (float): Maximum value for FP8 quantization. If None, no quantization is applied for input tensor.
 
     Returns:
         torch.Tensor: Result of linear transformation
     """
-    # Dequantize the weight
-    original_dtype = self.scale_weight.dtype
-    dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
+    if use_scaled_mm:
+        input_dtype = x.dtype
+        original_weight_dtype = self.scale_weight.dtype
+        weight_dtype = self.weight.dtype
+        target_dtype = torch.float8_e5m2
+        assert weight_dtype == torch.float8_e4m3fn, "Only FP8 E4M3FN format is supported"
+        assert x.ndim == 3, "Input tensor must be 3D (batch_size, seq_len, hidden_dim)"
 
-    # Perform linear transformation
-    if self.bias is not None:
-        output = F.linear(x, dequantized_weight, self.bias)
+        if max_value is None:
+            # no input quantization
+            scale_x = torch.tensor(1.0, dtype=torch.float32, device=x.device)
+        else:
+            # calculate scale factor for input tensor
+            scale_x = (torch.max(torch.abs(x.flatten())) / max_value).to(torch.float32)
+
+            # quantize input tensor to FP8: this seems to consume a lot of memory
+            x, _ = quantize_tensor_to_fp8(x, scale_x, 5, 2, 1, max_value, -max_value)
+
+        original_shape = x.shape
+        x = x.reshape(-1, x.shape[2]).to(target_dtype)
+
+        weight = self.weight.t()
+        scale_weight = self.scale_weight.to(torch.float32)
+
+        if self.bias is not None:
+            # float32 is not supported with bias in scaled_mm
+            o = torch._scaled_mm(x, weight, out_dtype=original_weight_dtype, bias=self.bias, scale_a=scale_x, scale_b=scale_weight)
+        else:
+            o = torch._scaled_mm(x, weight, out_dtype=input_dtype, scale_a=scale_x, scale_b=scale_weight)
+
+        return o.reshape(original_shape[0], original_shape[1], -1).to(input_dtype)
+
     else:
-        output = F.linear(x, dequantized_weight)
+        # Dequantize the weight
+        original_dtype = self.scale_weight.dtype
+        dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
 
-    return output
+        # Perform linear transformation
+        if self.bias is not None:
+            output = F.linear(x, dequantized_weight, self.bias)
+        else:
+            output = F.linear(x, dequantized_weight)
+
+        return output
 
 
-def apply_fp8_monkey_patch(model, optimized_state_dict):
+def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False):
     """
     Apply monkey patching to a model using FP8 optimized state dict.
 
     Args:
         model (nn.Module): Model instance to patch
         optimized_state_dict (dict): FP8 optimized state dict
+        use_scaled_mm (bool): Use scaled_mm for FP8 Linear layers, requires SM 8.9+ (RTX 40 series)
 
     Returns:
         nn.Module: The patched model (same instance, modified in-place)
     """
+    # # Calculate FP8 float8_e5m2 max value
+    # max_value = calculate_fp8_maxval(5, 2)
+    max_value = None  # do not quantize input tensor
+
     # Find all scale keys to identify FP8-optimized layers
     scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
 
@@ -232,9 +271,9 @@ def apply_fp8_monkey_patch(model, optimized_state_dict):
             # register the scale_weight as a buffer to load the state_dict
             module.register_buffer("scale_weight", torch.tensor(1.0, dtype=module.weight.dtype))
 
-            # Create a new forward method with the patched version
+            # Create a new forward method with the patched version.
             def new_forward(self, x):
-                return fp8_linear_forward_patch(self, x)
+                return fp8_linear_forward_patch(self, x, use_scaled_mm, max_value)
 
             # Bind method to module
             module.forward = new_forward.__get__(module, type(module))

@@ -17,6 +17,7 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+from utils import model_utils
 from utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
 from wan.configs import WAN_CONFIGS
 from wan.modules.clip import CLIPModel
@@ -56,6 +57,8 @@ class WanNetworkTrainer(NetworkTrainer):
                 "DiT weights is already in fp8 format, cannot scale to fp8. Please use fp16/bf16 weights / DiTの重みはすでにfp8形式です。fp8にスケーリングできません。fp16/bf16の重みを使用してください"
             )
 
+        args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
+
     @property
     def i2v_training(self) -> bool:
         return self._i2v_training
@@ -75,7 +78,9 @@ class WanNetworkTrainer(NetworkTrainer):
 
         def encode_for_text_encoder(text_encoder):
             sample_prompts_te_outputs = {}  # (prompt) -> (embeds, mask)
-            with accelerator.autocast(), torch.no_grad():
+            # with accelerator.autocast(), torch.no_grad(): # this causes NaN if dit_dtype is fp16
+            t5_dtype = config.t5_dtype
+            with torch.amp.autocast(device_type=device.type, dtype=t5_dtype), torch.no_grad():
                 for prompt_dict in prompts:
                     if "negative_prompt" not in prompt_dict:
                         prompt_dict["negative_prompt"] = self.config["sample_neg_prompt"]
@@ -174,9 +179,9 @@ class WanNetworkTrainer(NetworkTrainer):
         latent_video_length = (frame_count - 1) // self.config["vae_stride"][0] + 1
 
         # Get embeddings
-        context = sample_parameter["t5_embeds"].to(device=device, dtype=dit_dtype)
+        context = sample_parameter["t5_embeds"].to(device=device)
         if do_classifier_free_guidance:
-            context_null = sample_parameter["negative_t5_embeds"].to(device=device, dtype=dit_dtype)
+            context_null = sample_parameter["negative_t5_embeds"].to(device=device)
         else:
             context_null = None
 
@@ -209,7 +214,7 @@ class WanNetworkTrainer(NetworkTrainer):
             msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
             msk = msk.transpose(1, 2)  # B, C, T, H, W
 
-            with accelerator.autocast(), torch.no_grad():
+            with torch.amp.autocast(device_type=device.type, dtype=vae.dtype), torch.no_grad():
                 # Zero padding for the required number of frames only
                 padding_frames = frame_count - 1  # The first frame is the input image
                 image = torch.concat([image, torch.zeros(3, padding_frames, height, width)], dim=1).to(device=device)

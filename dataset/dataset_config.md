@@ -2,15 +2,11 @@
 
 ## Dataset Configuration
 
-<details>
-<summary>English</summary>
-
 Please create a TOML file for dataset configuration.
 
 Image and video datasets are supported. The configuration file can include multiple datasets, either image or video datasets, with caption text files or metadata JSONL files.
 
 The cache directory must be different for each dataset.
-</details>
 
 <details>
 <summary>日本語</summary>
@@ -44,14 +40,9 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 # other datasets can be added here. each dataset can have different configurations
 ```
 
-<details>
-<summary>English</summary>
-
 `cache_directory` is optional, default is None to use the same directory as the image directory. However, we recommend to set the cache directory to avoid accidental sharing of the cache files between different datasets.
 
 `num_repeats` is also available. It is optional, default is 1 (no repeat). It repeats the images (or videos) that many times to expand the dataset. For example, if `num_repeats = 2` and there are 20 images in the dataset, each image will be duplicated twice (with the same caption) to have a total of 40 images. It is useful to balance the multiple datasets with different sizes.
-
-</details>
 
 <details>
 <summary>日本語</summary>
@@ -129,10 +120,14 @@ frame_extraction = "head"
 # other datasets can be added here. each dataset can have different configurations
 ```
 
+__In HunyuanVideo and Wan2.1, the number of `target_frames` must be "N*4+1" (N=0,1,2,...).__
+
 <details>
 <summary>日本語</summary>
 
 resolution, caption_extension, target_frames, frame_extraction, frame_stride, frame_sample, batch_size, num_repeats, enable_bucket, bucket_no_upscale は general または datasets のどちらかに設定してください。
+
+__HunyuanVideoおよびWan2.1では、target_framesの数値は「N*4+1」である必要があります。__
 
 他の注意事項は画像データセットと同様です。
 </details>
@@ -187,16 +182,12 @@ metadata jsonl ファイルを使用する場合、caption_extension は必要�
 
 ### frame_extraction Options
 
-<details>
-<summary>English</summary>
-
 - `head`: Extract the first N frames from the video.
 - `chunk`: Extract frames by splitting the video into chunks of N frames.
 - `slide`: Extract frames from the video with a stride of `frame_stride`.
 - `uniform`: Extract `frame_sample` samples uniformly from the video.
 
 For example, consider a video with 40 frames. The following diagrams illustrate each extraction:
-</details>
 
 <details>
 <summary>日本語</summary>

@@ -4,11 +4,12 @@
 
 ## Table of contents / 目次
 
-- [How to specify `network_args`](#how-to-specify-network_args)
+- [How to specify `network_args`](#how-to-specify-network_args--network_argsの指定方法)
 - [LoRA+](#lora)
-- [Select the target modules of LoRA](#select-the-target-modules-of-lora)
-- [Save and view logs in TensorBoard format](#save-and-view-logs-in-tensorboard-format)
-
+- [Select the target modules of LoRA](#select-the-target-modules-of-lora--loraの対象モジュールを選択する)
+- [Save and view logs in TensorBoard format](#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)
+- [Save and view logs in wandb](#save-and-view-logs-in-wandb--wandbでログの保存と参照)
+- [FP8 weight optimization for models](#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化)
 
 ## How to specify `network_args` / `network_args`の指定方法
 

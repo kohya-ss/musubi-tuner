@@ -614,7 +614,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
     def device(self):
         return next(self.parameters()).device
 
-    def fp8_optimization(self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool) -> int:
+    def fp8_optimization(
+        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
+    ) -> int:
         """
         Optimize the model state_dict with fp8.
 
@@ -642,7 +644,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
 
         return state_dict
 

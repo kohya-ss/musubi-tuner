@@ -1,8 +1,11 @@
 __pycache__/
 *venv
 *logs
-uv.lock
 *.safetensors
 *.mp4
 *.png
 settings.json
+uv.lock
+main.exp
+main.lib
+main.obj

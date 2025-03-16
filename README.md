@@ -48,6 +48,14 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 
 ### Recent Updates
 
+- Mar 16, 2025
+    - Fixed a bug where the weights were cast to bf16 even when using fp16 weights in Wan2.1 training. [PR #160](https://github.com/kohya-ss/musubi-tuner/pull/160)
+        - Also fixed a bug where black images were generated during sample image generation when using fp16 weights.
+        - If you encounter issues with fp16 training, please use bf16.
+    - Refactored the inference script for Wan2.1. Added `--fp8_fast` and `--compile` options. Please refer to [here](./docs/wan.md#inference--推論) for details. PR [#153](https://github.com/kohya-ss/musubi-tuner/pull/153)
+        - A major change has been made, so please let us know if you encounter any issues.
+    - The newly added `--fp8_scaled` option seems to work well for fp8 training and inference. If you are using `--fp8_base` for training, or `--fp8` for inference, please try to add `--fp8_scaled`. Please report any issues you encounter.
+
 - Mar 13, 2025
     - In the inference script for HunyuanVideo, the `--fp8_fast` option for RTX 40x0 and the `--compile` option to use `torch.compile` have been added. Thanks to Sarania for PR [#137](https://github.com/kohya-ss/musubi-tuner/pull/137).
         - See [Inference](#inference) for details.
@@ -65,26 +73,6 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 - Mar 4, 2025
     - Added support for Wan 2.1 inference. Please use `wan_generate_video.py`. For details, please refer to [here](./docs/wan.md).
         - `requirements.txt` has been updated. Please run `pip install -r requirements.txt` again.
-
-- Feb 26, 2025
-    - Support I2V model training with SkyReels V1. This feature is highly experimental.
-        - Add following options for I2V training in `hv_train_network.py`. `--guidance_scale` should be set to 1.0 for I2V training. 
-        ```bash
-        --dit_in_channels 32  --guidance_scale 1.0
-        ```
-        - The first frame of the traiing video is used as the input to the I2V model. 
-        - The prompt file has the following additional options.
-            - `--n negative prompt...`: the negative prompt for the classifier free guidance.
-            - `--l 6.0`: the classifier free guidance scale. Should be set to 6.0 for SkyReels V1 models.
-            - `--i path/to/image.png`: the image path for image2video inference.
-            - `--g 1.0`: (this option already exists) the embedded guidance scale. Should be set to 1.0 for SkyReels V1 models.
-          - `--n`, `--l` and `--g` can be used SkyReels V1 T2V model as well.
-
-- Feb 24, 2025
-    - Added `--exclude_single_blocks` option to `hv_generate_video.py`. When specified, single block LoRA will not be applied. Thanks to maybleMyers for PR [#69](https://github.com/kohya-ss/musubi-tuner/pull/69)
-
-- Feb 22, 2025
-    - Added support for inference with SkyReels V1 T2V and I2V models. For details, please refer to [Inference with SkyReels V1](#inference-with-skyreels-v1). Thank you to sdbds for the contribution.
 
 ### Releases
 
