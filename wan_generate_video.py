@@ -136,6 +136,7 @@ def parse_args() -> argparse.Namespace:
         help="Torch.compile settings",
     )
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
+    parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
     args = parser.parse_args()
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
@@ -433,6 +434,13 @@ def optimize_model(
             target_device = device
 
         model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
+
+    if args.fp16_accumulation:
+        logger.info("Enabling FP16 accumulation")
+        if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+            torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        else:
+            raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
 
     if args.compile:
         compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
