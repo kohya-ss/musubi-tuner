@@ -48,6 +48,12 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 
 ### Recent Updates
 
+- Mar 18, 2025
+    - Updated SageAttention installation instructions to the latest version (no need to edit the source code). Thanks to fai-9 for PR [#165](https://github.com/kohya-ss/musubi-tuner/pull/165).
+
+- Mar 17, 2025
+    - Fixed a bug where the LoRA weights were corrupted when using float8_e4m3fn weights in Wan2.1 training.
+
 - Mar 16, 2025
     - Fixed a bug where the weights were cast to bf16 even when using fp16 weights in Wan2.1 training. [PR #160](https://github.com/kohya-ss/musubi-tuner/pull/160)
         - Also fixed a bug where black images were generated during sample image generation when using fp16 weights.
@@ -438,13 +444,9 @@ For reference, the build and installation instructions are as follows. You may n
     git clone https://github.com/thu-ml/SageAttention.git
     ```
 
-    You can skip step 4 by using the sdbsd repository mentioned above by `git clone https://github.com/sdbds/SageAttention-for-windows.git`.
+4. Open `x64 Native Tools Command Prompt for VS 2022` from the Start menu under Visual Studio 2022.
 
-4. Open `math.cuh` in the `SageAttention/csrc` folder and change `ushort` to `unsigned short` on lines 71 and 146, then save.
-
-5. Open `x64 Native Tools Command Prompt for VS 2022` from the Start menu under Visual Studio 2022.
-
-6. Activate your venv, navigate to the SageAttention folder, and run the following command. If you get a DISTUTILS not configured error, set `set DISTUTILS_USE_SDK=1` and try again:
+5. Activate your venv, navigate to the SageAttention folder, and run the following command. If you get a DISTUTILS not configured error, set `set DISTUTILS_USE_SDK=1` and try again:
     ```shell
     python setup.py install
     ```
