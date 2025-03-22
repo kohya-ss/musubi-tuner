@@ -320,15 +320,7 @@ class WanNetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         model = load_wan_model(
-            self.config,
-            self.i2v_training,
-            accelerator.device,
-            dit_path,
-            attn_mode,
-            split_attn,
-            loading_device,
-            dit_weight_dtype,
-            args.fp8_scaled,
+            self.config, accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled
         )
         return model
 

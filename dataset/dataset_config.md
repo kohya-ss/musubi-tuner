@@ -99,9 +99,10 @@ metadata jsonl ファイルを使用する場合、caption_extension は必要�
 ### Sample for Video Dataset with Caption Text Files
 
 ```toml
-# resolution, caption_extension, target_frames, frame_extraction, frame_stride, frame_sample, 
-# batch_size, num_repeats, enable_bucket, bucket_no_upscale should be set in either general or datasets
-# num_repeats is also available for video dataset, example is not shown here
+# Common parameters (resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale) 
+# can be set in either general or datasets sections
+# Video-specific parameters (target_frames, frame_extraction, frame_stride, frame_sample, max_frames)
+# must be set in each datasets section
 
 # general configurations
 [general]
@@ -117,17 +118,23 @@ cache_directory = "/path/to/cache_directory" # recommended to set cache director
 target_frames = [1, 25, 45]
 frame_extraction = "head"
 
+[[datasets]]
+video_directory = "/path/to/video_dir2"
+cache_directory = "/path/to/cache_directory2" # recommended to set cache directory
+frame_extraction = "full"
+max_frames = 45
+
 # other datasets can be added here. each dataset can have different configurations
 ```
 
-__In HunyuanVideo and Wan2.1, the number of `target_frames` must be "N*4+1" (N=0,1,2,...).__
+__In HunyuanVideo and Wan2.1, the number of `target_frames` must be "N\*4+1" (N=0,1,2,...).__ Otherwise, it will be truncated to the nearest "N*4+1".
 
 <details>
 <summary>日本語</summary>
 
-resolution, caption_extension, target_frames, frame_extraction, frame_stride, frame_sample, batch_size, num_repeats, enable_bucket, bucket_no_upscale は general または datasets のどちらかに設定してください。
+resolution, caption_extension, target_frames, frame_extraction, frame_stride, frame_sample, batch_size, num_repeats, enable_bucket, bucket_no_upscale, max_frames は general または datasets のどちらかに設定してください。
 
-__HunyuanVideoおよびWan2.1では、target_framesの数値は「N*4+1」である必要があります。__
+__HunyuanVideoおよびWan2.1では、target_framesの数値は「N\*4+1」である必要があります。__ これ以外の値の場合は、最も近いN\*4+1の値に切り捨てられます。
 
 他の注意事項は画像データセットと同様です。
 </details>
@@ -135,8 +142,11 @@ __HunyuanVideoおよびWan2.1では、target_framesの数値は「N*4+1」であ
 ### Sample for Video Dataset with Metadata JSONL File
 
 ```toml
-# resolution, target_frames, frame_extraction, frame_stride, frame_sample, 
-# batch_size, num_repeats, enable_bucket, bucket_no_upscale should be set in either general or datasets
+# Common parameters (resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale) 
+# can be set in either general or datasets sections
+# Video-specific parameters (target_frames, frame_extraction, frame_stride, frame_sample, max_frames)
+# must be set in each datasets section
+
 # caption_extension is not required for metadata jsonl file
 # cache_directory is required for each dataset with metadata jsonl file
 
@@ -173,7 +183,7 @@ JSONL file format for metadata:
 <details>
 <summary>日本語</summary>
 
-resolution, target_frames, frame_extraction, frame_stride, frame_sample, batch_size, num_repeats, enable_bucket, bucket_no_upscale は general または datasets のどちらかに設定してください。
+resolution, target_frames, frame_extraction, frame_stride, frame_sample, batch_size, num_repeats, enable_bucket, bucket_no_upscale, max_frames は general または datasets のどちらかに設定してください。
 
 metadata jsonl ファイルを使用する場合、caption_extension は必要ありません。また、cache_directory は必須です。
 
@@ -186,6 +196,11 @@ metadata jsonl ファイルを使用する場合、caption_extension は必要�
 - `chunk`: Extract frames by splitting the video into chunks of N frames.
 - `slide`: Extract frames from the video with a stride of `frame_stride`.
 - `uniform`: Extract `frame_sample` samples uniformly from the video.
+- `full`: Extract all frames from the video.
+
+In the case of `full`, the entire video is used, but it is trimmed to "N*4+1" frames. It is also trimmed to the `max_frames` if it exceeds that value. To avoid Out of Memory errors, please set `max_frames`.
+
+The frame extraction methods other than `full` are recommended when the video contains repeated actions. `full` is recommended when each video represents a single complete motion.
 
 For example, consider a video with 40 frames. The following diagrams illustrate each extraction:
 
@@ -196,6 +211,11 @@ For example, consider a video with 40 frames. The following diagrams illustrate 
 - `chunk`: 動画をNフレームずつに分割してフレームを抽出します。
 - `slide`: `frame_stride`に指定したフレームごとに動画からNフレームを抽出します。
 - `uniform`: 動画から一定間隔で、`frame_sample`個のNフレームを抽出します。
+- `full`: 動画から全てのフレームを抽出します。
+
+`full`の場合、各動画の全体を用いますが、「N*4+1」のフレーム数にトリミングされます。また`max_frames`を超える場合もその値にトリミングされます。Out of Memoryエラーを避けるために、`max_frames`を設定してください。
+
+`full`以外の抽出方法は、動画が特定の動作を繰り返している場合にお勧めします。`full`はそれぞれの動画がひとつの完結したモーションの場合にお勧めします。
 
 例えば、40フレームの動画を例とした抽出について、以下の図で説明します。
 </details>
@@ -242,6 +262,13 @@ xxxxxxxxxxxxxxxxxxxxxxxxxooooooooooooooo
 oooooxxxxxxxxxxxxxxxxxxxxxxxxxoooooooooo
 ooooooooooxxxxxxxxxxxxxxxxxxxxxxxxxooooo
 oooooooooooooooxxxxxxxxxxxxxxxxxxxxxxxxx
+
+Three Original Videos, 20, 25, 35 frames: x = frame, o = no frame
+
+full, max_frames = 31 -> extract all frames (trimmed to the maximum length):
+video1: xxxxxxxxxxxxxxxxx (trimmed to 17 frames)
+video2: xxxxxxxxxxxxxxxxxxxxxxxxx (25 frames)
+video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 ```
 
 ## Specifications
@@ -249,7 +276,7 @@ oooooooooooooooxxxxxxxxxxxxxxxxxxxxxxxxx
 ```toml
 # general configurations
 [general]
-resolution = [960, 544] # optional, [W, H], default is None. This is the default resolution for all datasets
+resolution = [960, 544] # optional, [W, H], default is [960, 544]. This is the default resolution for all datasets
 caption_extension = ".txt" # optional, default is None. This is the default caption extension for all datasets
 batch_size = 1 # optional, default is 1. This is the default batch size for all datasets
 num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset. Useful to balance the multiple datasets with different sizes.
@@ -285,6 +312,8 @@ video_directory = "/path/to/video_dir"
 caption_extension = ".txt" # required for caption text files, if general caption extension is not set
 resolution = [960, 544] # required if general resolution is not set
 
+# following configurations must be set in each [[datasets]] section for video datasets
+
 target_frames = [1, 25, 79] # required for video dataset. list of video lengths to extract frames. each element must be N*4+1 (N=0,1,2,...)
 
 # NOTE: Please do not include 1 in target_frames if you are using the frame_extraction "chunk". It will make the all frames to be extracted.
@@ -292,6 +321,7 @@ target_frames = [1, 25, 79] # required for video dataset. list of video lengths 
 frame_extraction = "head" # optional, "head" or "chunk", "slide", "uniform". Default is "head"
 frame_stride = 1 # optional, default is 1, available for "slide" frame extraction
 frame_sample = 4 # optional, default is 1 (same as "head"), available for "uniform" frame extraction
+max_frames = 129 # optional, default is 129. Maximum number of frames to extract, available for "full" frame extraction
 # batch_size, num_repeats, enable_bucket, bucket_no_upscale, cache_directory are also available for video dataset
 
 # sample video dataset with metadata jsonl file
@@ -301,7 +331,7 @@ video_jsonl_file = "/path/to/metadata.jsonl" # includes pairs of video files and
 target_frames = [1, 79]
 
 cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
-# frame_extraction, frame_stride, frame_sample are also available for metadata jsonl file
+# frame_extraction, frame_stride, frame_sample, max_frames are also available for metadata jsonl file
 ```
 
 <!-- 

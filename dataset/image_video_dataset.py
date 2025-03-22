@@ -1154,6 +1154,7 @@ class VideoDataset(BaseDataset):
         frame_stride: Optional[int] = 1,
         frame_sample: Optional[int] = 1,
         target_frames: Optional[list[int]] = None,
+        max_frames: Optional[int] = None,
         video_directory: Optional[str] = None,
         video_jsonl_file: Optional[str] = None,
         cache_directory: Optional[str] = None,
@@ -1173,10 +1174,27 @@ class VideoDataset(BaseDataset):
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
-        self.target_frames = target_frames
         self.frame_extraction = frame_extraction
         self.frame_stride = frame_stride
         self.frame_sample = frame_sample
+        self.max_frames = max_frames
+
+        if target_frames is not None:
+            target_frames = list(set(target_frames))
+            target_frames.sort()
+
+            # round each value to N*4+1
+            rounded_target_frames = [(f - 1) // 4 * 4 + 1 for f in target_frames]
+            rouneded_target_frames = list(set(rounded_target_frames))
+            rouneded_target_frames.sort()
+
+            # if value is changed, warn
+            if target_frames != rounded_target_frames:
+                logger.warning(f"target_frames are rounded to {rounded_target_frames}")
+
+            target_frames = tuple(rounded_target_frames)
+
+        self.target_frames = target_frames
 
         if video_directory is not None:
             self.datasource = VideoDirectoryDatasource(video_directory, caption_extension)
@@ -1206,6 +1224,7 @@ class VideoDataset(BaseDataset):
         metadata["frame_stride"] = self.frame_stride
         metadata["frame_sample"] = self.frame_sample
         metadata["target_frames"] = self.target_frames
+        metadata["max_frames"] = self.max_frames
         return metadata
 
     def retrieve_latent_cache_batches(self, num_workers: int):
@@ -1260,6 +1279,11 @@ class VideoDataset(BaseDataset):
                                 frame_indices = np.linspace(0, frame_count - target_frame, self.frame_sample, dtype=int)
                                 for i in frame_indices:
                                     crop_pos_and_frames.append((i, target_frame))
+                    elif self.frame_extraction == "full":
+                        # select all frames
+                        target_frame = min(frame_count, self.max_frames)
+                        target_frame = (target_frame - 1) // 4 * 4 + 1  # round to N*4+1
+                        crop_pos_and_frames.append((0, target_frame))
                     else:
                         raise ValueError(f"frame_extraction {self.frame_extraction} is not supported")
 

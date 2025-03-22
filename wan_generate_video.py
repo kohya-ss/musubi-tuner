@@ -97,6 +97,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
     parser.add_argument("--image_path", type=str, default=None, help="path to image for image2video inference")
+    parser.add_argument("--end_image_path", type=str, default=None, help="path to end image for image2video inference")
+    parser.add_argument("--trim_tail_frames", type=int, default=0, help="trim tail N frames from the video before saving")
+    parser.add_argument(
+        "--cfg_skip_mode",
+        type=str,
+        default="none",
+        choices=["early", "late", "middle", "early_late", "alternate", "none"],
+        help="CFG skip mode. each mode skips different parts of the CFG. "
+        " early: initial steps, late: later steps, middle: middle steps, early_late: both early and late, alternate: alternate, none: no skip (default)",
+    )
+    parser.add_argument(
+        "--cfg_apply_ratio",
+        type=float,
+        default=None,
+        help="The ratio of steps to apply CFG (0.0 to 1.0). Default is None (apply all steps).",
+    )
 
     # Flow Matching
     parser.add_argument(
@@ -346,7 +362,7 @@ def load_dit_model(
         loading_weight_dtype = dit_dtype  # load as-is
 
     # do not fp8 optimize because we will merge LoRA weights
-    model = load_wan_model(config, is_i2v, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False)
+    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False)
 
     return model
 
@@ -554,10 +570,18 @@ def prepare_i2v_inputs(
 
     # convert to numpy
     img_cv2 = np.array(img)  # PIL to numpy
-    img_cv2 = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB)
 
     # convert to tensor (-1 to 1)
     img_tensor = TF.to_tensor(img).sub_(0.5).div_(0.5).to(device)
+
+    # end frame image
+    if args.end_image_path is not None:
+        end_img = Image.open(args.end_image_path).convert("RGB")
+        end_img_cv2 = np.array(end_img)  # PIL to numpy
+    else:
+        end_img = None
+        end_img_cv2 = None
+    has_end_image = end_img is not None
 
     # calculate latent dimensions: keep aspect ratio
     h, w = img_tensor.shape[1:]
@@ -567,7 +591,7 @@ def prepare_i2v_inputs(
     h = lat_h * config.vae_stride[1]
     w = lat_w * config.vae_stride[2]
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
-    max_seq_len = lat_f * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
+    max_seq_len = (lat_f + (1 if has_end_image else 0)) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
 
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
@@ -575,7 +599,7 @@ def prepare_i2v_inputs(
     seed_g.manual_seed(seed)
 
     # generate noise
-    noise = torch.randn(16, lat_f, lat_h, lat_w, dtype=torch.float32, generator=seed_g, device=device)
+    noise = torch.randn(16, lat_f + (1 if has_end_image else 0), lat_h, lat_w, dtype=torch.float32, generator=seed_g, device=device)
 
     # configure negative prompt
     n_prompt = args.negative_prompt if args.negative_prompt else config.sample_neg_prompt
@@ -619,9 +643,14 @@ def prepare_i2v_inputs(
     # resize image
     interpolation = cv2.INTER_AREA if h < img_cv2.shape[0] else cv2.INTER_CUBIC
     img_resized = cv2.resize(img_cv2, (w, h), interpolation=interpolation)
-    img_resized = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
     img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
     img_resized = img_resized.unsqueeze(1)  # CFHW
+
+    if has_end_image:
+        interpolation = cv2.INTER_AREA if h < end_img_cv2.shape[1] else cv2.INTER_CUBIC
+        end_img_resized = cv2.resize(end_img_cv2, (w, h), interpolation=interpolation)
+        end_img_resized = TF.to_tensor(end_img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
+        end_img_resized = end_img_resized.unsqueeze(1)  # CFHW
 
     # create mask for the first frame
     # msk = torch.ones(1, frames, lat_h, lat_w, device=device)
@@ -631,8 +660,10 @@ def prepare_i2v_inputs(
     # msk = msk.transpose(1, 2)[0]
 
     # rewrite to simpler version
-    msk = torch.zeros(4, lat_f, lat_h, lat_w, device=device)
+    msk = torch.zeros(4, lat_f + (1 if has_end_image else 0), lat_h, lat_w, device=device)
     msk[:, 0] = 1
+    if has_end_image:
+        msk[:, -1] = 1
 
     # encode image to latent space
     with accelerator.autocast(), torch.no_grad():
@@ -640,6 +671,10 @@ def prepare_i2v_inputs(
         padding_frames = frames - 1  # the first frame is image
         img_resized = torch.concat([img_resized, torch.zeros(3, padding_frames, h, w, device=device)], dim=1)
         y = vae.encode([img_resized])[0]
+
+        if has_end_image:
+            y_end = vae.encode([end_img_resized])[0]
+            y = torch.concat([y, y_end], dim=1)  # add end frame
 
     y = torch.concat([msk, y])
     logger.info(f"Encoding complete")
@@ -747,6 +782,56 @@ def run_sampling(
     if use_cpu_offload:
         latent = latent.to("cpu")
 
+    # cfg skip
+    apply_cfg_array = []
+    num_timesteps = len(timesteps)
+
+    if args.cfg_skip_mode != "none" and args.cfg_apply_ratio is not None:
+        # Calculate thresholds based on cfg_apply_ratio
+        apply_steps = int(num_timesteps * args.cfg_apply_ratio)
+
+        if args.cfg_skip_mode == "early":
+            # Skip CFG in early steps, apply in late steps
+            start_index = num_timesteps - apply_steps
+            end_index = num_timesteps
+        elif args.cfg_skip_mode == "late":
+            # Skip CFG in late steps, apply in early steps
+            start_index = 0
+            end_index = apply_steps
+        elif args.cfg_skip_mode == "early_late":
+            # Skip CFG in early and late steps, apply in middle steps
+            start_index = (num_timesteps - apply_steps) // 2
+            end_index = start_index + apply_steps
+        elif args.cfg_skip_mode == "middle":
+            # Skip CFG in middle steps, apply in early and late steps
+            skip_steps = num_timesteps - apply_steps
+            middle_start = (num_timesteps - skip_steps) // 2
+            middle_end = middle_start + skip_steps
+
+        w = 0.0
+        for step_idx in range(num_timesteps):
+            if args.cfg_skip_mode == "alternate":
+                # accumulate w and apply CFG when w >= 1.0
+                w += args.cfg_apply_ratio
+                apply = w >= 1.0
+                if apply:
+                    w -= 1.0
+            elif args.cfg_skip_mode == "middle":
+                # Skip CFG in early and late steps, apply in middle steps
+                apply = step_idx < middle_start or step_idx >= middle_end
+            else:
+                # Apply CFG on some steps based on ratio
+                apply = step_idx >= start_index and step_idx < end_index
+
+            apply_cfg_array.append(apply)
+
+        pattern = ["A" if apply else "S" for apply in apply_cfg_array]
+        pattern = "".join(pattern)
+        logger.info(f"CFG skip mode: {args.cfg_skip_mode}, apply ratio: {args.cfg_apply_ratio}, pattern: {pattern}")
+    else:
+        # Apply CFG on all steps
+        apply_cfg_array = [True] * num_timesteps
+
     for i, t in enumerate(tqdm(timesteps)):
         # latent is on CPU if use_cpu_offload is True
         latent_model_input = [latent.to(device)]
@@ -754,15 +839,19 @@ def run_sampling(
 
         with accelerator.autocast(), torch.no_grad():
             noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0]
-            noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0]
-            del latent_model_input
-
             if use_cpu_offload:
                 noise_pred_cond = noise_pred_cond.to("cpu")
-                noise_pred_uncond = noise_pred_uncond.to("cpu")
 
-            # apply guidance
-            noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            apply_cfg = apply_cfg_array[i]  # apply CFG or not
+            if apply_cfg:
+                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0]
+                if use_cpu_offload:
+                    noise_pred_uncond = noise_pred_uncond.to("cpu")
+
+                # apply guidance
+                noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = noise_pred_cond
 
             # step
             latent_input = latent.unsqueeze(0)
@@ -913,6 +1002,10 @@ def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg) -> torch.
 
     with torch.autocast(device_type=device.type, dtype=vae_dtype), torch.no_grad():
         videos = vae.decode(x0)
+
+    # some tail frames may be corrupted when end frame is used, we add an option to remove them
+    if args.trim_tail_frames:
+        videos[0] = videos[0][:, : -args.trim_tail_frames]
 
     logger.info(f"Decoding complete")
     video = videos[0]

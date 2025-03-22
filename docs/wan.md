@@ -230,6 +230,10 @@ Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory con
 
 `--compile` enables torch.compile. See [here](/README.md#inference) for details.
 
+`--trim_tail_frames` can be used to trim the tail frames when saving. The default is 0.
+
+`--cfg_skip_mode` specifies the mode for skipping CFG in different steps. The default is `none` (all steps).`--cfg_apply_ratio` specifies the ratio of steps where CFG is applied. See below for details.
+
 Other options are same as `hv_generate_video.py` (some options are not supported, please check the help).
 
 <details>
@@ -258,7 +262,60 @@ Other options are same as `hv_generate_video.py` (some options are not supported
 
 `--compile`でtorch.compileを有効にします。詳細については[こちら](/README.md#inference)を参照してください。
 
+`--trim_tail_frames` で保存時に末尾のフレームをトリミングできます。デフォルトは0です。
+
+`--cfg_skip_mode` は異なるステップでCFGをスキップするモードを指定します。デフォルトは `none`（全ステップ）。`--cfg_apply_ratio` はCFGが適用されるステップの割合を指定します。詳細は後述します。
+
 その他のオプションは `hv_generate_video.py` と同じです（一部のオプションはサポートされていないため、ヘルプを確認してください）。
+</details>
+
+#### CFG Skip Mode / CFGスキップモード
+
+ These options allow you to balance generation speed against prompt accuracy. More skipped steps results in faster generation with potential quality degradation.
+
+Setting `--cfg_apply_ratio` to 0.5 speeds up the denoising loop by up to 25%.
+
+`--cfg_skip_mode` specified one of the following modes:
+
+- `early`: Skips CFG in early steps for faster generation, applying guidance mainly in later refinement steps
+- `late`: Skips CFG in later steps, applying guidance during initial structure formation
+- `middle`: Skips CFG in middle steps, applying guidance in both early and later steps
+- `early_late`: Skips CFG in both early and late steps, applying only in middle steps
+- `alternate`: Applies CFG in alternate steps based on the specified ratio
+- `none`: Applies CFG at all steps (default)
+
+`--cfg_apply_ratio` specifies a value from 0.0 to 1.0 controlling the proportion of steps where CFG is applied. For example, setting 0.5 means CFG will be applied in only 50% of the steps.
+
+If num_steps is 10, the following table shows the steps where CFG is applied based on the `--cfg_skip_mode` option (A means CFG is applied, S means it is skipped, `--cfg_apply_ratio` is 0.6):
+
+| skip mode | CFG apply pattern |
+|---|---|
+| early | SSSSAAAAAA |
+| late | AAAAAASSSS |
+| middle | AAASSSSAAA |
+| early_late | SSAAAAAASS |
+| alternate | SASASAASAS |
+
+The appropriate settings are unknown, but you may want to try `late` or `early_late` mode with a ratio of around 0.3 to 0.5.
+<details>
+<summary>日本語</summary>
+これらのオプションは、生成速度とプロンプトの精度のバランスを取ることができます。スキップされるステップが多いほど、生成速度が速くなりますが、品質が低下する可能性があります。
+
+ratioに0.5を指定することで、デノイジングのループが最大25%程度、高速化されます。
+
+`--cfg_skip_mode` は次のモードのいずれかを指定します：
+
+- `early`：初期のステップでCFGをスキップして、主に終盤の精細化のステップで適用します
+- `late`：終盤のステップでCFGをスキップし、初期の構造が決まる段階で適用します
+- `middle`：中間のステップでCFGをスキップし、初期と終盤のステップの両方で適用します
+- `early_late`：初期と終盤のステップの両方でCFGをスキップし、中間のステップのみ適用します
+- `alternate`：指定された割合に基づいてCFGを適用します
+
+`--cfg_apply_ratio` は、CFGが適用されるステップの割合を0.0から1.0の値で指定します。たとえば、0.5に設定すると、CFGはステップの50%のみで適用されます。
+
+具体的なパターンは上のテーブルを参照してください。
+
+適切な設定は不明ですが、モードは`late`または`early_late`、ratioは0.3~0.5程度から試してみると良いかもしれません。
 </details>
 
 ### I2V Inference / I2V推論
@@ -275,11 +332,16 @@ python wan_generate_video.py --fp8 --task i2v-14B --video_size 832 480 --video_l
 
 Add `--clip` to specify the CLIP model. `--image_path` is the path to the image to be used as the initial frame.
 
+`--end_image_path` can be used to specify the end image. This option is experimental. When this option is specified, the saved video will be slightly longer than the specified number of frames and will have noise, so it is recommended to specify `--trim_tail_frames 3` to trim the tail frames.
+
 Other options are same as T2V inference.
 
 <details>
 <summary>日本語</summary>
 `--clip` を追加してCLIPモデルを指定します。`--image_path` は初期フレームとして使用する画像のパスです。
+
+`--end_image_path` で終了画像を指定できます。このオプションは実験的なものです。このオプションを指定すると、保存される動画が指定フレーム数よりもやや多くなり、かつノイズが乗るため、`--trim_tail_frames 3` などを指定して末尾のフレームをトリミングすることをお勧めします。
+
 
 その他のオプションはT2V推論と同じです。
 </details>
