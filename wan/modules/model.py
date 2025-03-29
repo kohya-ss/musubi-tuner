@@ -707,7 +707,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             return
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
-    def forward(self, x, t, context, seq_len, clip_fea=None, y=None):
+    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None):
         r"""
         Forward pass through the diffusion model
 
@@ -784,10 +784,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         # print(f"x: {x.shape}, e: {e0.shape}, context: {context.shape}, seq_lens: {seq_lens}")
         for block_idx, block in enumerate(self.blocks):
-            if self.blocks_to_swap:
+            is_block_skipped = skip_block_indices is not None and block_idx in skip_block_indices
+
+            if self.blocks_to_swap and not is_block_skipped:
                 self.offloader.wait_for_block(block_idx)
 
-            x = block(x, **kwargs)
+            if not is_block_skipped:
+                x = block(x, **kwargs)
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, block_idx)

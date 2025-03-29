@@ -45,7 +45,7 @@ def main():
 
             logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
             weights_sd = load_file(lora_weight)
-            network = lora.create_network_from_weights_hunyuan_video(
+            network = lora.create_arch_network_from_weights(
                 lora_multiplier, weights_sd, unet=transformer, for_inference=True
             )
             logger.info("Merging LoRA weights to DiT model")

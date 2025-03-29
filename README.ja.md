@@ -41,6 +41,14 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/03/27
+    - Wan2.1の推論時に初期ノイズをCPUで生成する`--cpu_noise`オプションを追加しました。これにより同一seed時の結果がComfyUIと同じになる可能性があります（他の設定にもよります）。
+
+- 2025/03/23
+    - latentのキャッシュ時に、実際に学習に使われる画像、動画データをファイルとして保存する `--debug_mode video` オプションを追加しました。PR [#187](https://github.com/kohya-ss/musubi-tuner/pull/187) 詳細は[こちら](#latentの事前キャッシュ)を参照してください。HunyuanVideo、Wan2.1の両方で使用可能です。
+    - Wan2.1の推論時にSkip Layer Guidanceを有効化するオプションを追加しました。PR [#186](https://github.com/kohya-ss/musubi-tuner/pull/186) 詳細は[こちら](./docs/wan.md#skip-layer-guidance)を参照してください。
+    - Wan2.1の推論時にLoRAの適用対象モジュールを正規表現で指定できるようになりました。PR [#185](https://github.com/kohya-ss/musubi-tuner/pull/185) 詳細は[こちら](./docs/wan.md#t2v-inference--t2v推論)を参照してください。
+
 - 2025/03/22
     - 動画データセットの抽出方法に `full` を追加しました。それぞれの動画の最初から最後までを用います。詳細は[こちら](./dataset/dataset_config.md#frame_extraction-options)を参照してください。
         - `full`はそれぞれの動画がひとつの完結したモーションの場合にお勧めします。`full`以外の抽出方法は、動画が特定の動作を繰り返している場合にお勧めします。
@@ -69,24 +77,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
     - Wan2.1の推論スクリプトをリファクタリングしました。`--fp8_fast`と`--compile`オプションが追加されました。詳しくは[こちら](./docs/wan.md#inference--推論)を参照してください。PR [#153](https://github.com/kohya-ss/musubi-tuner/pull/153)
         - 大幅に変更を行ったため、不具合があればお知らせください。
     - 先日追加された`--fp8_scaled`オプションは、fp8での学習および推論の精度向上に効果があるようです。`--fp8_base`で学習している場合や、`--fp8`で推論している場合は、`--fp8_scaled`の追加をご検討ください。問題があればご連絡ください。
-    
-- 2025/03/13
-    - HunyuanVideoの推論スクリプトで、RTX 40x0向けの高速化オプション`--fp8_fast`と、`torch.compile`を使用するオプション`--compile`が追加されました。[PR #137](https://github.com/kohya-ss/musubi-tuner/pull/137) Sarania 氏に感謝いたします。
-        - 詳細は[推論](#推論)を参照してください。
-    - Wan2.1の学習、推論で、fp8量子化を行うオプションを`--fp8_scaled`を追加しました。[PR #141](https://github.com/kohya-ss/musubi-tuner/pull/141) 
-        - 単純なFP8へのキャストではなく、スケーリングを行うことで、VRAM使用量の削減と精度の維持を両立します。
-        - 詳細は[高度な設定](./docs/advanced_config.md#fp8-quantization)を参照してください。
-        - また`fp16`のモデルをWan2.1の学習と推論でサポートしました。
-
-- 2025/03/07
-    - Wan 2.1の学習で、サンプル画像生成を行わない場合でも`--t5`オプションが必須になっていたのを修正しました。
-
-- 2025/03/07
-    - Wan 2.1のLoRA学習をサポートしました。`wan_train_network.py`を使用してください。詳細は[こちら](./docs/wan.md)を参照してください。
-
-- 2025/03/04
-    - Wan 2.1の推論をサポートしました。`wan_generate_video.py`を使用してください。詳細は[こちら](./docs/wan.md)を参照してください。
-        - `requirements.txt`が更新されました。`pip install -r requirements.txt`を実行してください。
 
 ### リリースについて
 
@@ -210,6 +200,10 @@ uvでインストールした場合は、`uv run python cache_latents.py ...`の
 VRAMが足りない場合は、`--vae_spatial_tile_sample_min_size`を128程度に減らし、`--batch_size`を小さくしてください。
 
 `--debug_mode image` を指定するとデータセットの画像とキャプションが新規ウィンドウに表示されます。`--debug_mode console`でコンソールに表示されます（`ascii-magic`が必要）。
+
+`--debug_mode video`で、キャッシュディレクトリに画像または動画が保存されます（確認後、削除してください）。動画のビットレートは確認用に低くしてあります。実際には元動画の画像が学習に使用されます。
+
+`--debug_mode`指定時は、実際のキャッシュ処理は行われません。
 
 デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
 

@@ -3,6 +3,7 @@ from datetime import datetime
 import gc
 import random
 import os
+import re
 import time
 import math
 from typing import Tuple, Optional, List, Union, Any
@@ -68,6 +69,8 @@ def parse_args() -> argparse.Namespace:
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=1.0, help="LoRA multiplier")
+    parser.add_argument("--include_patterns", type=str, nargs="*", default=None, help="LoRA module include patterns")
+    parser.add_argument("--exclude_patterns", type=str, nargs="*", default=None, help="LoRA module exclude patterns")
     parser.add_argument(
         "--save_merged_model",
         type=str,
@@ -89,6 +92,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--infer_steps", type=int, default=None, help="number of inference steps")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument(
+        "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
+    )
     parser.add_argument(
         "--guidance_scale",
         type=float,
@@ -112,6 +118,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="The ratio of steps to apply CFG (0.0 to 1.0). Default is None (apply all steps).",
+    )
+    parser.add_argument(
+        "--slg_layers", type=str, default=None, help="Skip block (layer) indices for SLG (Skip Layer Guidance), comma separated"
+    )
+    parser.add_argument(
+        "--slg_scale",
+        type=float,
+        default=3.0,
+        help="scale for SLG classifier free guidance. Default is 3.0. Ignored if slg_mode is None or uncond",
+    )
+    parser.add_argument("--slg_start", type=float, default=0.0, help="start ratio for inference steps for SLG. Default is 0.0.")
+    parser.add_argument("--slg_end", type=float, default=0.3, help="end ratio for inference steps for SLG. Default is 0.3.")
+    parser.add_argument(
+        "--slg_mode",
+        type=str,
+        default=None,
+        choices=["original", "uncond"],
+        help="SLG mode. original: same as SD3, uncond: replace uncond pred with SLG pred",
     )
 
     # Flow Matching
@@ -206,6 +230,10 @@ def setup_args(args: argparse.Namespace) -> argparse.Namespace:
     # Force video_length to 1 for t2i tasks
     if "t2i" in args.task:
         assert args.video_length == 1, f"video_length should be 1 for task {args.task}"
+
+    # parse slg_layers
+    if args.slg_layers is not None:
+        args.slg_layers = list(map(int, args.slg_layers.split(",")))
 
     return args
 
@@ -386,6 +414,29 @@ def merge_lora_weights(model: WanModel, args: argparse.Namespace, device: torch.
 
         logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
         weights_sd = load_file(lora_weight)
+
+        # apply include/exclude patterns
+        original_key_count = len(weights_sd.keys())
+        if args.include_patterns is not None and len(args.include_patterns) > i:
+            include_pattern = args.include_patterns[i]
+            regex_include = re.compile(include_pattern)
+            weights_sd = {k: v for k, v in weights_sd.items() if regex_include.search(k)}
+            logger.info(f"Filtered keys with include pattern {include_pattern}: {original_key_count} -> {len(weights_sd.keys())}")
+        if args.exclude_patterns is not None and len(args.exclude_patterns) > i:
+            original_key_count_ex = len(weights_sd.keys())
+            exclude_pattern = args.exclude_patterns[i]
+            regex_exclude = re.compile(exclude_pattern)
+            weights_sd = {k: v for k, v in weights_sd.items() if not regex_exclude.search(k)}
+            logger.info(
+                f"Filtered keys with exclude pattern {exclude_pattern}: {original_key_count_ex} -> {len(weights_sd.keys())}"
+            )
+        if len(weights_sd) != original_key_count:
+            remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys()]))
+            remaining_keys.sort()
+            logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
+            if len(weights_sd) == 0:
+                logger.warning(f"No keys left after filtering.")
+
         if args.lycoris:
             lycoris_net, _ = create_network_from_weights(
                 multiplier=lora_multiplier,
@@ -511,8 +562,12 @@ def prepare_t2v_inputs(
 
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
-    seed_g = torch.Generator(device=device)
-    seed_g.manual_seed(seed)
+    if not args.cpu_noise:
+        seed_g = torch.Generator(device=device)
+        seed_g.manual_seed(seed)
+    else:
+        # ComfyUI compatible noise
+        seed_g = torch.manual_seed(seed)
 
     # load text encoder
     text_encoder = load_text_encoder(args, config, device)
@@ -533,9 +588,8 @@ def prepare_t2v_inputs(
     clean_memory_on_device(device)
 
     # generate noise
-    noise = torch.randn(
-        target_shape[0], target_shape[1], target_shape[2], target_shape[3], dtype=torch.float32, device=device, generator=seed_g
-    )
+    noise = torch.randn(target_shape, dtype=torch.float32, generator=seed_g, device=device if not args.cpu_noise else "cpu")
+    noise = noise.to(device)
 
     # prepare model input arguments
     arg_c = {"context": context, "seq_len": seq_len}
@@ -595,11 +649,24 @@ def prepare_i2v_inputs(
 
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
-    seed_g = torch.Generator(device=device)
-    seed_g.manual_seed(seed)
+    if not args.cpu_noise:
+        seed_g = torch.Generator(device=device)
+        seed_g.manual_seed(seed)
+    else:
+        # ComfyUI compatible noise
+        seed_g = torch.manual_seed(seed)
 
     # generate noise
-    noise = torch.randn(16, lat_f + (1 if has_end_image else 0), lat_h, lat_w, dtype=torch.float32, generator=seed_g, device=device)
+    noise = torch.randn(
+        16,
+        lat_f + (1 if has_end_image else 0),
+        lat_h,
+        lat_w,
+        dtype=torch.float32,
+        generator=seed_g,
+        device=device if not args.cpu_noise else "cpu",
+    )
+    noise = noise.to(device)
 
     # configure negative prompt
     n_prompt = args.negative_prompt if args.negative_prompt else config.sample_neg_prompt
@@ -776,11 +843,10 @@ def run_sampling(
         torch.Tensor: generated latent
     """
     arg_c, arg_null = inputs
-
-    latent = noise
     last_thread = None
-    if use_cpu_offload:
-        latent = latent.to("cpu")
+    latent = noise
+    latent_storage_device = device if not use_cpu_offload else "cpu"
+    latent = latent.to(latent_storage_device)
 
     # cfg skip
     apply_cfg_array = []
@@ -832,24 +898,52 @@ def run_sampling(
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
 
+    # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
+    slg_start_step = int(args.slg_start * num_timesteps)
+    slg_end_step = int(args.slg_end * num_timesteps)
+
     for i, t in enumerate(tqdm(timesteps)):
         # latent is on CPU if use_cpu_offload is True
         latent_model_input = [latent.to(device)]
         timestep = torch.stack([t]).to(device)
 
         with accelerator.autocast(), torch.no_grad():
-            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0]
-            if use_cpu_offload:
-                noise_pred_cond = noise_pred_cond.to("cpu")
+            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0].to(latent_storage_device)
 
             apply_cfg = apply_cfg_array[i]  # apply CFG or not
             if apply_cfg:
-                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0]
-                if use_cpu_offload:
-                    noise_pred_uncond = noise_pred_uncond.to("cpu")
+                apply_slg = i >= slg_start_step and i < slg_end_step
+                # print(f"Applying SLG: {apply_slg}, i: {i}, slg_start_step: {slg_start_step}, slg_end_step: {slg_end_step}")
+                if args.slg_mode == "original" and apply_slg:
+                    noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
 
-                # apply guidance
-                noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    # apply guidance
+                    # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
+                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+                    # calculate skip layer out
+                    skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
+                        latent_storage_device
+                    )
+
+                    # apply skip layer guidance
+                    # SD3 formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
+                    noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)
+                elif args.slg_mode == "uncond" and apply_slg:
+                    # noise_pred_uncond is skip layer out
+                    noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
+                        latent_storage_device
+                    )
+
+                    # apply guidance
+                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+                else:
+                    # normal guidance
+                    noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
+
+                    # apply guidance
+                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
                 noise_pred = noise_pred_cond
 

@@ -386,13 +386,14 @@ def load_video(
 
 class BucketBatchManager:
 
-    def __init__(self, bucketed_item_info: dict[tuple[int, int], list[ItemInfo]], batch_size: int):
+    def __init__(self, bucketed_item_info: dict[Union[tuple[int, int], tuple[int, int, int]], list[ItemInfo]], batch_size: int):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
         self.bucket_resos = list(self.buckets.keys())
         self.bucket_resos.sort()
 
-        self.bucket_batch_indices = []
+        # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
+        self.bucket_batch_indices: list[tuple[Union[tuple[int, int], tuple[int, int, int], int]]] = []
         for bucket_reso in self.bucket_resos:
             bucket = self.buckets[bucket_reso]
             num_batches = math.ceil(len(bucket) / self.batch_size)
@@ -409,8 +410,11 @@ class BucketBatchManager:
         logger.info(f"total batches: {len(self)}")
 
     def shuffle(self):
+        # shuffle each bucket
         for bucket in self.buckets.values():
             random.shuffle(bucket)
+        
+        # shuffle the order of batches
         random.shuffle(self.bucket_batch_indices)
 
     def __len__(self):

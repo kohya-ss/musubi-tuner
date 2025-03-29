@@ -50,6 +50,15 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 
 - **[NEW] GitHub Discussions Enabled**: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- Mar 27, 2025
+    - Added `--cpu_noise` option to generate initial noise on CPU during Wan2.1 inference. This may result in the same output as ComfyUI with the same seed (depending on other settings).
+
+- Mar 23, 2025
+    - Added an option to save the actual image and video data used in training as files during latent caching with `--debug_mode video`. PR [#187](https://github.com/kohya-ss/musubi-tuner/pull/187). See [here](#latent-pre-caching) for details. Available for both HunyuanVideo and Wan2.1.
+    - Added an option to use Skip Layer Guidance during Wan2.1 inference. PR [#186](https://github.com/kohya-ss/musubi-tuner/pull/186). See [here](./docs/wan.md#skip-layer-guidance) for details.
+    - Added the ability to specify the target modules for LoRA application during Wan2.1 inference using regular expressions. PR [#185](https://github.com/kohya-ss/musubi-tuner/pull/185). 
+        - See [here](./docs/wan.md#t2v-inference--t2v推論) for details.
+
 - Mar 22, 2025
     - Added `full` to the frame extraction method for video datasets. This uses the entire video from start to finish. See [here](./dataset/dataset_config.md#frame_extraction-options) for details.
         - `full` is recommended when each video represents a single complete motion. The frame extraction methods other than `full` are recommended when the video contains repeated actions. 
@@ -78,24 +87,6 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
     - Refactored the inference script for Wan2.1. Added `--fp8_fast` and `--compile` options. Please refer to [here](./docs/wan.md#inference--推論) for details. PR [#153](https://github.com/kohya-ss/musubi-tuner/pull/153)
         - A major change has been made, so please let us know if you encounter any issues.
     - The newly added `--fp8_scaled` option seems to work well for fp8 training and inference. If you are using `--fp8_base` for training, or `--fp8` for inference, please try to add `--fp8_scaled`. Please report any issues you encounter.
-
-- Mar 13, 2025
-    - In the inference script for HunyuanVideo, the `--fp8_fast` option for RTX 40x0 and the `--compile` option to use `torch.compile` have been added. Thanks to Sarania for PR [#137](https://github.com/kohya-ss/musubi-tuner/pull/137).
-        - See [Inference](#inference) for details.
-    - Added `--fp8_scaled` option for fp8 quantization in Wan2.1 training and inference. [PR #141](https://github.com/kohya-ss/musubi-tuner/pull/141) 
-        - This option quantizes the weights to FP8 with appropriate scaling, instead of simple casting to FP8. This reduces VRAM usage while maintaining precision.
-        - See [Advanced Configuration](./docs/advanced_config.md#fp8-quantization) for details.
-        - `fp16` models are now supported for Wan2.1 training and inference. 
-
-- Mar 9, 2025
-    - Fixed `--t5` option is required for training even without sampling images for Wan2.1 training.
-
-- Mar 7, 2025
-    - Added support for Wan 2.1 LoRA training. Please use `wan_train_network.py`. For details, please refer to [here](./docs/wan.md).
-        
-- Mar 4, 2025
-    - Added support for Wan 2.1 inference. Please use `wan_generate_video.py`. For details, please refer to [here](./docs/wan.md).
-        - `requirements.txt` has been updated. Please run `pip install -r requirements.txt` again.
 
 ### Releases
 
@@ -232,7 +223,11 @@ For additional options, use `python cache_latents.py --help`.
 
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size`.
 
-Use `--debug_mode image` to display dataset images and captions in a new window, or `--debug_mode console` to display them in the console (requires `ascii-magic`).
+Use `--debug_mode image` to display dataset images and captions in a new window, or `--debug_mode console` to display them in the console (requires `ascii-magic`). 
+
+With `--debug_mode video`, images or videos will be saved in the cache directory (please delete them after checking). The bitrate of the saved video is set to 1Mbps for preview purposes. The images decoded from the original video (not degraded) are used for the cache (for training).
+
+When `--debug_mode` is specified, the actual caching process is not performed.
 
 By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
 
