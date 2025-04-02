@@ -8,6 +8,7 @@ Image and video datasets are supported. The configuration file can include multi
 
 The cache directory must be different for each dataset.
 
+Each video is extracted frame by frame without additional processing and used for training. It is recommended to use videos with a frame rate of 24fps for HunyuanVideo and 16fps for Wan2.1. You can check the videos that will be trained using `--debug_mode video` when caching latent (see [here](/README.md#latent-caching)).
 <details>
 <summary>日本語</summary>
 
@@ -16,6 +17,8 @@ The cache directory must be different for each dataset.
 画像データセットと動画データセットがサポートされています。設定ファイルには、画像または動画データセットを複数含めることができます。キャプションテキストファイルまたはメタデータJSONLファイルを使用できます。
 
 キャッシュディレクトリは、各データセットごとに異なるディレクトリである必要があります。
+
+動画は追加のプロセスなしでフレームごとに抽出され、学習に用いられます。そのため、HunyuanVideoは24fps、Wan2.1は16fpsのフレームレートの動画を使用することをお勧めします。latentキャッシュ時の`--debug_mode video`を使用すると、学習される動画を確認できます（[こちら](/README.ja.md#latentの事前キャッシュ)を参照）。
 </details>
 
 ### Sample for Image Dataset with Caption Text Files
@@ -271,6 +274,39 @@ video2: xxxxxxxxxxxxxxxxxxxxxxxxx (25 frames)
 video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 ```
 
+### Sample for Video Dataset with Control Images
+
+The dataset with control videos is used for training ControlNet models. 
+
+The dataset configuration with caption text files is similar to the video dataset, but with an additional `control_directory` parameter. 
+
+The control video for a video is used from the `control_directory` with the same filename (or different extension) as the video, for example, `video_dir/video1.mp4` and `control_dir/video1.mp4` or `control_dir/video1.mov`. The control video can also be a directory without an extension, for example, `video_dir/video1.mp4` and `control_dir/video1`.
+
+```toml
+[[datasets]]
+video_directory = "/path/to/video_dir"
+control_directory = "/path/to/control_dir" # required for dataset with control videos
+cache_directory = "/path/to/cache_directory" # recommended to set cache directory
+target_frames = [1, 25, 45]
+frame_extraction = "head"
+```
+
+The dataset configuration with metadata JSONL file is  same as the video dataset, but metadata JSONL file must include the control video paths. The control video path can be a directory containing multiple images.
+
+```json
+{"video_path": "/path/to/video1.mp4", "control_path": "/path/to/control1.mp4", "caption": "A caption for video1"}
+{"video_path": "/path/to/video2.mp4", "control_path": "/path/to/control2.mp4", "caption": "A caption for video2"}
+```
+
+<details>
+<summary>日本語</summary>
+制御動画を持つデータセットです。ControlNetモデルの学習に使用します。
+
+キャプションを用いる場合のデータセット設定は動画データセットと似ていますが、`control_directory`パラメータが追加されています。上にある例を参照してください。ある動画に対する制御用動画として、動画と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある動画が使用されます（例：`video_dir/video1.mp4`と`control_dir/video1.mp4`または`control_dir/video1.mov`）。また、拡張子なしのディレクトリ内の、複数枚の画像を制御用動画として使用することもできます（例：`video_dir/video1.mp4`と`control_dir/video1`）。
+
+データセット設定でメタデータJSONLファイルを使用する場合は、動画と制御用動画のパスを含める必要があります。制御用動画のパスは、複数枚の画像を含むディレクトリのパスでも構いません。
+</details>
+
 ## Specifications
 
 ```toml
@@ -311,6 +347,8 @@ cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
 video_directory = "/path/to/video_dir"
 caption_extension = ".txt" # required for caption text files, if general caption extension is not set
 resolution = [960, 544] # required if general resolution is not set
+
+control_directory = "/path/to/control_dir" # optional, required for dataset with control images
 
 # following configurations must be set in each [[datasets]] section for video datasets
 

@@ -79,6 +79,21 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], batch: list[It
         clip_context = None
         y = None
 
+    # control videos
+    if batch[0].control_content is not None:
+        control_contents = torch.stack([torch.from_numpy(item.control_content) for item in batch])
+        if len(control_contents.shape) == 4:
+            control_contents = control_contents.unsqueeze(1)
+        control_contents = control_contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
+        control_contents = control_contents.to(vae.device, dtype=vae.dtype)
+        control_contents = control_contents / 127.5 - 1.0  # normalize to [-1, 1]
+        with torch.amp.autocast(device_type=vae.device.type, dtype=vae.dtype), torch.no_grad():
+            control_latent = vae.encode(control_contents)  # list of Tensor[C, F, H, W]
+        control_latent = torch.stack(control_latent, dim=0)  # B, C, F, H, W
+        control_latent = control_latent.to(vae.dtype)  # convert to bfloat16
+    else:
+        control_latent = None
+
     # # debug: decode and save
     # with torch.no_grad():
     #     latent_to_decode = latent / vae.config.scaling_factor
@@ -97,8 +112,9 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], batch: list[It
         l = latent[i]
         cctx = clip_context[i] if clip is not None else None
         y_i = y[i] if clip is not None else None
+        control_latent_i = control_latent[i] if control_latent is not None else None
         # print(f"save latent cache: {item.latent_cache_path}, latent shape: {l.shape}")
-        save_latent_cache_wan(item, l, cctx, y_i)
+        save_latent_cache_wan(item, l, cctx, y_i, control_latent_i)
 
 
 def main(args):

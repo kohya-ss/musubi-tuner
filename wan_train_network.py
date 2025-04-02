@@ -3,12 +3,13 @@ from typing import Optional
 from PIL import Image
 
 
+import numpy as np
 import torch
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
 from accelerate import Accelerator, init_empty_weights
 
-from dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL
+from dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL, load_video
 from hv_generate_video import resize_image_to_bucket
 from hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
 
@@ -43,7 +44,8 @@ class WanNetworkTrainer(NetworkTrainer):
 
     def handle_model_specific_args(self, args):
         self.config = WAN_CONFIGS[args.task]
-        self._i2v_training = "i2v" in args.task
+        self._i2v_training = "i2v" in args.task  # we cannot use config.i2v because Fun-Control T2V has i2v flag TODO refactor this
+        self._control_training = self.config.is_fun_control
 
         self.dit_dtype = detect_wan_sd_dtype(args.dit)
 
@@ -62,10 +64,6 @@ class WanNetworkTrainer(NetworkTrainer):
             self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
 
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
-
-    @property
-    def i2v_training(self) -> bool:
-        return self._i2v_training
 
     def process_sample_prompts(
         self,
@@ -108,10 +106,11 @@ class WanNetworkTrainer(NetworkTrainer):
         del t5
 
         # load CLIP and encode image (for I2V training)
+        # Note: VAE encoding is done in do_inference() for I2V training, because we have VAE in the pipeline. Control video is also done in do_inference()
         sample_prompts_image_embs = {}
         for prompt_dict in prompts:
-            if prompt_dict.get("image_path", None) is not None:
-                sample_prompts_image_embs[prompt_dict["image_path"]] = None
+            if prompt_dict.get("image_path", None) is not None and self.i2v_training:
+                sample_prompts_image_embs[prompt_dict["image_path"]] = None  # this will be replaced with CLIP context
 
         if len(sample_prompts_image_embs) > 0:
             logger.info(f"loading CLIP: {clip_path}")
@@ -144,7 +143,7 @@ class WanNetworkTrainer(NetworkTrainer):
                 prompt_dict_copy["negative_t5_embeds"] = te_outputs_1[p][0]
 
             p = prompt_dict.get("image_path", None)
-            if p is not None:
+            if p is not None and self.i2v_training:
                 prompt_dict_copy["clip_embeds"] = sample_prompts_image_embs[p]
 
             sample_parameters.append(prompt_dict_copy)
@@ -171,6 +170,7 @@ class WanNetworkTrainer(NetworkTrainer):
         guidance_scale,
         cfg_scale,
         image_path=None,
+        control_video_path=None,
     ):
         """architecture dependent inference"""
         model: WanModel = transformer
@@ -201,37 +201,59 @@ class WanNetworkTrainer(NetworkTrainer):
             latents.append(torch.randn(shape_or_frame, generator=generator, device=device, dtype=torch.float32))
         latents = torch.cat(latents, dim=2)
 
-        if self.i2v_training:
+        image_latents = None
+        if self.i2v_training or self.control_training:
             # Move VAE to the appropriate device for sampling: consider to cache image latents in CPU in advance
             vae.to(device)
             vae.eval()
 
-            image = Image.open(image_path)
-            image = resize_image_to_bucket(image, (width, height))  # returns a numpy array
-            image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(1).float()  # C, 1, H, W
-            image = image / 127.5 - 1  # -1 to 1
+            if self.i2v_training:
+                image = Image.open(image_path)
+                image = resize_image_to_bucket(image, (width, height))  # returns a numpy array
+                image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(1).float()  # C, 1, H, W
+                image = image / 127.5 - 1  # -1 to 1
 
-            # Create mask for the required number of frames
-            msk = torch.ones(1, frame_count, lat_h, lat_w, device=device)
-            msk[:, 1:] = 0
-            msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
-            msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
-            msk = msk.transpose(1, 2)  # B, C, T, H, W
+                # Create mask for the required number of frames
+                msk = torch.ones(1, frame_count, lat_h, lat_w, device=device)
+                msk[:, 1:] = 0
+                msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
+                msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
+                msk = msk.transpose(1, 2)  # B, C, T, H, W
 
-            with torch.amp.autocast(device_type=device.type, dtype=vae.dtype), torch.no_grad():
-                # Zero padding for the required number of frames only
-                padding_frames = frame_count - 1  # The first frame is the input image
-                image = torch.concat([image, torch.zeros(3, padding_frames, height, width)], dim=1).to(device=device)
-                y = vae.encode([image])[0]
+                with torch.amp.autocast(device_type=device.type, dtype=vae.dtype), torch.no_grad():
+                    # Zero padding for the required number of frames only
+                    padding_frames = frame_count - 1  # The first frame is the input image
+                    image = torch.concat([image, torch.zeros(3, padding_frames, height, width)], dim=1).to(device=device)
+                    y = vae.encode([image])[0]
 
-            y = y[:, :latent_video_length]  # may be not needed
-            y = y.unsqueeze(0)  # add batch dim
-            image_latents = torch.concat([msk, y], dim=1)
+                y = y[:, :latent_video_length]  # may be not needed
+                y = y.unsqueeze(0)  # add batch dim
+                image_latents = torch.concat([msk, y], dim=1)
+
+            if self.control_training:
+                # Control video
+                video = load_video(control_video_path, 0, frame_count, bucket_reso=(width, height))  # list of frames
+                video = np.stack(video, axis=0)  # F, H, W, C
+                video = torch.from_numpy(video).permute(3, 0, 1, 2).float()  # C, F, H, W
+                video = video / 127.5 - 1  # -1 to 1
+                video = video.to(device=device)
+
+                with torch.amp.autocast(device_type=device.type, dtype=vae.dtype), torch.no_grad():
+                    control_latents = vae.encode([video])[0]
+                    control_latents = control_latents[:, :latent_video_length]
+                    control_latents = control_latents.unsqueeze(0)  # add batch dim
+
+                # We supports Wan2.1-Fun-Control only
+                if image_latents is not None:
+                    image_latents = image_latents[:, 4:]  # remove mask for Wan2.1-Fun-Control
+                    image_latents[:, :, 1:] = 0  # remove except the first frame
+                else:
+                    image_latents = torch.zeros_like(control_latents)  # B, C, F, H, W
+
+                image_latents = torch.concat([control_latents, image_latents], dim=1)  # B, C, F, H, W
 
             vae.to("cpu")
             clean_memory_on_device(device)
-        else:
-            image_latents = None
 
         # use the default value for num_train_timesteps (1000)
         scheduler = FlowUniPCMultistepScheduler(shift=1, use_dynamic_shifting=False)
@@ -249,10 +271,10 @@ class WanNetworkTrainer(NetworkTrainer):
         arg_null = {"context": [context_null], "seq_len": max_seq_len}
 
         if self.i2v_training:
-            # I2V training
             arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
-            arg_c["y"] = image_latents
             arg_null["clip_fea"] = arg_c["clip_fea"]
+        if self.i2v_training or self.control_training:
+            arg_c["y"] = image_latents
             arg_null["y"] = image_latents
 
         # Wrap the inner loop with tqdm to track progress over timesteps
@@ -341,15 +363,24 @@ class WanNetworkTrainer(NetworkTrainer):
     ):
         model: WanModel = transformer
 
-        # I2V training
+        # I2V training and Control training
+        image_latents = None
+        clip_fea = None
         if self.i2v_training:
             image_latents = batch["latents_image"]
-            clip_fea = batch["clip"]
             image_latents = image_latents.to(device=accelerator.device, dtype=network_dtype)
+            clip_fea = batch["clip"]
             clip_fea = clip_fea.to(device=accelerator.device, dtype=network_dtype)
-        else:
-            image_latents = None
-            clip_fea = None
+        if self.control_training:
+            control_latents = batch["latents_control"]
+            control_latents = control_latents.to(device=accelerator.device, dtype=network_dtype)
+            if image_latents is not None:
+                image_latents = image_latents[:, 4:]  # remove mask for Wan2.1-Fun-Control
+                image_latents[:, :, 1:] = 0  # remove except the first frame
+            else:
+                image_latents = torch.zeros_like(control_latents)  # B, C, F, H, W
+            image_latents = torch.concat([control_latents, image_latents], dim=1)  # B, C, F, H, W
+            control_latents = None
 
         context = [t.to(device=accelerator.device, dtype=network_dtype) for t in batch["t5"]]
 

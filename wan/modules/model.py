@@ -729,8 +729,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
-        if self.model_type == "i2v":
-            assert clip_fea is not None and y is not None
+        # remove assertions to work with Fun-Control T2V
+        # if self.model_type == "i2v":
+        #     assert clip_fea is not None and y is not None
         # params
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:

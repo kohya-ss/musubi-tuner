@@ -9,6 +9,7 @@ from .shared_config import wan_shared_cfg
 i2v_14B = EasyDict(__name__="Config: Wan I2V 14B")
 i2v_14B.update(wan_shared_cfg)
 i2v_14B.i2v = True
+i2v_14B.is_fun_control = False
 
 i2v_14B.t5_checkpoint = "models_t5_umt5-xxl-enc-bf16.pth"
 i2v_14B.t5_tokenizer = "google/umt5-xxl"

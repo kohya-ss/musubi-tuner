@@ -317,23 +317,6 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
 # endregion
 
 
-def load_images(image_dir, video_length, bucket_reso):
-    image_files = glob_images(image_dir)
-    if len(image_files) == 0:
-        raise ValueError(f"No image files found in {image_dir}")
-    if len(image_files) < video_length:
-        raise ValueError(f"Number of images in {image_dir} is less than {video_length}")
-
-    image_files.sort()
-    images = []
-    for image_file in image_files[:video_length]:
-        image = Image.open(image_file)
-        image = resize_image_to_bucket(image, bucket_reso)  # returns a numpy array
-        images.append(image)
-
-    return images
-
-
 def prepare_vae(args, device):
     vae_dtype = torch.float16 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
     vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device=device, vae_path=args.vae)
@@ -486,9 +469,11 @@ def parse_args():
     parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     parser.add_argument(
-        "--compile_args", nargs=4, metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
+        "--compile_args",
+        nargs=4,
+        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
         default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
-        help="Torch.compile settings"
+        help="Torch.compile settings",
     )
     parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2.")
     parser.add_argument("--apply_final_norm", type=bool, default=False, help="Apply final norm for LLM. Default is False.")
@@ -591,12 +576,7 @@ def main():
         if args.video_path is not None:
             # v2v inference
             logger.info(f"Video2Video inference: {args.video_path}")
-
-            if os.path.isfile(args.video_path):
-                video = load_video(args.video_path, 0, video_length, bucket_reso=(width, height))  # list of frames
-            else:
-                video = load_images(args.video_path, video_length, bucket_reso=(width, height))  # list of frames
-
+            video = load_video(args.video_path, 0, video_length, bucket_reso=(width, height))  # list of frames
             if len(video) < video_length:
                 raise ValueError(f"Video length is less than {video_length}")
             video = np.stack(video, axis=0)  # F, H, W, C
@@ -739,16 +719,20 @@ def main():
             torch._dynamo.config.cache_size_limit = 32
             for i, block in enumerate(transformer.single_blocks):
                 compiled_block = torch.compile(
-                    block, backend=compile_backend, mode=compile_mode,
+                    block,
+                    backend=compile_backend,
+                    mode=compile_mode,
                     dynamic=compile_dynamic.lower() in "true",
-                    fullgraph=compile_fullgraph.lower() in "true"
+                    fullgraph=compile_fullgraph.lower() in "true",
                 )
                 transformer.single_blocks[i] = compiled_block
             for i, block in enumerate(transformer.double_blocks):
                 compiled_block = torch.compile(
-                    block, backend=compile_backend, mode=compile_mode,
+                    block,
+                    backend=compile_backend,
+                    mode=compile_mode,
                     dynamic=compile_dynamic.lower() in "true",
-                    fullgraph=compile_fullgraph.lower() in "true"
+                    fullgraph=compile_fullgraph.lower() in "true",
                 )
                 transformer.double_blocks[i] = compiled_block
 

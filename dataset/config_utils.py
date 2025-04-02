@@ -47,6 +47,7 @@ class ImageDatasetParams(BaseDatasetParams):
 class VideoDatasetParams(BaseDatasetParams):
     video_directory: Optional[str] = None
     video_jsonl_file: Optional[str] = None
+    control_directory: Optional[str] = None
     target_frames: Sequence[int] = (1,)
     frame_extraction: Optional[str] = "head"
     frame_stride: Optional[int] = 1
@@ -104,6 +105,7 @@ class ConfigSanitizer:
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
         "video_jsonl_file": str,
+        "control_directory": str,
         "target_frames": [int],
         "frame_extraction": str,
         "frame_stride": int,
@@ -289,6 +291,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                     f"""\
         video_directory: "{dataset.video_directory}"
         video_jsonl_file: "{dataset.video_jsonl_file}"
+        control_directory: "{dataset.control_directory}"
         target_frames: {dataset.target_frames}
         frame_extraction: {dataset.frame_extraction}
         frame_stride: {dataset.frame_stride}

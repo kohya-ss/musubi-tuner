@@ -33,6 +33,8 @@ Download the VAE from the above page `Wan2.1_VAE.pth` or download `split_files/v
 
 Download the DiT weights from the following page: https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/tree/main/split_files/diffusion_models
 
+Wan2.1 Fun Control model weights can be downloaded from [here](https://huggingface.co/alibaba-pai/Wan2.1-Fun-14B-Control). Navigate to each weight page and download. The Fun Control model seems to support not only T2V but also I2V tasks.
+
 Please select the appropriate weights according to T2V, I2V, resolution, model size, etc. 
 
 `fp16` and `bf16` models can be used, and `fp8_e4m3fn` models can be used if `--fp8` (or `--fp8_base`) is specified without specifying `--fp8_scaled`. **Please note that `fp8_scaled` models are not supported even with `--fp8_scaled`.**
@@ -59,6 +61,8 @@ VAEは上のページから `Wan2.1_VAE.pth` をダウンロードするか、�
 
 DiTの重みを次のページからダウンロードしてください：https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/tree/main/split_files/diffusion_models
 
+Wan2.1 Fun Controlモデルの重みは、[こちら](https://huggingface.co/alibaba-pai/Wan2.1-Fun-14B-Control)から、それぞれの重みのページに遷移し、ダウンロードしてください。Fun ControlモデルはT2VだけでなくI2Vタスクにも対応しているようです。
+
 T2VやI2V、解像度、モデルサイズなどにより適切な重みを選択してください。
 
 `fp16` および `bf16` モデルを使用できます。また、`--fp8` （または`--fp8_base`）を指定し`--fp8_scaled`を指定をしないときには `fp8_e4m3fn` モデルを使用できます。**`fp8_scaled` モデルはいずれの場合もサポートされていませんのでご注意ください。**
@@ -80,6 +84,8 @@ If you train I2V models, add `--clip path/to/models_clip_open-clip-xlm-roberta-l
 
 If you're running low on VRAM, specify `--vae_cache_cpu` to use the CPU for the VAE internal cache, which will reduce VRAM usage somewhat.
 
+The control video settings are required for training the Fun-Control model. Please refer to [Dataset Settings](/dataset/dataset_config.md#sample-for-video-dataset-with-control-images) for details.
+
 <details>
 <summary>日本語</summary>
 latentの事前キャッシングはHunyuanVideoとほぼ同じです。上のコマンド例を使用してキャッシュを作成してください。
@@ -87,6 +93,8 @@ latentの事前キャッシングはHunyuanVideoとほぼ同じです。上の�
 I2Vモデルを学習する場合は、`--clip path/to/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth` を追加してCLIPモデルを指定してください。指定しないと学習時にエラーが発生します。
 
 VRAMが不足している場合は、`--vae_cache_cpu` を指定するとVAEの内部キャッシュにCPUを使うことで、使用VRAMを多少削減できます。
+
+Fun-Controlモデルを学習する場合は、制御用動画の設定が必要です。[データセット設定](/dataset/dataset_config.md#sample-for-video-dataset-with-control-images)を参照してください。
 </details>
 
 ### Text Encoder Output Pre-caching
@@ -132,7 +140,7 @@ The above is an example. The appropriate values for `timestep_sampling` and `dis
 
 For additional options, use `python wan_train_network.py --help` (note that many options are unverified).
 
-`--task` is one of `t2v-1.3B`, `t2v-14B`, `i2v-14B` and `t2i-14B`. Specify the DiT weights for the task with `--dit`.
+`--task` is one of `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` (for Wan2.1 official models), `t2v-1.3B-FC`, `t2v-14B-FC`, and `i2v-14B-FC` (for Wan2.1 Fun Control model). Specify the DiT weights for the task with `--dit`.
 
 Don't forget to specify `--network_module networks.lora_wan`.
 
@@ -146,7 +154,7 @@ Use `convert_lora.py` for converting the LoRA weights after training, as in Huny
 
 その他のオプションについては `python wan_train_network.py --help` を使用してください（多くのオプションは未検証です）。
 
-`--task` には `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` のいずれかを指定します。`--dit`に、taskに応じたDiTの重みを指定してください。
+`--task` には `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` （これらはWan2.1公式モデル）、`t2v-1.3B-FC`, `t2v-14B-FC`, `i2v-14B-FC`（Wan2.1-Fun Controlモデル）を指定します。`--dit`に、taskに応じたDiTの重みを指定してください。
 
  `--network_module` に `networks.lora_wan` を指定することを忘れないでください。
 
@@ -169,7 +177,7 @@ Each option is the same as when generating images or as HunyuanVideo. Please ref
 
 If you train I2V models, add `--clip path/to/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth` to specify the CLIP model. 
 
-You can specify the initial image and negative prompts in the prompt file. Please refer to [here](/docs/sampling_during_training.md#prompt-file--プロンプトファイル).
+You can specify the initial image, the negative prompt and the control video (for Wan2.1-Fun-Control) in the prompt file. Please refer to [here](/docs/sampling_during_training.md#prompt-file--プロンプトファイル).
 
 <details>
 <summary>日本語</summary>
@@ -177,7 +185,7 @@ You can specify the initial image and negative prompts in the prompt file. Pleas
 
 I2Vモデルを学習する場合は、`--clip path/to/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth` を追加してCLIPモデルを指定してください。
 
-プロンプトファイルで、初期画像やネガティブプロンプト等を指定できます。[こちら](/docs/sampling_during_training.md#prompt-file--プロンプトファイル)を参照してください。
+プロンプトファイルで、初期画像やネガティブプロンプト、制御動画（Wan2.1-Fun-Control用）等を指定できます。[こちら](/docs/sampling_during_training.md#prompt-file--プロンプトファイル)を参照してください。
 </details>
 
 
@@ -206,7 +214,7 @@ python wan_generate_video.py --fp8 --task t2v-1.3B --video_size  832 480 --video
 --attn_mode torch
 ```
 
-`--task` is one of `t2v-1.3B`, `t2v-14B`, `i2v-14B` and `t2i-14B`.
+`--task` is one of `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` (these are Wan2.1 official models), `t2v-1.3B-FC`, `t2v-14B-FC` and `i2v-14B-FC` (for Wan2.1-Fun Control model).
 
 `--attn_mode` is `torch`, `sdpa` (same as `torch`), `xformers`, `sageattn`,`flash2`, `flash` (same as `flash2`) or `flash3`. `torch` is the default. Other options require the corresponding library to be installed. `flash3` (Flash attention 3) is not tested.
 
@@ -246,11 +254,15 @@ If you specify multiple LoRA weights, please specify them with multiple argument
 
 `--cpu_noise` generates initial noise on the CPU. This may result in the same results as ComfyUI with the same seed (depending on other settings).
 
+If you are using the Fun Control model, specify the control video with `--control_path`. You can specify a video file or a folder containing multiple image files. The number of frames in the video file (or the number of images) should be at least the number specified in `--video_length` (plus 1 frame if you specify `--end_image_path`).
+
+Please try to match the aspect ratio of the control video with the aspect ratio specified in `--video_size` (there may be some deviation from the initial image of I2V due to the use of bucketing processing).
+
 Other options are same as `hv_generate_video.py` (some options are not supported, please check the help).
 
 <details>
 <summary>日本語</summary>
-`--task` には `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` のいずれかを指定します。
+`--task` には `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` （これらはWan2.1公式モデル）、`t2v-1.3B-FC`, `t2v-14B-FC`, `i2v-14B-FC`（Wan2.1-Fun Controlモデル）を指定します。
 
 `--attn_mode` には `torch`, `sdpa`（`torch`と同じ）、`xformers`, `sageattn`, `flash2`, `flash`（`flash2`と同じ）, `flash3` のいずれかを指定します。デフォルトは `torch` です。その他のオプションを使用する場合は、対応するライブラリをインストールする必要があります。`flash3`（Flash attention 3）は未テストです。
 
@@ -288,6 +300,10 @@ LoRAのどのモジュールを適用するかを、`--include_patterns`と`--ex
 複数のLoRAの重みを指定する場合は、複数個の引数で指定してください。例：`--include_patterns "cross_attn" ".*" --exclude_patterns "dummy_do_not_exclude" "blocks_(0|1|2|3|4)"` `".*"`は全てにマッチする正規表現です。`dummy_do_not_exclude`は何にもマッチしないダミーの正規表現です。
 
 `--cpu_noise`を指定すると初期ノイズをCPUで生成します。これにより同一seed時の結果がComfyUIと同じになる可能性があります（他の設定にもよります）。
+
+Fun Controlモデルを使用する場合は、`--control_path`で制御用の映像を指定します。動画ファイル、または複数枚の画像ファイルを含んだフォルダを指定できます。動画ファイルのフレーム数（または画像の枚数）は、`--video_length`で指定したフレーム数以上にしてください（後述の`--end_image_path`を指定した場合は、さらに+1フレーム）。
+
+制御用の映像のアスペクト比は、`--video_size`で指定したアスペクト比とできるかぎり合わせてください（bucketingの処理を流用しているためI2Vの初期画像とズレる場合があります）。
 
 その他のオプションは `hv_generate_video.py` と同じです（一部のオプションはサポートされていないため、ヘルプを確認してください）。
 </details>
@@ -394,6 +410,8 @@ Add `--clip` to specify the CLIP model. `--image_path` is the path to the image 
 
 `--end_image_path` can be used to specify the end image. This option is experimental. When this option is specified, the saved video will be slightly longer than the specified number of frames and will have noise, so it is recommended to specify `--trim_tail_frames 3` to trim the tail frames.
 
+You can also use the Fun Control model for I2V inference. Specify the control video with `--control_path`. 
+
 Other options are same as T2V inference.
 
 <details>
@@ -402,6 +420,7 @@ Other options are same as T2V inference.
 
 `--end_image_path` で終了画像を指定できます。このオプションは実験的なものです。このオプションを指定すると、保存される動画が指定フレーム数よりもやや多くなり、かつノイズが乗るため、`--trim_tail_frames 3` などを指定して末尾のフレームをトリミングすることをお勧めします。
 
+I2V推論でもFun Controlモデルが使用できます。`--control_path` で制御用の映像を指定します。
 
 その他のオプションはT2V推論と同じです。
 </details>

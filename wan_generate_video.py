@@ -42,6 +42,7 @@ from hv_generate_video import save_images_grid, save_videos_grid, synchronize_de
 from blissful_tuner.latent_preview import latent_preview
 
 import threading
+from dataset.image_video_dataset import load_video
 
 import logging
 
@@ -104,6 +105,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
     parser.add_argument("--image_path", type=str, default=None, help="path to image for image2video inference")
     parser.add_argument("--end_image_path", type=str, default=None, help="path to end image for image2video inference")
+    parser.add_argument(
+        "--control_path",
+        type=str,
+        default=None,
+        help="path to control video for inference with controlnet. video file or directory with images",
+    )
     parser.add_argument("--trim_tail_frames", type=int, default=0, help="trim tail N frames from the video before saving")
     parser.add_argument(
         "--cfg_skip_mode",
@@ -538,7 +545,7 @@ def optimize_model(
 
 
 def prepare_t2v_inputs(
-    args: argparse.Namespace, config, accelerator: Accelerator, device: torch.device
+    args: argparse.Namespace, config, accelerator: Accelerator, device: torch.device, vae: Optional[WanVAE] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
     """Prepare inputs for T2V
 
@@ -554,6 +561,8 @@ def prepare_t2v_inputs(
     """
     # Prepare inputs for T2V
     # calculate dimensions and sequence length
+    height, width = args.video_size
+    frames = args.video_length
     (_, lat_f, lat_h, lat_w), seq_len = calculate_dimensions(args.video_size, args.video_length, config)
     target_shape = (16, lat_f, lat_h, lat_w)
 
@@ -587,6 +596,18 @@ def prepare_t2v_inputs(
     del text_encoder
     clean_memory_on_device(device)
 
+    # Fun-Control: encode control video to latent space
+    if config.is_fun_control:
+        # TODO use same resizing as for image
+        logger.info(f"Encoding control video to latent space")
+        # C, F, H, W
+        control_video = load_control_video(args.control_path, frames, height, width).to(device)
+        with accelerator.autocast(), torch.no_grad():
+            control_latent = vae.encode([control_video])[0]
+        y = torch.concat([control_latent, torch.zeros_like(control_latent)], dim=0)  # add control video latent
+    else:
+        y = None
+
     # generate noise
     noise = torch.randn(target_shape, dtype=torch.float32, generator=seed_g, device=device if not args.cpu_noise else "cpu")
     noise = noise.to(device)
@@ -594,6 +615,9 @@ def prepare_t2v_inputs(
     # prepare model input arguments
     arg_c = {"context": context, "seq_len": seq_len}
     arg_null = {"context": context_null, "seq_len": seq_len}
+    if y is not None:
+        arg_c["y"] = [y]
+        arg_null["y"] = [y]
 
     return noise, context, context_null, (arg_c, arg_null)
 
@@ -638,12 +662,12 @@ def prepare_i2v_inputs(
     has_end_image = end_img is not None
 
     # calculate latent dimensions: keep aspect ratio
-    h, w = img_tensor.shape[1:]
-    aspect_ratio = h / w
+    height, width = img_tensor.shape[1:]
+    aspect_ratio = height / width
     lat_h = round(np.sqrt(max_area * aspect_ratio) // config.vae_stride[1] // config.patch_size[1] * config.patch_size[1])
     lat_w = round(np.sqrt(max_area / aspect_ratio) // config.vae_stride[2] // config.patch_size[2] * config.patch_size[2])
-    h = lat_h * config.vae_stride[1]
-    w = lat_w * config.vae_stride[2]
+    height = lat_h * config.vae_stride[1]
+    width = lat_w * config.vae_stride[2]
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
     max_seq_len = (lat_f + (1 if has_end_image else 0)) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
 
@@ -708,14 +732,14 @@ def prepare_i2v_inputs(
     vae.to_device(device)
 
     # resize image
-    interpolation = cv2.INTER_AREA if h < img_cv2.shape[0] else cv2.INTER_CUBIC
-    img_resized = cv2.resize(img_cv2, (w, h), interpolation=interpolation)
+    interpolation = cv2.INTER_AREA if height < img_cv2.shape[0] else cv2.INTER_CUBIC
+    img_resized = cv2.resize(img_cv2, (width, height), interpolation=interpolation)
     img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
     img_resized = img_resized.unsqueeze(1)  # CFHW
 
     if has_end_image:
-        interpolation = cv2.INTER_AREA if h < end_img_cv2.shape[1] else cv2.INTER_CUBIC
-        end_img_resized = cv2.resize(end_img_cv2, (w, h), interpolation=interpolation)
+        interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
+        end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
         end_img_resized = TF.to_tensor(end_img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
         end_img_resized = end_img_resized.unsqueeze(1)  # CFHW
 
@@ -736,7 +760,7 @@ def prepare_i2v_inputs(
     with accelerator.autocast(), torch.no_grad():
         # padding to match the required number of frames
         padding_frames = frames - 1  # the first frame is image
-        img_resized = torch.concat([img_resized, torch.zeros(3, padding_frames, h, w, device=device)], dim=1)
+        img_resized = torch.concat([img_resized, torch.zeros(3, padding_frames, height, width, device=device)], dim=1)
         y = vae.encode([img_resized])[0]
 
         if has_end_image:
@@ -745,6 +769,21 @@ def prepare_i2v_inputs(
 
     y = torch.concat([msk, y])
     logger.info(f"Encoding complete")
+
+    # Fun-Control: encode control video to latent space
+    if config.is_fun_control:
+        # TODO use same resizing as for image
+        logger.info(f"Encoding control video to latent space")
+        # C, F, H, W
+        control_video = load_control_video(args.control_path, frames + (1 if has_end_image else 0), height, width).to(device)
+        with accelerator.autocast(), torch.no_grad():
+            control_latent = vae.encode([control_video])[0]
+        y = y[msk.shape[0] :]  # remove mask because Fun-Control does not need it
+        if has_end_image:
+            y[:, 1:-1] = 0  # remove image latent except first and last frame. according to WanVideoWrapper, this doesn't work
+        else:
+            y[:, 1:] = 0  # remove image latent except first frame
+        y = torch.concat([control_latent, y], dim=0)  # add control video latent
 
     # move VAE to CPU
     vae.to_device("cpu")
@@ -766,6 +805,28 @@ def prepare_i2v_inputs(
     }
 
     return noise, context, context_null, y, (arg_c, arg_null)
+
+
+def load_control_video(control_path: str, frames: int, height: int, width: int) -> torch.Tensor:
+    """load control video to latent space
+
+    Args:
+        control_path: path to control video
+        frames: number of frames in the video
+        height: height of the video
+        width: width of the video
+
+    Returns:
+        torch.Tensor: control video latent, CFHW
+    """
+    logger.info(f"Load control video from {control_path}")
+    video = load_video(control_path, 0, frames, bucket_reso=(width, height))  # list of frames
+    if len(video) < frames:
+        raise ValueError(f"Video length is less than {frames}")
+    # video = np.stack(video, axis=0)  # F, H, W, C
+    video = torch.stack([TF.to_tensor(frame).sub_(0.5).div_(0.5) for frame in video], dim=0)  # F, C, H, W, -1 to 1
+    video = video.permute(1, 0, 2, 3)  # C, F, H, W
+    return video
 
 
 def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> Tuple[Any, torch.Tensor]:
@@ -1021,8 +1082,11 @@ def generate(args: argparse.Namespace) -> torch.Tensor:
         # vae is on CPU
     else:
         # T2V: need text encoder
-        noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device)
         vae = None
+        if cfg.is_fun_control:
+            # Fun-Control: need VAE for encoding control video
+            vae = load_vae(args, cfg, device, vae_dtype)
+        noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
 
     # load DiT model
     model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
