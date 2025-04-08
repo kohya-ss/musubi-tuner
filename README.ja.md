@@ -42,6 +42,10 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/04/06
+    - JSONL形式の動画データセットで、動画ファイルだけでなく、複数枚の画像が格納されたディレクトリも指定できるようになりました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file)を参照してください。
+    - 動画データセットで、元動画のフレームレートを指定すると、アーキテクチャのフレームレートに自動的に間引く機能を追加しました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files)を参照してください。
+
 - 2025/03/30
     - Wan2.1-FunのControlモデルの学習を実験的に追加しました（未テスト）。[Wan2.1のドキュメント](./docs/wan.md#training--学習)を参照してください。
     - Wan2.1-FunのControlモデルによる推論を実験的にサポートしました。14BのI2VでのControlのみテスト済みです。[Wan2.1のドキュメント](./docs/wan.md#inference--推論)を参照してください。
@@ -68,20 +72,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
         - raindrop313氏の[ComfyUI-WanVideoStartEndFrames](https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames) の実装を参考にしました。raindrop313氏に感謝いたします。なお、実装を完全に再現したものではありませんので、何らかの問題があるかもしれません。
         - `--end_image_path`に最後のフレームの画像を指定してください。あわせて `--trim_tail_frames`オプションも追加されています。
         - 詳細は[こちら](./docs/wan.md#i2v-inference--i2v推論)を参照してください。
-    
-- 2025/03/18
-    - SageAttentionのインストール方法が最新に更新されました（ソースコードの編集が不要となりました）。PR [#165](https://github.com/kohya-ss/musubi-tuner/pull/165) fai-9氏に感謝いたします。
-
-- 2025/03/17
-    - Wan2.1の学習で、float8_e4m3fnの重みを使用した場合に、LoRAの重みも同形式になり、正しく保存されない不具合を集成しました。
-
-- 2025/03/16
-    - Wan2.1の学習で、fp16の重みを使用した場合でも重みがbf16にcastされていた不具合を修正しました。[PR #160]https://github.com/kohya-ss/musubi-tuner/pull/160)
-        - あわせてfp16の重みを使用するとサンプル画像生成で黒画像が生成される不具合を修正しました。
-        - fp16の学習で不具合が起きる場合にはbf16をお使いください。
-    - Wan2.1の推論スクリプトをリファクタリングしました。`--fp8_fast`と`--compile`オプションが追加されました。詳しくは[こちら](./docs/wan.md#inference--推論)を参照してください。PR [#153](https://github.com/kohya-ss/musubi-tuner/pull/153)
-        - 大幅に変更を行ったため、不具合があればお知らせください。
-    - 先日追加された`--fp8_scaled`オプションは、fp8での学習および推論の精度向上に効果があるようです。`--fp8_base`で学習している場合や、`--fp8`で推論している場合は、`--fp8_scaled`の追加をご検討ください。問題があればご連絡ください。
 
 ### リリースについて
 

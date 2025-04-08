@@ -89,6 +89,10 @@ def show_console(
 def save_video(image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]], cache_path: str, fps: int = 24):
     import av
 
+    directory = os.path.dirname(cache_path)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
     if (isinstance(image, np.ndarray) and len(image.shape) == 3) or isinstance(image, Image.Image):
         # save image
         image_path = cache_path.replace(".safetensors", ".jpg")

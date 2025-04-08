@@ -366,51 +366,120 @@ def load_video(
     end_frame: Optional[int] = None,
     bucket_selector: Optional[BucketSelector] = None,
     bucket_reso: Optional[tuple[int, int]] = None,
+    source_fps: Optional[float] = None,
+    target_fps: Optional[float] = None,
 ) -> list[np.ndarray]:
     """
     bucket_reso: if given, resize the video to the bucket resolution, (width, height)
     """
-    if os.path.isfile(video_path):
-        container = av.open(video_path)
-        video = []
-        for i, frame in enumerate(container.decode(video=0)):
-            if start_frame is not None and i < start_frame:
-                continue
-            if end_frame is not None and i >= end_frame:
-                break
-            frame = frame.to_image()
+    if source_fps is None or target_fps is None:
+        if os.path.isfile(video_path):
+            container = av.open(video_path)
+            video = []
+            for i, frame in enumerate(container.decode(video=0)):
+                if start_frame is not None and i < start_frame:
+                    continue
+                if end_frame is not None and i >= end_frame:
+                    break
+                frame = frame.to_image()
 
-            if bucket_selector is not None and bucket_reso is None:
-                bucket_reso = bucket_selector.get_bucket_resolution(frame.size)
+                if bucket_selector is not None and bucket_reso is None:
+                    bucket_reso = bucket_selector.get_bucket_resolution(frame.size)  # calc resolution from first frame
 
-            if bucket_reso is not None:
-                frame = resize_image_to_bucket(frame, bucket_reso)
-            else:
-                frame = np.array(frame)
+                if bucket_reso is not None:
+                    frame = resize_image_to_bucket(frame, bucket_reso)
+                else:
+                    frame = np.array(frame)
 
-            video.append(frame)
-        container.close()
+                video.append(frame)
+            container.close()
+        else:
+            # load images in the directory
+            image_files = glob_images(video_path)
+            image_files.sort()
+            video = []
+            for i in range(len(image_files)):
+                if start_frame is not None and i < start_frame:
+                    continue
+                if end_frame is not None and i >= end_frame:
+                    break
+
+                image_file = image_files[i]
+                image = Image.open(image_file).convert("RGB")
+
+                if bucket_selector is not None and bucket_reso is None:
+                    bucket_reso = bucket_selector.get_bucket_resolution(image.size)  # calc resolution from first frame
+                image = np.array(image)
+                if bucket_reso is not None:
+                    image = resize_image_to_bucket(image, bucket_reso)
+
+                video.append(image)
     else:
-        # load images in the directory
-        image_files = glob_images(video_path)
-        image_files.sort()
-        video = []
-        for i in range(len(image_files)):
-            if start_frame is not None and i < start_frame:
-                continue
-            if end_frame is not None and i >= end_frame:
-                break
+        # drop frames to match the target fps TODO commonize this code with the above if this works
+        frame_index_delta = target_fps / source_fps  # example: 16 / 30 = 0.5333
+        if os.path.isfile(video_path):
+            container = av.open(video_path)
+            video = []
+            frame_index_with_fraction = 0.0
+            previous_frame_index = -1
+            for i, frame in enumerate(container.decode(video=0)):
+                target_frame_index = int(frame_index_with_fraction)
+                frame_index_with_fraction += frame_index_delta
 
-            image_file = image_files[i]
-            image = Image.open(image_file).convert("RGB")
+                if target_frame_index == previous_frame_index:  # drop this frame
+                    continue
 
-            if bucket_selector is not None and bucket_reso is None:
-                bucket_reso = bucket_selector.get_bucket_resolution(image.size)
-            image = np.array(image)
-            if bucket_reso is not None:
-                image = resize_image_to_bucket(image, bucket_reso)
+                # accept this frame
+                previous_frame_index = target_frame_index
 
-            video.append(image)
+                if start_frame is not None and target_frame_index < start_frame:
+                    continue
+                if end_frame is not None and target_frame_index >= end_frame:
+                    break
+                frame = frame.to_image()
+
+                if bucket_selector is not None and bucket_reso is None:
+                    bucket_reso = bucket_selector.get_bucket_resolution(frame.size)  # calc resolution from first frame
+
+                if bucket_reso is not None:
+                    frame = resize_image_to_bucket(frame, bucket_reso)
+                else:
+                    frame = np.array(frame)
+
+                video.append(frame)
+            container.close()
+        else:
+            # load images in the directory
+            image_files = glob_images(video_path)
+            image_files.sort()
+            video = []
+            frame_index_with_fraction = 0.0
+            previous_frame_index = -1
+            for i in range(len(image_files)):
+                target_frame_index = int(frame_index_with_fraction)
+                frame_index_with_fraction += frame_index_delta
+
+                if target_frame_index == previous_frame_index:  # drop this frame
+                    continue
+
+                # accept this frame
+                previous_frame_index = target_frame_index
+
+                if start_frame is not None and target_frame_index < start_frame:
+                    continue
+                if end_frame is not None and target_frame_index >= end_frame:
+                    break
+
+                image_file = image_files[i]
+                image = Image.open(image_file).convert("RGB")
+
+                if bucket_selector is not None and bucket_reso is None:
+                    bucket_reso = bucket_selector.get_bucket_resolution(image.size)  # calc resolution from first frame
+                image = np.array(image)
+                if bucket_reso is not None:
+                    image = resize_image_to_bucket(image, bucket_reso)
+
+                video.append(image)
 
     return video
 
@@ -670,6 +739,9 @@ class VideoDatasource(ContentDatasource):
 
         self.bucket_selector = None
 
+        self.source_fps = None
+        self.target_fps = None
+
     def __len__(self):
         raise NotImplementedError
 
@@ -686,7 +758,9 @@ class VideoDatasource(ContentDatasource):
         end_frame = end_frame if end_frame is not None else self.end_frame
         bucket_selector = bucket_selector if bucket_selector is not None else self.bucket_selector
 
-        video = load_video(video_path, start_frame, end_frame, bucket_selector)
+        video = load_video(
+            video_path, start_frame, end_frame, bucket_selector, source_fps=self.source_fps, target_fps=self.target_fps
+        )
         return video
 
     def get_control_data_from_path(
@@ -700,7 +774,9 @@ class VideoDatasource(ContentDatasource):
         end_frame = end_frame if end_frame is not None else self.end_frame
         bucket_selector = bucket_selector if bucket_selector is not None else self.bucket_selector
 
-        control = load_video(control_path, start_frame, end_frame, bucket_selector)
+        control = load_video(
+            control_path, start_frame, end_frame, bucket_selector, source_fps=self.source_fps, target_fps=self.target_fps
+        )
         return control
 
     def set_start_and_end_frame(self, start_frame: Optional[int], end_frame: Optional[int]):
@@ -709,6 +785,10 @@ class VideoDatasource(ContentDatasource):
 
     def set_bucket_selector(self, bucket_selector: BucketSelector):
         self.bucket_selector = bucket_selector
+
+    def set_source_and_target_fps(self, source_fps: Optional[float], target_fps: Optional[float]):
+        self.source_fps = source_fps
+        self.target_fps = target_fps
 
     def __iter__(self):
         raise NotImplementedError
@@ -1253,6 +1333,9 @@ class ImageDataset(BaseDataset):
 
 
 class VideoDataset(BaseDataset):
+    TARGET_FPS_HUNYUAN = 24.0
+    TARGET_FPS_WAN = 16.0
+
     def __init__(
         self,
         resolution: Tuple[int, int],
@@ -1266,6 +1349,7 @@ class VideoDataset(BaseDataset):
         frame_sample: Optional[int] = 1,
         target_frames: Optional[list[int]] = None,
         max_frames: Optional[int] = None,
+        source_fps: Optional[float] = None,
         video_directory: Optional[str] = None,
         video_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
@@ -1291,6 +1375,14 @@ class VideoDataset(BaseDataset):
         self.frame_stride = frame_stride
         self.frame_sample = frame_sample
         self.max_frames = max_frames
+        self.source_fps = source_fps
+
+        if self.architecture == ARCHITECTURE_HUNYUAN_VIDEO:
+            self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
+        elif self.architecture == ARCHITECTURE_WAN:
+            self.target_fps = VideoDataset.TARGET_FPS_WAN
+        else:
+            raise ValueError(f"Unsupported architecture: {self.architecture}")
 
         if target_frames is not None:
             target_frames = list(set(target_frames))
@@ -1341,12 +1433,17 @@ class VideoDataset(BaseDataset):
         metadata["frame_sample"] = self.frame_sample
         metadata["target_frames"] = self.target_frames
         metadata["max_frames"] = self.max_frames
+        metadata["source_fps"] = self.source_fps
         metadata["has_control"] = self.has_control
         return metadata
 
     def retrieve_latent_cache_batches(self, num_workers: int):
         buckset_selector = BucketSelector(self.resolution, architecture=self.architecture)
         self.datasource.set_bucket_selector(buckset_selector)
+        if self.source_fps is not None:
+            self.datasource.set_source_and_target_fps(self.source_fps, self.target_fps)
+        else:
+            self.datasource.set_source_and_target_fps(None, None)  # no conversion
 
         executor = ThreadPoolExecutor(max_workers=num_workers)
 

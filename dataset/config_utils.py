@@ -53,6 +53,7 @@ class VideoDatasetParams(BaseDatasetParams):
     frame_stride: Optional[int] = 1
     frame_sample: Optional[int] = 1
     max_frames: Optional[int] = 129
+    source_fps: Optional[float] = None
 
 
 @dataclass
@@ -112,6 +113,7 @@ class ConfigSanitizer:
         "frame_sample": int,
         "max_frames": int,
         "cache_directory": str,
+        "source_fps": float,
     }
 
     # options handled by argparse but not handled by user config
@@ -297,6 +299,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         frame_stride: {dataset.frame_stride}
         frame_sample: {dataset.frame_sample}
         max_frames: {dataset.max_frames}
+        source_fps: {dataset.source_fps}
     \n"""
                 ),
                 "    ",

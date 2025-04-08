@@ -104,7 +104,7 @@ metadata jsonl ファイルを使用する場合、caption_extension は必要�
 ```toml
 # Common parameters (resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale) 
 # can be set in either general or datasets sections
-# Video-specific parameters (target_frames, frame_extraction, frame_stride, frame_sample, max_frames)
+# Video-specific parameters (target_frames, frame_extraction, frame_stride, frame_sample, max_frames, source_fps)
 # must be set in each datasets section
 
 # general configurations
@@ -120,6 +120,7 @@ video_directory = "/path/to/video_dir"
 cache_directory = "/path/to/cache_directory" # recommended to set cache directory
 target_frames = [1, 25, 45]
 frame_extraction = "head"
+source_fps = 30.0 # optional, source fps for videos in the directory, decimal number
 
 [[datasets]]
 video_directory = "/path/to/video_dir2"
@@ -132,12 +133,21 @@ max_frames = 45
 
 __In HunyuanVideo and Wan2.1, the number of `target_frames` must be "N\*4+1" (N=0,1,2,...).__ Otherwise, it will be truncated to the nearest "N*4+1".
 
+If the `source_fps` is specified, the videos in the directory are considered to be at this frame rate, and some frames will be skipped to match the model's frame rate (24 for HunyuanVideo and 16 for Wan2.1). __The value must be a decimal number, for example, `30.0` instead of `30`.__ The skipping is done automatically and does not consider the content of the images. Please check if the converted data is correct using `--debug_mode video`.
+
+If `source_fps` is not specified (default), all frames of the video will be used regardless of the video's frame rate.
+
 <details>
 <summary>日本語</summary>
 
-resolution, caption_extension, target_frames, frame_extraction, frame_stride, frame_sample, batch_size, num_repeats, enable_bucket, bucket_no_upscale, max_frames は general または datasets のどちらかに設定してください。
+共通パラメータ（resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale）は、generalまたはdatasetsのいずれかに設定できます。
+動画固有のパラメータ（target_frames, frame_extraction, frame_stride, frame_sample, max_frames, source_fps）は、各datasetsセクションに設定する必要があります。
 
 __HunyuanVideoおよびWan2.1では、target_framesの数値は「N\*4+1」である必要があります。__ これ以外の値の場合は、最も近いN\*4+1の値に切り捨てられます。
+
+`source_fps`を指定した場合、ディレクトリ内の動画をこのフレームレートとみなして、モデルのフレームレートにあうようにいくつかのフレームをスキップします（HunyuanVideoは24、Wan2.1は16）。__小数点を含む数値で指定してください。__ 例：`30`ではなく`30.0`。スキップは機械的に行われ、画像の内容は考慮しません。変換後のデータが正しいか、`--debug_mode video`で確認してください。
+
+`source_fps`を指定しない場合、動画のフレームは（動画自体のフレームレートに関係なく）すべて使用されます。
 
 他の注意事項は画像データセットと同様です。
 </details>
@@ -147,7 +157,7 @@ __HunyuanVideoおよびWan2.1では、target_framesの数値は「N\*4+1」で�
 ```toml
 # Common parameters (resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale) 
 # can be set in either general or datasets sections
-# Video-specific parameters (target_frames, frame_extraction, frame_stride, frame_sample, max_frames)
+# Video-specific parameters (target_frames, frame_extraction, frame_stride, frame_sample, max_frames, source_fps)
 # must be set in each datasets section
 
 # caption_extension is not required for metadata jsonl file
@@ -165,7 +175,7 @@ video_jsonl_file = "/path/to/metadata.jsonl"
 target_frames = [1, 25, 45]
 frame_extraction = "head"
 cache_directory = "/path/to/cache_directory_head"
-
+source_fps = 30.0 # optional, source fps for videos in the jsonl file
 # same metadata jsonl file can be used for multiple datasets
 [[datasets]]
 video_jsonl_file = "/path/to/metadata.jsonl"
@@ -183,12 +193,13 @@ JSONL file format for metadata:
 {"video_path": "/path/to/video2.mp4", "caption": "A caption for video2"}
 ```
 
+`video_path` can be a directory containing multiple images.
+
 <details>
 <summary>日本語</summary>
-
-resolution, target_frames, frame_extraction, frame_stride, frame_sample, batch_size, num_repeats, enable_bucket, bucket_no_upscale, max_frames は general または datasets のどちらかに設定してください。
-
 metadata jsonl ファイルを使用する場合、caption_extension は必要ありません。また、cache_directory は必須です。
+
+`video_path`は、複数の画像を含むディレクトリのパスでも構いません。
 
 他の注意事項は今までのデータセットと同様です。
 </details>

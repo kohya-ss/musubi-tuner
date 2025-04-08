@@ -1,11 +1,11 @@
 accelerate==1.2.1
 av==14.0.1
-bitsandbytes==0.45.0
+bitsandbytes==0.45.4
 diffusers==0.32.1
 einops==0.7.0
 huggingface-hub==0.26.5
 opencv-python==4.10.0.84
-pillow==10.2.0
+pillow
 safetensors==0.4.5
 toml==0.10.2
 tqdm==4.67.1
