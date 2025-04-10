@@ -51,6 +51,9 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 
 - **[NEW] GitHub Discussions Enabled**: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- Apr 9, 2025
+    - `hv_train_network.py` and `wan_train_network.py` now support PyTorch Dynamo optimization. PR [#215](https://github.com/kohya-ss/musubi-tuner/pull/215) Thanks to sdbds. See [here](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化) for details.
+
 - Apr 6, 2025
     - In the video dataset with JSONL format, you can now specify not only video files but also directories containing multiple images. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file) for details.
     - Added a feature to automatically downsample the original video's frame rate to the architecture's frame rate when specifying the original video's frame rate in the video dataset. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files) for details.
@@ -318,6 +321,8 @@ The format of LoRA trained is the same as `sd-scripts`.
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
 
 You can record logs during training. Refer to [Save and view logs in TensorBoard format](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
+
+For PyTorch Dynamo optimization, refer to [this document](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化).
 
 For sample image generation during training, refer to [this document](./docs/sampling_during_training.md). For advanced configuration, refer to [this document](./docs/advanced_config.md).
 

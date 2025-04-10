@@ -42,6 +42,10 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/04/09
+    - `hv_train_network.py`および `wan_train_network.py`にPyTorch Dynamoを使用するオプションが追加されました。PR [#215](https://github.com/kohya-ss/musubi-tuner/pull/215) sdbds 氏に感謝します。詳細は[こちら](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
+    - en: Added   
+
 - 2025/04/06
     - JSONL形式の動画データセットで、動画ファイルだけでなく、複数枚の画像が格納されたディレクトリも指定できるようになりました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file)を参照してください。
     - 動画データセットで、元動画のフレームレートを指定すると、アーキテクチャのフレームレートに自動的に間引く機能を追加しました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files)を参照してください。
@@ -273,6 +277,12 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 `--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。
 
 学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
+
+PyTorch Dynamoによる最適化を行う場合は、[こちら](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
+
+`--gradient_checkpointing`を指定すると、gradient checkpointingが有効になります。VRAM使用量は減りますが、学習速度は低下します。
+
+`--optimizer_type`には`adamw8bit`、`adamw8bit_apex_fused`、`adamw8bit_apex_fused_legacy`、`adamw8bit_apex_fused_legacy_no_scale`のいずれかを指定してください。
 
 学習中のサンプル画像生成については、[こちらのドキュメント](./docs/sampling_during_training.md)を参照してください。その他の高度な設定については[こちらのドキュメント](./docs/advanced_config.md)を参照してください。
 

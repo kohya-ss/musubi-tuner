@@ -10,6 +10,7 @@
 - [Save and view logs in TensorBoard format](#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)
 - [Save and view logs in wandb](#save-and-view-logs-in-wandb--wandbでログの保存と参照)
 - [FP8 weight optimization for models](#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化)
+- [PyTorch Dynamo optimization for model training](#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)
 
 ## How to specify `network_args` / `network_args`の指定方法
 
@@ -217,4 +218,99 @@ The implementation:
 1. 精度を維持できる適切な倍率で重みをFP8形式に量子化
 2. 重みをFP8量子化重みに置き換え、倍率をモデルのstate dictに保存
 3. Linear層にmonkey patchingすることでモデルを変更せずに逆量子化
- 
+ </details>
+
+ ## PyTorch Dynamo optimization for model training / モデルの学習におけるPyTorch Dynamoの最適化
+
+The PyTorch Dynamo options are now available to optimize the training process. PyTorch Dynamo is a Python-level JIT compiler designed to make unmodified PyTorch programs faster by using TorchInductor, a deep learning compiler. This integration allows for potential speedups in training while maintaining model accuracy.
+
+[PR #215](https://github.com/kohya-ss/musubi-tuner/pull/215) added this feature.
+
+Specify the `--dynamo_backend` option to enable Dynamo optimization with one of the available backends from the `DynamoBackend` enum.
+
+Additional options allow for fine-tuning the Dynamo behavior:
+- `--dynamo_mode`: Controls the optimization strategy
+- `--dynamo_fullgraph`: Enables fullgraph mode for potentially better optimization
+- `--dynamo_dynamic`: Enables dynamic shape handling
+
+The `--dynamo_dynamic` option has been reported to have many problems based on the validation in PR #215.
+
+### Available options:
+
+```
+--dynamo_backend {NO, INDUCTOR, NVFUSER, CUDAGRAPHS, CUDAGRAPHS_FALLBACK, etc.}
+    Specifies the Dynamo backend to use (default is NO, which disables Dynamo)
+
+--dynamo_mode {default, reduce-overhead, max-autotune}
+    Specifies the optimization mode (default is 'default')
+    - 'default': Standard optimization
+    - 'reduce-overhead': Focuses on reducing compilation overhead
+    - 'max-autotune': Performs extensive autotuning for potentially better performance
+
+--dynamo_fullgraph
+    Flag to enable fullgraph mode, which attempts to capture and optimize the entire model graph
+
+--dynamo_dynamic
+    Flag to enable dynamic shape handling for models with variable input shapes
+```
+
+### Usage example:
+
+```bash
+python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode default
+```
+
+For more aggressive optimization:
+```bash
+python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
+```
+
+Note: The best combination of options may depend on your specific model and hardware. Experimentation may be necessary to find the optimal configuration.
+
+<details>
+<summary>日本語</summary>
+PyTorch Dynamoオプションが学習プロセスを最適化するために追加されました。PyTorch Dynamoは、TorchInductor（ディープラーニングコンパイラ）を使用して、変更を加えることなくPyTorchプログラムを高速化するためのPythonレベルのJITコンパイラです。この統合により、モデルの精度を維持しながら学習の高速化が期待できます。
+
+[PR #215](https://github.com/kohya-ss/musubi-tuner/pull/215) で追加されました。
+
+`--dynamo_backend`オプションを指定して、`DynamoBackend`列挙型から利用可能なバックエンドの一つを選択することで、Dynamo最適化を有効にします。
+
+追加のオプションにより、Dynamoの動作を微調整できます：
+- `--dynamo_mode`：最適化戦略を制御します
+- `--dynamo_fullgraph`：より良い最適化の可能性のためにフルグラフモードを有効にします
+- `--dynamo_dynamic`：動的形状処理を有効にします
+
+PR #215での検証によると、`--dynamo_dynamic`には問題が多いことが報告されています。
+
+__利用可能なオプション：__
+
+```
+--dynamo_backend {NO, INDUCTOR, NVFUSER, CUDAGRAPHS, CUDAGRAPHS_FALLBACK, など}
+    使用するDynamoバックエンドを指定します（デフォルトはNOで、Dynamoを無効にします）
+
+--dynamo_mode {default, reduce-overhead, max-autotune}
+    最適化モードを指定します（デフォルトは 'default'）
+    - 'default'：標準的な最適化
+    - 'reduce-overhead'：コンパイルのオーバーヘッド削減に焦点を当てる
+    - 'max-autotune'：より良いパフォーマンスのために広範な自動調整を実行
+
+--dynamo_fullgraph
+    フルグラフモードを有効にするフラグ。モデルグラフ全体をキャプチャして最適化しようとします
+
+--dynamo_dynamic
+    可変入力形状を持つモデルのための動的形状処理を有効にするフラグ
+```
+
+__使用例：__
+
+```bash
+python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode default
+```
+
+より積極的な最適化の場合：
+```bash
+python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
+```
+
+注意：最適なオプションの組み合わせは、特定のモデルとハードウェアに依存する場合があります。最適な構成を見つけるために実験が必要かもしれません。
+</details>
