@@ -39,7 +39,7 @@ from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 from blissful_tuner.latent_preview import latent_preview
-from blissful_tuner.fp8_optimization import convert_fp8_linear
+from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 import logging
 
 logger = logging.getLogger(__name__)
@@ -480,8 +480,14 @@ def parse_args():
     parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
+    parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization")
+    parser.add_argument(
+        "--cfg_schedule",
+        type=str,
+        help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
+    )
     args = parser.parse_args()
-
+    args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
@@ -490,8 +496,57 @@ def parse_args():
 
     if args.fp8_fast and not args.fp8:
         raise ValueError("--fp8_fast requires --fp8")
-
     return args
+
+
+def parse_scheduled_cfg(schedule, infer_steps):
+    """
+    This function takes a string formatted as a combination of individual numbers and ranges
+    (e.g. "1-10,20,40-50") and returns a sorted list of the numbers.
+    """
+    steps = set()  # Using a set to avoid duplicate steps
+    # Split the input by commas to handle separate tokens
+    tokens = schedule.split(",")
+    for token in tokens:
+        token = token.strip()  # Remove any extra spaces
+        if "-" in token:
+            # If the token has a hyphen, it's a range
+            parts = token.split("-")
+            if len(parts) != 2:
+                # If there aren't exactly two parts, the range is malformed
+                raise argparse.ArgumentTypeError(f"Invalid range: {token}")
+            try:
+                # Convert the range's start and end into integers
+                start = int(parts[0])
+                end = int(parts[1])
+            except ValueError:
+                raise argparse.ArgumentTypeError(f"Invalid number in range: {token}")
+            if start > end:
+                raise argparse.ArgumentTypeError(f"Start cannot be greater than end in range: {token}")
+            # Add every number from start to end (inclusive) to our set
+            for i in range(start, end + 1):
+                if i not in steps:
+                    steps.add(i)
+        elif "e~" in token:
+            # If the token has a tilde, it's a modulus e.g. ever n steps
+            parts = token.split("~")
+            modulus = int(parts[1])
+            if len(parts) != 2:
+                raise argparse.ArgumentTypeError(f"Invalid modulus: {token}")
+            # Add every other number from start to end (inclusive) to our set
+            for i in range(modulus, infer_steps + 1, modulus):
+                if i not in steps:
+                    steps.add(i)
+        else:
+            # Handle individual numbers
+            try:
+                step = int(token)
+                if step not in steps:
+                    steps.add(step)
+            except ValueError:
+                raise argparse.ArgumentTypeError(f"Invalid number: {token}")
+    # Return the steps as a sorted list
+    return sorted(steps)
 
 
 def check_inputs(args):
@@ -554,9 +609,16 @@ def main():
 
         # encode prompt with LLM and Text Encoder
         logger.info(f"Encoding prompt: {prompt}")
-
         do_classifier_free_guidance = args.guidance_scale != 1.0
         if do_classifier_free_guidance:
+            cfg_schedule = []
+            if args.cfg_schedule is not None:
+                cfg_schedule = args.cfg_schedule
+                logger.info(f"CFG scheduling is enabled. CFG Steps: {cfg_schedule}")
+            else:
+                logger.info("Full CFG enabled!")
+                for i in range(0, args.infer_steps):
+                    cfg_schedule.append(i + 1)
             negative_prompt = args.negative_prompt
             if negative_prompt is None:
                 logger.info("Negative prompt is not provided, using empty prompt")
@@ -696,13 +758,23 @@ def main():
         logger.info(f"Casting model to {dit_weight_dtype}")
         transformer.to(dtype=dit_weight_dtype)
 
+        params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
         if args.fp8_fast:
             logger.info("Enabling FP8 acceleration")
-            params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
+
             for name, param in transformer.named_parameters():
                 dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
                 param.to(dtype=dtype_to_use)
             convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
+
+        if args.fp8_scaled:
+            logger.info("Scaling transformer...")
+            state_dict = transformer.state_dict()
+            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+            state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
+            apply_fp8_monkey_patch(transformer, state_dict, True if args.fp8_fast else False)
+            info = transformer.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded FP8 optimized weights: {info}")
 
         if args.fp16_accumulation:
             logger.info("Enabling FP16 accumulation")
@@ -823,8 +895,10 @@ def main():
         if embedded_guidance_scale is not None:
             guidance_expand = torch.tensor([embedded_guidance_scale * 1000.0] * latents.shape[0], dtype=torch.float32, device="cpu")
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
+            embedded_guidance_expand = guidance_expand
             if do_classifier_free_guidance:
                 guidance_expand = torch.cat([guidance_expand, guidance_expand], dim=0)
+                cfg_guidance_expand = guidance_expand
         else:
             guidance_expand = None
         freqs_cos, freqs_sin = get_rotary_pos_embed(vae_ver, transformer, video_length, height, width)
@@ -849,14 +923,21 @@ def main():
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                if do_classifier_free_guidance:
+                    do_cfg_for_step = (i + 1) in cfg_schedule
+                    guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
+                else:
+                    guidance_expand = embedded_guidance_expand
+                if do_cfg_for_step:
+                    logger.info(f"Do classifier free guidance for step {i + 1}...")
                 latents = scheduler.scale_model_input(latents, t)
 
                 # predict the noise residual
                 with torch.no_grad(), accelerator.autocast():
-                    latents_input = latents if not do_classifier_free_guidance else torch.cat([latents, latents], dim=0)
+                    latents_input = latents if not do_cfg_for_step else torch.cat([latents, latents], dim=0)
                     if image_latents is not None:
                         latents_image_input = (
-                            image_latents if not do_classifier_free_guidance else torch.cat([image_latents, image_latents], dim=0)
+                            image_latents if not do_cfg_for_step else torch.cat([image_latents, image_latents], dim=0)
                         )
                         latents_input = torch.cat([latents_input, latents_image_input], dim=1)  # 1 or 2, C*2, F, H, W
 
@@ -879,7 +960,7 @@ def main():
                     noise_pred = torch.cat(noise_pred_list, dim=0)
 
                 # perform classifier free guidance
-                if do_classifier_free_guidance:
+                if do_cfg_for_step:
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
