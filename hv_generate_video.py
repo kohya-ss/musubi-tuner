@@ -487,7 +487,12 @@ def parse_args():
         help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
     )
     args = parser.parse_args()
-    args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
+    if args.cfg_schedule:
+        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
+    else:
+        args.cfg_schedule = []
+        for i in range(0, args.infer_steps):
+            args.cfg_schedule.append(i + 1)
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
@@ -523,6 +528,8 @@ def parse_scheduled_cfg(schedule, infer_steps):
                 raise argparse.ArgumentTypeError(f"Invalid number in range: {token}")
             if start > end:
                 raise argparse.ArgumentTypeError(f"Start cannot be greater than end in range: {token}")
+            if end > infer_steps:
+                raise argparse.ArgumentTypeError(f"End cannot be greater than infer_steps {token}")
             # Add every number from start to end (inclusive) to our set
             for i in range(start, end + 1):
                 if i not in steps:
@@ -611,14 +618,10 @@ def main():
         logger.info(f"Encoding prompt: {prompt}")
         do_classifier_free_guidance = args.guidance_scale != 1.0
         if do_classifier_free_guidance:
-            cfg_schedule = []
             if args.cfg_schedule is not None:
-                cfg_schedule = args.cfg_schedule
-                logger.info(f"CFG scheduling is enabled. CFG Steps: {cfg_schedule}")
+                logger.info(f"CFG scheduling is enabled. CFG Steps: {args.cfg_schedule}")
             else:
-                logger.info("Full CFG enabled!")
-                for i in range(0, args.infer_steps):
-                    cfg_schedule.append(i + 1)
+                logger.info(f"Full CFG enabled! {args.cfg_schedule}")
             negative_prompt = args.negative_prompt
             if negative_prompt is None:
                 logger.info("Negative prompt is not provided, using empty prompt")
@@ -924,7 +927,7 @@ def main():
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if do_classifier_free_guidance:
-                    do_cfg_for_step = (i + 1) in cfg_schedule
+                    do_cfg_for_step = (i + 1) in args.cfg_schedule
                     guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
                 else:
                     guidance_expand = embedded_guidance_expand
