@@ -217,7 +217,7 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         else:
             o = torch._scaled_mm(x, weight, out_dtype=input_dtype, scale_a=scale_x, scale_b=scale_weight)
 
-        return o.reshape(original_shape[0], original_shape[1], -1).to(input_dtype)
+        return o.reshape(original_shape[0], original_shape[1], -1)
 
     else:
         # Dequantize the weight

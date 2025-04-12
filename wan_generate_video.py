@@ -964,7 +964,6 @@ def run_sampling(
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
     slg_end_step = int(args.slg_end * num_timesteps)
-
     for i, t in enumerate(tqdm(timesteps)):
         # latent is on CPU if use_cpu_offload is True
         latent_model_input = [latent.to(device)]
@@ -1017,8 +1016,8 @@ def run_sampling(
             # update latent
             latent = temp_x0.squeeze(0)
 
-        if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-            previewer.preview(latent, i + 1)
+            if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
+                previewer.preview(latent, i + 1)
 
     return latent
 
@@ -1049,6 +1048,7 @@ def generate(args: argparse.Namespace) -> torch.Tensor:
     dit_weight_dtype = dit_dtype  # default
     if args.fp8_scaled:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
+        dit_dtype = torch.float16
     elif args.fp8:
         dit_weight_dtype = torch.float8_e4m3fn
 

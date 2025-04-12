@@ -17,16 +17,17 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+@torch.compiler.disable
 class LatentPreviewer():
     def __init__(self, args, original_latents, timesteps, device, dtype, model_type="hunyuan"):
         self.mode = "latent2rgb" if args.preview_vae is None else "taehv"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")
         self.args = args
         self.model_type = model_type
-        self.original_latents = original_latents
-        self.timesteps_percent = timesteps / 1000
         self.device = device
         self.dtype = dtype if dtype != torch.float8_e4m3fn else torch.float16
+        self.original_latents = original_latents.to(self.device)
+        self.timesteps_percent = timesteps / 1000
         if self.model_type not in ["hunyuan", "wan"]:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
@@ -75,7 +76,7 @@ class LatentPreviewer():
         denoisy_latents = noisy_latents - (self.original_latents.to(device=noisy_latents.device) * noise_remaining)
 
         # Normalize
-        normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-5)
+        normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-8)
         return normalized_denoisy_latents
 
     def write_preview(self, frames, width, height, target="./latent_preview.mp4"):
