@@ -5,8 +5,8 @@ Created on Mon Mar 10 16:47:29 2025
 
 @author: blyss
 """
+import os
 import torch
-import torch.nn.functional as F
 import av
 from .taehv import TAEHV
 from .utils import load_torch_file
@@ -26,10 +26,15 @@ class LatentPreviewer():
         self.timesteps_percent = timesteps / 1000
         self.device = device
         self.dtype = dtype if dtype != torch.float8_e4m3fn else torch.float16
+        if self.model_type not in ["hunyuan", "wan"]:
+            raise ValueError(f"Unsupported model type: {self.model_type}")
 
         if self.mode == "taehv":
-            logger.info(f"Loading model {args.preview_vae}...")
-            tae_sd = load_torch_file(args.preview_vae, safe_load=True, device=args.device)
+            logger.info(f"Loading TAEHV: {args.preview_vae}...")
+            if os.path.exists(args.preview_vae):
+                tae_sd = load_torch_file(args.preview_vae, safe_load=True, device=args.device)
+            else:
+                raise FileNotFoundError(f"{args.preview_vae} was not found!")
             self.taehv = TAEHV(tae_sd).to(self.device, self.dtype)
             self.decoder = self.decode_taehv
             self.scale_factor = None
@@ -49,7 +54,7 @@ class LatentPreviewer():
 
         # Upscale if we used latent2rgb so output is same size as expected
         if self.scale_factor is not None:
-            upscaled = F.interpolate(
+            upscaled = torch.nn.functional.interpolate(
                 decoded,
                 scale_factor=self.scale_factor,
                 mode="bicubic",
@@ -113,9 +118,9 @@ class LatentPreviewer():
         Decodes latents with the TAEHV model, returns shape (F, C, H, W).
         """
 
+        latents_permuted = latents.permute(0, 2, 1, 3, 4)  # Reordered to B, F, C, H, W for TAE
+        latents_permuted = latents_permuted.to(device=self.device, dtype=self.dtype)
         with torch.no_grad():
-            latents_permuted = latents.permute(0, 2, 1, 3, 4)  # Reordered to B, F, C, H, W for TAE
-            latents_permuted = latents_permuted.to(device=self.device, dtype=self.dtype)
             decoded = self.taehv.decode_video(latents_permuted, parallel=False, show_progress_bar=False)
         return decoded.squeeze(0)  # squeeze off batch dimension as next step doesn't want it
 
@@ -167,9 +172,6 @@ class LatentPreviewer():
                 "bias": [-0.1835, -0.0868, -0.3360],
             },
         }
-
-        if self.model_type not in model_params:
-            raise ValueError(f"Unsupported model type: {self.model_type}")
 
         latent_rgb_factors = model_params[self.model_type]["rgb_factors"]
         latent_rgb_factors_bias = model_params[self.model_type]["bias"]
