@@ -39,7 +39,7 @@ except:
 from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
-from blissful_tuner.latent_preview import latent_preview
+from blissful_tuner.latent_preview import LatentPreviewer
 
 import threading
 from dataset.image_video_dataset import load_video
@@ -183,6 +183,7 @@ def parse_args() -> argparse.Namespace:
         help="Torch.compile settings",
     )
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
+    parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
     args = parser.parse_args()
 
@@ -904,10 +905,11 @@ def run_sampling(
         torch.Tensor: generated latent
     """
     arg_c, arg_null = inputs
-    last_thread = None
     latent = noise
     latent_storage_device = device if not use_cpu_offload else "cpu"
     latent = latent.to(latent_storage_device)
+    if args.preview_latent_every:
+        previewer = LatentPreviewer(args, noise, timesteps, model.device, model.dtype, model_type="wan")
 
     # cfg skip
     apply_cfg_array = []
@@ -1016,15 +1018,7 @@ def run_sampling(
             latent = temp_x0.squeeze(0)
 
         if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-            if last_thread is not None:  # Don't spawn more than one preview thread at a time
-                last_thread.join()
-                last_thread = None
-            thread = threading.Thread(target=latent_preview, args=(latent, noise, timesteps, i + 1, args, "wan"), daemon=True)
-            thread.start()
-            last_thread = thread
-
-    if last_thread is not None:
-        last_thread.join()  # Wait for preview thread
+            previewer.preview(latent, i + 1)
 
     return latent
 

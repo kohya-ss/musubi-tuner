@@ -4,6 +4,7 @@ __pycache__/
 *.safetensors
 *.mp4
 *.png
+*.sh
 settings.json
 uv.lock
 main.exp

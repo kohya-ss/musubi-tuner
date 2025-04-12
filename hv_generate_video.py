@@ -38,7 +38,7 @@ from convert_lora import convert_from_diffusers
 from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
-from blissful_tuner.latent_preview import latent_preview
+from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 import logging
 
@@ -481,6 +481,7 @@ def parse_args():
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
     parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization")
+    parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument(
         "--cfg_schedule",
         type=str,
@@ -870,7 +871,6 @@ def main():
         for i in range(latent_video_length):
             latents.append(randn_tensor(shape_of_frame, generator=generator, device=device, dtype=dit_dtype))
         latents = torch.cat(latents, dim=2)
-        original_latents = latents
         # pad image_latents to match the length of video_latents
         if image_latents is not None:
             zero_latents = torch.zeros_like(latents)
@@ -890,9 +890,9 @@ def main():
             timesteps = timesteps[-num_inference_steps:]
 
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
-
+        if args.preview_latent_every:
+            previewer = LatentPreviewer(args, original_latents=latents, timesteps=timesteps, device=device, dtype=dit_dtype, model_type="hunyuan")
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
-        last_thread = None
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
         if embedded_guidance_scale is not None:
@@ -931,8 +931,7 @@ def main():
                     guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
                 else:
                     guidance_expand = embedded_guidance_expand
-                if do_cfg_for_step:
-                    logger.info(f"Do classifier free guidance for step {i + 1}...")
+                    do_cfg_for_step = False
                 latents = scheduler.scale_model_input(latents, t)
 
                 # predict the noise residual
@@ -985,15 +984,9 @@ def main():
                         progress_bar.update()
 
                 if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-                    if last_thread is not None:  # Don't spawn more than one preview thread at a time
-                        last_thread.join()
-                        last_thread = None
-                    thread = threading.Thread(target=latent_preview, args=(latents, original_latents, timesteps, i + 1, args), daemon=True)
-                    thread.start()
-                    last_thread = thread
-
-        if last_thread is not None:
-            last_thread.join()  # Wait for preview thread
+                    #transformer.to("cpu")
+                    previewer.preview(latents, i + 1)
+                    #transformer.to("cuda")
 
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
