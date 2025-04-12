@@ -8,6 +8,7 @@ Created on Mon Mar 10 16:47:29 2025
 import os
 import torch
 import av
+from PIL import Image
 from .taehv import TAEHV
 from .utils import load_torch_file
 import logging
@@ -63,8 +64,8 @@ class LatentPreviewer():
         else:
             upscaled = decoded
 
-        _, _, h_up, w_up = upscaled.shape
-        self.write_video(upscaled, w_up, h_up)
+        _, _, h, w = upscaled.shape
+        self.write_preview(upscaled, w, h)
 
     def subtract_original_and_normalize(self, noisy_latents, current_step):
         # Compute what percent of original noise is remaining
@@ -77,10 +78,9 @@ class LatentPreviewer():
         normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-5)
         return normalized_denoisy_latents
 
-    def write_video(self, frames, width, height, target="./latent_preview.mp4"):
+    def write_preview(self, frames, width, height, target="./latent_preview.mp4"):
         # Check if we only have a single frame.
         if frames.shape[0] == 1:
-            from PIL import Image
             # Clamp, scale, convert to byte and move to CPU
             frame = frames[0].clamp(0, 1).mul(255).byte().cpu()
             # Permute from (3, H, W) to (H, W, 3) for PIL.
