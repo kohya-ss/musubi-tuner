@@ -222,7 +222,16 @@ def load_llm(text_encoder_path: str, dtype: Optional[Union[str, torch.dtype]] = 
         # support weights from ComfyUI
         if "tokenizer" in state_dict:
             state_dict.pop("tokenizer")
-
+        if "model.vision_tower.vision_model.encoder.layers.8.layer_norm2.weight" in state_dict:
+            logger.info("Loading Xtuner model(sans vision blocks)...")
+            filtered_dict = {}
+            for key, value in state_dict.items():
+                key = key.replace("model.language_model.", "")
+                if "vision" not in key and "multi_modal_projector" not in key:
+                    filtered_dict[key] = value
+            state_dict = filtered_dict
+        else:
+            logger.info("Loading Llama model...")
         text_encoder.load_state_dict(state_dict, strict=True, assign=True)
 
     return text_encoder

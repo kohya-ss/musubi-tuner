@@ -301,6 +301,9 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
 
     logger.info(f"Encoding prompt with text encoder 2")
     text_encoder_2.to(device=device)
+    if args.prompt_2:
+        prompt = args.prompt_2
+        logger.info("Using separate prompt for CLIP...")
     prompt_embeds_2, prompt_mask_2 = encode_prompt(prompt, device, num_videos, text_encoder_2)
 
     prompt_embeds = prompt_embeds.to("cpu")
@@ -486,6 +489,13 @@ def parse_args():
         "--cfg_schedule",
         type=str,
         help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
+    )
+    parser.add_argument("--prompt_2", type=str, required=False, help="Optional different prompt for CLIP")
+    parser.add_argument(
+        "--te_multiplier",
+        nargs=2,
+        metavar=("llm_multiplier", "clip_multiplier"),
+        help="Scale clip and llm influence"
     )
     args = parser.parse_args()
     if args.cfg_schedule:
@@ -761,8 +771,10 @@ def main():
 
         logger.info(f"Casting model to {dit_weight_dtype}")
         transformer.to(dtype=dit_weight_dtype)
-
-        params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
+        
+        #  Keep embeddings, modulation, bias, head
+        params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
+        
         if args.fp8_fast:
             logger.info("Enabling FP8 acceleration")
 
@@ -786,7 +798,30 @@ def main():
                 torch.backends.cuda.matmul.allow_fp16_accumulation = True
             else:
                 raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
+        if args.te_multiplier:
+            llm_multiplier, clip_multiplier = args.te_multiplier
+            logger.info(f"Scaling relative TE influence to LLM:{llm_multiplier}; CLIP:{clip_multiplier}")
+            clip_multiplier = float(clip_multiplier)
+            llm_multiplier = float(llm_multiplier)
+            # Scale CLIP influence
+            if hasattr(transformer, "txt_in"):
+                txt_in = transformer.txt_in
+                if hasattr(txt_in, "c_embedder"):
+                    original_c_embedder_forward = txt_in.c_embedder.forward
 
+                    def scaled_c_embedder_forward(*args, **kwargs):
+                        output = original_c_embedder_forward(*args, **kwargs)
+                        return output * clip_multiplier
+                    txt_in.c_embedder.forward = scaled_c_embedder_forward
+                    # Scale LLM influence
+                    if hasattr(txt_in, "individual_token_refiner"):
+                        for i, block in enumerate(txt_in.individual_token_refiner.blocks):
+                            original_block_forward = block.forward
+
+                            def scaled_block_forward(*args, **kwargs):
+                                output = original_block_forward(*args, **kwargs)
+                                return output * llm_multiplier
+                            block.forward = scaled_block_forward
         if args.compile:
             compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
             logger.info(
