@@ -2659,6 +2659,7 @@ def hv_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
     )
+    parser.add_argument("--fp8_scaled", action="store_true")
     return parser
 
 
