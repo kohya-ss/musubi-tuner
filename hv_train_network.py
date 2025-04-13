@@ -48,7 +48,7 @@ from hv_generate_video import save_images_grid, save_videos_grid, resize_image_t
 import logging
 
 from utils import huggingface_utils, model_utils, train_utils, sai_model_spec
-from .blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
