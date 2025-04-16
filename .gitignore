@@ -3,6 +3,8 @@ __pycache__/
 *logs
 *.safetensors
 *.mp4
+*.mkv
+*.mov
 *.png
 *.sh
 settings.json

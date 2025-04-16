@@ -6,7 +6,8 @@ import sys
 import os
 import time
 from typing import Optional, Union
-
+import shutil
+import subprocess
 import numpy as np
 import torch
 import torchvision
@@ -150,6 +151,50 @@ def save_images_grid(
         image = Image.fromarray(x)
         image.save(image_path)
 
+
+def save_videos_grid_prores(
+    videos: torch.Tensor, output_video: str, rescale: bool = False, fps: int = 24, n_rows: int = 1
+):
+    videos = rearrange(videos, "b c t h w -> t b c h w")
+    outputs = []
+    for video in videos:
+        video = torchvision.utils.make_grid(video, nrow=n_rows)
+        video = video.transpose(0, 1).transpose(1, 2).squeeze(-1)
+        if rescale:
+            video = (video + 1.0) / 2.0  # -1,1 -> 0,1
+        video = torch.clamp(video, 0, 1)
+        video = (video * 255).numpy().astype(np.uint8)
+        outputs.append(video)
+    output_dir = os.path.dirname(output_video)
+    os.makedirs(output_dir, exist_ok=True)
+    frame_dir = os.path.join(os.path.dirname(output_dir), "frames")
+    os.makedirs(frame_dir, exist_ok=True)
+    for idx, img in enumerate(outputs):
+        image_path = os.path.join(frame_dir, f"{idx:04d}.png")
+        image = Image.fromarray(img)
+        image.save(image_path)
+    # Run ffmpeg command to create video from the saved frames.
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-framerate",
+            f"{fps}",
+            "-i",
+            os.path.join(frame_dir, "%04d.png"),
+            "-c:v",
+            "prores_ks",
+            "-profile:v", "3",
+            "-pix_fmt",
+            "yuv422p10le",
+            "-colorspace", "1",
+            "-color_primaries", "1",
+            "-color_trc", "1",
+            output_video,
+        ],
+        check=True
+    )
+
+    shutil.rmtree(frame_dir)
 
 # region Encoding prompt
 
@@ -510,8 +555,6 @@ def parse_args():
 
     # update dit_weight based on model_base if not exists
 
-    if args.fp8_fast and not args.fp8:
-        raise ValueError("--fp8_fast requires --fp8")
     return args
 
 
@@ -543,24 +586,21 @@ def parse_scheduled_cfg(schedule, infer_steps):
                 raise argparse.ArgumentTypeError(f"End cannot be greater than infer_steps {token}")
             # Add every number from start to end (inclusive) to our set
             for i in range(start, end + 1):
-                if i not in steps:
-                    steps.add(i)
+                steps.add(i)
         elif "e~" in token:
             # If the token has a tilde, it's a modulus e.g. ever n steps
             parts = token.split("~")
-            modulus = int(parts[1])
             if len(parts) != 2:
-                raise argparse.ArgumentTypeError(f"Invalid modulus: {token}")
+                raise argparse.ArgumentTypeError(f"Invalid modulus or malformed: {token}")
+            modulus = int(parts[1])
             # Add every other number from start to end (inclusive) to our set
-            for i in range(modulus, infer_steps + 1, modulus):
-                if i not in steps:
-                    steps.add(i)
+            for i in range(modulus, infer_steps, modulus):
+                steps.add(i)
         else:
             # Handle individual numbers
             try:
                 step = int(token)
-                if step not in steps:
-                    steps.add(step)
+                steps.add(step)
             except ValueError:
                 raise argparse.ArgumentTypeError(f"Invalid number: {token}")
     # Return the steps as a sorted list
@@ -1065,7 +1105,7 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            save_videos_grid(sample, video_path, fps=args.fps)
+            save_videos_grid_prores(sample, video_path.replace(".mp4", ".mkv"), fps=args.fps)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images

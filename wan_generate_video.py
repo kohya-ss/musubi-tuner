@@ -30,7 +30,7 @@ from wan.modules.clip import CLIPModel
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-
+from convert_lora import convert_from_diffusers
 try:
     from lycoris.kohya import create_network_from_weights
 except:
@@ -38,7 +38,7 @@ except:
 
 from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
-from hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
+from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_prores, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
 
 import threading
@@ -51,6 +51,53 @@ logging.basicConfig(level=logging.INFO)
 
 
 def parse_args() -> argparse.Namespace:
+    def parse_scheduled_cfg(schedule, infer_steps):
+        """
+        This function takes a string formatted as a combination of individual numbers and ranges
+        (e.g. "1-10,20,40-50") and returns a sorted list of the numbers.
+        """
+        steps = set()  # Using a set to avoid duplicate steps
+        # Split the input by commas to handle separate tokens
+        tokens = schedule.split(",")
+        for token in tokens:
+            token = token.strip()  # Remove any extra spaces
+            if "-" in token:
+                # If the token has a hyphen, it's a range
+                parts = token.split("-")
+                if len(parts) != 2:
+                    # If there aren't exactly two parts, the range is malformed
+                    raise argparse.ArgumentTypeError(f"Invalid range: {token}")
+                try:
+                    # Convert the range's start and end into integers
+                    start = int(parts[0])
+                    end = int(parts[1])
+                except ValueError:
+                    raise argparse.ArgumentTypeError(f"Invalid number in range: {token}")
+                if start > end:
+                    raise argparse.ArgumentTypeError(f"Start cannot be greater than end in range: {token}")
+                if end > infer_steps:
+                    raise argparse.ArgumentTypeError(f"End cannot be greater than infer_steps {token}")
+                # Add every number from start to end (inclusive) to our set
+                for i in range(start, end + 1):
+                    steps.add(i)
+            elif "e~" in token:
+                # If the token has a tilde, it's a modulus e.g. ever n steps
+                parts = token.split("~")
+                if len(parts) != 2:
+                    raise argparse.ArgumentTypeError(f"Invalid modulus or malformed: {token}")
+                modulus = int(parts[1])
+                # Add every other number from start to end (inclusive) to our set
+                for i in range(modulus, infer_steps, modulus):
+                    steps.add(i)
+            else:
+                # Handle individual numbers
+                try:
+                    step = int(token)
+                    steps.add(step)
+                except ValueError:
+                    raise argparse.ArgumentTypeError(f"Invalid number: {token}")
+        # Return the steps as a sorted list
+        return sorted(steps)
     """parse command line arguments"""
     parser = argparse.ArgumentParser(description="Wan 2.1 inference script")
 
@@ -185,11 +232,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
+    parser.add_argument(
+        "--cfg_schedule",
+        type=str,
+        help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
+    )
     args = parser.parse_args()
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
+    if args.cfg_schedule:
+        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
 
     return args
 
@@ -422,7 +476,19 @@ def merge_lora_weights(model: WanModel, args: argparse.Namespace, device: torch.
 
         logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
         weights_sd = load_file(lora_weight)
+        conversion_needed = False
+        for key, weight in weights_sd.items():
+            prefix, key_body = key.split(".", 1)
+            if prefix == "diffusion_model" or prefix == "transformer":
+                conversion_needed = True
+                break
+            elif "lora_unet" in prefix:
+                conversion_needed = False
+                break
 
+        if conversion_needed:
+            logger.info("Converting LoRA from diffusers format")
+            weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
         # apply include/exclude patterns
         original_key_count = len(weights_sd.keys())
         if args.include_patterns is not None and len(args.include_patterns) > i:
@@ -916,6 +982,7 @@ def run_sampling(
     num_timesteps = len(timesteps)
 
     if args.cfg_skip_mode != "none" and args.cfg_apply_ratio is not None:
+        # Kohya's method
         # Calculate thresholds based on cfg_apply_ratio
         apply_steps = int(num_timesteps * args.cfg_apply_ratio)
 
@@ -957,6 +1024,11 @@ def run_sampling(
         pattern = ["A" if apply else "S" for apply in apply_cfg_array]
         pattern = "".join(pattern)
         logger.info(f"CFG skip mode: {args.cfg_skip_mode}, apply ratio: {args.cfg_apply_ratio}, pattern: {pattern}")
+    elif args.cfg_schedule is not None:
+        apply_cfg_array = [step + 1 in args.cfg_schedule for step in range(num_timesteps)]
+        pattern = ["A" if apply else "S" for apply in apply_cfg_array]
+        pattern = "".join(pattern)
+        logger.info(f"CFG scheduling is enabled. CFG Steps: {args.cfg_schedule} {pattern}")
     else:
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
@@ -1216,7 +1288,8 @@ def save_output(
         original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
         sample = sample.unsqueeze(0)
         video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
-        save_videos_grid(sample, video_path, fps=args.fps, rescale=True)
+        #save_videos_grid(sample, video_path, fps=args.fps, rescale=True)
+        save_videos_grid_prores(sample, video_path.replace(".mp4", ".mkv"), fps=args.fps, rescale=True)
         logger.info(f"Sample save to: {video_path}")
 
     elif args.output_type == "images":
