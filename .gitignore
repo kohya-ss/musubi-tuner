@@ -7,6 +7,7 @@ __pycache__/
 *.mov
 *.png
 *.sh
+yamls
 settings.json
 uv.lock
 main.exp

@@ -40,6 +40,7 @@ from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_prores, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
+from blissful_tuner.cfgzerostar import apply_zerostar
 
 import threading
 from dataset.image_video_dataset import load_video
@@ -237,6 +238,9 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
     )
+    parser.add_argument("--cfg_zerostar", action="store_true", help="CFG-Zero* - https://github.com/WeichenFan/CFG-Zero-star")
+    parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
+    parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 6 is good for Wan. Only 'comfy' rope_func supports this!")
     args = parser.parse_args()
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
@@ -452,7 +456,7 @@ def load_dit_model(
         loading_weight_dtype = dit_dtype  # load as-is
 
     # do not fp8 optimize because we will merge LoRA weights
-    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False)
+    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False, rope_func=args.rope_func, riflex_index=args.riflex_index)
 
     return model
 
@@ -1032,7 +1036,8 @@ def run_sampling(
     else:
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
-
+    if args.cfg_zerostar:
+        logger.info("Will activate CFGZero*!")
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
     slg_end_step = int(args.slg_end * num_timesteps)
@@ -1053,7 +1058,10 @@ def run_sampling(
 
                     # apply guidance
                     # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
-                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    if args.cfg_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale)  # Expects step index as 0 based
+                    else:
+                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                     # calculate skip layer out
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
@@ -1068,16 +1076,19 @@ def run_sampling(
                     noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
                         latent_storage_device
                     )
-
                     # apply guidance
-                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    if args.cfg_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale)
+                    else:
+                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 else:
                     # normal guidance
                     noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
-
-                    # apply guidance
-                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    if args.cfg_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale)
+                    else:
+                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
                 noise_pred = noise_pred_cond
 
