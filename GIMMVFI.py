@@ -56,7 +56,7 @@ def set_seed(seed=None):
     return seed
 
 
-def load_model(model_path, mode="gimmvfi_r", precision="fp32", torch_compile=False):
+def load_model(model_path, mode="gimmvfi_r", precision="fp32"):
     """
     Loads the GIMM-VFI model along with its required flow estimator.
 
@@ -67,7 +67,6 @@ def load_model(model_path, mode="gimmvfi_r", precision="fp32", torch_compile=Fal
         model_path (str): Path to the directory containing model files.
         mode (str): The model type ("gimmvfi_r" or "gimmvfi_f").
         precision (str): Precision setting (not used in this snippet).
-        torch_compile (bool): Whether to compile the model via torch.compile.
 
     Returns:
         torch.nn.Module: The fully loaded and prepared model.
@@ -122,8 +121,6 @@ def load_model(model_path, mode="gimmvfi_r", precision="fp32", torch_compile=Fal
     model.flow_estimator = flow_estimator
     model = model.eval().to(device)
 
-    if torch_compile:
-        model = torch.compile(model)
     return model
 
 
@@ -207,8 +204,6 @@ def images_to_video(imgs, output_video_path, fps):
         check=True
     )
 
-
-    # Remove the temporary directory using shutil for cross-platform compatibility.
     shutil.rmtree(frame_dir)
 
 

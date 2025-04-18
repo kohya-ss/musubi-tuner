@@ -1470,7 +1470,7 @@ class NetworkTrainer:
         )
         transformer.eval()
         transformer.requires_grad_(False)
-        if args.fp8_scaled:
+        if args.fp8_scaled_hunyuan:
             params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
             logger.info("Scaling transformer...")
             state_dict = transformer.state_dict()
@@ -2599,7 +2599,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         action="store_true",
         help="upload to huggingface asynchronously / huggingfaceに非同期でアップロードする",
     )
-
+    parser.add_argument("--fp8_scaled_hunyuan", action="store_true")
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")

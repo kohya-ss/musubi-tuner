@@ -22,6 +22,6 @@ def apply_zerostar(cond, uncond, current_step, guidance_scale, use_zero_init=Tru
     squared_norm = torch.sum(negative_flat ** 2, dim=1, keepdim=True) + 1e-8
     alpha = dot_product / squared_norm
     alpha = alpha.view(batch_size, *([1] * (len(cond.shape) - 1)))
-    print(f"ZeroStar: Alpha is {alpha}")
+    print(f"ZeroStar: Alpha is {torch.mean(alpha)}")
     noise_pred = uncond * alpha + guidance_scale * (cond - uncond * alpha)
     return noise_pred

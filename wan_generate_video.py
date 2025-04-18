@@ -41,6 +41,7 @@ from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_prores, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
+from blissful_tuner.utils import parse_scheduled_cfg
 
 import threading
 from dataset.image_video_dataset import load_video
@@ -52,53 +53,6 @@ logging.basicConfig(level=logging.INFO)
 
 
 def parse_args() -> argparse.Namespace:
-    def parse_scheduled_cfg(schedule, infer_steps):
-        """
-        This function takes a string formatted as a combination of individual numbers and ranges
-        (e.g. "1-10,20,40-50") and returns a sorted list of the numbers.
-        """
-        steps = set()  # Using a set to avoid duplicate steps
-        # Split the input by commas to handle separate tokens
-        tokens = schedule.split(",")
-        for token in tokens:
-            token = token.strip()  # Remove any extra spaces
-            if "-" in token:
-                # If the token has a hyphen, it's a range
-                parts = token.split("-")
-                if len(parts) != 2:
-                    # If there aren't exactly two parts, the range is malformed
-                    raise argparse.ArgumentTypeError(f"Invalid range: {token}")
-                try:
-                    # Convert the range's start and end into integers
-                    start = int(parts[0])
-                    end = int(parts[1])
-                except ValueError:
-                    raise argparse.ArgumentTypeError(f"Invalid number in range: {token}")
-                if start > end:
-                    raise argparse.ArgumentTypeError(f"Start cannot be greater than end in range: {token}")
-                if end > infer_steps:
-                    raise argparse.ArgumentTypeError(f"End cannot be greater than infer_steps {token}")
-                # Add every number from start to end (inclusive) to our set
-                for i in range(start, end + 1):
-                    steps.add(i)
-            elif "e~" in token:
-                # If the token has a tilde, it's a modulus e.g. ever n steps
-                parts = token.split("~")
-                if len(parts) != 2:
-                    raise argparse.ArgumentTypeError(f"Invalid modulus or malformed: {token}")
-                modulus = int(parts[1])
-                # Add every other number from start to end (inclusive) to our set
-                for i in range(modulus, infer_steps, modulus):
-                    steps.add(i)
-            else:
-                # Handle individual numbers
-                try:
-                    step = int(token)
-                    steps.add(step)
-                except ValueError:
-                    raise argparse.ArgumentTypeError(f"Invalid number: {token}")
-        # Return the steps as a sorted list
-        return sorted(steps)
     """parse command line arguments"""
     parser = argparse.ArgumentParser(description="Wan 2.1 inference script")
 
@@ -239,6 +193,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
     )
     parser.add_argument("--cfg_zerostar", action="store_true", help="CFG-Zero* - https://github.com/WeichenFan/CFG-Zero-star")
+    parser.add_argument("--zero_init_steps", type=int, default=-1, help="How many steps to zero out at the start for CFGZero*")
     parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
     parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 6 is good for Wan. Only 'comfy' rope_func supports this!")
     args = parser.parse_args()
@@ -456,7 +411,7 @@ def load_dit_model(
         loading_weight_dtype = dit_dtype  # load as-is
 
     # do not fp8 optimize because we will merge LoRA weights
-    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False, rope_func=args.rope_func, riflex_index=args.riflex_index)
+    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False, rope_func=args.rope_func, riflex_index=args.riflex_index, num_frames=args.video_length)
 
     return model
 
@@ -1037,7 +992,9 @@ def run_sampling(
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
     if args.cfg_zerostar:
-        logger.info("Will activate CFGZero*!")
+        logger.info("Will activate CFGZero* to scale CFG!")
+        if args.zero_init_steps != -1:
+            logger.info(f"Will zero the first {args.zero_init_steps} to give the model time to warm up!")
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
     slg_end_step = int(args.slg_end * num_timesteps)
@@ -1059,7 +1016,7 @@ def run_sampling(
                     # apply guidance
                     # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
                     if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale)  # Expects step index as 0 based
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, zero_init_steps=args.zero_init_steps - 1)  # Expects step index as 0 based
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
@@ -1078,7 +1035,7 @@ def run_sampling(
                     )
                     # apply guidance
                     if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale)
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, zero_init_steps=args.zero_init_steps - 1)
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
@@ -1086,7 +1043,7 @@ def run_sampling(
                     # normal guidance
                     noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
                     if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale)
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, zero_init_steps=args.zero_init_steps - 1)
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:

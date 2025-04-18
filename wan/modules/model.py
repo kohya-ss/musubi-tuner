@@ -20,7 +20,7 @@ from .attention import flash_attention
 from utils.device_utils import clean_memory_on_device
 from modules.custom_offloading_utils import ModelOffloader
 from modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from blissful_tuner.rope import apply_rope_comfy, EmbedND_RifleX
+from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
 
 __all__ = ["WanModel"]
 
@@ -168,7 +168,7 @@ class WanLayerNorm(nn.LayerNorm):
 
 class WanSelfAttention(nn.Module):
 
-    def __init__(self, dim, num_heads, window_size=(-1, -1), qk_norm=True, eps=1e-6, attn_mode="torch", split_attn=False):
+    def __init__(self, dim, num_heads, window_size=(-1, -1), qk_norm=True, eps=1e-6, attn_mode="torch", split_attn=False, rope_func="default"):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -179,6 +179,7 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
         self.attn_mode = attn_mode
         self.split_attn = split_attn
+        self.rope_func = rope_func
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -188,7 +189,7 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs, rope_func = "default"):
+    def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -217,7 +218,7 @@ class WanSelfAttention(nn.Module):
         q = q.view(b, s, n, d)
         k = k.view(b, s, n, d)
         v = v.view(b, s, n, d)
-        if rope_func == "comfy":
+        if self.rope_func == "comfy":
             q, k = apply_rope_comfy(q, k, freqs)
         else:
             rope_apply_inplace_cached(q, grid_sizes, freqs)
@@ -350,6 +351,7 @@ class WanAttentionBlock(nn.Module):
         eps=1e-6,
         attn_mode="torch",
         split_attn=False,
+        rope_func="default"
     ):
         super().__init__()
         self.dim = dim
@@ -359,10 +361,11 @@ class WanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        self.rope_func = rope_func
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, attn_mode, split_attn)
+        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, attn_mode, split_attn, rope_func)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
         self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
         self.norm2 = WanLayerNorm(dim, eps)
@@ -379,7 +382,7 @@ class WanAttentionBlock(nn.Module):
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
 
-    def _forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens, rope_func="default"):
+    def _forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
@@ -397,7 +400,7 @@ class WanAttentionBlock(nn.Module):
         assert e[0].dtype == torch.float32
 
         # self-attention
-        y = self.self_attn(self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes, freqs, rope_func)
+        y = self.self_attn(self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes, freqs)
         # with amp.autocast(dtype=torch.float32):
         #     x = x + y * e[2]
         x = x + y.to(torch.float32) * e[2]
@@ -421,10 +424,10 @@ class WanAttentionBlock(nn.Module):
         del y
         return x
 
-    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens, rope_func="default"):
+    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
         if self.training and self.gradient_checkpointing:
             return checkpoint(self._forward, x, e, seq_lens, grid_sizes, freqs, context, context_lens, use_reentrant=False)
-        return self._forward(x, e, seq_lens, grid_sizes, freqs, context, context_lens, rope_func)
+        return self._forward(x, e, seq_lens, grid_sizes, freqs, context, context_lens)
 
 
 class Head(nn.Module):
@@ -507,7 +510,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         attn_mode=None,
         split_attn=False,
         rope_func="default",
-        riflex_index=0
+        riflex_index=0,
+        num_frames=81
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -567,7 +571,6 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.attn_mode = attn_mode if attn_mode is not None else "torch"
         self.split_attn = split_attn
         self.rope_func = rope_func
-        self.riflex_index = riflex_index
 
         # embeddings
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -581,7 +584,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.blocks = nn.ModuleList(
             [
                 WanAttentionBlock(
-                    cross_attn_type, dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps, attn_mode, split_attn
+                    cross_attn_type, dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps, attn_mode, split_attn, rope_func
                 )
                 for _ in range(num_layers)
             ]
@@ -591,8 +594,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             d,
             10000.0,
             [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)],
-            num_frames=None,
-            k=self.riflex_index,
+            num_frames=num_frames,
+            k=riflex_index,
         )
         # head
         self.head = Head(dim, out_dim, patch_size, eps)
@@ -764,7 +767,11 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                     c = self.dim // self.num_heads // 2
                     self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs)
                 freqs_list.append(self.freqs_fhw[fhw])
-        elif self.rope_func == "comfy":
+        x = [u.flatten(2).transpose(1, 2) for u in x]
+        seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
+        assert seq_lens.max() <= seq_len, f"Sequence length exceeds maximum allowed length {seq_len}. Got {seq_lens.max()}"
+        x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
+        if self.rope_func == "comfy":
             f_len = ((F + (self.patch_size[0] // 2)) // self.patch_size[0])
             h_len = ((H + (self.patch_size[1] // 2)) // self.patch_size[1])
             w_len = ((W + (self.patch_size[2] // 2)) // self.patch_size[2])
@@ -774,10 +781,6 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
             img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=1)
             freqs_list = self.rope_embedder(img_ids).movedim(1, 2)
-        x = [u.flatten(2).transpose(1, 2) for u in x]
-        seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
-        assert seq_lens.max() <= seq_len, f"Sequence length exceeds maximum allowed length {seq_len}. Got {seq_lens.max()}"
-        x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
 
         # time embeddings
         # with amp.autocast(dtype=torch.float32):
@@ -799,7 +802,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             context_clip = None
 
         # arguments
-        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=freqs_list, context=context, context_lens=context_lens, rope_func=self.rope_func)
+        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=freqs_list, context=context, context_lens=context_lens)
 
         if self.blocks_to_swap:
             clean_memory_on_device(device)
@@ -900,16 +903,16 @@ def load_wan_model(
     dit_weight_dtype: Optional[torch.dtype],
     fp8_scaled: bool = False,
     rope_func: str = "default",
-    riflex_index: int = 0
+    riflex_index: int = 0,
+    num_frames: int = 81
 ) -> WanModel:
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
-    logger.info(f"Initializing with rope_func={rope_func} and riflex_index={riflex_index}")
     with init_empty_weights():
-        logger.info(f"Creating WanModel")
+        logger.info(f"Initialize WanModel with rope_func={rope_func} and riflex_index={riflex_index}")
         model = WanModel(
             model_type="i2v" if config.i2v else "t2v",
             dim=config.dim,
@@ -924,7 +927,8 @@ def load_wan_model(
             attn_mode=attn_mode,
             split_attn=split_attn,
             rope_func=rope_func,
-            riflex_index=riflex_index
+            riflex_index=riflex_index,
+            num_frames=num_frames
         )
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)

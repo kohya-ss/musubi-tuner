@@ -41,6 +41,7 @@ from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from blissful_tuner.utils import parse_scheduled_cfg
 import logging
 
 logger = logging.getLogger(__name__)
@@ -556,55 +557,6 @@ def parse_args():
     # update dit_weight based on model_base if not exists
 
     return args
-
-
-def parse_scheduled_cfg(schedule, infer_steps):
-    """
-    This function takes a string formatted as a combination of individual numbers and ranges
-    (e.g. "1-10,20,40-50") and returns a sorted list of the numbers.
-    """
-    steps = set()  # Using a set to avoid duplicate steps
-    # Split the input by commas to handle separate tokens
-    tokens = schedule.split(",")
-    for token in tokens:
-        token = token.strip()  # Remove any extra spaces
-        if "-" in token:
-            # If the token has a hyphen, it's a range
-            parts = token.split("-")
-            if len(parts) != 2:
-                # If there aren't exactly two parts, the range is malformed
-                raise argparse.ArgumentTypeError(f"Invalid range: {token}")
-            try:
-                # Convert the range's start and end into integers
-                start = int(parts[0])
-                end = int(parts[1])
-            except ValueError:
-                raise argparse.ArgumentTypeError(f"Invalid number in range: {token}")
-            if start > end:
-                raise argparse.ArgumentTypeError(f"Start cannot be greater than end in range: {token}")
-            if end > infer_steps:
-                raise argparse.ArgumentTypeError(f"End cannot be greater than infer_steps {token}")
-            # Add every number from start to end (inclusive) to our set
-            for i in range(start, end + 1):
-                steps.add(i)
-        elif "e~" in token:
-            # If the token has a tilde, it's a modulus e.g. ever n steps
-            parts = token.split("~")
-            if len(parts) != 2:
-                raise argparse.ArgumentTypeError(f"Invalid modulus or malformed: {token}")
-            modulus = int(parts[1])
-            # Add every other number from start to end (inclusive) to our set
-            for i in range(modulus, infer_steps, modulus):
-                steps.add(i)
-        else:
-            # Handle individual numbers
-            try:
-                step = int(token)
-                steps.add(step)
-            except ValueError:
-                raise argparse.ArgumentTypeError(f"Invalid number: {token}")
-    # Return the steps as a sorted list
-    return sorted(steps)
 
 
 def check_inputs(args):
