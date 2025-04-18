@@ -424,3 +424,108 @@ I2V推論でもFun Controlモデルが使用できます。`--control_path` で�
 
 その他のオプションはT2V推論と同じです。
 </details>
+
+### New Batch and Interactive Modes / 新しいバッチモードとインタラクティブモード
+
+In addition to single video generation, Wan 2.1 now supports batch generation from file and interactive prompt input:
+
+#### Batch Mode from File / ファイルからのバッチモード
+
+Generate multiple videos from prompts stored in a text file:
+
+```bash
+python wan_generate_video.py --from_file prompts.txt --task t2v-14B 
+--dit path/to/model.safetensors --vae path/to/vae.safetensors 
+--t5 path/to/t5_model.pth --save_path output_directory
+```
+
+The prompts file format:
+- One prompt per line
+- Empty lines and lines starting with # are ignored (comments)
+- Each line can include prompt-specific parameters using command-line style format:
+
+```
+A beautiful sunset over mountains --w 832 --h 480 --f 81 --d 42 --s 20
+A busy city street at night --w 480 --h 832 --g 7.5 --n low quality, blurry
+```
+
+Supported inline parameters (if ommitted, default values from the command line are used):
+- `--w`: Width
+- `--h`: Height
+- `--f`: Frame count
+- `--d`: Seed
+- `--s`: Inference steps
+- `--g` or `--l`: Guidance scale
+- `--fs`: Flow shift
+- `--i`: Image path (for I2V)
+- `--cn`: Control path (for Fun Control)
+- `--n`: Negative prompt
+
+In batch mode, models are loaded once and reused for all prompts, significantly improving overall generation time compared to multiple single runs.
+
+#### Interactive Mode / インタラクティブモード
+
+Interactive command-line interface for entering prompts:
+
+```bash
+python wan_generate_video.py --interactive --task t2v-14B 
+--dit path/to/model.safetensors --vae path/to/vae.safetensors 
+--t5 path/to/t5_model.pth --save_path output_directory
+```
+
+In interactive mode:
+- Enter prompts directly at the command line
+- Use the same inline parameter format as batch mode
+- Use Ctrl+D (or Ctrl+Z on Windows) to exit
+- Models remain loaded between generations for efficiency
+
+<details>
+<summary>日本語</summary>
+単一動画の生成に加えて、Wan 2.1は現在、ファイルからのバッチ生成とインタラクティブなプロンプト入力をサポートしています。
+
+#### ファイルからのバッチモード
+
+テキストファイルに保存されたプロンプトから複数の動画を生成します：
+
+```bash
+python wan_generate_video.py --from_file prompts.txt --task t2v-14B 
+--dit path/to/model.safetensors --vae path/to/vae.safetensors 
+--t5 path/to/t5_model.pth --save_path output_directory
+```
+
+プロンプトファイルの形式：
+- 1行に1つのプロンプト
+- 空行や#で始まる行は無視されます（コメント）
+- 各行にはコマンドライン形式でプロンプト固有のパラメータを含めることができます：
+
+サポートされているインラインパラメータ（省略した場合、コマンドラインのデフォルト値が使用されます）
+- `--w`: 幅
+- `--h`: 高さ
+- `--f`: フレーム数
+- `--d`: シード
+- `--s`: 推論ステップ
+- `--g` または `--l`: ガイダンススケール
+- `--fs`: フローシフト
+- `--i`: 画像パス（I2V用）
+- `--cn`: コントロールパス（Fun Control用）
+- `--n`: ネガティブプロンプト
+
+バッチモードでは、モデルは一度だけロードされ、すべてのプロンプトで再利用されるため、複数回の単一実行と比較して全体的な生成時間が大幅に改善されます。
+
+#### インタラクティブモード
+
+プロンプトを入力するためのインタラクティブなコマンドラインインターフェース：
+
+```bash
+python wan_generate_video.py --interactive --task t2v-14B 
+--dit path/to/model.safetensors --vae path/to/vae.safetensors 
+--t5 path/to/t5_model.pth --save_path output_directory
+```
+
+インタラクティブモードでは：
+- コマンドラインで直接プロンプトを入力
+- バッチモードと同じインラインパラメータ形式を使用
+- 終了するには Ctrl+D (Windowsでは Ctrl+Z) を使用
+- 効率のため、モデルは生成間で読み込まれたままになります
+</details>
+

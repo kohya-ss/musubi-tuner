@@ -507,6 +507,14 @@ class WanVAE_(nn.Module):
 
         self.cache_device = None
 
+    @property
+    def dtype(self):
+        return self.conv1.weight.dtype
+
+    @property
+    def device(self):
+        return self.conv1.weight.device
+
     def set_cache_device(self, device):
         # set cache device
         self.cache_device = device
@@ -700,7 +708,7 @@ class WanVAE:
             )
             .eval()
             .requires_grad_(False)
-            .to(device)
+            .to(device, dtype=dtype)
         )
         if cache_device is not None:
             self.model.set_cache_device(torch.device(cache_device))
