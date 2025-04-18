@@ -543,6 +543,7 @@ def parse_args():
         metavar=("llm_multiplier", "clip_multiplier"),
         help="Scale clip and llm influence"
     )
+    parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
     args = parser.parse_args()
     if args.cfg_schedule:
         args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
@@ -1057,7 +1058,10 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            save_videos_grid_prores(sample, video_path.replace(".mp4", ".mkv"), fps=args.fps)
+            if args.prores:
+                save_videos_grid_prores(sample, video_path.replace(".mp4", ".mkv"), fps=args.fps)
+            else:
+                save_videos_grid(sample, video_path, fps=args.fps)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images

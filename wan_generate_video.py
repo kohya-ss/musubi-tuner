@@ -209,6 +209,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zero_init_steps", type=int, default=-1, help="How many steps to zero out at the start for CFGZero*")
     parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
     parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 6 is good for Wan. Only 'comfy' rope_func supports this!")
+    parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
@@ -1380,9 +1381,11 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
-
     video = video.unsqueeze(0)
-    save_videos_grid(video, video_path, fps=args.fps, rescale=True)
+    if args.prores:
+        save_videos_grid_prores(video, video_path.replace(".mp4", ".mkv"), fps=args.fps, rescale=True)
+    else:
+        save_videos_grid(video, video_path, fps=args.fps, rescale=True)
     logger.info(f"Video saved to: {video_path}")
 
     return video_path
