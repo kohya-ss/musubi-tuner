@@ -20,7 +20,6 @@ def apply_zerostar(cond: torch.Tensor, uncond: torch.Tensor, current_step: int, 
     alpha = optimized_scale(positive_flat, negative_flat)
     alpha = alpha.view(batch_size, *([1] * (len(cond.shape) - 1)))
     alpha = alpha.to(cond.dtype)
-    print(f"CFGZero*: Alpha is {alpha}")
     # CFG formula modified with alpha
     noise_pred = uncond * alpha + guidance_scale * (cond - uncond * alpha)
     return noise_pred
