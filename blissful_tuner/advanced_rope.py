@@ -2,17 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 Created on Wed Apr 16 19:25:53 2025
+Advanced rope functions for Blissful Tuner extension
+License: Apache 2.0
 
 @author: blyss
 """
 import torch
 import torch.nn as nn
-from torch import Tensor
 from einops import rearrange
+from typing import List
 
 
 # From ComfyUI
-def apply_rope_comfy(xq: Tensor, xk: Tensor, freqs_cis: Tensor):
+def apply_rope_comfy(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
     xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
@@ -36,7 +38,7 @@ def rope_riflex(pos, dim, theta, L_test, k, temporal):
 
 
 class EmbedND_RifleX(nn.Module):
-    def __init__(self, dim, theta, axes_dim, num_frames, k):
+    def __init__(self: nn.Module, dim: int, theta: float, axes_dim: List[int], num_frames: int, k: int):
         super().__init__()
         self.dim = dim
         self.theta = theta

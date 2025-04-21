@@ -589,14 +589,15 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 for _ in range(num_layers)
             ]
         )
-        d = self.dim // self.num_heads
-        self.rope_embedder = EmbedND_RifleX(
-            d,
-            10000.0,
-            [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)],
-            num_frames=num_frames,
-            k=riflex_index,
-        )
+        if rope_func == "comfy":
+            d = self.dim // self.num_heads
+            self.rope_embedder = EmbedND_RifleX(
+                d,
+                10000.0,
+                [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)],
+                num_frames=num_frames,
+                k=riflex_index,
+            )
         # head
         self.head = Head(dim, out_dim, patch_size, eps)
 

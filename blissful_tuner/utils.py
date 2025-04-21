@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Utility functions for Blissful Tuner extension
+License: Apache 2.0
 Created on Sat Apr 12 14:09:37 2025
 
 @author: blyss
@@ -8,11 +10,19 @@ Created on Sat Apr 12 14:09:37 2025
 import argparse
 import torch
 import safetensors
-from typing import List
+from typing import List, Union, Dict, Tuple, Optional
 
 
 # Adapted from ComfyUI
-def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
+def load_torch_file(
+    ckpt: str,
+    safe_load: bool = False,
+    device: Union[str, torch.device] = None,
+    return_metadata: bool = False
+) -> Union[
+    Dict[str, torch.Tensor],
+    Tuple[Dict[str, torch.Tensor], Optional[Dict[str, str]]]
+]:
     if device is None:
         device = torch.device("cpu")
     metadata = None
@@ -49,6 +59,16 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     return (sd, metadata) if return_metadata else sd
 
 
+# Adapted from WanVideoWrapper
+def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None) -> torch.Tensor:
+    sigma = torch.ones((image.shape[0],)).to(image.device, image.dtype) * ratio
+    image_noise = torch.randn_like(image) * sigma[:, None, None, None]
+    image_noise = torch.where(image == -1, torch.zeros_like(image), image_noise)
+    image = image + image_noise
+    return image
+
+
+# Blyss wrote it!
 def parse_scheduled_cfg(schedule: str, infer_steps: int) -> List[int]:
     """
     Parse a schedule string like "1-10,20,!5,e~3" into a sorted list of steps.

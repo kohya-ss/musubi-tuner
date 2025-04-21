@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-@torch.compiler.disable
 class LatentPreviewer():
+    @torch.inference_mode()
     def __init__(self, args, original_latents, timesteps, device, dtype, model_type="hunyuan"):
         self.mode = "latent2rgb" if args.preview_vae is None else "taehv"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")
@@ -37,7 +37,7 @@ class LatentPreviewer():
                 tae_sd = load_torch_file(args.preview_vae, safe_load=True, device=args.device)
             else:
                 raise FileNotFoundError(f"{args.preview_vae} was not found!")
-            self.taehv = TAEHV(tae_sd).to(self.device, self.dtype)
+            self.taehv = TAEHV(tae_sd).to("cpu", self.dtype)  # Offload for VRAM and match datatype
             self.decoder = self.decode_taehv
             self.scale_factor = None
             self.fps = args.fps
@@ -46,7 +46,10 @@ class LatentPreviewer():
             self.scale_factor = 8
             self.fps = int(args.fps / 4)
 
+    @torch.inference_mode()
     def preview(self, noisy_latents, current_step):
+        if self.device == "cuda" or self.device == torch.device("cuda"):
+            torch.cuda.empty_cache()
         if self.model_type == "wan":
             noisy_latents = noisy_latents.unsqueeze(0)  # F, C, H, W -> B, F, C, H, W
         elif self.model_type == "hunyuan":
@@ -68,6 +71,7 @@ class LatentPreviewer():
         _, _, h, w = upscaled.shape
         self.write_preview(upscaled, w, h)
 
+    @torch.inference_mode()
     def subtract_original_and_normalize(self, noisy_latents, current_step):
         # Compute what percent of original noise is remaining
         noise_remaining = self.timesteps_percent[current_step].to(device=noisy_latents.device)
@@ -79,6 +83,7 @@ class LatentPreviewer():
         normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-8)
         return normalized_denoisy_latents
 
+    @torch.inference_mode()
     def write_preview(self, frames, width, height, target="./latent_preview.mp4"):
         # Check if we only have a single frame.
         if frames.shape[0] == 1:
@@ -114,17 +119,19 @@ class LatentPreviewer():
             container.mux(packet)
         container.close()
 
+    @torch.inference_mode()
     def decode_taehv(self, latents, current_step):
         """
         Decodes latents with the TAEHV model, returns shape (F, C, H, W).
         """
-
+        self.taehv.to(self.device)  # Onload
         latents_permuted = latents.permute(0, 2, 1, 3, 4)  # Reordered to B, F, C, H, W for TAE
         latents_permuted = latents_permuted.to(device=self.device, dtype=self.dtype)
-        with torch.no_grad():
-            decoded = self.taehv.decode_video(latents_permuted, parallel=False, show_progress_bar=False)
+        decoded = self.taehv.decode_video(latents_permuted, parallel=False, show_progress_bar=False)
+        self.taehv.to("cpu")  # Offload
         return decoded.squeeze(0)  # squeeze off batch dimension as next step doesn't want it
 
+    @torch.inference_mode()
     def decode_latent2rgb(self, latents, current_step):
         """
         Decodes latents to RGB using linear transform, returns shape (F, 3, H, W).

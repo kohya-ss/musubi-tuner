@@ -31,20 +31,15 @@ from blissful_tuner.gimmvfi.generalizable_INR.flowformer.configs.submission impo
 from blissful_tuner.gimmvfi.utils.flow_viz import flow_to_image
 from blissful_tuner.gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
 from blissful_tuner.utils import load_torch_file
-
+from typing import List, Tuple
 import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
 
-def set_seed(seed=None):
+def set_seed(seed: int = None) -> int:
     """
     Sets the random seed for reproducibility.
-    If no seed is given, a random 32-bit integer seed is generated.
-    Args:
-        seed (int, optional): The seed value to set.
-    Returns:
-        int: The seed value used.
     """
     if seed is None:
         seed = random.getrandbits(32)
@@ -56,20 +51,12 @@ def set_seed(seed=None):
     return seed
 
 
-def load_model(model_path, mode="gimmvfi_r", precision="fp32"):
+def load_model(model_path: str, mode: str = "gimmvfi_r", precision: str = "fp32") -> torch.nn.Module:
     """
     Loads the GIMM-VFI model along with its required flow estimator.
 
     Depending on the mode ("gimmvfi_r" or "gimmvfi_f") a different configuration,
     checkpoint, and flow estimation network are loaded.
-
-    Args:
-        model_path (str): Path to the directory containing model files.
-        mode (str): The model type ("gimmvfi_r" or "gimmvfi_f").
-        precision (str): Precision setting (not used in this snippet).
-
-    Returns:
-        torch.nn.Module: The fully loaded and prepared model.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -124,18 +111,10 @@ def load_model(model_path, mode="gimmvfi_r", precision="fp32"):
     return model
 
 
-def load_video_frames(video_path):
+def load_video_frames(video_path: str) -> Tuple[List[torch.Tensor], float]:
     """
     Loads all frames from the provided video file and converts each frame into
     a PyTorch tensor of shape [1, channels, height, width].
-
-    Args:
-        video_path (str): Path to the input video file.
-
-    Returns:
-        tuple:
-            - List[torch.Tensor]: A list of frame tensors.
-            - float: The original video frame rate (FPS).
     """
     cap = cv2.VideoCapture(video_path)
     frames = []
@@ -162,14 +141,9 @@ def load_video_frames(video_path):
     return frames, fps
 
 
-def images_to_video(imgs, output_video_path, fps):
+def images_to_video(imgs: List[np.array], output_video_path: str, fps: float):
     """
-    Converts a list of image arrays to a video file using ffmpeg.
-
-    Args:
-        imgs (List[np.array]): List of image arrays (uint8).
-        output_video_path (str): Path to save the output video.
-        fps (float): Frame rate for the output video.
+    Converts a list of image arrays to a video file using ffmpeg and save to specified path.
     """
     # Determine image dimensions from the first image
     height, width, _ = imgs[0].shape
@@ -207,12 +181,12 @@ def images_to_video(imgs, output_video_path, fps):
     shutil.rmtree(frame_dir)
 
 
-def tensor_to_image(tensor):
+def tensor_to_image(tensor: torch.Tensor) -> np.array:
     """
     Converts a single frame tensor to an 8-bit uint8 image array.
 
     Args:
-        tensor (torch.Tensor): A tensor of shape [1, C, H, W].
+        tensor: A tensor of shape [1, C, H, W].
 
     Returns:
         np.array: An image array in H x W x C format (BGR order).
@@ -222,20 +196,15 @@ def tensor_to_image(tensor):
     return img[:, :, ::-1].astype(np.uint8)  # Convert RGB to BGR for OpenCV
 
 
-def interpolate(model, frames, ds_factor, N):
+def interpolate(model: torch.nn.Module, frames: List[torch.Tensor], ds_factor: float, N: int) -> Tuple[List[np.array], List[np.array]]:
     """
     Interpolates frames using the provided model.
 
     Args:
-        model (torch.nn.Module): The loaded interpolation model.
-        frames (List[torch.Tensor]): List of input frame tensors.
-        ds_factor (float): Downsampling factor used by the model.
-        N (int): Number of interpolation steps between two frames.
-
-    Returns:
-        tuple:
-            - List[np.array]: A list of interpolated image arrays (uint8).
-            - List[np.array]: A list of flow visualization images (uint8) corresponding to the interpolation.
+        model: The loaded interpolation model.
+        frames: List of input frame tensors.
+        ds_factor: Downsampling factor used by the model.
+        N: Number of interpolation steps between two frames.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)

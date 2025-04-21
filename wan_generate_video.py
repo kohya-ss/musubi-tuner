@@ -43,8 +43,8 @@ from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_prores, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
-from blissful_tuner.utils import parse_scheduled_cfg
-
+from blissful_tuner.utils import parse_scheduled_cfg, add_noise_to_reference_video
+from blissful_tuner.prompt_weighting import get_weighted_prompt_embeds_t5
 import threading
 from dataset.image_video_dataset import load_video
 
@@ -210,10 +210,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
     parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 6 is good for Wan. Only 'comfy' rope_func supports this!")
     parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
+    parser.add_argument("--prores_keep_pngs", action="store_true", help="Keep intermediate frame directory(PNGs) when saving with prores")
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
-
+    parser.add_argument("--noise_aug_strength", type=float, default=0.0, help="Additional multiplier for i2v noise, higher might help motion/quality")
+    parser.add_argument("--prompt_weighting", action="store_true", help="Enable (AUTOMATIC1111) [style] (prompt weighting:1.2)")
     args = parser.parse_args()
 
     # Validate arguments
@@ -718,7 +720,11 @@ def prepare_t2v_inputs(
                 with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
                     context = text_encoder([args.prompt], device)
                     context_null = text_encoder([n_prompt], device)
-            else:
+            elif args.prompt_weighting:
+                logger.info("Weighting prompt...")
+                context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+            else:  # original behavior
                 context = text_encoder([args.prompt], device)
                 context_null = text_encoder([n_prompt], device)
 
@@ -884,7 +890,9 @@ def prepare_i2v_inputs(
     img_resized = cv2.resize(img_cv2, (width, height), interpolation=interpolation)
     img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
     img_resized = img_resized.unsqueeze(1)  # CFHW
-
+    if args.noise_aug_strength > 0.0:
+        logger.info(f"Adding noise {args.noise_aug_strength}...")
+        img_resized = add_noise_to_reference_video(img_resized, ratio=args.noise_aug_strength)
     if has_end_image:
         interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
         end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
@@ -1099,16 +1107,16 @@ def run_sampling(
         logger.info(f"CFG skip mode: {args.cfg_skip_mode}, apply ratio: {args.cfg_apply_ratio}, pattern: {pattern}")
     elif args.cfg_schedule is not None:
         apply_cfg_array = [step + 1 in args.cfg_schedule for step in range(num_timesteps)]
-        pattern = ["A" if apply else "S" for apply in apply_cfg_array]
-        pattern = "".join(pattern)
-        logger.info(f"CFG scheduling is enabled. CFG Steps: {args.cfg_schedule} {pattern}")
+        logger.info(f"CFG scheduling is enabled. CFG Steps: {args.cfg_schedule}")
     else:
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
+    use_zero_init = False
     if args.cfg_zerostar:
         logger.info("Will activate CFGZero* to scale CFG!")
         if args.zero_init_steps != -1:
-            logger.info(f"Will zero the first {args.zero_init_steps} to give the model time to warm up!")
+            use_zero_init = True
+            logger.info(f"Will zero the first {args.zero_init_steps} steps to give the model time to warm up!")
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
     slg_end_step = int(args.slg_end * num_timesteps)
@@ -1130,7 +1138,7 @@ def run_sampling(
                     # apply guidance
                     # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
                     if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, zero_init_steps=args.zero_init_steps - 1)  # Expects step index as 0 based
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_zero_init=use_zero_init, zero_init_steps=args.zero_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
@@ -1149,7 +1157,7 @@ def run_sampling(
                     )
                     # apply guidance
                     if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, zero_init_steps=args.zero_init_steps - 1)
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_zero_init=use_zero_init, zero_init_steps=args.zero_init_steps - 1)
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
@@ -1157,7 +1165,7 @@ def run_sampling(
                     # normal guidance
                     noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
                     if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, zero_init_steps=args.zero_init_steps - 1)
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_zero_init=use_zero_init, zero_init_steps=args.zero_init_steps - 1)
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
@@ -1383,7 +1391,7 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
     video = video.unsqueeze(0)
     if args.prores:
-        save_videos_grid_prores(video, video_path.replace(".mp4", ".mkv"), fps=args.fps, rescale=True)
+        save_videos_grid_prores(video, video_path.replace(".mp4", ".mkv"), fps=args.fps, rescale=True, keep_frames=args.prores_keep_pngs)
     else:
         save_videos_grid(video, video_path, fps=args.fps, rescale=True)
     logger.info(f"Video saved to: {video_path}")
