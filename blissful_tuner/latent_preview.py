@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Latent preview for Blissful Tuner extension
+License: Apache 2.0
 Created on Mon Mar 10 16:47:29 2025
 
 @author: blyss
@@ -84,7 +86,9 @@ class LatentPreviewer():
         return normalized_denoisy_latents
 
     @torch.inference_mode()
-    def write_preview(self, frames, width, height, target="./latent_preview.mp4"):
+    def write_preview(self, frames, width, height):
+        target_dir = os.path.dirname(os.path.realpath(self.args.save_path))
+        target = os.path.join(target_dir, "latent_preview.mp4")
         # Check if we only have a single frame.
         if frames.shape[0] == 1:
             # Clamp, scale, convert to byte and move to CPU
@@ -97,8 +101,7 @@ class LatentPreviewer():
             return
 
         # Otherwise, write out as a video.
-        target_video = target.replace(".png", ".mp4")  # in case the user is reusing commands and forgets
-        container = av.open(target_video, mode="w")
+        container = av.open(target, mode="w")
         stream = container.add_stream("libx264", rate=self.fps)
         stream.pix_fmt = "yuv420p"
         stream.width = width
