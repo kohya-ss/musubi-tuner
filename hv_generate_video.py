@@ -547,11 +547,7 @@ def parse_args():
     parser.add_argument("--prores_keep_pngs", action="store_true", help="Keep intermediate frame directory(PNGs) when saving with prores")
     args = parser.parse_args()
     if args.cfg_schedule:
-        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
-    else:
-        args.cfg_schedule = []
-        for i in range(0, args.infer_steps):
-            args.cfg_schedule.append(i + 1)
+        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
@@ -621,12 +617,15 @@ def main():
 
         # encode prompt with LLM and Text Encoder
         logger.info(f"Encoding prompt: {prompt}")
-        do_classifier_free_guidance = args.guidance_scale != 1.0
+        do_classifier_free_guidance = args.guidance_scale != 1.0 or args.cfg_schedule is not None
         if do_classifier_free_guidance:
             if args.cfg_schedule is not None:
-                logger.info(f"CFG scheduling is enabled. CFG Steps: {args.cfg_schedule}")
+                scale_per_step = args.cfg_schedule
+                included_steps = sorted(scale_per_step.keys())
+                step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
+                logger.info(f"CFG Schedule: {step_str}")
             else:
-                logger.info(f"Full CFG enabled! {args.cfg_schedule}")
+                logger.info("Full CFG enabled!")
             negative_prompt = args.negative_prompt
             if negative_prompt is None:
                 logger.info("Negative prompt is not provided, using empty prompt")
@@ -778,11 +777,11 @@ def main():
             convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
 
         if args.fp8_scaled:
-            logger.info("Scaling transformer...")
+            logger.info(f"Scaling transformer (fp8_fast/mm_scaled: {args.fp8_fast})...")
             state_dict = transformer.state_dict()
             move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
             state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
-            apply_fp8_monkey_patch(transformer, state_dict, True if args.fp8_fast else False)
+            apply_fp8_monkey_patch(transformer, state_dict, args.fp8_fast)
             info = transformer.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
 
@@ -927,10 +926,10 @@ def main():
         if embedded_guidance_scale is not None:
             guidance_expand = torch.tensor([embedded_guidance_scale * 1000.0] * latents.shape[0], dtype=torch.float32, device="cpu")
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
-            embedded_guidance_expand = guidance_expand
+            embedded_guidance_expand = guidance_expand if args.cfg_schedule is not None else None
             if do_classifier_free_guidance:
                 guidance_expand = torch.cat([guidance_expand, guidance_expand], dim=0)
-                cfg_guidance_expand = guidance_expand
+                cfg_guidance_expand = guidance_expand if args.cfg_schedule is not None else None  # We only need them seperate if we turn CFG on and off
         else:
             guidance_expand = None
         freqs_cos, freqs_sin = get_rotary_pos_embed(vae_ver, transformer, video_length, height, width)
@@ -951,16 +950,16 @@ def main():
         if args.split_attn and do_classifier_free_guidance and not args.split_uncond:
             logger.warning("split_attn is enabled, split_uncond will be enabled as well.")
             args.split_uncond = True
-
+        do_cfg_for_step = do_classifier_free_guidance  # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if do_classifier_free_guidance:
-                    do_cfg_for_step = (i + 1) in args.cfg_schedule
-                    guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
-                else:
-                    guidance_expand = embedded_guidance_expand
-                    do_cfg_for_step = False
+                    if args.cfg_schedule is not None:
+                        do_cfg_for_step = (i + 1) in args.cfg_schedule
+                        args.guidance_scale = args.cfg_schedule[i + 1]
+                        guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
+
                 latents = scheduler.scale_model_input(latents, t)
 
                 # predict the noise residual
