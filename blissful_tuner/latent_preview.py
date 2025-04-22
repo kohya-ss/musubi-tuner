@@ -87,8 +87,7 @@ class LatentPreviewer():
 
     @torch.inference_mode()
     def write_preview(self, frames, width, height):
-        target_dir = os.path.dirname(os.path.realpath(self.args.save_path))
-        target = os.path.join(target_dir, "latent_preview.mp4")
+        target = os.path.join(self.args.save_path, "latent_preview.mp4")
         # Check if we only have a single frame.
         if frames.shape[0] == 1:
             # Clamp, scale, convert to byte and move to CPU

@@ -217,9 +217,12 @@ def optimize_state_dict_with_fp8(
         # Optionally free memory on the calculation device every 16 optimizations.
         if calc_device is not None and optimized_count % 16 == 0:
             torch.cuda.empty_cache()
-    average_quantization_error /= optimized_count
-    logging.info(f"Number of optimized Linear layers: {optimized_count}")
-    logging.info(f"Mean quantization error: {average_quantization_error:.2f}%")
+    if optimized_count > 0:
+        average_quantization_error /= optimized_count
+        logging.info(f"Number of optimized Linear layers: {optimized_count}")
+        logging.info(f"Mean quantization error: {average_quantization_error:.2f}%")
+    else:
+        logging.info("optimize_state_dict_with_fp8 didn't optimize any layers! Maybe check your include/exclude keys?")
     return state_dict
 
 

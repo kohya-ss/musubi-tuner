@@ -168,7 +168,7 @@ def save_videos_grid_prores(
         outputs.append(video)
     output_dir = os.path.dirname(output_video)
     os.makedirs(output_dir, exist_ok=True)
-    frame_dir = os.path.join(os.path.dirname(output_dir), "out_frames")
+    frame_dir = os.path.join(output_dir, "out_frames")
     os.makedirs(frame_dir, exist_ok=True)
     for idx, img in enumerate(outputs):
         image_path = os.path.join(frame_dir, f"{idx:04d}.png")
@@ -544,7 +544,7 @@ def parse_args():
         help="Scale clip and llm influence"
     )
     parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
-    parser.add_argument("--keep_frames", action="store_true", help="Keep intermediate frame directory(PNGs) when saving with prores")
+    parser.add_argument("--prores_keep_pngs", action="store_true", help="Keep intermediate frame directory(PNGs) when saving with prores")
     args = parser.parse_args()
     if args.cfg_schedule:
         args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
@@ -1060,7 +1060,7 @@ def main():
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
             if args.prores:
-                save_videos_grid_prores(sample, video_path.replace(".mp4", ".mkv"), fps=args.fps, keep_frames=args.keep_frames)
+                save_videos_grid_prores(sample, video_path.replace(".mp4", ".mkv"), fps=args.fps, keep_frames=args.prores_keep_pngs)
             else:
                 save_videos_grid(sample, video_path, fps=args.fps)
             logger.info(f"Sample save to: {video_path}")

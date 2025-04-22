@@ -205,8 +205,8 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
     )
-    parser.add_argument("--cfg_zerostar", action="store_true", help="CFG-Zero* - https://github.com/WeichenFan/CFG-Zero-star")
-    parser.add_argument("--zero_init_steps", type=int, default=-1, help="How many steps to zero out at the start for CFGZero*")
+    parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
+    parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps.")
     parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
     parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 6 is good for Wan. Only 'comfy' rope_func supports this!")
     parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
@@ -229,7 +229,7 @@ def parse_args() -> argparse.Namespace:
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
     if args.cfg_schedule:
-        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps)
+        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
 
     return args
 
@@ -1106,17 +1106,19 @@ def run_sampling(
         pattern = "".join(pattern)
         logger.info(f"CFG skip mode: {args.cfg_skip_mode}, apply ratio: {args.cfg_apply_ratio}, pattern: {pattern}")
     elif args.cfg_schedule is not None:
-        apply_cfg_array = [step + 1 in args.cfg_schedule for step in range(num_timesteps)]
-        logger.info(f"CFG scheduling is enabled. CFG Steps: {args.cfg_schedule}")
+        scale_per_step = args.cfg_schedule
+        apply_cfg_array = [(i + 1) in scale_per_step for i in range(num_timesteps)]
+        included_steps = sorted(scale_per_step.keys())
+        step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
+        logger.info(f"CFG Schedule: {step_str}")
+
     else:
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
-    use_zero_init = False
-    if args.cfg_zerostar:
-        logger.info("Will activate CFGZero* to scale CFG!")
-        if args.zero_init_steps != -1:
-            use_zero_init = True
-            logger.info(f"Will zero the first {args.zero_init_steps} steps to give the model time to warm up!")
+
+    use_zerostar = args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1
+    if use_zerostar:
+        logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
     slg_end_step = int(args.slg_end * num_timesteps)
@@ -1130,6 +1132,8 @@ def run_sampling(
 
             apply_cfg = apply_cfg_array[i]  # apply CFG or not
             if apply_cfg:
+                if args.cfg_schedule is not None:
+                    args.guidance_scale = scale_per_step[i + 1]
                 apply_slg = i >= slg_start_step and i < slg_end_step
                 # print(f"Applying SLG: {apply_slg}, i: {i}, slg_start_step: {slg_start_step}, slg_end_step: {slg_end_step}")
                 if args.slg_mode == "original" and apply_slg:
@@ -1137,8 +1141,8 @@ def run_sampling(
 
                     # apply guidance
                     # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
-                    if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_zero_init=use_zero_init, zero_init_steps=args.zero_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
+                    if use_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
@@ -1156,16 +1160,16 @@ def run_sampling(
                         latent_storage_device
                     )
                     # apply guidance
-                    if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_zero_init=use_zero_init, zero_init_steps=args.zero_init_steps - 1)
+                    if use_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 else:
                     # normal guidance
                     noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
-                    if args.cfg_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_zero_init=use_zero_init, zero_init_steps=args.zero_init_steps - 1)
+                    if use_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:

@@ -69,7 +69,7 @@ def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None) -> to
 
 
 # Blyss wrote it!
-def parse_scheduled_cfg(schedule: str, infer_steps: int) -> List[int]:
+def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) -> List[int]:
     """
     Parse a schedule string like "1-10,20,!5,e~3" into a sorted list of steps.
 
@@ -77,11 +77,12 @@ def parse_scheduled_cfg(schedule: str, infer_steps: int) -> List[int]:
     - "e~n"    includes every nth step (n, 2n, ...) up to infer_steps
     - "x"      includes the single step x
     - Prefix "!" on any token to exclude those steps instead of including them.
+    - Postfix ":float" e.g. ":6.0" to any step or range to specify a guidance_scale override for that step
 
     Raises argparse.ArgumentTypeError on malformed tokens or out-of-range steps.
     """
-    included = set()
     excluded = set()
+    guidance_scale_dict = {}
 
     for raw in schedule.split(","):
         token = raw.strip()
@@ -94,6 +95,11 @@ def parse_scheduled_cfg(schedule: str, infer_steps: int) -> List[int]:
             token = token[1:]
         else:
             target = "include"
+
+        weight = guidance_scale
+        if ":" in token:
+            token, float_part = token.rsplit(":", 1)
+            weight = float(float_part)
 
         # modulus syntax: e.g. "e~3"
         if token.startswith("e~"):
@@ -140,9 +146,11 @@ def parse_scheduled_cfg(schedule: str, infer_steps: int) -> List[int]:
 
         # apply include/exclude
         if target == "include":
-            included.update(steps)
+            for step in steps:
+                guidance_scale_dict[step] = weight
         else:
             excluded.update(steps)
 
-    # final steps = included minus excluded, sorted
-    return sorted(s for s in included if s not in excluded and s <= infer_steps)
+    for step in excluded:
+        guidance_scale_dict.pop(step, None)
+    return guidance_scale_dict
