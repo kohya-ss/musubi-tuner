@@ -957,8 +957,9 @@ def main():
                 if do_classifier_free_guidance:
                     if args.cfg_schedule is not None:
                         do_cfg_for_step = (i + 1) in args.cfg_schedule
-                        args.guidance_scale = args.cfg_schedule[i + 1]
-                        guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
+                        if do_cfg_for_step:
+                            args.guidance_scale = args.cfg_schedule[i + 1]
+                            guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
 
                 latents = scheduler.scale_model_input(latents, t)
 
