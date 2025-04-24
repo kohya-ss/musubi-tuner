@@ -16,7 +16,7 @@ from typing import List, Union, Dict, Tuple, Optional
 # Adapted from ComfyUI
 def load_torch_file(
     ckpt: str,
-    safe_load: bool = False,
+    safe_load: bool = True,
     device: Union[str, torch.device] = None,
     return_metadata: bool = False
 ) -> Union[
@@ -44,7 +44,7 @@ def load_torch_file(
             raise e
     else:
 
-        pl_sd = torch.load(ckpt, map_location=device, weights_only=True)
+        pl_sd = torch.load(ckpt, map_location=device, weights_only=safe_load)
 
         if "state_dict" in pl_sd:
             sd = pl_sd["state_dict"]
@@ -68,7 +68,7 @@ def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None) -> to
     return image
 
 
-# Blyss wrote it!
+# Below here, Blyss wrote it!
 def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) -> List[int]:
     """
     Parse a schedule string like "1-10,20,!5,e~3" into a sorted list of steps.
@@ -154,3 +154,38 @@ def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) ->
     for step in excluded:
         guidance_scale_dict.pop(step, None)
     return guidance_scale_dict
+
+
+def setup_compute_context(device: Union[torch.device, str] = None, dtype: Union[torch.dtype, str] = None) -> Tuple[torch.device, torch.dtype]:
+    dtype_mapping = {
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+        "fp8": torch.float8_e4m3fn,
+        "float8": torch.float8_e4m3fn
+    }
+    if device is None:
+        device = torch.device("cpu")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.mps.is_available():
+            device = torch.device("mps")
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    if dtype is None:
+        dtype = torch.float32
+    elif isinstance(dtype, str):
+        if dtype not in dtype_mapping:
+            raise ValueError(f"Unknown dtype string '{dtype}'")
+        dtype = dtype_mapping[dtype]
+
+    torch.set_float32_matmul_precision('high')
+    if dtype == torch.float16 or dtype == torch.bfloat16:
+        if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+            torch.backends.cuda.matmul.allow_fp16_accumulation = True
+            print("FP16 accumulation enabled.")
+    return device, dtype

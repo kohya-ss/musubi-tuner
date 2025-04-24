@@ -13,51 +13,96 @@ import re
 from typing import Tuple, List
 
 
-def get_prompts_tokens_with_weights_t5(t5_tokenizer: T5Tokenizer, prompt: str) -> Tuple[List[int], List[float]]:
+def get_prompts_tokens_with_weights_t5(
+    t5_tokenizer: T5Tokenizer, prompt: str
+) -> Tuple[List[int], List[float]]:
     """
-    Returns two lists:
-      • ids_flat  = [int, int, …]    one raw token‑ID per real wordpiece
-      • weights_flat    = [float, …]       matching weight per token
+    Tokenize `prompt` once and return
+      - input_ids:    [token_id, …]
+      - token_weights: [weight, …] aligned 1:1 with input_ids
+    honoring the (text,weight) chunks produced by parse_prompt_attention.
     """
     if not prompt:
         prompt = "empty"
 
-    texts_and_weights = parse_prompt_attention(prompt)
-    ids_flat, weights_flat = [], []
+    # 1) break into (text, weight) chunks
+    chunks = parse_prompt_attention(prompt)
 
-    for chunk, weight in texts_and_weights:
-        # this returns tensor of (1, N)
-        ids_tensor = t5_tokenizer(chunk, add_special_tokens=True, padding=False)
-        # squeeze off the batch dim → shape (N,)
-        token_ids = ids_tensor.squeeze(0).tolist()
+    # 2) build the concatenated string and record each chunk's char spans
+    full_text = ""
+    spans: List[Tuple[int,int,float]] = []  # [(start, end, weight), …]
+    cursor = 0
+    for text, w in chunks:
+        full_text += text
+        spans.append((cursor, cursor + len(text), w))
+        cursor += len(text)
 
-        ids_flat.extend(token_ids)
-        weights_flat.extend([weight] * len(token_ids))
-    return ids_flat, weights_flat
+    # 3) run the tokenizer once, capturing char offsets
+    encoded = t5_tokenizer(
+        full_text,
+        return_tensors="pt",
+        return_offsets_mapping=True,
+        add_special_tokens=True,
+    )
+    ids = encoded["input_ids"][0].tolist()
+    offsets = encoded["offset_mapping"][0].tolist()  # list of (start,end) per token
+
+    # 4) map each token to its chunk-weight by looking at its start offset
+    token_weights: List[float] = []
+    for (s, e) in offsets:
+        # special tokens often have (0,0) offsets; give them weight=1
+        if s == e == 0:
+            token_weights.append(1.0)
+            continue
+
+        # find the span that covers `s`
+        for (st, en, w) in spans:
+            if st <= s < en:
+                token_weights.append(w)
+                break
+        else:
+            # fallback
+            token_weights.append(1.0)
+
+    return ids, token_weights
 
 
-def get_weighted_prompt_embeds_t5(prompt: str, t5: T5EncoderModel, device: torch.device, max_len: int = None) -> List[torch.Tensor]:
-    # 1) build flat lists of ids & weights
-    ids_flat, weights_flat = get_prompts_tokens_with_weights_t5(t5.tokenizer, prompt)
+def get_weighted_prompt_embeds_t5(
+    prompt: str,
+    t5: T5EncoderModel,
+    device: torch.device,
+    max_len: int = None
+) -> torch.Tensor:
+    """
+    Produce a single tensor of shape (1, seq_len, hidden_dim) where
+    each token embedding is scaled by its prompt-weight.
+
+    Returns:
+        weighted_embeds: torch.FloatTensor[1, seq_len, hidden_dim]
+    """
+    tokenizer = t5.tokenizer
+    # 1) grab flat ids + weights
+    ids_flat, weights_flat = get_prompts_tokens_with_weights_t5(tokenizer, prompt)
 
     # 2) optionally truncate
     if max_len is not None:
         ids_flat = ids_flat[:max_len]
         weights_flat = weights_flat[:max_len]
 
-    # 3) wrap into a single batch‑dim Tensor
-    ids = torch.tensor([ids_flat], dtype=torch.long, device=device)  # (1, seq_len)
-    mask = (ids != 0).long()  # (1, seq_len)
+    # 3) batchify
+    ids = torch.tensor([ids_flat], device=device)          # (1, L)
+    attn_mask = (ids != tokenizer.pad_token_id).long()     # (1, L)
 
-    # 4) encode and drop batch dim
-    hidden = t5.model(ids, mask)        # returns (1, seq_len, hidden_dim)
-    hidden = hidden.squeeze(0)          # now (seq_len, hidden_dim)
+    # 4) encode
+    with torch.no_grad():
+        outputs = t5.encoder(input_ids=ids, attention_mask=attn_mask)
+        hidden = outputs.last_hidden_state                 # (1, L, D)
 
-    # 5) apply per‑token weights
-    weight = torch.tensor(weights_flat, device=device)                      # (seq_len,)
-    hidden = hidden * weight[:, None]  # broadcast → (seq_len, hidden_dim)
-
-    return [hidden]
+    # 5) apply per-token weights
+    weight = torch.tensor(weights_flat, device=device)      # (L,)
+    weighted = hidden * weight.unsqueeze(0).unsqueeze(-1)   # broadcast to (1,L,D)
+    weighted = weighted.squeeze(0)    # → (L, D)
+    return [weighted]
 
 
 re_attention = re.compile(r"""
