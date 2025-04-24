@@ -887,7 +887,7 @@ class NetworkTrainer:
         transformer.switch_block_swap_for_inference()
 
         # Create a directory to save the samples
-        save_dir = args.output_dir + "/sample"
+        save_dir = os.path.join(args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
 
         # save random state to restore later
