@@ -77,7 +77,6 @@ class LatentPreviewer():
     def subtract_original_and_normalize(self, noisy_latents, current_step):
         # Compute what percent of original noise is remaining
         noise_remaining = self.timesteps_percent[current_step].to(device=noisy_latents.device)
-
         # Subtract the portion of original latents
         denoisy_latents = noisy_latents - (self.original_latents.to(device=noisy_latents.device) * noise_remaining)
 

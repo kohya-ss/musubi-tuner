@@ -1013,7 +1013,7 @@ def main():
                         progress_bar.update()
 
                 if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-                    previewer.preview(latents, i + 1)
+                    previewer.preview(latents, i)
 
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))

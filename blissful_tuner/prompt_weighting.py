@@ -35,7 +35,7 @@ def get_weighted_prompt_embeds_t5(
     # Apply weights to embeddings if any were extracted
     for i, weights in enumerate(all_weights):
         for text, weight in weights.items():
-            print(f"Applying weight {weight} to prompt: {text}")
+            print(f"Applying weight {weight} to promptchunk: {text}")
             if len(weights) > 0:
                 context[i] = context[i] * weight
 

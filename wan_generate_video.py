@@ -1057,7 +1057,6 @@ def run_sampling(
     latent = latent.to(latent_storage_device)
     if args.preview_latent_every:
         previewer = LatentPreviewer(args, noise, timesteps, model.device, model.dtype, model_type="wan")
-
     # cfg skip
     apply_cfg_array = []
     num_timesteps = len(timesteps)
@@ -1183,7 +1182,7 @@ def run_sampling(
             latent = temp_x0.squeeze(0)
 
             if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-                previewer.preview(latent, i + 1)
+                previewer.preview(latent, i)
 
     return latent
 
