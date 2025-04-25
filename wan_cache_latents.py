@@ -11,7 +11,7 @@ from dataset import config_utils
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from PIL import Image
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from dataset.image_video_dataset import ItemInfo, save_latent_cache_wan, ARCHITECTURE_WAN
 from utils.model_utils import str_to_dtype
@@ -20,8 +20,8 @@ from wan.modules.vae import WanVAE
 from wan.modules.clip import CLIPModel
 import cache_latents
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], batch: list[ItemInfo]):

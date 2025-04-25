@@ -43,9 +43,6 @@ from gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
 from utils import load_torch_file, setup_compute_context
 from video_processing_common import BlissfulVideoProcessor
 from typing import List
-import logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger(__name__)
 
 
 def set_seed(seed: int = None) -> int:

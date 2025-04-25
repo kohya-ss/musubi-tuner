@@ -5,11 +5,11 @@ from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from utils import model_utils
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 def convert_from_diffusers(prefix, weights_sd):

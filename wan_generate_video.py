@@ -43,16 +43,12 @@ from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_prores, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
-from blissful_tuner.utils import parse_scheduled_cfg, add_noise_to_reference_video
+from blissful_tuner.utils import parse_scheduled_cfg, add_noise_to_reference_video, string_to_seed, BlissfulLogger
 from blissful_tuner.prompt_weighting import get_weighted_prompt_embeds_t5
 import threading
 from dataset.image_video_dataset import load_video
 
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
+logger = BlissfulLogger(__name__, "green")
 
 class GenerationSettings:
     def __init__(
@@ -107,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=16, help="video fps, Default is 16")
     parser.add_argument("--infer_steps", type=int, default=None, help="number of inference steps")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument("--seed", type=str, default=None, help="Seed for evaluation.")
     parser.add_argument(
         "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
     )
@@ -217,7 +213,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noise_aug_strength", type=float, default=0.0, help="Additional multiplier for i2v noise, higher might help motion/quality")
     parser.add_argument("--prompt_weighting", action="store_true", help="Enable (AUTOMATIC1111) [style] (prompt weighting:1.2)")
     args = parser.parse_args()
-
+    if args.seed is not None:
+        try:
+            args.seed = int(args.seed)
+        except ValueError:
+            string_seed = args.seed
+            args.seed = string_to_seed(args.seed)
+            logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
     # Validate arguments
     if args.from_file and args.interactive:
         raise ValueError("Cannot use both --from_file and --interactive at the same time")
@@ -1110,6 +1112,7 @@ def run_sampling(
         included_steps = sorted(scale_per_step.keys())
         step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
         logger.info(f"CFG Schedule: {step_str}")
+        logger.info(f"Total CFG steps: {len(included_steps)}")
 
     else:
         # Apply CFG on all steps

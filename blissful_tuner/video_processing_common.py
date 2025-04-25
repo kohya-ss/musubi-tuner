@@ -63,7 +63,7 @@ class BlissfulVideoProcessor:
         output_dir = os.path.dirname(input_file_path)
 
         if not output_file_path:
-            output_file_path = os.path.join(output_dir, f"{name}_{modifier}{ext or '.mkv'}")
+            output_file_path = os.path.join(output_dir, f"{name}_{modifier}.mkv")
 
         if os.path.exists(output_file_path):
             choice = input(f"{output_file_path} exists. F for 'fix' by appending _! Overwrite?[y/N/f]: ").strip().lower()
@@ -71,7 +71,7 @@ class BlissfulVideoProcessor:
                 base = name
                 while os.path.exists(output_file_path):
                     base += '_'
-                    output_file_path = os.path.join(output_dir, f"{base}_{modifier}" + (ext or '.mkv'))
+                    output_file_path = os.path.join(output_dir, f"{base}_{modifier}.mkv")
             elif choice != 'y':
                 print("Aborted.")
                 exit()

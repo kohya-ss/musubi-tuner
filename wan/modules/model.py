@@ -7,12 +7,12 @@ import torch.nn as nn
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 from einops import repeat
 from utils.device_utils import clean_memory_on_device

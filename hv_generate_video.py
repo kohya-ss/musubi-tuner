@@ -41,11 +41,11 @@ from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from blissful_tuner.utils import parse_scheduled_cfg
-import logging
+from blissful_tuner.utils import parse_scheduled_cfg, string_to_seed
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 def clean_memory_on_device(device):
@@ -470,7 +470,7 @@ def parse_args():
     parser.add_argument("--fps", type=int, default=24, help="video fps")
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument("--seed", type=str, default=None, help="Seed for evaluation.")
     parser.add_argument(
         "--guidance_scale",
         type=float,
@@ -546,6 +546,13 @@ def parse_args():
     parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
     parser.add_argument("--prores_keep_pngs", action="store_true", help="Keep intermediate frame directory(PNGs) when saving with prores")
     args = parser.parse_args()
+    if args.seed is not None:
+        try:
+            args.seed = int(args.seed)
+        except ValueError:
+            string_seed = args.seed
+            args.seed = string_to_seed(args.seed)
+            logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
     if args.cfg_schedule:
         args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
@@ -624,6 +631,7 @@ def main():
                 included_steps = sorted(scale_per_step.keys())
                 step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
                 logger.info(f"CFG Schedule: {step_str}")
+                logger.info(f"Total CFG steps: {len(included_steps)}")
             else:
                 logger.info("Full CFG enabled!")
             negative_prompt = args.negative_prompt

@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from tqdm import tqdm
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 # based on ComfyUI's and MinusZoneAI's fp8_linear optimization
@@ -219,10 +219,10 @@ def optimize_state_dict_with_fp8(
             torch.cuda.empty_cache()
     if optimized_count > 0:
         average_quantization_error /= optimized_count
-        logging.info(f"Number of optimized Linear layers: {optimized_count}")
-        logging.info(f"Mean quantization error: {average_quantization_error:.2f}%")
+        logger.info(f"Number of optimized Linear layers: {optimized_count}")
+        logger.info(f"Mean quantization error: {average_quantization_error:.2f}%")
     else:
-        logging.info("optimize_state_dict_with_fp8 didn't optimize any layers! Maybe check your include/exclude keys?")
+        logger.info("optimize_state_dict_with_fp8 didn't optimize any layers! Maybe check your include/exclude keys?")
     return state_dict
 
 
@@ -335,5 +335,5 @@ def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False, sca
 
             patched_count += 1
 
-    logging.info(f"Number of monkey-patched Linear layers: {patched_count}")
+    logger.info(f"Number of monkey-patched Linear layers: {patched_count}")
     return model

@@ -43,12 +43,12 @@ import networks.lora as lora_module
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from utils import huggingface_utils, model_utils, train_utils, sai_model_spec
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 BASE_MODEL_VERSION_HUNYUAN_VIDEO = "hunyuan_video"

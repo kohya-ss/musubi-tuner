@@ -16,13 +16,13 @@ from dataset.image_video_dataset import ARCHITECTURE_WAN, ItemInfo, save_text_en
 from wan.configs import wan_t2v_14B
 
 import cache_text_encoder_outputs
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from utils.model_utils import str_to_dtype
 from wan.modules.t5 import T5EncoderModel
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 def encode_and_save_batch(

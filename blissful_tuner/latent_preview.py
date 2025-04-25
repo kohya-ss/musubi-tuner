@@ -13,10 +13,9 @@ import av
 from PIL import Image
 from .taehv import TAEHV
 from .utils import load_torch_file
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
 
 
 class LatentPreviewer():

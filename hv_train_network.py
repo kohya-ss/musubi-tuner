@@ -45,13 +45,13 @@ from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
 from hv_generate_video import save_images_grid, save_videos_grid, resize_image_to_bucket, encode_to_latents
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from utils import huggingface_utils, model_utils, train_utils, sai_model_spec
 from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 SS_METADATA_KEY_BASE_MODEL_VERSION = "ss_base_model_version"

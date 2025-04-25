@@ -11,6 +11,8 @@ from transformers import T5Model
 import torch
 import re
 from typing import Tuple, List
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def get_weighted_prompt_embeds_t5(
@@ -35,7 +37,7 @@ def get_weighted_prompt_embeds_t5(
     # Apply weights to embeddings if any were extracted
     for i, weights in enumerate(all_weights):
         for text, weight in weights.items():
-            print(f"Applying weight {weight} to promptchunk: {text}")
+            logger.info(f"Applying weight ({weight}) to promptchunk: '{text}'")
             if len(weights) > 0:
                 context[i] = context[i] * weight
 

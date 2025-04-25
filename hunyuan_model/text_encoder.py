@@ -20,10 +20,10 @@ from transformers.models.llama import LlamaModel
 from safetensors.torch import load_file
 from accelerate import init_empty_weights
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 CLIP_L_HUGGINGFACE_MODEL_ID = "openai/clip-vit-large-patch14"

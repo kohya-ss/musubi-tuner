@@ -5,10 +5,10 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 import networks.lora as lora
 

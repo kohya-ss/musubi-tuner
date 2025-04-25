@@ -1,5 +1,5 @@
 import argparse
-import logging
+from blissful_tuner.utils import BlissfulLogger
 import os
 import shutil
 
@@ -8,8 +8,8 @@ import torch
 
 from utils import huggingface_utils
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 # checkpointファイル名

@@ -8,9 +8,12 @@ Created on Sat Apr 12 14:09:37 2025
 @author: blyss
 """
 import argparse
+import hashlib
 import torch
 import safetensors
 from typing import List, Union, Dict, Tuple, Optional
+import logging
+from rich.logging import RichHandler
 
 
 # Adapted from ComfyUI
@@ -69,6 +72,70 @@ def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None) -> to
 
 
 # Below here, Blyss wrote it!
+
+class BlissfulLogger:
+    def __init__(self, logging_source, log_color, do_announce=False):
+        logging_source = f"{logging_source}"
+        self.logging_source = "{:<8}".format(logging_source)
+        self.log_color = log_color
+        self.logger = logging.getLogger(self.logging_source)
+        self.logger.setLevel(logging.DEBUG)
+
+        self.handler = RichHandler(
+            show_time=False,
+            show_level=True,
+            show_path=True,
+            rich_tracebacks=True,
+            markup=True
+        )
+
+        formatter = logging.Formatter(
+            f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
+        )
+
+        self.handler.setFormatter(formatter)
+        self.logger.addHandler(self.handler)
+        if do_announce:
+            self.logger.info("Set up logging!")
+
+    def set_color(self, new_color):
+        self.log_color = new_color
+        formatter = logging.Formatter(
+            f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
+        )
+        self.handler.setFormatter(formatter)
+
+    def set_name(self, new_name):
+        self.logging_source = "{:<8}".format(new_name)
+        self.logger = logging.getLogger(self.logging_source)
+        self.logger.setLevel(logging.DEBUG)
+
+        # Remove any existing handlers (just in case)
+        if not self.logger.hasHandlers():
+            self.logger.addHandler(self.handler)
+        else:
+            self.logger.handlers.clear()
+            self.logger.addHandler(self.handler)
+
+    def info(self, msg):
+        self.logger.info(msg, stacklevel=2)
+
+    def debug(self, msg):
+        self.logger.debug(msg, stacklevel=2)
+
+    def warning(self, msg):
+        self.logger.warning(msg, stacklevel=2)
+
+    def error(self, msg):
+        self.logger.error(msg, stacklevel=2)
+
+    def critical(self, msg):
+        self.logger.critical(msg, stacklevel=2)
+
+    def setLevel(self, level):
+        self.logger.set_level(level)
+
+
 def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) -> List[int]:
     """
     Parse a schedule string like "1-10,20,!5,e~3" into a sorted list of steps.
@@ -189,3 +256,22 @@ def setup_compute_context(device: Union[torch.device, str] = None, dtype: Union[
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
             print("FP16 accumulation enabled.")
     return device, dtype
+
+
+def string_to_seed(s: str, bits: int = 63) -> int:
+    """
+    Turn any string into a reproducible integer in [0, 2**bits).
+
+    Args:
+        s:           Input string
+        bits:        Number of bits for the final seed (PyTorch accepts up to 63 safely)
+    Returns:
+        A non-negative int < 2**bits
+    """
+    # 1) SHA256 digest of the UTF-8 bytes
+    digest = hashlib.sha256(s.encode("utf-8")).digest()
+    # 2) big integer from those 32 bytes
+    full_int = int.from_bytes(digest, byteorder="big")
+    # 3) reduce it into the desired bit-width (same as full_int % (2**bits))
+    mask = (1 << bits) - 1
+    return full_int & mask

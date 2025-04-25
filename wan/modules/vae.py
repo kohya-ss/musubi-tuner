@@ -1,5 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-import logging
+from blissful_tuner.utils import BlissfulLogger
 import os
 from typing import Optional, Union
 
@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from safetensors.torch import load_file
+logging = BlissfulLogger(__name__, "green")
 
 __all__ = [
     "WanVAE",
