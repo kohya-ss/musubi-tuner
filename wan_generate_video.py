@@ -720,15 +720,21 @@ def prepare_t2v_inputs(
         with torch.no_grad():
             if args.fp8_t5:
                 with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
+                    if args.prompt_weighting:
+                        logger.info("Weighting prompt...")
+                        context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                        context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                    else:
+                        context = text_encoder([args.prompt], device)
+                        context_null = text_encoder([n_prompt], device)
+            else:  # original behavior
+                if args.prompt_weighting:
+                    logger.info("Weighting prompt...")
+                    context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                    context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                else:
                     context = text_encoder([args.prompt], device)
                     context_null = text_encoder([n_prompt], device)
-            elif args.prompt_weighting:
-                logger.info("Weighting prompt...")
-                context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
-                context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
-            else:  # original behavior
-                context = text_encoder([args.prompt], device)
-                context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
         del text_encoder
@@ -854,11 +860,21 @@ def prepare_i2v_inputs(
         with torch.no_grad():
             if args.fp8_t5:
                 with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
+                    if args.prompt_weighting:
+                        logger.info("Weighting prompt...")
+                        context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                        context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                    else:
+                        context = text_encoder([args.prompt], device)
+                        context_null = text_encoder([n_prompt], device)
+            else:  # original behavior
+                if args.prompt_weighting:
+                    logger.info("Weighting prompt...")
+                    context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                    context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                else:
                     context = text_encoder([args.prompt], device)
                     context_null = text_encoder([n_prompt], device)
-            else:
-                context = text_encoder([args.prompt], device)
-                context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
         del text_encoder
