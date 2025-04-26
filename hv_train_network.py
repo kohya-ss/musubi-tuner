@@ -934,7 +934,7 @@ class NetworkTrainer:
         width = sample_parameter.get("width", 256)  # make smaller for faster and memory saving inference
         height = sample_parameter.get("height", 256)
         frame_count = sample_parameter.get("frame_count", 1)
-        guidance_scale = sample_parameter.get("guidance_scale", 6.0)
+        guidance_scale = sample_parameter.get("guidance_scale", self.default_guidance_scale)
         discrete_flow_shift = sample_parameter.get("discrete_flow_shift", 14.5)
         seed = sample_parameter.get("seed")
         prompt: str = sample_parameter.get("prompt", "")
@@ -1015,6 +1015,10 @@ class NetworkTrainer:
         )
 
         # Save video
+        if video is None:
+            logger.error("No video generated / 生成された動画がありません")
+            return
+        
         ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
         num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
         seed_suffix = "" if seed is None else f"_{seed}"
@@ -1050,6 +1054,8 @@ class NetworkTrainer:
 
         self._control_training = False  # HunyuanVideo does not support control training yet
 
+        self.default_guidance_scale = 6.0
+        
     @property
     def i2v_training(self) -> bool:
         return self._i2v_training

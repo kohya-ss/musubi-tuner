@@ -76,6 +76,8 @@ ARCHITECTURE_HUNYUAN_VIDEO = "hv"
 ARCHITECTURE_HUNYUAN_VIDEO_FULL = "hunyuan_video"
 ARCHITECTURE_WAN = "wan"
 ARCHITECTURE_WAN_FULL = "wan"
+ARCHITECTURE_FRAMEPACK = "fp"
+ARCHITECTURE_FRAMEPACK_FULL = "framepack"
 
 
 def glob_images(directory, base="*"):
@@ -109,6 +111,8 @@ def divisible_by(num: int, divisor: int) -> int:
 def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: tuple[int, int]) -> np.ndarray:
     """
     Resize the image to the bucket resolution.
+
+    bucket_reso: **(width, height)**
     """
     is_pil_image = isinstance(image, Image.Image)
     if is_pil_image:
@@ -218,6 +222,41 @@ def save_latent_cache_wan(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_WAN_FULL)
 
 
+def save_latent_cache_framepack(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    latent_indices: torch.Tensor,
+    clean_latents: torch.Tensor,
+    clean_latent_indices: torch.Tensor,
+    clean_latents_2x: torch.Tensor,
+    clean_latent_2x_indices: torch.Tensor,
+    clean_latents_4x: torch.Tensor,
+    clean_latent_4x_indices: torch.Tensor,
+    image_embeddings: torch.Tensor,
+):
+    """FramePack architecture only"""
+    assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    # `latents_xxx` must have {F, H, W} suffix
+    indices_dtype_str = dtype_to_str(latent_indices.dtype)
+    sd[f"image_embeddings_{dtype_str}"] = image_embeddings.detach().cpu()  # image embeddings dtype is same as latents dtype
+    sd[f"latent_indices_{indices_dtype_str}"] = latent_indices.detach().cpu()
+    sd[f"clean_latent_indices_{indices_dtype_str}"] = clean_latent_indices.detach().cpu()
+    sd[f"clean_latent_2x_indices_{indices_dtype_str}"] = clean_latent_2x_indices.detach().cpu()
+    sd[f"clean_latent_4x_indices_{indices_dtype_str}"] = clean_latent_4x_indices.detach().cpu()
+    sd[f"latents_clean_{F}x{H}x{W}_{dtype_str}"] = clean_latents.detach().cpu().contiguous()
+    sd[f"latents_clean_2x_{F}x{H}x{W}_{dtype_str}"] = clean_latents_2x.detach().cpu().contiguous()
+    sd[f"latents_clean_4x_{F}x{H}x{W}_{dtype_str}"] = clean_latents_4x.detach().cpu().contiguous()
+
+    # for key, value in sd.items():
+    #     print(f"{key}: {value.shape}")
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_FRAMEPACK_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -268,6 +307,20 @@ def save_text_encoder_output_cache_wan(item_info: ItemInfo, embed: torch.Tensor)
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_WAN_FULL)
 
 
+def save_text_encoder_output_cache_framepack(
+    item_info: ItemInfo, llama_vec: torch.Tensor, llama_attention_mask: torch.Tensor, clip_l_pooler: torch.Tensor
+):
+    """FramePack architecture only."""
+    sd = {}
+    dtype_str = dtype_to_str(llama_vec.dtype)
+    sd[f"llama_vec_{dtype_str}"] = llama_vec.detach().cpu()
+    sd[f"llama_attention_mask"] = llama_attention_mask.detach().cpu()
+    dtype_str = dtype_to_str(clip_l_pooler.dtype)
+    sd[f"clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FRAMEPACK_FULL)
+
+
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
@@ -307,6 +360,7 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
 class BucketSelector:
     RESOLUTION_STEPS_HUNYUAN = 16
     RESOLUTION_STEPS_WAN = 16
+    RESOLUTION_STEPS_FRAMEPACK = 16
 
     def __init__(
         self, resolution: Tuple[int, int], enable_bucket: bool = True, no_upscale: bool = False, architecture: str = "no_default"
@@ -319,6 +373,8 @@ class BucketSelector:
             self.reso_steps = BucketSelector.RESOLUTION_STEPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_WAN:
             self.reso_steps = BucketSelector.RESOLUTION_STEPS_WAN
+        elif self.architecture == ARCHITECTURE_FRAMEPACK:
+            self.reso_steps = BucketSelector.RESOLUTION_STEPS_FRAMEPACK
         else:
             raise ValueError(f"Invalid architecture: {self.architecture}")
 
@@ -1335,6 +1391,7 @@ class ImageDataset(BaseDataset):
 class VideoDataset(BaseDataset):
     TARGET_FPS_HUNYUAN = 24.0
     TARGET_FPS_WAN = 16.0
+    TARGET_FPS_FRAMEPACK = 30.0
 
     def __init__(
         self,
@@ -1381,6 +1438,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_WAN:
             self.target_fps = VideoDataset.TARGET_FPS_WAN
+        elif self.architecture == ARCHITECTURE_FRAMEPACK:
+            self.target_fps = VideoDataset.TARGET_FPS_FRAMEPACK
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
@@ -1607,7 +1666,7 @@ class VideoDataset(BaseDataset):
             image_width, image_height = map(int, image_size.split("x"))
             image_size = (image_width, image_height)
 
-            frame_pos, frame_count = tokens[-3].split("-")
+            frame_pos, frame_count = tokens[-3].split("-")[:2]  # "00000-000", or optional section index "00000-000-00"
             frame_pos, frame_count = int(frame_pos), int(frame_count)
 
             item_key = "_".join(tokens[:-3])

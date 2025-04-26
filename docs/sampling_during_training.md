@@ -72,8 +72,8 @@ A line starting with `#` is a comment.
 * `--f` specifies the number of frames. The default is 1, which generates a still image.
 * `--d` specifies the seed. The default is random.
 * `--s` specifies the number of steps in generation. The default is 20.
-* `--g` specifies the guidance scale. The default is 6.0, which is the default value during inference of HunyuanVideo. Specify 1.0 for SkyReels V1 models. Ignore this option for Wan2.1 models.
-* `--fs` specifies the discrete flow shift. The default is 14.5, which corresponds to the number of steps 20. In the HunyuanVideo paper, 7.0 is recommended for 50 steps, and 17.0 is recommended for less than 20 steps (e.g. 10).
+* `--g` specifies the embedded guidance scale (not CFG scale). The default is 6.0 for HunyuanVideo, 10.0 for FramePack, which is the default value during inference of each architecture. Specify 1.0 for SkyReels V1 models. Ignore this option for Wan2.1 models.
+* `--fs` specifies the discrete flow shift. The default is 14.5, which corresponds to the number of steps 20. In the HunyuanVideo paper, 7.0 is recommended for 50 steps, and 17.0 is recommended for less than 20 steps (e.g. 10). Ignore this option for FramePack models (it uses 10.0).
 
 If you train I2V models, you must add the following option.
 
@@ -98,8 +98,8 @@ If you train the model with classifier free guidance (such as Wan2.1), you can u
 * `--f` フレーム数を指定します。省略時は1で、静止画を生成します。
 * `--d` シードを指定します。省略時はランダムです。
 * `--s` 生成におけるステップ数を指定します。省略時は20です。
-* `--g` guidance scaleを指定します。省略時は6.0で、HunyuanVideoの推論時のデフォルト値です。
-* `--fs` discrete flow shiftを指定します。省略時は14.5で、ステップ数20の場合に対応した値です。HunyuanVideoの論文では、ステップ数50の場合は7.0、ステップ数20未満（10など）で17.0が推奨されています。
+* `--g` embedded guidance scaleを指定します（CFG scaleではありません）。省略時はHunyuanVideoは6.0、FramePackは10.0で、各アーキテクチャの推論時のデフォルト値です。SkyReels V1モデルの場合は1.0を指定してください。Wan2.1モデルの場合はこのオプションは無視されます。
+* `--fs` discrete flow shiftを指定します。省略時は14.5で、ステップ数20の場合に対応した値です。HunyuanVideoの論文では、ステップ数50の場合は7.0、ステップ数20未満（10など）で17.0が推奨されています。FramePackモデルはこのオプションは無視され、10.0が使用されます。
 
 I2Vモデルを学習する場合、以下のオプションを追加してください。
 

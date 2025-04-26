@@ -7,7 +7,7 @@ import re
 import time
 import math
 import copy
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Tuple, Optional, List, Union, Any, Dict
 
 import torch
@@ -516,7 +516,7 @@ def load_dit_model(
     return model
 
 
-def merge_lora_weights(model: WanModel, args: argparse.Namespace, device: torch.device) -> None:
+def merge_lora_weights(lora_module: ModuleType, model: torch.nn.Module, args: argparse.Namespace, device: torch.device) -> None:
     """merge LoRA weights to the model
 
     Args:
@@ -582,7 +582,7 @@ def merge_lora_weights(model: WanModel, args: argparse.Namespace, device: torch.
             )
             lycoris_net.merge_to(None, model, weights_sd, dtype=None, device=device)
         else:
-            network = lora_wan.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=model, for_inference=True)
+            network = lora_module.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=model, for_inference=True)
             network.merge_to(None, model, weights_sd, device=device, non_blocking=True)
 
         synchronize_device(device)
@@ -1269,7 +1269,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
         # merge LoRA weights
         if args.lora_weight is not None and len(args.lora_weight) > 0:
-            merge_lora_weights(model, args, device)
+            merge_lora_weights(lora_wan, model, args, device)
 
             # if we only want to save the model, we can skip the rest
             if args.save_merged_model:
@@ -1597,7 +1597,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # 5. Merge LoRA weights if needed
     if args.lora_weight is not None and len(args.lora_weight) > 0:
-        merge_lora_weights(model, args, device)
+        merge_lora_weights(lora_wan, model, args, device)
         if args.save_merged_model:
             logger.info("Model merged and saved. Exiting.")
             return
@@ -1769,7 +1769,7 @@ def process_interactive(args: argparse.Namespace) -> None:
 
                     # Merge LoRA weights if needed
                     if args.lora_weight is not None and len(args.lora_weight) > 0:
-                        merge_lora_weights(model, args, device)
+                        merge_lora_weights(lora_wan, model, args, device)
 
                     # Optimize model
                     optimize_model(model, args, device, dit_dtype, dit_weight_dtype)

@@ -65,6 +65,8 @@ class WanNetworkTrainer(NetworkTrainer):
 
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
 
+        self.default_guidance_scale = 1.0  # not used
+
     def process_sample_prompts(
         self,
         args: argparse.Namespace,

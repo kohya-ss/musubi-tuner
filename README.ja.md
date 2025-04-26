@@ -32,9 +32,9 @@
 
 ## はじめに
 
-このリポジトリは、HunyuanVideoおよびWan2.1のLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1のリポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1、FramePackのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1、FramePackのリポジトリとは関係ありません。
 
-Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。
+Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を参照してください。
 
 *リポジトリは開発中です。*
 
@@ -42,6 +42,9 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/04/26
+    - FramePackの推論およびLoRA学習を追加しました。PR [#230](https://github.com/kohya-ss/musubi-tuner/pull/230) 詳細は[FramePackのドキュメント](./docs/framepack.md)を参照してください。
+    
 - 2025/04/18
     - Wan2.1の推論時に、ファイルからプロンプトを読み込んで生成する一括生成モードと、コマンドラインからプロンプトを指定して生成するインタラクティブモードを追加しました。詳細は[こちら](./docs/wan.md#interactive-mode--インタラクティブモード)を参照してください。
 
@@ -55,29 +58,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 - 2025/03/30
     - Wan2.1-FunのControlモデルの学習を実験的に追加しました（未テスト）。[Wan2.1のドキュメント](./docs/wan.md#training--学習)を参照してください。
     - Wan2.1-FunのControlモデルによる推論を実験的にサポートしました。14BのI2VでのControlのみテスト済みです。[Wan2.1のドキュメント](./docs/wan.md#inference--推論)を参照してください。
-
-- 2025/03/27
-    - Wan2.1の推論時に初期ノイズをCPUで生成する`--cpu_noise`オプションを追加しました。これにより同一seed時の結果がComfyUIと同じになる可能性があります（他の設定にもよります）。
-
-- 2025/03/23
-    - latentのキャッシュ時に、実際に学習に使われる画像、動画データをファイルとして保存する `--debug_mode video` オプションを追加しました。PR [#187](https://github.com/kohya-ss/musubi-tuner/pull/187) 詳細は[こちら](#latentの事前キャッシュ)を参照してください。HunyuanVideo、Wan2.1の両方で使用可能です。
-    - Wan2.1の推論時にSkip Layer Guidanceを有効化するオプションを追加しました。PR [#186](https://github.com/kohya-ss/musubi-tuner/pull/186) 詳細は[こちら](./docs/wan.md#skip-layer-guidance)を参照してください。
-    - Wan2.1の推論時にLoRAの適用対象モジュールを正規表現で指定できるようになりました。PR [#185](https://github.com/kohya-ss/musubi-tuner/pull/185) 詳細は[こちら](./docs/wan.md#t2v-inference--t2v推論)を参照してください。
-
-- 2025/03/22
-    - 動画データセットの抽出方法に `full` を追加しました。それぞれの動画の最初から最後までを用います。詳細は[こちら](./dataset/dataset_config.md#frame_extraction-options)を参照してください。
-        - `full`はそれぞれの動画がひとつの完結したモーションの場合にお勧めします。`full`以外の抽出方法は、動画が特定の動作を繰り返している場合にお勧めします。
-    - 動画データセットで`target_frames`に「4\*N+1」以外の値が指定された場合、自動的に「4\*N+1」に変換されるよう修正しました。
-    - データセット設定のドキュメントの誤りを一部修正しました。
-    - Wan2.1の推論時に、CFG (classifier free guidance) を一部のステップでスキップすることで、推論速度を向上させるオプションを追加しました。PR [#180](https://github.com/kohya-ss/musubi-tuner/pull/180) 
-        - `--cfg_skip_mode`と`--cfg_apply_ratio`で設定します。詳細は[こちら](./docs/wan.md#cfg-skip-mode--cfgスキップモード)を参照してください。
-
-- 2025/03/21
-    - Wan2.1の推論時、CLIPに渡される画像が誤ってBGR形式になっていた不具合を修正しました。PR [#176](https://github.com/kohya-ss/musubi-tuner/pull/176) 
-    - Wan2.1の推論時に最後のフレームの画像を指定できるようになりました。PR [#177](https://github.com/kohya-ss/musubi-tuner/pull/177) この機能は実験的なものです。
-        - raindrop313氏の[ComfyUI-WanVideoStartEndFrames](https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames) の実装を参考にしました。raindrop313氏に感謝いたします。なお、実装を完全に再現したものではありませんので、何らかの問題があるかもしれません。
-        - `--end_image_path`に最後のフレームの画像を指定してください。あわせて `--trim_tail_frames`オプションも追加されています。
-        - 詳細は[こちら](./docs/wan.md#i2v-inference--i2v推論)を参照してください。
 
 ### リリースについて
 
@@ -449,5 +429,7 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 `hunyuan_model`ディレクトリ以下のコードは、[HunyuanVideo](https://github.com/Tencent/HunyuanVideo)のコードを一部改変して使用しているため、そちらのライセンスに従います。
 
 `wan`ディレクトリ以下のコードは、[Wan2.1](https://github.com/Wan-Video/Wan2.1)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
+
+`frame_pack`ディレクトリ以下のコードは、[frame_pack](https://github.com/lllyasviel/FramePack)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
 
 他のコードはApache License 2.0に従います。一部Diffusersのコードをコピー、改変して使用しています。

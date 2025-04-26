@@ -1,3 +1,5 @@
+import os
+import re
 import torch
 import json
 import struct
@@ -169,7 +171,7 @@ class MemoryEfficientSafeOpen:
 
 
 def load_safetensors(
-    path: str, device: Union[str, torch.device], disable_mmap: bool = False, dtype: Optional[torch.dtype] = torch.float32
+    path: str, device: Union[str, torch.device], disable_mmap: bool = False, dtype: Optional[torch.dtype] = None
 ) -> dict[str, torch.Tensor]:
     if disable_mmap:
         # return safetensors.torch.load(open(path, "rb").read())
@@ -189,3 +191,31 @@ def load_safetensors(
             for key in state_dict.keys():
                 state_dict[key] = state_dict[key].to(dtype=dtype)
         return state_dict
+
+
+def load_split_weights(
+    file_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False
+) -> Dict[str, torch.Tensor]:
+    """
+    Load split weights from a file. If the file name ends with 00001-of-00004 etc, it will load all files with the same prefix.
+    dtype is as is, no conversion is done.
+    """
+    device = torch.device(device)
+
+    # if the file name ends with 00001-of-00004 etc, we need to load the files with the same prefix
+    basename = os.path.basename(file_path)
+    match = re.match(r"^(.*?)(\d+)-of-(\d+)\.safetensors$", basename)
+    if match:
+        prefix = basename[: match.start(2)]
+        count = int(match.group(3))
+        state_dict = {}
+        for i in range(count):
+            filename = f"{prefix}{i+1:05d}-of-{count:05d}.safetensors"
+            filepath = os.path.join(os.path.dirname(file_path), filename)
+            if os.path.exists(filepath):
+                state_dict.update(load_safetensors(filepath, device=device, disable_mmap=disable_mmap))
+            else:
+                raise FileNotFoundError(f"File {filepath} not found")
+    else:
+        state_dict = load_safetensors(file_path, device=device, disable_mmap=disable_mmap)
+    return state_dict

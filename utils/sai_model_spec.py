@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple, Union
 import safetensors
 from blissful_tuner.utils import BlissfulLogger
 
-from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN
+from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN, ARCHITECTURE_FRAMEPACK
 
 logger = BlissfulLogger(__name__, "green")
 
@@ -58,9 +58,13 @@ ARCH_HUNYUAN_VIDEO = "hunyuan-video"
 # Official Wan2.1 weights does not have sai_model_spec, so we use this as an architecture name
 ARCH_WAN = "wan2.1"
 
+ARCH_FRAMEPACK = "framepack"
+
 ADAPTER_LORA = "lora"
 
 IMPL_HUNYUAN_VIDEO = "https://github.com/Tencent/HunyuanVideo"
+IMPL_WAN = "https://github.com/Wan-Video/Wan2.1"
+IMPL_FRAMEPACK = "https://github.com/lllyasviel/FramePack"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -120,8 +124,13 @@ def build_metadata(
     # arch = ARCH_HUNYUAN_VIDEO
     if architecture == ARCHITECTURE_HUNYUAN_VIDEO:
         arch = ARCH_HUNYUAN_VIDEO
+        impl = IMPL_HUNYUAN_VIDEO
     elif architecture == ARCHITECTURE_WAN:
         arch = ARCH_WAN
+        impl = IMPL_WAN
+    elif architecture == ARCHITECTURE_FRAMEPACK:
+        arch = ARCH_FRAMEPACK
+        impl = IMPL_FRAMEPACK
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 
@@ -129,7 +138,6 @@ def build_metadata(
         arch += f"/{ADAPTER_LORA}"
     metadata["modelspec.architecture"] = arch
 
-    impl = IMPL_HUNYUAN_VIDEO
     metadata["modelspec.implementation"] = impl
 
     if title is None:
