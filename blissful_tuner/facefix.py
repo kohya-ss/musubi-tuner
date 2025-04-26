@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--only_center", action="store_true", help="Only process center face")
     parser.add_argument("--weight", type=float, default=0.5, help="Strength of GFPGAN power")
     parser.add_argument('-s', '--upscale', type=float, default=1, help='The final upsampling scale of the image. Default: 1')
-    parser.add_argument('--detection_model', type=str, default='retinaface_resnet50', help='Face detector. Optional: retinaface_resnet50, retinaface_mobile0.25, YOLOv5l, YOLOv5n, dlib. Default: retinaface_resnet50')
+    parser.add_argument('--detection_model', type=str, default='retinaface_resnet50', help='Face detector. Default: retinaface_resnet50')
     parser.add_argument("--keep_pngs", action="store_true", help="Keep intermediate PNGs as well")
     parser.add_argument("--mode", type=str, default="gfpgan", help="Mode - either gfpgan or codeformer")
     parser.add_argument("--fidelity_weight", type=float, default=0.5)

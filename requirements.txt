@@ -16,6 +16,13 @@ voluptuous==0.15.2
 ftfy==6.3.1
 easydict==1.13
 
+# Blyss's extensions
+basicsr==1.4.2
+facexlib==0.3.0
+ffmpeg-python==0.2.0
+PySide6==6.9.0
+omegaconf==2.3.0
+
 # optional dependencies
 # ascii-magic==2.3.0
 # matplotlib==3.10.0
