@@ -22,6 +22,12 @@ facexlib==0.3.0
 ffmpeg-python==0.2.0
 PySide6==6.9.0
 omegaconf==2.3.0
+cupy==13.4.1
+timm==1.0.15
+yacs==0.1.8
+spandrel==0.4.1
+loguru==0.7.3
+rich==14.0.0
 
 # optional dependencies
 # ascii-magic==2.3.0
