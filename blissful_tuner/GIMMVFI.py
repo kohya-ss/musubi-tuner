@@ -23,12 +23,10 @@ Created on Mon Apr 14 12:23:15 2025
 @author: blyss
 """
 
-import argparse
 import os
-import random
 import torch
 import yaml
-import numpy as np
+import warnings
 from tqdm import tqdm
 from omegaconf import OmegaConf
 
@@ -41,22 +39,9 @@ from gimmvfi.generalizable_INR.flowformer.core.FlowFormer.LatentCostFormer.trans
 from gimmvfi.generalizable_INR.flowformer.configs.submission import get_cfg
 from gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
 from utils import load_torch_file, setup_compute_context
-from video_processing_common import BlissfulVideoProcessor
+from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, set_seed
 from typing import List
-
-
-def set_seed(seed: int = None) -> int:
-    """
-    Sets the random seed for reproducibility.
-    """
-    if seed is None:
-        seed = random.getrandbits(32)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    return seed
+warnings.filterwarnings("ignore")
 
 
 def load_model(model_path: str, device: torch.device, dtype: torch.dtype, mode: str = "gimmvfi_r") -> torch.nn.Module:
@@ -191,22 +176,16 @@ def interpolate(model: torch.nn.Module, frames: List[torch.Tensor], ds_factor: f
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Frame rate interpolation using GIMM-VFI")
-    parser.add_argument("--model", required=True, help="Path to the checkpoint directory")
-    parser.add_argument("--input", required=True, help="Input video file to interpolate")
-    parser.add_argument("--dtype", type=str, default="fp32", help="Datatype to use")
-    parser.add_argument("--output", type=str, default=None, help="Output video file path (no extension), default is same path as input")
+    parser = setup_parser_video_common(description="Frame rate interpolation using GIMM-VFI")
     parser.add_argument("--ds_factor", type=float, default=1.0, help="Downsampling factor")
     parser.add_argument("--mode", type=str, default="gimmvfi_f", help="Model mode: 'gimmvfi_r' or 'gimmvfi_f' for RAFT or FlowFormer version respectively")
     parser.add_argument("--factor", type=int, default=2, help="Interpolation steps between frames")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for reproducibility")
-    parser.add_argument("--keep_pngs", action="store_true", help="Also keep individual frames as PNGs")
     args = parser.parse_args()
     device, dtype = setup_compute_context(None, args.dtype)
     VideoProcessor = BlissfulVideoProcessor(device, dtype)
-    VideoProcessor.prepare_files_and_path(args.input, args.output, "VFI")
+    VideoProcessor.prepare_files_and_path(args.input, args.output, "VFI", args.codec, args.container)
     model = load_model(args.model, device, dtype, args.mode)
-    frames, fps, _, _ = VideoProcessor.load_video_frames(make_rgb=True)
+    frames, fps, _, _ = VideoProcessor.load_frames(make_rgb=True)
     frames = VideoProcessor.np_image_to_tensor(frames)
     new_fps = fps * args.factor  # Adjust the frame rate according to the interpolation
 
@@ -217,7 +196,7 @@ def main():
     interpolate(model, frames, args.ds_factor, args.factor, VideoProcessor)
 
     # Save the interpolated video.
-    VideoProcessor.write_buffered_pngs_to_video(new_fps, None, None, args.keep_pngs)
+    VideoProcessor.write_buffered_frames_to_output(new_fps, args.keep_pngs)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ Created on Wed Apr 23 10:19:19 2025
 @author: blyss
 """
 
-import argparse
 from typing import List
 import torch
 import numpy as np
@@ -16,8 +15,9 @@ from tqdm import tqdm
 
 from swinir.network_swinir import SwinIR
 from spandrel import ImageModelDescriptor, ModelLoader
-from video_processing_common import BlissfulVideoProcessor
-from utils import setup_compute_context, load_torch_file
+from video_processing_common import BlissfulVideoProcessor, set_seed, setup_parser_video_common
+from utils import setup_compute_context, load_torch_file, BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def upscale_frames_swin(
@@ -75,7 +75,7 @@ def load_swin_model(
     Returns:
         SwinIR model in eval() on device and dtype.
     """
-    print(f"Loading SwinIR model ({dtype})…")
+    logger.info(f"Loading SwinIR model ({dtype})…")
     model = SwinIR(
         upscale=4,
         in_chans=3,
@@ -111,7 +111,7 @@ def load_esrgan_model(
     Returns:
         Model ready for inference.
     """
-    print(f"Loading ESRGAN model ({dtype})…")
+    logger.info(f"Loading ESRGAN model ({dtype})…")
     descriptor = ModelLoader().load_from_file(model_path)
     assert isinstance(descriptor, ImageModelDescriptor)
     model = descriptor.model.eval().to(device, dtype)
@@ -122,15 +122,7 @@ def main() -> None:
     """
     Parse CLI args, load input, model, and run upscaling pipeline.
     """
-    parser = argparse.ArgumentParser(
-        description="Video upscaling using SwinIR or ESRGAN models"
-    )
-    parser.add_argument("--model", required=True, help="Path to model checkpoint")
-    parser.add_argument("--input", required=True, help="Input video file")
-    parser.add_argument(
-        "--output", default=None,
-        help="Output file (defaults to <input>_<mode>.mkv)"
-    )
+    parser = setup_parser_video_common(description="Video upscaling using SwinIR or ESRGAN models")
     parser.add_argument(
         "--scale", type=float, default=2,
         help="Final scale multiplier for output resolution"
@@ -139,11 +131,6 @@ def main() -> None:
         "--mode", choices=["swinir", "esrgan"], default="swinir",
         help="Model architecture to use"
     )
-    parser.add_argument(
-        "--dtype", choices=["fp16", "bf16", "fp32"], default="fp32",
-        help="Precision mode for inference"
-    )
-    parser.add_argument("--keep_frames", action="store_true", help="Also keep intermediate PNGs")
     args = parser.parse_args()
     args.mode = args.mode.lower()
     # Map string → torch.dtype
@@ -151,15 +138,15 @@ def main() -> None:
     VideoProcessor = BlissfulVideoProcessor(device, dtype)
     VideoProcessor.prepare_files_and_path(args.input, args.output, args.mode.upper())
 
-    frames, fps, w, h = VideoProcessor.load_video_frames(make_rgb=True)
-
+    frames, fps, w, h = VideoProcessor.load_frames(make_rgb=True)
+    set_seed(args.seed)
     # Load and run model
     if args.mode == "swinir":
         model = load_swin_model(args.model, device, dtype)
         upscale_frames_swin(model, frames, VideoProcessor)
     else:
         model = load_esrgan_model(args.model, device, dtype)
-        print("Processing with ESRGAN...")
+        logger.info("Processing with ESRGAN...")
         for frame in tqdm(frames, desc="Upscaling ESRGAN"):
             inp = VideoProcessor.np_image_to_tensor(frame)
             with torch.no_grad():
@@ -167,10 +154,10 @@ def main() -> None:
             VideoProcessor.write_np_or_tensor_to_png(sr)
 
     # Write video
-    print("Encoding output video...")
+    logger.info("Encoding output video...")
     out_w, out_h = int(w * args.scale), int(h * args.scale)
-    VideoProcessor.write_buffered_pngs_to_video(fps, out_w, out_h, args.keep_frames)
-    print("Done!")
+    VideoProcessor.write_buffered_frames_to_output(fps, args.keep_pngs, (out_w, out_h))
+    logger.info("Done!")
 
 
 if __name__ == "__main__":

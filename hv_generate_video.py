@@ -41,11 +41,11 @@ from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from blissful_tuner.utils import parse_scheduled_cfg, string_to_seed
+from blissful_tuner.video_processing_common import BlissfulVideoProcessor
 from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 def clean_memory_on_device(device):
@@ -113,7 +113,7 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
     stream.width = width
     stream.height = height
     stream.pix_fmt = pixel_format
-    stream.bit_rate = 16000000  # MEGAbit/s
+    stream.bit_rate = 8000000  # 8Mbit/s
 
     for frame_array in outputs:
         frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
@@ -153,49 +153,38 @@ def save_images_grid(
         image.save(image_path)
 
 
-def save_videos_grid_prores(
-    videos: torch.Tensor, output_video: str, rescale: bool = False, fps: int = 24, n_rows: int = 1, keep_frames: bool = False
+def save_videos_grid_advanced(
+    videos: torch.Tensor,
+    output_video: str,
+    codec: str,
+    container: str,
+    rescale: bool = False,
+    fps: int = 24,
+    n_rows: int = 1,
+    keep_frames: bool = False
 ):
+
+    # 1) rearrange so we iterate over time
     videos = rearrange(videos, "b c t h w -> t b c h w")
+
+    VideoProcessor = BlissfulVideoProcessor()
+    VideoProcessor.prepare_files_and_path(
+        input_file_path=None,
+        output_file_path=output_video,
+        codec=codec,
+        container=container
+    )
+
     outputs = []
     for video in videos:
-        video = torchvision.utils.make_grid(video, nrow=n_rows)
-        video = video.transpose(0, 1).transpose(1, 2).squeeze(-1)
-        if rescale:
-            video = (video + 1.0) / 2.0  # -1,1 -> 0,1
-        video = torch.clamp(video, 0, 1)
-        video = (video * 255).numpy().astype(np.uint8)
-        outputs.append(video)
-    output_dir = os.path.dirname(output_video)
-    os.makedirs(output_dir, exist_ok=True)
-    frame_dir = os.path.join(output_dir, "out_frames")
-    os.makedirs(frame_dir, exist_ok=True)
-    for idx, img in enumerate(outputs):
-        image_path = os.path.join(frame_dir, f"{idx:04d}.png")
-        image = Image.fromarray(img)
-        image.save(image_path)
-    # Run ffmpeg command to create video from the saved frames.
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-framerate",
-            f"{fps}",
-            "-i",
-            os.path.join(frame_dir, "%04d.png"),
-            "-c:v",
-            "prores_ks",
-            "-profile:v", "3",
-            "-pix_fmt",
-            "yuv422p10le",
-            "-colorspace", "1",
-            "-color_primaries", "1",
-            "-color_trc", "1",
-            output_video,
-        ],
-        check=True
-    )
-    if not keep_frames:
-        shutil.rmtree(frame_dir)
+        # 2) tile frames into one grid [C, H, W]
+        grid = torchvision.utils.make_grid(video, nrow=n_rows)
+        # 3) convert to an OpenCV-ready numpy array
+        np_img = VideoProcessor.tensor_to_np_image(grid, rescale=rescale)
+        outputs.append(np_img)
+
+    # 4) write them out
+    VideoProcessor.write_np_images_to_output(outputs, fps, keep_frames)
 
 # region Encoding prompt
 
@@ -524,37 +513,9 @@ def parse_args():
         default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
         help="Torch.compile settings",
     )
-    parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2.")
-    parser.add_argument("--apply_final_norm", type=bool, default=False, help="Apply final norm for LLM. Default is False.")
-    parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
-    parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
-    parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
-    parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization")
-    parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
-    parser.add_argument(
-        "--cfg_schedule",
-        type=str,
-        help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
-    )
-    parser.add_argument("--prompt_2", type=str, required=False, help="Optional different prompt for CLIP")
-    parser.add_argument(
-        "--te_multiplier",
-        nargs=2,
-        metavar=("llm_multiplier", "clip_multiplier"),
-        help="Scale clip and llm influence"
-    )
-    parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
-    parser.add_argument("--prores_keep_pngs", action="store_true", help="Keep intermediate frame directory(PNGs) when saving with prores")
+    parser = add_blissful_args(parser, mode="hunyuan")
     args = parser.parse_args()
-    if args.seed is not None:
-        try:
-            args.seed = int(args.seed)
-        except ValueError:
-            string_seed = args.seed
-            args.seed = string_to_seed(args.seed)
-            logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
-    if args.cfg_schedule:
-        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
+    args = parse_blissful_args(args)
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
@@ -1067,8 +1028,8 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            if args.prores:
-                save_videos_grid_prores(sample, video_path.replace(".mp4", ".mkv"), fps=args.fps, keep_frames=args.prores_keep_pngs)
+            if args.codec is not None:
+                save_videos_grid_advanced(sample, video_path, args.codec, args.container, fps=args.fps, keep_frames=args.keep_pngs)
             else:
                 save_videos_grid(sample, video_path, fps=args.fps)
             logger.info(f"Sample save to: {video_path}")

@@ -4,25 +4,19 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
 from blissful_tuner.utils import BlissfulLogger
-
 from utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
-
-logger = BlissfulLogger(__name__, "green")
- 
-
 from einops import repeat
 from utils.device_utils import clean_memory_on_device
 from .attention import flash_attention
-from utils.device_utils import clean_memory_on_device
 from modules.custom_offloading_utils import ModelOffloader
 from modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
-
+logger = BlissfulLogger(__name__, "green")
 __all__ = ["WanModel"]
+
 
 def sinusoidal_embedding_1d(dim, position):
     # preprocess

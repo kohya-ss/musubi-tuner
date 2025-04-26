@@ -40,11 +40,12 @@ except:
 
 from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
-from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_prores, synchronize_device
+from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_advanced, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
-from blissful_tuner.utils import parse_scheduled_cfg, add_noise_to_reference_video, string_to_seed, BlissfulLogger
+from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
 from blissful_tuner.prompt_weighting import get_weighted_prompt_embeds_t5
+from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 import threading
 from dataset.image_video_dataset import load_video
 
@@ -193,33 +194,13 @@ def parse_args() -> argparse.Namespace:
         default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
         help="Torch.compile settings",
     )
-    parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
-    parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
-    parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
-    parser.add_argument(
-        "--cfg_schedule",
-        type=str,
-        help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
-    )
-    parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
-    parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps.")
-    parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
-    parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 6 is good for Wan. Only 'comfy' rope_func supports this!")
-    parser.add_argument("--prores", action="store_true", help="Save video as Apple ProRes(perceptually lossless) instead of MP4")
-    parser.add_argument("--prores_keep_pngs", action="store_true", help="Keep intermediate frame directory(PNGs) when saving with prores")
+
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
-    parser.add_argument("--noise_aug_strength", type=float, default=0.0, help="Additional multiplier for i2v noise, higher might help motion/quality")
-    parser.add_argument("--prompt_weighting", action="store_true", help="Enable (AUTOMATIC1111) [style] (prompt weighting:1.2)")
+    parser = add_blissful_args(parser, mode="wan")
     args = parser.parse_args()
-    if args.seed is not None:
-        try:
-            args.seed = int(args.seed)
-        except ValueError:
-            string_seed = args.seed
-            args.seed = string_to_seed(args.seed)
-            logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
+    args = parse_blissful_args(args)
     # Validate arguments
     if args.from_file and args.interactive:
         raise ValueError("Cannot use both --from_file and --interactive at the same time")
@@ -230,8 +211,6 @@ def parse_args() -> argparse.Namespace:
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
-    if args.cfg_schedule:
-        args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
 
     return args
 
@@ -1412,8 +1391,8 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
     video = video.unsqueeze(0)
-    if args.prores:
-        save_videos_grid_prores(video, video_path.replace(".mp4", ".mkv"), fps=args.fps, rescale=True, keep_frames=args.prores_keep_pngs)
+    if args.codec is not None:
+        save_videos_grid_advanced(video, video_path, args.codec, args.container, rescale=True, fps=args.fps, keep_frames=args.keep_pngs)
     else:
         save_videos_grid(video, video_path, fps=args.fps, rescale=True)
     logger.info(f"Video saved to: {video_path}")
