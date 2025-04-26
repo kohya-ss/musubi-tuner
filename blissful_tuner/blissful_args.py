@@ -7,7 +7,7 @@ Created on Sat Apr 26 15:11:58 2025
 """
 import argparse
 from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg
-logger = BlissfulLogger(__name__, "green")
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> argparse.ArgumentParser:

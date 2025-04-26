@@ -15,7 +15,7 @@ from .taehv import TAEHV
 from .utils import load_torch_file
 from blissful_tuner.utils import BlissfulLogger
 
-logger = BlissfulLogger(__name__, "green")
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 class LatentPreviewer():

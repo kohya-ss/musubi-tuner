@@ -12,7 +12,7 @@ import torch
 import re
 from typing import Tuple, List
 from blissful_tuner.utils import BlissfulLogger
-logger = BlissfulLogger(__name__, "green")
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def get_weighted_prompt_embeds_t5(

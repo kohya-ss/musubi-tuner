@@ -40,13 +40,13 @@ except:
 
 from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
-from hv_generate_video import save_images_grid, save_videos_grid, save_videos_grid_advanced, synchronize_device
+from hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
 from blissful_tuner.prompt_weighting import get_weighted_prompt_embeds_t5
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
-import threading
+from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from dataset.image_video_dataset import load_video
 
 logger = BlissfulLogger(__name__, "green")

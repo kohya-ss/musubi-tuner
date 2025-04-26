@@ -13,6 +13,8 @@ import os
 import random
 import shutil
 import subprocess
+from einops import rearrange
+import torchvision
 from typing import List, Tuple, Union, Optional
 from PIL import Image, UnidentifiedImageError
 import cv2
@@ -25,7 +27,7 @@ except ImportError:  # This is needed so we can import either within blissful_tu
     from utils import BlissfulLogger, string_to_seed
 
 
-logger = BlissfulLogger(__name__, "green")
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def set_seed(seed: Union[int, str] = None) -> int:
@@ -396,3 +398,37 @@ class BlissfulVideoProcessor:
             ]
         else:
             raise ValueError(f"Unsupported codec: {self.codec}")
+
+
+def save_videos_grid_advanced(
+    videos: torch.Tensor,
+    output_video: str,
+    codec: str,
+    container: str,
+    rescale: bool = False,
+    fps: int = 24,
+    n_rows: int = 1,
+    keep_frames: bool = False
+):
+
+    # 1) rearrange so we iterate over time
+    videos = rearrange(videos, "b c t h w -> t b c h w")
+
+    VideoProcessor = BlissfulVideoProcessor()
+    VideoProcessor.prepare_files_and_path(
+        input_file_path=None,
+        output_file_path=output_video,
+        codec=codec,
+        container=container
+    )
+
+    outputs = []
+    for video in videos:
+        # 2) tile frames into one grid [C, H, W]
+        grid = torchvision.utils.make_grid(video, nrow=n_rows)
+        # 3) convert to an OpenCV-ready numpy array
+        np_img = VideoProcessor.tensor_to_np_image(grid, rescale=rescale)
+        outputs.append(np_img)
+
+    # 4) write them out
+    VideoProcessor.write_np_images_to_output(outputs, fps, keep_frames)

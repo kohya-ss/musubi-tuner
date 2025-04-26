@@ -17,7 +17,7 @@ from swinir.network_swinir import SwinIR
 from spandrel import ImageModelDescriptor, ModelLoader
 from video_processing_common import BlissfulVideoProcessor, set_seed, setup_parser_video_common
 from utils import setup_compute_context, load_torch_file, BlissfulLogger
-logger = BlissfulLogger(__name__, "green")
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def upscale_frames_swin(

@@ -6,7 +6,7 @@ from blissful_tuner.utils import BlissfulLogger
 
 from tqdm import tqdm
 
-logger = BlissfulLogger(__name__, "green")
+logger = BlissfulLogger(__name__, "#8e00ed")
  
 
 

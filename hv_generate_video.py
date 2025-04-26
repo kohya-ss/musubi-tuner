@@ -1,13 +1,9 @@
 import argparse
 from datetime import datetime
-from pathlib import Path
 import random
-import sys
 import os
 import time
-from typing import Optional, Union
-import shutil
-import subprocess
+from typing import Union
 import numpy as np
 import torch
 import torchvision
@@ -20,7 +16,6 @@ from einops import rearrange
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from PIL import Image
-import threading
 from hunyuan_model import vae
 from hunyuan_model.text_encoder import TextEncoder
 from hunyuan_model.text_encoder import PROMPT_TEMPLATE
@@ -41,7 +36,7 @@ from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from blissful_tuner.video_processing_common import BlissfulVideoProcessor
+from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from blissful_tuner.utils import BlissfulLogger
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 
@@ -152,39 +147,6 @@ def save_images_grid(
         image = Image.fromarray(x)
         image.save(image_path)
 
-
-def save_videos_grid_advanced(
-    videos: torch.Tensor,
-    output_video: str,
-    codec: str,
-    container: str,
-    rescale: bool = False,
-    fps: int = 24,
-    n_rows: int = 1,
-    keep_frames: bool = False
-):
-
-    # 1) rearrange so we iterate over time
-    videos = rearrange(videos, "b c t h w -> t b c h w")
-
-    VideoProcessor = BlissfulVideoProcessor()
-    VideoProcessor.prepare_files_and_path(
-        input_file_path=None,
-        output_file_path=output_video,
-        codec=codec,
-        container=container
-    )
-
-    outputs = []
-    for video in videos:
-        # 2) tile frames into one grid [C, H, W]
-        grid = torchvision.utils.make_grid(video, nrow=n_rows)
-        # 3) convert to an OpenCV-ready numpy array
-        np_img = VideoProcessor.tensor_to_np_image(grid, rescale=rescale)
-        outputs.append(np_img)
-
-    # 4) write them out
-    VideoProcessor.write_np_images_to_output(outputs, fps, keep_frames)
 
 # region Encoding prompt
 

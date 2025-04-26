@@ -2605,7 +2605,6 @@ def setup_parser_common() -> argparse.ArgumentParser:
         action="store_true",
         help="upload to huggingface asynchronously / huggingfaceに非同期でアップロードする",
     )
-    parser.add_argument("--fp8_scaled_hunyuan", action="store_true")
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
@@ -2665,7 +2664,7 @@ def hv_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
     )
-    parser.add_argument("--fp8_scaled", action="store_true")
+    parser.add_argument("--fp8_scaled_hunyuan", action="store_true", help="FP8 scaled for Hunyuan")
     return parser
 
 

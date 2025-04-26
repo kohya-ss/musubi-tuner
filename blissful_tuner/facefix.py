@@ -8,7 +8,7 @@ from codeformer.basicsr.utils.registry import ARCH_REGISTRY
 from basicsr.utils import img2tensor, tensor2img
 from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, set_seed
 from utils import BlissfulLogger
-logger = BlissfulLogger(__name__, "green")
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def main():
