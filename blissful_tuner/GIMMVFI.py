@@ -24,9 +24,10 @@ Created on Mon Apr 14 12:23:15 2025
 """
 
 import os
+import warnings
+from typing import List
 import torch
 import yaml
-import warnings
 from tqdm import tqdm
 from omegaconf import OmegaConf
 
@@ -40,7 +41,6 @@ from gimmvfi.generalizable_INR.flowformer.configs.submission import get_cfg
 from gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
 from utils import load_torch_file, setup_compute_context
 from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, set_seed
-from typing import List
 warnings.filterwarnings("ignore")
 
 

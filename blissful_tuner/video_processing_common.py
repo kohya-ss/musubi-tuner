@@ -8,20 +8,20 @@ Created on Thu Apr 24 11:29:37 2025
 Author: Blyss
 """
 import argparse
-from rich_argparse import RichHelpFormatter
 import glob
 import os
 import random
 import shutil
 import subprocess
+from pathlib import Path
+from typing import List, Tuple, Union, Optional
 from einops import rearrange
 import torchvision
-from typing import List, Tuple, Union, Optional
+from rich_argparse import RichHelpFormatter
 from PIL import Image, UnidentifiedImageError
 import cv2
 import numpy as np
 import torch
-from pathlib import Path
 try:
     from blissful_tuner.utils import BlissfulLogger, string_to_seed
 except ImportError:  # This is needed so we can import either within blissful_tuner directory or base musubi directory
@@ -51,6 +51,7 @@ def set_seed(seed: Union[int, str] = None) -> int:
 
 
 def setup_parser_video_common(description: Optional[str] = None) -> argparse.ArgumentParser:
+    "Common function for setting up the parser for GIMM-VFI, upscaler, and face fix"
     parser = argparse.ArgumentParser(description=description, formatter_class=RichHelpFormatter)
     parser.add_argument("--model", required=True, help="Path to the model(directory for GIMM-VFI, .safetensors otherwise)")
     parser.add_argument("--input", required=True, help="Input video/image to process")
@@ -141,7 +142,7 @@ class BlissfulVideoProcessor:
                 raise ValueError("Invalid container format {container}! Expected 'mkv' or 'mp4'!")
         if input_file_path is not None:
             basename = os.path.basename(input_file_path)
-            name, ext = os.path.splitext(basename)
+            name, _ = os.path.splitext(basename)
             output_dir = os.path.dirname(input_file_path)
             is_image = _is_image_file(input_file_path)
             if is_image:
@@ -244,8 +245,7 @@ class BlissfulVideoProcessor:
 
         if isinstance(tensor, torch.Tensor):
             return _convert(tensor)
-        else:
-            return [_convert(t) for t in tensor]
+        return [_convert(t) for t in tensor]
 
     def load_frames(
         self,
@@ -381,7 +381,7 @@ class BlissfulVideoProcessor:
                 "-color_primaries", "1",
                 "-color_trc", "1",
             ]
-        elif self.codec == "h264":
+        if self.codec == "h264":
             # libx264
             return [
                 "-c:v", "libx264",
@@ -389,7 +389,7 @@ class BlissfulVideoProcessor:
                 "-crf", "16",
                 "-pix_fmt", "yuv420p",
             ]
-        elif self.codec == "h265":
+        if self.codec == "h265":
             # libx265
             return [
                 "-c:v", "libx265",
@@ -397,8 +397,7 @@ class BlissfulVideoProcessor:
                 "-crf", "16",
                 "-pix_fmt", "yuv420p",
             ]
-        else:
-            raise ValueError(f"Unsupported codec: {self.codec}")
+        raise ValueError(f"Unsupported codec: {self.codec}")
 
 
 def save_videos_grid_advanced(
@@ -411,6 +410,7 @@ def save_videos_grid_advanced(
     n_rows: int = 1,
     keep_frames: bool = False
 ):
+    "Function for saving Musubi Tuner outputs with more codec and container types"
 
     # 1) rearrange so we iterate over time
     videos = rearrange(videos, "b c t h w -> t b c h w")

@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Face restoration for Blissful Tuner Extension
+
+License: Apache 2.0
+Created on Wed Apr 23 10:19:19 2025
+@author: blyss
+"""
+
 from tqdm import tqdm
 from gfpgan import GFPGANer
 import torch
@@ -60,7 +69,7 @@ def main():
             use_parse=True,
             device=device)
 
-        for i, frame in enumerate(tqdm(frames)):
+        for frame in tqdm(frames):
             # clean all the intermediate results to process the next image
             face_helper.clean_all()
             face_helper.read_image(frame)
@@ -70,7 +79,7 @@ def main():
             # align and warp each face
             face_helper.align_warp_face()
             # face restoration for each cropped face
-            for idx, cropped_face in enumerate(face_helper.cropped_faces):
+            for cropped_face in face_helper.cropped_faces:
                 # prepare data
                 cropped_face_t = img2tensor(cropped_face / 255., bgr2rgb=True, float32=True)
                 normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
