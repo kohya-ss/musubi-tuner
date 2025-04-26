@@ -8,6 +8,7 @@ Created on Thu Apr 24 11:29:37 2025
 Author: Blyss
 """
 import argparse
+from rich_argparse import RichHelpFormatter
 import glob
 import os
 import random
@@ -50,7 +51,7 @@ def set_seed(seed: Union[int, str] = None) -> int:
 
 
 def setup_parser_video_common(description: Optional[str] = None) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=description)
+    parser = argparse.ArgumentParser(description=description, formatter_class=RichHelpFormatter)
     parser.add_argument("--model", required=True, help="Path to the model(directory for GIMM-VFI, .safetensors otherwise)")
     parser.add_argument("--input", required=True, help="Input video/image to process")
     parser.add_argument("--dtype", type=str, default="fp32", help="Datatype to use")

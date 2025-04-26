@@ -29,7 +29,7 @@ try:
     from lycoris.kohya import create_network_from_weights
 except:
     pass
-
+from rich_argparse import RichHelpFormatter
 from convert_lora import convert_from_diffusers
 from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
@@ -388,7 +388,7 @@ def decode_latents(args, latents, device):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="HunyuanVideo inference script")
+    parser = argparse.ArgumentParser(description="HunyuanVideo inference script", formatter_class=RichHelpFormatter)
 
     parser.add_argument("--dit", type=str, required=True, help="DiT checkpoint path or directory")
     parser.add_argument(

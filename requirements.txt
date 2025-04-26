@@ -28,6 +28,7 @@ yacs==0.1.8
 spandrel==0.4.1
 loguru==0.7.3
 rich==14.0.0
+rich-argparse==1.7.0
 
 # optional dependencies
 # ascii-magic==2.3.0

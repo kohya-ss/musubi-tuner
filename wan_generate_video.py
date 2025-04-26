@@ -9,7 +9,7 @@ import math
 import copy
 from types import ModuleType, SimpleNamespace
 from typing import Tuple, Optional, List, Union, Any, Dict
-
+from rich_argparse import RichHelpFormatter
 import torch
 import accelerate
 from accelerate import Accelerator
@@ -64,7 +64,7 @@ class GenerationSettings:
 
 def parse_args() -> argparse.Namespace:
     """parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Wan 2.1 inference script")
+    parser = argparse.ArgumentParser(description="Wan 2.1 inference script", formatter_class=RichHelpFormatter)
 
     # WAN arguments
     parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")

@@ -18,7 +18,7 @@ import accelerate
 import numpy as np
 from packaging.version import Version
 from PIL import Image
-
+from rich_argparse import RichHelpFormatter
 import huggingface_hub
 import toml
 
@@ -2048,7 +2048,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         except ValueError:
             raise argparse.ArgumentTypeError(f"'{value}' is not an int or float")
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
 
     # general settings
     parser.add_argument(

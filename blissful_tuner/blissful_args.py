@@ -9,6 +9,27 @@ import argparse
 from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg
 logger = BlissfulLogger(__name__, "#8e00ed")
 
+CFG_SCHEDULE_HELP = """
+Comma-separated list of steps/ranges where CFG should be applied.
+
+You can specify:
+- Single steps (e.g., '5')
+- Ranges (e.g., '1-10')
+- Modulus patterns (e.g., 'e~2' for every 2 steps)
+- Guidance scale overrides (e.g., '1-10:5.0')
+
+Example schedule:
+  'e~2:6.4, 1-10, 46-50'
+
+This would apply:
+- Default CFG scale for steps 1-10 and 46-50
+- 6.4 CFG scale every 2 steps outside that range
+- No CFG otherwise
+
+You can exclude steps using '!', e.g., '!32' skips step 32.
+Note: The list is processed left to right, so modulus ranges should come first and exclusions at the end!
+"""
+
 
 def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> argparse.ArgumentParser:
     if mode == "wan":
@@ -37,17 +58,17 @@ def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> arg
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument("--keep_pngs", action="store_true", help="Also keep individual frames as PNGs")
     parser.add_argument(
-        "--cfg_schedule",
-        type=str,
-        help="Comma-separated list of steps/ranges where CFG should be applied (e.g. '1-10,20,40-50')."
-    )
-    parser.add_argument(
         "--codec", choices=["prores", "h264", "h265"], default=None,
         help="Codec to use, choose from 'prores', 'h264', or 'h265'"
     )
     parser.add_argument(
         "--container", choices=["mkv", "mp4"], default="mkv",
         help="Container format to use, choose from 'mkv' or 'mp4'. Note prores can only go in MKV!"
+    )
+    parser.add_argument(
+        "--cfg_schedule",
+        type=str,
+        help=CFG_SCHEDULE_HELP
     )
     return parser
 

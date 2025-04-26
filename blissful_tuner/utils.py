@@ -72,7 +72,6 @@ def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None) -> to
 
 
 # Below here, Blyss wrote it!
-
 class BlissfulLogger:
     def __init__(self, logging_source, log_color, do_announce=False):
         logging_source = f"{logging_source}"
