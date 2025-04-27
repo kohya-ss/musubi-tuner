@@ -302,7 +302,7 @@ def string_to_seed(s: str, bits: int = 63) -> int:
     mask = (1 << bits) - 1
     algo = 0
     for i, char in enumerate(s):
-        char_val = ord(char)
+        char_val = ord(char)  # This logic actually likely makes the randomness slightly LESS random but I dunno it feels better than just using the hash...
         if i % 2 == 0:
             algo *= char_val
         elif i % 3 == 0:
