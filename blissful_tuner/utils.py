@@ -19,9 +19,9 @@ from rich.logging import RichHandler
 # Adapted from ComfyUI
 def load_torch_file(
     ckpt: str,
-    safe_load: bool = True,
-    device: Union[str, torch.device] = None,
-    return_metadata: bool = False
+    safe_load: Optional[bool] = True,
+    device: Optional[Union[str, torch.device]] = None,
+    return_metadata: Optional[bool] = False
 ) -> Union[
     Dict[str, torch.Tensor],
     Tuple[Dict[str, torch.Tensor], Optional[Dict[str, str]]]
@@ -63,7 +63,7 @@ def load_torch_file(
 
 
 # Adapted from WanVideoWrapper
-def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None) -> torch.Tensor:
+def add_noise_to_reference_video(image: torch.Tensor, ratio: Optional[float] = None) -> torch.Tensor:
     sigma = torch.ones((image.shape[0],)).to(image.device, image.dtype) * ratio
     image_noise = torch.randn_like(image) * sigma[:, None, None, None]
     image_noise = torch.where(image == -1, torch.zeros_like(image), image_noise)
@@ -73,7 +73,7 @@ def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None) -> to
 
 # Below here, Blyss wrote it!
 class BlissfulLogger:
-    def __init__(self, logging_source, log_color, do_announce=False):
+    def __init__(self, logging_source: str, log_color: str, do_announce: Optional[bool] = False):
         logging_source = f"{logging_source}"
         self.logging_source = "{:<8}".format(logging_source)
         self.log_color = log_color
@@ -222,7 +222,7 @@ def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) ->
     return guidance_scale_dict
 
 
-def setup_compute_context(device: Union[torch.device, str] = None, dtype: Union[torch.dtype, str] = None) -> Tuple[torch.device, torch.dtype]:
+def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dtype: Optional[Union[torch.dtype, str]] = None) -> Tuple[torch.device, torch.dtype]:
     dtype_mapping = {
         "fp16": torch.float16,
         "float16": torch.float16,
@@ -259,7 +259,7 @@ def setup_compute_context(device: Union[torch.device, str] = None, dtype: Union[
 
 def string_to_seed(s: str, bits: int = 63) -> int:
     """
-    Turn any string into a reproducible integer in [0, 2**bits).
+    Turn any string into a reproducible integer in [0, 2**bits) with a hash and some other logic.
 
     Args:
         s:           Input string
@@ -267,10 +267,19 @@ def string_to_seed(s: str, bits: int = 63) -> int:
     Returns:
         A non-negative int < 2**bits
     """
-    # 1) SHA256 digest of the UTF-8 bytes
     digest = hashlib.sha256(s.encode("utf-8")).digest()
-    # 2) big integer from those 32 bytes
-    full_int = int.from_bytes(digest, byteorder="big")
-    # 3) reduce it into the desired bit-width (same as full_int % (2**bits))
+    crypto = int.from_bytes(digest, byteorder="big")
     mask = (1 << bits) - 1
-    return full_int & mask
+    algo = 0
+    for i, char in enumerate(s):
+        char_val = ord(char)
+        if i % 2 == 0:
+            algo *= char_val
+        elif i % 3 == 0:
+            algo -= char_val
+        elif i % 5 == 0:
+            algo /= char_val
+        else:
+            algo += char_val
+    seed = ((int(algo) + crypto) // 2) & mask
+    return seed
