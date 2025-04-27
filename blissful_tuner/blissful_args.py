@@ -37,10 +37,7 @@ def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> arg
     if mode == "wan":
         parser.add_argument("--noise_aug_strength", type=float, default=0.0, help="Additional multiplier for i2v noise, higher might help motion/quality")
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (AUTOMATIC1111) [style] (prompt weighting:1.2)")
-        parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
-        parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps.")
         parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
-        parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 6 is good for Wan. Only 'comfy' rope_func supports this!")
 
     elif mode == "hunyuan":
         parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2.")
@@ -55,6 +52,9 @@ def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> arg
             help="Scale clip and llm influence"
         )
     # Common
+    parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 4 is good for Hunyuan, 6 is good for Wan. Only 'comfy' rope_func supports this with Wan!")
+    parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
+    parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps.")
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch Nightly")
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps")
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
@@ -87,7 +87,11 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
     if hasattr(args, "riflex_index"):
         if args.riflex_index != 0:
-            if args.rope_func.lower() != "comfy":
-                logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
-                raise ValueError("RIFLEx can only be used with rope_func =='comfy'!")
+            if hasattr(args, "rope_func"):
+                if args.rope_func.lower() != "comfy":
+                    logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
+                    raise ValueError("RIFLEx can only be used with rope_func =='comfy'!")
+    if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
+        if args.guidance_scale == 1 and not args.cfg_schedule:
+            logger.warning("Requested CFGZero* but CFG is not enabled so it will have no effect!")
     return args
