@@ -5,6 +5,7 @@
 ## 目次
 
 - [はじめに](#はじめに)
+    - [スポンサー募集のお知らせ](#スポンサー募集のお知らせ)
     - [最近の更新](#最近の更新)
     - [リリースについて](#リリースについて)
 - [概要](#概要)
@@ -37,6 +38,10 @@
 Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を参照してください。
 
 *リポジトリは開発中です。*
+
+### スポンサー募集のお知らせ
+
+このプロジェクトがお役に立ったなら、ご支援いただけると嬉しく思います。 [GitHub Sponsors](https://github.com/sponsors/kohya-ss/)で受け付けています。
 
 ### 最近の更新
 
@@ -99,7 +104,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-オプションとして、FlashAttention、SageAttention（推論にのみ使用、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
+オプションとして、FlashAttention、SageAttention（**推論にのみ使用できます**、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
 
 また、`ascii-magic`（データセットの確認に使用）、`matplotlib`（timestepsの可視化に使用）、`tensorboard`（学習ログの記録に使用）を必要に応じてインストールしてください。
 
@@ -250,7 +255,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 （block swapのアイデアは2kpr氏の実装に基づくものです。2kpr氏にあらためて感謝します。）
 
-`--sdpa`でPyTorchのscaled dot product attentionを使用します。`--flash_attn`で[FlashAttention]:(https://github.com/Dao-AILab/flash-attention)を使用します。`--xformers`でxformersの利用も可能ですが、xformersを使う場合は`--split_attn`を指定してください。`--sage_attn`でSageAttentionを使用しますが、SageAttentionは現時点では学習に未対応のため、正しく動作しません。
+`--sdpa`でPyTorchのscaled dot product attentionを使用します。`--flash_attn`で[FlashAttention]:(https://github.com/Dao-AILab/flash-attention)を使用します。`--xformers`でxformersの利用も可能ですが、xformersを使う場合は`--split_attn`を指定してください。`--sage_attn`でSageAttentionを使用しますが、SageAttentionは現時点では学習に未対応のため、エラーが発生します。
 
 `--split_attn`を指定すると、attentionを分割して処理します。速度が多少低下しますが、VRAM使用量はわずかに減ります。
 

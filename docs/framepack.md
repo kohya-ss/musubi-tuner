@@ -198,6 +198,7 @@ Key differences from HunyuanVideo training:
 -   Memory saving options like `--fp8_base` (for DiT) and `--fp8_llm` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8_base` for DiT.
 -   `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size` options are available for the VAE to prevent out-of-memory during sampling (similar to caching).
 -  `--gradient_checkpointing` is available for memory savings.
+- If you encounter an error when the batch size is greater than 1 (especially when specifying `--sdpa` or `--xformers`, it will always result in an error), please specify `--split_attn`.
 <!-- -   Use `convert_lora.py` for converting the LoRA weights after training, similar to HunyuanVideo. -->
 
 Training settings (learning rate, optimizers, etc.) are experimental. Feedback is welcome.
@@ -218,6 +219,7 @@ HunyuanVideoの学習との主な違いは次のとおりです。
 -  `--fp8_base`（DiT用）や`--fp8_llm`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_base`指定時は、`--fp8_scaled`を使用することをお勧めします。
 -  サンプル生成時にメモリ不足を防ぐため、VAE用の`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`オプションが利用可能です（キャッシング時と同様）。
 -  メモリ節約のために`--gradient_checkpointing`が利用可能です。
+- バッチサイズが1より大きい場合にエラーが出た時には（特に`--sdpa`や`--xformers`を指定すると必ずエラーになります。）、`--split_attn`を指定してください。
 
 </details>
 

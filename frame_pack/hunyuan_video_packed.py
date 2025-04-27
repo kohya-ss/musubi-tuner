@@ -796,7 +796,7 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         x = flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         del q, k, v  # free memory
     else:
-        raise NotImplementedError("No Attn Installed!")
+        raise NotImplementedError("No Attn Installed or batch_size > 1 is not supported in this configuration. Try `--split_attn`.")
     x = x.view(batch_size, max_seqlen_q, *x.shape[2:])
     return x
 
