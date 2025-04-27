@@ -20,7 +20,7 @@ from hunyuan_model import vae
 from hunyuan_model.text_encoder import TextEncoder
 from hunyuan_model.text_encoder import PROMPT_TEMPLATE
 from hunyuan_model.vae import load_vae
-from hunyuan_model.models import load_transformer, get_rotary_pos_embed
+from hunyuan_model.models import load_transformer
 
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
@@ -39,6 +39,8 @@ from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey
 from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from blissful_tuner.utils import BlissfulLogger
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
+from blissful_tuner.cfgzerostar import apply_zerostar
+from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
 
 logger = BlissfulLogger(__name__, "green")
 
@@ -863,7 +865,7 @@ def main():
                 cfg_guidance_expand = guidance_expand if args.cfg_schedule is not None else None  # We only need them seperate if we turn CFG on and off
         else:
             guidance_expand = None
-        freqs_cos, freqs_sin = get_rotary_pos_embed(vae_ver, transformer, video_length, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed_riflex(vae_ver, transformer, video_length, height, width, args.riflex_index)
         # n_tokens = freqs_cos.shape[0]
 
         # move and cast all inputs to the correct device and dtype
@@ -881,7 +883,11 @@ def main():
         if args.split_attn and do_classifier_free_guidance and not args.split_uncond:
             logger.warning("split_attn is enabled, split_uncond will be enabled as well.")
             args.split_uncond = True
-        do_cfg_for_step = do_classifier_free_guidance  # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
+        do_cfg_for_step = do_classifier_free_guidance         # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
+        use_zerostar = (args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1)
+        if use_zerostar:
+            logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
+
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -924,7 +930,10 @@ def main():
                 # perform classifier free guidance
                 if do_cfg_for_step:
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    if use_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
+                    else:
+                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                     # # SkyReels' rescale noise config is omitted for now
                     # if guidance_rescale > 0.0:

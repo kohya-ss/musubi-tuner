@@ -44,7 +44,7 @@ from hv_generate_video import save_images_grid, save_videos_grid, synchronize_de
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
-from blissful_tuner.prompt_weighting import get_weighted_prompt_embeds_t5
+from blissful_tuner.prompt_weighting import MiniT5Wrapper
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from dataset.image_video_dataset import load_video
@@ -694,26 +694,18 @@ def prepare_t2v_inputs(
         # load text encoder
         text_encoder = load_text_encoder(args, config, device)
         text_encoder.model.to(device)
+        if args.prompt_weighting:
+            text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
 
         # encode prompt
         with torch.no_grad():
             if args.fp8_t5:
                 with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
-                    if args.prompt_weighting:
-                        logger.info("Weighting prompt...")
-                        context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
-                        context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
-                    else:
-                        context = text_encoder([args.prompt], device)
-                        context_null = text_encoder([n_prompt], device)
-            else:  # original behavior
-                if args.prompt_weighting:
-                    logger.info("Weighting prompt...")
-                    context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
-                    context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
-                else:
                     context = text_encoder([args.prompt], device)
                     context_null = text_encoder([n_prompt], device)
+            else:
+                context = text_encoder([args.prompt], device)
+                context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
         del text_encoder
@@ -834,26 +826,18 @@ def prepare_i2v_inputs(
         # load text encoder
         text_encoder = load_text_encoder(args, config, device)
         text_encoder.model.to(device)
+        if args.prompt_weighting:
+            text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
 
         # encode prompt
         with torch.no_grad():
             if args.fp8_t5:
                 with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
-                    if args.prompt_weighting:
-                        logger.info("Weighting prompt...")
-                        context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
-                        context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
-                    else:
-                        context = text_encoder([args.prompt], device)
-                        context_null = text_encoder([n_prompt], device)
-            else:  # original behavior
-                if args.prompt_weighting:
-                    logger.info("Weighting prompt...")
-                    context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
-                    context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
-                else:
                     context = text_encoder([args.prompt], device)
                     context_null = text_encoder([n_prompt], device)
+            else:
+                context = text_encoder([args.prompt], device)
+                context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
         del text_encoder
@@ -862,12 +846,13 @@ def prepare_i2v_inputs(
         # load CLIP model
         clip = load_clip_model(args, config, device)
         clip.model.to(device)
-
+        if args.noise_aug_strength > 0:
+            img_tensor = add_noise_to_reference_video(img_tensor, args.noise_aug_strength)
         # encode image to CLIP context
-        logger.info(f"Encoding image to CLIP context")
+        logger.info("Encoding image to CLIP context")
         with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
             clip_context = clip.visual([img_tensor[:, None, :, :]])
-        logger.info(f"Encoding complete")
+        logger.info("Encoding complete")
 
         # free CLIP model and clean memory
         del clip
@@ -887,9 +872,7 @@ def prepare_i2v_inputs(
     img_resized = cv2.resize(img_cv2, (width, height), interpolation=interpolation)
     img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
     img_resized = img_resized.unsqueeze(1)  # CFHW
-    if args.noise_aug_strength > 0.0:
-        logger.info(f"Adding noise {args.noise_aug_strength}...")
-        img_resized = add_noise_to_reference_video(img_resized, ratio=args.noise_aug_strength)
+
     if has_end_image:
         interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
         end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
@@ -1505,6 +1488,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     logger.info("Loading text encoder to encode all prompts")
     text_encoder = load_text_encoder(args, cfg, device)
     text_encoder.model.to(device)
+    if args.prompt_weighting:
+        text_encoder = MiniT5Wrapper(device, cfg.t5_dtype, text_encoder)
 
     encoded_contexts = {}
 
@@ -1689,6 +1674,8 @@ def process_interactive(args: argparse.Namespace) -> None:
                 if text_encoder is None:
                     logger.info("Loading text encoder")
                     text_encoder = load_text_encoder(args, cfg, device)
+                    if args.prompt_weighting:
+                        text_encoder = MiniT5Wrapper(device, cfg.t5_dtype, text_encoder)
 
                 text_encoder.model.to(device)
 
@@ -1700,10 +1687,10 @@ def process_interactive(args: argparse.Namespace) -> None:
                 with torch.no_grad():
                     if args.fp8_t5:
                         with torch.amp.autocast(device_type=device.type, dtype=cfg.t5_dtype):
-                            context = text_encoder([prompt_data["prompt"]], device)
+                            context = text_encoder([args.prompt], device)
                             context_null = text_encoder([n_prompt], device)
-                    else:
-                        context = text_encoder([prompt_data["prompt"]], device)
+                    else:  # original behavior
+                        context = text_encoder([args.prompt], device)
                         context_null = text_encoder([n_prompt], device)
 
                 encoded_context = {"context": context, "context_null": context_null}
@@ -1723,9 +1710,11 @@ def process_interactive(args: argparse.Namespace) -> None:
                     if prompt_args.image_path and os.path.exists(prompt_args.image_path):
                         img = Image.open(prompt_args.image_path).convert("RGB")
                         img_tensor = TF.to_tensor(img).sub_(0.5).div_(0.5).to(device)
-
+                        img_tensor = img_tensor.unsqueeze(1)
+                        if args.noise_aug_strength > 0.0:
+                            img_tensor = add_noise_to_reference_video(img_tensor, ratio=args.noise_aug_strength)
                         with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
-                            clip_context = clip.visual([img_tensor[:, None, :, :]])
+                            clip_context = clip.visual([img_tensor])
 
                         encoded_context["clip_context"] = clip_context
 

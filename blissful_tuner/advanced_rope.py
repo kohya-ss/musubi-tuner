@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from typing import List
+from blissful_tuner.hvw_posemb_layers import get_nd_rotary_pos_embed
 
 
 # From ComfyUI
@@ -53,3 +54,59 @@ class EmbedND_RifleX(nn.Module):
             dim=-3,
         )
         return emb.unsqueeze(1)
+
+
+# Modified from HunyuanVideo Wrapper
+def get_rotary_pos_embed_riflex(vae_ver, transformer, latent_video_length, height, width, k=0):
+    if "884" in vae_ver:
+        latents_size = [(latent_video_length - 1) // 4 + 1, height // 8, width // 8]
+    elif "888" in vae_ver:
+        latents_size = [(latent_video_length - 1) // 8 + 1, height // 8, width // 8]
+    else:
+        latents_size = [latent_video_length, height // 8, width // 8]
+
+    target_ndim = 3
+    ndim = 5 - 2
+    rope_theta = 256  # 225
+    patch_size = transformer.patch_size
+    rope_dim_list = transformer.rope_dim_list
+    hidden_size = transformer.hidden_size
+    heads_num = transformer.heads_num
+    head_dim = hidden_size // heads_num
+
+    if isinstance(patch_size, int):
+        assert all(s % patch_size == 0 for s in latents_size), (
+            f"Latent size(last {ndim} dimensions) should be divisible by patch size({patch_size}), "
+            f"but got {latents_size}."
+        )
+        rope_sizes = [s // patch_size for s in latents_size]
+    elif isinstance(patch_size, list):
+        assert all(
+            s % patch_size[idx] == 0
+            for idx, s in enumerate(latents_size)
+        ), (
+            f"Latent size(last {ndim} dimensions) should be divisible by patch size({patch_size}), "
+            f"but got {latents_size}."
+        )
+        rope_sizes = [
+            s // patch_size[idx] for idx, s in enumerate(latents_size)
+        ]
+
+    if len(rope_sizes) != target_ndim:
+        rope_sizes = [1] * (target_ndim - len(rope_sizes)) + rope_sizes  # time axis
+
+    if rope_dim_list is None:
+        rope_dim_list = [head_dim // target_ndim for _ in range(target_ndim)]
+    assert (
+        sum(rope_dim_list) == head_dim
+    ), "sum(rope_dim_list) should equal to head_dim of attention layer"
+    freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
+        rope_dim_list,
+        rope_sizes,
+        theta=rope_theta,
+        use_real=True,
+        theta_rescale_factor=1,
+        num_frames=latent_video_length,
+        k=k,
+    )
+    return freqs_cos, freqs_sin
