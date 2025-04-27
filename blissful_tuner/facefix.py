@@ -7,7 +7,7 @@ License: Apache 2.0
 Created on Wed Apr 23 10:19:19 2025
 @author: blyss
 """
-
+from rich.traceback import install as install_rich_tracebacks
 from tqdm import tqdm
 from gfpgan import GFPGANer
 import torch
@@ -18,6 +18,7 @@ from basicsr.utils import img2tensor, tensor2img
 from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, set_seed
 from utils import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
+install_rich_tracebacks()
 
 
 def main():

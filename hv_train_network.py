@@ -21,7 +21,7 @@ from PIL import Image
 from rich_argparse import RichHelpFormatter
 import huggingface_hub
 import toml
-
+from rich.traceback import install as install_rich_tracebacks
 import torch
 from tqdm import tqdm
 from accelerate.utils import TorchDynamoPlugin, set_seed, DynamoBackend
@@ -2034,6 +2034,8 @@ class NetworkTrainer:
 
 
 def setup_parser_common() -> argparse.ArgumentParser:
+    install_rich_tracebacks()  # Do this here as setup_parser_common is the first call by both hv_train and wan_train and even fpack_train so it's a good place to hook
+
     def int_or_float(value):
         if value.endswith("%"):
             try:
@@ -2675,7 +2677,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    # It does now
+    args.fp8_scaled = False  # Use --fp8_scaled_hunyuan for Hunyuan
 
     trainer = NetworkTrainer()
     trainer.train(args)

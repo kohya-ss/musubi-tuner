@@ -263,7 +263,7 @@ def string_to_seed(s: str, bits: int = 63) -> int:
 
     Args:
         s:           Input string
-        bits:        Number of bits for the final seed (PyTorch accepts up to 63 safely)
+        bits:        Number of bits for the final seed (PyTorch accepts up to 63 safely, numpy likes 32)
     Returns:
         A non-negative int < 2**bits
     """

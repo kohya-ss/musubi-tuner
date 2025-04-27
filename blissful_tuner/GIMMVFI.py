@@ -30,6 +30,7 @@ import torch
 import yaml
 from tqdm import tqdm
 from omegaconf import OmegaConf
+from rich.traceback import install as install_rich_tracebacks
 
 # Importing necessary modules from our project
 from gimmvfi.generalizable_INR.gimmvfi_r import GIMMVFI_R
@@ -42,6 +43,7 @@ from gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
 from utils import load_torch_file, setup_compute_context
 from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, set_seed
 warnings.filterwarnings("ignore")
+install_rich_tracebacks()
 
 
 def load_model(model_path: str, device: torch.device, dtype: torch.dtype, mode: str = "gimmvfi_r") -> torch.nn.Module:

@@ -6,6 +6,7 @@ Created on Sat Apr 26 15:11:58 2025
 @author: blyss
 """
 import argparse
+from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg
 logger = BlissfulLogger(__name__, "#8e00ed")
 
@@ -32,6 +33,7 @@ Note: The list is processed left to right, so modulus ranges should come first a
 
 
 def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> argparse.ArgumentParser:
+    install_rich_tracebacks()
     if mode == "wan":
         parser.add_argument("--noise_aug_strength", type=float, default=0.0, help="Additional multiplier for i2v noise, higher might help motion/quality")
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (AUTOMATIC1111) [style] (prompt weighting:1.2)")
@@ -83,4 +85,9 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
             logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
     if args.cfg_schedule:
         args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
+    if hasattr(args, "riflex_index"):
+        if args.riflex_index != 0:
+            if args.rope_func.lower() != "comfy":
+                logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
+                raise ValueError("RIFLEx can only be used with rope_func =='comfy'!")
     return args
