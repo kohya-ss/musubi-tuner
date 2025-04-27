@@ -8,7 +8,7 @@ Current extensions:
 - Load diffusion-pipe style LoRAs for inference without converting first
 - Extended saving options (--codec codec, --container container, can save Prores into MKV, or either of h264, h265 into MP4 or MKV)
 - Advanced CFG scheduling: (--cfg_schedule, please see the --help for usage. Can specify guidance scale down to individual steps if you like!)
-- FP16 accumulation (--fp16_accumulation, works best with Wan FP16 models and requires PyTorch 2.7.0 or higher)
+- FP16 accumulation (--fp16_accumulation, works best with Wan FP16 models and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with --compile)
 - GIMM-VFI framerate interpolation (blissful_tuner/GIMMVFI.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
 - Upscaling with SwinIR or ESRGAN type models (blissful_tuner/upscaler.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
 
