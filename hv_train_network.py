@@ -1018,7 +1018,7 @@ class NetworkTrainer:
         if video is None:
             logger.error("No video generated / 生成された動画がありません")
             return
-        
+
         ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
         num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
         seed_suffix = "" if seed is None else f"_{seed}"
@@ -1055,7 +1055,7 @@ class NetworkTrainer:
         self._control_training = False  # HunyuanVideo does not support control training yet
 
         self.default_guidance_scale = 6.0
-        
+
     @property
     def i2v_training(self) -> bool:
         return self._i2v_training
@@ -1393,6 +1393,12 @@ class NetworkTrainer:
         if args.dit is None:
             raise ValueError("path to DiT model is required / DiTモデルのパスが必要です")
         assert not args.fp8_scaled or args.fp8_base, "fp8_scaled requires fp8_base / fp8_scaledはfp8_baseが必要です"
+
+        if args.sage_attn:
+            raise ValueError(
+                "SageAttention doesn't support training currently. Please use `--sdpa` or `--xformers` etc. instead."
+                " / SageAttentionは現在学習をサポートしていないようです。`--sdpa`や`--xformers`などの他のオプションを使ってください"
+            )
 
         # check model specific arguments
         self.handle_model_specific_args(args)
