@@ -1,6 +1,6 @@
 ## Blissful Tuner
 Unofficial, experimental extensions of Musubi Tuner by Blyss Sarania.
-Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community!
+Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do NOT post about issues with this version on the main Musubi Github repo!
 
 Current extensions:
 - Latent preview during generation with either latent2RGB or TAEHV (--preview_latent_every N where N is a number of steps, --preview_vae /path/to/model models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
