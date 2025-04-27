@@ -18,10 +18,10 @@ from voluptuous import Any, ExactSequence, MultipleInvalid, Object, Schema
 
 from .image_video_dataset import DatasetGroup, ImageDataset, VideoDataset
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 @dataclass

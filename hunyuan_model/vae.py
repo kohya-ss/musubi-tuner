@@ -12,10 +12,10 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusers.models.attention_processor import SpatialNorm
 from modules.unet_causal_3d_blocks import CausalConv3d, UNetMidBlockCausal3D, get_down_block3d, get_up_block3d
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 SCALING_FACTOR = 0.476986

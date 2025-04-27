@@ -9,7 +9,7 @@ import math
 import copy
 from types import ModuleType, SimpleNamespace
 from typing import Tuple, Optional, List, Union, Any, Dict
-
+from rich_argparse import RichHelpFormatter
 import torch
 import accelerate
 from accelerate import Accelerator
@@ -32,7 +32,7 @@ from wan.modules.clip import CLIPModel
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-
+from convert_lora import convert_from_diffusers
 try:
     from lycoris.kohya import create_network_from_weights
 except:
@@ -41,13 +41,15 @@ except:
 from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
+from blissful_tuner.latent_preview import LatentPreviewer
+from blissful_tuner.cfgzerostar import apply_zerostar
+from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
+from blissful_tuner.prompt_weighting import get_weighted_prompt_embeds_t5
+from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
+from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from dataset.image_video_dataset import load_video
 
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
+logger = BlissfulLogger(__name__, "green")
 
 class GenerationSettings:
     def __init__(
@@ -62,7 +64,7 @@ class GenerationSettings:
 
 def parse_args() -> argparse.Namespace:
     """parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Wan 2.1 inference script")
+    parser = argparse.ArgumentParser(description="Wan 2.1 inference script", formatter_class=RichHelpFormatter)
 
     # WAN arguments
     parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
@@ -102,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=16, help="video fps, Default is 16")
     parser.add_argument("--infer_steps", type=int, default=None, help="number of inference steps")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument("--seed", type=str, default=None, help="Seed for evaluation.")
     parser.add_argument(
         "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
     )
@@ -196,9 +198,9 @@ def parse_args() -> argparse.Namespace:
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
-
+    parser = add_blissful_args(parser, mode="wan")
     args = parser.parse_args()
-
+    args = parse_blissful_args(args)
     # Validate arguments
     if args.from_file and args.interactive:
         raise ValueError("Cannot use both --from_file and --interactive at the same time")
@@ -488,7 +490,7 @@ def load_dit_model(
         loading_weight_dtype = dit_dtype  # load as-is
 
     # do not fp8 optimize because we will merge LoRA weights
-    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False)
+    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False, rope_func=args.rope_func, riflex_index=args.riflex_index, num_frames=args.video_length)
 
     return model
 
@@ -512,7 +514,19 @@ def merge_lora_weights(lora_module: ModuleType, model: torch.nn.Module, args: ar
 
         logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
         weights_sd = load_file(lora_weight)
+        conversion_needed = False
+        for key, weight in weights_sd.items():
+            prefix, key_body = key.split(".", 1)
+            if prefix == "diffusion_model" or prefix == "transformer":
+                conversion_needed = True
+                break
+            elif "lora_unet" in prefix:
+                conversion_needed = False
+                break
 
+        if conversion_needed:
+            logger.info("Converting LoRA from diffusers format")
+            weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
         # apply include/exclude patterns
         original_key_count = len(weights_sd.keys())
         if args.include_patterns is not None and len(args.include_patterns) > i:
@@ -600,6 +614,13 @@ def optimize_model(
 
         model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
+    if args.fp16_accumulation:
+        logger.info("Enabling FP16 accumulation")
+        if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+            torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        else:
+            raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
+
     if args.compile:
         compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
         logger.info(
@@ -678,11 +699,21 @@ def prepare_t2v_inputs(
         with torch.no_grad():
             if args.fp8_t5:
                 with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
+                    if args.prompt_weighting:
+                        logger.info("Weighting prompt...")
+                        context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                        context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                    else:
+                        context = text_encoder([args.prompt], device)
+                        context_null = text_encoder([n_prompt], device)
+            else:  # original behavior
+                if args.prompt_weighting:
+                    logger.info("Weighting prompt...")
+                    context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                    context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                else:
                     context = text_encoder([args.prompt], device)
                     context_null = text_encoder([n_prompt], device)
-            else:
-                context = text_encoder([args.prompt], device)
-                context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
         del text_encoder
@@ -808,11 +839,21 @@ def prepare_i2v_inputs(
         with torch.no_grad():
             if args.fp8_t5:
                 with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
+                    if args.prompt_weighting:
+                        logger.info("Weighting prompt...")
+                        context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                        context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                    else:
+                        context = text_encoder([args.prompt], device)
+                        context_null = text_encoder([n_prompt], device)
+            else:  # original behavior
+                if args.prompt_weighting:
+                    logger.info("Weighting prompt...")
+                    context = get_weighted_prompt_embeds_t5(args.prompt, text_encoder, device)
+                    context_null = get_weighted_prompt_embeds_t5(n_prompt, text_encoder, device)
+                else:
                     context = text_encoder([args.prompt], device)
                     context_null = text_encoder([n_prompt], device)
-            else:
-                context = text_encoder([args.prompt], device)
-                context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
         del text_encoder
@@ -846,7 +887,9 @@ def prepare_i2v_inputs(
     img_resized = cv2.resize(img_cv2, (width, height), interpolation=interpolation)
     img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
     img_resized = img_resized.unsqueeze(1)  # CFHW
-
+    if args.noise_aug_strength > 0.0:
+        logger.info(f"Adding noise {args.noise_aug_strength}...")
+        img_resized = add_noise_to_reference_video(img_resized, ratio=args.noise_aug_strength)
     if has_end_image:
         interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
         end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
@@ -1006,16 +1049,17 @@ def run_sampling(
         torch.Tensor: generated latent
     """
     arg_c, arg_null = inputs
-
     latent = noise
     latent_storage_device = device if not use_cpu_offload else "cpu"
     latent = latent.to(latent_storage_device)
-
+    if args.preview_latent_every:
+        previewer = LatentPreviewer(args, noise, timesteps, model.device, model.dtype, model_type="wan")
     # cfg skip
     apply_cfg_array = []
     num_timesteps = len(timesteps)
 
     if args.cfg_skip_mode != "none" and args.cfg_apply_ratio is not None:
+        # Kohya's method
         # Calculate thresholds based on cfg_apply_ratio
         apply_steps = int(num_timesteps * args.cfg_apply_ratio)
 
@@ -1057,14 +1101,24 @@ def run_sampling(
         pattern = ["A" if apply else "S" for apply in apply_cfg_array]
         pattern = "".join(pattern)
         logger.info(f"CFG skip mode: {args.cfg_skip_mode}, apply ratio: {args.cfg_apply_ratio}, pattern: {pattern}")
+    elif args.cfg_schedule is not None:
+        scale_per_step = args.cfg_schedule
+        apply_cfg_array = [(i + 1) in scale_per_step for i in range(num_timesteps)]
+        included_steps = sorted(scale_per_step.keys())
+        step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
+        logger.info(f"CFG Schedule: {step_str}")
+        logger.info(f"Total CFG steps: {len(included_steps)}")
+
     else:
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
 
+    use_zerostar = args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1
+    if use_zerostar:
+        logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
     slg_end_step = int(args.slg_end * num_timesteps)
-
     for i, t in enumerate(tqdm(timesteps)):
         # latent is on CPU if use_cpu_offload is True
         latent_model_input = [latent.to(device)]
@@ -1075,6 +1129,8 @@ def run_sampling(
 
             apply_cfg = apply_cfg_array[i]  # apply CFG or not
             if apply_cfg:
+                if args.cfg_schedule is not None:
+                    args.guidance_scale = scale_per_step[i + 1]
                 apply_slg = i >= slg_start_step and i < slg_end_step
                 # print(f"Applying SLG: {apply_slg}, i: {i}, slg_start_step: {slg_start_step}, slg_end_step: {slg_end_step}")
                 if args.slg_mode == "original" and apply_slg:
@@ -1082,7 +1138,10 @@ def run_sampling(
 
                     # apply guidance
                     # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
-                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    if use_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
+                    else:
+                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                     # calculate skip layer out
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
@@ -1097,16 +1156,19 @@ def run_sampling(
                     noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
                         latent_storage_device
                     )
-
                     # apply guidance
-                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    if use_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)
+                    else:
+                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 else:
                     # normal guidance
                     noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
-
-                    # apply guidance
-                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    if use_zerostar:
+                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)
+                    else:
+                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
                 noise_pred = noise_pred_cond
 
@@ -1116,6 +1178,9 @@ def run_sampling(
 
             # update latent
             latent = temp_x0.squeeze(0)
+
+            if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
+                previewer.preview(latent, i)
 
     return latent
 
@@ -1325,9 +1390,11 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
-
     video = video.unsqueeze(0)
-    save_videos_grid(video, video_path, fps=args.fps, rescale=True)
+    if args.codec is not None:
+        save_videos_grid_advanced(video, video_path, args.codec, args.container, rescale=True, fps=args.fps, keep_frames=args.keep_pngs)
+    else:
+        save_videos_grid(video, video_path, fps=args.fps, rescale=True)
     logger.info(f"Video saved to: {video_path}")
 
     return video_path
@@ -1386,7 +1453,6 @@ def save_output(
         sample = decode_latent(latent.unsqueeze(0), args, cfg)
         original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
         save_images(sample, args, original_name)
-
 
 def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Namespace) -> List[Dict]:
     """Process multiple prompts for batch mode

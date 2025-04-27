@@ -13,10 +13,10 @@ from dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL,
 from hv_generate_video import resize_image_to_bucket
 from hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 from utils import model_utils
 from utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
@@ -344,7 +344,7 @@ class WanNetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         model = load_wan_model(
-            self.config, accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled
+            self.config, accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled, rope_func=args.rope_func
         )
         return model
 
@@ -426,6 +426,7 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         help="text encoder (CLIP) checkpoint path, optional. If training I2V model, this is required",
     )
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
+    parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
     return parser
 
 

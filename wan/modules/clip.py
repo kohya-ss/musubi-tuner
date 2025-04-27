@@ -1,6 +1,6 @@
 # Modified from ``https://github.com/openai/CLIP'' and ``https://github.com/mlfoundations/open_clip''
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-import logging
+from blissful_tuner.utils import BlissfulLogger
 import math
 import os
 
@@ -15,7 +15,7 @@ from .tokenizers import HuggingfaceTokenizer
 from .xlm_roberta import XLMRoberta
 
 from utils.safetensors_utils import load_safetensors
-
+logging = BlissfulLogger(__name__, "green")
 __all__ = [
     "XLMRobertaCLIP",
     "clip_xlm_roberta_vit_h_14",

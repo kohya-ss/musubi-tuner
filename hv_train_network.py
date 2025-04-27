@@ -18,7 +18,7 @@ import accelerate
 import numpy as np
 from packaging.version import Version
 from PIL import Image
-
+from rich_argparse import RichHelpFormatter
 import huggingface_hub
 import toml
 
@@ -45,12 +45,13 @@ from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
 from hv_generate_video import save_images_grid, save_videos_grid, resize_image_to_bucket, encode_to_latents
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 SS_METADATA_KEY_BASE_MODEL_VERSION = "ss_base_model_version"
@@ -1475,7 +1476,15 @@ class NetworkTrainer:
         )
         transformer.eval()
         transformer.requires_grad_(False)
-
+        if args.fp8_scaled_hunyuan:
+            params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
+            logger.info("Scaling transformer...")
+            state_dict = transformer.state_dict()
+            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+            state_dict = optimize_state_dict_with_fp8(state_dict, accelerator.device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
+            apply_fp8_monkey_patch(transformer, state_dict)
+            info = transformer.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded FP8 optimized weights: {info}")
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
             transformer.enable_block_swap(blocks_to_swap, accelerator.device, supports_backward=True)
@@ -2039,7 +2048,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         except ValueError:
             raise argparse.ArgumentTypeError(f"'{value}' is not an int or float")
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
 
     # general settings
     parser.add_argument(
@@ -2596,11 +2605,9 @@ def setup_parser_common() -> argparse.ArgumentParser:
         action="store_true",
         help="upload to huggingface asynchronously / huggingfaceに非同期でアップロードする",
     )
-
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
-
     return parser
 
 
@@ -2657,6 +2664,7 @@ def hv_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
     )
+    parser.add_argument("--fp8_scaled_hunyuan", action="store_true", help="FP8 scaled for Hunyuan")
     return parser
 
 
@@ -2667,7 +2675,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    args.fp8_scaled = False  # HunyuanVideo does not support this yet
+    # It does now
 
     trainer = NetworkTrainer()
     trainer.train(args)

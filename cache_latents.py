@@ -11,15 +11,15 @@ from dataset import config_utils
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from PIL import Image
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from dataset.image_video_dataset import BaseDataset, ItemInfo, save_latent_cache, ARCHITECTURE_HUNYUAN_VIDEO
 from hunyuan_model.vae import load_vae
 from hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 from utils.model_utils import str_to_dtype
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 def show_image(image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]]) -> int:

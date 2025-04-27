@@ -5,12 +5,11 @@ from io import BytesIO
 import os
 from typing import List, Optional, Tuple, Union
 import safetensors
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN, ARCHITECTURE_FRAMEPACK
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = BlissfulLogger(__name__, "green")
 
 
 r"""

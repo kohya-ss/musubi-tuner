@@ -1,12 +1,9 @@
 import argparse
 from datetime import datetime
-from pathlib import Path
 import random
-import sys
 import os
 import time
-from typing import Optional, Union
-
+from typing import Union
 import numpy as np
 import torch
 import torchvision
@@ -19,13 +16,12 @@ from einops import rearrange
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from PIL import Image
-
 from hunyuan_model import vae
 from hunyuan_model.text_encoder import TextEncoder
 from hunyuan_model.text_encoder import PROMPT_TEMPLATE
 from hunyuan_model.vae import load_vae
 from hunyuan_model.models import load_transformer, get_rotary_pos_embed
-from hunyuan_model.fp8_optimization import convert_fp8_linear
+
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
 
@@ -33,15 +29,18 @@ try:
     from lycoris.kohya import create_network_from_weights
 except:
     pass
-
+from rich_argparse import RichHelpFormatter
+from convert_lora import convert_from_diffusers
 from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
+from blissful_tuner.latent_preview import LatentPreviewer
+from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from blissful_tuner.video_processing_common import save_videos_grid_advanced
+from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
 
 
 def clean_memory_on_device(device):
@@ -109,7 +108,7 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
     stream.width = width
     stream.height = height
     stream.pix_fmt = pixel_format
-    stream.bit_rate = 4000000  # 4Mbit/s
+    stream.bit_rate = 8000000  # 8Mbit/s
 
     for frame_array in outputs:
         frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
@@ -208,9 +207,9 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder_dtype = torch.float16
     text_encoder_type = "llm"
     text_len = 256
-    hidden_state_skip_layer = 2
-    apply_final_norm = False
-    reproduce = False
+    hidden_state_skip_layer = args.hidden_state_skip_layer
+    apply_final_norm = args.apply_final_norm
+    reproduce = False if not args.reproduce else True
 
     text_encoder_2_type = "clipL"
     text_len_2 = 77
@@ -234,6 +233,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
 
     # load text encoders
     logger.info(f"loading text encoder: {args.text_encoder1}")
+    logger.info(f"hidden_state_skip_layer: {hidden_state_skip_layer}; apply_final_norm: {apply_final_norm}; Reproducible output: {reproduce}")
     text_encoder = TextEncoder(
         text_encoder_type=text_encoder_type,
         max_length=max_length,
@@ -298,6 +298,9 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
 
     logger.info(f"Encoding prompt with text encoder 2")
     text_encoder_2.to(device=device)
+    if args.prompt_2:
+        prompt = args.prompt_2
+        logger.info("Using separate prompt for CLIP...")
     prompt_embeds_2, prompt_mask_2 = encode_prompt(prompt, device, num_videos, text_encoder_2)
 
     prompt_embeds = prompt_embeds.to("cpu")
@@ -385,7 +388,7 @@ def decode_latents(args, latents, device):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="HunyuanVideo inference script")
+    parser = argparse.ArgumentParser(description="HunyuanVideo inference script", formatter_class=RichHelpFormatter)
 
     parser.add_argument("--dit", type=str, required=True, help="DiT checkpoint path or directory")
     parser.add_argument(
@@ -418,7 +421,7 @@ def parse_args():
     parser.add_argument("--fps", type=int, default=24, help="video fps")
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument("--seed", type=str, default=None, help="Seed for evaluation.")
     parser.add_argument(
         "--guidance_scale",
         type=float,
@@ -472,17 +475,14 @@ def parse_args():
         default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
         help="Torch.compile settings",
     )
-
+    parser = add_blissful_args(parser, mode="hunyuan")
     args = parser.parse_args()
-
+    args = parse_blissful_args(args)
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
 
     # update dit_weight based on model_base if not exists
-
-    if args.fp8_fast and not args.fp8:
-        raise ValueError("--fp8_fast requires --fp8")
 
     return args
 
@@ -547,9 +547,16 @@ def main():
 
         # encode prompt with LLM and Text Encoder
         logger.info(f"Encoding prompt: {prompt}")
-
-        do_classifier_free_guidance = args.guidance_scale != 1.0
+        do_classifier_free_guidance = args.guidance_scale != 1.0 or args.cfg_schedule is not None
         if do_classifier_free_guidance:
+            if args.cfg_schedule is not None:
+                scale_per_step = args.cfg_schedule
+                included_steps = sorted(scale_per_step.keys())
+                step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
+                logger.info(f"CFG Schedule: {step_str}")
+                logger.info(f"Total CFG steps: {len(included_steps)}")
+            else:
+                logger.info("Full CFG enabled!")
             negative_prompt = args.negative_prompt
             if negative_prompt is None:
                 logger.info("Negative prompt is not provided, using empty prompt")
@@ -628,6 +635,19 @@ def main():
 
                 logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                 weights_sd = load_file(lora_weight)
+                conversion_needed = False
+                for key, weight in weights_sd.items():
+                    prefix, key_body = key.split(".", 1)
+                    if prefix == "diffusion_model" or prefix == "transformer":
+                        conversion_needed = True
+                        break
+                    elif "lora_unet" in prefix:
+                        conversion_needed = False
+                        break
+
+                if conversion_needed:
+                    logger.info("Converting LoRA from diffusers format")
+                    weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
 
                 # Filter to exclude keys that are part of single_blocks
                 if args.exclude_single_blocks:
@@ -675,15 +695,57 @@ def main():
 
         logger.info(f"Casting model to {dit_weight_dtype}")
         transformer.to(dtype=dit_weight_dtype)
-
+        
+        #  Keep embeddings, modulation, bias, head
+        params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
+        
         if args.fp8_fast:
             logger.info("Enabling FP8 acceleration")
-            params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
+
             for name, param in transformer.named_parameters():
                 dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
                 param.to(dtype=dtype_to_use)
             convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
 
+        if args.fp8_scaled:
+            logger.info(f"Scaling transformer (fp8_fast/mm_scaled: {args.fp8_fast})...")
+            state_dict = transformer.state_dict()
+            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+            state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
+            apply_fp8_monkey_patch(transformer, state_dict, args.fp8_fast)
+            info = transformer.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded FP8 optimized weights: {info}")
+
+        if args.fp16_accumulation:
+            logger.info("Enabling FP16 accumulation")
+            if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                torch.backends.cuda.matmul.allow_fp16_accumulation = True
+            else:
+                raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
+        if args.te_multiplier:
+            llm_multiplier, clip_multiplier = args.te_multiplier
+            logger.info(f"Scaling relative TE influence to LLM:{llm_multiplier}; CLIP:{clip_multiplier}")
+            clip_multiplier = float(clip_multiplier)
+            llm_multiplier = float(llm_multiplier)
+            # Scale CLIP influence
+            if hasattr(transformer, "txt_in"):
+                txt_in = transformer.txt_in
+                if hasattr(txt_in, "c_embedder"):
+                    original_c_embedder_forward = txt_in.c_embedder.forward
+
+                    def scaled_c_embedder_forward(*args, **kwargs):
+                        output = original_c_embedder_forward(*args, **kwargs)
+                        return output * clip_multiplier
+                    txt_in.c_embedder.forward = scaled_c_embedder_forward
+                    # Scale LLM influence
+                    if hasattr(txt_in, "individual_token_refiner"):
+                        for i, block in enumerate(txt_in.individual_token_refiner.blocks):
+                            original_block_forward = block.forward
+
+                            def scaled_block_forward(*args, **kwargs):
+                                output = original_block_forward(*args, **kwargs)
+                                return output * llm_multiplier
+                            block.forward = scaled_block_forward
         if args.compile:
             compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
             logger.info(
@@ -768,7 +830,6 @@ def main():
         for i in range(latent_video_length):
             latents.append(randn_tensor(shape_of_frame, generator=generator, device=device, dtype=dit_dtype))
         latents = torch.cat(latents, dim=2)
-
         # pad image_latents to match the length of video_latents
         if image_latents is not None:
             zero_latents = torch.zeros_like(latents)
@@ -788,16 +849,18 @@ def main():
             timesteps = timesteps[-num_inference_steps:]
 
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
-
+        if args.preview_latent_every:
+            previewer = LatentPreviewer(args, original_latents=latents, timesteps=timesteps, device=device, dtype=dit_dtype, model_type="hunyuan")
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
-
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
         if embedded_guidance_scale is not None:
             guidance_expand = torch.tensor([embedded_guidance_scale * 1000.0] * latents.shape[0], dtype=torch.float32, device="cpu")
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
+            embedded_guidance_expand = guidance_expand if args.cfg_schedule is not None else None
             if do_classifier_free_guidance:
                 guidance_expand = torch.cat([guidance_expand, guidance_expand], dim=0)
+                cfg_guidance_expand = guidance_expand if args.cfg_schedule is not None else None  # We only need them seperate if we turn CFG on and off
         else:
             guidance_expand = None
         freqs_cos, freqs_sin = get_rotary_pos_embed(vae_ver, transformer, video_length, height, width)
@@ -818,18 +881,25 @@ def main():
         if args.split_attn and do_classifier_free_guidance and not args.split_uncond:
             logger.warning("split_attn is enabled, split_uncond will be enabled as well.")
             args.split_uncond = True
-
+        do_cfg_for_step = do_classifier_free_guidance  # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                if do_classifier_free_guidance:
+                    if args.cfg_schedule is not None:
+                        do_cfg_for_step = (i + 1) in args.cfg_schedule
+                        if do_cfg_for_step:
+                            args.guidance_scale = args.cfg_schedule[i + 1]
+                            guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
+
                 latents = scheduler.scale_model_input(latents, t)
 
                 # predict the noise residual
                 with torch.no_grad(), accelerator.autocast():
-                    latents_input = latents if not do_classifier_free_guidance else torch.cat([latents, latents], dim=0)
+                    latents_input = latents if not do_cfg_for_step else torch.cat([latents, latents], dim=0)
                     if image_latents is not None:
                         latents_image_input = (
-                            image_latents if not do_classifier_free_guidance else torch.cat([image_latents, image_latents], dim=0)
+                            image_latents if not do_cfg_for_step else torch.cat([image_latents, image_latents], dim=0)
                         )
                         latents_input = torch.cat([latents_input, latents_image_input], dim=1)  # 1 or 2, C*2, F, H, W
 
@@ -852,7 +922,7 @@ def main():
                     noise_pred = torch.cat(noise_pred_list, dim=0)
 
                 # perform classifier free guidance
-                if do_classifier_free_guidance:
+                if do_cfg_for_step:
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
@@ -872,6 +942,9 @@ def main():
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
                     if progress_bar is not None:
                         progress_bar.update()
+
+                if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
+                    previewer.preview(latents, i)
 
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
@@ -917,7 +990,10 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            save_videos_grid(sample, video_path, fps=args.fps)
+            if args.codec is not None:
+                save_videos_grid_advanced(sample, video_path, args.codec, args.container, fps=args.fps, keep_frames=args.keep_pngs)
+            else:
+                save_videos_grid(sample, video_path, fps=args.fps)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images

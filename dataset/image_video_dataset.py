@@ -18,10 +18,10 @@ import av
 from utils import safetensors_utils
 from utils.model_utils import dtype_to_str
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP"]

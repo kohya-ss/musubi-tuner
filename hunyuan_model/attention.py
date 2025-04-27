@@ -4,6 +4,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 try:
     import flash_attn
@@ -17,12 +19,12 @@ except ImportError:
     flash_attn_func = None
 
 try:
-    print(f"Trying to import sageattention")
+    logger.info(f"Trying to import sageattention")
     from sageattention import sageattn_varlen, sageattn
 
-    print("Successfully imported sageattention")
+    logger.info("Successfully imported sageattention")
 except ImportError:
-    print(f"Failed to import sageattention")
+    logger.warning(f"Failed to import sageattention")
     sageattn_varlen = None
     sageattn = None
 

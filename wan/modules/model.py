@@ -6,21 +6,15 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
-
-import logging
-
+from blissful_tuner.utils import BlissfulLogger
 from utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
+from einops import repeat
 from utils.device_utils import clean_memory_on_device
-
 from .attention import flash_attention
-from utils.device_utils import clean_memory_on_device
 from modules.custom_offloading_utils import ModelOffloader
 from modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-
+from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
+logger = BlissfulLogger(__name__, "green")
 __all__ = ["WanModel"]
 
 
@@ -53,7 +47,6 @@ def rope_apply(x, grid_sizes, freqs):
 
         # split freqs
         freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
-
         # loop over samples
         output = []
         for i, (f, h, w) in enumerate(grid_sizes.tolist()):
@@ -117,7 +110,6 @@ def rope_apply_inplace_cached(x, grid_sizes, freqs_list):
 
     return x
 
-
 class WanRMSNorm(nn.Module):
 
     def __init__(self, dim, eps=1e-5):
@@ -170,7 +162,7 @@ class WanLayerNorm(nn.LayerNorm):
 
 class WanSelfAttention(nn.Module):
 
-    def __init__(self, dim, num_heads, window_size=(-1, -1), qk_norm=True, eps=1e-6, attn_mode="torch", split_attn=False):
+    def __init__(self, dim, num_heads, window_size=(-1, -1), qk_norm=True, eps=1e-6, attn_mode="torch", split_attn=False, rope_func="default"):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -181,6 +173,7 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
         self.attn_mode = attn_mode
         self.split_attn = split_attn
+        self.rope_func = rope_func
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -219,9 +212,11 @@ class WanSelfAttention(nn.Module):
         q = q.view(b, s, n, d)
         k = k.view(b, s, n, d)
         v = v.view(b, s, n, d)
-
-        rope_apply_inplace_cached(q, grid_sizes, freqs)
-        rope_apply_inplace_cached(k, grid_sizes, freqs)
+        if self.rope_func == "comfy":
+            q, k = apply_rope_comfy(q, k, freqs)
+        else:
+            rope_apply_inplace_cached(q, grid_sizes, freqs)
+            rope_apply_inplace_cached(k, grid_sizes, freqs)
         qkv = [q, k, v]
         del q, k, v
         x = flash_attention(
@@ -350,6 +345,7 @@ class WanAttentionBlock(nn.Module):
         eps=1e-6,
         attn_mode="torch",
         split_attn=False,
+        rope_func="default"
     ):
         super().__init__()
         self.dim = dim
@@ -359,10 +355,11 @@ class WanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        self.rope_func = rope_func
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, attn_mode, split_attn)
+        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, attn_mode, split_attn, rope_func)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
         self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
         self.norm2 = WanLayerNorm(dim, eps)
@@ -506,6 +503,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         eps=1e-6,
         attn_mode=None,
         split_attn=False,
+        rope_func="default",
+        riflex_index=0,
+        num_frames=81
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -564,6 +564,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.eps = eps
         self.attn_mode = attn_mode if attn_mode is not None else "torch"
         self.split_attn = split_attn
+        self.rope_func = rope_func
 
         # embeddings
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -577,12 +578,20 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.blocks = nn.ModuleList(
             [
                 WanAttentionBlock(
-                    cross_attn_type, dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps, attn_mode, split_attn
+                    cross_attn_type, dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps, attn_mode, split_attn, rope_func
                 )
                 for _ in range(num_layers)
             ]
         )
-
+        if rope_func == "comfy":
+            d = self.dim // self.num_heads
+            self.rope_embedder = EmbedND_RifleX(
+                d,
+                10000.0,
+                [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)],
+                num_frames=num_frames,
+                k=riflex_index,
+            )
         # head
         self.head = Head(dim, out_dim, patch_size, eps)
 
@@ -733,6 +742,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # if self.model_type == "i2v":
         #     assert clip_fea is not None and y is not None
         # params
+        _, F, H, W = x[0].shape
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
@@ -744,19 +754,28 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # embeddings
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
         grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
-
-        freqs_list = []
-        for fhw in grid_sizes:
-            fhw = tuple(fhw.tolist())
-            if fhw not in self.freqs_fhw:
-                c = self.dim // self.num_heads // 2
-                self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs)
-            freqs_list.append(self.freqs_fhw[fhw])
-
+        if self.rope_func == "default":
+            freqs_list = []
+            for fhw in grid_sizes:
+                fhw = tuple(fhw.tolist())
+                if fhw not in self.freqs_fhw:
+                    c = self.dim // self.num_heads // 2
+                    self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs)
+                freqs_list.append(self.freqs_fhw[fhw])
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len, f"Sequence length exceeds maximum allowed length {seq_len}. Got {seq_lens.max()}"
         x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
+        if self.rope_func == "comfy":
+            f_len = ((F + (self.patch_size[0] // 2)) // self.patch_size[0])
+            h_len = ((H + (self.patch_size[1] // 2)) // self.patch_size[1])
+            w_len = ((W + (self.patch_size[2] // 2)) // self.patch_size[2])
+            img_ids = torch.zeros((f_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
+            img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, f_len - 1, steps=f_len, device=x.device, dtype=x.dtype).reshape(-1, 1, 1)
+            img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
+            img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
+            img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=1)
+            freqs_list = self.rope_embedder(img_ids).movedim(1, 2)
 
         # time embeddings
         # with amp.autocast(dtype=torch.float32):
@@ -878,15 +897,17 @@ def load_wan_model(
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype],
     fp8_scaled: bool = False,
+    rope_func: str = "default",
+    riflex_index: int = 0,
+    num_frames: int = 81
 ) -> WanModel:
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
-
     with init_empty_weights():
-        logger.info(f"Creating WanModel")
+        logger.info(f"Initialize WanModel with rope_func={rope_func} and riflex_index={riflex_index}")
         model = WanModel(
             model_type="i2v" if config.i2v else "t2v",
             dim=config.dim,
@@ -900,6 +921,9 @@ def load_wan_model(
             text_len=config.text_len,
             attn_mode=attn_mode,
             split_attn=split_attn,
+            rope_func=rope_func,
+            riflex_index=riflex_index,
+            num_frames=num_frames
         )
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)

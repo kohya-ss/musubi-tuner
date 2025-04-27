@@ -14,12 +14,12 @@ from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, BaseDataset,
 from hunyuan_model import text_encoder as text_encoder_module
 from hunyuan_model.text_encoder import TextEncoder
 
-import logging
+from blissful_tuner.utils import BlissfulLogger
 
 from utils.model_utils import str_to_dtype
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "green")
+ 
 
 
 def encode_prompt(text_encoder: TextEncoder, prompt: Union[str, list[str]]):
