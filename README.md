@@ -2,27 +2,28 @@
 Unofficial, experimental extensions of Musubi Tuner by Blyss Sarania.
 Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do NOT post about issues with this version on the main Musubi Github repo!
 
-Current extensions:
+Current extensions(exclusive of FramePack until I get to work on that):
 - Latent preview during generation with either latent2RGB or TAEHV (--preview_latent_every N where N is a number of steps, --preview_vae /path/to/model models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
-- Beautiful rich logging and rich argparse
+- Beautiful rich logging, rich argparse and rich tracebacks
 - Load diffusion-pipe style LoRAs for inference without converting first
-- Extended saving options (--codec codec, --container container, can save Prores into MKV, or either of h264, h265 into MP4 or MKV)
+- Extended saving options (--codec codec, --container container, can save Apple ProRes(super high bitrate perceptually lossless) into MKV, or either of h264, h265 into MP4 or MKV)
 - Advanced CFG scheduling: (--cfg_schedule, please see the --help for usage. Can specify guidance scale down to individual steps if you like!)
-- FP16 accumulation (--fp16_accumulation, works best with Wan FP16 models and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with --compile)
+- FP16 accumulation (--fp16_accumulation, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with --compile it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
 - GIMM-VFI framerate interpolation (blissful_tuner/GIMMVFI.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
 - Upscaling with SwinIR or ESRGAN type models (blissful_tuner/upscaler.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
+- Use strings as your seed because why not! Also easier to remember!
+- RIFLEx e.g. https://github.com/thu-ml/RIFLEx for longer vids (--riflex_index N, where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81, requires --rope_func comfy with Wan; 4 is good for Hunyuan and you can make at least double length!)
+- CFGZero* e.g. https://github.com/WeichenFan/CFG-Zero-star (--cfgzerostar_scaling, --cfgzerostar_init_steps N, where N is the total number of steps to 0 out at the start. 2 is good for T2V, 1 for I2V but it's better for T2V in my experience. Support for Hunyuan is HIGHLY experimental and only available with CFG enabled.)
 
 Hunyuan only:
 - Several more LLM options (--hidden_state_skip_layer, --apply_final_norm, --reproduce, please see the --help for explanations!)
 - FP8 scaled support using the same algo as Wan (--fp8_scaled for inference, --fp8_scaled_hunyuan for training. Training isn't super tested!)
-- Seperate prompt for CLIP (--prompt_2, provides a different prompt to CLIP since it's used to simpler text)
+- Separate prompt for CLIP (--prompt_2, provides a different prompt to CLIP since it's used to simpler text)
 - Rescale text encoders based on https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan (--te_multiplier llm clip, such as --te_multiplier 0.9 1.2 to downweight the LLM slightly and upweight the CLIP slightly)
 
-Wan only (currently not fully for interactive mode yet!):
+Wan only(now supporting both one shot and interactive modes!):
 - Prompt weighting (--prompt_weighting, and then in your prompt you can do like "a cat playing with a (large:1.4) red ball" to upweight the effect of "large". Note that [this] or (this) isn't supported, only (this:1.0) and also downweighting has curious effects
 - ROPE ported from ComfyUI that doesn't use complex numbers. Massive VRAM savings when used with --compile! (--rope_func comfy)
-- RifleX e.g. https://github.com/thu-ml/RIFLEx for longer vids (--riflex_index N, where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81)
-- CFGZero* e.g. https://github.com/WeichenFan/CFG-Zero-star (--cfgzerostar_scaling, --cfgzerostar_init N, where N is the total number of steps to 0 out at the start. 2 is good for T2V, 1 for I2V but it's better for T2V in my experience)
 - Adjustable extra noise during I2V (--noise_aug_strength F, where F is the amount of extra noise. Low values work best like e.g. 0.03)
 
 My general code and Musubi Tuner code is licensed Apache 2.0. Other projects included may have different licensing, in which case you will find a LICENSE file in their directory specifying the terms under which they are included!
