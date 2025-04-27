@@ -759,7 +759,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         if section_index_from_last in context_img:
             image_index = section_index_from_last
             apply_section_image = not is_last_section  # last section already has latent_padding_size=0
-        elif section_index in context:
+        elif section_index in context_img:
             image_index = section_index
             apply_section_image = not is_last_section
         else:
