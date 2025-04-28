@@ -85,12 +85,11 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
             logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
     if args.cfg_schedule:
         args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
-    if hasattr(args, "riflex_index"):
-        if args.riflex_index != 0:
-            if hasattr(args, "rope_func"):
-                if args.rope_func.lower() != "comfy":
-                    logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
-                    raise ValueError("RIFLEx can only be used with rope_func =='comfy'!")
+    if args.riflex_index != 0:
+        if hasattr(args, "rope_func"):
+            if args.rope_func.lower() != "comfy":
+                logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
+                raise ValueError("RIFLEx can only be used with rope_func =='comfy'!")
     if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
         if args.guidance_scale == 1 and not args.cfg_schedule:
             logger.warning("Requested CFGZero* but CFG is not enabled so it will have no effect!")

@@ -934,6 +934,8 @@ def main():
                         noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                elif i <= args.cfgzerostar_init_steps - 1:  # Note only zero init can be used with embedded
+                    noise_pred *= 0  # Do this here too to handle the case where CFG is disabled
 
                     # # SkyReels' rescale noise config is omitted for now
                     # if guidance_rescale > 0.0:

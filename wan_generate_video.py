@@ -352,7 +352,7 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int, int]:
     size = f"{width}*{height}"
 
     if size not in SUPPORTED_SIZES[args.task]:
-        logger.warning(f"Size {size} is not supported for task {args.task}. Supported sizes are {SUPPORTED_SIZES[args.task]}.")
+        logger.info(f"Size {size} is not (officially) supported for task {args.task}.\n Officially supported sizes are {SUPPORTED_SIZES[args.task]}.")
 
     video_length = args.video_length
 

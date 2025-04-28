@@ -181,7 +181,10 @@ def main():
     parser = setup_parser_video_common(description="Frame rate interpolation using GIMM-VFI")
     parser.add_argument("--ds_factor", type=float, default=1.0, help="Downsampling factor")
     parser.add_argument("--mode", type=str, default="gimmvfi_f", help="Model mode: 'gimmvfi_r' or 'gimmvfi_f' for RAFT or FlowFormer version respectively")
-    parser.add_argument("--factor", type=int, default=2, help="Interpolation steps between frames")
+    parser.add_argument(
+        "--factor", type=int, default=2, help="Factor to increase the number of frames by. \
+        A factor of 2 will double the fps, taking e.g. a 16fps video to 32fps. Can go up to 8 but higher values have more artifacts"
+    )
     args = parser.parse_args()
     device, dtype = setup_compute_context(None, args.dtype)
     VideoProcessor = BlissfulVideoProcessor(device, dtype)
