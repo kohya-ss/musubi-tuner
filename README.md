@@ -12,7 +12,7 @@ Current extensions(exclusive of FramePack until I get to work on that):
 - GIMM-VFI framerate interpolation (blissful_tuner/GIMMVFI.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
 - Upscaling with SwinIR or ESRGAN type models (blissful_tuner/upscaler.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
 - Use strings as your seed because why not! Also easier to remember!
-- RIFLEx e.g. https://github.com/thu-ml/RIFLEx for longer vids (--riflex_index N, where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81, requires --rope_func comfy with Wan; 4 is good for Hunyuan and you can make at least double length!)
+ - RifleX e.g. https://github.com/thu-ml/RIFLEx for longer vids (--riflex_index N, where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81, requires --rope_func comfy with Wan; 4 is good for Hunyuan and you can make at least double length!)
 - CFGZero* e.g. https://github.com/WeichenFan/CFG-Zero-star (--cfgzerostar_scaling, --cfgzerostar_init_steps N, where N is the total number of steps to 0 out at the start. 2 is good for T2V, 1 for I2V but it's better for T2V in my experience. Support for Hunyuan is HIGHLY experimental and only available with CFG enabled.)
 
 Hunyuan only:
@@ -21,10 +21,10 @@ Hunyuan only:
 - Separate prompt for CLIP (--prompt_2, provides a different prompt to CLIP since it's used to simpler text)
 - Rescale text encoders based on https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan (--te_multiplier llm clip, such as --te_multiplier 0.9 1.2 to downweight the LLM slightly and upweight the CLIP slightly)
 
-Wan only(now supporting both one shot and interactive modes!):
+Wan only(now supporting both one shot and interactive modes):
 - Prompt weighting (--prompt_weighting, and then in your prompt you can do like "a cat playing with a (large:1.4) red ball" to upweight the effect of "large". Note that [this] or (this) isn't supported, only (this:1.0) and also downweighting has curious effects
 - ROPE ported from ComfyUI that doesn't use complex numbers. Massive VRAM savings when used with --compile! (--rope_func comfy)
-- Adjustable extra noise during I2V (--noise_aug_strength F, where F is the amount of extra noise. Low values work best like e.g. 0.03)
+- Adjustable extra noise during I2V (--noise_aug_strength F, where F is the amount of extra noise. Low values work best like e.g. 0.02 and this can improve detail in I2V)
 
 My general code and Musubi Tuner code is licensed Apache 2.0. Other projects included may have different licensing, in which case you will find a LICENSE file in their directory specifying the terms under which they are included!
 # Musubi Tuner Readme
