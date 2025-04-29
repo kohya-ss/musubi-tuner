@@ -6,10 +6,12 @@ Created on Sat Apr 26 15:11:58 2025
 @author: blyss
 """
 import argparse
+import torch
 from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg
 logger = BlissfulLogger(__name__, "#8e00ed")
 
+BLISSFUL_VERSION = "0.4.0"
 CFG_SCHEDULE_HELP = """
 Comma-separated list of steps/ranges where CFG should be applied.
 
@@ -32,6 +34,20 @@ Note: The list is processed left to right, so modulus ranges should come first a
 """
 
 
+def blissful_prefunc():
+    """Simple function to print about version, environment, and things"""
+    cuda_list = [f"PyTorch: {torch.__version__}"]
+    if torch.cuda.is_available():
+        allocator = torch.cuda.get_allocator_backend()
+        cuda = torch.cuda.get_device_properties(0)
+        cuda_list[0] += f", CUDA: {torch.version.cuda} CC: {cuda.major}.{cuda.minor}"
+        cuda_list.append(f"Device: '{cuda.name}', VRAM: '{cuda.total_memory // 1024 ** 2}MB'")
+    logger.info(f"Blissful Tuner extension for Musubi Tuner version {BLISSFUL_VERSION}!")
+    logger.info(f"Memory allocation: '{allocator}'")
+    for string in cuda_list:
+        logger.info(string)
+
+
 def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if mode == "wan":
@@ -48,12 +64,7 @@ def add_blissful_args(parser: argparse.ArgumentParser, mode: str = "wan") -> arg
         parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
         parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization. Better quality/accuracy with slightly more VRAM usage.")
         parser.add_argument("--prompt_2", type=str, required=False, help="Optional different prompt for CLIP")
-        parser.add_argument(
-            "--te_multiplier",
-            nargs=2,
-            metavar=("llm_multiplier", "clip_multiplier"),
-            help="Scale clip and llm influence"
-        )
+        parser.add_argument("--te_multiplier", nargs=2, metavar=("llm_multiplier", "clip_multiplier"), help="Scale clip and llm influence")
     # Common
     parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 4 is good for Hunyuan, 6 is good for Wan. Only 'comfy' rope_func supports this with Wan!")
     parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
@@ -87,4 +98,5 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
         if args.guidance_scale == 1 and not args.cfg_schedule:
             logger.warning("Requested CFGZero* but CFG is not enabled so it will have no effect!")
+    blissful_prefunc()
     return args
