@@ -23,13 +23,15 @@ class LatentPreviewer():
     def __init__(self, args, original_latents, timesteps, device, dtype, model_type="hunyuan"):
         self.mode = "latent2rgb" if args.preview_vae is None else "taehv"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")
+        self.subtract_noise = True if model_type != "framepack" else False
         self.args = args
         self.model_type = model_type
         self.device = device
         self.dtype = dtype if dtype != torch.float8_e4m3fn else torch.float16
-        self.original_latents = original_latents.to(self.device)
-        self.timesteps_percent = timesteps / 1000
-        if self.model_type not in ["hunyuan", "wan"]:
+        if model_type != "framepack" and original_latents is not None and timesteps is not None:
+            self.original_latents = original_latents.to(self.device)
+            self.timesteps_percent = timesteps / 1000
+        if self.model_type not in ["hunyuan", "wan", "framepack"]:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
         if self.mode == "taehv":
@@ -48,15 +50,15 @@ class LatentPreviewer():
             self.fps = int(args.fps / 4)
 
     @torch.inference_mode()
-    def preview(self, noisy_latents, current_step):
+    def preview(self, noisy_latents, current_step=None):
         if self.device == "cuda" or self.device == torch.device("cuda"):
             torch.cuda.empty_cache()
         if self.model_type == "wan":
             noisy_latents = noisy_latents.unsqueeze(0)  # F, C, H, W -> B, F, C, H, W
         elif self.model_type == "hunyuan":
             pass  # already B, F, C, H, W
-        denoisy_latents = self.subtract_original_and_normalize(noisy_latents, current_step)
-        decoded = self.decoder(denoisy_latents, current_step)  # returned as F, C, H, W
+        denoisy_latents = self.subtract_original_and_normalize(noisy_latents, current_step) if self.subtract_noise else noisy_latents
+        decoded = self.decoder(denoisy_latents)  # returned as F, C, H, W
 
         # Upscale if we used latent2rgb so output is same size as expected
         if self.scale_factor is not None:
@@ -120,7 +122,7 @@ class LatentPreviewer():
         container.close()
 
     @torch.inference_mode()
-    def decode_taehv(self, latents, current_step):
+    def decode_taehv(self, latents):
         """
         Decodes latents with the TAEHV model, returns shape (F, C, H, W).
         """
@@ -132,7 +134,7 @@ class LatentPreviewer():
         return decoded.squeeze(0)  # squeeze off batch dimension as next step doesn't want it
 
     @torch.inference_mode()
-    def decode_latent2rgb(self, latents, current_step):
+    def decode_latent2rgb(self, latents):
         """
         Decodes latents to RGB using linear transform, returns shape (F, 3, H, W).
         """
@@ -181,7 +183,7 @@ class LatentPreviewer():
             },
         }
 
-        latent_rgb_factors = model_params[self.model_type]["rgb_factors"]
+        latent_rgb_factors = model_params[self.model_type]["rgb_factors"] if self.model_type != "framepack" else model_params["hunyuan"]
         latent_rgb_factors_bias = model_params[self.model_type]["bias"]
 
         # Prepare linear transform

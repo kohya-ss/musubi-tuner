@@ -24,14 +24,14 @@ import torch.nn.functional as F
 from torch import nn
 from einops import rearrange
 
-from diffusers.utils import logging
 from diffusers.models.activations import get_activation
 from diffusers.models.attention_processor import SpatialNorm
 from diffusers.models.attention_processor import Attention
 from diffusers.models.normalization import AdaGroupNorm
 from diffusers.models.normalization import RMSNorm
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def prepare_causal_attention_mask(n_frame: int, n_hw: int, dtype, device, batch_size: int = None):

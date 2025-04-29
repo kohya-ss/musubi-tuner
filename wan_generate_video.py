@@ -198,7 +198,7 @@ def parse_args() -> argparse.Namespace:
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
-    parser = add_blissful_args(parser, mode="wan")
+    parser = add_blissful_args(parser)
     args = parser.parse_args()
     args = parse_blissful_args(args)
     # Validate arguments
@@ -613,13 +613,6 @@ def optimize_model(
             target_device = device
 
         model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
-
-    if args.fp16_accumulation:
-        logger.info("Enabling FP16 accumulation")
-        if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
-            torch.backends.cuda.matmul.allow_fp16_accumulation = True
-        else:
-            raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
 
     if args.compile:
         compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args

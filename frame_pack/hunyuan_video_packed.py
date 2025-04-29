@@ -18,23 +18,25 @@ from modules.custom_offloading_utils import ModelOffloader
 from utils.safetensors_utils import load_split_weights
 from modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from accelerate import init_empty_weights
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 try:
     # raise NotImplementedError
     from xformers.ops import memory_efficient_attention as xformers_attn_func
 
-    print("Xformers is installed!")
+    logger.info("Xformers is installed!")
 except:
-    print("Xformers is not installed!")
+    logger.info("Xformers is not installed!")
     xformers_attn_func = None
 
 try:
     # raise NotImplementedError
     from flash_attn import flash_attn_varlen_func, flash_attn_func
 
-    print("Flash Attn is installed!")
+    logger.info("Flash Attn is installed!")
 except:
-    print("Flash Attn is not installed!")
+    logger.info("Flash Attn is not installed!")
     flash_attn_varlen_func = None
     flash_attn_func = None
 
@@ -42,17 +44,12 @@ try:
     # raise NotImplementedError
     from sageattention import sageattn_varlen, sageattn
 
-    print("Sage Attn is installed!")
+    logger.info("Sage Attn is installed!")
 except:
-    print("Sage Attn is not installed!")
+    logger.info("Sage Attn is not installed!")
     sageattn_varlen = None
     sageattn = None
 
-
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 # region diffusers
 
@@ -1570,11 +1567,11 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
 
     def enable_gradient_checkpointing(self):
         self.use_gradient_checkpointing = True
-        print("Gradient checkpointing enabled for HunyuanVideoTransformer3DModelPacked.")  # Logging
+        logger.info("Gradient checkpointing enabled for HunyuanVideoTransformer3DModelPacked.")  # Logging
 
     def disable_gradient_checkpointing(self):
         self.use_gradient_checkpointing = False
-        print("Gradient checkpointing disabled for HunyuanVideoTransformer3DModelPacked.")  # Logging
+        logger.info("Gradient checkpointing disabled for HunyuanVideoTransformer3DModelPacked.")  # Logging
 
     def initialize_teacache(self, enable_teacache=True, num_steps=25, rel_l1_thresh=0.15):
         self.enable_teacache = enable_teacache
@@ -1586,9 +1583,9 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         self.previous_residual = None
         self.teacache_rescale_func = np.poly1d([7.33226126e02, -4.01131952e02, 6.75869174e01, -3.14987800e00, 9.61237896e-02])
         if enable_teacache:
-            print(f"TeaCache enabled: num_steps={num_steps}, rel_l1_thresh={rel_l1_thresh}")
+            logger.info(f"TeaCache enabled: num_steps={num_steps}, rel_l1_thresh={rel_l1_thresh}")
         else:
-            print("TeaCache disabled.")
+            logger.info("TeaCache disabled.")
 
     def gradient_checkpointing_method(self, block, *args):
         if self.use_gradient_checkpointing:
@@ -1626,7 +1623,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             supports_backward,
             device,  # , debug=True
         )
-        print(
+        logger.info(
             f"HunyuanVideoTransformer3DModelPacked: Block swap enabled. Swapping {num_blocks} blocks, "
             + f"double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}, supports_backward: {supports_backward}."
         )
@@ -1636,14 +1633,14 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             self.offloader_double.set_forward_only(True)
             self.offloader_single.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            print(f"HunyuanVideoTransformer3DModelPacked: Block swap set to forward only.")
+            logger.info(f"HunyuanVideoTransformer3DModelPacked: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap and self.blocks_to_swap > 0:
             self.offloader_double.set_forward_only(False)
             self.offloader_single.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            print(f"HunyuanVideoTransformer3DModelPacked: Block swap set to forward and backward.")
+            logger.info(f"HunyuanVideoTransformer3DModelPacked: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage

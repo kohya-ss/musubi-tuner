@@ -22,10 +22,8 @@ from transformers import (
 from utils.safetensors_utils import load_split_weights
 from hunyuan_model.vae import load_vae as hunyuan_load_vae
 
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def load_vae(

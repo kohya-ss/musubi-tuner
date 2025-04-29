@@ -12,13 +12,10 @@ from dataset.image_video_dataset import ARCHITECTURE_FRAMEPACK, ItemInfo, save_t
 import cache_text_encoder_outputs
 from frame_pack import hunyuan
 from frame_pack.framepack_utils import load_text_encoder1, load_text_encoder2
-
-import logging
-
 from frame_pack.utils import crop_or_pad_yield_mask
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 def encode_and_save_batch(

@@ -24,14 +24,8 @@ from frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from frame_pack.utils import crop_or_pad_yield_mask
 from dataset.image_video_dataset import resize_image_to_bucket
 from hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
-
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-from utils import model_utils
-from utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 class FramePackNetworkTrainer(NetworkTrainer):

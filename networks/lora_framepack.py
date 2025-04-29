@@ -4,12 +4,6 @@ import ast
 from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
-
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
 import networks.lora as lora
 
 

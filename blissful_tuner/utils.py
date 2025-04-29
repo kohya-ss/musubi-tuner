@@ -152,7 +152,10 @@ class BlissfulLogger:
     def debug(self, msg):
         self.logger.debug(msg, stacklevel=2)
 
-    def warning(self, msg):
+    def warning(self, msg, levelmod=0):
+        self.logger.warning(msg, stacklevel=2 + levelmod)
+
+    def warn(self, msg):
         self.logger.warning(msg, stacklevel=2)
 
     def error(self, msg):
@@ -313,3 +316,9 @@ def string_to_seed(s: str, bits: int = 63) -> int:
             algo += char_val
     seed = (abs(crypto - int(algo))) & mask
     return seed
+
+
+def error_out(error, message):
+    logger = BlissfulLogger(__name__, "#8e00ed")
+    logger.warning(message, levelmod=1)
+    raise error(message)

@@ -477,7 +477,7 @@ def parse_args():
         default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
         help="Torch.compile settings",
     )
-    parser = add_blissful_args(parser, mode="hunyuan")
+    parser = add_blissful_args(parser)
     args = parser.parse_args()
     args = parse_blissful_args(args)
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
@@ -708,12 +708,6 @@ def main():
                     param.to(dtype=dtype_to_use)
                 convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
 
-        if args.fp16_accumulation:
-            logger.info("Enabling FP16 accumulation")
-            if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
-                torch.backends.cuda.matmul.allow_fp16_accumulation = True
-            else:
-                raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
         if args.te_multiplier:
             llm_multiplier, clip_multiplier = args.te_multiplier
             logger.info(f"Scaling relative TE influence to LLM:{llm_multiplier}; CLIP:{clip_multiplier}")

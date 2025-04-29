@@ -9,7 +9,7 @@ import time
 import math
 import copy
 from typing import Tuple, Optional, List, Union, Any, Dict
-
+from rich.traceback import install as install_rich_tracebacks
 import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
@@ -19,7 +19,7 @@ import numpy as np
 import torchvision.transforms.functional as TF
 from transformers import LlamaModel
 from tqdm import tqdm
-
+from rich_argparse import RichHelpFormatter
 from networks import lora_framepack
 from hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 from frame_pack import hunyuan
@@ -40,11 +40,12 @@ from hv_generate_video import save_images_grid, save_videos_grid, synchronize_de
 from wan_generate_video import merge_lora_weights
 from frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
 from dataset.image_video_dataset import load_video
+from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
+from blissful_tuner.video_processing_common import save_videos_grid_advanced
+from blissful_tuner.latent_preview import LatentPreviewer
+from blissful_tuner.utils import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 class GenerationSettings:
@@ -55,7 +56,8 @@ class GenerationSettings:
 
 def parse_args() -> argparse.Namespace:
     """parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Wan 2.1 inference script")
+    install_rich_tracebacks()
+    parser = argparse.ArgumentParser(description="Framepack inference script", formatter_class=RichHelpFormatter)
 
     # WAN arguments
     # parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
@@ -99,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=30, help="video fps, Default is 30")
     parser.add_argument("--infer_steps", type=int, default=25, help="number of inference steps, Default is 25")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument("--seed", type=str, default=None, help="Seed for evaluation.")
     # parser.add_argument(
     #     "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
     # )
@@ -140,7 +142,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
-    # parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled")
+    parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled mode and can degrade quality slightly but offers noticeable speedup")
     parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder 1 (LLM)")
     parser.add_argument(
         "--device", type=str, default=None, help="device to use for inference. If None, use CUDA if available, otherwise use CPU"
@@ -164,20 +166,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
-    # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
-    # parser.add_argument(
-    #     "--compile_args",
-    #     nargs=4,
-    #     metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-    #     default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
-    #     help="Torch.compile settings",
-    # )
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
+    parser.add_argument(
+        "--compile_args",
+        nargs=4,
+        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
+        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        help="Torch.compile settings",
+    )
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
 
+    parser = add_blissful_args(parser)
     args = parser.parse_args()
+    args = parse_blissful_args(args)
 
     # Validate arguments
     if args.from_file and args.interactive:
@@ -318,7 +322,7 @@ def optimize_model(model: HunyuanVideoTransformer3DModelPacked, args: argparse.N
 
         # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
         move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=False)  # args.fp8_fast)
+        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)  # args.fp8_fast)
 
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded FP8 optimized weights: {info}")
@@ -340,20 +344,20 @@ def optimize_model(model: HunyuanVideoTransformer3DModelPacked, args: argparse.N
         if target_device is not None and target_dtype is not None:
             model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # if args.compile:
-    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-    #     logger.info(
-    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-    #     )
-    #     torch._dynamo.config.cache_size_limit = 32
-    #     for i in range(len(model.blocks)):
-    #         model.blocks[i] = torch.compile(
-    #             model.blocks[i],
-    #             backend=compile_backend,
-    #             mode=compile_mode,
-    #             dynamic=compile_dynamic.lower() in "true",
-    #             fullgraph=compile_fullgraph.lower() in "true",
-    #         )
+    if args.compile:
+        compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
+        logger.info(
+            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+        )
+        torch._dynamo.config.cache_size_limit = 32
+        for i in range(len(model.transformer_blocks)):
+            model.transformer_blocks[i] = torch.compile(
+                model.transformer_blocks[i],
+                backend=compile_backend,
+                mode=compile_mode,
+                dynamic=compile_dynamic.lower() in "true",
+                fullgraph=compile_fullgraph.lower() in "true",
+            )
 
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
@@ -744,7 +748,8 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         # use `latent_paddings = list(reversed(range(total_latent_sections)))` to compare
         # 4 sections: 3, 2, 1, 0. 50 sections: 3, 2, 2, ... 2, 1, 0
         latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
-
+    if args.preview_latent_every:
+        previewer = LatentPreviewer(args, None, None, model.device, model.dtype, model_type="framepack")
     for section_index_reverse, latent_padding in enumerate(latent_paddings):
         section_index = total_latent_sections - 1 - section_index_reverse
         section_index_from_last = -(section_index_reverse + 1)  # -1, -2 ...
@@ -852,6 +857,8 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
 
         real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
+        if args.preview_latent_every is not None and (section_index_reverse + 1) % args.preview_latent_every == 0:
+            previewer.preview(real_history_latents)
 
         logger.info(f"Generated. Latent shape {real_history_latents.shape}")
 
@@ -959,7 +966,10 @@ def save_video(
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}{latent_frames}.mp4"
 
     video = video.unsqueeze(0)
-    save_videos_grid(video, video_path, fps=args.fps, rescale=True)
+    if args.codec is not None:
+        save_videos_grid_advanced(video, video_path, args.codec, args.container, rescale=True, fps=args.fps, keep_frames=args.keep_pngs)
+    else:
+        save_videos_grid(video, video_path, fps=args.fps, rescale=True)
     logger.info(f"Video saved to: {video_path}")
 
     return video_path
