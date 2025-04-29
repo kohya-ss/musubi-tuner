@@ -694,20 +694,19 @@ def main():
                 mem_eff_save_file(transformer.state_dict(), args.save_merged_model)  # save_file needs a lot of memory
                 logger.info("Merged model saved")
                 return
+        if not args.fp8_scaled:
+            logger.info(f"Casting model to {dit_weight_dtype}")
+            transformer.to(dtype=dit_weight_dtype)
+            #  Keep embeddings, modulation, bias, head
+            params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
 
-        logger.info(f"Casting model to {dit_weight_dtype}")
-        transformer.to(dtype=dit_weight_dtype)
+            if args.fp8_fast:
+                logger.info("Enabling FP8 acceleration")
 
-        #  Keep embeddings, modulation, bias, head
-        params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
-
-        if args.fp8_fast:
-            logger.info("Enabling FP8 acceleration")
-
-            for name, param in transformer.named_parameters():
-                dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
-                param.to(dtype=dtype_to_use)
-            convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
+                for name, param in transformer.named_parameters():
+                    dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
+                    param.to(dtype=dtype_to_use)
+                convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
 
         if args.fp16_accumulation:
             logger.info("Enabling FP16 accumulation")
