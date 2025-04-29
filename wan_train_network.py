@@ -436,7 +436,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
-    args.fp8_scaled_hunyuan = False
     args.dit_dtype = None  # automatically detected
     if args.vae_dtype is None:
         args.vae_dtype = "bfloat16"  # make bfloat16 as default for VAE

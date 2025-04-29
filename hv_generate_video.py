@@ -505,7 +505,7 @@ def main():
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
     dit_dtype = torch.bfloat16
-    dit_weight_dtype = torch.float8_e4m3fn if args.fp8 else dit_dtype
+    dit_weight_dtype = torch.float8_e4m3fn if args.fp8 and not args.fp8_scaled else dit_dtype
     logger.info(f"Using device: {device}, DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}")
 
     original_base_names = None
@@ -623,7 +623,7 @@ def main():
         # the model is too large, so we load the model to cpu. in addition, the .pt file is loaded to cpu anyway
         # on the fly merging will be a solution for this issue for .safetenors files (not implemented yet)
         transformer = load_transformer(
-            args.dit, args.attn_mode, args.split_attn, loading_device, dit_dtype, in_channels=dit_in_channels
+            args.dit, args.attn_mode, args.split_attn, loading_device, device, dit_dtype, in_channels=dit_in_channels, fp8_mode=args.fp8_scaled
         )
         transformer.eval()
 
@@ -697,10 +697,10 @@ def main():
 
         logger.info(f"Casting model to {dit_weight_dtype}")
         transformer.to(dtype=dit_weight_dtype)
-        
+
         #  Keep embeddings, modulation, bias, head
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
-        
+
         if args.fp8_fast:
             logger.info("Enabling FP8 acceleration")
 
@@ -708,15 +708,6 @@ def main():
                 dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
                 param.to(dtype=dtype_to_use)
             convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
-
-        if args.fp8_scaled:
-            logger.info(f"Scaling transformer (fp8_fast/mm_scaled: {args.fp8_fast})...")
-            state_dict = transformer.state_dict()
-            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
-            apply_fp8_monkey_patch(transformer, state_dict, args.fp8_fast)
-            info = transformer.load_state_dict(state_dict, strict=True, assign=True)
-            logger.info(f"Loaded FP8 optimized weights: {info}")
 
         if args.fp16_accumulation:
             logger.info("Enabling FP16 accumulation")

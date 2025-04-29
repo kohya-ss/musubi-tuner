@@ -17,8 +17,10 @@ from .modulate_layers import ModulateDiT, modulate, apply_gate
 from .token_refiner import SingleTokenRefiner
 from modules.custom_offloading_utils import ModelOffloader, synchronize_device, clean_memory_on_device
 from hunyuan_model.posemb_layers import get_nd_rotary_pos_embed
-
+from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from blissful_tuner.utils import BlissfulLogger
 from utils.safetensors_utils import MemoryEfficientSafeOpen
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 class MMDoubleStreamBlock(nn.Module):
@@ -534,7 +536,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
 
         self.attn_mode = attn_mode
         self.split_attn = split_attn
-        print(f"Using {self.attn_mode} attention mode, split_attn: {self.split_attn}")
+        logger.info(f"Using {self.attn_mode} attention mode, split_attn: {self.split_attn}")
 
         # image projection
         self.img_in = PatchEmbed(self.patch_size, self.in_channels, self.hidden_size, **factory_kwargs)
@@ -630,7 +632,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.double_blocks + self.single_blocks:
             block.enable_gradient_checkpointing()
 
-        print(f"HYVideoDiffusionTransformer: Gradient checkpointing enabled.")
+        logger.info(f"HYVideoDiffusionTransformer: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -640,7 +642,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.double_blocks + self.single_blocks:
             block.disable_gradient_checkpointing()
 
-        print(f"HYVideoDiffusionTransformer: Gradient checkpointing disabled.")
+        logger.info(f"HYVideoDiffusionTransformer: Gradient checkpointing disabled.")
 
     def enable_img_in_txt_in_offloading(self):
         self._enable_img_in_txt_in_offloading = True
@@ -663,7 +665,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         self.offloader_single = ModelOffloader(
             "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
         )
-        print(
+        logger.info(
             f"HYVideoDiffusionTransformer: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
         )
 
@@ -672,14 +674,14 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self.offloader_double.set_forward_only(True)
             self.offloader_single.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            print(f"HYVideoDiffusionTransformer: Block swap set to forward only.")
+            logger.info(f"HYVideoDiffusionTransformer: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader_double.set_forward_only(False)
             self.offloader_single.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            print(f"HYVideoDiffusionTransformer: Block swap set to forward and backward.")
+            logger.info(f"HYVideoDiffusionTransformer: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -967,12 +969,12 @@ def load_state_dict(model, model_path):
     return model
 
 
-def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels=16) -> HYVideoDiffusionTransformer:
+def load_transformer(dit_path, attn_mode, split_attn, load_device, main_device, dtype, in_channels=16, fp8_mode=False, fp8_fast=False) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
-    factor_kwargs = {"device": device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
+    factor_kwargs = {"device": load_device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
     out_channels = latent_channels
-
+    logger.info(f"Initialize HYVideoDiffusionTransformer from {dtype}")
     with accelerate.init_empty_weights():
         transformer = load_dit_model(
             text_states_dim=4096,
@@ -988,7 +990,7 @@ def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels
             state_dict = {}
             for k in f.keys():
                 tensor = f.get_tensor(k)
-                tensor = tensor.to(device=device, dtype=dtype)
+                tensor = tensor.to(device=load_device, dtype=dtype)
                 # TODO support comfy model
                 # if k.startswith("model.model."):
                 #     k = convert_comfy_model_key(k)
@@ -996,7 +998,14 @@ def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels
         transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
         transformer = load_state_dict(transformer, dit_path)
-
+    if fp8_mode:
+        params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
+        logger.info("Scaling transformer to FP8...")
+        state_dict = transformer.state_dict()
+        state_dict = optimize_state_dict_with_fp8(state_dict, main_device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=False)
+        apply_fp8_monkey_patch(transformer, state_dict, use_scaled_mm=fp8_fast)
+        info = transformer.load_state_dict(state_dict, strict=True, assign=True)
+        logger.info(f"Loaded FP8 optimized weights: {info}")
     return transformer
 
 

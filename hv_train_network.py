@@ -1313,7 +1313,7 @@ class NetworkTrainer:
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels)
+        transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, accelerator.device, dit_weight_dtype, args.dit_in_channels, args.fp8_scaled)
 
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")
@@ -1482,15 +1482,7 @@ class NetworkTrainer:
         )
         transformer.eval()
         transformer.requires_grad_(False)
-        if args.fp8_scaled_hunyuan:
-            params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
-            logger.info("Scaling transformer...")
-            state_dict = transformer.state_dict()
-            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = optimize_state_dict_with_fp8(state_dict, accelerator.device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
-            apply_fp8_monkey_patch(transformer, state_dict)
-            info = transformer.load_state_dict(state_dict, strict=True, assign=True)
-            logger.info(f"Loaded FP8 optimized weights: {info}")
+
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
             transformer.enable_block_swap(blocks_to_swap, accelerator.device, supports_backward=True)
@@ -2669,10 +2661,8 @@ def hv_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         " / VAEの空間タイリングを有効にする、デフォルトはFalse。vae_spatial_tile_sample_min_sizeが設定されている場合、自動的に有効になります。",
     )
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
-    parser.add_argument(
-        "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
-    )
-    parser.add_argument("--fp8_scaled_hunyuan", action="store_true", help="FP8 scaled for Hunyuan")
+    parser.add_argument("--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256")
+    parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization for better accuracy/quality")
     return parser
 
 
@@ -2682,8 +2672,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
-
-    args.fp8_scaled = False  # Use --fp8_scaled_hunyuan for Hunyuan
 
     trainer = NetworkTrainer()
     trainer.train(args)
