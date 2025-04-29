@@ -398,7 +398,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
-
+    args.fp8_scaled_hunyuan = False
     assert (
         args.vae_dtype is None or args.vae_dtype == "float16"
     ), "VAE dtype must be float16 / VAEのdtypeはfloat16でなければなりません"
