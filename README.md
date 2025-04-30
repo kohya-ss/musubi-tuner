@@ -1,4 +1,7 @@
 ## Blissful Tuner
+
+[English](./README.md) | [日本語](./README.ja.md)
+
 Blissful extension of Musubi Tuner by Blyss Sarania
 Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place!
 
@@ -38,8 +41,6 @@ Framepack only extensions:
 My general code and Musubi Tuner code is licensed Apache 2.0. Other projects included may have different licensing, in which case you will find a LICENSE file in their directory specifying the terms under which they are included! Below is the original Musubi Readme which still remains relevant:
 
 # Musubi Tuner Readme
-
-[English](./README.md) | [日本語](./README.ja.md)
 
 ## Table of Contents
 
