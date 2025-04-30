@@ -1,3 +1,42 @@
+## Blissful Tuner
+(このセクションは機械翻訳です)
+Blyss Sarania による Musubi Tuner の Blissful な拡張機能
+Musubi Tuner の拡張版です。生成動画モデルを扱うためのツールスイートの作成に重点を置いた、高度で実験的な機能を備えています。動画生成時にプレビューしたり、推論速度を向上させたり、動画を長くしたり、作成した動画をより細かく制御したり、VFI やアップスケーリングなどで動画を強化したりできます。Musubi をさらに活用したいなら、ここが最適な場所です！
+
+Musubi Tuner の開発に尽力してくれた kohya-ss 氏、重要なコードを移植してくれた HunyuanVideoWrapper と WanVideoWrapper の kijai 氏、そしてオープンソース生成 AI コミュニティのすべての開発者に心から感謝いたします。多くの変更が実験的な性質のものであるため、一部の機能は未修正の Musubi と同じように動作しない可能性があることにご注意ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題については、Musubi のメイン Github リポジトリではなく、このリポジトリの Issues セクションに投稿してください。
+
+すべてのモデルに拡張機能が追加されました。
+- latent2RGB または TAEHV による生成中に潜在プレビューを実行できます (--preview_latent_every N (N はステップ数 (フレームパックの場合はセクション数))、--preview_vae /path/to/model モデル: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
+- 美しく豊富なログ出力、豊富な引数解析、豊富なトレースバック機能
+- 拡張された保存オプション (--codec コーデック、--container コンテナ、Apple ProRes (超高ビットレート知覚的ロスレス) を MKV に保存、または h264 または h265 を MP4 または MKV に保存可能)
+- 高度な CFG スケジューリング: (--cfg_schedule、使用方法については --help を参照してください。必要に応じて、個々のステップにガイダンススケールダウンを指定できます！)
+- FP16 積分 (--fp16_accumulation、Wan FP16 モデルで最も効果的に機能しますが (Hunyaun bf16 でも動作します！)、PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に --compile を使用すると、精度を損なうことなく fp8_fast/mmscaled とほぼ同等の速度になります！また、fp8 スケールモードでも動作します！)
+- GIMM-VFI フレームレート補間 (blissful_tuner/GIMMVFI.py、使用方法については --help を参照してください。モデル: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
+- SwinIR または ESRGAN タイプのモデルを使用したアップスケーリング (blissful_tuner/upscaler.py。使用方法については --help を参照してください。モデル: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
+- シードには文字列を使用してください。覚えやすいのも魅力です！
+
+Wan/Hunyuan 拡張機能:
+- 拡散パイプ形式の LoRA を、変換せずに推論用に読み込みます。
+- 長い動画の場合は RifleX (例: https://github.com/thu-ml/RIFLEx) を使用します (--riflex_index N、N は RifleX の周波数です。Wan の場合は 6 が適しており、通常は 81 フレームではなく約 115 フレームまで処理できます。Wan では --rope_func が必要です。Hunyuan の場合は 4 が適しており、少なくとも 2 倍の長さにできます)。
+- CFGZero* (例: https://github.com/WeichenFan/CFG-Zero-star (--cfgzerostar_scaling, --cfgzerostar_init_steps N、Nは開始時に0になるまでのステップ数です。T2Vの場合は2、I2Vの場合は1が適切ですが、私の経験ではT2Vの方が適しています。Hunyuanのサポートは非​​常に実験的であり、CFGが有効になっている場合にのみ利用可能です。)
+
+Hunyuan専用の拡張機能:
+- LLMオプションの追加 (--hidden_​​state_skip_layer, --apply_final_norm, --reproduce、説明は--helpを参照してください!)
+- Wanと同じアルゴリズムを使用したFP8スケールのサポート (--fp8_scaled、kateトレーニングは十分にテストされていません!)
+- CLIP用の別のプロンプト (--prompt_2、CLIPはよりシンプルなテキストに使用されるため、CLIPとは異なるプロンプトを提供します)
+- テキストのスケール変更https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan をベースにしたエンコーダー (--te_multiplier llm clip、例えば --te_multiplier 0.9 1.2 のように指定すると、LLM をわずかにダウンウェイトし、CLIP をわずかにアップウェイトします)
+
+Wan のみの拡張機能 (現在、ワンショットモードとインタラクティブモードの両方をサポート):
+- プロンプトの重み付け (--prompt_weighting を指定し、プロンプトで「(large:1.4) の赤いボールで遊ぶ猫」のように指定することで、「large」の効果をアップウェイトできます。[this] や (this) はサポートされておらず、(this:1.0) のみがサポートされています。また、ダウンウェイトには奇妙な効果があります。
+- 複素数を使用しない ComfyUI から移植された ROPE。--compile と併用すると、VRAM を大幅に節約できます。 (--rope_func comfy)
+- I2V 中の追加ノイズを調整可能 (--noise_aug_strength F、F は追加ノイズの量。例えば 0.02 のような低い値が最も効果的で、I2V のディテールを改善できます)
+
+フレームパックのみの拡張機能:
+- Torch.compile (--compile、Wan と Hunyuan が既に使用している構文と同じ)
+- FP8 fast/mm_scaled (--fp8_fast、40xx カードで速度向上、ただし画質は若干低下)
+
+私のコード全体とMusubi TunerのコードはApache 2.0ライセンスです。他のプロジェクトは異なるライセンスを使用している可能性があります。その場合は、それぞれのディレクトリにLICENSEファイルがあり、ライセンス条件が記載されています。以下は、現在でも有効なMusubiのオリジナルのReadmeです。
+
 # Musubi Tuner
 
 [English](./README.md) | [日本語](./README.ja.md)
