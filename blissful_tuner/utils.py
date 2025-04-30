@@ -313,8 +313,10 @@ def string_to_seed(s: str, bits: int = 63) -> int:
         elif i % 5 == 0:
             algo /= char_val
         else:
-            algo *= char_val
-    if algo == float("inf"):
+            char_val_str = str(char_val)
+            for digit in char_val_str:
+                algo *= int(digit) if digit != "0" else .31415  # Prevents us from ascending to infinity
+    if algo == float("inf"):  # In case we somehow still do
         algo = len(s) + (314159 * ord(s[len(s) // 2])) - ord(s[len(s) // 4])
     seed = (abs(crypto - int(algo))) & mask
     return seed
