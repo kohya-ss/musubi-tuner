@@ -13,7 +13,7 @@ from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg, error_out
 logger = BlissfulLogger(__name__, "#8e00ed")
 
-BLISSFUL_VERSION = "0.4.0"
+BLISSFUL_VERSION = "0.4.5"
 
 CFG_SCHEDULE_HELP = """
 Comma-separated list of steps/ranges where CFG should be applied.
@@ -62,7 +62,7 @@ def blissful_prefunc(args: argparse.Namespace):
         cuda = torch.cuda.get_device_properties(0)
         cuda_list[0] += f", CUDA: {torch.version.cuda} CC: {cuda.major}.{cuda.minor}"
         cuda_list.append(f"Device: '{cuda.name}', VRAM: '{cuda.total_memory // 1024 ** 2}MB'")
-    logger.info(f"Blissful Tuner extension for Musubi Tuner version {BLISSFUL_VERSION}!")
+    logger.info(f"Blissful Tuner extension of Musubi Tuner version {BLISSFUL_VERSION}!")
     logger.info(f"Memory allocation: '{allocator}'")
     for string in cuda_list:
         logger.info(string)
