@@ -7,10 +7,11 @@ License: Apache 2.0
 @author: blyss
 """
 import torch
+from typing import Optional
 
 
-def apply_zerostar(cond: torch.Tensor, uncond: torch.Tensor, current_step: int, guidance_scale: float, use_scaling: bool = True, zero_init_steps: int = -1) -> torch.Tensor:
-
+def apply_zerostar(cond: torch.Tensor, uncond: torch.Tensor, current_step: int, guidance_scale: float, use_scaling: Optional[bool] = True, zero_init_steps: Optional[int] = -1) -> torch.Tensor:
+    """Function to apply CFGZero* scaling and zero init"""
     if (current_step <= zero_init_steps):
         return cond * 0
     if not use_scaling:
@@ -28,8 +29,8 @@ def apply_zerostar(cond: torch.Tensor, uncond: torch.Tensor, current_step: int, 
     return noise_pred
 
 
-def optimized_scale(positive_flat, negative_flat):
-
+def optimized_scale(positive_flat: torch.Tensor, negative_flat: torch.Tensor) -> torch.Tensor:
+    """Computes optimized scaling factors for CFG"""
     dot_product = torch.sum(positive_flat * negative_flat, dim=1, keepdim=True)
     squared_norm = torch.sum(negative_flat ** 2, dim=1, keepdim=True) + 1e-8
 
