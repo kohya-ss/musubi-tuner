@@ -10,15 +10,33 @@ from hunyuan_model.text_encoder import PROMPT_TEMPLATE
 
 
 @torch.no_grad()
-def encode_prompt_conds(prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2, max_length=256):
+def encode_prompt_conds(prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2, max_length=256, custom_system_prompt=None):
     assert isinstance(prompt, str)
 
     prompt = [prompt]
 
     # LLAMA
 
-    prompt_llama = [PROMPT_TEMPLATE["dit-llm-encode-video"]["template"].format(p) for p in prompt]
-    crop_start = PROMPT_TEMPLATE["dit-llm-encode-video"]["crop_start"]
+    # We can verify crop_start by checking the token count of the prompt:
+    # custom_system_prompt = (
+    #     "Describe the video by detailing the following aspects: "
+    #     "1. The main content and theme of the video."
+    #     "2. The color, shape, size, texture, quantity, text, and spatial relationships of the objects."
+    #     "3. Actions, events, behaviors temporal relationships, physical movement changes of the objects."
+    #     "4. background environment, light, style and atmosphere."
+    #     "5. camera angles, movements, and transitions used in the video:"
+    # )
+    if custom_system_prompt is None:
+        prompt_llama = [PROMPT_TEMPLATE["dit-llm-encode-video"]["template"].format(p) for p in prompt]
+        crop_start = PROMPT_TEMPLATE["dit-llm-encode-video"]["crop_start"]
+    else:
+        # count tokens for custom_system_prompt
+        full_prompt = f"<|start_header_id|>system<|end_header_id|>\n\n{custom_system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"
+        print(f"Custom system prompt: {full_prompt}")
+        system_prompt_tokens = tokenizer(full_prompt, return_tensors="pt", truncation=True).input_ids[0].shape[0]
+        print(f"Custom system prompt token count: {system_prompt_tokens}")
+        prompt_llama = [full_prompt + p + "<|eot_id|>" for p in prompt]
+        crop_start = system_prompt_tokens
 
     llama_inputs = tokenizer(
         prompt_llama,

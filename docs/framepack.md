@@ -108,7 +108,9 @@ Key differences from HunyuanVideo caching:
 -   The script generates multiple cache files per video, each corresponding to a different section, with the section index appended to the filename (e.g., `..._frame_pos-0000-count_...` becomes `..._frame_pos-0000-0000-count_...`, `..._frame_pos-0000-0001-count_...`, etc.).
 -   Image embeddings are calculated using the Image Encoder and stored in the cache files alongside the latents.
 
-By default, the sampling method used is Inverted anti-drifting (the same as during inference, using the latent and index in reverse order), described in the paper. You can switch to Vanilla sampling in the paper (using the temporally ordered latent and index) by specifying `--vanilla_sampling`. Preliminary tests suggest that Vanilla sampling may yield better quality. If you change this option, please overwrite the existing cache without specifying `--skip_existing`.
+By default, the sampling method used is Inverted anti-drifting (the same as during inference, using the latent and index in reverse order), described in the paper. You can switch to Vanilla sampling in the paper (using the temporally ordered latent and index) by specifying `--vanilla_sampling`. If you change this option, please overwrite the existing cache without specifying `--skip_existing`.
+
+ ~~Preliminary tests suggest that Vanilla sampling may yield better quality.~~ Some community reports indicate that Vanilla sampling may not work well in some cases.
 
 For VRAM savings during VAE decoding, consider using `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size`. If VRAM is overflowing and using shared memory, it is recommended to set `--vae_chunk_size` to 16 or 8, and `--vae_spatial_tile_sample_min_size` to 64 or 32.
 
@@ -127,7 +129,9 @@ HunyuanVideoのキャッシングとの主な違いは次のとおりです。
 -  スクリプトは、各ビデオに対して複数のキャッシュファイルを生成します。各ファイルは異なるセクションに対応し、セクションインデックスがファイル名に追加されます（例：`..._frame_pos-0000-count_...`は`..._frame_pos-0000-0000-count_...`、`..._frame_pos-0000-0001-count_...`などになります）。
 -  画像埋め込みは画像エンコーダーを使用して計算され、latentとともにキャッシュファイルに保存されます。
 
-デフォルトでは、論文のサンプリング方法 Inverted anti-drifting （推論時と同じ、逆順の latent と index を使用）を使用します。`--vanilla_sampling`を指定すると Vanilla sampling （時間順の latent と index を使用）に変更できます。簡単なテストの結果では、Vanilla sampling の方が品質が良いようです。このオプションの有無を変更する場合には `--skip_existing` を指定せずに既存のキャッシュを上書きしてください。
+デフォルトでは、論文のサンプリング方法 Inverted anti-drifting （推論時と同じ、逆順の latent と index を使用）を使用します。`--vanilla_sampling`を指定すると Vanilla sampling （時間順の latent と index を使用）に変更できます。このオプションの有無を変更する場合には `--skip_existing` を指定せずに既存のキャッシュを上書きしてください。
+
+~~簡単なテストの結果では、Vanilla sampling の方が品質が良いようです。~~ コミュニティからの報告によると、Vanilla sampling はうまく動かない場合もあるようです。
 
 VAEのdecode時のVRAM節約のために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`を使用することを検討してください。VRAMがあふれて共有メモリを使用している場合には、`--vae_chunk_size`を16、8などに、`--vae_spatial_tile_sample_min_size`を64、32などに変更することをお勧めします。
 </details>
@@ -260,6 +264,8 @@ Key differences from HunyuanVideo inference:
 -   `--bulk_decode` option can decode all frames at once, potentially faster but uses more VRAM during decoding. `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size` options are recommended to prevent out-of-memory errors.
 -   `--sample_solver` (default `unipc`) is available but only `unipc` is implemented.
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
+- `--latent_paddings` option overrides the default padding for each section. Specify it as a comma-separated list of integers, e.g., `--latent_paddings 0,0,0,0`.
+- `--custom_system_prompt` option overrides the default system prompt for the LLaMA Text Encoder 1. Specify it as a string. See [here](../hunyuan_model/text_encoder.py#L152) for the default system prompt.
 -   Batch and interactive modes (`--from_file`, `--interactive`) are **not yet implemented** for FramePack generation.
 
 Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable.
@@ -286,6 +292,8 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  `--bulk_decode`オプションは、すべてのフレームを一度にデコードできるオプションです。高速ですが、デコード中にVRAMを多く使用します。VRAM不足エラーを防ぐために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`オプションを指定することをお勧めします。
 -  `--sample_solver`（デフォルト`unipc`）は利用可能ですが、`unipc`のみが実装されています。
 -  `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
+- `--latent_paddings`オプションは、各セクションのデフォルトのパディングを上書きします。カンマ区切りの整数リストとして指定します。例：`--latent_paddings 0,0,0,0`。
+- `--custom_system_prompt`オプションは、LLaMA Text Encoder 1のデフォルトのシステムプロンプトを上書きします。文字列として指定します。デフォルトのシステムプロンプトは[こちら](../hunyuan_model/text_encoder.py#L152)を参照してください。
 -  バッチモードとインタラクティブモード（`--from_file`、`--interactive`）はFramePack生成には**まだ実装されていません**。
 
 `--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。
@@ -307,6 +315,7 @@ This section describes experimental features added to the `fpack_generate_video.
 ### **2. Section Start Image Guidance (`--image_path` Extended Format)**
 
 *   **Functionality:** Guides specific sections within the video to start with a visual state close to a provided image.
+    * You can force the start image by setting `--latent_paddings` to `0,0,0,0` (specify the number of sections as a comma-separated list). If `latent_paddings` is set to 1 or more, the specified image will be used as a reference image (default behavior).
 *   **Usage:** `--image_path "SECTION_SPEC:path/to/image.jpg;;;SECTION_SPEC:path/to/another.jpg;;;..."`
     *   `SECTION_SPEC`: Defines the target section(s). Rules:
         *   `0`: The first section of the video (generated last in Inverted Anti-drifting).
@@ -327,12 +336,13 @@ This section describes experimental features added to the `fpack_generate_video.
     *   Use `;;;` as a separator.
     *   If a prompt for a specific section is not provided, the prompt associated with index `0` (or the closest specified applicable prompt) is typically used. Check behavior if defaults are critical.
 *   **Mechanism:** During the generation of each section, the corresponding section-specific prompt is used as the primary textual guidance for the model.
-*   **Prompt Content Recommendation:**
+*   **Prompt Content Recommendation** when using `--latent_paddings 0,0,0,0`:
     *   Recall that FramePack uses Inverted Anti-drifting and references future context.
     *   It is recommended to describe "**the main content or state change that should occur in the current section, *and* the subsequent events or states leading towards the end of the video**" in the prompt for each section.
     *   Including the content of subsequent sections in the current section's prompt helps the model maintain context and overall coherence.
     *   Example: For section 1, the prompt might describe what happens in section 1 *and* briefly summarize section 2 (and beyond).
     *   However, based on observations (e.g., the `latent_paddings` comment), the model's ability to perfectly utilize very long-term context might be limited. Experimentation is key. Describing just the "goal for the current section" might also work. Start by trying the "section and onwards" approach.
+* Use the default prompt when `latent_paddings` is >= 1 or `--latent_paddings` is not specified.
 *   **Use Cases:** Describing evolving storylines, gradual changes in character actions or emotions, step-by-step processes over time.
 
 ### **Combined Usage Example**
@@ -385,6 +395,7 @@ python fpack_generate_video.py \
 #### **2. セクション開始画像ガイダンス (`--image_path` 拡張書式)**
 
 *   **機能:** 動画内の特定のセクションが、指定された画像に近い視覚状態から始まるように誘導します。
+    * `--latent_paddings`を`0,0,0,0`（カンマ区切りでセクション数だけ指定）に設定することで、セクションの開始画像を強制できます。`latent_paddings`が1以上の場合、指定された画像は参照画像として使用されます。
 *   **書式:** `--image_path "セクション指定子:画像パス;;;セクション指定子:別の画像パス;;;..."`
     *   `セクション指定子`: 対象セクションを定義します。ルール：
         *   `0`: 動画の最初のセクション（Inverted Anti-driftingでは最後に生成）。
@@ -405,12 +416,13 @@ python fpack_generate_video.py \
     *   区切り文字は `;;;` です。
     *   特定セクションのプロンプトがない場合、通常はインデックス`0`に関連付けられたプロンプト（または最も近い適用可能な指定プロンプト）が使用されます。デフォルトの挙動が重要な場合は確認してください。
 *   **動作:** 各セクションの生成時、対応するセクション別プロンプトがモデルへの主要なテキスト指示として使用されます。
-*   **プロンプト内容の推奨:**
+*  `latent_paddings`に`0`を指定した場合の **プロンプト内容の推奨:**
     *   FramePackはInverted Anti-driftingを採用し、未来のコンテキストを参照することを思い出してください。
     *   各セクションのプロンプトには、「**現在のセクションで起こるべき主要な内容や状態変化、*および*それに続く動画の終端までの内容**」を記述することを推奨します。
     *   現在のセクションのプロンプトに後続セクションの内容を含めることで、モデルが全体的な文脈を把握し、一貫性を保つのに役立ちます。
     *   例：セクション1のプロンプトには、セクション1の内容 *と* セクション2（以降）の簡単な要約を記述します。
     *   ただし、モデルの長期コンテキスト完全利用能力には限界がある可能性も示唆されています（例：`latent_paddings`コメント）。実験が鍵となります。「現在のセクションの目標」のみを記述するだけでも機能する場合があります。まずは「セクション以降」アプローチを試すことをお勧めします。
+* `latent_paddings`が`1`以上（またはデフォルト）の場合は、通常のプロンプト内容を記述してください。
 *   **用途:** 時間経過に伴うストーリーの変化、キャラクターの行動や感情の段階的な変化、段階的なプロセスなどを記述する場合。
 
 #### **組み合わせ使用例**

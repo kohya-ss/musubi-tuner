@@ -88,6 +88,9 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/05/01
+    - FramePackの推論コードに、latent padding指定、カスタムプロンプト指定等の機能を追加しました。詳細は[FramePackのドキュメント](./docs/framepack.md#inference)を参照してください。
+        - セクション開始画像を指定したときの振る舞いが変わりました（latent paddingを自動的に0に指定しなくなったため、開始画像は参照画像として用いられます）。以前と同じ振る舞い（セクション開始画像を強制）にするには、`--latent_padding 0,0,0,0`（セクション数だけ0を指定）としてください。
 - 2025/04/26
     - FramePackの推論およびLoRA学習を追加しました。PR [#230](https://github.com/kohya-ss/musubi-tuner/pull/230) 詳細は[FramePackのドキュメント](./docs/framepack.md)を参照してください。
     
@@ -100,10 +103,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 - 2025/04/06
     - JSONL形式の動画データセットで、動画ファイルだけでなく、複数枚の画像が格納されたディレクトリも指定できるようになりました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file)を参照してください。
     - 動画データセットで、元動画のフレームレートを指定すると、アーキテクチャのフレームレートに自動的に間引く機能を追加しました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files)を参照してください。
-
-- 2025/03/30
-    - Wan2.1-FunのControlモデルの学習を実験的に追加しました（未テスト）。[Wan2.1のドキュメント](./docs/wan.md#training--学習)を参照してください。
-    - Wan2.1-FunのControlモデルによる推論を実験的にサポートしました。14BのI2VでのControlのみテスト済みです。[Wan2.1のドキュメント](./docs/wan.md#inference--推論)を参照してください。
 
 ### リリースについて
 

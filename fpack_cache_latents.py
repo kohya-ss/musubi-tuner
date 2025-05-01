@@ -338,13 +338,14 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
                     all_latent_cache_paths.append(p)
                     all_existing = all_existing and os.path.exists(p)
 
-                if all_existing:
+                if not all_existing:  # if any section cache is missing
                     filtered_batch.append(item)
 
             if args.skip_existing:
-                if len(filtered_batch) == 0:
+                if len(filtered_batch) == 0:  # all sections exist
+                    logger.info(f"All sections exist for {batch[0].item_key}, skipping")
                     continue
-                batch = filtered_batch
+                batch = filtered_batch  # update batch to only missing sections
 
             bs = args.batch_size if args.batch_size is not None else len(batch)
             for i in range(0, len(batch), bs):

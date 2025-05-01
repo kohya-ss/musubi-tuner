@@ -97,6 +97,10 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- May 1, 2025:
+    - Added features to the inference code of FramePack, such as latent padding specification and custom prompt specification. See [FramePack documentation](./docs/framepack.md#inference) for details.
+        - The behavior when specifying the section start image has changed (it no longer automatically sets latent padding to 0, so the start image is used as a reference image). To maintain the previous behavior (force the section start image), specify `--latent_padding 0,0,0,0` (specify 0 for each section).
+        
 - Apr 26, 2025:
     - Added inference and LoRA training for FramePack. PR [#230](https://github.com/kohya-ss/musubi-tuner/pull/230). See [FramePack documentation](./docs/framepack.md) for details.
 
@@ -110,34 +114,6 @@ If you find this project helpful, please consider supporting its development via
     - In the video dataset with JSONL format, you can now specify not only video files but also directories containing multiple images. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file) for details.
     - Added a feature to automatically downsample the original video's frame rate to the architecture's frame rate when specifying the original video's frame rate in the video dataset. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files) for details.
 
-- Mar 30, 2025
-    - Added experimental support for training Wan2.1-Fun's Control model (untested). See [here](./docs/wan.md#training--学習) for details.
-    - Added experimental support for inference with Wan2.1-Fun's Control model. Tested only with 14B I2V Control. See [here](./docs/wan.md#inference--推論) for details.
-
-- Mar 27, 2025
-    - Added `--cpu_noise` option to generate initial noise on CPU during Wan2.1 inference. This may result in the same output as ComfyUI with the same seed (depending on other settings).
-
-- Mar 23, 2025
-    - Added an option to save the actual image and video data used in training as files during latent caching with `--debug_mode video`. PR [#187](https://github.com/kohya-ss/musubi-tuner/pull/187). See [here](#latent-pre-caching) for details. Available for both HunyuanVideo and Wan2.1.
-    - Added an option to use Skip Layer Guidance during Wan2.1 inference. PR [#186](https://github.com/kohya-ss/musubi-tuner/pull/186). See [here](./docs/wan.md#skip-layer-guidance) for details.
-    - Added the ability to specify the target modules for LoRA application during Wan2.1 inference using regular expressions. PR [#185](https://github.com/kohya-ss/musubi-tuner/pull/185). 
-        - See [here](./docs/wan.md#t2v-inference--t2v推論) for details.
-
-- Mar 22, 2025
-    - Added `full` to the frame extraction method for video datasets. This uses the entire video from start to finish. See [here](./dataset/dataset_config.md#frame_extraction-options) for details.
-        - `full` is recommended when each video represents a single complete motion. The frame extraction methods other than `full` are recommended when the video contains repeated actions. 
-    - If a value other than "4\*N+1" is specified for `target_frames` in the video dataset, it will be automatically converted to "4\*N+1".
-    - Corrected some errors in the dataset configuration documentation.
-    - Added an option to speed up inference by skipping CFG (classifier free guidance) at some steps during Wan2.1 inference. PR [#180](https://github.com/kohya-ss/musubi-tuner/pull/180) 
-        - Set with `--cfg_skip_mode` and `--cfg_apply_ratio`. See [here](./docs/wan.md#cfg-skip-mode--cfgスキップモード) for details.
-
-- Mar 21, 2025
-    - Fixed a bug where the image passed to CLIP during Wan2.1 inference was incorrectly in BGR format. PR [#176](https://github.com/kohya-ss/musubi-tuner/pull/176) 
-    - Added the ability to specify the last frame image during Wan2.1 inference. PR [#177](https://github.com/kohya-ss/musubi-tuner/pull/177) This feature is experimental.
-        - This feature is based on the implementation by raindrop313 in [ComfyUI-WanVideoStartEndFrames](https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames). Many thanks to raindrop313. Note that this is not a complete reproduction of the implementation, so there may be issues.
-        - Specify the last frame image with `--end_image_path`. Also, the `--trim_tail_frames` option has been added.
-        - See [here](./docs/wan.md#i2v-inference--i2v推論) for details.
-        
 
 ### Releases
 
