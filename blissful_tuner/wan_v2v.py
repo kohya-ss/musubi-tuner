@@ -37,10 +37,15 @@ def prepare_v2v_noise(
     steps = args.infer_steps
     if args.v2v_denoise <= 1.0:
         steps = int(steps * args.v2v_denoise)
-        timesteps = timesteps[-(steps + 1):]
+        timesteps = timesteps[-(steps):]
     elif args.v2v_denoise > 1.0:
         raise ValueError("--v2v_noise cannot be greater than 1.0!")
     args.infer_steps = steps
+    if args.cfg_schedule is not None:
+        invalid_steps = [step for step in args.cfg_schedule.keys() if int(step) > steps]
+        for step in invalid_steps:
+            args.cfg_schedule.pop(step, None)
+
 
     # 2) Compute target latent-grid dimensions
     height_px, width_px = args.video_size
