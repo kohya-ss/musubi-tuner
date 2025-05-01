@@ -44,7 +44,7 @@ from hv_generate_video import save_images_grid, save_videos_grid, synchronize_de
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
-from blissful_tuner.prompt_management import MiniT5Wrapper
+from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from dataset.image_video_dataset import load_video
@@ -215,7 +215,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def parse_prompt_line(line: str) -> Dict[str, Any]:
+def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict[str, Any]:
     """Parse a prompt line into a dictionary of argument overrides
 
     Args:
@@ -227,7 +227,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
     # TODO common function with hv_train_network.line_to_prompt_dict
     parts = line.split(" --")
     prompt = parts[0].strip()
-
+    if prompt_wildcards is not None:
+        prompt = process_wildcards(prompt, prompt_wildcards)
     # Create dictionary of overrides
     overrides = {"prompt": prompt}
 
@@ -1430,6 +1431,7 @@ def save_output(
         original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
         save_images(sample, args, original_name)
 
+
 def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Namespace) -> List[Dict]:
     """Process multiple prompts for batch mode
 
@@ -1448,7 +1450,7 @@ def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Na
             continue
 
         # Parse prompt line and create override dictionary
-        prompt_data = parse_prompt_line(line)
+        prompt_data = parse_prompt_line(line, base_args.prompt_wildcards)
         logger.info(f"Parsed prompt data: {prompt_data}")
         prompts_data.append(prompt_data)
 
@@ -1658,7 +1660,7 @@ def process_interactive(args: argparse.Namespace) -> None:
                     continue
 
                 # Parse prompt
-                prompt_data = parse_prompt_line(line)
+                prompt_data = parse_prompt_line(line, args.prompt_wildcards)
                 prompt_args = apply_overrides(args, prompt_data)
 
                 # Ensure we have all the models we need
