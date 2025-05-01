@@ -35,10 +35,10 @@ def prepare_v2v_noise(
     """
     # 1) Possibly shorten the schedule
     steps = args.infer_steps
-    if args.v2v_noise <= 1.0:
+    if args.v2v_denoise <= 1.0:
         steps = int(steps * args.v2v_noise)
         timesteps = timesteps[-(steps + 1):]
-    elif args.v2v_noise > 1.0:
+    elif args.v2v_denoise > 1.0:
         raise ValueError("--v2v_noise cannot be greater than 1.0!")
     args.infer_steps = steps
 
