@@ -105,7 +105,6 @@ def process_wildcards(
 
     Args:
         prompts:       A single prompt string or list of prompt strings.
-        wildcard_replace:  Function that maps a key (no underscores) to its replacement str.
         max_depth:     Maximum recursion depth before bailing out.
 
     Returns:

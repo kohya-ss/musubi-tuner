@@ -46,6 +46,7 @@ from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
+from blissful_tuner.wan_v2v import prepare_v2v_noise
 from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from dataset.image_video_dataset import load_video
 
@@ -1190,7 +1191,8 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
     # prepare seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     args.seed = seed  # set seed to args for saving
-
+    # setup scheduler
+    scheduler, timesteps = setup_scheduler(args, cfg, device)
     # Check if we have shared models
     if shared_models is not None:
         # Use shared models and encoded data
@@ -1205,6 +1207,9 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         else:
             # T2V
             noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
+            if args.video_path is not None:  # V2V
+                logger.info("Preparing V2V...")
+                noise, timesteps = prepare_v2v_noise(args, cfg, timesteps, device, vae)
     else:
         # prepare inputs without shared models
         if is_i2v:
@@ -1215,11 +1220,13 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         else:
             # T2V: need text encoder
             vae = None
-            if cfg.is_fun_control:
+            if cfg.is_fun_control or args.video_path is not None:
                 # Fun-Control: need VAE for encoding control video
                 vae = load_vae(args, cfg, device, vae_dtype)
             noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
-
+            if args.video_path is not None:
+                logger.info("Preparing V2V...")
+                noise, timesteps = prepare_v2v_noise(args, cfg, timesteps, device, vae)
         # load DiT model
         model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
 
@@ -1233,9 +1240,6 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
         # optimize model: fp8 conversion, block swap etc.
         optimize_model(model, args, device, dit_dtype, dit_weight_dtype)
-
-    # setup scheduler
-    scheduler, timesteps = setup_scheduler(args, cfg, device)
 
     # set random generator
     seed_g = torch.Generator(device=device)
