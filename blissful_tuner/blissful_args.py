@@ -84,7 +84,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
             "--rope_func", type=str, default="default",
             help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile to enable BIG VRAM savings"
         )
-        parser.add_argument("--v2v_noise", type=float, default=0.5, help="Percent of noise to add for V2V, 0.0-1.0")
+        parser.add_argument("--v2v_denoise", type=float, default=0.5, help="Amount of denoising to do for V2V, 0.0-1.0")
         parser.add_argument(
             "--v2v_pad_mode", type=str, choices=["front", "end"], default="end",
             help="Padding mode for when V2V input is shorter than requested output"

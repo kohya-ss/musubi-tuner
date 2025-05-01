@@ -112,7 +112,7 @@ def prepare_v2v_noise(
 
     if in_f < tgt_f:
         pad_count = tgt_f - in_f
-        logger.info(f"Padding input at the {args.v2v_pad_mode} with {pad_count} frames...")
+        logger.info(f"Padding input at the {args.v2v_pad_mode}")
         if args.v2v_pad_mode == "front":
             # repeat the first frame pad_count times at the front
             pad = input_samples[:, :1].repeat(1, pad_count, 1, 1)
@@ -128,7 +128,7 @@ def prepare_v2v_noise(
         # too many frames: truncate the tail
         input_samples = input_samples[:, :tgt_f]
 
-    # 8) Blend noise & input according to v2v_noise strength
-    noise = noise * args.v2v_noise + input_samples * (1.0 - args.v2v_noise)
-
+    # 8) Blend noise & input according to updated timestep schedule
+    latent_timestep = timesteps[:1].to(noise) / 1000
+    noise = noise * latent_timestep + (1 - latent_timestep) * input_samples
     return noise, timesteps

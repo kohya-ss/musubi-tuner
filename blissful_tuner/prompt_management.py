@@ -47,25 +47,31 @@ def wildcard_replace(wildcard: str, wildcard_location: str) -> str:
     Replace a single __wildcard__ by picking a weighted random entry
     from the file `{wildcard}.txt` in `wildcard_location`.
 
-    File format (one entry per line):
-        option_name       → weight = 1.0
-        option_name:2.5   → weight = 2.5
-
-    Weights are used *relatively*, so option A with weight=2.0
-    is twice as likely as option B with weight=1.0.
-
-    Raises:
-      FileNotFoundError if the file isn't there.
-      ValueError for malformed weights or empty files.
+    Supports subdirectories (e.g. "colors/Autumn") but forbids:
+      - Absolute paths (leading '/')
+      - Parent traversal ('..')
     """
-    path = os.path.join(wildcard_location, f"{wildcard}.txt")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"Wildcard file not found: {path}")
+    # 1) Sanitize the wildcard key
+    if os.path.isabs(wildcard):
+        raise ValueError(f"Absolute paths not allowed in wildcard: {wildcard!r}")
+    if ".." in wildcard.split(os.sep):
+        raise ValueError(f"Parent-directory traversal not allowed in wildcard: {wildcard!r}")
 
-    options = []
-    weights = []
+    # 2) Build and resolve the real path
+    base_dir = os.path.abspath(wildcard_location)
+    candidate = os.path.abspath(os.path.join(base_dir, f"{wildcard}.txt"))
 
-    with open(path, "r", encoding="utf-8") as f:
+    # 3) Ensure it's still inside base_dir
+    if not (candidate == base_dir or candidate.startswith(base_dir + os.sep)):
+        raise ValueError(f"Wildcard path escapes base directory: {candidate}")
+
+    # 4) Load options & weights
+    options: List[str] = []
+    weights: List[float] = []
+    if not os.path.isfile(candidate):
+        raise FileNotFoundError(f"Wildcard file not found: {candidate}")
+
+    with open(candidate, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -77,9 +83,7 @@ def wildcard_replace(wildcard: str, wildcard_location: str) -> str:
                 try:
                     weight = float(w_str.strip())
                 except ValueError:
-                    raise ValueError(
-                        f"Invalid weight '{w_str}' in {path} on line: {raw!r}"
-                    )
+                    raise ValueError(f"Invalid weight '{w_str}' in {candidate!r} on line: {raw!r}")
             else:
                 name = line
                 weight = 1.0
@@ -89,9 +93,9 @@ def wildcard_replace(wildcard: str, wildcard_location: str) -> str:
                 weights.append(weight)
 
     if not options:
-        raise ValueError(f"No valid options found in wildcard file: {path}")
+        raise ValueError(f"No valid options found in wildcard file: {candidate}")
 
-    # random.choices uses weights relatively
+    # 5) Pick one by relative weights
     return random.choices(options, weights=weights, k=1)[0]
 
 
