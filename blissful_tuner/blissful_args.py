@@ -94,6 +94,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         parser.add_argument("--te_multiplier", nargs=2, metavar=("llm_multiplier", "clip_multiplier"), help="Scale clip and llm influence")
     elif DIFFUSION_MODEL == "framepack":
         parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N sections. If --preview_vae is not specified it will use latent2rgb")
+        parser.add_argument("--te_multiplier", nargs=2, metavar=("llm_multiplier", "clip_multiplier"), help="Scale clip and llm influence")
 
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
         parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 4 is good for Hunyuan, 6 is good for Wan. Only 'comfy' rope_func supports this with Wan!")

@@ -16,6 +16,32 @@ from blissful_tuner.utils import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 
+def rescale_text_encoders_hunyuan(llm_scale: float, clip_scale: float, transformer: torch.nn.Module) -> torch.nn.Module:
+    logger.info(f"Scaling relative TE influence to LLM:{llm_scale}; CLIP:{clip_scale}")
+    clip_multiplier = float(clip_scale)
+    llm_multiplier = float(llm_scale)
+    # Scale CLIP influence
+    if hasattr(transformer, "txt_in"):
+        txt_in = transformer.txt_in
+        if hasattr(txt_in, "c_embedder"):
+            original_c_embedder_forward = txt_in.c_embedder.forward
+
+            def scaled_c_embedder_forward(*args, **kwargs):
+                output = original_c_embedder_forward(*args, **kwargs)
+                return output * clip_multiplier
+            txt_in.c_embedder.forward = scaled_c_embedder_forward
+            # Scale LLM influence
+            if hasattr(txt_in, "individual_token_refiner"):
+                for i, block in enumerate(txt_in.individual_token_refiner.blocks):
+                    original_block_forward = block.forward
+
+                    def scaled_block_forward(*args, **kwargs):
+                        output = original_block_forward(*args, **kwargs)
+                        return output * llm_multiplier
+                    block.forward = scaled_block_forward
+    return transformer
+
+
 def wildcard_replace(wildcard: str, wildcard_location: str) -> str:
     """
     Replace a single __wildcard__ by picking a weighted random entry

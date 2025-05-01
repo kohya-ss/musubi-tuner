@@ -41,6 +41,7 @@ from blissful_tuner.utils import BlissfulLogger
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
+from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
 
 logger = BlissfulLogger(__name__, "green")
 
@@ -710,28 +711,8 @@ def main():
 
         if args.te_multiplier:
             llm_multiplier, clip_multiplier = args.te_multiplier
-            logger.info(f"Scaling relative TE influence to LLM:{llm_multiplier}; CLIP:{clip_multiplier}")
-            clip_multiplier = float(clip_multiplier)
-            llm_multiplier = float(llm_multiplier)
-            # Scale CLIP influence
-            if hasattr(transformer, "txt_in"):
-                txt_in = transformer.txt_in
-                if hasattr(txt_in, "c_embedder"):
-                    original_c_embedder_forward = txt_in.c_embedder.forward
+            transformer = rescale_text_encoders_hunyuan(llm_multiplier, clip_multiplier, transformer)
 
-                    def scaled_c_embedder_forward(*args, **kwargs):
-                        output = original_c_embedder_forward(*args, **kwargs)
-                        return output * clip_multiplier
-                    txt_in.c_embedder.forward = scaled_c_embedder_forward
-                    # Scale LLM influence
-                    if hasattr(txt_in, "individual_token_refiner"):
-                        for i, block in enumerate(txt_in.individual_token_refiner.blocks):
-                            original_block_forward = block.forward
-
-                            def scaled_block_forward(*args, **kwargs):
-                                output = original_block_forward(*args, **kwargs)
-                                return output * llm_multiplier
-                            block.forward = scaled_block_forward
         if args.compile:
             compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
             logger.info(

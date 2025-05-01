@@ -42,6 +42,7 @@ from frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_e
 from dataset.image_video_dataset import load_video
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.video_processing_common import save_videos_grid_advanced
+from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.utils import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
@@ -356,6 +357,10 @@ def optimize_model(model: HunyuanVideoTransformer3DModelPacked, args: argparse.N
 
         if target_device is not None and target_dtype is not None:
             model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
+
+    if args.te_multiplier:
+        llm_multiplier, clip_multiplier = args.te_multiplier
+        model = rescale_text_encoders_hunyuan(llm_multiplier, clip_multiplier, model)
 
     if args.compile:
         compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args

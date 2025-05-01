@@ -17,6 +17,7 @@ Extensions for all models:
 - GIMM-VFI framerate interpolation (blissful_tuner/GIMMVFI.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
 - Upscaling with SwinIR or ESRGAN type models (blissful_tuner/upscaler.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
 - Use strings as your seed because why not! Also easier to remember!
+- Use wildcards in your prompts for more variation! (--prompt_wildcards /path/to/wildcard/directory for instance __color__ in your prompt would look for color.txt in that directory. The wildcard file format is one potential replacement string per line, with an optional relative weight attached like red:2.0 or "some longer string:0.5"  - wildcards can also contain wildcards themselves, the recursion limit is 50 steps!)
 
 
 Wan/Hunyuan extensions:
