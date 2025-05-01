@@ -44,7 +44,7 @@ from hv_generate_video import save_images_grid, save_videos_grid, synchronize_de
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
-from blissful_tuner.prompt_weighting import MiniT5Wrapper
+from blissful_tuner.prompt_management import MiniT5Wrapper
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.video_processing_common import save_videos_grid_advanced
 from dataset.image_video_dataset import load_video

@@ -11,6 +11,7 @@ import argparse
 import torch
 from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg, error_out
+from blissful_tuner.prompt_management import process_wildcards
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 BLISSFUL_VERSION = "0.4.5"
@@ -101,7 +102,10 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps. If --preview_vae is not specified it will use latent2rgb")
 
     # Common
-
+    parser.add_argument(
+        "--prompt_wildcards", type=str, default=None,
+        help="Path to a directory of wildcard.txt files to enable wildcards in prompts and negative prompts. For instance __color__ will look for wildcards in color.txt in that directory. \
+        Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.")
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument("--cfg_schedule", type=str, help=CFG_SCHEDULE_HELP)
     parser.add_argument("--keep_pngs", action="store_true", help="Save frames as PNGs in addition to output video")
@@ -112,6 +116,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
 
 
 def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
+    blissful_prefunc(args)
     if args.seed is not None:
         try:
             args.seed = int(args.seed)
@@ -119,6 +124,11 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
             string_seed = args.seed
             args.seed = string_to_seed(args.seed)
             logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
+    if args.prompt_wildcards is not None:
+        args.prompt = process_wildcards(args.prompt, args.prompt_wildcards) if args.prompt is not None else None
+        args.negative_prompt = process_wildcards(args.negative_prompt, args.prompt_wildcards) if args.negative_prompt is not None else None
+        if hasattr(args, "prompt_2"):
+            args.prompt_2 = process_wildcards(args.prompt_2, args.prompt_wildcards) if args.prompt2 is not None else None
     if DIFFUSION_MODEL == "wan":
         if args.riflex_index != 0 and args.rope_func.lower() != "comfy":
             logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
@@ -129,5 +139,4 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
             if args.guidance_scale == 1 and not args.cfg_schedule:
                 error_out(AttributeError, "Requested CFGZero* but CFG is not enabled so it will have no effect!")
-    blissful_prefunc(args)
     return args
