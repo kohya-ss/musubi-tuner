@@ -78,7 +78,6 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
-        parser.add_argument("--noise_aug_strength", type=float, default=0.0, help="Additional multiplier for i2v noise, higher might help motion/quality")
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (prompt weighting:1.2)")
         parser.add_argument(
             "--rope_func", type=str, default="default",

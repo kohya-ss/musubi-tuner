@@ -43,7 +43,7 @@ from utils.device_utils import clean_memory_on_device
 from hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
-from blissful_tuner.utils import BlissfulLogger, add_noise_to_reference_video
+from blissful_tuner.utils import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.wan_v2v import prepare_v2v_noise
@@ -841,8 +841,6 @@ def prepare_i2v_inputs(
         # load CLIP model
         clip = load_clip_model(args, config, device)
         clip.model.to(device)
-        if args.noise_aug_strength > 0:
-            img_tensor = add_noise_to_reference_video(img_tensor, args.noise_aug_strength)
         # encode image to CLIP context
         logger.info("Encoding image to CLIP context")
         with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
@@ -1710,8 +1708,6 @@ def process_interactive(args: argparse.Namespace) -> None:
                         img = Image.open(prompt_args.image_path).convert("RGB")
                         img_tensor = TF.to_tensor(img).sub_(0.5).div_(0.5).to(device)
                         img_tensor = img_tensor.unsqueeze(1)
-                        if args.noise_aug_strength > 0.0:
-                            img_tensor = add_noise_to_reference_video(img_tensor, ratio=args.noise_aug_strength)
                         with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
                             clip_context = clip.visual([img_tensor])
 

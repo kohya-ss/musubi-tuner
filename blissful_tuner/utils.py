@@ -62,45 +62,6 @@ def load_torch_file(
     return (sd, metadata) if return_metadata else sd
 
 
-def add_noise_to_reference_video(
-    image: torch.Tensor,
-    ratio: Optional[float] = None
-) -> torch.Tensor:
-    """
-    Add Gaussian noise (scaled by `ratio`) to an image or batch of images.
-    Supports:
-      • Single image:   (C, H, W)
-      • Batch of images: (B, C, H, W)
-    Any pixel exactly == –1 will have zero noise (mask value).
-    """
-    if ratio is None or ratio == 0.0:
-        return image
-
-    dims = image.ndim
-    if dims == 3:
-        # Single image -> make it a batch of 1
-        image = image.unsqueeze(0)  # -> (1, C, H, W)
-        squeeze_back = True
-    elif dims == 4:
-        squeeze_back = False
-    else:
-        raise ValueError(
-            f"add_noise_to_reference_video() expected 3D or 4D tensor, got {dims}D"
-        )
-
-    # image is now (B, C, H, W)
-    B, C, H, W = image.shape
-    # make a (B,) sigma array, all = ratio
-    sigma = image.new_ones((B,)) * ratio
-    # sample noise and scale by sigma
-    noise = torch.randn_like(image) * sigma.view(B, 1, 1, 1)
-    # zero out noise wherever the original was -1
-    noise = torch.where(image == -1, torch.zeros_like(image), noise)
-
-    out = image + noise
-    return out.squeeze(0) if squeeze_back else out
-
-
 # Below here, Blyss wrote it!
 class BlissfulLogger:
     def __init__(self, logging_source: str, log_color: str, do_announce: Optional[bool] = False):
