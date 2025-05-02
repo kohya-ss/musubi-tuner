@@ -4,14 +4,14 @@
 
 Blissful extension of Musubi Tuner by Blyss Sarania
 
-Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place!
+Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place! Note for best performance and compatibility, Python 3.12 with PyTorch 2.7.0 or later is recommended!
 
 Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do not post about issues with this version on the main Musubi Github repo but rather use this repo's issues section!
 
 Extensions for all models:
 - Latent preview during generation with either latent2RGB or TAEHV (`--preview_latent_every N` where N is a number of steps(or sections for framepack). By default uses latent2rgb, TAE can be enabled with `--preview_vae /path/to/model` models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
 - Beautiful rich logging, rich argparse and rich tracebacks
-- Extended saving options (`--codec codec --container container`, can save Apple ProRes(super high bitrate perceptually lossless) into MKV, or either of h264, h265 into MP4 or MKV)
+- Extended saving options (`--codec codec --container container`, can save Apple ProRes(`--codec prores`, super high bitrate perceptually lossless) into `--container mkv`, or either of `h264`, `h265` into `mp4` or `mkv`)
 - Advanced CFG scheduling: (`--cfg_schedule`, please see the `--help` for usage. Can specify guidance scale down to individual steps if you like!)
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
 - GIMM-VFI framerate interpolation (`blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
@@ -38,7 +38,7 @@ Wan only extensions(now supporting both one shot and interactive modes):
 
 Framepack only extensions:
 - Torch.compile (`--compile`, same syntax as Wan and Hunyuan already use)
-- FP8 fast/mm_scaled (`--fp8_fast`, increased speed on 40xx cards with a mild hit to quality)
+- FP8 fast/mm_scaled (`--fp8_fast`, increased speed on 40xx cards with a mild hit to quality, Wan and Hunyuan have this already in native Musubi!)
 
 My general code and Musubi Tuner code is licensed Apache 2.0. Other projects included may have different licensing, in which case you will find a LICENSE file in their directory specifying the terms under which they are included! Below is the original Musubi Readme which still remains relevant:
 

@@ -7,6 +7,22 @@ License: Apache 2.0
 Created on Wed Apr 23 10:19:19 2025
 @author: blyss
 """
+import sys
+import types
+
+# Patch basicsr expecting torchvision.transforms.functional_tensor
+try:
+    import torchvision.transforms.functional as F
+
+    # Create a dummy module to stand in for functional_tensor
+    functional_tensor = types.ModuleType("functional_tensor")
+    functional_tensor.rgb_to_grayscale = F.rgb_to_grayscale
+
+    # Insert into sys.modules so basicsr can find it
+    sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
+except ImportError:
+    print("Failed to monkeypatch torchvision for basicsr fallback!")
+
 from rich.traceback import install as install_rich_tracebacks
 from tqdm import tqdm
 from gfpgan import GFPGANer

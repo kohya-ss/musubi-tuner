@@ -37,14 +37,14 @@ def prepare_v2v_noise(
     if args.v2v_denoise > 1.0:
         raise ValueError("--v2v_denoise must be < 1.0!")
     if args.v2v_noise_mode == "traditional":
-        logger.info(f"Modifying timestep schedule to run {args.v2v_denoise * 100}% of the process")
         steps = int(args.infer_steps * args.v2v_denoise)
         timesteps = timesteps[-(steps):]
+        logger.info(f"Modifying timestep schedule to run {args.v2v_denoise * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%")
     elif args.v2v_noise_mode == "direct":
         normalized_ts = timesteps.float() / 1000
         start_idx = torch.argmin(torch.abs(normalized_ts - args.v2v_denoise))
         timesteps = timesteps[start_idx:]
-        logger.info(f"Modifying timestep schedule to add as close to {args.v2v_denoise * 100}% noise as possible. Actual noise: {timesteps.float()[0] / 10:.2f}%")
+        logger.info(f"Modifying timestep schedule to add as close to {args.v2v_denoise * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%")
     args.infer_steps = len(timesteps)
 
     if args.cfg_schedule is not None:
