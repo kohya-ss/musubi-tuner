@@ -9,36 +9,36 @@ Here you will find an extended version of Musubi Tuner with advanced and experim
 Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do not post about issues with this version on the main Musubi Github repo but rather use this repo's issues section!
 
 Extensions for all models:
-- Latent preview during generation with either latent2RGB or TAEHV (--preview_latent_every N where N is a number of steps(or sections for framepack), --preview_vae /path/to/model models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
+- Latent preview during generation with either latent2RGB or TAEHV (`--preview_latent_every N` where N is a number of steps(or sections for framepack). By default uses latent2rgb, TAE can be enabled with `--preview_vae /path/to/model` models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
 - Beautiful rich logging, rich argparse and rich tracebacks
-- Extended saving options (--codec codec, --container container, can save Apple ProRes(super high bitrate perceptually lossless) into MKV, or either of h264, h265 into MP4 or MKV)
-- Advanced CFG scheduling: (--cfg_schedule, please see the --help for usage. Can specify guidance scale down to individual steps if you like!)
-- FP16 accumulation (--fp16_accumulation, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with --compile it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
-- GIMM-VFI framerate interpolation (blissful_tuner/GIMMVFI.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
-- Upscaling with SwinIR or ESRGAN type models (blissful_tuner/upscaler.py, please see it's --help for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
+- Extended saving options (`--codec codec --container container`, can save Apple ProRes(super high bitrate perceptually lossless) into MKV, or either of h264, h265 into MP4 or MKV)
+- Advanced CFG scheduling: (`--cfg_schedule`, please see the `--help` for usage. Can specify guidance scale down to individual steps if you like!)
+- FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
+- GIMM-VFI framerate interpolation (`blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
+- Upscaling with SwinIR or ESRGAN type models (`blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
 - Use strings as your seed because why not! Also easier to remember!
-- Use wildcards in your prompts for more variation! (--prompt_wildcards /path/to/wildcard/directory for instance __color__ in your prompt would look for color.txt in that directory. The wildcard file format is one potential replacement string per line, with an optional relative weight attached like red:2.0 or "some longer string:0.5"  - wildcards can also contain wildcards themselves, the recursion limit is 50 steps!)
+- Use wildcards in your prompts for more variation! (`--prompt_wildcards /path/to/wildcard/directory`, for instance `__color__` in your prompt would look for color.txt in that directory. The wildcard file format is one potential replacement string per line, with an optional relative weight attached like red:2.0 or "some longer string:0.5"  - wildcards can also contain wildcards themselves, the recursion limit is 50 steps!)
 
 
 Wan/Hunyuan extensions:
 - Load diffusion-pipe style LoRAs for inference without converting first
-- RifleX e.g. https://github.com/thu-ml/RIFLEx for longer vids (--riflex_index N, where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81, requires --rope_func comfy with Wan; 4 is good for Hunyuan and you can make at least double length!)
-- CFGZero* e.g. https://github.com/WeichenFan/CFG-Zero-star (--cfgzerostar_scaling, --cfgzerostar_init_steps N, where N is the total number of steps to 0 out at the start. 2 is good for T2V, 1 for I2V but it's better for T2V in my experience. Support for Hunyuan is HIGHLY experimental and only available with CFG enabled.)
+- RifleX e.g. https://github.com/thu-ml/RIFLEx for longer vids (`--riflex_index N` where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81, requires `--rope_func comfy` with Wan; 4 is good for Hunyuan and you can make at least double length!)
+- CFGZero* e.g. https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` where N is the total number of steps to 0 out at the start. 2 is good for T2V, 1 for I2V but it's better for T2V in my experience. Support for Hunyuan is HIGHLY experimental and only available with CFG enabled.)
 
 Hunyuan only extensions:
-- Several more LLM options (--hidden_state_skip_layer, --apply_final_norm, --reproduce, please see the --help for explanations!)
-- FP8 scaled support using the same algo as Wan (--fp8_scaled, kate Training isn't super tested!)
-- Separate prompt for CLIP (--prompt_2, provides a different prompt to CLIP since it's used to simpler text)
-- Rescale text encoders based on https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan (--te_multiplier llm clip, such as --te_multiplier 0.9 1.2 to downweight the LLM slightly and upweight the CLIP slightly)
+- Several more LLM options (`--hidden_state_skip_layer N --apply_final_norm --reproduce`, please see the `--help` for explanations!)
+- FP8 scaled support using the same algo as Wan (`--fp8_scaled`, Training isn't super tested!)
+- Separate prompt for CLIP (`--prompt_2 "second prompt goes here"`, provides a different prompt to CLIP since it's used to simpler text)
+- Rescale text encoders based on https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan (`--te_multiplier llm clip` such as `--te_multiplier 0.9 1.2` to downweight the LLM slightly and upweight the CLIP slightly)
 
 Wan only extensions(now supporting both one shot and interactive modes):
-- V2V inferencing (--video_path /path/to/input/video --v2v_denoise amount where amount is a float 0.0 - 1.0 that controls how strong the noise added to the source video will be(Note what it actually controls is what percent of the timestep schedule will be run, not the actual noise percent directly.) Supports scaling, padding, and truncation so the input doesn't have to be the same res as the output or even the same length! If --video_length is shorter than the input, the input will be truncated and include only the first --video_length frames. If --video_length is longer than the input, the first frame or last frame will be repeated to pad the length depending on --v2v_pad_mode. Lastly, note that V2V uses the T2V "--task" modes and models, not the I2V ones. --infer_steps should be the same amount it would for a full denoise e.g. 50 for default T2V inference. Actual steps processed will be infer_steps * v2v_denoise)
-- Prompt weighting (--prompt_weighting, and then in your prompt you can do like "a cat playing with a (large:1.4) red ball" to upweight the effect of "large". Note that [this] or (this) isn't supported, only (this:1.0) and also downweighting has curious effects
-- ROPE ported from ComfyUI that doesn't use complex numbers. Massive VRAM savings when used with --compile! (--rope_func comfy)
+- V2V inferencing (`--video_path /path/to/input/video --v2v_denoise amount` where amount is a float 0.0 - 1.0 that controls how strong the noise added to the source video will be. If `--v2v_noise_mode traditional` then it will run the last (amount * 100) percent of the timestep schedule like other implementations. If `--v2v_noise_mode direct` it will directly control the amount of noise added as closely as possible by starting from wherever in the timestep schedule is closest to that value and proceeding from there. Supports scaling, padding, and truncation so the input doesn't have to be the same res as the output or even the same length! If `--video_length` is shorter than the input, the input will be truncated and include only the first `--video_length` frames. If `--video_length` is longer than the input, the first frame or last frame will be repeated to pad the length depending on `--v2v_pad_mode`. Lastly, note that V2V uses the T2V `--task` modes and models, not the I2V ones. `--infer_steps` should be the same amount it would for a full denoise e.g. 50 for default T2V inference because we need to modify from a full schedule. Actual steps will depend on `--v2v_noise_mode`)
+- Prompt weighting (`--prompt_weighting` and then in your prompt you can do like "a cat playing with a (large:1.4) red ball" to upweight the effect of "large". Note that [this] or (this) isn't supported, only (this:1.0) and also downweighting has curious effects
+- ROPE ported from ComfyUI that doesn't use complex numbers. Massive VRAM savings when used with `--compile`! (`--rope_func comfy`)
 
 Framepack only extensions:
-- Torch.compile (--compile, same syntax as Wan and Hunyuan already use)
-- FP8 fast/mm_scaled (--fp8_fast, increased speed on 40xx cards with a mild hit to quality)
+- Torch.compile (`--compile`, same syntax as Wan and Hunyuan already use)
+- FP8 fast/mm_scaled (`--fp8_fast`, increased speed on 40xx cards with a mild hit to quality)
 
 My general code and Musubi Tuner code is licensed Apache 2.0. Other projects included may have different licensing, in which case you will find a LICENSE file in their directory specifying the terms under which they are included! Below is the original Musubi Readme which still remains relevant:
 
