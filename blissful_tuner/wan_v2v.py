@@ -34,20 +34,24 @@ def prepare_v2v_noise(
       - timesteps:  possibly shortened timesteps tensor
     """
     # 1) Possibly shorten the schedule
-    steps = args.infer_steps
-    if args.v2v_denoise <= 1.0:
-        steps = int(steps * args.v2v_denoise)
+    if args.v2v_denoise > 1.0:
+        raise ValueError("--v2v_denoise must be < 1.0!")
+    if args.v2v_noise_mode == "traditional":
+        logger.info(f"Modifying timestep schedule to run {args.v2v_denoise * 100}% of the process")
+        steps = int(args.infer_steps * args.v2v_denoise)
         timesteps = timesteps[-(steps):]
-    elif args.v2v_denoise > 1.0:
-        raise ValueError("--v2v_noise cannot be greater than 1.0!")
-    args.infer_steps = steps
+    elif args.v2v_noise_mode == "direct":
+        normalized_ts = timesteps.float() / 1000
+        start_idx = torch.argmin(torch.abs(normalized_ts - args.v2v_denoise))
+        timesteps = timesteps[start_idx:]
+        logger.info(f"Modifying timestep schedule to add as close to {args.v2v_denoise * 100}% noise as possible. Actual noise: {timesteps.float()[0] / 10:.2f}%")
+    args.infer_steps = len(timesteps)
+
     if args.cfg_schedule is not None:
-        invalid_steps = [step for step in args.cfg_schedule.keys() if int(step) > steps]
+        invalid_steps = [step for step in args.cfg_schedule.keys() if int(step) > args.infer_steps]
         for step in invalid_steps:
             args.cfg_schedule.pop(step, None)
 
-
-    # 2) Compute target latent-grid dimensions
     height_px, width_px = args.video_size
     total_frames = args.video_length
     max_area = width_px * height_px
@@ -74,7 +78,7 @@ def prepare_v2v_noise(
     lat_f = (total_frames - 1) // config.vae_stride[0] + 1
 
     # 3) Load raw frames
-    vp = BlissfulVideoProcessor(device, vae.dtype)
+    vp = BlissfulVideoProcessor(device, vae.dtype, process_only=True)
     vp.prepare_files_and_path(args.video_path, None)
     raw_frames, _, _, _ = vp.load_frames(make_rgb=True)  # list of np.ndarray or PIL.Image
 
@@ -90,18 +94,21 @@ def prepare_v2v_noise(
 
     # 5) Encode the entire video in one go to latent space
     vae.to_device(device)
+    logger.info("Encoding input video to latent space")
     with torch.autocast(device_type=str(device), dtype=vae.dtype), torch.no_grad():
         latent_list = vae.encode(video)           # returns list of length B=1
-    input_samples = latent_list[0]                              # [C, T, H_lat, W_lat]
+    input_samples = latent_list[0]                # [C, T, H_lat, W_lat]
     vae.to_device("cpu")
-    # 6) Prepare RNG & noise tensor
+
+    # 6) Prepare RNG & noise tensor for diffusion
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
+
     if not args.cpu_noise:
         seed_g = torch.Generator(device=device).manual_seed(seed)
     else:
         seed_g = torch.manual_seed(seed)
 
-    noise = torch.randn(
+    base_noise = torch.randn(
         input_samples.shape[0],    # C
         lat_f,                     # T
         lat_h,                     # H_lat
@@ -113,7 +120,7 @@ def prepare_v2v_noise(
 
     # 7) Ensure input_samples has exactly T = noise.shape[1] frames
     in_f = input_samples.shape[1]
-    tgt_f = noise.shape[1]
+    tgt_f = base_noise.shape[1]
 
     if in_f < tgt_f:
         pad_count = tgt_f - in_f
@@ -134,6 +141,9 @@ def prepare_v2v_noise(
         input_samples = input_samples[:, :tgt_f]
 
     # 8) Blend noise & input according to updated timestep schedule
-    latent_timestep = timesteps[:1].to(noise) / 1000
-    noise = noise * latent_timestep + (1 - latent_timestep) * input_samples
+    timestep_noise_percent = timesteps[:1].to(base_noise) / 1000
+    noise = base_noise * timestep_noise_percent + (1 - timestep_noise_percent) * input_samples
+    if args.extra_noise is not None:
+        logger.info((f"Adding {100 * args.extra_noise}% extra noise"))
+        noise += args.extra_noise * base_noise
     return noise, timesteps

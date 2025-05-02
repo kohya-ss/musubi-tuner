@@ -78,9 +78,10 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
+        parser.add_argument("--extra_noise", type=float, default=None, help="Extra noise for i2v/v2v. Low values are best e.g. 0.02. Can help add fine details, especially when upscaling(output res > input res)")
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (prompt weighting:1.2)")
         parser.add_argument(
-            "--rope_func", type=str, default="default",
+            "--rope_func", type=str, choices=["default", "comfy"], default="default",
             help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile to enable BIG VRAM savings"
         )
         parser.add_argument("--v2v_denoise", type=float, default=0.5, help="Amount of denoising to do for V2V, 0.0-1.0")
@@ -88,10 +89,15 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
             "--v2v_pad_mode", type=str, choices=["front", "end"], default="end",
             help="Padding mode for when V2V input is shorter than requested output"
         )
+        parser.add_argument(
+            "--v2v_noise_mode", choices=["traditional", "direct"], default="traditional",
+            help="Controls how --v2v_denoise value works. Traditional is like usual and controls what percent of the timestep schedule to run.\
+                Direct allows you to directly control how much noise will be added."
+        )
 
     elif DIFFUSION_MODEL == "hunyuan":
         parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2. Think 'clip skip' for the LLM")
-        parser.add_argument("--apply_final_norm", type=bool, default=False, help="Apply final norm for LLM. Default is False. Usually makes things worse.")
+        parser.add_argument("--apply_final_norm", action="store_true", help="Apply final norm for LLM. Default is False. Usually makes things worse.")
         parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
         parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization. Better quality/accuracy with slightly more VRAM usage.")
         parser.add_argument("--prompt_2", type=str, required=False, help="Optional different prompt for CLIP")

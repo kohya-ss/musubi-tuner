@@ -892,6 +892,17 @@ def prepare_i2v_inputs(
     y = torch.concat([msk, y])
     logger.info(f"Encoding complete")
 
+    if args.extra_noise not in (None, 0.0):
+        logger.info(f"Adding {100 * args.extra_noise:.1f}% extra noise to I2V conditioning latents")
+        extra_noise = torch.randn(
+            y.shape,
+            generator=seed_g,
+            device=y.device,
+            dtype=y.dtype
+        ) * args.extra_noise
+        y = y + extra_noise
+
+
     # Fun-Control: encode control video to latent space
     if config.is_fun_control:
         # TODO use same resizing as for image

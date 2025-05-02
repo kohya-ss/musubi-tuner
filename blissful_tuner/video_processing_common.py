@@ -78,7 +78,7 @@ class BlissfulVideoProcessor:
     Manager for working with images and video in generative AI workloads
     """
 
-    def __init__(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> None:
+    def __init__(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, process_only: Optional[bool] = False) -> None:
         """
         Initialize with a target device and dtype for tensor operations.
 
@@ -95,6 +95,7 @@ class BlissfulVideoProcessor:
         self.output_directory = ""
         self.new_ext = ".mkv"
         self.codec = "prores"
+        self.process_only = process_only
 
     def prepare_files_and_path(
         self,
@@ -125,6 +126,7 @@ class BlissfulVideoProcessor:
                 return True
             except (UnidentifiedImageError, OSError):
                 return False
+
         if codec is not None:
             if codec.lower() in ["prores", "h264", "h265"]:
                 self.codec = codec.lower()
@@ -152,36 +154,36 @@ class BlissfulVideoProcessor:
             output_dir = os.path.dirname(output_file_path)
         else:
             raise ValueError("At least one of input_file_path or output_file_path must be provided!")
+        if not self.process_only:
+            if not output_file_path:
+                output_file_path = os.path.join(output_dir, f"{name}_{modifier}{self.new_ext}")
+            o_basename = os.path.basename(output_file_path)
+            o_name, o_ext = os.path.splitext(o_basename)
+            o_output_dir = os.path.dirname(output_file_path)
+            if o_ext != self.new_ext:
+                logger.warning(f"Extension '{o_ext[-3:]}' not valid for output! Updating to '{self.new_ext[-3:]}'...")
+                output_file_path = os.path.join(o_output_dir, f"{o_name}{self.new_ext}")
 
-        if not output_file_path:
-            output_file_path = os.path.join(output_dir, f"{name}_{modifier}{self.new_ext}")
-        o_basename = os.path.basename(output_file_path)
-        o_name, o_ext = os.path.splitext(o_basename)
-        o_output_dir = os.path.dirname(output_file_path)
-        if o_ext != self.new_ext:
-            logger.warning(f"Extension '{o_ext[-3:]}' not valid for output! Updating to '{self.new_ext[-3:]}'...")
-            output_file_path = os.path.join(o_output_dir, f"{o_name}{self.new_ext}")
+            if os.path.exists(output_file_path):
+                choice = input(f"{output_file_path} exists. F for 'fix' by appending _! Overwrite?[y/N/f]: ").strip().lower()
+                if choice == 'f':
+                    base = o_name
+                    while os.path.exists(output_file_path):
+                        base += '_'
+                        output_file_path = os.path.join(o_output_dir, f"{base}{self.new_ext}")
+                elif choice != 'y':
+                    logger.info("Aborted.")
+                    exit()
 
-        if os.path.exists(output_file_path):
-            choice = input(f"{output_file_path} exists. F for 'fix' by appending _! Overwrite?[y/N/f]: ").strip().lower()
-            if choice == 'f':
-                base = o_name
-                while os.path.exists(output_file_path):
-                    base += '_'
-                    output_file_path = os.path.join(o_output_dir, f"{base}{self.new_ext}")
-            elif choice != 'y':
-                logger.info("Aborted.")
-                exit()
-
+            self.output_file_path = output_file_path
+            self.output_directory = output_dir
+            self.frame_dir = os.path.join(self.output_directory, 'frames')
+            if os.path.exists(self.frame_dir):
+                while os.path.exists(self.frame_dir):
+                    self.frame_dir += "_"
+            logger.info(f"Output will be saved to: {self.output_file_path} using {self.codec}!")
         self.input_file_path = input_file_path
-        self.output_file_path = output_file_path
-        self.output_directory = output_dir
-        self.frame_dir = os.path.join(self.output_directory, 'frames')
-        if os.path.exists(self.frame_dir):
-            while os.path.exists(self.frame_dir):
-                self.frame_dir += "_"
 
-        logger.info(f"Output will be saved to: {self.output_file_path} using {self.codec}!")
         return self.input_file_path, self.output_file_path
 
     def np_image_to_tensor(
