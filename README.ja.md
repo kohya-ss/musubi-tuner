@@ -5,41 +5,43 @@
 Blyss Sarania による Musubi Tuner の Blissful な拡張機能
 
 (このセクションは機械翻訳です)
-Musubi Tuner の拡張版です。生成動画モデルを扱うためのツールスイートの作成に重点を置いた、高度で実験的な機能を備えています。動画生成時にプレビューしたり、推論速度を向上させたり、動画を長くしたり、作成した動画をより細かく制御したり、VFI やアップスケーリングなどで動画を強化したりできます。Musubi をさらに活用したいなら、ここが最適な場所です！
+ここでは、生成動画モデルを扱うためのツールスイートの作成に重点を置いた、高度で実験的な機能を備えたMusubi Tunerの拡張バージョンをご覧いただけます。動画生成時にプレビューしたり、推論速度を向上させたり、動画を長くしたり、作成した動画をより細かく制御したり、VFIやアップスケーリングなどで動画を強化したりできます。Musubiをさらに活用したい方は、ぜひこの機会にお試しください。最適なパフォーマンスと互換性を得るには、Python 3.12とPyTorch 2.7.0以降を推奨します。「requirements.txt」に追加の要件が追加されているため、通常のMusubiから移行する場合は、再度「pip install -r requirements.txt」を実行する必要があります。開発はPython 3.12で行われていますが、3.10との互換性も維持するよう努めています。
 
-Musubi Tuner の開発に尽力してくれた kohya-ss 氏、重要なコードを移植してくれた HunyuanVideoWrapper と WanVideoWrapper の kijai 氏、そしてオープンソース生成 AI コミュニティのすべての開発者に心から感謝いたします。多くの変更が実験的な性質のものであるため、一部の機能は未修正の Musubi と同じように動作しない可能性があることにご注意ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題については、Musubi のメイン Github リポジトリではなく、このリポジトリの Issues セクションに投稿してください。
+Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコードを移植したHunyuanVideoWrapperとWanVideoWrapperを開発してくださったkijaiさん、そしてオープンソース生成AIコミュニティの開発者の皆様に心より感謝申し上げます。多くの変更は実験的なものであるため、修正前のMusubiと同じように動作しない部分もあることをご了承ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題は、MusubiのメインGithubリポジトリではなく、このリポジトリのIssuesセクションに投稿してください。
 
 すべてのモデルに拡張機能が追加されました。
-- latent2RGB または TAEHV による生成中に潜在プレビューを実行できます (--preview_latent_every N (N はステップ数 (フレームパックの場合はセクション数))、--preview_vae /path/to/model モデル: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
+- latent2RGB または TAEHV による生成時に潜在プレビューを実行できます (`--preview_latent_every N`、N はステップ数 (フレームパックの場合はセクション数))。デフォルトでは latent2rgb を使用しますが、TAE は `--preview_vae /path/to/model` で有効化できます。モデル: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
 - 美しく豊富なログ出力、豊富な引数解析、豊富なトレースバック機能
-- 拡張された保存オプション (--codec コーデック、--container コンテナ、Apple ProRes (超高ビットレート知覚的ロスレス) を MKV に保存、または h264 または h265 を MP4 または MKV に保存可能)
-- 高度な CFG スケジューリング: (--cfg_schedule、使用方法については --help を参照してください。必要に応じて、個々のステップにガイダンススケールダウンを指定できます！)
-- FP16 積分 (--fp16_accumulation、Wan FP16 モデルで最も効果的に機能しますが (Hunyaun bf16 でも動作します！)、PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に --compile を使用すると、精度を損なうことなく fp8_fast/mmscaled とほぼ同等の速度になります！また、fp8 スケールモードでも動作します！)
-- GIMM-VFI フレームレート補間 (blissful_tuner/GIMMVFI.py、使用方法については --help を参照してください。モデル: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
-- SwinIR または ESRGAN タイプのモデルを使用したアップスケーリング (blissful_tuner/upscaler.py。使用方法については --help を参照してください。モデル: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
-- シードには文字列を使用してください。覚えやすいのも魅力です！
+- 拡張された保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートで知覚的にロスレス) を `--container mkv`、または`h264`、`h265` のいずれかを `mp4` または `mkv` に変換します。
+- 高度な CFG スケジューリング: (`--cfg_schedule`、使用方法については `--help` を参照してください。必要に応じて、個々のステップにガイダンススケールダウンを指定できます。)
+- FP16 積算 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能しますが (Hunyaun bf16 でも機能します!)、PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、精度を損なうことなく fp8_fast/mmscaled とほぼ同等の速度を実現します。 fp8スケールモードにも対応しています！
+- GIMM-VFIフレームレート補間（`blissful_tuner/GIMMVFI.py`、使用方法については`--help`をご覧ください。モデル：https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0）
+- SwinIRまたはESRGANタイプのモデルによるアップスケーリング（`blissful_tuner/upscaler.py`、使用方法については`--help`をご覧ください。モデル： https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
+- シードとして文字列を使うのがおすすめです！覚えやすく、さらに便利です！
+- プロンプトにワイルドカードを使うと、バリエーションが広がります！ （`--prompt_wildcards /path/to/wildcard/directory` のように指定します。例えば、プロンプトで `__color__` と指定すると、そのディレクトリ内の color.txt が検索されます。ワイルドカードファイルの形式は、1行につき1つの置換候補文字列で、red:2.0 や "some long string:0.5" のように相対的な重みを任意で付加できます。ワイルドカード自体にワイルドカードを含めることも可能で、再帰回数の制限は50回です。）
 
-Wan/Hunyuan 拡張機能:
-- 拡散パイプ形式の LoRA を、変換せずに推論用に読み込みます。
-- 長い動画の場合は RifleX (例: https://github.com/thu-ml/RIFLEx) を使用します (--riflex_index N、N は RifleX の周波数です。Wan の場合は 6 が適しており、通常は 81 フレームではなく約 115 フレームまで処理できます。Wan では --rope_func が必要です。Hunyuan の場合は 4 が適しており、少なくとも 2 倍の長さにできます)。
-- CFGZero* (例: https://github.com/WeichenFan/CFG-Zero-star (--cfgzerostar_scaling, --cfgzerostar_init_steps N、Nは開始時に0になるまでのステップ数です。T2Vの場合は2、I2Vの場合は1が適切ですが、私の経験ではT2Vの方が適しています。Hunyuanのサポートは非​​常に実験的であり、CFGが有効になっている場合にのみ利用可能です。)
+Wan/Hunyuan 拡張機能：
+- 拡散パイプ形式の LoRA を、事前に変換することなく推論用に読み込みます。
+- RifleX などより長い動画は https://github.com/thu-ml/RIFLEx をご覧ください（`--riflex_index N` で、N は RifleX の周波数です。Wan の場合は 6 が適しており、通常 81 フレームではなく約 115 フレームまで再生できます。Wan の場合は `--rope_func comfy` が必要です。Hunyuan の場合は 4 が適しており、少なくとも 2 倍の長さにできます！）
+- CFGZero* 例: https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` で、N は開始時に 0 になるまでのステップ数です。T2V の場合は 2、I2V の場合は 1 が適切ですが、私の経験では T2V の方が適しています。Hunyuan のサポートは非​​常に実験的であり、CFG が有効になっている場合にのみ利用可能です。)
 
-Hunyuan専用の拡張機能:
-- LLMオプションの追加 (--hidden_​​state_skip_layer, --apply_final_norm, --reproduce、説明は--helpを参照してください!)
-- Wanと同じアルゴリズムを使用したFP8スケールのサポート (--fp8_scaled、kateトレーニングは十分にテストされていません!)
-- CLIP用の別のプロンプト (--prompt_2、CLIPはよりシンプルなテキストに使用されるため、CLIPとは異なるプロンプトを提供します)
-- テキストのスケール変更https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan をベースにしたエンコーダー (--te_multiplier llm clip、例えば --te_multiplier 0.9 1.2 のように指定すると、LLM をわずかにダウンウェイトし、CLIP をわずかにアップウェイトします)
+Hunyuan 専用の拡張機能:
+- いくつかの LLM オプションを追加 (`--hidden_​​state_skip_layer N --apply_final_norm --reproduce`、説明については `--help` を参照してください!)
+- Wan と同じアルゴリズムを使用した FP8 スケールのサポート (`--fp8_scaled`、トレーニングは十分にテストされていません!)
+- CLIP 用の別のプロンプト (`--prompt_2 "second prompt goes here"`、CLIP とは異なるプロンプトを表示します。よりシンプルなテキストに使用されます。
+- https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan に基づいてテキストエンコーダーを再スケールします（`--te_multiplier llm clip` を `--te_multiplier 0.9 1.2` のように使用することで、LLM をわずかにダウンウェイトし、CLIP をわずかにアップウェイトします）。
 
-Wan のみの拡張機能 (現在、ワンショットモードとインタラクティブモードの両方をサポート):
-- プロンプトの重み付け (--prompt_weighting を指定し、プロンプトで「(large:1.4) の赤いボールで遊ぶ猫」のように指定することで、「large」の効果をアップウェイトできます。[this] や (this) はサポートされておらず、(this:1.0) のみがサポートされています。また、ダウンウェイトには奇妙な効果があります。
-- 複素数を使用しない ComfyUI から移植された ROPE。--compile と併用すると、VRAM を大幅に節約できます。 (--rope_func comfy)
-- I2V 中の追加ノイズを調整可能 (--noise_aug_strength F、F は追加ノイズの量。例えば 0.02 のような低い値が最も効果的で、I2V のディテールを改善できます)
+WAN 専用拡張機能（ワンショットモードとインタラクティブモードの両方をサポート）：
+- V2V 推論（`--video_path /path/to/input/video --v2v_denoise amount` で、amount は 0.0 - 1.0 の浮動小数点数で、ソースビデオに追加するノイズの強度を制御します。`--v2v_noise_mode Traditional` の場合、他の実装と同様に、タイムステップスケジュールの最後の (amount * 100) パーセントを実行します。`--v2v_noise_mode direct` の場合、タイムステップスケジュール内でその値に最も近い場所から開始し、そこから処理を進めることで、追加するノイズの量を可能な限り正確に直接制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。 `--video_length` が入力よりも長い場合、`--v2v_pad_mode` の設定に応じて、最初のフレームまたは最後のフレームが繰り返して長さが調整されます。最後に、V2V は I2V ではなく、T2V の `--task` モードとモデルを使用することに注意してください。`--infer_steps` は、完全なノイズ除去と同じ値、例えばデフォルトの T2V 推論では 50 に設定する必要があります。これは、完全なスケジュールから変更する必要があるためです。実際の手順は `--v2v_noise_mode` に依存します。
+- プロンプトの重み付け（`--prompt_weighting` を指定し、プロンプトで「(large:1.4) の赤いボールで遊ぶ猫」のように記述することで、「large」の効果を強調できます。[this] や (this) はサポートされておらず、(this:1.0) のみがサポートされています。また、重み付けを下げると奇妙な効果が生じることに注意してください。
+- 複素数を使用しない ComfyUI から移植された ROPE。`--compile` と併用すると VRAM を大幅に節約できます！(`--rope_func comfy`)
+- I2V/V2V 用の追加潜在ノイズ（オプション）（`--extra_noise 0.02`、0.04 未満の値を推奨。これにより、V2V/I2V のディテールとテクスチャが向上しますが、値が大きすぎるとアーティファクトや影の動きが発生します。V2V では 0.01～0.02 程度を使用しています。 I2V 用 0.02-0.04
 
-フレームパックのみの拡張機能:
-- Torch.compile (--compile、Wan と Hunyuan が既に使用している構文と同じ)
-- FP8 fast/mm_scaled (--fp8_fast、40xx カードで速度向上、ただし画質は若干低下)
+フレームパックのみの拡張機能：
+- Torch.compile (`--compile`、Wan と Hunyuan が既に使用している構文と同じ)
+- FP8 fast/mm_scaled (`--fp8_fast`、40xx カードで速度が向上しますが、品質は若干低下します。Wan と Hunyuan は既にネイティブ Musubi でこの機能を実現しています！)
 
-私のコード全体とMusubi TunerのコードはApache 2.0ライセンスです。他のプロジェクトは異なるライセンスを使用している可能性があります。その場合は、それぞれのディレクトリにLICENSEファイルがあり、ライセンス条件が記載されています。以下は、現在でも有効なMusubiのオリジナルのReadmeです。
+私のコード全体と Musubi Tuner のコードは Apache 2.0 ライセンスです。含まれている他のプロジェクトはライセンスが異なる場合があります。その場合は、それぞれのディレクトリにライセンス条項を記載した LICENSE ファイルがあります。以下は、現在でも有効なオリジナルの Musubi Readme です。
 
 # Musubi Tuner
 
