@@ -63,7 +63,7 @@ def blissful_prefunc(args: argparse.Namespace):
         cuda = torch.cuda.get_device_properties(0)
         cuda_list[0] += f", CUDA: {torch.version.cuda} CC: {cuda.major}.{cuda.minor}"
         cuda_list.append(f"Device: '{cuda.name}', VRAM: '{cuda.total_memory // 1024 ** 2}MB'")
-    logger.info(f"Blissful Tuner extension of Musubi Tuner version {BLISSFUL_VERSION}!")
+    logger.info(f"Blissful Tuner version {BLISSFUL_VERSION} extended from Musubi Tuner!")
     logger.info(f"Memory allocation: '{allocator}'")
     for string in cuda_list:
         logger.info(string)
