@@ -192,36 +192,61 @@ class FramePackNetworkTrainer(NetworkTrainer):
         clean_memory_on_device(device)
 
         # sampilng
+        f1_mode = args.f1
         history_latents = torch.zeros((1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=torch.float32)
-        total_generated_latent_frames = 0
 
-        latent_paddings = reversed(range(total_latent_sections))
+        if not f1_mode:
+            total_generated_latent_frames = 0
+            latent_paddings = reversed(range(total_latent_sections))
+        else:
+            total_generated_latent_frames = 1
+            history_latents = torch.cat([history_latents, start_latent.to(history_latents)], dim=2)
+            latent_paddings = [0] * total_latent_sections
 
         if total_latent_sections > 4:
             latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
 
-        for latent_padding in latent_paddings:
-            is_last_section = latent_padding == 0
-            latent_padding_size = latent_padding * latent_window_size
+        latent_paddings = list(latent_paddings)
+        for loop_index in range(total_latent_sections):
+            latent_padding = latent_paddings[loop_index]
 
-            logger.info(f"latent_padding_size = {latent_padding_size}, is_last_section = {is_last_section}")
+            if not f1_mode:
+                is_last_section = latent_padding == 0
+                latent_padding_size = latent_padding * latent_window_size
 
-            indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
-            (
-                clean_latent_indices_pre,
-                blank_indices,
-                latent_indices,
-                clean_latent_indices_post,
-                clean_latent_2x_indices,
-                clean_latent_4x_indices,
-            ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
-            clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+                logger.info(f"latent_padding_size = {latent_padding_size}, is_last_section = {is_last_section}")
 
-            clean_latents_pre = start_latent.to(history_latents)
-            clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split(
-                [1, 2, 16], dim=2
-            )
-            clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
+                indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
+                (
+                    clean_latent_indices_pre,
+                    blank_indices,
+                    latent_indices,
+                    clean_latent_indices_post,
+                    clean_latent_2x_indices,
+                    clean_latent_4x_indices,
+                ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
+                clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+
+                clean_latents_pre = start_latent.to(history_latents)
+                clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split(
+                    [1, 2, 16], dim=2
+                )
+                clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
+            else:
+                indices = torch.arange(0, sum([1, 16, 2, 1, latent_window_size])).unsqueeze(0)
+                (
+                    clean_latent_indices_start,
+                    clean_latent_4x_indices,
+                    clean_latent_2x_indices,
+                    clean_latent_1x_indices,
+                    latent_indices,
+                ) = indices.split([1, 16, 2, 1, latent_window_size], dim=1)
+                clean_latent_indices = torch.cat([clean_latent_indices_start, clean_latent_1x_indices], dim=1)
+
+                clean_latents_4x, clean_latents_2x, clean_latents_1x = history_latents[:, :, -sum([16, 2, 1]) :, :, :].split(
+                    [16, 2, 1], dim=2
+                )
+                clean_latents = torch.cat([start_latent.to(history_latents), clean_latents_1x], dim=2)
 
             # if use_teacache:
             #     transformer.initialize_teacache(enable_teacache=True, num_steps=steps)
@@ -270,13 +295,16 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 clean_latent_4x_indices=clean_latent_4x_indices,
             )
 
-            if is_last_section:
-                generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
-
             total_generated_latent_frames += int(generated_latents.shape[2])
-            history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
-
-            real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
+            if not f1_mode:
+                if is_last_section:
+                    generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
+                    total_generated_latent_frames += 1
+                history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
+                real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
+            else:
+                history_latents = torch.cat([history_latents, generated_latents.to(history_latents)], dim=2)
+                real_history_latents = history_latents[:, :, -total_generated_latent_frames:, :, :]
 
             logger.info(f"Generated. Latent shape {real_history_latents.shape}")
 
@@ -383,6 +411,7 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--image_encoder", type=str, required=True, help="Image encoder (CLIP) checkpoint path or directory")
     parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
     parser.add_argument("--bulk_decode", action="store_true", help="decode all frames at once in sample generation")
+    parser.add_argument("--f1", action="store_true", help="Use F1 sampling method for sample generation")
     return parser
 
 

@@ -91,6 +91,10 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/05/04
+    - FramePack-F1の学習および推論を追加しました（実験的機能）。詳細は[FramePackのドキュメント](./docs/framepack.md)を参照してください。
+        - FramePack-F1用に、`--f1`オプションを指定してlatentのキャッシュを再作成してください（`--vanilla_sampling`が`--f1`に変わり、仕様も変わっています）。FramePack-F1はFramePackとは互換性がありません。FramePackとFramePack-F1のキャッシュファイルは共有できないため、別の`.toml`ファイルを使用して別のキャッシュディレクトリを指定してください。
+
 - 2025/05/01
     - FramePackの推論コードに、latent padding指定、カスタムプロンプト指定等の機能を追加しました。詳細は[FramePackのドキュメント](./docs/framepack.md#inference)を参照してください。
         - セクション開始画像を指定したときの振る舞いが変わりました（latent paddingを自動的に0に指定しなくなったため、開始画像は参照画像として用いられます）。以前と同じ振る舞い（セクション開始画像を強制）にするには、`--latent_padding 0,0,0,0`（セクション数だけ0を指定）としてください。

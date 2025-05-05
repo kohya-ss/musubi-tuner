@@ -10,6 +10,8 @@ Key differences from HunyuanVideo:
 - Caching and training scripts are specific to FramePack (`fpack_*.py`).
 - Due to its progressive generation nature, VRAM usage can be significantly lower, especially for longer videos, compared to other architectures.
 
+The official documentation does not provide detailed explanations on how to train the model, but it is based on the FramePack implementation and paper.
+
 This feature is experimental.
 
 <details>
@@ -22,22 +24,26 @@ HunyuanVideoとの主な違いは次のとおりです。
 - キャッシングと学習スクリプトはFramePack専用（`fpack_*.py`）です。
 - セクションずつ生成するため、他のアーキテクチャと比較して、特に長いビデオの場合、VRAM使用量が大幅に少なくなる可能性があります。
 
-この機能は実験的なものですです。
+学習方法について公式からは詳細な説明はありませんが、FramePackの実装と論文を参考にしています。
+
+この機能は実験的なものです。
 </details>
 
 ## Download the model / モデルのダウンロード
 
 You need to download the DiT, VAE, Text Encoder 1 (LLaMA), Text Encoder 2 (CLIP), and Image Encoder (SigLIP) models specifically for FramePack. Several download options are available for each component.
 
-***Note:** The weights are publicly available on the following page: [maybleMyers/framepack_h1111](https://huggingface.co/maybleMyers/framepack_h1111). Thank you maybleMyers!
+***Note:** The weights are publicly available on the following page: [maybleMyers/framepack_h1111](https://huggingface.co/maybleMyers/framepack_h1111) (except for FramePack-F1). Thank you maybleMyers!
 
 ### DiT Model
 
 Choose one of the following methods:
 
-1.  **From lllyasviel's Hugging Face repo:** Download the three `.safetensors` files (starting with `diffusion_pytorch_model-00001-of-00003.safetensors`) from [lllyasviel/FramePackI2V_HY](https://huggingface.co/lllyasviel/FramePackI2V_HY). Specify the path to the first file (`...-00001-of-00003.safetensors`) as the `--dit` argument.
-2.  **From local FramePack installation:** If you have cloned and run the official FramePack repository, the model might be downloaded locally. Specify the path to the snapshot directory, e.g., `path/to/FramePack/hf_download/hub/models--lllyasviel--FramePackI2V_HY/snapshots/<hex-uuid-folder>`.
-3.  **From Kijai's Hugging Face repo:** Download the single file `FramePackI2V_HY_bf16.safetensors` from [Kijai/HunyuanVideo_comfy](https://huggingface.co/Kijai/HunyuanVideo_comfy/blob/main/FramePackI2V_HY_bf16.safetensors). Specify the path to this file as the `--dit` argument.
+1.  **From lllyasviel's Hugging Face repo:** Download the three `.safetensors` files (starting with `diffusion_pytorch_model-00001-of-00003.safetensors`) from [lllyasviel/FramePackI2V_HY](https://huggingface.co/lllyasviel/FramePackI2V_HY). Specify the path to the first file (`...-00001-of-00003.safetensors`) as the `--dit` argument. For FramePack-F1, download from [lllyasviel/FramePack_F1_I2V_HY_20250503](https://huggingface.co/lllyasviel/FramePack_F1_I2V_HY_20250503).
+
+2.  **From local FramePack installation:** If you have cloned and run the official FramePack repository, the model might be downloaded locally. Specify the path to the snapshot directory, e.g., `path/to/FramePack/hf_download/hub/models--lllyasviel--FramePackI2V_HY/snapshots/<hex-uuid-folder>`. FramePack-F1 is also available in the same way.
+
+3.  **From Kijai's Hugging Face repo:** Download the single file `FramePackI2V_HY_bf16.safetensors` from [Kijai/HunyuanVideo_comfy](https://huggingface.co/Kijai/HunyuanVideo_comfy/blob/main/FramePackI2V_HY_bf16.safetensors). Specify the path to this file as the `--dit` argument. No FramePack-F1 model is available here currently.
 
 ### VAE Model
 
@@ -74,7 +80,7 @@ Choose one of the following methods:
 <details>
 <summary>日本語</summary>
 
-※以下のページに重みが一括で公開されています。maybleMyers 氏に感謝いたします。: https://huggingface.co/maybleMyers/framepack_h1111
+※以下のページに重みが一括で公開されています（FramePack-F1を除く）。maybleMyers 氏に感謝いたします。: https://huggingface.co/maybleMyers/framepack_h1111
 
 DiT、VAE、テキストエンコーダー1（LLaMA）、テキストエンコーダー2（CLIP）、および画像エンコーダー（SigLIP）モデルは複数の方法でダウンロードできます。英語の説明を参考にして、ダウンロードしてください。
 
@@ -95,7 +101,7 @@ Latent pre-caching uses a dedicated script for FramePack. You **must** provide t
 
 ```bash
 python fpack_cache_latents.py \
-    --dataset_config path/to/toml --vanilla_sampling \
+    --dataset_config path/to/toml \
     --vae path/to/vae_model.safetensors \
     --image_encoder path/to/image_encoder_model.safetensors \
     --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 
@@ -108,12 +114,12 @@ Key differences from HunyuanVideo caching:
 -   The script generates multiple cache files per video, each corresponding to a different section, with the section index appended to the filename (e.g., `..._frame_pos-0000-count_...` becomes `..._frame_pos-0000-0000-count_...`, `..._frame_pos-0000-0001-count_...`, etc.).
 -   Image embeddings are calculated using the Image Encoder and stored in the cache files alongside the latents.
 
-By default, the sampling method used is Inverted anti-drifting (the same as during inference, using the latent and index in reverse order), described in the paper. You can switch to Vanilla sampling in the paper (using the temporally ordered latent and index) by specifying `--vanilla_sampling`. If you change this option, please overwrite the existing cache without specifying `--skip_existing`.
-
- ~~Preliminary tests suggest that Vanilla sampling may yield better quality.~~ Some community reports indicate that Vanilla sampling may not work well in some cases.
-
 For VRAM savings during VAE decoding, consider using `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size`. If VRAM is overflowing and using shared memory, it is recommended to set `--vae_chunk_size` to 16 or 8, and `--vae_spatial_tile_sample_min_size` to 64 or 32.
 
+**FramePack-F1 support:**
+You can apply the FramePack-F1 sampling method by changing the options during caching. The training script also requires specifying `--f1` to change the options during sample generation.
+
+By default, the sampling method used is Inverted anti-drifting (the same as during inference with the original FramePack model, using the latent and index in reverse order), described in the paper. You can switch to FramePack-F1 sampling (Vanilla sampling, using the temporally ordered latent and index) by specifying `--f1`. If you change this option, please overwrite the existing cache without specifying `--skip_existing`.
 <details>
 <summary>日本語</summary>
 FramePackのデフォルト解像度は640x640です。各バケットのデフォルト解像度については、[ソースコード](../frame_pack/bucket_tools.py)を参照してください。
@@ -129,11 +135,12 @@ HunyuanVideoのキャッシングとの主な違いは次のとおりです。
 -  スクリプトは、各ビデオに対して複数のキャッシュファイルを生成します。各ファイルは異なるセクションに対応し、セクションインデックスがファイル名に追加されます（例：`..._frame_pos-0000-count_...`は`..._frame_pos-0000-0000-count_...`、`..._frame_pos-0000-0001-count_...`などになります）。
 -  画像埋め込みは画像エンコーダーを使用して計算され、latentとともにキャッシュファイルに保存されます。
 
-デフォルトでは、論文のサンプリング方法 Inverted anti-drifting （推論時と同じ、逆順の latent と index を使用）を使用します。`--vanilla_sampling`を指定すると Vanilla sampling （時間順の latent と index を使用）に変更できます。このオプションの有無を変更する場合には `--skip_existing` を指定せずに既存のキャッシュを上書きしてください。
-
-~~簡単なテストの結果では、Vanilla sampling の方が品質が良いようです。~~ コミュニティからの報告によると、Vanilla sampling はうまく動かない場合もあるようです。
-
 VAEのdecode時のVRAM節約のために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`を使用することを検討してください。VRAMがあふれて共有メモリを使用している場合には、`--vae_chunk_size`を16、8などに、`--vae_spatial_tile_sample_min_size`を64、32などに変更することをお勧めします。
+
+**FramePack-F1のサポート：**
+キャッシュ時のオプションを変更することで、FramePack-F1のサンプリング方法を適用できます。学習スクリプトについても`--f1`を指定してサンプル生成時のオプションを変更する必要があります。
+
+デフォルトでは、論文のサンプリング方法 Inverted anti-drifting （無印のFramePackの推論時と同じ、逆順の latent と index を使用）を使用します。`--f1`を指定すると FramePack-F1 の Vanilla sampling （時間順の latent と index を使用）に変更できます。このオプションの有無を変更する場合には `--skip_existing` を指定せずに既存のキャッシュを上書きしてください。
 </details>
 
 ### Text Encoder Output Pre-caching / テキストエンコーダー出力の事前キャッシング
@@ -196,6 +203,7 @@ The maximum value for `--blocks_to_swap` is 36. The default resolution for Frame
 
 Key differences from HunyuanVideo training:
 -   Uses `fpack_train_network.py`.
+- `--f1` option is available for FramePack-F1 model training. You need to specify the FramePack-F1 model as `--dit`. This option only changes the sample generation during training. The training process itself is the same as the original FramePack model.
 -   **Requires** specifying `--vae`, `--text_encoder1`, `--text_encoder2`, and `--image_encoder`.
 -   **Requires** specifying `--network_module networks.lora_framepack`.
 -  Optional `--latent_window_size` argument (default 9, should match caching).
@@ -217,6 +225,7 @@ FramePackの学習は専用のスクリプト`fpack_train_network.py`を使用�
 
 HunyuanVideoの学習との主な違いは次のとおりです。
 -  `fpack_train_network.py`を使用します。
+- FramePack-F1モデルの学習時には`--f1`を指定してください。この場合、`--dit`にFramePack-F1モデルを指定する必要があります。このオプションは学習時のサンプル生成時のみに影響し、学習プロセス自体は元のFramePackモデルと同じです。
 -  `--vae`、`--text_encoder1`、`--text_encoder2`、`--image_encoder`を指定する必要があります。
 -  `--network_module networks.lora_framepack`を指定する必要があります。
 -  必要に応じて`--latent_window_size`引数（デフォルト9）を指定できます（キャッシング時と一致させる必要があります）。
@@ -250,6 +259,7 @@ python fpack_generate_video.py \
 
 Key differences from HunyuanVideo inference:
 -   Uses `fpack_generate_video.py`.
+- `--f1` option is available for FramePack-F1 model inference (forward generation). You need to specify the FramePack-F1 model as `--dit`.
 -   **Requires** specifying `--vae`, `--text_encoder1`, `--text_encoder2`, and `--image_encoder`.
 -   **Requires** specifying `--image_path` for the starting frame.
 -   **Requires** specifying `--video_seconds` (length of the video in seconds).
@@ -264,7 +274,7 @@ Key differences from HunyuanVideo inference:
 -   `--bulk_decode` option can decode all frames at once, potentially faster but uses more VRAM during decoding. `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size` options are recommended to prevent out-of-memory errors.
 -   `--sample_solver` (default `unipc`) is available but only `unipc` is implemented.
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
-- `--latent_paddings` option overrides the default padding for each section. Specify it as a comma-separated list of integers, e.g., `--latent_paddings 0,0,0,0`.
+- `--latent_paddings` option overrides the default padding for each section. Specify it as a comma-separated list of integers, e.g., `--latent_paddings 0,0,0,0`. This option is ignored if `--f1` is specified.
 - `--custom_system_prompt` option overrides the default system prompt for the LLaMA Text Encoder 1. Specify it as a string. See [here](../hunyuan_model/text_encoder.py#L152) for the default system prompt.
 -   Batch and interactive modes (`--from_file`, `--interactive`) are **not yet implemented** for FramePack generation.
 
@@ -278,6 +288,7 @@ FramePackの推論は専用のスクリプト`fpack_generate_video.py`を使用�
 
 HunyuanVideoの推論との主な違いは次のとおりです。
 -  `fpack_generate_video.py`を使用します。
+- `--f1`を指定すると、FramePack-F1モデルの推論を行います（順方向で生成）。`--dit`にFramePack-F1モデルを指定する必要があります。
 -  `--vae`、`--text_encoder1`、`--text_encoder2`、`--image_encoder`を指定する必要があります。
 -  `--image_path`を指定する必要があります（開始フレーム）。
 -  `--video_seconds`を指定する必要があります（秒単位でのビデオの長さを指定）。
@@ -292,7 +303,7 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  `--bulk_decode`オプションは、すべてのフレームを一度にデコードできるオプションです。高速ですが、デコード中にVRAMを多く使用します。VRAM不足エラーを防ぐために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`オプションを指定することをお勧めします。
 -  `--sample_solver`（デフォルト`unipc`）は利用可能ですが、`unipc`のみが実装されています。
 -  `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
-- `--latent_paddings`オプションは、各セクションのデフォルトのパディングを上書きします。カンマ区切りの整数リストとして指定します。例：`--latent_paddings 0,0,0,0`。
+- `--latent_paddings`オプションは、各セクションのデフォルトのパディングを上書きします。カンマ区切りの整数リストとして指定します。例：`--latent_paddings 0,0,0,0`。`--f1`を指定した場合は無視されます。
 - `--custom_system_prompt`オプションは、LLaMA Text Encoder 1のデフォルトのシステムプロンプトを上書きします。文字列として指定します。デフォルトのシステムプロンプトは[こちら](../hunyuan_model/text_encoder.py#L152)を参照してください。
 -  バッチモードとインタラクティブモード（`--from_file`、`--interactive`）はFramePack生成には**まだ実装されていません**。
 
@@ -311,6 +322,8 @@ This section describes experimental features added to the `fpack_generate_video.
 *   **Usage:** `--end_image_path <path_to_image_file>`
 *   **Mechanism:** The provided image is encoded using the VAE. This latent representation is used as a target or starting point during the generation of the final video section (which is the first step in Inverted Anti-drifting).
 *   **Use Cases:** Defining a clear ending for the video, such as a character striking a specific pose or a product appearing in a close-up.
+
+This option is ignored if `--f1` is specified. The end image is not used in the FramePack-F1 model.
 
 ### **2. Section Start Image Guidance (`--image_path` Extended Format)**
 
@@ -336,16 +349,16 @@ This section describes experimental features added to the `fpack_generate_video.
     *   Use `;;;` as a separator.
     *   If a prompt for a specific section is not provided, the prompt associated with index `0` (or the closest specified applicable prompt) is typically used. Check behavior if defaults are critical.
 *   **Mechanism:** During the generation of each section, the corresponding section-specific prompt is used as the primary textual guidance for the model.
-*   **Prompt Content Recommendation** when using `--latent_paddings 0,0,0,0`:
+*   **Prompt Content Recommendation** when using `--latent_paddings 0,0,0,0` without `--f1` (original FramePack model):
     *   Recall that FramePack uses Inverted Anti-drifting and references future context.
     *   It is recommended to describe "**the main content or state change that should occur in the current section, *and* the subsequent events or states leading towards the end of the video**" in the prompt for each section.
     *   Including the content of subsequent sections in the current section's prompt helps the model maintain context and overall coherence.
     *   Example: For section 1, the prompt might describe what happens in section 1 *and* briefly summarize section 2 (and beyond).
     *   However, based on observations (e.g., the `latent_paddings` comment), the model's ability to perfectly utilize very long-term context might be limited. Experimentation is key. Describing just the "goal for the current section" might also work. Start by trying the "section and onwards" approach.
-* Use the default prompt when `latent_paddings` is >= 1 or `--latent_paddings` is not specified.
+* Use the default prompt when `latent_paddings` is >= 1 or `--latent_paddings` is not specified, or when using `--f1` (FramePack-F1 model). 
 *   **Use Cases:** Describing evolving storylines, gradual changes in character actions or emotions, step-by-step processes over time.
 
-### **Combined Usage Example**
+### **Combined Usage Example** (with `--f1` not specified)
 
 Generating a 3-section video of "A dog runs towards a thrown ball, catches it, and runs back":
 
@@ -392,6 +405,8 @@ python fpack_generate_video.py \
 *   **動作:** 指定された画像はVAEでエンコードされ、その潜在表現が動画の最終セクション（Inverted Anti-driftingでは最初に生成される）の生成時の目標または開始点として使用されます。
 *   **用途:** キャラクターが特定のポーズで終わる、特定の商品がクローズアップで終わるなど、動画の結末を明確に定義する場合。
 
+このオプションは、`--f1`を指定した場合は無視されます。FramePack-F1モデルでは終端画像は使用されません。
+
 #### **2. セクション開始画像ガイダンス (`--image_path` 拡張書式)**
 
 *   **機能:** 動画内の特定のセクションが、指定された画像に近い視覚状態から始まるように誘導します。
@@ -416,16 +431,16 @@ python fpack_generate_video.py \
     *   区切り文字は `;;;` です。
     *   特定セクションのプロンプトがない場合、通常はインデックス`0`に関連付けられたプロンプト（または最も近い適用可能な指定プロンプト）が使用されます。デフォルトの挙動が重要な場合は確認してください。
 *   **動作:** 各セクションの生成時、対応するセクション別プロンプトがモデルへの主要なテキスト指示として使用されます。
-*  `latent_paddings`に`0`を指定した場合の **プロンプト内容の推奨:**
+*  `latent_paddings`に`0`を指定した場合（非F1モデル）の **プロンプト内容の推奨:**
     *   FramePackはInverted Anti-driftingを採用し、未来のコンテキストを参照することを思い出してください。
     *   各セクションのプロンプトには、「**現在のセクションで起こるべき主要な内容や状態変化、*および*それに続く動画の終端までの内容**」を記述することを推奨します。
     *   現在のセクションのプロンプトに後続セクションの内容を含めることで、モデルが全体的な文脈を把握し、一貫性を保つのに役立ちます。
     *   例：セクション1のプロンプトには、セクション1の内容 *と* セクション2（以降）の簡単な要約を記述します。
     *   ただし、モデルの長期コンテキスト完全利用能力には限界がある可能性も示唆されています（例：`latent_paddings`コメント）。実験が鍵となります。「現在のセクションの目標」のみを記述するだけでも機能する場合があります。まずは「セクション以降」アプローチを試すことをお勧めします。
-* `latent_paddings`が`1`以上（またはデフォルト）の場合は、通常のプロンプト内容を記述してください。
+* `latent_paddings`が`1`以上（またはデフォルト）の場合や、F1モデルでは、通常のプロンプト内容を記述してください。
 *   **用途:** 時間経過に伴うストーリーの変化、キャラクターの行動や感情の段階的な変化、段階的なプロセスなどを記述する場合。
 
-#### **組み合わせ使用例**
+#### **組み合わせ使用例** （`--f1`未指定時）
 
 「投げられたボールに向かって犬が走り、それを捕まえ、走って戻ってくる」3セクション動画の生成：
 （コマンド記述例は英語版を参考にしてください）

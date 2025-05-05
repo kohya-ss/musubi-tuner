@@ -176,72 +176,39 @@ def encode_and_save_batch(
                 target_start_f = section_index * latent_window_size + 1
                 target_end_f = target_start_f + latent_window_size
                 target_latents = video_lat[:, :, target_start_f:target_end_f, :, :]
+                start_latent = video_lat[:, :, 0:1, :, :]
 
                 # Clean latents preparation (Vanilla)
+                clean_latents_total_count = 1 + 2 + 16
+                history_latents = torch.zeros(
+                    size=(1, 16, clean_latents_total_count, video_lat.shape[-2], video_lat.shape[-1]),
+                    device=video_lat.device,
+                    dtype=video_lat.dtype,
+                )
 
-                # Get clean_latents_pre (Always frame 0)
-                clean_latents_pre = video_lat[:, :, 0:1, :, :]
+                history_start_f = 0
+                video_start_f = target_start_f - clean_latents_total_count
+                copy_count = clean_latents_total_count
+                if video_start_f < 0:
+                    history_start_f = -video_start_f
+                    copy_count = clean_latents_total_count - history_start_f
+                    video_start_f = 0
+                if copy_count > 0:
+                    history_latents[:, :, history_start_f:] = video_lat[:, :, video_start_f : video_start_f + copy_count, :, :]
 
-                # Frame indices for past context (relative to anchor)
-                idx_post_frame = target_start_f - 1  # Frame index of the last frame of section i-1
-                idx_2x_frame_1 = idx_post_frame - 1
-                idx_2x_frame_2 = idx_post_frame - 2
-                idx_4x_start_frame = idx_post_frame - idx_2x_frame_2 - 16
-
-                # Helper function to get frame or zeros if index is out of bounds
-                def get_frame_or_zeros(frame_idx):
-                    if frame_idx >= 0:
-                        # Ensure frame_idx doesn't exceed the actual length
-                        if frame_idx < video_lat.shape[2]:
-                            return video_lat[:, :, frame_idx : frame_idx + 1, :, :]
-                        else:
-                            # This case should ideally not happen if indexing is correct
-                            logger.warning(
-                                f"Attempted to access frame {frame_idx} beyond latent length {video_lat.shape[2]}. Returning zeros."
-                            )
-                            return torch.zeros_like(clean_latents_pre)
-                    else:
-                        return torch.zeros_like(clean_latents_pre)
-
-                # Get clean_latents_post (frame at idx_post_frame)
-                clean_latents_post = get_frame_or_zeros(idx_post_frame)
-
-                # Get clean_latents_2x (frames at idx_2x_frame_1, idx_2x_frame_2)
-                frame_2x_1 = get_frame_or_zeros(idx_2x_frame_1)
-                frame_2x_2 = get_frame_or_zeros(idx_2x_frame_2)
-                clean_latents_2x = torch.cat(
-                    [frame_2x_2, frame_2x_1], dim=2
-                )  # Order might matter (older first?) - assuming order [..., t-2, t-1]
-
-                # Get clean_latents_4x (16 frames ending at idx_4x_start_frame)
-                clean_latents_4x_list = []
-                for i in range(16):
-                    frame_idx = idx_4x_start_frame + i
-                    clean_latents_4x_list.append(get_frame_or_zeros(frame_idx))
-                clean_latents_4x = torch.cat(clean_latents_4x_list, dim=2)  # Ensure correct temporal order [..., t-18, ..., t-3]
-
-                # Combine pre and post for the main clean_latents input
-                clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)  # (1, C, 2, H, W)
-
-                # Indices generation (Vanilla with Offset)
-                vanilla_offset_size = section_index * latent_window_size  # Offset based on section index
-                # print(f"Vanilla offset size: {vanilla_offset_size}")
-
-                # Calculate total length including the offset
-                total_length = sum([1, vanilla_offset_size, latent_window_size, 1, 2, 16])
-                indices = torch.arange(0, total_length).unsqueeze(0)
-
-                # Split indices including the offset part
+                # indices generation (Vanilla): copy from FramePack-F1
+                indices = torch.arange(0, sum([1, 16, 2, 1, latent_window_size])).unsqueeze(0)
                 (
-                    clean_latent_indices_pre,  # Index for frame 0
-                    past_offset_indices,  # Indices representing the time offset *before* section i
-                    latent_indices,  # Indices for the target latents (section i)
-                    clean_latent_indices_post,  # Index for frame from end of section i-1
-                    clean_latent_2x_indices,  # Indices for frames from end of section i-2, i-3
-                    clean_latent_4x_indices,  # Indices for the 16 past frames
-                ) = indices.split([1, vanilla_offset_size, latent_window_size, 1, 2, 16], dim=1)
+                    clean_latent_indices_start,
+                    clean_latent_4x_indices,
+                    clean_latent_2x_indices,
+                    clean_latent_1x_indices,
+                    latent_indices,
+                ) = indices.split([1, 16, 2, 1, latent_window_size], dim=1)
+                clean_latent_indices = torch.cat([clean_latent_indices_start, clean_latent_1x_indices], dim=1)
 
-                clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+                clean_latents_4x, clean_latents_2x, clean_latents_1x = history_latents.split([16, 2, 1], dim=2)
+                clean_latents = torch.cat([start_latent, clean_latents_1x], dim=2)
 
                 # Save cache
                 item.latent_cache_path = append_section_idx_to_latent_cache_path(original_latent_cache_path, section_index)
@@ -265,9 +232,9 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--image_encoder", type=str, required=True, help="Image encoder (CLIP) checkpoint path or directory")
     parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
     parser.add_argument(
-        "--vanilla_sampling",
+        "--f1",
         action="store_true",
-        help="Generate cache for vanilla (autoregressive) sampling instead of inference emulation",
+        help="Generate cache for F1 model (vanilla (autoregressive) sampling) instead of Inverted anti-drifting (plain FramePack)",
     )
     return parser
 
@@ -302,11 +269,11 @@ def main(args: argparse.Namespace):
     image_encoder.eval()
     image_encoder.to(device)
 
-    logger.info(f"Cache generation mode: {'Vanilla Sampling' if args.vanilla_sampling else 'Inference Emulation'}")
+    logger.info(f"Cache generation mode: {'Vanilla Sampling' if args.f1 else 'Inference Emulation'}")
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, feature_extractor, image_encoder, batch, args.latent_window_size, args.vanilla_sampling)
+        encode_and_save_batch(vae, feature_extractor, image_encoder, batch, args.latent_window_size, args.f1)
 
     # reuse core loop from cache_latents with no change
     encode_datasets_framepack(datasets, encode, args)

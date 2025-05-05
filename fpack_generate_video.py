@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 directory or path")
     parser.add_argument("--text_encoder2", type=str, required=True, help="Text Encoder 2 directory or path")
     parser.add_argument("--image_encoder", type=str, required=True, help="Image Encoder directory or path")
+    parser.add_argument("--f1", action="store_true", help="Use F1 sampling method")
+
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=1.0, help="LoRA multiplier")
@@ -739,7 +741,8 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
         # optimize model: fp8 conversion, block swap etc.
         optimize_model(model, args, device)
-
+    if args.preview_latent_every:
+        previewer = LatentPreviewer(args, None, None, model.device, model.dtype, model_type="framepack")
     # sampling
     latent_window_size = args.latent_window_size  # default is 9
     # ex: (5s * 30fps) / (9 * 4) = 4.16 -> 4 sections, 60s -> 1800 / 36 = 50 sections
@@ -756,25 +759,51 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         f"infer_steps: {args.infer_steps}, frames per generation: {num_frames}"
     )
 
+    # video generation ######
+    f1_mode = args.f1
+
+    # prepare history latents
     history_latents = torch.zeros((1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=torch.float32)
-    if end_latent is not None:
+    if end_latent is not None and not f1_mode:
         logger.info(f"Use end image: {args.end_image_path}")
         history_latents[:, :, 0:1] = end_latent.to(history_latents)
 
-    total_generated_latent_frames = 0
+    # prepare clean latents and indices
+    if not f1_mode:
+        # Inverted Anti-drifting
+        total_generated_latent_frames = 0
+        latent_paddings = reversed(range(total_latent_sections))
 
-    latent_paddings = reversed(range(total_latent_sections))
+        if total_latent_sections > 4:
+            # In theory the latent_paddings should follow the above sequence, but it seems that duplicating some
+            # items looks better than expanding it when total_latent_sections > 4
+            # One can try to remove below trick and just
+            # use `latent_paddings = list(reversed(range(total_latent_sections)))` to compare
+            # 4 sections: 3, 2, 1, 0. 50 sections: 3, 2, 2, ... 2, 1, 0
+            latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
 
-    if total_latent_sections > 4:
-        # In theory the latent_paddings should follow the above sequence, but it seems that duplicating some
-        # items looks better than expanding it when total_latent_sections > 4
-        # One can try to remove below trick and just
-        # use `latent_paddings = list(reversed(range(total_latent_sections)))` to compare
-        # 4 sections: 3, 2, 1, 0. 50 sections: 3, 2, 2, ... 2, 1, 0
-        latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
-
-    if args.preview_latent_every:
-        previewer = LatentPreviewer(args, None, None, model.device, model.dtype, model_type="framepack")
+        if args.latent_paddings is not None:
+            # parse user defined latent paddings
+            user_latent_paddings = [int(x) for x in args.latent_paddings.split(",")]
+            if len(user_latent_paddings) < total_latent_sections:
+                print(
+                    f"User defined latent paddings length {len(user_latent_paddings)} does not match total sections {total_latent_sections}."
+                )
+                print(f"Use default paddings instead for unspecified sections.")
+                latent_paddings[: len(user_latent_paddings)] = user_latent_paddings
+            elif len(user_latent_paddings) > total_latent_sections:
+                print(
+                    f"User defined latent paddings length {len(user_latent_paddings)} is greater than total sections {total_latent_sections}."
+                )
+                print(f"Use only first {total_latent_sections} paddings instead.")
+                latent_paddings = user_latent_paddings[:total_latent_sections]
+            else:
+                latent_paddings = user_latent_paddings
+    else:
+        start_latent = context_img[0]["start_latent"]
+        history_latents = torch.cat([history_latents, start_latent], dim=2)
+        total_generated_latent_frames = 1  # a bit hacky, but we employ the same logic as in official code
+        latent_paddings = [0] * total_latent_sections  # dummy paddings for F1 mode
 
     if args.latent_paddings is not None:
         # parse user defined latent paddings
@@ -791,56 +820,83 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
             )
             print(f"Use only first {total_latent_sections} paddings instead.")
             latent_paddings = user_latent_paddings[:total_latent_sections]
+
+    latent_paddings = list(latent_paddings)  # make sure it's a list
+    for loop_index in range(total_latent_sections):
+        latent_padding = latent_paddings[loop_index]
+
+        if not f1_mode:
+            # Inverted Anti-drifting
+            section_index_reverse = loop_index  # 0, 1, 2, 3
+            section_index = total_latent_sections - 1 - section_index_reverse  # 3, 2, 1, 0
+            section_index_from_last = -(section_index_reverse + 1)  # -1, -2, -3, -4
+
+            is_last_section = section_index == 0
+            is_first_section = section_index_reverse == 0
+            latent_padding_size = latent_padding * latent_window_size
+
         else:
-            latent_paddings = user_latent_paddings
-
-    for section_index_reverse, latent_padding in enumerate(latent_paddings):
-        section_index = total_latent_sections - 1 - section_index_reverse
-        section_index_from_last = -(section_index_reverse + 1)  # -1, -2 ...
-
-        is_last_section = section_index == 0
-        is_first_section = section_index_reverse == 0
-        latent_padding_size = latent_padding * latent_window_size
-
-        logger.info(f"latent_padding_size = {latent_padding_size}, is_last_section = {is_last_section}")
+            section_index = loop_index  # 0, 1, 2, 3
+            section_index_from_last = section_index - total_latent_sections  # -4, -3, -2, -1
+            is_last_section = loop_index == total_latent_sections - 1
+            is_first_section = loop_index == 0
+            latent_padding_size = 0  # dummy padding for F1 mode
 
         # select start latent
         if section_index_from_last in context_img:
             image_index = section_index_from_last
-            apply_section_image = not is_last_section  # last section already has latent_padding_size=0
         elif section_index in context_img:
             image_index = section_index
-            apply_section_image = not is_last_section
         else:
             image_index = 0
-            apply_section_image = False
 
         start_latent = context_img[image_index]["start_latent"]
         image_path = context_img[image_index]["image_path"]
-        if apply_section_image:
+        if image_index != 0:  # use section image other than section 0
             logger.info(f"Apply experimental section image, latent_padding_size = {latent_padding_size}, image_path = {image_path}")
 
-        # sum([1, 3, 9, 1, 2, 16]) = 32
-        indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
-        (
-            clean_latent_indices_pre,
-            blank_indices,
-            latent_indices,
-            clean_latent_indices_post,
-            clean_latent_2x_indices,
-            clean_latent_4x_indices,
-        ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
-        clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+        if not f1_mode:
+            # Inverted Anti-drifting
+            indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
+            (
+                clean_latent_indices_pre,
+                blank_indices,
+                latent_indices,
+                clean_latent_indices_post,
+                clean_latent_2x_indices,
+                clean_latent_4x_indices,
+            ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
+            clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
 
-        clean_latents_pre = start_latent.to(history_latents)
-        clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split([1, 2, 16], dim=2)
-        clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
+            clean_latents_pre = start_latent.to(history_latents)
+            clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split(
+                [1, 2, 16], dim=2
+            )
+            clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
+
+        else:
+            # F1 mode
+            indices = torch.arange(0, sum([1, 16, 2, 1, latent_window_size])).unsqueeze(0)
+            (
+                clean_latent_indices_start,
+                clean_latent_4x_indices,
+                clean_latent_2x_indices,
+                clean_latent_1x_indices,
+                latent_indices,
+            ) = indices.split([1, 16, 2, 1, latent_window_size], dim=1)
+            clean_latent_indices = torch.cat([clean_latent_indices_start, clean_latent_1x_indices], dim=1)
+
+            clean_latents_4x, clean_latents_2x, clean_latents_1x = history_latents[:, :, -sum([16, 2, 1]) :, :, :].split(
+                [16, 2, 1], dim=2
+            )
+            clean_latents = torch.cat([start_latent.to(history_latents), clean_latents_1x], dim=2)
 
         # if use_teacache:
         #     transformer.initialize_teacache(enable_teacache=True, num_steps=steps)
         # else:
         #     transformer.initialize_teacache(enable_teacache=False)
 
+        # prepare conditioning inputs
         if section_index_from_last in context:
             prompt_index = section_index_from_last
         elif section_index in context:
@@ -864,6 +920,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         llama_attention_mask_n = context_null["llama_attention_mask"].to(device)
         clip_l_pooler_n = context_null["clip_l_pooler"].to(device, dtype=torch.bfloat16)
 
+        # call DiT model to generate latents
         generated_latents = sample_hunyuan(
             transformer=model,
             sampler=args.sample_solver,
@@ -893,18 +950,26 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
             clean_latents_4x=clean_latents_4x,
             clean_latent_4x_indices=clean_latent_4x_indices,
         )
-
-        if is_last_section:
-            generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
-
+        # concatenate generated latents
         total_generated_latent_frames += int(generated_latents.shape[2])
-        history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
+        if not f1_mode:
+            # Inverted Anti-drifting: prepend generated latents to history latents
+            if is_last_section:
+                generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
+                total_generated_latent_frames += 1
 
-        real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
+            history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
+            real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
+        else:
+            # F1 mode: append generated latents to history latents
+            history_latents = torch.cat([history_latents, generated_latents.to(history_latents)], dim=2)
+            real_history_latents = history_latents[:, :, -total_generated_latent_frames:, :, :]
+
+        logger.info(f"Generated. Latent shape {real_history_latents.shape}")
+
         if args.preview_latent_every is not None and (section_index_reverse + 1) % args.preview_latent_every == 0:
             previewer.preview(real_history_latents)
 
-        logger.info(f"Generated. Latent shape {real_history_latents.shape}")
 
         # # TODO support saving intermediate video
         # clean_memory_on_device(device)
