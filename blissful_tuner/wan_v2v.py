@@ -53,31 +53,31 @@ def prepare_v2v_noise(
         for step in invalid_steps:
             args.cfg_schedule.pop(step, None)
 
-    video_height, video_width = args.video_size
-    video_area = video_height * video_width
-    aspect_ratio = video_height / video_width
+    output_height, output_width = args.video_size
+    output_video_area = output_height * output_width
+    aspect_ratio = output_height / output_width
 
-    lat_h = int(
+    latent_height = int(
         round(
-            np.sqrt(video_area * aspect_ratio)
-            // config.vae_stride[1]
-            // config.patch_size[1]
+            np.sqrt(output_video_area * aspect_ratio)
+            / config.vae_stride[1]
+            / config.patch_size[1]
             * config.patch_size[1]
         )
     )
-    lat_w = int(
+    latent_width = int(
         round(
-            np.sqrt(video_area / aspect_ratio)
-            // config.vae_stride[2]
-            // config.patch_size[2]
+            np.sqrt(output_video_area / aspect_ratio)
+            / config.vae_stride[2]
+            / config.patch_size[2]
             * config.patch_size[2]
         )
     )
-    latent_height = lat_h * config.vae_stride[1]
-    latent_width = lat_w * config.vae_stride[2]
-
+    computed_height = latent_height * config.vae_stride[1]
+    computed_width = latent_width * config.vae_stride[2]
+    #logger.info(f"lat_h: {latent_height}; lat_w: {latent_width}; height: {computed_height}; width:{computed_width}")
     # 3) Load raw frames
-    vp = BlissfulVideoProcessor(device, vae.dtype, process_only=True)
+    vp = BlissfulVideoProcessor(device, vae.dtype, will_write_video=False)
     vp.prepare_files_and_path(args.video_path, None)
     raw_frames, _, _, _ = vp.load_frames(make_rgb=True)  # list of np.ndarray or PIL.Image
 
@@ -85,7 +85,7 @@ def prepare_v2v_noise(
     frame_tensors = []
     for arr in raw_frames:
         t = TF.to_tensor(arr)                                   # [C, H_px, W_px], 0–1
-        t = TF.resize(t, [latent_height, latent_width], interpolation=TF.InterpolationMode.BICUBIC)
+        t = TF.resize(t, [computed_height, computed_width], interpolation=TF.InterpolationMode.BICUBIC)
         t = t.sub_(0.5).div_(0.5).to(device)                     # normalize to [-1,1]
         frame_tensors.append(t)
     video = torch.stack(frame_tensors, dim=0)                   # [T, C, H_px, W_px]
@@ -124,9 +124,9 @@ def prepare_v2v_noise(
     # 8) Blend noise & input according to updated timestep schedule
     timestep_noise_percent = timesteps[:1].to(base_noise) / 1000
     noise = base_noise * timestep_noise_percent + (1 - timestep_noise_percent) * input_samples
-    if args.extra_noise is not None:
-        logger.info((f"Adding {100 * args.extra_noise}% extra noise to V2V frames"))
-        noise += args.extra_noise * base_noise
+    if args.v2v_extra_noise is not None:
+        logger.info((f"Adding {100 * args.v2v_extra_noise}% extra noise to V2V frames"))
+        noise += args.v2v_extra_noise * base_noise
 
     clean_memory_on_device(device)
     return noise, timesteps

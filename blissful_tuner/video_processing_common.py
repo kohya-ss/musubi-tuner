@@ -78,7 +78,12 @@ class BlissfulVideoProcessor:
     Manager for working with images and video in generative AI workloads
     """
 
-    def __init__(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, process_only: Optional[bool] = False) -> None:
+    def __init__(
+        self,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+        will_write_video: Optional[bool] = True  # Foo
+    ) -> None:
         """
         Initialize with a target device and dtype for tensor operations.
 
@@ -95,7 +100,7 @@ class BlissfulVideoProcessor:
         self.output_directory = ""
         self.new_ext = ".mkv"
         self.codec = "prores"
-        self.process_only = process_only
+        self.will_write_video = will_write_video
 
     def prepare_files_and_path(
         self,
@@ -139,7 +144,8 @@ class BlissfulVideoProcessor:
                 if self.codec != "prores":
                     self.new_ext = ".mp4"
                 else:
-                    logger.warning("Prores can only be written into an mkv but mp4 was passed! Selecting mkv and continuing...")
+                    if self.will_write_video:
+                        logger.warning("Prores can only be written into an mkv but mp4 was passed! Selecting mkv and continuing...")
             else:
                 raise ValueError("Invalid container format {container}! Expected 'mkv' or 'mp4'!")
         if input_file_path is not None:
@@ -154,7 +160,7 @@ class BlissfulVideoProcessor:
             output_dir = os.path.dirname(output_file_path)
         else:
             raise ValueError("At least one of input_file_path or output_file_path must be provided!")
-        if not self.process_only:
+        if self.will_write_video:
             if not output_file_path:
                 output_file_path = os.path.join(output_dir, f"{name}_{modifier}{self.new_ext}")
             o_basename = os.path.basename(output_file_path)
@@ -182,6 +188,12 @@ class BlissfulVideoProcessor:
                 while os.path.exists(self.frame_dir):
                     self.frame_dir += "_"
             logger.info(f"Output will be saved to: {self.output_file_path} using {self.codec}!")
+        else:
+            if output_file_path is not None:
+                logger.info(f"Will write output to {output_file_path}!")
+                self.output_file_path = output_file_path
+                self.output_dir = output_file_path
+                self.frame_dir = os.path.join(output_file_path, "frames")
         self.input_file_path = input_file_path
 
         return self.input_file_path, self.output_file_path

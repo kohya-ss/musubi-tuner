@@ -73,12 +73,18 @@ def blissful_prefunc(args: argparse.Namespace):
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
         else:
             raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
+    if args.video_path is not None:
+        if "i2v" in args.task:
+            logger.info("V2V operating in IV2V mode!")
+        else:
+            logger.info("V2V operating in normal mode!")
 
 
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
-        parser.add_argument("--extra_noise", type=float, default=None, help="Extra noise for i2v/v2v. Low values are best e.g. 0.02. Can help add fine details, especially when upscaling(output res > input res)")
+        parser.add_argument("--v2v_extra_noise", type=float, default=None, help="Extra latent noise for v2v. Low values are best e.g. 0.015. Can help add fine details, especially when upscaling(output res > input res)")
+        parser.add_argument("--i2v_extra_noise", type=float, default=None, help="Extra latent noise for i2v. Low values are best e.g. 0.025. Can help add fine details, especially when upscaling(output res > input res)")
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (prompt weighting:1.2)")
         parser.add_argument(
             "--rope_func", type=str, choices=["default", "comfy"], default="default",

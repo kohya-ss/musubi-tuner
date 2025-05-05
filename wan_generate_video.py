@@ -768,7 +768,8 @@ def prepare_i2v_inputs(
         # classic I2V path
         img = Image.open(args.image_path).convert("RGB")
         img_cv2 = np.array(img)  # for the VAE path later
-        logger.info(f"Loaded still image `{args.image_path}` for I2V.")
+        if args.video_path is not None:
+            logger.info(f"Loaded still image `{args.image_path}` as I2V anchor for IV2V.")
     elif args.video_path is not None:
         # V2V‐with‐I2V‐anchor path
         logger.info("Using first frame of video as I2V anchor for IV2V.")
@@ -777,12 +778,10 @@ def prepare_i2v_inputs(
         cap.release()
         if not success or frame_bgr is None:
             raise RuntimeError(f"Failed to read first frame from `{args.video_path}`")
-        # convert BGR→RGB
         img_cv2 = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        # wrap it back into a PIL Image so the rest of your code is unchanged
         img = Image.fromarray(img_cv2)
     else:
-        raise ValueError("Must supply --image_path for I2V or --video_path for IV2V‐anchoring!")
+        raise ValueError(f"Must supply --image_path for I2V or --video_path for IV2V when task is {args.task}!")
 
     # convert to tensor (-1 to 1)
     img_tensor = TF.to_tensor(img).sub_(0.5).div_(0.5).to(device)
@@ -796,14 +795,15 @@ def prepare_i2v_inputs(
     has_end_image = end_img is not None
 
     # calculate latent dimensions: keep aspect ratio
-    height, width = img_tensor.shape[1:] if not args.video_path else args.video_size
+    height, width = img_tensor.shape[1:]
     aspect_ratio = height / width
-    lat_h = round(np.sqrt(max_area * aspect_ratio) // config.vae_stride[1] // config.patch_size[1] * config.patch_size[1])
-    lat_w = round(np.sqrt(max_area / aspect_ratio) // config.vae_stride[2] // config.patch_size[2] * config.patch_size[2])
+    lat_h = int(round(np.sqrt(max_area * aspect_ratio) / config.vae_stride[1] / config.patch_size[1] * config.patch_size[1]))
+    lat_w = int(round(np.sqrt(max_area / aspect_ratio) / config.vae_stride[2] / config.patch_size[2] * config.patch_size[2]))
     height = lat_h * config.vae_stride[1]
     width = lat_w * config.vae_stride[2]
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
     max_seq_len = (lat_f + (1 if has_end_image else 0)) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
+    #logger.info(f"lat_h: {lat_h}; lat_w: {lat_w}; height: {height}; width:{width}")
 
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
@@ -904,14 +904,14 @@ def prepare_i2v_inputs(
     y = torch.concat([msk, y])
     logger.info(f"Encoding complete")
 
-    if args.extra_noise not in (None, 0.0):
-        logger.info(f"Adding {100 * args.extra_noise:.1f}% extra noise to I2V conditioning latents")
+    if args.i2v_extra_noise not in (None, 0.0):
+        logger.info(f"Adding {100 * args.i2v_extra_noise:.1f}% extra noise to I2V conditioning latents")
         extra_noise = torch.randn(
             y.shape,
             generator=seed_g,
             device=y.device,
             dtype=y.dtype
-        ) * args.extra_noise
+        ) * args.i2v_extra_noise
         y = y + extra_noise
 
 
