@@ -803,7 +803,6 @@ def prepare_i2v_inputs(
     width = lat_w * config.vae_stride[2]
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
     max_seq_len = (lat_f + (1 if has_end_image else 0)) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
-    #logger.info(f"lat_h: {lat_h}; lat_w: {lat_w}; height: {height}; width:{width}")
 
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)

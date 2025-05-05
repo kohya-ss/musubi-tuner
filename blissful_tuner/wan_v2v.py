@@ -75,7 +75,7 @@ def prepare_v2v_noise(
     )
     computed_height = latent_height * config.vae_stride[1]
     computed_width = latent_width * config.vae_stride[2]
-    #logger.info(f"lat_h: {latent_height}; lat_w: {latent_width}; height: {computed_height}; width:{computed_width}")
+
     # 3) Load raw frames
     vp = BlissfulVideoProcessor(device, vae.dtype, will_write_video=False)
     vp.prepare_files_and_path(args.video_path, None)
