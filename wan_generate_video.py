@@ -796,7 +796,7 @@ def prepare_i2v_inputs(
     has_end_image = end_img is not None
 
     # calculate latent dimensions: keep aspect ratio
-    height, width = img_tensor.shape[1:]
+    height, width = img_tensor.shape[1:] if not args.video_path else args.video_size
     aspect_ratio = height / width
     lat_h = round(np.sqrt(max_area * aspect_ratio) // config.vae_stride[1] // config.patch_size[1] * config.patch_size[1])
     lat_w = round(np.sqrt(max_area / aspect_ratio) // config.vae_stride[2] // config.patch_size[2] * config.patch_size[2])
