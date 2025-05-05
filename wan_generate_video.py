@@ -764,16 +764,28 @@ def prepare_i2v_inputs(
     height, width = args.video_size
     frames = args.video_length
     max_area = width * height
-
-    # load image
-    img = Image.open(args.image_path).convert("RGB")
-
-    # convert to numpy
-    img_cv2 = np.array(img)  # PIL to numpy
+    if args.image_path is not None:
+        # classic I2V path
+        img = Image.open(args.image_path).convert("RGB")
+        img_cv2 = np.array(img)  # for the VAE path later
+        logger.info(f"Loaded still image `{args.image_path}` for I2V.")
+    elif args.video_path is not None:
+        # V2V‐with‐I2V‐anchor path
+        logger.info("Using first frame of video as I2V anchor for IV2V.")
+        cap = cv2.VideoCapture(args.video_path)
+        success, frame_bgr = cap.read()
+        cap.release()
+        if not success or frame_bgr is None:
+            raise RuntimeError(f"Failed to read first frame from `{args.video_path}`")
+        # convert BGR→RGB
+        img_cv2 = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        # wrap it back into a PIL Image so the rest of your code is unchanged
+        img = Image.fromarray(img_cv2)
+    else:
+        raise ValueError("Must supply --image_path for I2V or --video_path for IV2V‐anchoring!")
 
     # convert to tensor (-1 to 1)
     img_tensor = TF.to_tensor(img).sub_(0.5).div_(0.5).to(device)
-
     # end frame image
     if args.end_image_path is not None:
         end_img = Image.open(args.end_image_path).convert("RGB")
