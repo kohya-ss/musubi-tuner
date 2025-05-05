@@ -6,13 +6,13 @@ Created on Thu May  1 13:01:35 2025
 @author: blyss
 """
 import argparse
-import random
 from typing import Tuple
 import torch
 import numpy as np
 import torchvision.transforms.functional as TF
 from easydict import EasyDict
 from wan.modules.vae import WanVAE
+from utils.device_utils import clean_memory_on_device
 from blissful_tuner.video_processing_common import BlissfulVideoProcessor
 from blissful_tuner.utils import BlissfulLogger
 
@@ -20,6 +20,7 @@ logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def prepare_v2v_noise(
+    base_noise: torch.Tensor,
     args: argparse.Namespace,
     config: EasyDict,
     timesteps: torch.Tensor,
@@ -52,14 +53,13 @@ def prepare_v2v_noise(
         for step in invalid_steps:
             args.cfg_schedule.pop(step, None)
 
-    height_px, width_px = args.video_size
-    total_frames = args.video_length
-    max_area = width_px * height_px
-    aspect = height_px / width_px
+    video_height, video_width = args.video_size
+    video_area = video_height * video_width
+    aspect_ratio = video_height / video_width
 
     lat_h = int(
         round(
-            np.sqrt(max_area * aspect)
+            np.sqrt(video_area * aspect_ratio)
             // config.vae_stride[1]
             // config.patch_size[1]
             * config.patch_size[1]
@@ -67,15 +67,14 @@ def prepare_v2v_noise(
     )
     lat_w = int(
         round(
-            np.sqrt(max_area / aspect)
+            np.sqrt(video_area / aspect_ratio)
             // config.vae_stride[2]
             // config.patch_size[2]
             * config.patch_size[2]
         )
     )
-    height_px = lat_h * config.vae_stride[1]
-    width_px  = lat_w * config.vae_stride[2]
-    lat_f = (total_frames - 1) // config.vae_stride[0] + 1
+    latent_height = lat_h * config.vae_stride[1]
+    latent_width = lat_w * config.vae_stride[2]
 
     # 3) Load raw frames
     vp = BlissfulVideoProcessor(device, vae.dtype, process_only=True)
@@ -86,7 +85,7 @@ def prepare_v2v_noise(
     frame_tensors = []
     for arr in raw_frames:
         t = TF.to_tensor(arr)                                   # [C, H_px, W_px], 0–1
-        t = TF.resize(t, [height_px, width_px], interpolation=TF.InterpolationMode.BICUBIC)
+        t = TF.resize(t, [latent_height, latent_width], interpolation=TF.InterpolationMode.BICUBIC)
         t = t.sub_(0.5).div_(0.5).to(device)                     # normalize to [-1,1]
         frame_tensors.append(t)
     video = torch.stack(frame_tensors, dim=0)                   # [T, C, H_px, W_px]
@@ -99,24 +98,6 @@ def prepare_v2v_noise(
         latent_list = vae.encode(video)           # returns list of length B=1
     input_samples = latent_list[0]                # [C, T, H_lat, W_lat]
     vae.to_device("cpu")
-
-    # 6) Prepare RNG & noise tensor for diffusion
-    seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
-
-    if not args.cpu_noise:
-        seed_g = torch.Generator(device=device).manual_seed(seed)
-    else:
-        seed_g = torch.manual_seed(seed)
-
-    base_noise = torch.randn(
-        input_samples.shape[0],    # C
-        lat_f,                     # T
-        lat_h,                     # H_lat
-        lat_w,                     # W_lat
-        dtype=torch.float32,
-        generator=seed_g,
-        device=device if not args.cpu_noise else "cpu",
-    ).to(device)
 
     # 7) Ensure input_samples has exactly T = noise.shape[1] frames
     in_f = input_samples.shape[1]
@@ -144,6 +125,8 @@ def prepare_v2v_noise(
     timestep_noise_percent = timesteps[:1].to(base_noise) / 1000
     noise = base_noise * timestep_noise_percent + (1 - timestep_noise_percent) * input_samples
     if args.extra_noise is not None:
-        logger.info((f"Adding {100 * args.extra_noise}% extra noise"))
+        logger.info((f"Adding {100 * args.extra_noise}% extra noise to V2V frames"))
         noise += args.extra_noise * base_noise
+
+    clean_memory_on_device(device)
     return noise, timesteps

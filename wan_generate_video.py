@@ -1216,9 +1216,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         else:
             # T2V
             noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
-            if args.video_path is not None:  # V2V
-                logger.info("Preparing V2V...")
-                noise, timesteps = prepare_v2v_noise(args, cfg, timesteps, device, vae)
+
     else:
         # prepare inputs without shared models
         if is_i2v:
@@ -1233,9 +1231,9 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
                 # Fun-Control: need VAE for encoding control video
                 vae = load_vae(args, cfg, device, vae_dtype)
             noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
-            if args.video_path is not None:
-                logger.info("Preparing V2V...")
-                noise, timesteps = prepare_v2v_noise(args, cfg, timesteps, device, vae)
+
+        if args.video_path is not None:
+            noise, timesteps = prepare_v2v_noise(noise, args, cfg, timesteps, device, vae)
         # load DiT model
         model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
 
