@@ -10,15 +10,17 @@ Author: Blyss
 import argparse
 import glob
 import os
+import re
 import random
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Optional, Dict
 from einops import rearrange
 import torchvision
 from rich_argparse import RichHelpFormatter
 from PIL import Image, UnidentifiedImageError
+from PIL.PngImagePlugin import PngInfo
 import cv2
 import numpy as np
 import torch
@@ -318,6 +320,7 @@ class BlissfulVideoProcessor:
         fps: Optional[float] = 1,
         keep_frames: Optional[bool] = False,
         rescale: Optional[Tuple[int, int]] = None,
+        metadata: Optional[Dict[str, str]] = None
     ) -> None:
         """
         Dump a list of BGR frames as PNGs
@@ -332,18 +335,25 @@ class BlissfulVideoProcessor:
         for idx, img in enumerate(imgs):
             path = os.path.join(self.frame_dir, f"{idx:06d}.png")
             cv2.imwrite(path, img)
-        self.write_buffered_frames_to_output(fps, keep_frames, rescale)
+        self.write_buffered_frames_to_output(fps, keep_frames, rescale, metadata=metadata)
 
     def write_buffered_frames_to_output(
         self,
         fps: Optional[float] = 1,
         keep_frames: Optional[bool] = False,
         rescale: Optional[Tuple[int, int]] = None,
+        metadata: Optional[Dict[str, str]] = None
     ) -> None:
         """
         Encode the PNG sequence in the frames directory to a video via ffmpeg,
         or—if there's only one frame—just write out an (optionally-rescaled) PNG.
         """
+        def _sanitize_metadata_value(v: str) -> str:
+            # 1) turn any newlines into literal "\n"
+            v = v.replace("\n", "\\n").replace("\r", "\\r")
+            # 2) strip out any non-printable control characters
+            v = re.sub(r"[^\x20-\x7E]", "", v)
+            return v
         # 1) get all the PNGs
         pattern = os.path.join(self.frame_dir, "*.png")
         png_paths = sorted(glob.glob(pattern))
@@ -351,17 +361,14 @@ class BlissfulVideoProcessor:
         # 2) single-image case
         if len(png_paths) == 1:
             src = png_paths[0]
-
-            if rescale is None:
-                # just copy the original
-                shutil.copy(src, self.output_file_path)
-            else:
-                # PIL approach: open, resize, save
-                width, height = rescale
-                with Image.open(src) as img:
-                    # LANCZOS gives a high-quality down/upscale
-                    img = img.resize((width, height), Image.LANCZOS)
-                    img.save(self.output_file_path)
+            with Image.open(src) as img:
+                if rescale is not None:
+                    img = img.resize(rescale, Image.LANCZOS)
+                pnginfo = PngInfo()
+                if metadata is not None:
+                    for key, value in metadata.items():
+                        pnginfo.add_text(key, _sanitize_metadata_value(value))
+                img.save(self.output_file_path, pnginfo=pnginfo)
         else:
             # 3) multi‐frame → video
             codec_args = self._get_ffmpeg_codec_args()
@@ -373,11 +380,15 @@ class BlissfulVideoProcessor:
             if rescale is not None:
                 w, h = rescale
                 cmd += ["-vf", f"scale={w}:{h}"]
-
-            # overwrite without prompt
+            if metadata is not None:
+                for key, value in metadata.items():
+                    sanitized_value = _sanitize_metadata_value(value)
+                    cmd += ["-metadata", f"{key}={sanitized_value}"]
+            # overwrite without prompt because we've handled that elsewhere
             cmd += ["-y", self.output_file_path]
 
             subprocess.run(cmd, check=True)
+
         if not keep_frames:
             shutil.rmtree(self.frame_dir, ignore_errors=True)
 
@@ -417,12 +428,9 @@ class BlissfulVideoProcessor:
 def save_videos_grid_advanced(
     videos: torch.Tensor,
     output_video: str,
-    codec: str,
-    container: str,
+    args: argparse.Namespace,
     rescale: bool = False,
-    fps: int = 24,
     n_rows: int = 1,
-    keep_frames: bool = False
 ):
     "Function for saving Musubi Tuner outputs with more codec and container types"
 
@@ -433,8 +441,8 @@ def save_videos_grid_advanced(
     VideoProcessor.prepare_files_and_path(
         input_file_path=None,
         output_file_path=output_video,
-        codec=codec,
-        container=container
+        codec=args.codec,
+        container=args.container
     )
 
     outputs = []
@@ -445,5 +453,27 @@ def save_videos_grid_advanced(
         np_img = VideoProcessor.tensor_to_np_image(grid, rescale=rescale)
         outputs.append(np_img)
 
-    # 4) write them out
-    VideoProcessor.write_np_images_to_output(outputs, fps, keep_frames)
+    metadata = None
+    if not args.no_metadata:
+        from blissful_tuner.blissful_args import get_current_model_type
+        metadata = {  # Construct metadata dict
+            "model_type": f"{get_current_model_type()}",
+            "prompt": f"{args.prompt}",
+            "seed": f"{args.seed}",
+            "infer_steps": f"{args.infer_steps}",
+            "guidance_scale": f"{args.guidance_scale}",
+            "flow_shift": f"{args.flow_shift}"
+        }
+
+        if args.cfg_schedule is not None:
+            metadata["cfg_schedule"] = f"{args.cfg_schedule}"
+        if hasattr(args, "embedded_cfg_scale"):
+            metadata["embedded_guidance_scale"] = f"{args.embedded_cfg_scale}"
+        if args.negative_prompt is not None:
+            metadata["negative_prompt"] = f"{args.negative_prompt}"
+        if args.lora_weight:
+            for i, lora_weight in enumerate(args.lora_weight):
+                lora_weight = os.path.basename(lora_weight)
+                metadata[f"lora_{i}"] = f"{lora_weight}: {args.lora_multiplier[i]}"
+
+    VideoProcessor.write_np_images_to_output(outputs, args.fps, args.keep_pngs, metadata=metadata)

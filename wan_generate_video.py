@@ -1391,7 +1391,7 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
     video = video.unsqueeze(0)
     if args.codec is not None:
-        save_videos_grid_advanced(video, video_path, args.codec, args.container, rescale=True, fps=args.fps, keep_frames=args.keep_pngs)
+        save_videos_grid_advanced(video, video_path, args, rescale=True)
     else:
         save_videos_grid(video, video_path, fps=args.fps, rescale=True)
     logger.info(f"Video saved to: {video_path}")

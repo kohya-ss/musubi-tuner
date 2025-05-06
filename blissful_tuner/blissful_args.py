@@ -55,6 +55,10 @@ else:
     raise ValueError("Unsupported root script for Blissful Extension!")
 
 
+def get_current_model_type():
+    return DIFFUSION_MODEL
+
+
 def blissful_prefunc(args: argparse.Namespace):
     """Simple function to print about version, environment, and things"""
     cuda_list = [f"PyTorch: {torch.__version__}"]
@@ -68,6 +72,7 @@ def blissful_prefunc(args: argparse.Namespace):
     for string in cuda_list:
         logger.info(string)
     if args.optimized and MODE == "generate":
+        logger.info("Optimized arguments enabled!")
         args.fp16_accumulation = True
         args.attn_mode = "sageattn"
         args.compile = True
@@ -142,7 +147,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         "--optimized", action="store_true",
         help="Overrides the default values of several command line args to provide an optimized but quality experience.\
         Enables fp16_accumulation, fp8_scaled, sageattn and torch.compile. For Wan additionally enables 'rope_func comfy'.\
-        For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed!"
+        For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed in addition to PyTorch 2.7.0 or higher!"
     )
     return parser
 

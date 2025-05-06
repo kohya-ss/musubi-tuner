@@ -1000,7 +1000,7 @@ def load_transformer(dit_path, attn_mode, split_attn, load_device, main_device, 
         transformer = load_state_dict(transformer, dit_path)
     if fp8_mode:
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
-        logger.info("Scaling transformer to FP8...")
+        logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if fp8_fast else ''}...")
         state_dict = transformer.state_dict()
         state_dict = optimize_state_dict_with_fp8(state_dict, main_device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=False)
         apply_fp8_monkey_patch(transformer, state_dict, use_scaled_mm=fp8_fast)

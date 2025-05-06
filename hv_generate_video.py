@@ -624,7 +624,7 @@ def main():
         # the model is too large, so we load the model to cpu. in addition, the .pt file is loaded to cpu anyway
         # on the fly merging will be a solution for this issue for .safetenors files (not implemented yet)
         transformer = load_transformer(
-            args.dit, args.attn_mode, args.split_attn, loading_device, device, dit_dtype, in_channels=dit_in_channels, fp8_mode=args.fp8_scaled
+            args.dit, args.attn_mode, args.split_attn, loading_device, device, dit_dtype, in_channels=dit_in_channels, fp8_mode=args.fp8_scaled, fp8_fast=args.fp8_fast
         )
         transformer.eval()
 
@@ -830,6 +830,7 @@ def main():
                 cfg_guidance_expand = guidance_expand if args.cfg_schedule is not None else None  # We only need them seperate if we turn CFG on and off
         else:
             guidance_expand = None
+
         freqs_cos, freqs_sin = get_rotary_pos_embed_riflex(vae_ver, transformer, video_length, height, width, args.riflex_index)
         # n_tokens = freqs_cos.shape[0]
 
@@ -967,7 +968,7 @@ def main():
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
             if args.codec is not None:
-                save_videos_grid_advanced(sample, video_path, args.codec, args.container, fps=args.fps, keep_frames=args.keep_pngs)
+                save_videos_grid_advanced(sample, video_path, args)
             else:
                 save_videos_grid(sample, video_path, fps=args.fps)
             logger.info(f"Sample save to: {video_path}")
