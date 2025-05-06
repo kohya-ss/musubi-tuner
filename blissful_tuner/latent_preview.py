@@ -55,7 +55,7 @@ class LatentPreviewer():
             torch.cuda.empty_cache()
         if self.model_type == "wan":
             noisy_latents = noisy_latents.unsqueeze(0)  # F, C, H, W -> B, F, C, H, W
-        elif self.model_type == "hunyuan":
+        elif self.model_type in ["hunyuan", "framepack"]:
             pass  # already B, F, C, H, W
         denoisy_latents = self.subtract_original_and_normalize(noisy_latents, current_step) if self.subtract_noise else noisy_latents
         decoded = self.decoder(denoisy_latents)  # returned as F, C, H, W

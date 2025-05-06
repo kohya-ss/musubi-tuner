@@ -67,6 +67,15 @@ def blissful_prefunc(args: argparse.Namespace):
     logger.info(f"Memory allocation: '{allocator}'")
     for string in cuda_list:
         logger.info(string)
+    if args.optimized and MODE == "generate":
+        args.fp16_accumulation = True
+        args.attn_mode = "sageattn"
+        args.compile = True
+        args.fp8_scaled = True
+        if DIFFUSION_MODEL == "wan":
+            args.rope_func = "comfy"
+        elif DIFFUSION_MODEL in ["hunyuan", "framepack"]:
+            args.fp8_fast = True
     if args.fp16_accumulation and MODE == "generate":
         logger.info("Enabling FP16 accumulation")
         if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
@@ -129,6 +138,12 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--codec", choices=["prores", "h264", "h265"], default=None, help="Codec to use, choose from 'prores', 'h264', or 'h265'")
     parser.add_argument("--container", choices=["mkv", "mp4"], default="mkv", help="Container format to use, choose from 'mkv' or 'mp4'. Note prores can only go in MKV!")
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
+    parser.add_argument(
+        "--optimized", action="store_true",
+        help="Overrides the default values of several command line args to provide an optimized but quality experience.\
+        Enables fp16_accumulation, fp8_scaled, sageattn and torch.compile. For Wan additionally enables 'rope_func comfy'.\
+        For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed!"
+    )
     return parser
 
 
