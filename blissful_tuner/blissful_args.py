@@ -150,6 +150,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         Enables fp16_accumulation, fp8_scaled, sageattn and torch.compile. For Wan additionally enables 'rope_func comfy'.\
         For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed in addition to PyTorch 2.7.0 or higher!"
     )
+    parser.add_argument("--perp_neg", type=float, default=None, help="Enable and set scale for perpendicular negative guidance")
     return parser
 
 

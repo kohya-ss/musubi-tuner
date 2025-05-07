@@ -368,7 +368,7 @@ class BlissfulVideoProcessor:
                 if metadata is not None:
                     for key, value in metadata.items():
                         pnginfo.add_text(key, _sanitize_metadata_value(value))
-                img.save(self.output_file_path, pnginfo=pnginfo)
+                img.save(self.output_file_path.replace(".mp4", ".png").replace(".mkv", ".png"), pnginfo=pnginfo)
         else:
             # 3) multi‐frame → video
             codec_args = self._get_ffmpeg_codec_args()

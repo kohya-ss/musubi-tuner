@@ -44,7 +44,7 @@ from hv_generate_video import save_images_grid, save_videos_grid, synchronize_de
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.utils import BlissfulLogger
-from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
+from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards, perpendicular_negative_cfg
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.wan_v2v import prepare_v2v_noise
 from blissful_tuner.video_processing_common import save_videos_grid_advanced
@@ -701,6 +701,12 @@ def prepare_t2v_inputs(
             else:
                 context = text_encoder([args.prompt], device)
                 context_null = text_encoder([n_prompt], device)
+            if args.perp_neg is not None:
+                if args.fp8_t5:
+                    with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
+                        context_nocond = text_encoder("", device)
+                else:
+                    context_nocond = text_encoder("", device)
 
         # free text encoder and clean memory
         del text_encoder
@@ -731,11 +737,14 @@ def prepare_t2v_inputs(
     # prepare model input arguments
     arg_c = {"context": context, "seq_len": seq_len}
     arg_null = {"context": context_null, "seq_len": seq_len}
+    arg_nocond = { "context": context_nocond, "seq_len": seq_len} if args.perp_neg is not None else None
     if y is not None:
         arg_c["y"] = [y]
         arg_null["y"] = [y]
+        if args.perp_neg is not None:
+            arg_nocond["y"] = [y]
 
-    return noise, context, context_null, (arg_c, arg_null)
+    return noise, context, context_null, (arg_c, arg_null), arg_nocond
 
 
 def prepare_i2v_inputs(
@@ -1029,6 +1038,7 @@ def run_sampling(
     accelerator: Accelerator,
     is_i2v: bool = False,
     use_cpu_offload: bool = True,
+    arg_nocond: dict = None
 ) -> torch.Tensor:
     """run sampling
     Args:
@@ -1165,6 +1175,9 @@ def run_sampling(
                     noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
                     if use_zerostar:
                         noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)
+                    elif args.perp_neg is not None:
+                        noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond)[0].to(latent_storage_device)
+                        noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)
                     else:
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
@@ -1226,7 +1239,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
             noise, context, context_null, y, inputs = prepare_i2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
         else:
             # T2V
-            noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
+            noise, context, context_null, inputs, arg_nocond = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
 
     else:
         # prepare inputs without shared models
@@ -1241,7 +1254,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
             if cfg.is_fun_control or args.video_path is not None:
                 # Fun-Control: need VAE for encoding control video
                 vae = load_vae(args, cfg, device, vae_dtype)
-            noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
+            noise, context, context_null, inputs, arg_nocond = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
 
         if args.video_path is not None:
             noise, timesteps = prepare_v2v_noise(noise, args, cfg, timesteps, device, vae)
@@ -1264,7 +1277,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
     seed_g.manual_seed(seed)
 
     # run sampling
-    latent = run_sampling(model, noise, scheduler, timesteps, args, inputs, device, seed_g, accelerator, is_i2v)
+    latent = run_sampling(model, noise, scheduler, timesteps, args, inputs, device, seed_g, accelerator, is_i2v, arg_nocond=arg_nocond)
 
     # Only clean up shared models if they were created within this function
     if shared_models is None:

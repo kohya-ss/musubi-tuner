@@ -869,7 +869,6 @@ def main():
                         latents_input = torch.cat([latents_input, latents_image_input], dim=1)  # 1 or 2, C*2, F, H, W
 
                     batch_size = 1 if args.split_uncond else latents_input.shape[0]
-                    logger.info(f"{latents_input.shape[0]}")
                     noise_pred_list = []
                     for j in range(0, latents_input.shape[0], batch_size):
                         # pick the “cond” index (1) instead of uncond (0) when do_classifier_free_guidance is True but do_cfg_for_step is False

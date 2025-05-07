@@ -16,6 +16,17 @@ from blissful_tuner.utils import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 
+def perpendicular_negative_cfg(cond, uncond, nocond, negative_scale, guidance_scale):
+
+    pos_cond = cond - nocond
+    neg_cond = uncond - nocond
+
+    perp_neg_cond = neg_cond - ((torch.mul(neg_cond, pos_cond).sum()) / (torch.norm(pos_cond)**2)) * pos_cond
+    perp_neg_cond *= negative_scale
+    noise_pred = nocond + guidance_scale * (pos_cond - perp_neg_cond)
+    return noise_pred
+
+
 def rescale_text_encoders_hunyuan(llm_scale: float, clip_scale: float, transformer: torch.nn.Module) -> torch.nn.Module:
     logger.info(f"Scaling relative TE influence to LLM:{llm_scale}; CLIP:{clip_scale}")
     clip_multiplier = float(clip_scale)
