@@ -971,7 +971,7 @@ def main():
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
             metadata = prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
-            save_videos_grid_advanced(sample, video_path, args, metadata)
+            save_videos_grid_advanced(sample, video_path, args, metadata=metadata)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images

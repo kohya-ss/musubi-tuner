@@ -28,7 +28,7 @@ def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = No
     metadata = {  # Construct metadata dict
         "model_type": f"{get_current_model_type()}",
         "prompt": f"{args.prompt}",
-        "seed": f"{seed}",
+        "seeds": f"{seed}",
         "infer_steps": f"{args.infer_steps}",
         "guidance_scale": f"{args.guidance_scale}",
         "flow_shift": f"{args.flow_shift}"
