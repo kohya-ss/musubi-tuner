@@ -41,9 +41,9 @@ from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
 from hv_generate_video import synchronize_device, save_images_grid
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.cfgzerostar import apply_zerostar_scaling
+from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg
 from blissful_tuner.utils import BlissfulLogger
-from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards, perpendicular_negative_cfg
+from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata
 from dataset.image_video_dataset import load_video

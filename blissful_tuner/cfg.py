@@ -9,6 +9,16 @@ License: Apache 2.0
 import torch
 
 
+def perpendicular_negative_cfg(cond: torch.Tensor, uncond: torch.Tensor, nocond: torch.Tensor, negative_scale: float, guidance_scale: float):
+    """Perpendicular negative CFG"""
+    pos_cond = cond - nocond
+    neg_cond = uncond - nocond
+    perp_neg_cond = neg_cond - ((torch.mul(neg_cond, pos_cond).sum()) / (torch.norm(pos_cond)**2)) * pos_cond
+    perp_neg_cond *= negative_scale
+    noise_pred = nocond + guidance_scale * (pos_cond - perp_neg_cond)
+    return noise_pred
+
+
 def apply_zerostar_scaling(cond: torch.Tensor, uncond: torch.Tensor, guidance_scale: float) -> torch.Tensor:
     """Function to apply CFGZero* scaling"""
     batch_size = cond.shape[0]

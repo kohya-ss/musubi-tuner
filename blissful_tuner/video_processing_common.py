@@ -167,7 +167,7 @@ class BlissfulVideoProcessor:
             o_name, o_ext = os.path.splitext(o_basename)
             o_output_dir = os.path.dirname(output_file_path)
             if o_ext != self.new_ext:
-                logger.warning(f"Extension '{o_ext[-3:]}' not valid for output! Updating to '{self.new_ext[-3:]}'...")
+                #logger.warning(f"Extension '{o_ext[-3:]}' not valid for output! Updating to '{self.new_ext[-3:]}'...")
                 output_file_path = os.path.join(o_output_dir, f"{o_name}{self.new_ext}")
 
             if os.path.exists(output_file_path):
@@ -366,7 +366,8 @@ class BlissfulVideoProcessor:
                 if metadata is not None:
                     for key, value in metadata.items():
                         pnginfo.add_text(key, _sanitize_metadata_value(value))
-                img.save(self.output_file_path.replace(".mp4", ".png").replace(".mkv", ".png"), pnginfo=pnginfo)
+                final_output = self.output_file_path.replace(".mp4", ".png").replace(".mkv", ".png")
+                img.save(final_output, pnginfo=pnginfo)
         else:
             # 3) multi‐frame → video
             codec_args = self._get_ffmpeg_codec_args()
@@ -386,9 +387,10 @@ class BlissfulVideoProcessor:
             cmd += ["-y", self.output_file_path]
 
             subprocess.run(cmd, check=True)
-
+            final_output = self.output_file_path
         if not keep_frames:
             shutil.rmtree(self.frame_dir, ignore_errors=True)
+        logger.info(f"Wrote output to {final_output}")
 
     def _get_ffmpeg_codec_args(self) -> List[str]:
         """

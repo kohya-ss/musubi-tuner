@@ -88,7 +88,7 @@ def blissful_prefunc(args: argparse.Namespace):
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
         else:
             logger.warning("FP16 accumulation not available! Requires at least PyTorch 2.7.0")
-    if args.video_path is not None:
+    if args.video_path is not None and DIFFUSION_MODEL == "wan":
         if "i2v" in args.task:
             logger.info("V2V operating in IV2V mode!")
         else:
