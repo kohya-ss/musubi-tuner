@@ -41,7 +41,7 @@ from blissful_tuner.utils import BlissfulLogger
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.cfgzerostar import apply_zerostar
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
-from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
+from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan, perpendicular_negative_cfg
 
 logger = BlissfulLogger(__name__, "green")
 
@@ -154,51 +154,59 @@ def save_images_grid(
 # region Encoding prompt
 
 
-def encode_prompt(prompt: Union[str, list[str]], device: torch.device, num_videos_per_prompt: int, text_encoder: TextEncoder):
-    r"""
-    Encodes the prompt into text encoder hidden states.
+def encode_prompt(
+    prompt: Union[str, list[str]],
+    device: torch.device,
+    num_videos_per_prompt: int,
+    text_encoder: TextEncoder,
+):
+    # If we got multiple prompts, just call ourselves on each one separately
+    if isinstance(prompt, list) and len(prompt) > 1:
+        embeds, masks = [], []
+        for single in prompt:
+            emb, mask = encode_prompt(single, device, num_videos_per_prompt, text_encoder)  # Avoids infinite loop b/c called with string so misses this logic
+            embeds.append(emb)
+            if mask is not None:
+                masks.append(mask)
+        # concatenate along the batch axis
+        prompt_embeds = torch.cat(embeds, dim=0)
+        attention_mask = torch.cat(masks, dim=0) if masks else None
+        return prompt_embeds, attention_mask
 
-    Args:
-        prompt (`str` or `List[str]`):
-            prompt to be encoded
-        device: (`torch.device`):
-            torch device
-        num_videos_per_prompt (`int`):
-            number of videos that should be generated per prompt
-        text_encoder (TextEncoder):
-            text encoder to be used for encoding the prompt
-    """
-    # LoRA and Textual Inversion are not supported in this script
-    # negative prompt and prompt embedding are not supported in this script
-    # clip_skip is not supported in this script because it is not used in the original script
+    # --- from here down, `prompt` is a single str ---
     data_type = "video"  # video only, image is not supported
 
     text_inputs = text_encoder.text2tokens(prompt, data_type=data_type)
-
     with torch.no_grad():
-        prompt_outputs = text_encoder.encode(text_inputs, data_type=data_type, device=device)
-    prompt_embeds = prompt_outputs.hidden_state
+        outputs = text_encoder.encode(text_inputs, data_type=data_type, device=device)
 
-    attention_mask = prompt_outputs.attention_mask
+    prompt_embeds = outputs.hidden_state
+    attention_mask = outputs.attention_mask
+
+    # tile the mask if provided
     if attention_mask is not None:
-        attention_mask = attention_mask.to(device)
-        bs_embed, seq_len = attention_mask.shape
-        attention_mask = attention_mask.repeat(1, num_videos_per_prompt)
-        attention_mask = attention_mask.view(bs_embed * num_videos_per_prompt, seq_len)
+        attention_mask = (
+            attention_mask.to(device)
+            .repeat(1, num_videos_per_prompt)
+            .view(-1, attention_mask.shape[-1])
+        )
 
-    prompt_embeds_dtype = text_encoder.dtype
-    prompt_embeds = prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
+    # ensure correct dtype/device
+    prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
 
+    # handle 2D vs 3D embeddings
     if prompt_embeds.ndim == 2:
-        bs_embed, _ = prompt_embeds.shape
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_videos_per_prompt, -1)
+        bs, dim = prompt_embeds.shape
+        prompt_embeds = (
+            prompt_embeds.repeat(1, num_videos_per_prompt)
+            .view(bs * num_videos_per_prompt, dim)
+        )
     else:
-        bs_embed, seq_len, _ = prompt_embeds.shape
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_videos_per_prompt, seq_len, -1)
+        bs, seq_len, dim = prompt_embeds.shape
+        prompt_embeds = (
+            prompt_embeds.repeat(1, num_videos_per_prompt, 1)
+            .view(bs * num_videos_per_prompt, seq_len, dim)
+        )
 
     return prompt_embeds, attention_mask
 
@@ -565,7 +573,7 @@ def main():
                 logger.info("Negative prompt is not provided, using empty prompt")
                 negative_prompt = ""
             logger.info(f"Encoding negative prompt: {negative_prompt}")
-            prompt = [negative_prompt, prompt]
+            prompt = [negative_prompt, prompt] if args.perp_neg is None else ["", negative_prompt, prompt]
         else:
             if args.negative_prompt is not None:
                 logger.warning("Negative prompt is provided but guidance_scale is 1.0, negative prompt will be ignored.")
@@ -824,7 +832,9 @@ def main():
         if embedded_guidance_scale is not None:
             guidance_expand = torch.tensor([embedded_guidance_scale * 1000.0] * latents.shape[0], dtype=torch.float32, device="cpu")
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
-            if do_classifier_free_guidance:
+            if args.perp_neg is not None:
+                guidance_expand = torch.cat([guidance_expand, guidance_expand, guidance_expand], dim=0)
+            elif do_classifier_free_guidance:
                 guidance_expand = torch.cat([guidance_expand, guidance_expand], dim=0)
 
         freqs_cos, freqs_sin = get_rotary_pos_embed_riflex(vae_ver, transformer, video_length, height, width, args.riflex_index)
@@ -859,13 +869,20 @@ def main():
 
                 latents = scheduler.scale_model_input(latents, t)
 
+                def latent_helper(_latents):
+                    if not do_cfg_for_step:
+                        _latents_input = _latents
+                    elif args.perp_neg is None:
+                        _latents_input = torch.cat([_latents, _latents], dim=0)
+                    else:
+                        _latents_input = torch.cat([_latents, _latents, _latents], dim=0)
+                    return _latents_input
+
                 # predict the noise residual
                 with torch.no_grad(), accelerator.autocast():
-                    latents_input = latents if not do_cfg_for_step else torch.cat([latents, latents], dim=0)
+                    latents_input = latent_helper(latents)
                     if image_latents is not None:
-                        latents_image_input = (
-                            image_latents if not do_cfg_for_step else torch.cat([image_latents, image_latents], dim=0)
-                        )
+                        latents_image_input = latent_helper(image_latents)
                         latents_input = torch.cat([latents_input, latents_image_input], dim=1)  # 1 or 2, C*2, F, H, W
 
                     batch_size = 1 if args.split_uncond else latents_input.shape[0]
@@ -892,10 +909,14 @@ def main():
 
                 # perform classifier free guidance
                 if do_cfg_for_step:
-                    noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                     if use_zerostar:
+                        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                         noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
+                    elif args.perp_neg is not None:
+                        noise_pred_nocond, noise_pred_uncond, noise_pred_cond = noise_pred.chunk(3)
+                        noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)
                     else:
+                        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
                 elif i <= args.cfgzerostar_init_steps - 1:  # Note only zero init can be used with embedded
                     noise_pred *= 0  # Do this here too to handle the case where CFG is disabled
