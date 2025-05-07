@@ -15,7 +15,6 @@ from typing import List, Union, Dict, Tuple, Optional
 import logging
 from rich.logging import RichHandler
 
-
 # Adapted from ComfyUI
 def load_torch_file(
     ckpt: str,
@@ -119,8 +118,8 @@ class BlissfulLogger:
     def warn(self, msg):
         self.logger.warning(msg, stacklevel=2)
 
-    def error(self, msg):
-        self.logger.error(msg, stacklevel=2)
+    def error(self, msg, levelmod=0):
+        self.logger.error(msg, stacklevel=2 + levelmod)
 
     def critical(self, msg):
         self.logger.critical(msg, stacklevel=2)
@@ -285,5 +284,5 @@ def string_to_seed(s: str, bits: int = 63) -> int:
 
 def error_out(error, message):
     logger = BlissfulLogger(__name__, "#8e00ed")
-    logger.warning(message, levelmod=1)
+    logger.error(message, levelmod=1)
     raise error(message)

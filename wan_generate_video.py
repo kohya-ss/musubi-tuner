@@ -7,7 +7,7 @@ import re
 import time
 import math
 import copy
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import Tuple, Optional, List, Union, Any, Dict
 from rich_argparse import RichHelpFormatter
 import torch
@@ -22,9 +22,8 @@ import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
 from networks import lora_wan
-from utils.safetensors_utils import mem_eff_save_file, load_safetensors
+from utils.safetensors_utils import mem_eff_save_file
 from wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
-import wan
 from wan.modules.model import WanModel, load_wan_model, detect_wan_sd_dtype
 from wan.modules.vae import WanVAE
 from wan.modules.t5 import T5EncoderModel
@@ -35,22 +34,22 @@ from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from convert_lora import convert_from_diffusers
 try:
     from lycoris.kohya import create_network_from_weights
-except:
+except ImportError:
     pass
 
 from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
-from hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
+from hv_generate_video import synchronize_device, save_images_grid
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.cfgzerostar import apply_zerostar
+from blissful_tuner.cfgzerostar import apply_zerostar_scaling
 from blissful_tuner.utils import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards, perpendicular_negative_cfg
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
-from blissful_tuner.wan_v2v import prepare_v2v_noise
-from blissful_tuner.video_processing_common import save_videos_grid_advanced
+from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata
 from dataset.image_video_dataset import load_video
 
 logger = BlissfulLogger(__name__, "green")
+
 
 class GenerationSettings:
     def __init__(
@@ -549,7 +548,7 @@ def merge_lora_weights(lora_module: ModuleType, model: torch.nn.Module, args: ar
             remaining_keys.sort()
             logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
             if len(weights_sd) == 0:
-                logger.warning(f"No keys left after filtering.")
+                logger.warning("No keys left after filtering.")
 
         if args.lycoris:
             lycoris_net, _ = create_network_from_weights(
@@ -719,7 +718,7 @@ def prepare_t2v_inputs(
     # Fun-Control: encode control video to latent space
     if config.is_fun_control:
         # TODO use same resizing as for image
-        logger.info(f"Encoding control video to latent space")
+        logger.info("Encoding control video to latent space")
         # C, F, H, W
         control_video = load_control_video(args.control_path, frames, height, width).to(device)
         vae.to_device(device)
@@ -737,7 +736,7 @@ def prepare_t2v_inputs(
     # prepare model input arguments
     arg_c = {"context": context, "seq_len": seq_len}
     arg_null = {"context": context_null, "seq_len": seq_len}
-    arg_nocond = { "context": context_nocond, "seq_len": seq_len} if args.perp_neg is not None else None
+    arg_nocond = {"context": context_nocond, "seq_len": seq_len} if args.perp_neg is not None else None
     if y is not None:
         arg_c["y"] = [y]
         arg_null["y"] = [y]
@@ -877,7 +876,7 @@ def prepare_i2v_inputs(
         clip_context = encoded_context["clip_context"]
 
     # encode image to latent space with VAE
-    logger.info(f"Encoding image to latent space")
+    logger.info("Encoding image to latent space")
     vae.to_device(device)
 
     # resize image
@@ -910,7 +909,7 @@ def prepare_i2v_inputs(
             y = torch.concat([y, y_end], dim=1)  # add end frame
 
     y = torch.concat([msk, y])
-    logger.info(f"Encoding complete")
+    logger.info("Encoding complete")
 
     if args.i2v_extra_noise not in (None, 0.0):
         logger.info(f"Adding {100 * args.i2v_extra_noise:.1f}% extra noise to I2V conditioning latents")
@@ -922,16 +921,15 @@ def prepare_i2v_inputs(
         ) * args.i2v_extra_noise
         y = y + extra_noise
 
-
     # Fun-Control: encode control video to latent space
     if config.is_fun_control:
         # TODO use same resizing as for image
-        logger.info(f"Encoding control video to latent space")
+        logger.info("Encoding control video to latent space")
         # C, F, H, W
         control_video = load_control_video(args.control_path, frames + (1 if has_end_image else 0), height, width).to(device)
         with accelerator.autocast(), torch.no_grad():
             control_latent = vae.encode([control_video])[0]
-        y = y[msk.shape[0] :]  # remove mask because Fun-Control does not need it
+        y = y[msk.shape[0]:]  # remove mask because Fun-Control does not need it
         if has_end_image:
             y[:, 1:-1] = 0  # remove image latent except first and last frame. according to WanVideoWrapper, this doesn't work
         else:
@@ -1121,8 +1119,7 @@ def run_sampling(
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
 
-    use_zerostar = args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1
-    if use_zerostar:
+    if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
         logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
@@ -1133,54 +1130,28 @@ def run_sampling(
         timestep = torch.stack([t]).to(device)
 
         with accelerator.autocast(), torch.no_grad():
-            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0].to(latent_storage_device)
-
-            apply_cfg = apply_cfg_array[i]  # apply CFG or not
-            if apply_cfg:
-                if args.cfg_schedule is not None:
-                    args.guidance_scale = scale_per_step[i + 1]
-                apply_slg = i >= slg_start_step and i < slg_end_step
-                # print(f"Applying SLG: {apply_slg}, i: {i}, slg_start_step: {slg_start_step}, slg_end_step: {slg_end_step}")
-                if args.slg_mode == "original" and apply_slg:
-                    noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
-
-                    # apply guidance
-                    # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
-                    if use_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
-                    else:
-                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                    # calculate skip layer out
-                    skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
-                        latent_storage_device
-                    )
-
-                    # apply skip layer guidance
-                    # SD3 formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
-                    noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)
-                elif args.slg_mode == "uncond" and apply_slg:
-                    # noise_pred_uncond is skip layer out
-                    noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
-                        latent_storage_device
-                    )
-                    # apply guidance
-                    if use_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)
-                    else:
-                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                else:
-                    # normal guidance
-                    noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
-                    if use_zerostar:
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)
-                    elif args.perp_neg is not None:
-                        noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond)[0].to(latent_storage_device)
-                        noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)
-                    else:
-                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-            else:
+            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0].to(latent_storage_device)  # Cond is always the same
+            apply_cfg = apply_cfg_array[i]  # Will we do any CFG or just proceed with cond?
+            if apply_cfg:  # We will do CFG this step
+                if args.cfg_schedule is not None:  # Is it scheduled CFG? If so and it's off we won't come here but if it's on...
+                    args.guidance_scale = scale_per_step[i + 1]  # Then reset the guidance scale for this step
+                apply_slg = i >= slg_start_step and i < slg_end_step  # Do we do SLG this step
+                skip_block_indices = args.slg_layers if (apply_slg and args.slg_mode == "uncond") else None  # In "uncond" mode, we just do uncond with layer skip so combine logic
+                noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=skip_block_indices, **arg_null)[0].to(latent_storage_device)  # Calculate uncond either with or without skipped layers
+                if args.perp_neg is not None:  # Are we using perpendicular negative?
+                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond)[0].to(latent_storage_device)  # Then calculate nocond
+                    noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)  # And update the noise_pred
+                elif args.cfgzerostar_scaling:  # No perp_neg, so CFGZero* scaling instead? (mutually exclusive)
+                    noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)  # does CFG with scaling inside, returns noise_pred after CFG formula
+                else:  # Neither perp_neg nor scaling so normal CFG formula
+                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides step as 1 based but i is 0 based
+                    noise_pred *= 0
+                elif apply_slg and args.slg_mode == "original":  # No need do traditional slg on zeroed steps so make it an elif
+                    # SLG original mode uses 3 model passes, cond, uncond, and uncond with layer skip
+                    skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
+                    noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
+            else:  # No CFG shenanigans at all
                 noise_pred = noise_pred_cond
 
             # step
@@ -1334,7 +1305,7 @@ def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg) -> torch.
     if args.trim_tail_frames:
         videos[0] = videos[0][:, : -args.trim_tail_frames]
 
-    logger.info(f"Decoding complete")
+    logger.info("Decoding complete")
     video = videos[0]
     del videos
     video = video.to(torch.float32).cpu()
@@ -1359,24 +1330,8 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
 
     seed = args.seed
-    video_length = args.video_length
     latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
-
-    if args.no_metadata:
-        metadata = None
-    else:
-        metadata = {
-            "seeds": f"{seed}",
-            "prompt": f"{args.prompt}",
-            "height": f"{height}",
-            "width": f"{width}",
-            "video_length": f"{video_length}",
-            "infer_steps": f"{args.infer_steps}",
-            "guidance_scale": f"{args.guidance_scale}",
-        }
-        if args.negative_prompt is not None:
-            metadata["negative_prompt"] = f"{args.negative_prompt}"
-
+    metadata = prepare_metadata(args)  # Will be set to None inside if args.no_metadata
     sd = {"latent": latent}
     save_file(sd, latent_path, metadata=metadata)
     logger.info(f"Latent saved to: {latent_path}")
@@ -1403,10 +1358,8 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
     video = video.unsqueeze(0)
-    if args.codec is not None:
-        save_videos_grid_advanced(video, video_path, args, rescale=True)
-    else:
-        save_videos_grid(video, video_path, fps=args.fps, rescale=True)
+    metadata = prepare_metadata(args)
+    save_videos_grid_advanced(video, video_path, args, rescale=True, metadata=metadata)
     logger.info(f"Video saved to: {video_path}")
 
     return video_path
@@ -1454,17 +1407,11 @@ def save_output(
         # save latent
         save_latent(latent, args, height, width)
 
-    if args.output_type == "video" or args.output_type == "both":
+    if args.output_type != "latent":
         # save video
         sample = decode_latent(latent.unsqueeze(0), args, cfg)
         original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
         save_video(sample, args, original_name)
-
-    elif args.output_type == "images":
-        # save images
-        sample = decode_latent(latent.unsqueeze(0), args, cfg)
-        original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
-        save_images(sample, args, original_name)
 
 
 def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Namespace) -> List[Dict]:
@@ -1607,7 +1554,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     all_prompt_args = []
 
     for i, prompt_data in enumerate(prompts_data):
-        logger.info(f"Processing prompt {i+1}/{len(prompts_data)}: {prompt_data['prompt'][:50]}...")
+        logger.info(f"Processing prompt {i + 1}/{len(prompts_data)}: {prompt_data['prompt'][:50]}...")
 
         # Apply overrides for this prompt
         prompt_args = apply_overrides(args, prompt_data)
@@ -1645,7 +1592,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         vae.to_device(device)
 
         for i, (latent, prompt_args) in enumerate(zip(all_latents, all_prompt_args)):
-            logger.info(f"Decoding output {i+1}/{len(all_latents)}")
+            logger.info(f"Decoding output {i + 1}/{len(all_latents)}")
 
             # Decode latent
             video = decode_latent(latent.unsqueeze(0), prompt_args, cfg)

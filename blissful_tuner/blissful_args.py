@@ -14,7 +14,7 @@ from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled
 from blissful_tuner.prompt_management import process_wildcards
 logger = BlissfulLogger(__name__, "#8e00ed")
 
-BLISSFUL_VERSION = "0.4.5"
+BLISSFUL_VERSION = "0.6.6"
 
 CFG_SCHEDULE_HELP = """
 Comma-separated list of steps/ranges where CFG should be applied.
@@ -80,14 +80,14 @@ def blissful_prefunc(args: argparse.Namespace):
         if DIFFUSION_MODEL == "wan":
             args.rope_func = "comfy"
         elif DIFFUSION_MODEL in ["hunyuan", "framepack"]:
-            args.fp16_accumulation = False
+            args.fp16_accumulation = False  # Disable this for hunyuan and framepack b/c we enable fp8_fast which offsets it anyway and torch 2.7.0 has issues with compiling hunyuan sometimes
             args.fp8_fast = True
     if args.fp16_accumulation and MODE == "generate":
         logger.info("Enabling FP16 accumulation")
         if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
         else:
-            raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum")
+            logger.warning("FP16 accumulation not available! Requires at least PyTorch 2.7.0")
     if args.video_path is not None:
         if "i2v" in args.task:
             logger.info("V2V operating in IV2V mode!")
@@ -112,8 +112,8 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         )
         parser.add_argument(
             "--v2v_noise_mode", choices=["traditional", "direct"], default="traditional",
-            help="Controls how --v2v_denoise value works. Traditional is like usual and controls what percent of the timestep schedule to run.\
-                Direct allows you to directly control how much noise will be added."
+            help="Controls how --v2v_denoise value works. Traditional is like usual and controls what percent of the timestep schedule to run. "
+            "Direct allows you to directly control how much noise will be added."
         )
 
     elif DIFFUSION_MODEL == "hunyuan":
@@ -132,29 +132,35 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
         parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps. 2 is good for Wan T2V, 1 for I2V")
         parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps. If --preview_vae is not specified it will use latent2rgb")
-
+        parser.add_argument("--cfg_schedule", type=str, help=CFG_SCHEDULE_HELP)
+        parser.add_argument(
+            "--perp_neg", type=float, default=None,
+            help="Enable and set scale for perpendicular negative guidance. Start with like 1.5 - 2.0. This is a stronger, more precise form of CFG."
+            "It requires a third modeling pass per step so it will slow you down by 30 percent but can definitely help isolating concepts. An example would be "
+            "prompting for 'nature photography' when using 'tree' as a negative. Normal CFG will mostly avoid trees but because 'nature' and 'tree' are associated "
+            "there will likely still be some. With perp neg, the entire concept of tree is subtracted from the result.")
     # Common
     parser.add_argument(
         "--prompt_wildcards", type=str, default=None,
-        help="Path to a directory of wildcard.txt files to enable wildcards in prompts and negative prompts. For instance __color__ will look for wildcards in color.txt in that directory. \
-        Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.")
+        help="Path to a directory of wildcard.txt files to enable wildcards in prompts and negative prompts. For instance __color__ will look for wildcards in color.txt in that directory. "
+        "Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.")
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
-    parser.add_argument("--cfg_schedule", type=str, help=CFG_SCHEDULE_HELP)
     parser.add_argument("--keep_pngs", action="store_true", help="Save frames as PNGs in addition to output video")
-    parser.add_argument("--codec", choices=["prores", "h264", "h265"], default=None, help="Codec to use, choose from 'prores', 'h264', or 'h265'")
-    parser.add_argument("--container", choices=["mkv", "mp4"], default="mkv", help="Container format to use, choose from 'mkv' or 'mp4'. Note prores can only go in MKV!")
+    parser.add_argument("--codec", choices=["prores", "h264", "h265"], default="h264", help="Codec to use, choose from 'prores', 'h264', or 'h265'")
+    parser.add_argument("--container", choices=["mkv", "mp4"], default="mp4", help="Container format to use, choose from 'mkv' or 'mp4'. Note prores can only go in MKV!")
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
     parser.add_argument(
         "--optimized", action="store_true",
-        help="Overrides the default values of several command line args to provide an optimized but quality experience.\
-        Enables fp16_accumulation, fp8_scaled, sageattn and torch.compile. For Wan additionally enables 'rope_func comfy'.\
-        For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed in addition to PyTorch 2.7.0 or higher!"
+        help="Overrides the default values of several command line args to provide an optimized but quality experience. "
+        "Enables fp16_accumulation, fp8_scaled, sageattn and torch.compile. For Wan additionally enables 'rope_func comfy'. "
+        "For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed in addition to PyTorch 2.7.0 or higher!"
     )
-    parser.add_argument("--perp_neg", type=float, default=None, help="Enable and set scale for perpendicular negative guidance")
     return parser
 
 
 def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
+    if args.cfgzerostar_scaling and args.perp_neg is not None:
+        error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
     blissful_prefunc(args)
     if args.seed is not None:
         try:

@@ -16,8 +16,6 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Tuple, Union, Optional, Dict
-from einops import rearrange
-import torchvision
 from rich_argparse import RichHelpFormatter
 from PIL import Image, UnidentifiedImageError
 from PIL.PngImagePlugin import PngInfo
@@ -423,57 +421,3 @@ class BlissfulVideoProcessor:
                 "-pix_fmt", "yuv420p",
             ]
         raise ValueError(f"Unsupported codec: {self.codec}")
-
-
-def save_videos_grid_advanced(
-    videos: torch.Tensor,
-    output_video: str,
-    args: argparse.Namespace,
-    rescale: bool = False,
-    n_rows: int = 1,
-):
-    "Function for saving Musubi Tuner outputs with more codec and container types"
-
-    # 1) rearrange so we iterate over time
-    videos = rearrange(videos, "b c t h w -> t b c h w")
-
-    VideoProcessor = BlissfulVideoProcessor()
-    VideoProcessor.prepare_files_and_path(
-        input_file_path=None,
-        output_file_path=output_video,
-        codec=args.codec,
-        container=args.container
-    )
-
-    outputs = []
-    for video in videos:
-        # 2) tile frames into one grid [C, H, W]
-        grid = torchvision.utils.make_grid(video, nrow=n_rows)
-        # 3) convert to an OpenCV-ready numpy array
-        np_img = VideoProcessor.tensor_to_np_image(grid, rescale=rescale)
-        outputs.append(np_img)
-
-    metadata = None
-    if not args.no_metadata:
-        from blissful_tuner.blissful_args import get_current_model_type
-        metadata = {  # Construct metadata dict
-            "model_type": f"{get_current_model_type()}",
-            "prompt": f"{args.prompt}",
-            "seed": f"{args.seed}",
-            "infer_steps": f"{args.infer_steps}",
-            "guidance_scale": f"{args.guidance_scale}",
-            "flow_shift": f"{args.flow_shift}"
-        }
-
-        if args.cfg_schedule is not None:
-            metadata["cfg_schedule"] = f"{args.cfg_schedule}"
-        if hasattr(args, "embedded_cfg_scale"):
-            metadata["embedded_guidance_scale"] = f"{args.embedded_cfg_scale}"
-        if args.negative_prompt is not None:
-            metadata["negative_prompt"] = f"{args.negative_prompt}"
-        if args.lora_weight:
-            for i, lora_weight in enumerate(args.lora_weight):
-                lora_weight = os.path.basename(lora_weight)
-                metadata[f"lora_{i}"] = f"{lora_weight}: {args.lora_multiplier[i]}"
-
-    VideoProcessor.write_np_images_to_output(outputs, args.fps, args.keep_pngs, metadata=metadata)

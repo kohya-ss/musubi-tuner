@@ -5,18 +5,78 @@ Created on Thu May  1 13:01:35 2025
 
 @author: blyss
 """
+import os
 import argparse
-from typing import Tuple
+from typing import Tuple, Optional, Any
 import torch
 import numpy as np
+from einops import rearrange
+import torchvision
 import torchvision.transforms.functional as TF
 from easydict import EasyDict
 from wan.modules.vae import WanVAE
 from utils.device_utils import clean_memory_on_device
+from blissful_tuner.blissful_args import get_current_model_type
 from blissful_tuner.video_processing_common import BlissfulVideoProcessor
 from blissful_tuner.utils import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "#8e00ed")
+
+
+def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:
+    seed = args.seed if seed_override is None else seed_override
+    metadata = {  # Construct metadata dict
+        "model_type": f"{get_current_model_type()}",
+        "prompt": f"{args.prompt}",
+        "seed": f"{seed}",
+        "infer_steps": f"{args.infer_steps}",
+        "guidance_scale": f"{args.guidance_scale}",
+        "flow_shift": f"{args.flow_shift}"
+    }
+
+    if args.cfg_schedule is not None:
+        metadata["cfg_schedule"] = f"{args.cfg_schedule}"
+    if hasattr(args, "embedded_cfg_scale"):
+        metadata["embedded_guidance_scale"] = f"{args.embedded_cfg_scale}"
+    if args.negative_prompt is not None:
+        metadata["negative_prompt"] = f"{args.negative_prompt}"
+    if args.lora_weight:
+        for i, lora_weight in enumerate(args.lora_weight):
+            lora_weight = os.path.basename(lora_weight)
+            metadata[f"lora_{i}"] = f"{lora_weight}: {args.lora_multiplier[i]}"
+    return metadata
+
+
+def save_videos_grid_advanced(
+    videos: torch.Tensor,
+    output_video: str,
+    args: argparse.Namespace,
+    rescale: Optional[bool] = False,
+    n_rows: Optional[int] = 1,
+    metadata: Optional[dict] = None
+):
+    "Function for saving Musubi Tuner outputs with more codec and container types"
+
+    # 1) rearrange so we iterate over time
+    videos = rearrange(videos, "b c t h w -> t b c h w")
+
+    VideoProcessor = BlissfulVideoProcessor()
+    VideoProcessor.prepare_files_and_path(
+        input_file_path=None,
+        output_file_path=output_video,
+        codec=args.codec,
+        container=args.container
+    )
+
+    outputs = []
+    for video in videos:
+        # 2) tile frames into one grid [C, H, W]
+        grid = torchvision.utils.make_grid(video, nrow=n_rows)
+        # 3) convert to an OpenCV-ready numpy array
+        np_img = VideoProcessor.tensor_to_np_image(grid, rescale=rescale)
+        outputs.append(np_img)
+
+    VideoProcessor.write_np_images_to_output(outputs, args.fps, args.keep_pngs, metadata=metadata)
 
 
 def prepare_v2v_noise(

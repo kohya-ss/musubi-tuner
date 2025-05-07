@@ -27,19 +27,19 @@ from networks import lora
 
 try:
     from lycoris.kohya import create_network_from_weights
-except:
+except ImportError:
     pass
 from rich_argparse import RichHelpFormatter
 from convert_lora import convert_from_diffusers
 from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
-from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
+from dataset.image_video_dataset import load_video, resize_image_to_bucket
+from blissful_tuner.fp8_optimization import convert_fp8_linear
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.fp8_optimization import convert_fp8_linear, apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from blissful_tuner.video_processing_common import save_videos_grid_advanced
+from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata
 from blissful_tuner.utils import BlissfulLogger
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
-from blissful_tuner.cfgzerostar import apply_zerostar
+from blissful_tuner.cfgzerostar import apply_zerostar_scaling
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan, perpendicular_negative_cfg
 
@@ -297,7 +297,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder_2.eval()
 
     # encode prompt
-    logger.info(f"Encoding prompt with text encoder 1")
+    logger.info("Encoding prompt with text encoder 1")
     text_encoder.to(device=device)
     if fp8_llm:
         with accelerator.autocast():
@@ -307,7 +307,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder = None
     clean_memory_on_device(device)
 
-    logger.info(f"Encoding prompt with text encoder 2")
+    logger.info("Encoding prompt with text encoder 2")
     text_encoder_2.to(device=device)
     if args.prompt_2:
         prompt = args.prompt_2
@@ -594,7 +594,7 @@ def main():
             video = torch.from_numpy(video).permute(3, 0, 1, 2).unsqueeze(0).float()  # 1, C, F, H, W
             video = video / 255.0
 
-            logger.info(f"Encoding video to latents")
+            logger.info("Encoding video to latents")
             video_latents = encode_to_latents(args, video, device)
             video_latents = video_latents.to(device=device, dtype=dit_dtype)
 
@@ -611,7 +611,7 @@ def main():
             image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).unsqueeze(2).float()  # 1, C, 1, H, W
             image = image / 255.0
 
-            logger.info(f"Encoding image to latents")
+            logger.info("Encoding image to latents")
             image_latents = encode_to_latents(args, image, device)  # 1, C, 1, H, W
             image_latents = image_latents.to(device=device, dtype=dit_dtype)
 
@@ -759,7 +759,7 @@ def main():
             transformer.enable_img_in_txt_in_offloading()
 
         # load scheduler
-        logger.info(f"Loading scheduler")
+        logger.info("Loading scheduler")
         scheduler = FlowMatchDiscreteScheduler(shift=args.flow_shift, reverse=True, solver="euler")
 
         # Prepare timesteps
@@ -856,8 +856,7 @@ def main():
             logger.warning("split_attn is enabled, split_uncond will be enabled as well.")
             args.split_uncond = True
         do_cfg_for_step = do_classifier_free_guidance         # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
-        use_zerostar = (args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1)
-        if use_zerostar:
+        if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
             logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
@@ -893,14 +892,14 @@ def main():
                         slice_end = slice_idx + batch_size
 
                         noise_pred = transformer(
-                            latents_input[j : j + batch_size],
+                            latents_input[j: j + batch_size],
                             t.repeat(batch_size).to(device=device, dtype=dit_dtype),
-                            text_states=prompt_embeds[slice_idx : slice_end],
-                            text_mask=prompt_mask[slice_idx : slice_end],
-                            text_states_2=prompt_embeds_2[slice_idx : slice_end],
+                            text_states=prompt_embeds[slice_idx: slice_end],
+                            text_mask=prompt_mask[slice_idx: slice_end],
+                            text_states_2=prompt_embeds_2[slice_idx: slice_end],
                             freqs_cos=freqs_cos,
                             freqs_sin=freqs_sin,
-                            guidance=guidance_expand[slice_idx : slice_end],
+                            guidance=guidance_expand[slice_idx: slice_end],
                             return_dict=True,
                         )["x"]
                         noise_pred_list.append(noise_pred)
@@ -909,17 +908,18 @@ def main():
 
                 # perform classifier free guidance
                 if do_cfg_for_step:
-                    if use_zerostar:
+                    if args.cfgzserostar_scaling:
                         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                        noise_pred = apply_zerostar(noise_pred_cond, noise_pred_uncond, i, args.guidance_scale, use_scaling=args.cfgzerostar_scaling, zero_init_steps=args.cfgzerostar_init_steps - 1)  # Expects step index as 0 based but user will provide N steps as 1 based
+                        noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)
                     elif args.perp_neg is not None:
                         noise_pred_nocond, noise_pred_uncond, noise_pred_cond = noise_pred.chunk(3)
                         noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)
                     else:
                         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-                elif i <= args.cfgzerostar_init_steps - 1:  # Note only zero init can be used with embedded
-                    noise_pred *= 0  # Do this here too to handle the case where CFG is disabled
+
+                if i <= args.cfgzerostar_init_steps - 1:  # CFGZero* zero init
+                    noise_pred *= 0
 
                     # # SkyReels' rescale noise config is omitted for now
                     # if guidance_rescale > 0.0:
@@ -958,26 +958,11 @@ def main():
         # save latent
         for i, latent in enumerate(latents):
             latent_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}_latent.safetensors"
-
-            if args.no_metadata:
-                metadata = None
-            else:
-                metadata = {
-                    "seeds": f"{seeds[i]}",
-                    "prompt": f"{args.prompt}",
-                    "height": f"{height}",
-                    "width": f"{width}",
-                    "video_length": f"{video_length}",
-                    "infer_steps": f"{num_inference_steps}",
-                    "guidance_scale": f"{args.guidance_scale}",
-                    "embedded_cfg_scale": f"{args.embedded_cfg_scale}",
-                }
-                if args.negative_prompt is not None:
-                    metadata["negative_prompt"] = f"{args.negative_prompt}"
+            metadata = prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
             sd = {"latent": latent}
             save_file(sd, latent_path, metadata=metadata)
-
             logger.info(f"Latent save to: {latent_path}")
+
     if output_type == "video" or output_type == "both":
         # save video
         videos = decode_latents(args, latents, device)
@@ -985,10 +970,8 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            if args.codec is not None:
-                save_videos_grid_advanced(sample, video_path, args)
-            else:
-                save_videos_grid(sample, video_path, fps=args.fps)
+            metadata = prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
+            save_videos_grid_advanced(sample, video_path, args, metadata)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images

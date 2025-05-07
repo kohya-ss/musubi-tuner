@@ -14,7 +14,6 @@ Extensions for all models:
 - Save generation metadata in videos/images (automatic, disable with `--no-metadata`)
 - Beautiful rich logging, rich argparse and rich tracebacks
 - Extended saving options (`--codec codec --container container`, can save Apple ProRes(`--codec prores`, super high bitrate perceptually lossless) into `--container mkv`, or either of `h264`, `h265` into `mp4` or `mkv`)
-- Advanced CFG scheduling: (`--cfg_schedule`, please see the `--help` for usage. Can specify guidance scale down to individual steps if you like!)
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
 - GIMM-VFI framerate interpolation (`blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
 - Upscaling with SwinIR or ESRGAN type models (`blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
@@ -26,6 +25,8 @@ Wan/Hunyuan extensions:
 - Load diffusion-pipe style LoRAs for inference without converting first
 - RifleX e.g. https://github.com/thu-ml/RIFLEx for longer vids (`--riflex_index N` where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81, requires `--rope_func comfy` with Wan; 4 is good for Hunyuan and you can make at least double length!)
 - CFGZero* e.g. https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` where N is the total number of steps to 0 out at the start. 2 is good for T2V, 1 for I2V but it's better for T2V in my experience. Support for Hunyuan is HIGHLY experimental and only available with CFG enabled.)
+- Advanced CFG scheduling: (`--cfg_schedule`, please see the `--help` for usage. Can specify guidance scale down to individual steps if you like!)
+- Perpendicular Negative Guidance (`--perp_neg neg_strength`, where neg_strength is a float that controls the string of the negative prompt. See '--help' for more!)
 
 Hunyuan only extensions:
 - Several more LLM options (`--hidden_state_skip_layer N --apply_final_norm --reproduce`, please see the `--help` for explanations!)

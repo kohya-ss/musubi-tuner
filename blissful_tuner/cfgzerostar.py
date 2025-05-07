@@ -7,25 +7,18 @@ License: Apache 2.0
 @author: blyss
 """
 import torch
-from typing import Optional
 
 
-def apply_zerostar(cond: torch.Tensor, uncond: torch.Tensor, current_step: int, guidance_scale: float, use_scaling: Optional[bool] = True, zero_init_steps: Optional[int] = -1) -> torch.Tensor:
-    """Function to apply CFGZero* scaling and zero init"""
-    if (current_step <= zero_init_steps):
-        return cond * 0
-    if not use_scaling:
-        # CFG formula
-        noise_pred = uncond + guidance_scale * (cond - uncond)
-    else:
-        batch_size = cond.shape[0]
-        positive_flat = cond.view(batch_size, -1)
-        negative_flat = uncond.view(batch_size, -1)
-        alpha = optimized_scale(positive_flat, negative_flat)
-        alpha = alpha.view(batch_size, *([1] * (len(cond.shape) - 1)))
-        alpha = alpha.to(cond.dtype)
-        # CFG formula modified with alpha
-        noise_pred = uncond * alpha + guidance_scale * (cond - uncond * alpha)
+def apply_zerostar_scaling(cond: torch.Tensor, uncond: torch.Tensor, guidance_scale: float) -> torch.Tensor:
+    """Function to apply CFGZero* scaling"""
+    batch_size = cond.shape[0]
+    positive_flat = cond.view(batch_size, -1)
+    negative_flat = uncond.view(batch_size, -1)
+    alpha = optimized_scale(positive_flat, negative_flat)
+    alpha = alpha.view(batch_size, *([1] * (len(cond.shape) - 1)))
+    alpha = alpha.to(cond.dtype)
+    # CFG formula modified with alpha
+    noise_pred = uncond * alpha + guidance_scale * (cond - uncond * alpha)
     return noise_pred
 
 
