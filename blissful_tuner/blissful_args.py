@@ -80,6 +80,7 @@ def blissful_prefunc(args: argparse.Namespace):
         if DIFFUSION_MODEL == "wan":
             args.rope_func = "comfy"
         elif DIFFUSION_MODEL in ["hunyuan", "framepack"]:
+            args.fp16_accumulation = False
             args.fp8_fast = True
     if args.fp16_accumulation and MODE == "generate":
         logger.info("Enabling FP16 accumulation")

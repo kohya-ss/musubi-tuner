@@ -223,15 +223,12 @@ def load_llm(text_encoder_path: str, dtype: Optional[Union[str, torch.dtype]] = 
         if "tokenizer" in state_dict:
             state_dict.pop("tokenizer")
         if "model.vision_tower.vision_model.encoder.layers.8.layer_norm2.weight" in state_dict:
-            logger.info("Loading Xtuner model(sans vision blocks)...")
             filtered_dict = {}
             for key, value in state_dict.items():
                 key = key.replace("model.language_model.", "")
                 if "vision" not in key and "multi_modal_projector" not in key:
                     filtered_dict[key] = value
             state_dict = filtered_dict
-        else:
-            logger.info("Loading Llama model...")
         text_encoder.load_state_dict(state_dict, strict=True, assign=True)
 
     return text_encoder
@@ -253,7 +250,7 @@ def load_text_encoder(
     text_encoder_path: str,
     text_encoder_dtype: Optional[Union[str, torch.dtype]] = None,
 ):
-    logger.info(f"Loading text encoder model ({text_encoder_type}) from: {text_encoder_path}")
+    #logger.info(f"Loading text encoder model ({text_encoder_type}) from: {text_encoder_path}")
 
     # reduce peak memory usage by specifying the dtype of the model
     dtype = text_encoder_dtype
@@ -280,7 +277,7 @@ def load_text_encoder(
 
 
 def load_tokenizer(tokenizer_type, tokenizer_path=None, padding_side="right"):
-    logger.info(f"Loading tokenizer ({tokenizer_type}) from: {tokenizer_path}")
+    #logger.info(f"Loading tokenizer ({tokenizer_type}) from: {tokenizer_path}")
 
     if tokenizer_type == "clipL":
         tokenizer = load_clip_l_tokenizer(tokenizer_path)

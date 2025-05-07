@@ -824,12 +824,8 @@ def main():
         if embedded_guidance_scale is not None:
             guidance_expand = torch.tensor([embedded_guidance_scale * 1000.0] * latents.shape[0], dtype=torch.float32, device="cpu")
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
-            embedded_guidance_expand = guidance_expand if args.cfg_schedule is not None else None
             if do_classifier_free_guidance:
                 guidance_expand = torch.cat([guidance_expand, guidance_expand], dim=0)
-                cfg_guidance_expand = guidance_expand if args.cfg_schedule is not None else None  # We only need them seperate if we turn CFG on and off
-        else:
-            guidance_expand = None
 
         freqs_cos, freqs_sin = get_rotary_pos_embed_riflex(vae_ver, transformer, video_length, height, width, args.riflex_index)
         # n_tokens = freqs_cos.shape[0]
@@ -853,16 +849,13 @@ def main():
         use_zerostar = (args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1)
         if use_zerostar:
             logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
-
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                if do_classifier_free_guidance:
-                    if args.cfg_schedule is not None:
-                        do_cfg_for_step = (i + 1) in args.cfg_schedule
-                        if do_cfg_for_step:
-                            args.guidance_scale = args.cfg_schedule[i + 1]
-                            guidance_expand = cfg_guidance_expand if do_cfg_for_step else embedded_guidance_expand
+                if do_classifier_free_guidance and args.cfg_schedule is not None:
+                    do_cfg_for_step = (i + 1) in args.cfg_schedule
+                    if do_cfg_for_step:
+                        args.guidance_scale = args.cfg_schedule[i + 1]
 
                 latents = scheduler.scale_model_input(latents, t)
 
@@ -876,21 +869,26 @@ def main():
                         latents_input = torch.cat([latents_input, latents_image_input], dim=1)  # 1 or 2, C*2, F, H, W
 
                     batch_size = 1 if args.split_uncond else latents_input.shape[0]
-
+                    logger.info(f"{latents_input.shape[0]}")
                     noise_pred_list = []
                     for j in range(0, latents_input.shape[0], batch_size):
-                        noise_pred = transformer(  # For an input image (129, 192, 336) (1, 256, 256)
-                            latents_input[j : j + batch_size],  # [1, 16, 33, 24, 42]
-                            t.repeat(batch_size).to(device=device, dtype=dit_dtype),  # [1]
-                            text_states=prompt_embeds[j : j + batch_size],  # [1, 256, 4096]
-                            text_mask=prompt_mask[j : j + batch_size],  # [1, 256]
-                            text_states_2=prompt_embeds_2[j : j + batch_size],  # [1, 768]
-                            freqs_cos=freqs_cos,  # [seqlen, head_dim]
-                            freqs_sin=freqs_sin,  # [seqlen, head_dim]
-                            guidance=guidance_expand[j : j + batch_size],  # [1]
+                        # pick the “cond” index (1) instead of uncond (0) when do_classifier_free_guidance is True but do_cfg_for_step is False
+                        slice_idx = (j + 1) if (do_classifier_free_guidance and not do_cfg_for_step) else j
+                        slice_end = slice_idx + batch_size
+
+                        noise_pred = transformer(
+                            latents_input[j : j + batch_size],
+                            t.repeat(batch_size).to(device=device, dtype=dit_dtype),
+                            text_states=prompt_embeds[slice_idx : slice_end],
+                            text_mask=prompt_mask[slice_idx : slice_end],
+                            text_states_2=prompt_embeds_2[slice_idx : slice_end],
+                            freqs_cos=freqs_cos,
+                            freqs_sin=freqs_sin,
+                            guidance=guidance_expand[slice_idx : slice_end],
                             return_dict=True,
                         )["x"]
                         noise_pred_list.append(noise_pred)
+
                     noise_pred = torch.cat(noise_pred_list, dim=0)
 
                 # perform classifier free guidance
