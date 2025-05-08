@@ -31,13 +31,14 @@ def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = No
         "seeds": f"{seed}",
         "infer_steps": f"{args.infer_steps}",
         "guidance_scale": f"{args.guidance_scale}",
-        "flow_shift": f"{args.flow_shift}"
+        "flow_shift": f"{args.flow_shift}",
+        "bt_fps": f"{args.fps}"
     }
 
     if args.cfg_schedule is not None:
         metadata["cfg_schedule"] = f"{args.cfg_schedule}"
     if hasattr(args, "embedded_cfg_scale"):
-        metadata["embedded_guidance_scale"] = f"{args.embedded_cfg_scale}"
+        metadata["embedded_cfg_scale"] = f"{args.embedded_cfg_scale}"
     if args.negative_prompt is not None:
         metadata["negative_prompt"] = f"{args.negative_prompt}"
     if args.lora_weight:

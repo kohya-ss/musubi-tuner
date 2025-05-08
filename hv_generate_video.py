@@ -522,22 +522,24 @@ def main():
         original_base_names = []
         latents_list = []
         seeds = []
-        for latent_path in args.latent_path:
+        for i, latent_path in enumerate(args.latent_path):
             original_base_names.append(os.path.splitext(os.path.basename(latent_path))[0])
             seed = 0
-
+            meta_keep = None if args.no_metadata else [{} for _ in args.latent_path]
             if os.path.splitext(latent_path)[1] != ".safetensors":
                 latents = torch.load(latent_path, map_location="cpu")
             else:
                 latents = load_file(latent_path)["latent"]
                 with safe_open(latent_path, framework="pt") as f:
                     metadata = f.metadata()
+                    meta_keep[i] = metadata  # Used to pass the metadata through to save step
                 if metadata is None:
                     metadata = {}
                 logger.info(f"Loaded metadata: {metadata}")
 
                 if "seeds" in metadata:
                     seed = int(metadata["seeds"])
+                    args.seed = seed
 
             seeds.append(seed)
             latents_list.append(latents)
@@ -970,7 +972,7 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            metadata = prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
+            metadata = meta_keep[i] if meta_keep is not None else prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
             save_videos_grid_advanced(sample, video_path, args, metadata=metadata)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":

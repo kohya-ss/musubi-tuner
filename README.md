@@ -11,7 +11,7 @@ Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for H
 Extensions for all models:
 - Latent preview during generation with either latent2RGB or TAEHV (`--preview_latent_every N` where N is a number of steps(or sections for framepack). By default uses latent2rgb, TAE can be enabled with `--preview_vae /path/to/model` models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
 - Optimized generation settings for fast, high quality gens (`--optimized`, enables various optimizations and settings based on the model. Requires SageAttention, Triton, PyTorch 2.7.0 or higher)
-- Save generation metadata in videos/images (automatic, disable with `--no-metadata`)
+- Save generation metadata in videos/images (automatic with `--container mkv`, disable with `--no-metadata`, not available with `--container mp4`)
 - Beautiful rich logging, rich argparse and rich tracebacks
 - Extended saving options (`--codec codec --container container`, can save Apple ProRes(`--codec prores`, super high bitrate perceptually lossless) into `--container mkv`, or either of `h264`, `h265` into `mp4` or `mkv`)
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)

@@ -1135,9 +1135,11 @@ def run_sampling(
             if apply_cfg:  # We will do CFG this step
                 if args.cfg_schedule is not None:  # Is it scheduled CFG? If so and it's off we won't come here but if it's on...
                     args.guidance_scale = scale_per_step[i + 1]  # Then reset the guidance scale for this step
-                apply_slg = i >= slg_start_step and i < slg_end_step  # Do we do SLG this step
+
+                apply_slg = args.slg_mode is not None and i >= slg_start_step and i < slg_end_step  # Do we do SLG this step
                 skip_block_indices = args.slg_layers if (apply_slg and args.slg_mode == "uncond") else None  # In "uncond" mode, we just do uncond with layer skip so combine logic
                 noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=skip_block_indices, **arg_null)[0].to(latent_storage_device)  # Calculate uncond either with or without skipped layers
+
                 if args.perp_neg is not None:  # Are we using perpendicular negative?
                     noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond)[0].to(latent_storage_device)  # Then calculate nocond
                     noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)  # And update the noise_pred
@@ -1145,12 +1147,14 @@ def run_sampling(
                     noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)  # does CFG with scaling inside, returns noise_pred after CFG formula
                 else:  # Neither perp_neg nor scaling so normal CFG formula
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-                if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides step as 1 based but i is 0 based
+
+                if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
                     noise_pred *= 0
                 elif apply_slg and args.slg_mode == "original":  # No need do traditional slg on zeroed steps so make it an elif
                     # SLG original mode uses 3 model passes, cond, uncond, and uncond with layer skip
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
                     noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
+
             else:  # No CFG shenanigans at all
                 noise_pred = noise_pred_cond
 
@@ -1339,7 +1343,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     return latent_path
 
 
-def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name: Optional[str] = None) -> str:
+def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name: Optional[str] = None, metadata: Optional[dict] = None) -> str:
     """Save video to file
 
     Args:
@@ -1358,7 +1362,7 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
     video = video.unsqueeze(0)
-    metadata = prepare_metadata(args)
+    metadata = prepare_metadata(args) if metadata is None else metadata
     save_videos_grid_advanced(video, video_path, args, rescale=True, metadata=metadata)
     logger.info(f"Video saved to: {video_path}")
 
@@ -1391,7 +1395,13 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
 
 
 def save_output(
-    latent: torch.Tensor, args: argparse.Namespace, cfg, height: int, width: int, original_base_names: Optional[List[str]] = None
+    latent: torch.Tensor,
+    args: argparse.Namespace,
+    cfg,
+    height: int,
+    width: int,
+    original_base_names: Optional[List[str]] = None,
+    metadata: Optional[dict] = None
 ) -> None:
     """save output
 
@@ -1411,7 +1421,7 @@ def save_output(
         # save video
         sample = decode_latent(latent.unsqueeze(0), args, cfg)
         original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
-        save_video(sample, args, original_name)
+        save_video(sample, args, original_name, metadata)
 
 
 def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Namespace) -> List[Dict]:
@@ -1870,7 +1880,7 @@ def main():
         args.seed = seeds[0]
 
         # Decode and save
-        save_output(latent[0], args, cfg, height, width, original_base_names)
+        save_output(latent[0], args, cfg, height, width, original_base_names, metadata=metadata)
 
     elif args.from_file:
         # Batch mode from file

@@ -379,7 +379,7 @@ class BlissfulVideoProcessor:
             if rescale is not None:
                 w, h = rescale
                 cmd += ["-vf", f"scale={w}:{h}"]
-            if metadata is not None:
+            if metadata is not None and self.new_ext == ".mkv":
                 for key, value in metadata.items():
                     sanitized_value = _sanitize_metadata_value(value)
                     cmd += ["-metadata", f"{key}={sanitized_value}"]
