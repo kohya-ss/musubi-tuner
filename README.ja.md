@@ -10,12 +10,13 @@ Blyss Sarania による Musubi Tuner の Blissful な拡張機能
 
 Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコードを移植したHunyuanVideoWrapperとWanVideoWrapperを開発してくださったkijaiさん、そしてオープンソース生成AIコミュニティの開発者の皆様に心より感謝申し上げます。多くの変更は実験的なものであるため、修正前のMusubiと同じように動作しない部分もあることをご了承ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題は、MusubiのメインGithubリポジトリではなく、このリポジトリのIssuesセクションに投稿してください。
 
-すべてのモデルに拡張機能が追加されました。
-- latent2RGB または TAEHV による生成時に潜在プレビューを実行できます (`--preview_latent_every N`、N はステップ数 (フレームパックの場合はセクション数))。デフォルトでは latent2rgb を使用しますが、TAE は `--preview_vae /path/to/model` で有効化できます。モデル: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
-- 美しく豊富なログ出力、豊富な引数解析、豊富なトレースバック機能
-- 拡張された保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートで知覚的にロスレス) を `--container mkv`、または`h264`、`h265` のいずれかを `mp4` または `mkv` に変換します。
-- 高度な CFG スケジューリング: (`--cfg_schedule`、使用方法については `--help` を参照してください。必要に応じて、個々のステップにガイダンススケールダウンを指定できます。)
-- FP16 積算 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能しますが (Hunyaun bf16 でも機能します!)、PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、精度を損なうことなく fp8_fast/mmscaled とほぼ同等の速度を実現します。 fp8スケールモードにも対応しています！
+すべてのモデル向けの拡張機能：
+- latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0）
+- 高速で高品質な生成のための最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）
+- 生成メタデータを動画/画像に保存(`--container mkv` では自動、`--no-metadata` では無効化、`--container mp4` では利用不可)
+- 美しくリッチなログ出力、豊富な引数解析、そして豊富なトレースバック
+- 拡張された保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートの知覚的ロスレス) を `--container mkv` に保存、または `h264`、`h265` のいずれかを `mp4` または `mkv` に保存可能)
+- FP16 積算 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも機能します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、fp8_fast/mmscaled とほぼ同等の速度になります。精度の低下はありません！fp8スケールモードにも対応しています！
 - GIMM-VFIフレームレート補間（`blissful_tuner/GIMMVFI.py`、使用方法については`--help`をご覧ください。モデル：https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0）
 - SwinIRまたはESRGANタイプのモデルによるアップスケーリング（`blissful_tuner/upscaler.py`、使用方法については`--help`をご覧ください。モデル： https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
 - シードとして文字列を使うのがおすすめです！覚えやすく、さらに便利です！
@@ -25,23 +26,24 @@ Wan/Hunyuan 拡張機能：
 - 拡散パイプ形式の LoRA を、事前に変換することなく推論用に読み込みます。
 - RifleX などより長い動画は https://github.com/thu-ml/RIFLEx をご覧ください（`--riflex_index N` で、N は RifleX の周波数です。Wan の場合は 6 が適しており、通常 81 フレームではなく約 115 フレームまで再生できます。Wan の場合は `--rope_func comfy` が必要です。Hunyuan の場合は 4 が適しており、少なくとも 2 倍の長さにできます！）
 - CFGZero* 例: https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` で、N は開始時に 0 になるまでのステップ数です。T2V の場合は 2、I2V の場合は 1 が適切ですが、私の経験では T2V の方が適しています。Hunyuan のサポートは非​​常に実験的であり、CFG が有効になっている場合にのみ利用可能です。)
+- 高度な CFG スケジューリング: (`--cfg_schedule`、使用方法については `--help` を参照してください。必要に応じて、個々のステップにガイダンスのスケールダウンを指定することもできます!)
+- 垂直負ガイダンス (`--perp_neg neg_strength`、neg_strength は負プロンプトの文字列を制御する浮動小数点数です。詳細は '--help' を参照してください!)
 
 Hunyuan 専用の拡張機能:
-- いくつかの LLM オプションを追加 (`--hidden_​​state_skip_layer N --apply_final_norm --reproduce`、説明については `--help` を参照してください!)
-- Wan と同じアルゴリズムを使用した FP8 スケールのサポート (`--fp8_scaled`、トレーニングは十分にテストされていません!)
-- CLIP 用の別のプロンプト (`--prompt_2 "second prompt goes here"`、CLIP とは異なるプロンプトを表示します。よりシンプルなテキストに使用されます。
-- https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan に基づいてテキストエンコーダーを再スケールします（`--te_multiplier llm clip` を `--te_multiplier 0.9 1.2` のように使用することで、LLM をわずかにダウンウェイトし、CLIP をわずかにアップウェイトします）。
+- その他の LLM オプション(`--hidden_​​state_skip_layer N --apply_final_norm --reproduce`、説明は`--help`を参照してください！)
+- Wanと同じアルゴリズムを使用したFP8スケールのサポート (`--fp8_scaled`、トレーニングは十分にテストされていません！)
+- CLIP用の別のプロンプト (`--prompt_2 "second prompt goes here"`、CLIPはよりシンプルなテキストに使用されるため、異なるプロンプトを提供します)
+- https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyanに基づいてテキストエンコーダーを再スケールします (`--te_multiplier llm clip`、例えば`--te_multiplier 0.9 1.2`のように、LLMをわずかに重み付け下げ、CLIPをわずかに重み付けします)
 
 WAN 専用拡張機能（ワンショットモードとインタラクティブモードの両方をサポート）：
-- V2V推論（`--video_path /path/to/input/video --v2v_denoise amount`、amountは0.0～1.0の浮動小数点数で、ソースビデオに追加されるノイズの強さを制御します。`--v2v_noise_mode traditional`の場合、他の実装と同様に、タイムステップスケジュールの最後の（amount * 100）パーセントを実行します。`--v2v_noise_mode direct`の場合、タイムステップスケジュール内でその値に最も近い場所から開始して、可能な限り追加されるノイズの量を直接制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length`が入力より短い場合、入力は切り捨てられ、最初の`--video_length`フレームのみが含まれます。`--video_length`が入力より長い場合、最初のフレームまたは最後の`--v2v_pad_mode` の設定に応じて、フレームの長さを詰めるためにフレームが繰り返されます。T2V または I2V の `--task` モードとモデルを使用できます（個人的には I2V モードの方が品質が良いと思います）。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去と同じ値にする必要があります。例えば、T2V の場合はデフォルトで 50、I2V の場合は 40 です。これは、完全なスケジュールから変更する必要があるためです。実際のステップ数は `--v2v_noise_mode` の設定に依存します。
+- V2V 推論（`--video_path /path/to/input/video --v2v_denoise amount` で、amount は 0.0 - 1.0 の浮動小数点数で、ソースビデオに追加するノイズの強度を制御します。`--v2v_noise_mode Traditional` の場合、他の実装と同様に、タイムステップスケジュールの最後の (amount * 100) パーセントを実行します。`--v2v_noise_mode direct` の場合、タイムステップスケジュール内でその値に最も近い場所から開始し、そこから処理を進めることで、追加するノイズの量を可能な限り正確に直接制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。 `--video_length` が入力より長い場合、`--v2v_pad_mode` の設定に応じて、最初のフレームまたは最後のフレームが繰り返され、長さが調整されます。T2V または I2V の `--task` モードとモデルを使用できます（個人的には i2v モードの方が品質が良いと思います）。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去と同じ値にする必要があります。例えば、T2V の場合はデフォルトで 50、I2V の場合は 40 です。これは、完全なスケジュールから変更する必要があるためです。実際の手順は `--v2v_noise_mode` に依存します。
 - プロンプトの重み付け（`--prompt_weighting` を指定し、プロンプトで「(large:1.4) の赤いボールで遊ぶ猫」のように記述することで、「large」の効果を強調できます。[this] や (this) はサポートされておらず、(this:1.0) のみがサポートされています。また、重み付けを下げると奇妙な効果が生じることに注意してください。
 - 複素数を使用しない ComfyUI から移植された ROPE。`--compile` と併用すると VRAM を大幅に節約できます！(`--rope_func comfy`)
-- I2V/V2V のオプションの追加潜在ノイズ (`--v2v_extra_noise 0.02 --i2v_extra_noise 0.02`、0.04 未満の値が推奨されます。これにより、V2V/I2V の細かいディテールとテクスチャが向上しますが、値が大きすぎるとアーティファクトや移動する影が発生します。私は V2V の場合は 0.01～0.02、I2V の場合は 0.02～0.04 程度を使用します)
+- I2V/V2V 用のオプションの追加潜在ノイズ（`--v2v_extra_noise 0.02 --i2v_extra_noise 0.02`、0.04 未満の値を推奨。これにより、V2V/I2V の細かいディテールとテクスチャが向上しますが、多すぎるとアーティファクトや動く影が発生します。私はV2Vの場合は約0.01～0.02、I2Vの場合は約0.02～0.04）
 
 フレームパックのみの拡張機能：
-- Torch.compile (`--compile`、Wan と Hunyuan が既に使用している構文と同じ)
-- FP8 fast/mm_scaled (`--fp8_fast`、40xx カードで速度が向上しますが、品質は若干低下します。Wan と Hunyuan は既にネイティブ Musubi でこの機能を実現しています！)
-
+- Torch.compile（`--compile`、WanとHunyuanが既に使用している構文と同じ）
+- FP8 fast/mm_scaled（`--fp8_fast`、40xxカードでの速度向上、ただし品質は若干低下。WanとHunyuanは既にネイティブMusubiでこの機能を実現しています！）
 私のコード全体と Musubi Tuner のコードは Apache 2.0 ライセンスです。含まれている他のプロジェクトはライセンスが異なる場合があります。その場合は、それぞれのディレクトリにライセンス条項を記載した LICENSE ファイルがあります。以下は、現在でも有効なオリジナルの Musubi Readme です。
 
 # Musubi Tuner
