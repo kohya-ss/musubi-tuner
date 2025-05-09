@@ -537,8 +537,8 @@ def main():
                     metadata = {}
                 logger.info(f"Loaded metadata: {metadata}")
 
-                if "seeds" in metadata:
-                    seed = int(metadata["seeds"])
+                if "bt_seeds" in metadata:
+                    seed = int(metadata["bt_seeds"])
                     args.seed = seed
 
             seeds.append(seed)

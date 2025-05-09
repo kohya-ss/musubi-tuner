@@ -1144,7 +1144,6 @@ def run_sampling(
         timestep = torch.stack([t]).to(device)
 
         with accelerator.autocast(), torch.no_grad():
-
             noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0].to(latent_storage_device)  # Cond is always the same
             apply_cfg = apply_cfg_array[i]  # Will we do any CFG or just proceed with cond?
             if apply_cfg:  # We will do CFG this step
@@ -1870,14 +1869,14 @@ def main():
                     metadata = {}
                 logger.info(f"Loaded metadata: {metadata}")
 
-                if "seeds" in metadata:
-                    seed = int(metadata["seeds"])
-                if "height" in metadata and "width" in metadata:
-                    height = int(metadata["height"])
-                    width = int(metadata["width"])
+                if "bt_seeds" in metadata:
+                    seed = int(metadata["bt_seeds"])
+                if "bt_height" in metadata and "bt_width" in metadata:
+                    height = int(metadata["bt_height"])
+                    width = int(metadata["bt_width"])
                     args.video_size = [height, width]
-                if "video_length" in metadata:
-                    args.video_length = int(metadata["video_length"])
+                if "bt_video_length" in metadata:
+                    args.video_length = int(metadata["bt_video_length"])
 
             seeds.append(seed)
             latents_list.append(latents)

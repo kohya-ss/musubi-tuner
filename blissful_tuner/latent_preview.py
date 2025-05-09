@@ -7,7 +7,9 @@ Created on Mon Mar 10 16:47:29 2025
 
 @author: blyss
 """
+import argparse
 import os
+from typing import Optional, List
 import torch
 import av
 from PIL import Image
@@ -20,7 +22,15 @@ logger = BlissfulLogger(__name__, "#8e00ed")
 
 class LatentPreviewer():
     @torch.inference_mode()
-    def __init__(self, args, original_latents, timesteps, device, dtype, model_type="hunyuan"):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        original_latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+        model_type: Optional[str] = "hunyuan"
+    ) -> None:
         self.mode = "latent2rgb" if args.preview_vae is None else "taehv"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")
         self.subtract_noise = True if model_type != "framepack" else False
@@ -50,7 +60,7 @@ class LatentPreviewer():
             self.fps = int(args.fps / 4)
 
     @torch.inference_mode()
-    def preview(self, noisy_latents, current_step=None):
+    def preview(self, noisy_latents: torch.Tensor, current_step: Optional[int] = None) -> None:
         if self.device == "cuda" or self.device == torch.device("cuda"):
             torch.cuda.empty_cache()
         if self.model_type == "wan":
@@ -75,18 +85,17 @@ class LatentPreviewer():
         self.write_preview(upscaled, w, h)
 
     @torch.inference_mode()
-    def subtract_original_and_normalize(self, noisy_latents, current_step):
+    def subtract_original_and_normalize(self, noisy_latents: torch.Tensor, current_step: int):
         # Compute what percent of original noise is remaining
         noise_remaining = self.timesteps_percent[current_step].to(device=noisy_latents.device)
         # Subtract the portion of original latents
         denoisy_latents = noisy_latents - (self.original_latents.to(device=noisy_latents.device) * noise_remaining)
-
         # Normalize
         normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-8)
         return normalized_denoisy_latents
 
     @torch.inference_mode()
-    def write_preview(self, frames, width, height):
+    def write_preview(self, frames: List[torch.Tensor], width: int, height: int) -> None:
         target = os.path.join(self.args.save_path, "latent_preview.mp4")
         # Check if we only have a single frame.
         if frames.shape[0] == 1:
@@ -122,7 +131,7 @@ class LatentPreviewer():
         container.close()
 
     @torch.inference_mode()
-    def decode_taehv(self, latents):
+    def decode_taehv(self, latents: torch.Tensor):
         """
         Decodes latents with the TAEHV model, returns shape (F, C, H, W).
         """
@@ -134,7 +143,7 @@ class LatentPreviewer():
         return decoded.squeeze(0)  # squeeze off batch dimension as next step doesn't want it
 
     @torch.inference_mode()
-    def decode_latent2rgb(self, latents):
+    def decode_latent2rgb(self, latents: torch.Tensor):
         """
         Decodes latents to RGB using linear transform, returns shape (F, 3, H, W).
         """

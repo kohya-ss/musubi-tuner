@@ -59,6 +59,10 @@ def get_current_model_type():
     return DIFFUSION_MODEL
 
 
+def get_current_version():
+    return BLISSFUL_VERSION
+
+
 def blissful_prefunc(args: argparse.Namespace):
     """Simple function to print about version, environment, and things"""
     cuda_list = [f"PyTorch: {torch.__version__}"]

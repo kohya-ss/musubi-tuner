@@ -16,7 +16,7 @@ import torchvision.transforms.functional as TF
 from easydict import EasyDict
 from wan.modules.vae import WanVAE
 from utils.device_utils import clean_memory_on_device
-from blissful_tuner.blissful_args import get_current_model_type
+from blissful_tuner.blissful_args import get_current_model_type, get_current_version
 from blissful_tuner.video_processing_common import BlissfulVideoProcessor
 from blissful_tuner.utils import BlissfulLogger
 
@@ -26,25 +26,27 @@ logger = BlissfulLogger(__name__, "#8e00ed")
 def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:
     seed = args.seed if seed_override is None else seed_override
     metadata = {  # Construct metadata dict
-        "model_type": f"{get_current_model_type()}",
-        "prompt": f"{args.prompt}",
-        "seeds": f"{seed}",
-        "infer_steps": f"{args.infer_steps}",
-        "guidance_scale": f"{args.guidance_scale}",
-        "flow_shift": f"{args.flow_shift}",
-        "bt_fps": f"{args.fps}"
+        "bt_model_type": f"{get_current_model_type()}",
+        "bt_prompt": f"{args.prompt}",
+        "bt_seeds": f"{seed}",
+        "bt_infer_steps": f"{args.infer_steps}",
+        "bt_guidance_scale": f"{args.guidance_scale}",
+        "bt_flow_shift": f"{args.flow_shift}",
+        "bt_fps": f"{args.fps}",
+        "bt_tunerver": f"{get_current_version()}"
     }
-
+    if hasattr(args, "task"):
+        metadata["bt_wantask"] = f"{args.task}"
     if args.cfg_schedule is not None:
-        metadata["cfg_schedule"] = f"{args.cfg_schedule}"
+        metadata["bt_cfg_schedule"] = f"{args.cfg_schedule}"
     if hasattr(args, "embedded_cfg_scale"):
-        metadata["embedded_cfg_scale"] = f"{args.embedded_cfg_scale}"
+        metadata["bt_embedded_cfg_scale"] = f"{args.embedded_cfg_scale}"
     if args.negative_prompt is not None:
-        metadata["negative_prompt"] = f"{args.negative_prompt}"
+        metadata["bt_negative_prompt"] = f"{args.negative_prompt}"
     if args.lora_weight:
         for i, lora_weight in enumerate(args.lora_weight):
             lora_weight = os.path.basename(lora_weight)
-            metadata[f"lora_{i}"] = f"{lora_weight}: {args.lora_multiplier[i]}"
+            metadata[f"bt_lora_{i}"] = f"{lora_weight}: {args.lora_multiplier[i]}"
     return metadata
 
 

@@ -9,7 +9,7 @@ License: Apache 2.0
 import torch
 
 
-def perpendicular_negative_cfg(cond: torch.Tensor, uncond: torch.Tensor, nocond: torch.Tensor, negative_scale: float, guidance_scale: float):
+def perpendicular_negative_cfg(cond: torch.Tensor, uncond: torch.Tensor, nocond: torch.Tensor, negative_scale: float, guidance_scale: float) -> torch.Tensor:
     """Perpendicular negative CFG"""
     pos_cond = cond - nocond
     neg_cond = uncond - nocond
