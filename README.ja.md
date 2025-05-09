@@ -91,6 +91,13 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/05/09 update 2
+    - FramePackの推論コードで、1フレーム推論に対応しました。これは当リポジトリの独自の機能で、動画ではなく、プロンプトに従って時間経過した後の画像を生成するものです。つまり、限定的ですが画像の自然言語による編集が可能です。詳細は[FramePackのドキュメント](./docs/framepack.md#single-frame-inference--単一フレーム推論)を参照してください。
+    - FramePackの推論コードに、生成する動画長を秒数ではなくセクション数で指定する`--video_sections`オプションを追加しました。また`--output_type latent_images`（latentと画像の両方を保存）が追加されました。
+
+- 2025/05/09 
+    - FramePackの推論コードで、HunyuanVideo用のLoRAを適用できるようになりました。当リポジトリのLoRAとdiffusion-pipeのLoRAの両方が適用可能です。詳細は[FramePackのドキュメント](./docs/framepack.md#inference)を参照してください。
+
 - 2025/05/04
     - FramePack-F1の学習および推論を追加しました（実験的機能）。詳細は[FramePackのドキュメント](./docs/framepack.md)を参照してください。
         - FramePack-F1用に、`--f1`オプションを指定してlatentのキャッシュを再作成してください（`--vanilla_sampling`が`--f1`に変わり、仕様も変わっています）。FramePack-F1はFramePackとは互換性がありません。FramePackとFramePack-F1のキャッシュファイルは共有できないため、別の`.toml`ファイルを使用して別のキャッシュディレクトリを指定してください。
@@ -103,13 +110,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
     
 - 2025/04/18
     - Wan2.1の推論時に、ファイルからプロンプトを読み込んで生成する一括生成モードと、コマンドラインからプロンプトを指定して生成するインタラクティブモードを追加しました。詳細は[こちら](./docs/wan.md#interactive-mode--インタラクティブモード)を参照してください。
-
-- 2025/04/09
-    - `hv_train_network.py`および `wan_train_network.py`にPyTorch Dynamoを使用するオプションが追加されました。PR [#215](https://github.com/kohya-ss/musubi-tuner/pull/215) sdbds 氏に感謝します。詳細は[こちら](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
-
-- 2025/04/06
-    - JSONL形式の動画データセットで、動画ファイルだけでなく、複数枚の画像が格納されたディレクトリも指定できるようになりました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file)を参照してください。
-    - 動画データセットで、元動画のフレームレートを指定すると、アーキテクチャのフレームレートに自動的に間引く機能を追加しました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files)を参照してください。
 
 ### リリースについて
 

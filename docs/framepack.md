@@ -262,7 +262,7 @@ Key differences from HunyuanVideo inference:
 - `--f1` option is available for FramePack-F1 model inference (forward generation). You need to specify the FramePack-F1 model as `--dit`.
 -   **Requires** specifying `--vae`, `--text_encoder1`, `--text_encoder2`, and `--image_encoder`.
 -   **Requires** specifying `--image_path` for the starting frame.
--   **Requires** specifying `--video_seconds` (length of the video in seconds).
+-   **Requires** specifying `--video_seconds` or `--video_sections`. `--video_seconds` specifies the length of the video in seconds, while `--video_sections` specifies the number of sections. If `--video_sections` is specified, `--video_seconds` is ignored.
 - `--video_size` is the size of the generated video, height and width are specified in that order.
 -   `--prompt`: Prompt for generation.
 -  Optional `--latent_window_size` argument (default 9, should match caching and training).
@@ -280,6 +280,10 @@ Key differences from HunyuanVideo inference:
 
 Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable.
 
+`--output_type` supports `latent_images` in addition to the options available in HunyuanVideo/Wan2.1. This option saves the latent and image files in the specified directory. 
+
+The LoRA weights that can be specified in `--lora_weight` are not limited to the FramePack weights trained in this repository. You can also specify the HunyuanVideo LoRA weights from this repository and the HunyuanVideo LoRA weights from diffusion-pipe (automatic detection).
+
 The maximum value for `--blocks_to_swap` is 38.
 <details>
 <summary>日本語</summary>
@@ -291,7 +295,7 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 - `--f1`を指定すると、FramePack-F1モデルの推論を行います（順方向で生成）。`--dit`にFramePack-F1モデルを指定する必要があります。
 -  `--vae`、`--text_encoder1`、`--text_encoder2`、`--image_encoder`を指定する必要があります。
 -  `--image_path`を指定する必要があります（開始フレーム）。
--  `--video_seconds`を指定する必要があります（秒単位でのビデオの長さを指定）。
+-  `--video_seconds` または `--video_sections` を指定する必要があります。`--video_seconds`は秒単位でのビデオの長さを指定し、`--video_sections`はセクション数を指定します。`--video_sections`を指定した場合、`--video_seconds`は無視されます。
 -  `--video_size`は生成するビデオのサイズで、高さと幅をその順番で指定します。
 -   `--prompt`: 生成用のプロンプトです。
 -  必要に応じて`--latent_window_size`引数（デフォルト9）を指定できます（キャッシング時、学習時と一致させる必要があります）。
@@ -308,6 +312,8 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  バッチモードとインタラクティブモード（`--from_file`、`--interactive`）はFramePack生成には**まだ実装されていません**。
 
 `--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。
+
+`--lora_weight`に指定できるLoRAの重みは、当リポジトリで学習したFramePackの重み以外に、当リポジトリのHunyuanVideoのLoRA、diffusion-pipeのHunyuanVideoのLoRAが指定可能です（自動判定）。
 
 `--blocks_to_swap`の最大値は38です。
 </details>
@@ -464,5 +470,69 @@ python fpack_generate_video.py \
 *   **逆順生成:** 生成は動画の終わりから始まりに向かって進むことを常に意識してください。セクション`-1`（最後のセクション、上の例では `2`）が最初に生成されます。
 *   **連続性とガイダンスのバランス:** 開始画像ガイダンスは強力ですが、セクション間で画像が大きく異なると、遷移が不自然になる可能性があります。ガイダンスの強さとスムーズな流れの必要性のバランスを取ってください。
 *   **プロンプトの最適化:** 推奨されるプロンプト内容はあくまでも参考です。モデルの観察された挙動と望ましい出力品質に基づいてプロンプトを微調整してください。
+
+</details>
+
+## Single Frame Inference / 単一フレーム推論
+
+This script also allows for single frame inference, which is not an official feature of FramePack but rather a custom implementation.
+
+Theoretically, it generates an image after a specified time from the starting image, following the prompt. This means that, although limited, it allows for natural language-based image editing.
+
+To perform single frame inference, specify the `--one_frame_inference` option with the desired mode. Here’s an example:
+
+```bash
+--video_sections 1 --output_type latent_images --one_frame_inference default
+```
+
+The `--one_frame_inference` option is recommended to be set to `default` or `no_2x,no_4x`. If you specify `--output_type` as `latent_images`, both the latent and image will be saved.
+
+You can specify the following strings in the `--one_frame_inference` option, separated by commas:
+
+-   `default`: Default inference mode. Enables single image inference.
+-   `no_2x`: Generates without passing clean latents 2x to the model. Slightly improves generation speed. The impact on generation results is unknown.
+-   `no_4x`: Generates without passing clean latents 4x to the model. Slightly improves generation speed. The impact on generation results is unknown.
+-   `no_post`: Generates without passing clean latents' post (previous frame's latent representation) to the model. Improves generation speed by about 20%, but may result in unstable generation.
+
+Even when passing clean latents 2x, clean latents 4x, or post, the values are zero vectors. However, especially when specifying `no_post`, increasing `latent_window_size` may lead to unstable generation results.
+
+Normally, specify `--video_sections 1` to indicate only one section (one image).
+
+The `--latent_window_size` is used as the timestamp for the frame being inferred (specifically, the RoPE value). Increasing it from the default of 9 may lead to larger changes. It has been confirmed that it generates without issues up to around 40.
+
+The `--end_image_path` is ignored.
+
+If you specify a value greater than 1 for `--video_sections`, multiple images will be generated at timestamps of `latent_window_size * n` (where n is the number of sections).
+
+<details>
+<summary>日本語</summary>
+このスクリプトでは、単一画像の推論を行うこともできます。FramePack公式の機能ではなく、独自の実装です。
+
+理論的には、開始画像から、プロンプトに従い、指定時間経過後の画像を生成します。つまり制限付きですが自然言語による画像編集を行うことができます。
+
+単一画像推論を行うには`--one_frame_inference`オプションに、単一画像推論のモードを指定してください。記述例は以下の通りです。
+
+```bash
+--video_sections 1 --output_type latent_images --one_frame_inference default
+```
+
+`--one_frame_inference`のオプションは、`default`または `no_2x,no_4x`を推奨します。`--output_type`に`latent_images`を指定するとlatentと画像の両方が保存されます。
+
+`--one_frame_inference`のオプションには、カンマ区切りで以下の文字列を任意個数指定できます。
+
+- `default`: デフォルトの推論モード。単一画像推論を有効にします。
+- `no_2x`: clean latents 2xをモデルに渡さずに生成します。わずかに生成速度が向上します。生成結果への影響は不明です。
+- `no_4x`: clean latents 4xをモデルに渡さずに生成します。わずかに生成速度が向上します。生成結果への影響は不明です。
+-  `no_post`: clean latents の post （前フレームの潜在表現）を渡さずに生成します。生成速度が20%程度向上しますが、生成結果が不安定になる場合があります。
+
+clean latents 2x、clean latents 4x、postを渡す場合でも値はゼロベクトルですが、特に`no_post`を指定すると、`latent_window_size`を大きくすると生成結果が不安定になる場合があります。
+
+通常は`--video_sections 1` として1セクションのみ（画像1枚）を指定してください。
+
+`--latent_window_size`は、推論するフレームのタイムスタンプとして用いられます（具体的には、RoPEの値）。デフォルトの9から大きくすると、変化量が大きくなる可能性があります。40程度までは破綻なく生成されることを確認しています。
+
+`--end_image_path`は無視されます。
+
+`--video_sections` に1より大きい値を指定した場合、`latent_window_size * n` (nはセクション数)のタイムスタンプで複数枚画像が生成されます。
 
 </details>
