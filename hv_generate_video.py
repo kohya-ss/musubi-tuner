@@ -910,7 +910,7 @@ def main():
 
                 # perform classifier free guidance
                 if do_cfg_for_step:
-                    if args.cfgzserostar_scaling:
+                    if args.cfgzerostar_scaling:
                         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                         noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)
                     elif args.perp_neg is not None:
