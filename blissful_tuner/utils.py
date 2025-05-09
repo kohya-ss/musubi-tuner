@@ -8,12 +8,15 @@ Created on Sat Apr 12 14:09:37 2025
 @author: blyss
 """
 import argparse
+import random
 import hashlib
 import torch
 import safetensors
+import numpy as np
 from typing import List, Union, Dict, Tuple, Optional
 import logging
 from rich.logging import RichHandler
+
 
 # Adapted from ComfyUI
 def load_torch_file(
@@ -279,6 +282,25 @@ def string_to_seed(s: str, bits: int = 63) -> int:
     if algo == float("inf"):  # In case we somehow still do
         algo = len(s) + (314159 * ord(s[len(s) // 2])) - ord(s[len(s) // 4])
     seed = (abs(crypto - int(algo))) & mask
+    return seed
+
+
+def power_seed(seed: Union[int, str] = None) -> int:
+    """
+    Sets the random seed for reproducibility.
+    """
+    if seed is None:
+        seed = random.getrandbits(32)
+    else:
+        try:
+            seed = int(seed)
+        except ValueError:
+            seed = string_to_seed(seed, bits=32)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     return seed
 
 

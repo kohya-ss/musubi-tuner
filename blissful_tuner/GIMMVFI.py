@@ -40,8 +40,8 @@ from gimmvfi.generalizable_INR.raft import RAFT
 from gimmvfi.generalizable_INR.flowformer.core.FlowFormer.LatentCostFormer.transformer import FlowFormer
 from gimmvfi.generalizable_INR.flowformer.configs.submission import get_cfg
 from gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
-from utils import load_torch_file, setup_compute_context
-from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, set_seed
+from utils import load_torch_file, setup_compute_context, power_seed
+from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
 warnings.filterwarnings("ignore")
 install_rich_tracebacks()
 
@@ -195,7 +195,7 @@ def main():
     new_fps = fps * args.factor  # Adjust the frame rate according to the interpolation
 
     # Set seed for reproducibility.
-    set_seed(args.seed)
+    power_seed(args.seed)
 
     # Perform the frame interpolation.
     interpolate(model, frames, args.ds_factor, args.factor, VideoProcessor)

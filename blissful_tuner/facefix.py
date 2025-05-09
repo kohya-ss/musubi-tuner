@@ -31,8 +31,8 @@ from torchvision.transforms.functional import normalize
 from facexlib.utils.face_restoration_helper import FaceRestoreHelper
 from codeformer.basicsr.utils.registry import ARCH_REGISTRY
 from basicsr.utils import img2tensor, tensor2img
-from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, set_seed
-from utils import BlissfulLogger
+from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from utils import BlissfulLogger, power_seed
 logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 
@@ -50,7 +50,7 @@ def main():
     VideoProcessor = BlissfulVideoProcessor(device, torch.float32)
     VideoProcessor.prepare_files_and_path(args.input, args.output, args.mode.upper())
     frames, fps, _, _ = VideoProcessor.load_frames()
-    set_seed(args.seed)
+    power_seed(args.seed)
     if args.mode.lower() == "gfpgan":
         restorer = GFPGANer(
             model_path=args.model,

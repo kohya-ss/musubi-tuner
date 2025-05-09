@@ -483,7 +483,7 @@ def parse_args():
         "--compile_args",
         nargs=4,
         metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        default=["inductor", "default", "False", "False"],
         help="Torch.compile settings",
     )
     parser = add_blissful_args(parser)

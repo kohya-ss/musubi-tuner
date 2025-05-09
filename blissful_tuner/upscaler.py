@@ -15,8 +15,8 @@ from tqdm import tqdm
 from rich.traceback import install as install_rich_tracebacks
 from swinir.network_swinir import SwinIR
 from spandrel import ImageModelDescriptor, ModelLoader
-from video_processing_common import BlissfulVideoProcessor, set_seed, setup_parser_video_common
-from utils import setup_compute_context, load_torch_file, BlissfulLogger
+from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from utils import setup_compute_context, load_torch_file, BlissfulLogger, power_seed
 logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 
@@ -140,7 +140,7 @@ def main() -> None:
     VideoProcessor.prepare_files_and_path(args.input, args.output, args.mode.upper())
 
     frames, fps, w, h = VideoProcessor.load_frames(make_rgb=True)
-    set_seed(args.seed)
+    power_seed(args.seed)
     # Load and run model
     if args.mode == "swinir":
         model = load_swin_model(args.model, device, dtype)

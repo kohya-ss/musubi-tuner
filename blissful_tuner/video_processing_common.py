@@ -23,31 +23,12 @@ import cv2
 import numpy as np
 import torch
 try:
-    from blissful_tuner.utils import BlissfulLogger, string_to_seed
+    from blissful_tuner.utils import BlissfulLogger
 except ImportError:  # This is needed so we can import either within blissful_tuner directory or base musubi directory
-    from utils import BlissfulLogger, string_to_seed
+    from utils import BlissfulLogger
 
 
 logger = BlissfulLogger(__name__, "#8e00ed")
-
-
-def set_seed(seed: Union[int, str] = None) -> int:
-    """
-    Sets the random seed for reproducibility.
-    """
-    if seed is None:
-        seed = random.getrandbits(32)
-    else:
-        try:
-            seed = int(seed)
-        except ValueError:
-            seed = string_to_seed(seed, bits=32)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    return seed
 
 
 def setup_parser_video_common(description: Optional[str] = None) -> argparse.ArgumentParser:

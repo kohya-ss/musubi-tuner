@@ -186,7 +186,7 @@ def parse_args() -> argparse.Namespace:
         "--compile_args",
         nargs=4,
         metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        default=["inductor", "default", "False", "False"],
         help="Torch.compile settings",
     )
 

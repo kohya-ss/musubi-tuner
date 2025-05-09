@@ -10,7 +10,7 @@ import os
 import argparse
 import torch
 from rich.traceback import install as install_rich_tracebacks
-from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg, error_out
+from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg, error_out, power_seed
 from blissful_tuner.prompt_management import process_wildcards
 logger = BlissfulLogger(__name__, "#8e00ed")
 
@@ -165,10 +165,12 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.seed is not None:
         try:
             args.seed = int(args.seed)
+            logger.info(f"Seed {args.seed} was set globally!")
         except ValueError:
             string_seed = args.seed
-            args.seed = string_to_seed(args.seed)
-            logger.info(f"Seed {args.seed} was generated from string '{string_seed}'!")
+            args.seed = string_to_seed(args.seed, bits=32)
+            logger.info(f"Seed {args.seed} was generated from string '{string_seed}' and set globally!!")
+        power_seed(args.seed)
     if args.prompt_wildcards is not None:
         args.prompt = process_wildcards(args.prompt, args.prompt_wildcards) if args.prompt is not None else None
         args.negative_prompt = process_wildcards(args.negative_prompt, args.prompt_wildcards) if args.negative_prompt is not None else None

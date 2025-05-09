@@ -48,6 +48,9 @@ from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata
 from dataset.image_video_dataset import load_video
 
+gc.collect()
+torch.cuda.empty_cache()
+
 logger = BlissfulLogger(__name__, "green")
 
 
@@ -191,7 +194,7 @@ def parse_args() -> argparse.Namespace:
         "--compile_args",
         nargs=4,
         metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        default=["inductor", "default", "False", "False"],
         help="Torch.compile settings",
     )
 
@@ -1130,6 +1133,7 @@ def run_sampling(
         timestep = torch.stack([t]).to(device)
 
         with accelerator.autocast(), torch.no_grad():
+
             noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0].to(latent_storage_device)  # Cond is always the same
             apply_cfg = apply_cfg_array[i]  # Will we do any CFG or just proceed with cond?
             if apply_cfg:  # We will do CFG this step
@@ -1137,8 +1141,8 @@ def run_sampling(
                     args.guidance_scale = scale_per_step[i + 1]  # Then reset the guidance scale for this step
 
                 apply_slg = args.slg_mode is not None and i >= slg_start_step and i < slg_end_step  # Do we do SLG this step
-                skip_block_indices = args.slg_layers if (apply_slg and args.slg_mode == "uncond") else None  # In "uncond" mode, we just do uncond with layer skip so combine logic
-                noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=skip_block_indices, **arg_null)[0].to(latent_storage_device)  # Calculate uncond either with or without skipped layers
+                skip_block_indices = None if not apply_slg else args.slg_layers  # If so set slg else None(implicit none anyway)
+                noise_pred_uncond = model(latent_model_input, timestep, skip_block_indices=skip_block_indices, **arg_null)[0].to(latent_storage_device)  # uncond
 
                 if args.perp_neg is not None:  # Are we using perpendicular negative?
                     noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond)[0].to(latent_storage_device)  # Then calculate nocond
@@ -1149,7 +1153,7 @@ def run_sampling(
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
-                    noise_pred *= 0
+                    noise_pred *= 0  # Zero this step
                 elif apply_slg and args.slg_mode == "original":  # No need do traditional slg on zeroed steps so make it an elif
                     # SLG original mode uses 3 model passes, cond, uncond, and uncond with layer skip
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
