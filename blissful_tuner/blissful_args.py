@@ -92,7 +92,7 @@ def blissful_prefunc(args: argparse.Namespace):
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
         else:
             logger.warning("FP16 accumulation not available! Requires at least PyTorch 2.7.0")
-    if args.video_path is not None and DIFFUSION_MODEL == "wan":
+    if DIFFUSION_MODEL == "wan" and args.video_path is not None:
         if "i2v" in args.task:
             logger.info("V2V operating in IV2V mode!")
         else:
@@ -163,8 +163,9 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
 
 
 def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
-    if args.cfgzerostar_scaling and args.perp_neg is not None:
-        error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
+    if DIFFUSION_MODEL != "framepack":
+        if args.cfgzerostar_scaling and args.perp_neg is not None:
+            error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
     blissful_prefunc(args)
     if args.seed is not None:
         try:

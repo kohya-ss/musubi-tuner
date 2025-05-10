@@ -26,7 +26,7 @@ Wan/Hunyuan extensions:
 - RifleX e.g. https://github.com/thu-ml/RIFLEx for longer vids (`--riflex_index N` where N is the RifleX frequency. 6 is good for Wan, can usually go to ~115 frames instead of just 81, requires `--rope_func comfy` with Wan; 4 is good for Hunyuan and you can make at least double length!)
 - CFGZero* e.g. https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` where N is the total number of steps to 0 out at the start. 2 is good for T2V, 1 for I2V but it's better for T2V in my experience. Support for Hunyuan is HIGHLY experimental and only available with CFG enabled.)
 - Advanced CFG scheduling: (`--cfg_schedule`, please see the `--help` for usage. Can specify guidance scale down to individual steps if you like!)
-- Perpendicular Negative Guidance (`--perp_neg neg_strength`, where neg_strength is a float that controls the string of the negative prompt. See '--help' for more!)
+- Perpendicular Negative Guidance (`--perp_neg neg_strength`, where neg_strength is a float that controls the string of the negative prompt. See `--help` for more!)
 
 Hunyuan only extensions:
 - Several more LLM options (`--hidden_state_skip_layer N --apply_final_norm --reproduce`, please see the `--help` for explanations!)
