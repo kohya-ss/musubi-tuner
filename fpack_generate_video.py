@@ -420,7 +420,7 @@ def decode_latent(
     vae: AutoencoderKLCausal3D,
     latent: torch.Tensor,
     device: torch.device,
-    one_frame_inference_mode: bool,
+    one_frame_inference_mode: bool=False,
 ) -> torch.Tensor:
     logger.info(f"Decoding video...")
     if latent.ndim == 4:
