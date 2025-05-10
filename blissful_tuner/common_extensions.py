@@ -25,24 +25,19 @@ logger = BlissfulLogger(__name__, "#8e00ed")
 
 def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:
     seed = args.seed if seed_override is None else seed_override
-    metadata = {  # Construct metadata dict
+    attr_list = ["prompt", "infer_steps", "guidance_scale", "flow_shift", "fps", "task", "embedded_cfg_scale", "negative_prompt", "cfg_schedule"]
+    metadata = {
         "bt_model_type": f"{get_current_model_type()}",
-        "bt_prompt": f"{args.prompt}",
         "bt_seeds": f"{seed}",
-        "bt_infer_steps": f"{args.infer_steps}",
-        "bt_guidance_scale": f"{args.guidance_scale}",
-        "bt_flow_shift": f"{args.flow_shift}",
-        "bt_fps": f"{args.fps}",
         "bt_tunerver": f"{get_current_version()}"
     }
-    if hasattr(args, "task"):
-        metadata["bt_wantask"] = f"{args.task}"
-    if args.cfg_schedule is not None:
-        metadata["bt_cfg_schedule"] = f"{args.cfg_schedule}"
-    if hasattr(args, "embedded_cfg_scale"):
-        metadata["bt_embedded_cfg_scale"] = f"{args.embedded_cfg_scale}"
-    if args.negative_prompt is not None:
-        metadata["bt_negative_prompt"] = f"{args.negative_prompt}"
+
+    for attr in attr_list:
+        if hasattr(args, attr):
+            value = getattr(args, attr)
+            value = str(value) if value is not None else "N/A"
+            metadata[f"bt_{attr}"] = value
+
     if args.lora_weight:
         for i, lora_weight in enumerate(args.lora_weight):
             lora_weight = os.path.basename(lora_weight)

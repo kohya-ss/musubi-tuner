@@ -41,7 +41,7 @@ from wan_generate_video import merge_lora_weights
 from frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
 from dataset.image_video_dataset import load_video
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
-from blissful_tuner.common_extensions import save_videos_grid_advanced
+from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.utils import BlissfulLogger
@@ -1280,10 +1280,8 @@ def save_video(
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}{latent_frames}.mp4"
 
     video = video.unsqueeze(0)
-    if args.codec is not None:
-        save_videos_grid_advanced(video, video_path, args.codec, args.container, rescale=True, fps=args.fps, keep_frames=args.keep_pngs)
-    else:
-        save_videos_grid(video, video_path, fps=args.fps, rescale=True)
+    metadata = prepare_metadata(args)
+    save_videos_grid_advanced(video, video_path, args, rescale=True, metadata=metadata)
     logger.info(f"Video saved to: {video_path}")
 
     return video_path
