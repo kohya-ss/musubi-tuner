@@ -30,7 +30,7 @@ Wan/Hunyuan extensions:
 
 Hunyuan only extensions:
 - Several more LLM options (`--hidden_state_skip_layer N --apply_final_norm --reproduce`, please see the `--help` for explanations!)
-- FP8 scaled support using the same algo as Wan (`--fp8_scaled`, Training isn't super tested!)
+- FP8 scaled support using the same algo as Wan (`--fp8_scaled`, HIGHLY recommend both for inference and training. It's just better fp8 that's all you need to know!)
 - Separate prompt for CLIP (`--prompt_2 "second prompt goes here"`, provides a different prompt to CLIP since it's used to simpler text)
 - Rescale text encoders based on https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan (`--te_multiplier llm clip` such as `--te_multiplier 0.9 1.2` to downweight the LLM slightly and upweight the CLIP slightly)
 
