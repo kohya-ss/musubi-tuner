@@ -30,8 +30,12 @@ def encode_and_save_batch(
     batch: List[ItemInfo],
     latent_window_size: int,
     vanilla_sampling: bool = False,
+    one_frame: bool = False,
 ):
     """Encode a batch of original RGB videos and save FramePack section caches."""
+    if one_frame:
+        encode_and_save_batch_one_frame(vae, feature_extractor, image_encoder, batch, latent_window_size, vanilla_sampling)
+        return
 
     # Stack batch into tensor (B,C,F,H,W) in RGB order
     contents = torch.stack([torch.from_numpy(item.content) for item in batch])
@@ -58,9 +62,10 @@ def encode_and_save_batch(
             f"Not enough frames for FramePack: {batch[0].frame_count} frames ({latent_f} latent frames), minimum required: {min_frames_needed} frames ({latent_window_size+1} latent frames)"
         )
 
-    # 実際に処理する潜在変数のフレーム数 (セクション境界に合わせる)
-    latent_f_aligned = total_latent_sections * latent_window_size + 1
-    # 実際に処理する元のフレーム数
+    # actual latent frame count (aligned to section boundaries)
+    latent_f_aligned = total_latent_sections * latent_window_size + 1 if not one_frame else 1
+
+    # actual video frame count
     frame_count_aligned = (latent_f_aligned - 1) * 4 + 1
     if frame_count_aligned != batch[0].frame_count:
         logger.info(
@@ -228,6 +233,96 @@ def encode_and_save_batch(
                 )
 
 
+def encode_and_save_batch_one_frame(
+    vae: AutoencoderKLCausal3D,
+    feature_extractor: SiglipImageProcessor,
+    image_encoder: SiglipVisionModel,
+    batch: List[ItemInfo],
+    latent_window_size: int,
+    vanilla_sampling: bool = False,
+):
+    # item.content: target image (H, W, C)
+    # item.control_content: start image (H, W, C)
+
+    # Stack batch into tensor (B,F,H,W,C) in RGB order.
+    contents = torch.stack(
+        [torch.stack([torch.from_numpy(item.control_content), torch.from_numpy(item.content)]) for item in batch]
+    )
+
+    contents = contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
+    contents = contents.to(vae.device, dtype=vae.dtype)
+    contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
+
+    height, width = contents.shape[3], contents.shape[4]
+    if height < 8 or width < 8:
+        item = batch[0]  # other items should have the same size
+        raise ValueError(f"Image or video size too small: {item.item_key} and {len(batch) - 1} more, size: {item.original_size}")
+
+    # VAE encode (list of tensor -> stack)
+    start_latents = hunyuan.vae_encode(contents[:, :, 0:1], vae)  # include scaling factor
+    start_latents = start_latents.to("cpu")  # (B, C, 1, H/8, W/8)
+    latents = hunyuan.vae_encode(contents[:, :, 1:], vae)  # include scaling factor
+    latents = latents.to("cpu")  # (B, C, 1, H/8, W/8)
+
+    # Vision encoding per‑item (once): use control content because it is the start image
+    images = [item.control_content for item in batch]  # list of [H, W, C]
+
+    # encode image with image encoder
+    image_embeddings = []
+    with torch.no_grad():
+        for image in images:
+            image_encoder_output = hf_clip_vision_encode(image, feature_extractor, image_encoder)
+            image_embeddings.append(image_encoder_output.last_hidden_state)
+    image_embeddings = torch.cat(image_embeddings, dim=0)  # B, LEN, 1152
+    image_embeddings = image_embeddings.to("cpu")  # Save memory
+
+    # history latents is always zeroes for one frame training
+    history_latents = torch.zeros(
+        (1, latents.shape[1], 1 + 2 + 16, latents.shape[3], latents.shape[4]), dtype=latents.dtype
+    )  # C=16 for HY
+
+    # indices generation (same as inference)
+    indices = torch.arange(0, sum([1, latent_window_size, 1, 2, 16])).unsqueeze(0)
+    (
+        clean_latent_indices_pre,  # Index for start_latent
+        latent_indices,  # Indices for the target latents to predict
+        clean_latent_indices_post,  # Index for the most recent history frame
+        clean_latent_2x_indices,  # Indices for the next 2 history frames
+        clean_latent_4x_indices,  # Indices for the next 16 history frames
+    ) = indices.split([1, latent_window_size, 1, 2, 16], dim=1)
+
+    # Indices for clean_latents (start + recent history)
+    latent_indices = latent_indices[:, -1:]  # Only the last index is used for one frame training
+    clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+
+    # clean latents preparation for all items (emulating inference)
+    clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split([1, 2, 16], dim=2)
+
+    for b, item in enumerate(batch):
+        original_latent_cache_path = item.latent_cache_path
+
+        # clean latents preparation (emulating inference)
+        clean_latents_pre = start_latents[b : b + 1]
+        clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)  # Combine start frame + placeholder
+
+        # Target latents for this section (ground truth)
+        target_latents = latents[b : b + 1]
+
+        # save cache (file path is inside item.latent_cache_path pattern), remove batch dim
+        save_latent_cache_framepack(
+            item_info=item,
+            latent=target_latents.squeeze(0),  # Ground truth for this section
+            latent_indices=latent_indices.squeeze(0),  # Indices for the ground truth section
+            clean_latents=clean_latents.squeeze(0),  # Start frame + history placeholder
+            clean_latent_indices=clean_latent_indices.squeeze(0),  # Indices for start frame + history placeholder
+            clean_latents_2x=clean_latents_2x.squeeze(0),  # History placeholder
+            clean_latent_2x_indices=clean_latent_2x_indices.squeeze(0),  # Indices for history placeholder
+            clean_latents_4x=clean_latents_4x.squeeze(0),  # History placeholder
+            clean_latent_4x_indices=clean_latent_4x_indices.squeeze(0),  # Indices for history placeholder
+            image_embeddings=image_embeddings[b],
+        )
+
+
 def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--image_encoder", type=str, required=True, help="Image encoder (CLIP) checkpoint path or directory")
     parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
@@ -235,6 +330,11 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
         "--f1",
         action="store_true",
         help="Generate cache for F1 model (vanilla (autoregressive) sampling) instead of Inverted anti-drifting (plain FramePack)",
+    )
+    parser.add_argument(
+        "--one_frame",
+        action="store_true",
+        help="Generate cache for one frame training (single frame, single section). latent_window_size is used as the index of the target frame.",
     )
     return parser
 
@@ -273,7 +373,7 @@ def main(args: argparse.Namespace):
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, feature_extractor, image_encoder, batch, args.latent_window_size, args.f1)
+        encode_and_save_batch(vae, feature_extractor, image_encoder, batch, args.latent_window_size, args.f1, args.one_frame)
 
     # reuse core loop from cache_latents with no change
     encode_datasets_framepack(datasets, encode, args)
@@ -294,16 +394,21 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
             batch: list[ItemInfo] = batch  # type: ignore
 
             # latent_cache_path is "{basename}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
-            # we expand it to "{basename}_{section_idx:04d}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
+            # For video dataset,we expand it to "{basename}_{section_idx:04d}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
             filtered_batch = []
             for item in batch:
-                latent_f = (item.frame_count - 1) // 4 + 1
-                num_sections = math.floor((latent_f - 1) / args.latent_window_size)
-                all_existing = True
-                for sec in range(num_sections):
-                    p = append_section_idx_to_latent_cache_path(item.latent_cache_path, sec)
-                    all_latent_cache_paths.append(p)
-                    all_existing = all_existing and os.path.exists(p)
+                if item.frame_count is None:
+                    # image dataset
+                    all_latent_cache_paths.append(item.latent_cache_path)
+                    all_existing = os.path.exists(item.latent_cache_path)
+                else:
+                    latent_f = (item.frame_count - 1) // 4 + 1
+                    num_sections = max(1, math.floor((latent_f - 1) / args.latent_window_size))  # min 1 section
+                    all_existing = True
+                    for sec in range(num_sections):
+                        p = append_section_idx_to_latent_cache_path(item.latent_cache_path, sec)
+                        all_latent_cache_paths.append(p)
+                        all_existing = all_existing and os.path.exists(p)
 
                 if not all_existing:  # if any section cache is missing
                     filtered_batch.append(item)

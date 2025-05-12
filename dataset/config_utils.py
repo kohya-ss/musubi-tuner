@@ -41,6 +41,7 @@ class BaseDatasetParams:
 class ImageDatasetParams(BaseDatasetParams):
     image_directory: Optional[str] = None
     image_jsonl_file: Optional[str] = None
+    control_directory: Optional[str] = None
 
 
 @dataclass
@@ -102,6 +103,7 @@ class ConfigSanitizer:
         "image_directory": str,
         "image_jsonl_file": str,
         "cache_directory": str,
+        "control_directory": str,
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -283,6 +285,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                     f"""\
         image_directory: "{dataset.image_directory}"
         image_jsonl_file: "{dataset.image_jsonl_file}"
+        control_directory: "{dataset.control_directory}"
     \n"""
                 ),
                 "    ",

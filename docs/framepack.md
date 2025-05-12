@@ -116,10 +116,13 @@ Key differences from HunyuanVideo caching:
 
 For VRAM savings during VAE decoding, consider using `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size`. If VRAM is overflowing and using shared memory, it is recommended to set `--vae_chunk_size` to 16 or 8, and `--vae_spatial_tile_sample_min_size` to 64 or 32.
 
-**FramePack-F1 support:**
-You can apply the FramePack-F1 sampling method by changing the options during caching. The training script also requires specifying `--f1` to change the options during sample generation.
+Specifying `--f1` is required for FramePack-F1 training. For one-frame training, specify `--one_frame`. If you change the presence of these options, please overwrite the existing cache without specifying `--skip_existing`.
 
-By default, the sampling method used is Inverted anti-drifting (the same as during inference with the original FramePack model, using the latent and index in reverse order), described in the paper. You can switch to FramePack-F1 sampling (Vanilla sampling, using the temporally ordered latent and index) by specifying `--f1`. If you change this option, please overwrite the existing cache without specifying `--skip_existing`.
+**FramePack-F1 support:**
+You can apply the FramePack-F1 sampling method by specifying `--f1` during caching. The training script also requires specifying `--f1` to change the options during sample generation.
+
+By default, the sampling method used is Inverted anti-drifting (the same as during inference with the original FramePack model, using the latent and index in reverse order), described in the paper. You can switch to FramePack-F1 sampling (Vanilla sampling, using the temporally ordered latent and index) by specifying `--f1`.
+
 <details>
 <summary>日本語</summary>
 FramePackのデフォルト解像度は640x640です。各バケットのデフォルト解像度については、[ソースコード](../frame_pack/bucket_tools.py)を参照してください。
@@ -137,10 +140,12 @@ HunyuanVideoのキャッシングとの主な違いは次のとおりです。
 
 VAEのdecode時のVRAM節約のために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`を使用することを検討してください。VRAMがあふれて共有メモリを使用している場合には、`--vae_chunk_size`を16、8などに、`--vae_spatial_tile_sample_min_size`を64、32などに変更することをお勧めします。
 
-**FramePack-F1のサポート：**
-キャッシュ時のオプションを変更することで、FramePack-F1のサンプリング方法を適用できます。学習スクリプトについても`--f1`を指定してサンプル生成時のオプションを変更する必要があります。
+FramePack-F1の学習を行う場合は`--f1`を指定してください。後述の1フレーム学習を行う場合、`--one_frame`を指定してください。これらのオプションの有無を変更する場合には、`--skip_existing`を指定せずに既存のキャッシュを上書きしてください。
 
-デフォルトでは、論文のサンプリング方法 Inverted anti-drifting （無印のFramePackの推論時と同じ、逆順の latent と index を使用）を使用します。`--f1`を指定すると FramePack-F1 の Vanilla sampling （時間順の latent と index を使用）に変更できます。このオプションの有無を変更する場合には `--skip_existing` を指定せずに既存のキャッシュを上書きしてください。
+**FramePack-F1のサポート：**
+キャッシュ時のオプションに`--f1`を指定することで、FramePack-F1のサンプリング方法を適用できます。学習スクリプトについても`--f1`を指定してサンプル生成時のオプションを変更する必要があります。
+
+デフォルトでは、論文のサンプリング方法 Inverted anti-drifting （無印のFramePackの推論時と同じ、逆順の latent と index を使用）を使用します。`--f1`を指定すると FramePack-F1 の Vanilla sampling （時間順の latent と index を使用）に変更できます。
 </details>
 
 ### Text Encoder Output Pre-caching / テキストエンコーダー出力の事前キャッシング
@@ -234,6 +239,39 @@ HunyuanVideoの学習との主な違いは次のとおりです。
 -  メモリ節約のために`--gradient_checkpointing`が利用可能です。
 - バッチサイズが1より大きい場合にエラーが出た時には（特に`--sdpa`や`--xformers`を指定すると必ずエラーになります。）、`--split_attn`を指定してください。
 
+</details>
+
+### Single Frame Training / 1フレーム学習
+
+**This feature is experimental.** It trains in the same way as single frame inference.
+
+The dataset must be an image dataset. If you use caption files, you need to specify `control_directory` and place the **starting images** in that directory. The `image_directory` should contain the images after the change. The filenames of both directories must match. Caption files should be placed in the `image_directory`.
+
+If you use JSONL files, specify them as `{"image_path": "/path/to/target_image1.jpg", "control_path": "/path/to/source_image1.jpg", "caption": "The object changes to red."}`. The `image_path` should point to the images after the change, and `control_path` should point to the starting images. 
+
+For the dataset configuration, see [here](../dataset/dataset_config.md#sample-for-video-dataset-with-control-images) for more details.
+
+For single frame training, specify `--one_frame` in `fpack_cache_latents.py` to create the cache. The `--latent_window_size` is used as the timestamp of the frames to be trained (specifically, the RoPE value). It may be desirable to match the value used during inference.
+
+Specify `--one_frame` in `fpack_train_network.py` to change the inference method during sample generation. Also, specify `--latent_window_size` appropriately.
+
+The optimal training settings are currently unknown. Feedback is welcome.
+
+<details>
+<summary>日本語</summary>
+**この機能は実験的なものです。** 1フレーム推論と同様の方法で学習を行います。
+
+データセットは画像データセットである必要があります。キャプションファイルを用いる場合は、`control_directory`を追加で指定し、そのディレクトリに**開始画像**を格納してください。`image_directory`には変化後の画像を格納します。両者のファイル名は一致させる必要があります。キャプションファイルは`image_directory`に格納してください。
+
+JSONLファイルを用いる場合は、`{"image_path": "/path/to/target_image1.jpg", "control_path": "/path/to/source_image1.jpg", "caption": "The object changes to red"}`のように指定してください。`image_path`は変化後の画像、`control_path`は開始画像を指定します。
+
+データセットの設定については、[こちら](../dataset/dataset_config.md#sample-for-video-dataset-with-control-images)も参照してください。
+
+1フレーム学習時は、`fpack_cache_latents.py`に`--one_frame`を指定してキャッシュを作成してください。`--latent_window_size`は学習するフレームのタイムスタンプとして用いられます（具体的にはRoPEの値）。推論時と同じ値が望ましいかもしれません。
+
+`fpack_train_network.py`に`--one_frame`を指定してサンプル画像生成時の推論方法を変更してください。また`--latent_window_size`を適切に指定してください。
+
+最適な学習設定は今のところ不明です。フィードバックを歓迎します。
 </details>
 
 ## Inference
@@ -473,7 +511,9 @@ python fpack_generate_video.py \
 
 </details>
 
-## Single Frame Inference / 単一フレーム推論
+## Single Frame Inference / 1フレーム推論
+
+**This feature is highly experimental** and not officially supported. It is intended for users who want to explore the potential of FramePack for single frame inference, which is not a standard feature of the model.
 
 This script also allows for single frame inference, which is not an official feature of FramePack but rather a custom implementation.
 
@@ -506,6 +546,8 @@ If you specify a value greater than 1 for `--video_sections`, multiple images wi
 
 <details>
 <summary>日本語</summary>
+**この機能は非常に実験的であり**、公式にはサポートされていません。FramePackを使用して1フレーム推論の可能性を試したいユーザーに向けたものです。
+
 このスクリプトでは、単一画像の推論を行うこともできます。FramePack公式の機能ではなく、独自の実装です。
 
 理論的には、開始画像から、プロンプトに従い、指定時間経過後の画像を生成します。つまり制限付きですが自然言語による画像編集を行うことができます。
@@ -529,7 +571,7 @@ clean latents 2x、clean latents 4x、postを渡す場合でも値はゼロベ�
 
 通常は`--video_sections 1` として1セクションのみ（画像1枚）を指定してください。
 
-`--latent_window_size`は、推論するフレームのタイムスタンプとして用いられます（具体的には、RoPEの値）。デフォルトの9から大きくすると、変化量が大きくなる可能性があります。40程度までは破綻なく生成されることを確認しています。
+`--latent_window_size`は、推論するフレームのタイムスタンプとして用いられます（具体的にはRoPEの値）。デフォルトの9から大きくすると、変化量が大きくなる可能性があります。40程度までは破綻なく生成されることを確認しています。
 
 `--end_image_path`は無視されます。
 

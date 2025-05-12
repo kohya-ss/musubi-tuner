@@ -289,6 +289,30 @@ video2: xxxxxxxxxxxxxxxxxxxxxxxxx (25 frames)
 video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 ```
 
+### Sample for Image Dataset with Control Images
+
+The dataset with control images is used for training the single frame training for FramePack.
+
+The dataset configuration with caption text files is similar to the image dataset, but with an additional `control_directory` parameter.
+
+The control images are used from the `control_directory` with the same filename (or different extension) as the image, for example, `image_dir/image1.jpg` and `control_dir/image1.png`. The images in `image_directory` should be the target images (the images to be generated during inference, the changed images). The `control_directory` should contain the starting images for inference. The captions should be stored in `image_directory`.
+
+The metadata JSONL file format is the same as the image dataset, but with an additional `control_path` parameter.
+
+```json
+{"image_path": "/path/to/image1.jpg", "control_path": "/path/to/control1.png", "caption": "A caption for image1"}
+{"image_path": "/path/to/image2.jpg", "control_path": "/path/to/control2.png", "caption": "A caption for image2"}
+```
+
+<details>
+<summary>日本語</summary>
+制御画像を持つデータセットです。FramePackの単一フレーム学習に使用します。
+
+キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御用画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションは`image_directory`へ格納してください。
+
+メタデータJSONLファイルを使用する場合は、`control_path`を追加してください。
+</details>
+
 ### Sample for Video Dataset with Control Images
 
 The dataset with control videos is used for training ControlNet models. 
@@ -346,6 +370,7 @@ num_repeats = 1 # optional, overwrite the default num_repeats
 enable_bucket = false # optional, overwrite the default bucketing setting
 bucket_no_upscale = true # optional, overwrite the default bucketing setting
 cache_directory = "/path/to/cache_directory" # optional, default is None to use the same directory as the image directory. NOTE: caching is always enabled
+control_directory = "/path/to/control_dir" # optional, required for dataset with control images
 
 # sample image dataset with metadata **jsonl** file
 [[datasets]]

@@ -659,10 +659,11 @@ class ImageDatasource(ContentDatasource):
 
 
 class ImageDirectoryDatasource(ImageDatasource):
-    def __init__(self, image_directory: str, caption_extension: Optional[str] = None):
+    def __init__(self, image_directory: str, caption_extension: Optional[str] = None, control_directory: Optional[str] = None):
         super().__init__()
         self.image_directory = image_directory
         self.caption_extension = caption_extension
+        self.control_directory = control_directory
         self.current_idx = 0
 
         # glob images
@@ -670,19 +671,51 @@ class ImageDirectoryDatasource(ImageDatasource):
         self.image_paths = glob_images(self.image_directory)
         logger.info(f"found {len(self.image_paths)} images")
 
+        # glob control images if specified
+        if self.control_directory is not None:
+            logger.info(f"glob control images in {self.control_directory}")
+            self.has_control = True
+            self.control_paths = {}
+            for image_path in self.image_paths:
+                image_basename = os.path.basename(image_path)
+                control_path = os.path.join(self.control_directory, image_basename)
+                if os.path.exists(control_path):
+                    self.control_paths[image_path] = control_path
+                else:
+                    # another extension for control path
+                    # for example: image_path = "img/image.png" -> control_path = "control/image.jpg"
+                    image_basename_no_ext = os.path.splitext(image_basename)[0]
+                    for ext in IMAGE_EXTENSIONS:
+                        potential_path = os.path.join(self.control_directory, image_basename_no_ext + ext)
+                        if os.path.exists(potential_path):
+                            self.control_paths[image_path] = potential_path
+                            break
+
+            logger.info(f"found {len(self.control_paths)} matching control images")
+            missing_controls = len(self.image_paths) - len(self.control_paths)
+            if missing_controls > 0:
+                missing_control_paths = set(self.image_paths) - set(self.control_paths.keys())
+                logger.error(f"Could not find matching control images for {missing_controls} images: {missing_control_paths}")
+                raise ValueError(f"Could not find matching control images for {missing_controls} images")
+
     def is_indexable(self):
         return True
 
     def __len__(self):
         return len(self.image_paths)
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str]:
+    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str, Optional[Image.Image]]:
         image_path = self.image_paths[idx]
         image = Image.open(image_path).convert("RGB")
 
         _, caption = self.get_caption(idx)
 
-        return image_path, image, caption
+        control = None
+        if self.has_control:
+            control_path = self.control_paths[image_path]
+            control = Image.open(control_path).convert("RGB")
+
+        return image_path, image, caption, control
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
@@ -738,20 +771,35 @@ class ImageJsonlDatasource(ImageDatasource):
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} images")
 
+        # Check if there are control paths in the JSONL
+        self.has_control = any("control_path" in item for item in self.data)
+        if self.has_control:
+            control_count = sum(1 for item in self.data if "control_path" in item)
+            if control_count < len(self.data):
+                missing_control_images = [item["image_path"] for item in self.data if "control_path" not in item]
+                logger.error(f"Some images do not have control paths in JSONL data: {missing_control_images}")
+                raise ValueError(f"Some images do not have control paths in JSONL data: {missing_control_images}")
+            logger.info(f"found {control_count} control images in JSONL data")
+
     def is_indexable(self):
         return True
 
     def __len__(self):
         return len(self.data)
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str]:
+    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str, Optional[Image.Image]]:
         data = self.data[idx]
         image_path = data["image_path"]
         image = Image.open(image_path).convert("RGB")
 
         caption = data["caption"]
 
-        return image_path, image, caption
+        control = None
+        if self.has_control:
+            control_path = data["control_path"]
+            control = Image.open(control_path).convert("RGB")
+
+        return image_path, image, caption, control
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]
@@ -1220,6 +1268,7 @@ class ImageDataset(BaseDataset):
         bucket_no_upscale: bool,
         image_directory: Optional[str] = None,
         image_jsonl_file: Optional[str] = None,
+        control_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
@@ -1237,8 +1286,9 @@ class ImageDataset(BaseDataset):
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
+        self.control_directory = control_directory
         if image_directory is not None:
-            self.datasource = ImageDirectoryDatasource(image_directory, caption_extension)
+            self.datasource = ImageDirectoryDatasource(image_directory, caption_extension, control_directory)
         elif image_jsonl_file is not None:
             self.datasource = ImageJsonlDatasource(image_jsonl_file)
         else:
@@ -1249,6 +1299,7 @@ class ImageDataset(BaseDataset):
 
         self.batch_manager = None
         self.num_train_items = 0
+        self.has_control = self.datasource.has_control
 
     def get_metadata(self):
         metadata = super().get_metadata()
@@ -1256,6 +1307,9 @@ class ImageDataset(BaseDataset):
             metadata["image_directory"] = os.path.basename(self.image_directory)
         if self.image_jsonl_file is not None:
             metadata["image_jsonl_file"] = os.path.basename(self.image_jsonl_file)
+        if self.control_directory is not None:
+            metadata["control_directory"] = os.path.basename(self.control_directory)
+        metadata["has_control"] = self.has_control
         return metadata
 
     def get_total_image_count(self):
@@ -1280,12 +1334,15 @@ class ImageDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_size, item_key, image, caption = future.result()
+                    original_size, item_key, image, caption, control = future.result()
                     bucket_height, bucket_width = image.shape[:2]
                     bucket_reso = (bucket_width, bucket_height)
 
                     item_info = ItemInfo(item_key, caption, original_size, bucket_reso, content=image)
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
+
+                    if control is not None:
+                        item_info.control_content = control
 
                     if bucket_reso not in batches:
                         batches[bucket_reso] = []
@@ -1308,14 +1365,16 @@ class ImageDataset(BaseDataset):
         for fetch_op in self.datasource:
 
             # fetch and resize image in a separate thread
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str]:
-                image_key, image, caption = op()
+            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image]]:
+                image_key, image, caption, control = op()
                 image: Image.Image
                 image_size = image.size
 
                 bucket_reso = buckset_selector.get_bucket_resolution(image_size)
                 image = resize_image_to_bucket(image, bucket_reso)
-                return image_size, image_key, image, caption
+                if control is not None:
+                    control = resize_image_to_bucket(control, bucket_reso)
+                return image_size, image_key, image, caption, control
 
             future = executor.submit(fetch_and_resize, fetch_op)
             futures.append(future)

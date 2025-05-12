@@ -93,6 +93,9 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/05/11
+    - FramePackの学習で1フレーム推論用の学習に対応しました（実験的機能）。詳細は[FramePackのドキュメント](./docs/framepack.md#single-frame-training--1フレーム学習)を参照してください。
+    
 - 2025/05/09 update 2
     - FramePackの推論コードで、1フレーム推論に対応しました。これは当リポジトリの独自の機能で、動画ではなく、プロンプトに従って時間経過した後の画像を生成するものです。つまり、限定的ですが画像の自然言語による編集が可能です。詳細は[FramePackのドキュメント](./docs/framepack.md#single-frame-inference--単一フレーム推論)を参照してください。
     - FramePackの推論コードに、生成する動画長を秒数ではなくセクション数で指定する`--video_sections`オプションを追加しました。また`--output_type latent_images`（latentと画像の両方を保存）が追加されました。

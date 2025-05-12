@@ -164,10 +164,12 @@ class FramePackNetworkTrainer(NetworkTrainer):
         do_classifier_free_guidance = do_classifier_free_guidance and cfg_scale != 1.0
 
         # prepare parameters
+        one_frame_mode = args.one_frame
+
         latent_window_size = args.latent_window_size  # default is 9
         latent_f = (frame_count - 1) // 4 + 1
         total_latent_sections = math.floor((latent_f - 1) / latent_window_size)
-        if total_latent_sections < 1:
+        if total_latent_sections < 1 and not one_frame_mode:
             logger.warning(f"Not enough frames for FramePack: {latent_f}, minimum: {latent_window_size*4+1}")
             return None
 
@@ -205,6 +207,10 @@ class FramePackNetworkTrainer(NetworkTrainer):
 
         if total_latent_sections > 4:
             latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
+
+        if one_frame_mode:
+            latent_paddings = [0]
+            total_latent_sections = 1
 
         latent_paddings = list(latent_paddings)
         for loop_index in range(total_latent_sections):
@@ -248,6 +254,9 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 )
                 clean_latents = torch.cat([start_latent.to(history_latents), clean_latents_1x], dim=2)
 
+            if one_frame_mode:
+                latent_indices = latent_indices[:, -1:]  # use last index only
+
             # if use_teacache:
             #     transformer.initialize_teacache(enable_teacache=True, num_steps=steps)
             # else:
@@ -270,7 +279,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 sampler=args.sample_solver,
                 width=width,
                 height=height,
-                frames=num_frames,
+                frames=num_frames if not one_frame_mode else 1,
                 real_guidance_scale=cfg_scale,
                 distilled_guidance_scale=guidance_scale,
                 guidance_rescale=0.0,
@@ -315,7 +324,12 @@ class FramePackNetworkTrainer(NetworkTrainer):
         gc.collect()
         clean_memory_on_device(device)
 
-        video = decode_latent(latent_window_size, total_latent_sections, args.bulk_decode, vae, real_history_latents, device)
+        if one_frame_mode:
+            real_history_latents = real_history_latents[:, :, -1:, :, :]  # use generated latents only
+
+        video = decode_latent(
+            latent_window_size, total_latent_sections, args.bulk_decode, vae, real_history_latents, device, one_frame_mode
+        )
         video = video.to("cpu", dtype=torch.float32).unsqueeze(0)  # add batch dimension
         video = (video / 2 + 0.5).clamp(0, 1)  # -1 to 1 -> 0 to 1
         clean_memory_on_device(device)
@@ -412,6 +426,7 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
     parser.add_argument("--bulk_decode", action="store_true", help="decode all frames at once in sample generation")
     parser.add_argument("--f1", action="store_true", help="Use F1 sampling method for sample generation")
+    parser.add_argument("--one_frame", action="store_true", help="Use one frame sampling method for sample generation")
     return parser
 
 

@@ -102,6 +102,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- May 11, 2025:
+    - Added support for single frame training in FramePack. This is an experimental feature that allows training for single frame inference. See [FramePack documentation](./docs/framepack.md#single-frame-training--1フレーム学習) for details.
+
 - May 9, 2025 update 2:
     - Added support for single frame inference in FramePack. This is a unique feature of this repository that generates an image after time progression according to the prompt, rather than a video. In other words, it allows limited natural language editing of images. See [FramePack documentation](./docs/framepack.md#single-frame-inference--単一フレーム推論) for details.
     - Added `--video_sections` option to specify the length of the generated video in terms of sections instead of seconds in the inference code of FramePack. Also added `--output_type latent_images` (saves both latent and images).
