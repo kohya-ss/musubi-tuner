@@ -178,7 +178,7 @@ def interpolate(model: torch.nn.Module, frames: List[torch.Tensor], ds_factor: f
 
 
 def main():
-    parser = setup_parser_video_common(description="Frame rate interpolation using GIMM-VFI")
+    parser = setup_parser_video_common(description="Frame rate interpolation using GIMM-VFI", model_help="Path to folder containing models/configs for GIMM-VFI")
     parser.add_argument("--ds_factor", type=float, default=1.0, help="Downsampling factor")
     parser.add_argument("--mode", type=str, default="gimmvfi_f", help="Model mode: 'gimmvfi_r' or 'gimmvfi_f' for RAFT or FlowFormer version respectively")
     parser.add_argument(
