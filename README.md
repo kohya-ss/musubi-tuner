@@ -15,11 +15,8 @@ Extensions for all models:
 - Beautiful rich logging, rich argparse and rich tracebacks
 - Extended saving options (`--codec codec --container container`, can save Apple ProRes(`--codec prores`, super high bitrate perceptually lossless) into `--container mkv`, or either of `h264`, `h265` into `mp4` or `mkv`)
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
-- GIMM-VFI framerate interpolation (`blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
-- Upscaling with SwinIR or ESRGAN type models (`blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )|
 - Use strings as your seed because why not! Also easier to remember!
 - Use wildcards in your prompts for more variation! (`--prompt_wildcards /path/to/wildcard/directory`, for instance `__color__` in your prompt would look for color.txt in that directory. The wildcard file format is one potential replacement string per line, with an optional relative weight attached like red:2.0 or "some longer string:0.5"  - wildcards can also contain wildcards themselves, the recursion limit is 50 steps!)
-
 
 Wan/Hunyuan extensions:
 - Load diffusion-pipe style LoRAs for inference without converting first
@@ -43,6 +40,12 @@ Wan only extensions(now supporting both one shot and interactive modes):
 Framepack only extensions:
 - Torch.compile (`--compile`, same syntax as Wan and Hunyuan already use)
 - FP8 fast/mm_scaled (`--fp8_fast`, increased speed on 40xx cards with a mild hit to quality, Wan and Hunyuan have this already in native Musubi!)
+
+Non model specific extras:
+- GIMM-VFI framerate interpolation (`blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
+- Upscaling with SwinIR or ESRGAN type models (`blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )
+- Face blurring script based on Yolo - helpful for training non face altering LoRA! ( `blissful_tuner/yolo_blur.py`, please see it's `--help` for usage. Recommended model: https://www.dropbox.com/scl/fi/44xdsohltv2kofxrirvrj/yolo.7z?rlkey=zk6bv5iw3ic1pbgo4e8cblbw1&st=kwm6fzgk&dl=0 )
+- Face restoration with CodeFormer/GFPGAN (`blissful_tuner/facefix.py`, per usual please have a look at the `--help`! Models: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
 
 My general code and Musubi Tuner code is licensed Apache 2.0. Other projects included may have different licensing, in which case you will find a LICENSE file in their directory specifying the terms under which they are included! Below is the original Musubi Readme which still remains relevant:
 

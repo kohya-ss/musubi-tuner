@@ -123,7 +123,7 @@ def main() -> None:
     """
     Parse CLI args, load input, model, and run upscaling pipeline.
     """
-    parser = setup_parser_video_common(description="Video upscaling using SwinIR or ESRGAN models")
+    parser = setup_parser_video_common(description="Video upscaling using SwinIR or ESRGAN models", model_help="Path to model safetensors/pt file e.g. SwinIR.safetensors, 4x_NMKD-Siax_200k.safetensors")
     parser.add_argument(
         "--scale", type=float, default=2,
         help="Final scale multiplier for output resolution"

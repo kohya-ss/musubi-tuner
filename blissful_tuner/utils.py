@@ -13,7 +13,7 @@ import hashlib
 import torch
 import safetensors
 import numpy as np
-from typing import List, Union, Dict, Tuple, Optional
+from typing import List, Union, Dict, Tuple, Optional, Type
 import logging
 from rich.logging import RichHandler
 
@@ -219,6 +219,7 @@ def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) ->
 
 
 def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dtype: Optional[Union[torch.dtype, str]] = None) -> Tuple[torch.device, torch.dtype]:
+    logger = BlissfulLogger(__name__, "#8e00ed")
     dtype_mapping = {
         "fp16": torch.float16,
         "float16": torch.float16,
@@ -242,14 +243,14 @@ def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dty
         dtype = torch.float32
     elif isinstance(dtype, str):
         if dtype not in dtype_mapping:
-            raise ValueError(f"Unknown dtype string '{dtype}'")
+            error_out(ValueError, f"Unknown dtype string '{dtype}'", logger=logger)
         dtype = dtype_mapping[dtype]
 
     torch.set_float32_matmul_precision('high')
     if dtype == torch.float16 or dtype == torch.bfloat16:
         if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
-            print("FP16 accumulation enabled.")
+            logger.info("FP16 accumulation enabled.")
     return device, dtype
 
 
@@ -304,7 +305,7 @@ def power_seed(seed: Union[int, str] = None) -> int:
     return seed
 
 
-def error_out(error, message):
-    logger = BlissfulLogger(__name__, "#8e00ed")
+def error_out(error: Type[Exception], message: str, logger: Optional[BlissfulLogger] = None) -> None:
+    logger = logger if logger is not None else BlissfulLogger(__name__, "#8e00ed")
     logger.error(message, levelmod=1)
     raise error(message)

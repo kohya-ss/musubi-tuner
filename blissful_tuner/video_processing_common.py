@@ -11,7 +11,6 @@ import argparse
 import glob
 import os
 import re
-import random
 import shutil
 import subprocess
 from pathlib import Path
@@ -31,10 +30,11 @@ except ImportError:  # This is needed so we can import either within blissful_tu
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 
-def setup_parser_video_common(description: Optional[str] = None) -> argparse.ArgumentParser:
-    "Common function for setting up the parser for GIMM-VFI, upscaler, and face fix"
+def setup_parser_video_common(description: Optional[str] = None, model_help: Optional[str] = None) -> argparse.ArgumentParser:
+    "Common function for various tasks"
     parser = argparse.ArgumentParser(description=description, formatter_class=RichHelpFormatter)
-    parser.add_argument("--model", required=True, help="Path to the model(directory for GIMM-VFI, .safetensors otherwise)")
+    model_help = "Path to the model" if model_help is None else model_help
+    parser.add_argument("--model", required=True, help=model_help)
     parser.add_argument("--input", required=True, help="Input video/image to process")
     parser.add_argument("--dtype", type=str, default="fp32", help="Datatype to use")
     parser.add_argument(
@@ -392,7 +392,7 @@ class BlissfulVideoProcessor:
             return [
                 "-c:v", "libx264",
                 "-preset", "slow",
-                "-crf", "16",
+                "-crf", "12",
                 "-pix_fmt", "yuv420p",
             ]
         if self.codec == "h265":
@@ -400,7 +400,7 @@ class BlissfulVideoProcessor:
             return [
                 "-c:v", "libx265",
                 "-preset", "slow",
-                "-crf", "16",
+                "-crf", "12",
                 "-pix_fmt", "yuv420p",
             ]
         raise ValueError(f"Unsupported codec: {self.codec}")
