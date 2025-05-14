@@ -1399,7 +1399,12 @@ class NetworkTrainer:
                 "SageAttention doesn't support training currently. Please use `--sdpa` or `--xformers` etc. instead."
                 " / SageAttentionは現在学習をサポートしていないようです。`--sdpa`や`--xformers`などの他のオプションを使ってください"
             )
-
+        if args.fp16_accumulation:
+            logger.info("Enabling FP16 accumulation")
+            if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                torch.backends.cuda.matmul.allow_fp16_accumulation = True
+            else:
+                logger.warning("FP16 accumulation not available! Requires at least PyTorch 2.7.0")
         # check model specific arguments
         self.handle_model_specific_args(args)
 
@@ -2608,6 +2613,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
+    parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
     return parser
 
 
