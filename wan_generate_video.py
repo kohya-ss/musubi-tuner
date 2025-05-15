@@ -48,9 +48,6 @@ from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata
 from dataset.image_video_dataset import load_video
 
-gc.collect()
-torch.cuda.empty_cache()
-
 logger = BlissfulLogger(__name__, "green")
 
 
