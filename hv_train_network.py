@@ -1402,6 +1402,7 @@ class NetworkTrainer:
         if args.fp16_accumulation:
             logger.info("Enabling FP16 accumulation")
             if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                logger.warning("FP16 accumulation is /not/ recommended when training due to degraded quality!")
                 torch.backends.cuda.matmul.allow_fp16_accumulation = True
             else:
                 logger.warning("FP16 accumulation not available! Requires at least PyTorch 2.7.0")
