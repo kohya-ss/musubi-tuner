@@ -65,14 +65,20 @@ def load_torch_file(
 
 
 # Below here, Blyss wrote it!
+
 class BlissfulLogger:
-    def __init__(self, logging_source: str, log_color: str, do_announce: Optional[bool] = False):
-        logging_source = f"{logging_source}"
-        self.logging_source = "{:<8}".format(logging_source)
+    def __init__(self, logging_source: str, log_color: str, do_announce: bool = False):
+        self.logging_source = logging_source
         self.log_color = log_color
+
+        # grab (or create) the named logger
         self.logger = logging.getLogger(self.logging_source)
         self.logger.setLevel(logging.DEBUG)
 
+        # DON’T let it propagate to root (which has its own handler)
+        if self.logger.hasHandlers():
+            self.logger.handlers.clear()
+        # now add one RichHandler
         self.handler = RichHandler(
             show_time=False,
             show_level=True,
@@ -80,13 +86,11 @@ class BlissfulLogger:
             rich_tracebacks=True,
             markup=True
         )
-
-        formatter = logging.Formatter(
-            f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
-        )
-
-        self.handler.setFormatter(formatter)
+        fmt = f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
+        self.handler.setFormatter(logging.Formatter(fmt))
         self.logger.addHandler(self.handler)
+        self.logger.propagate = False
+
         if do_announce:
             self.logger.info("Set up logging!")
 

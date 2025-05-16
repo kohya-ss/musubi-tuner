@@ -7,7 +7,6 @@ from blissful_tuner.utils import BlissfulLogger
 from tqdm import tqdm
 
 logger = BlissfulLogger(__name__, "#8e00ed")
- 
 
 
 # based on ComfyUI's and MinusZoneAI's fp8_linear optimization
@@ -63,8 +62,10 @@ def calculate_fp8_maxval(exp_bits=4, mantissa_bits=3, sign_bits=1):
         float: Maximum value representable in FP8 format
     """
     assert exp_bits + mantissa_bits + sign_bits == 8, "Total bits must be 8"
-    if exp_bits == 5:
+    if exp_bits == 5 and mantissa_bits == 2:
         return 57344
+    if exp_bits == 4 and mantissa_bits == 3:
+        return 448  # Hard code to save calculations
     # Calculate exponent bias
     bias = 2 ** (exp_bits - 1) - 1
 
