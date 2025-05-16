@@ -63,7 +63,7 @@ class BlissfulVideoProcessor:
         self,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
-        will_write_video: Optional[bool] = True  # Foo
+        will_write_video: bool = True  # Foo
     ) -> None:
         """
         Initialize with a target device and dtype for tensor operations.
@@ -87,9 +87,9 @@ class BlissfulVideoProcessor:
         self,
         input_file_path: Optional[str] = None,
         output_file_path: Optional[str] = None,
-        modifier: Optional[str] = "",
-        codec: Optional[str] = "prores",
-        container: Optional[str] = "mkv",
+        modifier: str = "",
+        codec: str = "prores",
+        container: str = "mkv",
     ) -> Tuple[str, str]:
         """
         Determine and confirm input/output paths, generating a default output
@@ -244,7 +244,7 @@ class BlissfulVideoProcessor:
 
     def load_frames(
         self,
-        make_rgb: Optional[bool] = False
+        make_rgb: bool = False
     ) -> Tuple[List[np.ndarray], float, int, int]:
         """
         Load all frames from the input video/image as uint8 BGR or RGB numpy arrays.
@@ -296,8 +296,8 @@ class BlissfulVideoProcessor:
     def write_np_images_to_output(
         self,
         imgs: List[np.ndarray],
-        fps: Optional[float] = 1,
-        keep_frames: Optional[bool] = False,
+        fps: float = 1.0,
+        keep_frames: bool = False,
         rescale: Optional[Tuple[int, int]] = None,
         metadata: Optional[Dict[str, str]] = None
     ) -> None:
@@ -318,8 +318,8 @@ class BlissfulVideoProcessor:
 
     def write_buffered_frames_to_output(
         self,
-        fps: Optional[float] = 1,
-        keep_frames: Optional[bool] = False,
+        fps: float = 1.0,
+        keep_frames: bool = False,
         rescale: Optional[Tuple[int, int]] = None,
         metadata: Optional[Dict[str, str]] = None
     ) -> None:

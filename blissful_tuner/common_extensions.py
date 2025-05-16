@@ -49,8 +49,8 @@ def save_videos_grid_advanced(
     videos: torch.Tensor,
     output_video: str,
     args: argparse.Namespace,
-    rescale: Optional[bool] = False,
-    n_rows: Optional[int] = 1,
+    rescale: bool = False,
+    n_rows: int = 1,
     metadata: Optional[dict] = None
 ):
     "Function for saving Musubi Tuner outputs with more codec and container types"

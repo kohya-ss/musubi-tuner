@@ -29,7 +29,7 @@ class LatentPreviewer():
         timesteps: torch.Tensor,
         device: torch.device,
         dtype: torch.dtype,
-        model_type: Optional[str] = "hunyuan"
+        model_type: str = "hunyuan"
     ) -> None:
         self.mode = "latent2rgb" if args.preview_vae is None else "taehv"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")

@@ -21,9 +21,9 @@ from rich.logging import RichHandler
 # Adapted from ComfyUI
 def load_torch_file(
     ckpt: str,
-    safe_load: Optional[bool] = True,
+    safe_load: bool = True,
     device: Optional[Union[str, torch.device]] = None,
-    return_metadata: Optional[bool] = False
+    return_metadata: bool = False
 ) -> Union[
     Dict[str, torch.Tensor],
     Tuple[Dict[str, torch.Tensor], Optional[Dict[str, str]]]
