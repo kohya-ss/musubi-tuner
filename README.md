@@ -47,7 +47,7 @@ Non model specific extras:
 - Face blurring script based on Yolo - helpful for training non face altering LoRA! ( `blissful_tuner/yolo_blur.py`, please see it's `--help` for usage. Recommended model: https://www.dropbox.com/scl/fi/44xdsohltv2kofxrirvrj/yolo.7z?rlkey=zk6bv5iw3ic1pbgo4e8cblbw1&st=kwm6fzgk&dl=0 )
 - Face restoration with CodeFormer/GFPGAN (`blissful_tuner/facefix.py`, per usual please have a look at the `--help`! Models: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
 
-Also a related project of mine ( https://github.com/Sarania/Envious ) is useful for managing Nvidia GPUs from the terminal on Linux. It requires nvidia-ml-py and supports realtime monitoring, over/underclocking, power limit adjustment, fan control, profiles, and more. It also has a little process monitor for the GPU VRAM! Basically it's like nvidia-smi if that didn't suck 😂
+Also a related project of mine ( https://github.com/Sarania/Envious ) is useful for managing Nvidia GPUs from the terminal on Linux. It requires nvidia-ml-py and supports realtime monitoring, over/underclocking, power limit adjustment, fan control, profiles, and more. It also has a little process monitor for the GPU VRAM! Basically it's like nvidia-smi except not bad 😂
 
 My general code and Musubi Tuner code is licensed Apache 2.0. Other projects included may have different licensing, in which case you will find a LICENSE file in their directory specifying the terms under which they are included! Below is the original Musubi Readme which still remains relevant:
 
