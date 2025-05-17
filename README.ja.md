@@ -49,6 +49,8 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 - Yoloベースの顔ぼかしスクリプト - 顔の改変を伴わないLoRAのトレーニングに役立ちます！(`blissful_tuner/yolo_blur.py`、使用方法については`--help`をご覧ください。推奨モデル: https://www.dropbox.com/scl/fi/44xdsohltv2kofxrirvrj/yolo.7z?rlkey=zk6bv5iw3ic1pbgo4e8cblbw1&st=kwm6fzgk&dl=0 )
 - CodeFormer/GFPGANによる顔の修復 (`blissful_tuner/facefix.py`、いつものように`--help` を見てください! モデル: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
 
+また、私の関連プロジェクト（ https://github.com/Sarania/Envious ）は、LinuxのターミナルからNvidia GPUを管理するのに便利です。nvidia-ml-pyが必要ですが、リアルタイムモニタリング、オーバークロック/アンダークロック、電力制限調整、ファン制御、プロファイルなどをサポートしています。GPU VRAM用の小さなプロセスモニターも付いています！nvidia-smiがダメな場合のnvidia-smiのようなものです😂
+
 私のコード全体と Musubi Tuner のコードは Apache 2.0 ライセンスです。含まれている他のプロジェクトはライセンスが異なる場合があります。その場合は、それぞれのディレクトリにライセンス条項を記載した LICENSE ファイルがあります。以下は、現在でも有効なオリジナルの Musubi Readme です。
 
 # Musubi Tuner
