@@ -519,28 +519,28 @@ This script also allows for single frame inference, which is not an official fea
 
 Theoretically, it generates an image after a specified time from the starting image, following the prompt. This means that, although limited, it allows for natural language-based image editing.
 
-To perform single frame inference, specify the `--one_frame_inference` option with the desired mode. Here’s an example:
+To perform single frame inference, specify some option in the `--one_frame_inference` option. Here is an example:
 
 ```bash
---video_sections 1 --output_type latent_images --one_frame_inference default
+--video_sections 1 --output_type latent_images --one_frame_inference zero_post
 ```
 
-The `--one_frame_inference` option is recommended to be set to `default` or `no_2x,no_4x`. If you specify `--output_type` as `latent_images`, both the latent and image will be saved.
+The `--one_frame_inference` option is recommended to be set to `zero_post` or `no_2x,no_4x`. If you specify `--output_type` as `latent_images`, both the latent and image will be saved.
 
 You can specify the following strings in the `--one_frame_inference` option, separated by commas:
 
--   `default`: Default inference mode. Enables single image inference.
+-   `zero_post`: Generates with the clean latents' post (previous frame's latent representation) set to zero vectors.
 -   `no_2x`: Generates without passing clean latents 2x to the model. Slightly improves generation speed. The impact on generation results is unknown.
 -   `no_4x`: Generates without passing clean latents 4x to the model. Slightly improves generation speed. The impact on generation results is unknown.
--   `no_post`: Generates without passing clean latents' post (previous frame's latent representation) to the model. Improves generation speed by about 20%, but may result in unstable generation.
+-   `no_post`: Generates without passing clean latents' post (previous frame's latent representation) to the model. Improves generation speed by about 20%, but may result in unstable generation. This option cannot be specified in the kisekaechi method, described later.
 
-Even when passing clean latents 2x, clean latents 4x, or post, the values are zero vectors. However, especially when specifying `no_post`, increasing `latent_window_size` may lead to unstable generation results.
+Even when passing clean latents 2x, clean latents 4x, or post, the values are zero vectors, but the results may differ depending on whether or not values are passed. In particular, specifying `no_post` may lead to unstable generation results when `latent_window_size` is increased.
 
 Normally, specify `--video_sections 1` to indicate only one section (one image).
 
 The `--latent_window_size` is used as the timestamp for the frame being inferred (specifically, the RoPE value). Increasing it from the default of 9 may lead to larger changes. It has been confirmed that it generates without issues up to around 40.
 
-The `--end_image_path` is ignored.
+The `--end_image_path` is ignored (if not using the kisekaechi method).
 
 If you specify a value greater than 1 for `--video_sections`, multiple images will be generated at timestamps of `latent_window_size * n` (where n is the number of sections).
 
@@ -552,29 +552,91 @@ If you specify a value greater than 1 for `--video_sections`, multiple images wi
 
 理論的には、開始画像から、プロンプトに従い、指定時間経過後の画像を生成します。つまり制限付きですが自然言語による画像編集を行うことができます。
 
-単一画像推論を行うには`--one_frame_inference`オプションに、単一画像推論のモードを指定してください。記述例は以下の通りです。
+単一画像推論を行うには`--one_frame_inference`オプションに、何らかのオプションを指定してください。記述例は以下の通りです。
 
 ```bash
---video_sections 1 --output_type latent_images --one_frame_inference default
+--video_sections 1 --output_type latent_images --one_frame_inference zero_post
 ```
 
-`--one_frame_inference`のオプションは、`default`または `no_2x,no_4x`を推奨します。`--output_type`に`latent_images`を指定するとlatentと画像の両方が保存されます。
+`--one_frame_inference`のオプションは、`zero_post`または `zero_post,no_2x,no_4x`を推奨します。`--output_type`に`latent_images`を指定するとlatentと画像の両方が保存されます。
 
 `--one_frame_inference`のオプションには、カンマ区切りで以下の文字列を任意個数指定できます。
 
-- `default`: デフォルトの推論モード。単一画像推論を有効にします。
+- `zero_post`: clean latents の post （前フレームの潜在表現）をゼロベクトルにして生成します。
 - `no_2x`: clean latents 2xをモデルに渡さずに生成します。わずかに生成速度が向上します。生成結果への影響は不明です。
 - `no_4x`: clean latents 4xをモデルに渡さずに生成します。わずかに生成速度が向上します。生成結果への影響は不明です。
--  `no_post`: clean latents の post （前フレームの潜在表現）を渡さずに生成します。生成速度が20%程度向上しますが、生成結果が不安定になる場合があります。
+-  `no_post`: clean latents の post を渡さずに生成します。生成速度が20%程度向上しますが、生成結果が不安定になる場合があります。後述のkisekaechi方式では指定できません。
 
-clean latents 2x、clean latents 4x、postを渡す場合でも値はゼロベクトルですが、特に`no_post`を指定すると、`latent_window_size`を大きくすると生成結果が不安定になる場合があります。
+clean latents 2x、clean latents 4x、postをモデルに渡す場合でも値はゼロベクトルですが、値を渡すか否かで結果は変わります。特に`no_post`を指定すると、`latent_window_size`を大きくすると生成結果が不安定になる場合があります。
 
 通常は`--video_sections 1` として1セクションのみ（画像1枚）を指定してください。
 
 `--latent_window_size`は、推論するフレームのタイムスタンプとして用いられます（具体的にはRoPEの値）。デフォルトの9から大きくすると、変化量が大きくなる可能性があります。40程度までは破綻なく生成されることを確認しています。
 
-`--end_image_path`は無視されます。
+`--end_image_path`は無視されます（kisekaechi方式でない場合）。
 
 `--video_sections` に1より大きい値を指定した場合、`latent_window_size * n` (nはセクション数)のタイムスタンプで複数枚画像が生成されます。
+
+</details>
+
+### kisekaeichi method: History Reference Options / kisekaeichi方式：履歴参照オプション
+
+This new inference method, called `kisekaeichi`, was proposed by furusu. In the standard single frame inference, `clean_latents_1x` is a zero vector. By specifying a reference image instead, the generated image can be made to resemble that image.
+
+The generated samples can be found in the pull request [#284](https://github.com/kohya-ss/musubi-tuner/pull/284).
+
+It is expected to work only with FramePack (non-F1 model) and not with F1 models.
+
+The following options have been added to `--one_frame_inference` for kisekaeichi. They can be used in conjunction with existing flags like `no_2x`, `no_4x`, and `no_post`.
+
+-   `target_index=<integer>`: Specifies the index of the image to be generated. The default is the last frame (=latent_window_size).
+-   `history_index=<integer>`: Specifies the index of the clean latent post to be referenced. The default is the last frame + 1 (=latent_window_size + 1).
+
+Additionally, the following command-line options have been added. These arguments are only valid when `--one_frame_inference` is specified.
+
+-   `--image_mask_path <path>`: Specifies the path to a grayscale mask to be applied to the starting image. The 255 areas remain as they are, while the 0 areas are overwritten.
+-   `--end_image_mask_path <path>`: Specifies the path to a grayscale mask to be applied to the ending image. The 255 areas are referenced, while the 0 areas are ignored.
+
+Example:
+
+```bash
+--video_sections 1 --output_type latent_images --image_path img.png --end_image_path end_img.png \
+--one_frame_inference target_index=1,history_index=13 --image_mask_path mask.png --end_image_mask_path end_mask.png
+```
+
+The optimal values for `target_index` and `history_index` are unknown. Specify a value greater than or equal to 1 for `target_index`, and a value smaller than `history_index`. Specifying 1 may result in less change from the starting image, but it may also introduce noise. Specifying 9 or 13 may improve noise but increase changes from the original image.
+
+The `history_index` should be specified as a value greater than `target_index`. Values around 13 to 16 may be good.
+
+<details>
+<summary>日本語</summary>
+
+`kisekaeichi`と呼ばれるこの新しい推論方式は、furusu氏により提案されました。通常の1フレーム推論ではclean_latents_1xはゼロベクトルですが、代わりに参照用画像を
+指定することで、生成される画像をその画像に近づけることができます。
+
+生成サンプルはプルリクエスト[#284](https://github.com/kohya-ss/musubi-tuner/pull/284)を参照してください。
+
+FramePack無印のみ動作し、F1モデルでは動作しないと思われます。
+
+kisekaeichi用に `--one_frame_inference`に以下のオプションが追加されています。`no_2x`や`no_4x`、`no_post`など既存のフラグと併用できます。
+
+- `target_index=<整数>`: 生成する画像のindexを指定します。デフォルトは最後のフレームです（=latent_window_size）。
+- `history_index=<整数>`: 参照するclean latent postのindexを指定します。デフォルトは最後のフレーム+1です（=latent_window_size+1）。
+
+またコマンドラインオプションに以下が追加されています。これらの引数は`--one_frame_inference`を指定した場合のみ有効です。
+
+- `--image_mask_path <パス>`: 開始画像に適用するグレースケールマスクのパスを指定します。255の部分がそのまま残る部分、0の部分が書き換えられる部分です。
+- `--end_image_mask_path <パス>`: 終了画像に適用するグレースケールマスクのパスを指定します。255の部分が参照される部分、0の部分が無視される部分です。
+
+例:
+
+```bash
+--video_sections 1 --output_type latent_images --image_path img.png --end_image_path end_img.png \
+--one_frame_inference target_index=1,history_index=13 --image_mask_path mask.png --end_image_mask_path end_mask.png
+```
+
+`target_index`と`history_index`の最適値は不明です。`target_index`は1以上、`history_index`より小さい値を指定してください。1だと開始画像からの変化が少なくなりますが、ノイズが乗ったりすることが多いようです。9や13などを指定するとノイズは改善されるかもしれませんが、元の画像からの変化が大きくなります。
+
+`history_index`は`target_index`より大きい値を指定してください。13~16程度が良いかもしれません。
 
 </details>

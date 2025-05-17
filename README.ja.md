@@ -98,6 +98,9 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/05/17
+    - FramePackの1フレーム推論でkisekaeichi方式に対応しました。furusu氏の提案したこの新しい推論方式は、post latentに参照画像を設定することで生成される画像を制御するものです。詳細は[FramePackのドキュメント](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション)を参照してください。
+
 - 2025/05/11
     - FramePackの学習で1フレーム推論用の学習に対応しました（実験的機能）。詳細は[FramePackのドキュメント](./docs/framepack.md#single-frame-training--1フレーム学習)を参照してください。
     

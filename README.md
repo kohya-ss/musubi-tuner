@@ -105,6 +105,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- May 17, 2025:
+    - Added support for kisekaeichi method in FramePack's single frame inference. This new inference method proposed by furusu allows controlling the generated image by setting the reference image in post latent. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
+
 - May 11, 2025:
     - Added support for single frame training in FramePack. This is an experimental feature that allows training for single frame inference. See [FramePack documentation](./docs/framepack.md#single-frame-training--1フレーム学習) for details.
 
