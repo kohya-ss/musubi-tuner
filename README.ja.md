@@ -98,6 +98,11 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/05/17 update 1
+    - `--max_data_loader_n_workers`に2以上を指定するとひとつのエポック内でデータの重複や欠落が起きる不具合を修正しました。PR [#287](https://github.com/kohya-ss/musubi-tuner/pull/287),  issue [#283](https://github.com/kohya-ss/musubi-tuner/issues/283)
+        - 長期的には全てのデータが学習されますが、短期的にはデータの偏りが起きていました。
+        - データセットの初期化が不適切でそれぞれのDataSetが異なる順番でデータを返していたため、複数のDataLoaderの使用時に不具合が起きていました。初期化を修正してすべてのDataSetが同じ順番でデータを返すよう修正しました。
+
 - 2025/05/17
     - FramePackの1フレーム推論でkisekaeichi方式に対応しました。furusu氏の提案したこの新しい推論方式は、post latentに参照画像を設定することで生成される画像を制御するものです。詳細は[FramePackのドキュメント](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション)を参照してください。
 

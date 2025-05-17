@@ -555,8 +555,9 @@ class BucketBatchManager:
             num_batches = math.ceil(len(bucket) / self.batch_size)
             for i in range(num_batches):
                 self.bucket_batch_indices.append((bucket_reso, i))
-
-        self.shuffle()
+        
+        # do no shuffle here to avoid multiple datasets have different order
+        # self.shuffle()
 
     def show_bucket_info(self):
         for bucket_reso in self.bucket_resos:
