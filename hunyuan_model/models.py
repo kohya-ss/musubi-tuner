@@ -974,7 +974,7 @@ def load_transformer(dit_path, attn_mode, split_attn, load_device, main_device, 
     factor_kwargs = {"device": load_device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
     out_channels = latent_channels
-    logger.info(f"Initialize HYVideoDiffusionTransformer from {dtype}")
+    logger.info(f"Initialize HYVideoDiffusionTransformer from {dit_path} with dtype {dtype}")
     with accelerate.init_empty_weights():
         transformer = load_dit_model(
             text_states_dim=4096,

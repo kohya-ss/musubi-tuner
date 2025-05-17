@@ -1468,7 +1468,7 @@ class NetworkTrainer:
         self.blocks_to_swap = blocks_to_swap
         loading_device = "cpu" if blocks_to_swap > 0 else accelerator.device
 
-        logger.info(f"Loading DiT model from {args.dit}")
+        #logger.info(f"Loading DiT model from {args.dit}")
         if args.sdpa:
             attn_mode = "torch"
         elif args.flash_attn:
@@ -1481,8 +1481,9 @@ class NetworkTrainer:
             attn_mode = "flash3"
         else:
             raise ValueError(
-                f"either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
+                "either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
             )
+        logger.info(f"DiT parameters: attn_mode: {attn_mode}, split_attn: {args.split_attn}")
         transformer = self.load_transformer(
             accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
         )
@@ -2614,7 +2615,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
-    parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
+    parser.add_argument("--fp16_accumulation", action="store_true", help="(Not recommended) Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
     return parser
 
 
