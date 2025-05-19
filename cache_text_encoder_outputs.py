@@ -100,14 +100,14 @@ def process_text_encoder_batches(
 
 
 def post_process_cache_files(
-    datasets: list[BaseDataset], all_cache_files_for_dataset: list[set], all_cache_paths_for_dataset: list[set]
+    datasets: list[BaseDataset], all_cache_files_for_dataset: list[set], all_cache_paths_for_dataset: list[set], keep_cache: bool
 ):
     for i, dataset in enumerate(datasets):
         all_cache_files = all_cache_files_for_dataset[i]
         all_cache_paths = all_cache_paths_for_dataset[i]
         for cache_file in all_cache_files:
             if cache_file not in all_cache_paths:
-                if args.keep_cache:
+                if keep_cache:
                     logger.info(f"Keep cache file not in the dataset: {cache_file}")
                 else:
                     os.remove(cache_file)
@@ -181,7 +181,7 @@ def main(args):
     del text_encoder_2
 
     # remove cache files not in dataset
-    post_process_cache_files(datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset)
+    post_process_cache_files(datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache)
 
 
 def setup_parser_common():
