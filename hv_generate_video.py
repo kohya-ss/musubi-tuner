@@ -630,11 +630,11 @@ def main():
         # if image_latents is given, the model should be I2V model, so the in_channels should be 32
         dit_in_channels = args.dit_in_channels if args.dit_in_channels is not None else (32 if image_latents is not None else 16)
 
-        # if we use LoRA, weigths should be bf16 instead of fp8, because merging should be done in bf16
+        # if we use LoRA, weigths should be bf16 instead of fp8, because merging should be done in bf16 <--- shoulda read this Blyss :P
         # the model is too large, so we load the model to cpu. in addition, the .pt file is loaded to cpu anyway
         # on the fly merging will be a solution for this issue for .safetenors files (not implemented yet)
         transformer = load_transformer(
-            args.dit, args.attn_mode, args.split_attn, loading_device, device, dit_dtype, in_channels=dit_in_channels, fp8_mode=args.fp8_scaled, fp8_fast=args.fp8_fast
+            args.dit, args.attn_mode, args.split_attn, loading_device, device, dit_dtype, in_channels=dit_in_channels
         )
         transformer.eval()
 
@@ -718,6 +718,8 @@ def main():
                     dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
                     param.to(dtype=dtype_to_use)
                 convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
+        else:
+            transformer.scale_to_fp8(device, args.fp8_fast)
 
         if args.te_multiplier:
             llm_multiplier, clip_multiplier = args.te_multiplier
