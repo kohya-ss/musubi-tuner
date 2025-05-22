@@ -1,5 +1,5 @@
 import argparse
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 import os
 import shutil
 

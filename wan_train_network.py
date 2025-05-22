@@ -13,7 +13,7 @@ from dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL,
 from hv_generate_video import resize_image_to_bucket
 from hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

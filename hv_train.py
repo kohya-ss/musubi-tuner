@@ -43,7 +43,7 @@ import networks.lora as lora_module
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 from utils import huggingface_utils, model_utils, train_utils, sai_model_spec
 

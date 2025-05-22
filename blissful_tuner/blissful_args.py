@@ -11,7 +11,8 @@ import argparse
 import random
 import torch
 from rich.traceback import install as install_rich_tracebacks
-from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg, error_out, power_seed
+from blissful_tuner.utils import string_to_seed, error_out, power_seed
+from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import process_wildcards
 logger = BlissfulLogger(__name__, "#8e00ed")
 
@@ -168,15 +169,15 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if args.cfgzerostar_scaling and args.perp_neg is not None:
             error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
     blissful_prefunc(args)
-    args.seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
-    try:
-        args.seed = int(args.seed)
-        logger.info(f"Seed {args.seed} was set globally!")
-    except ValueError:
-        string_seed = args.seed
-        args.seed = string_to_seed(args.seed, bits=32)
-        logger.info(f"Seed {args.seed} was generated from string '{string_seed}' and set globally!!")
-    power_seed(args.seed)
+    if not getattr(args, "interactive", False):
+        args.seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
+        try:
+            args.seed = int(args.seed)
+        except ValueError:
+            args.seed = string_to_seed(args.seed, bits=32)
+        power_seed(args.seed)
+    else:
+        logger.info("Skip global seed for interactive generation!")
     if args.prompt_wildcards is not None:
         args.prompt = process_wildcards(args.prompt, args.prompt_wildcards) if args.prompt is not None else None
         args.negative_prompt = process_wildcards(args.negative_prompt, args.prompt_wildcards) if args.negative_prompt is not None else None
@@ -187,8 +188,6 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
             logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
             raise ValueError("RIFLEx can only be used with rope_func =='comfy'!")
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
-        if args.cfg_schedule:
-            args.cfg_schedule = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
         if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
             if args.guidance_scale == 1 and not args.cfg_schedule:
                 error_out(AttributeError, "Requested CFGZero* but CFG is not enabled so it will have no effect!")

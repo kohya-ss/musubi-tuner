@@ -14,7 +14,7 @@ from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, BaseDataset,
 from hunyuan_model import text_encoder as text_encoder_module
 from hunyuan_model.text_encoder import TextEncoder
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 from utils.model_utils import str_to_dtype
 

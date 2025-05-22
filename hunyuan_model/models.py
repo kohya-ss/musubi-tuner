@@ -18,7 +18,7 @@ from .token_refiner import SingleTokenRefiner
 from modules.custom_offloading_utils import ModelOffloader, synchronize_device, clean_memory_on_device
 from hunyuan_model.posemb_layers import get_nd_rotary_pos_embed
 from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 from utils.safetensors_utils import MemoryEfficientSafeOpen
 logger = BlissfulLogger(__name__, "#8e00ed")
 

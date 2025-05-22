@@ -12,7 +12,7 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusers.models.attention_processor import SpatialNorm
 from modules.unet_causal_3d_blocks import CausalConv3d, UNetMidBlockCausal3D, get_down_block3d, get_up_block3d
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 from utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
 from einops import repeat
 from utils.device_utils import clean_memory_on_device

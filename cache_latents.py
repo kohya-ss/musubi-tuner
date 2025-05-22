@@ -11,7 +11,7 @@ from dataset import config_utils
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from PIL import Image
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 from dataset.image_video_dataset import BaseDataset, ItemInfo, save_latent_cache, ARCHITECTURE_HUNYUAN_VIDEO
 from hunyuan_model.vae import load_vae

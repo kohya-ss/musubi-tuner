@@ -6,6 +6,8 @@ CFGZero* implementation for Blissful Tuner extension based on https://github.com
 License: Apache 2.0
 @author: blyss
 """
+import argparse
+from typing import List
 import torch
 
 
@@ -41,3 +43,90 @@ def optimized_scale(positive_flat: torch.Tensor, negative_flat: torch.Tensor) ->
     st_star = dot_product / squared_norm
 
     return st_star
+
+
+def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) -> List[int]:
+    """
+    Parse a schedule string like "1-10,20,!5,e~3" into a sorted list of steps.
+
+    - "start-end" includes all steps in [start, end]
+    - "e~n"    includes every nth step (n, 2n, ...) up to infer_steps
+    - "x"      includes the single step x
+    - Prefix "!" on any token to exclude those steps instead of including them.
+    - Postfix ":float" e.g. ":6.0" to any step or range to specify a guidance_scale override for that step
+
+    Raises argparse.ArgumentTypeError on malformed tokens or out-of-range steps.
+    """
+    excluded = set()
+    guidance_scale_dict = {}
+
+    for raw in schedule.split(","):
+        token = raw.strip()
+        if not token:
+            continue  # skip empty tokens
+
+        # exclusion if it starts with "!"
+        if token.startswith("!"):
+            target = "exclude"
+            token = token[1:]
+        else:
+            target = "include"
+
+        weight = guidance_scale
+        if ":" in token:
+            token, float_part = token.rsplit(":", 1)
+            weight = float(float_part)
+
+        # modulus syntax: e.g. "e~3"
+        if token.startswith("e~"):
+            num_str = token[2:]
+            try:
+                n = int(num_str)
+            except ValueError:
+                raise argparse.ArgumentTypeError(f"Invalid modulus in '{raw}'")
+            if n < 1:
+                raise argparse.ArgumentTypeError(f"Modulus must be ≥ 1 in '{raw}'")
+
+            steps = range(n, infer_steps + 1, n)
+
+        # range syntax: e.g. "5-10"
+        elif "-" in token:
+            parts = token.split("-")
+            if len(parts) != 2:
+                raise argparse.ArgumentTypeError(f"Malformed range '{raw}'")
+            start_str, end_str = parts
+            try:
+                start = int(start_str)
+                end = int(end_str)
+            except ValueError:
+                raise argparse.ArgumentTypeError(f"Non‑integer in range '{raw}'")
+            if start < 1 or end < 1:
+                raise argparse.ArgumentTypeError(f"Steps must be ≥ 1 in '{raw}'")
+            if start > end:
+                raise argparse.ArgumentTypeError(f"Start > end in '{raw}'")
+            if end > infer_steps:
+                raise argparse.ArgumentTypeError(f"End > infer_steps ({infer_steps}) in '{raw}'")
+
+            steps = range(start, end + 1)
+
+        # single‑step syntax: e.g. "7"
+        else:
+            try:
+                step = int(token)
+            except ValueError:
+                raise argparse.ArgumentTypeError(f"Invalid token '{raw}'")
+            if step < 1 or step > infer_steps:
+                raise argparse.ArgumentTypeError(f"Step {step} out of range 1–{infer_steps} in '{raw}'")
+
+            steps = [step]
+
+        # apply include/exclude
+        if target == "include":
+            for step in steps:
+                guidance_scale_dict[step] = weight
+        else:
+            excluded.update(steps)
+
+    for step in excluded:
+        guidance_scale_dict.pop(step, None)
+    return guidance_scale_dict

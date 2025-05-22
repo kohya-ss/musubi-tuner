@@ -19,7 +19,7 @@ from wan.modules.vae import WanVAE
 from utils.device_utils import clean_memory_on_device
 from blissful_tuner.blissful_args import get_current_model_type, get_current_version
 from blissful_tuner.video_processing_common import BlissfulVideoProcessor
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "#8e00ed")
 

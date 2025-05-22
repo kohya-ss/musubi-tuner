@@ -18,7 +18,7 @@ from voluptuous import Any, ExactSequence, MultipleInvalid, Object, Schema
 
 from .image_video_dataset import DatasetGroup, ImageDataset, VideoDataset
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

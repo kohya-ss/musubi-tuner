@@ -32,7 +32,8 @@ from facexlib.utils.face_restoration_helper import FaceRestoreHelper
 from codeformer.basicsr.utils.registry import ARCH_REGISTRY
 from basicsr.utils import img2tensor, tensor2img
 from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
-from utils import BlissfulLogger, power_seed
+from utils import power_seed
+from blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 

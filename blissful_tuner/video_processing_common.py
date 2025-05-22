@@ -22,9 +22,9 @@ import cv2
 import numpy as np
 import torch
 try:
-    from blissful_tuner.utils import BlissfulLogger
+    from blissful_tuner.blissful_logger import BlissfulLogger
 except ImportError:  # This is needed so we can import either within blissful_tuner directory or base musubi directory
-    from utils import BlissfulLogger
+    from blissful_logger import BlissfulLogger
 
 
 logger = BlissfulLogger(__name__, "#8e00ed")

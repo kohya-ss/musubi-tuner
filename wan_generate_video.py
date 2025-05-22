@@ -41,8 +41,9 @@ from utils.model_utils import str_to_dtype
 from utils.device_utils import clean_memory_on_device
 from hv_generate_video import synchronize_device, save_images_grid
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
+from blissful_tuner.utils import string_to_seed
+from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata
@@ -247,7 +248,10 @@ def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict
         elif option == "f":
             overrides["video_length"] = int(value)
         elif option == "d":
-            overrides["seed"] = int(value)
+            try:
+                overrides["seed"] = int(value)
+            except ValueError:
+                overrides["seed"] = string_to_seed(value)
         elif option == "s":
             overrides["infer_steps"] = int(value)
         elif option == "g" or option == "l":
@@ -260,6 +264,8 @@ def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict
             overrides["control_path"] = value
         elif option == "n":
             overrides["negative_prompt"] = value
+        elif option == "cs":
+            overrides["cfg_schedule"] = value
 
     return overrides
 
@@ -1119,7 +1125,7 @@ def run_sampling(
         pattern = "".join(pattern)
         logger.info(f"CFG skip mode: {args.cfg_skip_mode}, apply ratio: {args.cfg_apply_ratio}, pattern: {pattern}")
     elif args.cfg_schedule is not None:
-        scale_per_step = args.cfg_schedule
+        scale_per_step = parse_scheduled_cfg(args.cfg_schedule, num_timesteps, args.guidance_scale)
         apply_cfg_array = [(i + 1) in scale_per_step for i in range(num_timesteps)]
         included_steps = sorted(scale_per_step.keys())
         step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)

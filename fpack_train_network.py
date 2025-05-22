@@ -24,7 +24,7 @@ from frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from frame_pack.utils import crop_or_pad_yield_mask
 from dataset.image_video_dataset import resize_image_to_bucket
 from hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 

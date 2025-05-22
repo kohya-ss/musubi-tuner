@@ -16,7 +16,7 @@ from dataset.image_video_dataset import ARCHITECTURE_WAN, ItemInfo, save_text_en
 from wan.configs import wan_t2v_14B
 
 import cache_text_encoder_outputs
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 from utils.model_utils import str_to_dtype
 from wan.modules.t5 import T5EncoderModel

@@ -5,7 +5,7 @@ from io import BytesIO
 import os
 from typing import List, Optional, Tuple, Union
 import safetensors
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN, ARCHITECTURE_FRAMEPACK
 

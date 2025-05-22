@@ -4,7 +4,7 @@ from huggingface_hub import HfApi
 from pathlib import Path
 import argparse
 import os
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

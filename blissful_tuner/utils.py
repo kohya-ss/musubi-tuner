@@ -7,15 +7,16 @@ Created on Sat Apr 12 14:09:37 2025
 
 @author: blyss
 """
-import argparse
 import random
 import hashlib
 import torch
 import safetensors
 import numpy as np
-from typing import List, Union, Dict, Tuple, Optional, Type
-import logging
-from rich.logging import RichHandler
+from typing import Union, Dict, Tuple, Optional, Type
+try:
+    from blissful_logger import BlissfulLogger
+except ImportError:
+    from blissful_tuner.blissful_logger import BlissfulLogger
 
 
 # Adapted from ComfyUI
@@ -66,162 +67,6 @@ def load_torch_file(
 
 # Below here, Blyss wrote it!
 
-class BlissfulLogger:
-    def __init__(self, logging_source: str, log_color: str, do_announce: bool = False):
-        self.logging_source = logging_source
-        self.log_color = log_color
-
-        # grab (or create) the named logger
-        self.logger = logging.getLogger(self.logging_source)
-        self.logger.setLevel(logging.DEBUG)
-
-        # DON’T let it propagate to root (which has its own handler)
-        if self.logger.hasHandlers():
-            self.logger.handlers.clear()
-        # now add one RichHandler
-        self.handler = RichHandler(
-            show_time=False,
-            show_level=True,
-            show_path=True,
-            rich_tracebacks=True,
-            markup=True
-        )
-        fmt = f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
-        self.handler.setFormatter(logging.Formatter(fmt))
-        self.logger.addHandler(self.handler)
-        self.logger.propagate = False
-
-        if do_announce:
-            self.logger.info("Set up logging!")
-
-    def set_color(self, new_color):
-        self.log_color = new_color
-        formatter = logging.Formatter(
-            f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
-        )
-        self.handler.setFormatter(formatter)
-
-    def set_name(self, new_name):
-        self.logging_source = "{:<8}".format(new_name)
-        self.logger = logging.getLogger(self.logging_source)
-        self.logger.setLevel(logging.DEBUG)
-
-        # Remove any existing handlers (just in case)
-        if not self.logger.hasHandlers():
-            self.logger.addHandler(self.handler)
-        else:
-            self.logger.handlers.clear()
-            self.logger.addHandler(self.handler)
-
-    def info(self, msg):
-        self.logger.info(msg, stacklevel=2)
-
-    def debug(self, msg):
-        self.logger.debug(msg, stacklevel=2)
-
-    def warning(self, msg, levelmod=0):
-        self.logger.warning(msg, stacklevel=2 + levelmod)
-
-    def warn(self, msg):
-        self.logger.warning(msg, stacklevel=2)
-
-    def error(self, msg, levelmod=0):
-        self.logger.error(msg, stacklevel=2 + levelmod)
-
-    def critical(self, msg):
-        self.logger.critical(msg, stacklevel=2)
-
-    def setLevel(self, level):
-        self.logger.set_level(level)
-
-
-def parse_scheduled_cfg(schedule: str, infer_steps: int, guidance_scale: int) -> List[int]:
-    """
-    Parse a schedule string like "1-10,20,!5,e~3" into a sorted list of steps.
-
-    - "start-end" includes all steps in [start, end]
-    - "e~n"    includes every nth step (n, 2n, ...) up to infer_steps
-    - "x"      includes the single step x
-    - Prefix "!" on any token to exclude those steps instead of including them.
-    - Postfix ":float" e.g. ":6.0" to any step or range to specify a guidance_scale override for that step
-
-    Raises argparse.ArgumentTypeError on malformed tokens or out-of-range steps.
-    """
-    excluded = set()
-    guidance_scale_dict = {}
-
-    for raw in schedule.split(","):
-        token = raw.strip()
-        if not token:
-            continue  # skip empty tokens
-
-        # exclusion if it starts with "!"
-        if token.startswith("!"):
-            target = "exclude"
-            token = token[1:]
-        else:
-            target = "include"
-
-        weight = guidance_scale
-        if ":" in token:
-            token, float_part = token.rsplit(":", 1)
-            weight = float(float_part)
-
-        # modulus syntax: e.g. "e~3"
-        if token.startswith("e~"):
-            num_str = token[2:]
-            try:
-                n = int(num_str)
-            except ValueError:
-                raise argparse.ArgumentTypeError(f"Invalid modulus in '{raw}'")
-            if n < 1:
-                raise argparse.ArgumentTypeError(f"Modulus must be ≥ 1 in '{raw}'")
-
-            steps = range(n, infer_steps + 1, n)
-
-        # range syntax: e.g. "5-10"
-        elif "-" in token:
-            parts = token.split("-")
-            if len(parts) != 2:
-                raise argparse.ArgumentTypeError(f"Malformed range '{raw}'")
-            start_str, end_str = parts
-            try:
-                start = int(start_str)
-                end = int(end_str)
-            except ValueError:
-                raise argparse.ArgumentTypeError(f"Non‑integer in range '{raw}'")
-            if start < 1 or end < 1:
-                raise argparse.ArgumentTypeError(f"Steps must be ≥ 1 in '{raw}'")
-            if start > end:
-                raise argparse.ArgumentTypeError(f"Start > end in '{raw}'")
-            if end > infer_steps:
-                raise argparse.ArgumentTypeError(f"End > infer_steps ({infer_steps}) in '{raw}'")
-
-            steps = range(start, end + 1)
-
-        # single‑step syntax: e.g. "7"
-        else:
-            try:
-                step = int(token)
-            except ValueError:
-                raise argparse.ArgumentTypeError(f"Invalid token '{raw}'")
-            if step < 1 or step > infer_steps:
-                raise argparse.ArgumentTypeError(f"Step {step} out of range 1–{infer_steps} in '{raw}'")
-
-            steps = [step]
-
-        # apply include/exclude
-        if target == "include":
-            for step in steps:
-                guidance_scale_dict[step] = weight
-        else:
-            excluded.update(steps)
-
-    for step in excluded:
-        guidance_scale_dict.pop(step, None)
-    return guidance_scale_dict
-
-
 def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dtype: Optional[Union[torch.dtype, str]] = None) -> Tuple[torch.device, torch.dtype]:
     logger = BlissfulLogger(__name__, "#8e00ed")
     dtype_mapping = {
@@ -247,7 +92,7 @@ def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dty
         dtype = torch.float32
     elif isinstance(dtype, str):
         if dtype not in dtype_mapping:
-            error_out(ValueError, f"Unknown dtype string '{dtype}'", logger=logger)
+            error_out(ValueError, f"Unknown dtype string '{dtype}'")
         dtype = dtype_mapping[dtype]
 
     torch.set_float32_matmul_precision('high')
@@ -268,6 +113,7 @@ def string_to_seed(s: str, bits: int = 63) -> int:
     Returns:
         A non-negative int < 2**bits
     """
+    logger = BlissfulLogger(__name__, "#8e00ed")
     digest = hashlib.sha256(s.encode("utf-8")).digest()
     crypto = int.from_bytes(digest, byteorder="big")
     mask = (1 << bits) - 1
@@ -287,6 +133,7 @@ def string_to_seed(s: str, bits: int = 63) -> int:
     if algo == float("inf"):  # In case we somehow still do
         algo = len(s) + (314159 * ord(s[len(s) // 2])) - ord(s[len(s) // 4])
     seed = (abs(crypto - int(algo))) & mask
+    logger.info(f"Seed '{seed}' was generated from string '{s}'")
     return seed
 
 
@@ -294,6 +141,7 @@ def power_seed(seed: Union[int, str] = None) -> int:
     """
     Sets the random seed for reproducibility.
     """
+    logger = BlissfulLogger(__name__, "#8e00ed")
     if seed is None:
         seed = random.getrandbits(32)
     else:
@@ -306,10 +154,11 @@ def power_seed(seed: Union[int, str] = None) -> int:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    logger.info(f"Seed '{seed}' was set globally!")
     return seed
 
 
-def error_out(error: Type[Exception], message: str, logger: Optional[BlissfulLogger] = None) -> None:
-    logger = logger if logger is not None else BlissfulLogger(__name__, "#8e00ed")
+def error_out(error: Type[Exception], message: str) -> None:
+    logger = BlissfulLogger(__name__, "#8e00ed")
     logger.error(message, levelmod=1)
     raise error(message)

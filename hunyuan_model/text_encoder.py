@@ -20,7 +20,7 @@ from transformers.models.llama import LlamaModel
 from safetensors.torch import load_file
 from accelerate import init_empty_weights
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

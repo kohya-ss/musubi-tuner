@@ -15,7 +15,7 @@ import av
 from PIL import Image
 from .taehv import TAEHV
 from .utils import load_torch_file
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "#8e00ed")
 

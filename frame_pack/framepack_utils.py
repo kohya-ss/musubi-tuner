@@ -22,7 +22,7 @@ from transformers import (
 from utils.safetensors_utils import load_split_weights
 from hunyuan_model.vae import load_vae as hunyuan_load_vae
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 

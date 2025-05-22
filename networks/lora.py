@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

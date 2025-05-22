@@ -37,9 +37,9 @@ from dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
-from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg
+from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
 
@@ -563,7 +563,7 @@ def main():
         do_classifier_free_guidance = args.guidance_scale != 1.0 or args.cfg_schedule is not None
         if do_classifier_free_guidance:
             if args.cfg_schedule is not None:
-                scale_per_step = args.cfg_schedule
+                scale_per_step = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
                 included_steps = sorted(scale_per_step.keys())
                 step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
                 logger.info(f"CFG Schedule: {step_str}")
@@ -866,9 +866,9 @@ def main():
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if do_classifier_free_guidance and args.cfg_schedule is not None:
-                    do_cfg_for_step = (i + 1) in args.cfg_schedule
+                    do_cfg_for_step = (i + 1) in scale_per_step
                     if do_cfg_for_step:
-                        args.guidance_scale = args.cfg_schedule[i + 1]
+                        args.guidance_scale = scale_per_step[i + 1]
 
                 latents = scheduler.scale_model_input(latents, t)
 

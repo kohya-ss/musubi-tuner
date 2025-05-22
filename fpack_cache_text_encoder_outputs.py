@@ -13,7 +13,7 @@ import cache_text_encoder_outputs
 from frame_pack import hunyuan
 from frame_pack.framepack_utils import load_text_encoder1, load_text_encoder2
 from frame_pack.utils import crop_or_pad_yield_mask
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 

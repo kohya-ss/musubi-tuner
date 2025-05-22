@@ -1,6 +1,6 @@
 # Modified from transformers.models.t5.modeling_t5
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-# from blissful_tuner.utils import BlissfulLogger
+# from blissful_tuner.blissful_logger import BlissfulLogger
 import math
 import os
 
@@ -12,7 +12,7 @@ from .tokenizers import HuggingfaceTokenizer
 from accelerate import init_empty_weights
 from safetensors.torch import load_file
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

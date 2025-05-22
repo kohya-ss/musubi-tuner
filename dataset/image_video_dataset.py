@@ -18,7 +18,7 @@ import av
 from utils import safetensors_utils
 from utils.model_utils import dtype_to_str
 
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  

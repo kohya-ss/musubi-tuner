@@ -12,7 +12,7 @@ from transformers import T5Model
 import torch
 import re
 from typing import Tuple, List, Union
-from blissful_tuner.utils import BlissfulLogger
+from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 
