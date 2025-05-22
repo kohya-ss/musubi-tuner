@@ -244,7 +244,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
 
     # load text encoders
     logger.info(f"loading text encoder: {args.text_encoder1}")
-    logger.info(f"hidden_state_skip_layer: {hidden_state_skip_layer}; apply_final_norm: {apply_final_norm}; Reproducible output: {reproduce}")
+    logger.info(f"hidden_state_skip_layer: {hidden_state_skip_layer}; apply_final_norm: {apply_final_norm}")
     text_encoder = TextEncoder(
         text_encoder_type=text_encoder_type,
         max_length=max_length,

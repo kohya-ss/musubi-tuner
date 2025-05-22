@@ -8,6 +8,7 @@ Created on Sat Apr 26 15:11:58 2025
 import sys
 import os
 import argparse
+import random
 import torch
 from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import BlissfulLogger, string_to_seed, parse_scheduled_cfg, error_out, power_seed
@@ -167,15 +168,15 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if args.cfgzerostar_scaling and args.perp_neg is not None:
             error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
     blissful_prefunc(args)
-    if args.seed is not None:
-        try:
-            args.seed = int(args.seed)
-            logger.info(f"Seed {args.seed} was set globally!")
-        except ValueError:
-            string_seed = args.seed
-            args.seed = string_to_seed(args.seed, bits=32)
-            logger.info(f"Seed {args.seed} was generated from string '{string_seed}' and set globally!!")
-        power_seed(args.seed)
+    args.seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
+    try:
+        args.seed = int(args.seed)
+        logger.info(f"Seed {args.seed} was set globally!")
+    except ValueError:
+        string_seed = args.seed
+        args.seed = string_to_seed(args.seed, bits=32)
+        logger.info(f"Seed {args.seed} was generated from string '{string_seed}' and set globally!!")
+    power_seed(args.seed)
     if args.prompt_wildcards is not None:
         args.prompt = process_wildcards(args.prompt, args.prompt_wildcards) if args.prompt is not None else None
         args.negative_prompt = process_wildcards(args.negative_prompt, args.prompt_wildcards) if args.negative_prompt is not None else None
