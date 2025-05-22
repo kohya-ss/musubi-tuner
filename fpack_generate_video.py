@@ -277,7 +277,7 @@ def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict
             try:
                 overrides["seed"] = int(value)
             except ValueError:
-                overrides["seed"] = string_to_seed(value)
+                overrides["seed"] = string_to_seed(value, bits=32)
         elif option == "s":
             overrides["infer_steps"] = int(value)
         elif option == "g" or option == "l":
