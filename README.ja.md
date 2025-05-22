@@ -57,6 +57,9 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 
 ## 目次
 
+<details>
+<summary>クリックすると展開します</summary>
+
 - [はじめに](#はじめに)
     - [スポンサー募集のお知らせ](#スポンサー募集のお知らせ)
     - [最近の更新](#最近の更新)
@@ -83,6 +86,7 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 - [免責事項](#免責事項)
 - [コントリビューションについて](#コントリビューションについて)
 - [ライセンス](#ライセンス)
+</details>
 
 ## はじめに
 
@@ -96,9 +100,17 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 このプロジェクトがお役に立ったなら、ご支援いただけると嬉しく思います。 [GitHub Sponsors](https://github.com/sponsors/kohya-ss/)で受け付けています。
 
+
 ### 最近の更新
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2025/05/22
+    - FramePackの推論スクリプトで、以下の対応を行いました。
+        - **破壊的変更**: 1フレーム推論で画像を保存する場合、サブディレクトリを作成しなくなりました。
+        - バッチモードとインタラクティブモードに対応しました。
+            - バッチモードでは、プロンプトをファイルから読み込んで生成します。インタラクティブモードでは、コマンドラインからプロンプトを指定して生成します。詳細は[FramePackのドキュメント](./docs/framepack.md#batch-and-interactive-modes--バッチモードとインタラクティブモード)を参照してください。
+        - kisekaeichi方式の参照画像を複数指定できるようになりました。詳細は[FramePackのドキュメント](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション)を参照してください。
 
 - 2025/05/17 update 1
     - `--max_data_loader_n_workers`に2以上を指定するとひとつのエポック内でデータの重複や欠落が起きる不具合を修正しました。PR [#287](https://github.com/kohya-ss/musubi-tuner/pull/287),  issue [#283](https://github.com/kohya-ss/musubi-tuner/issues/283)

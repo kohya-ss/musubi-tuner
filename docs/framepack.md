@@ -212,7 +212,7 @@ Key differences from HunyuanVideo training:
 -   **Requires** specifying `--vae`, `--text_encoder1`, `--text_encoder2`, and `--image_encoder`.
 -   **Requires** specifying `--network_module networks.lora_framepack`.
 -  Optional `--latent_window_size` argument (default 9, should match caching).
--   Memory saving options like `--fp8_base` (for DiT) and `--fp8_llm` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8_base` for DiT.
+-   Memory saving options like `--fp8` (for DiT) and `--fp8_llm` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
 -   `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size` options are available for the VAE to prevent out-of-memory during sampling (similar to caching).
 -  `--gradient_checkpointing` is available for memory savings.
 - If you encounter an error when the batch size is greater than 1 (especially when specifying `--sdpa` or `--xformers`, it will always result in an error), please specify `--split_attn`.
@@ -234,7 +234,7 @@ HunyuanVideoの学習との主な違いは次のとおりです。
 -  `--vae`、`--text_encoder1`、`--text_encoder2`、`--image_encoder`を指定する必要があります。
 -  `--network_module networks.lora_framepack`を指定する必要があります。
 -  必要に応じて`--latent_window_size`引数（デフォルト9）を指定できます（キャッシング時と一致させる必要があります）。
--  `--fp8_base`（DiT用）や`--fp8_llm`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_base`指定時は、`--fp8_scaled`を使用することをお勧めします。
+-  `--fp8`（DiT用）や`--fp8_llm`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
 -  サンプル生成時にメモリ不足を防ぐため、VAE用の`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`オプションが利用可能です（キャッシング時と同様）。
 -  メモリ節約のために`--gradient_checkpointing`が利用可能です。
 - バッチサイズが1より大きい場合にエラーが出た時には（特に`--sdpa`や`--xformers`を指定すると必ずエラーになります。）、`--split_attn`を指定してください。
@@ -314,7 +314,6 @@ Key differences from HunyuanVideo inference:
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
 - `--latent_paddings` option overrides the default padding for each section. Specify it as a comma-separated list of integers, e.g., `--latent_paddings 0,0,0,0`. This option is ignored if `--f1` is specified.
 - `--custom_system_prompt` option overrides the default system prompt for the LLaMA Text Encoder 1. Specify it as a string. See [here](../hunyuan_model/text_encoder.py#L152) for the default system prompt.
--   Batch and interactive modes (`--from_file`, `--interactive`) are **not yet implemented** for FramePack generation.
 
 Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable.
 
@@ -347,13 +346,126 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
 - `--latent_paddings`オプションは、各セクションのデフォルトのパディングを上書きします。カンマ区切りの整数リストとして指定します。例：`--latent_paddings 0,0,0,0`。`--f1`を指定した場合は無視されます。
 - `--custom_system_prompt`オプションは、LLaMA Text Encoder 1のデフォルトのシステムプロンプトを上書きします。文字列として指定します。デフォルトのシステムプロンプトは[こちら](../hunyuan_model/text_encoder.py#L152)を参照してください。
--  バッチモードとインタラクティブモード（`--from_file`、`--interactive`）はFramePack生成には**まだ実装されていません**。
 
 `--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。
 
 `--lora_weight`に指定できるLoRAの重みは、当リポジトリで学習したFramePackの重み以外に、当リポジトリのHunyuanVideoのLoRA、diffusion-pipeのHunyuanVideoのLoRAが指定可能です（自動判定）。
 
 `--blocks_to_swap`の最大値は38です。
+</details>
+
+## Batch and Interactive Modes / バッチモードとインタラクティブモード
+
+In addition to single video generation, FramePack now supports batch generation from file and interactive prompt input:
+
+### Batch Mode from File / ファイルからのバッチモード
+
+Generate multiple videos from prompts stored in a text file:
+
+```bash
+python fpack_generate_video.py --from_file prompts.txt 
+--dit path/to/dit_model --vae path/to/vae_model.safetensors 
+--text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
+--image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
+```
+
+The prompts file format:
+- One prompt per line
+- Empty lines and lines starting with # are ignored (comments)
+- Each line can include prompt-specific parameters using command-line style format:
+
+```
+A beautiful sunset over mountains --w 832 --h 480 --f 5 --d 42 --s 20 --i path/to/start_image.jpg
+A busy city street at night --w 480 --h 832 --i path/to/another_start.jpg
+```
+
+Supported inline parameters (if omitted, default values from the command line are used):
+- `--w`: Width
+- `--h`: Height
+- `--f`: Video seconds
+- `--d`: Seed
+- `--s`: Inference steps
+- `--g` or `--l`: Guidance scale
+- `--i`: Image path (for start image)
+- `--im`: Image mask path
+- `--n`: Negative prompt
+- `--vs`: Video sections
+- `--ei`: End image path (can be specified multiple times for one frame inference)
+- `--eim`: End image mask path (can be specified multiple times for one frame inference)
+- `--of`: One frame inference mode options (same as `--one_frame_inference` in the command line)
+
+In batch mode, models are loaded once and reused for all prompts, significantly improving overall generation time compared to multiple single runs.
+
+### Interactive Mode / インタラクティブモード
+
+Interactive command-line interface for entering prompts:
+
+```bash
+python fpack_generate_video.py --interactive
+--dit path/to/dit_model --vae path/to/vae_model.safetensors 
+--text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
+--image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
+```
+
+In interactive mode:
+- Enter prompts directly at the command line
+- Use the same inline parameter format as batch mode
+- Use Ctrl+D (or Ctrl+Z on Windows) to exit
+- Models remain loaded between generations for efficiency
+
+<details>
+<summary>日本語</summary>
+単一動画の生成に加えて、FramePackは現在、ファイルからのバッチ生成とインタラクティブなプロンプト入力をサポートしています。
+
+#### ファイルからのバッチモード
+
+テキストファイルに保存されたプロンプトから複数の動画を生成します：
+
+```bash
+python fpack_generate_video.py --from_file prompts.txt 
+--dit path/to/dit_model --vae path/to/vae_model.safetensors 
+--text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
+--image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
+```
+
+プロンプトファイルの形式（サンプルは英語ドキュメントを参照）：
+- 1行に1つのプロンプト
+- 空行や#で始まる行は無視されます（コメント）
+- 各行にはコマンドライン形式でプロンプト固有のパラメータを含めることができます：
+
+サポートされているインラインパラメータ（省略した場合、コマンドラインのデフォルト値が使用されます）
+- `--w`: 幅
+- `--h`: 高さ
+- `--f`: 動画の秒数
+- `--d`: シード
+- `--s`: 推論ステップ
+- `--g` または `--l`: ガイダンススケール
+- `--i`: 画像パス（開始画像用）
+- `--im`: 画像マスクパス
+- `--n`: ネガティブプロンプト
+- `--vs`: 動画セクション数
+- `--ei`: 終了画像パス（1フレーム推論では複数指定可）
+- `--eim`: 終了画像マスクパス（1フレーム推論では複数指定可）
+- `--of`: 1フレーム推論モードオプション（コマンドラインの`--one_frame_inference`と同様）
+
+バッチモードでは、モデルは一度だけロードされ、すべてのプロンプトで再利用されるため、複数回の単一実行と比較して全体的な生成時間が大幅に改善されます。
+
+#### インタラクティブモード
+
+プロンプトを入力するためのインタラクティブなコマンドラインインターフェース：
+
+```bash
+python fpack_generate_video.py --interactive
+--dit path/to/dit_model --vae path/to/vae_model.safetensors 
+--text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
+--image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
+```
+
+インタラクティブモードでは：
+- コマンドラインで直接プロンプトを入力
+- バッチモードと同じインラインパラメータ形式を使用
+- 終了するには Ctrl+D (Windowsでは Ctrl+Z) を使用
+- 効率のため、モデルは生成間で読み込まれたままになります
 </details>
 
 ## Advanced Video Control Features (Experimental) / 高度なビデオ制御機能（実験的）
@@ -529,10 +641,12 @@ The `--one_frame_inference` option is recommended to be set to `zero_post` or `n
 
 You can specify the following strings in the `--one_frame_inference` option, separated by commas:
 
--   `zero_post`: Generates with the clean latents' post (previous frame's latent representation) set to zero vectors.
+-   `zero_post`: Generates with the clean latents post (previous generated frame's latent representation) set to zero vectors.
 -   `no_2x`: Generates without passing clean latents 2x to the model. Slightly improves generation speed. The impact on generation results is unknown.
 -   `no_4x`: Generates without passing clean latents 4x to the model. Slightly improves generation speed. The impact on generation results is unknown.
--   `no_post`: Generates without passing clean latents' post (previous frame's latent representation) to the model. Improves generation speed by about 20%, but may result in unstable generation. This option cannot be specified in the kisekaechi method, described later.
+-   `no_post`: Generates without passing clean latents post to the model. Improves generation speed by about 20%, but may result in unstable generation. This option cannot be specified in the kisekaechi method, described later.
+
+The `kisekaeichi` method, described later, allows for more detailed control using additional parameters like `target_index`, `start_index`, and `history_index` within this option.
 
 Even when passing clean latents 2x, clean latents 4x, or post, the values are zero vectors, but the results may differ depending on whether or not values are passed. In particular, specifying `no_post` may lead to unstable generation results when `latent_window_size` is increased.
 
@@ -562,10 +676,12 @@ If you specify a value greater than 1 for `--video_sections`, multiple images wi
 
 `--one_frame_inference`のオプションには、カンマ区切りで以下の文字列を任意個数指定できます。
 
-- `zero_post`: clean latents の post （前フレームの潜在表現）をゼロベクトルにして生成します。
+- `zero_post`: clean latents の post （前に生成されたフレームの潜在表現）をゼロベクトルにして生成します。
 - `no_2x`: clean latents 2xをモデルに渡さずに生成します。わずかに生成速度が向上します。生成結果への影響は不明です。
 - `no_4x`: clean latents 4xをモデルに渡さずに生成します。わずかに生成速度が向上します。生成結果への影響は不明です。
 -  `no_post`: clean latents の post を渡さずに生成します。生成速度が20%程度向上しますが、生成結果が不安定になる場合があります。後述のkisekaechi方式では指定できません。
+
+後述のkisekaeichi方式では、このオプション内で `target_index`、`start_index`、`history_index` といった追加のパラメータを指定して、より詳細な制御が可能です。
 
 clean latents 2x、clean latents 4x、postをモデルに渡す場合でも値はゼロベクトルですが、値を渡すか否かで結果は変わります。特に`no_post`を指定すると、`latent_window_size`を大きくすると生成結果が不安定になる場合があります。
 
@@ -587,24 +703,27 @@ The generated samples can be found in the pull request [#284](https://github.com
 
 It is expected to work only with FramePack (non-F1 model) and not with F1 models.
 
-The following options have been added to `--one_frame_inference` for kisekaeichi. They can be used in conjunction with existing flags like `no_2x`, `no_4x`, and `no_post`.
+The following options have been added to `--one_frame_inference` for kisekaeichi. They can be used in conjunction with existing flags like `no_2x`, `no_4x`. Note that `no_post` cannot be used with this method.
 
 -   `target_index=<integer>`: Specifies the index of the image to be generated. The default is the last frame (=latent_window_size).
--   `history_index=<integer>`: Specifies the index of the clean latent post to be referenced. The default is the last frame + 1 (=latent_window_size + 1).
+-   `start_index=<integer>`: Specifies the index of the starting image's clean latent. Default is 0.
+-   `history_index=<integer_or_semicolon_separated_integers>`: Specifies the index(es) of the clean latent post for the reference (end) image(s). The default is typically related to `latent_window_size + 1`.
+    *   If a single integer is provided (e.g., `history_index=13`), it applies to all end images.
+    *   If multiple integers are provided, separated by semicolons (e.g., `history_index="13;14"`), they are applied to corresponding end images in order. If the number of specified indices is less than the number of end images, the last index is applied to the remaining end images.
 
 Additionally, the following command-line options have been added. These arguments are only valid when `--one_frame_inference` is specified.
 
 -   `--image_mask_path <path>`: Specifies the path to a grayscale mask to be applied to the starting image. The 255 areas remain as they are, while the 0 areas are overwritten.
--   `--end_image_mask_path <path>`: Specifies the path to a grayscale mask to be applied to the ending image. The 255 areas are referenced, while the 0 areas are ignored.
+-   `--end_image_mask_path <path1> [<path2> ...]` : Specifies the path(s) to grayscale mask(s) to be applied to the ending image(s). Provide one or more paths separated by spaces. Each mask is applied to the corresponding end image. The 255 areas are referenced, while the 0 areas are ignored.
 
 Example:
 
 ```bash
---video_sections 1 --output_type latent_images --image_path img.png --end_image_path end_img.png \
---one_frame_inference target_index=1,history_index=13 --image_mask_path mask.png --end_image_mask_path end_mask.png
+--video_sections 1 --output_type latent_images --image_path img.png --end_image_path end_img1.png end_img2.png \
+--one_frame_inference target_index=1,start_index=0,history_index=13;14 --image_mask_path mask.png --end_image_mask_path end_mask1.png end_mask2.png
 ```
 
-The optimal values for `target_index` and `history_index` are unknown. Specify a value greater than or equal to 1 for `target_index`, and a value smaller than `history_index`. Specifying 1 may result in less change from the starting image, but it may also introduce noise. Specifying 9 or 13 may improve noise but increase changes from the original image.
+The optimal values for `target_index`, `start_index`, and `history_index` are unknown. Specify a value greater than or equal to 1 for `target_index`. `start_index` is typically 0. For `history_index`, ensure it's appropriate for the `latent_window_size`. Specifying 1 for `target_index` may result in less change from the starting image, but it may also introduce noise. Specifying 9 or 13 may improve noise but increase changes from the original image.
 
 The `history_index` should be specified as a value greater than `target_index`. Values around 13 to 16 may be good.
 
@@ -618,24 +737,27 @@ The `history_index` should be specified as a value greater than `target_index`. 
 
 FramePack無印のみ動作し、F1モデルでは動作しないと思われます。
 
-kisekaeichi用に `--one_frame_inference`に以下のオプションが追加されています。`no_2x`や`no_4x`、`no_post`など既存のフラグと併用できます。
+kisekaeichi用に `--one_frame_inference`に以下のオプションが追加されています。`no_2x`や`no_4x`など既存のフラグと併用できます。この方式では`no_post`は使用できません。
 
 - `target_index=<整数>`: 生成する画像のindexを指定します。デフォルトは最後のフレームです（=latent_window_size）。
-- `history_index=<整数>`: 参照するclean latent postのindexを指定します。デフォルトは最後のフレーム+1です（=latent_window_size+1）。
+- `start_index=<整数>`: 開始画像のclean latentのindexを指定します。デフォルトは0です。
+- `history_index=<整数またはセミコロン区切りの整数>`: 参照する終了画像のclean latent postのインデックスを指定します。デフォルトは通常 `latent_window_size + 1` に関連する値です。
+    *   単一の整数を指定した場合（例: `history_index=13`）、全ての終了画像に同じインデックスが適用されます。
+    *   セミコロン区切りで複数の整数（例: `history_index="13;14"`）を指定した場合、各終了画像に順番に対応するインデックスが適用されます。指定したインデックスの数が終了画像の数より少ない場合、最後のインデックスが残りの終了画像に適用されます。
 
 またコマンドラインオプションに以下が追加されています。これらの引数は`--one_frame_inference`を指定した場合のみ有効です。
 
 - `--image_mask_path <パス>`: 開始画像に適用するグレースケールマスクのパスを指定します。255の部分がそのまま残る部分、0の部分が書き換えられる部分です。
-- `--end_image_mask_path <パス>`: 終了画像に適用するグレースケールマスクのパスを指定します。255の部分が参照される部分、0の部分が無視される部分です。
+- `--end_image_mask_path <パス1> [<パス2> ...]` : 終了画像に適用するグレースケールマスクのパスを1つ以上、スペース区切りで指定します。各マスクは対応する終了画像に適用されます。255の部分が参照される部分、0の部分が無視される部分です。
 
 例:
 
 ```bash
---video_sections 1 --output_type latent_images --image_path img.png --end_image_path end_img.png \
---one_frame_inference target_index=1,history_index=13 --image_mask_path mask.png --end_image_mask_path end_mask.png
+--video_sections 1 --output_type latent_images --image_path img.png --end_image_path end_img1.png end_img2.png \
+--one_frame_inference target_index=1,start_index=0,history_index="13;14" --image_mask_path mask.png --end_image_mask_path end_mask1.png end_mask2.png
 ```
 
-`target_index`と`history_index`の最適値は不明です。`target_index`は1以上、`history_index`より小さい値を指定してください。1だと開始画像からの変化が少なくなりますが、ノイズが乗ったりすることが多いようです。9や13などを指定するとノイズは改善されるかもしれませんが、元の画像からの変化が大きくなります。
+`target_index`、`start_index`、`history_index`の最適値は不明です。`target_index`は1以上を指定してください。`start_index`は通常0です。`history_index`は`latent_window_size`に対して適切な値を指定してください。`target_index`に1を指定すると開始画像からの変化が少なくなりますが、ノイズが乗ったりすることが多いようです。9や13などを指定するとノイズは改善されるかもしれませんが、元の画像からの変化が大きくなります。
 
 `history_index`は`target_index`より大きい値を指定してください。13~16程度が良いかもしれません。
 

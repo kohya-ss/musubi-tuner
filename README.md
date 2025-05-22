@@ -55,6 +55,9 @@ My general code and Musubi Tuner code is licensed Apache 2.0. Other projects inc
 
 ## Table of Contents
 
+<details>
+<summary>Click to expand</summary>
+
 - [Musubi Tuner](#musubi-tuner)
   - [Table of Contents](#table-of-contents)
   - [Introduction](#introduction)
@@ -89,6 +92,8 @@ My general code and Musubi Tuner code is licensed Apache 2.0. Other projects inc
   - [Contributing](#contributing)
   - [License](#license)
 
+</details>
+
 ## Introduction
 
 This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1 and FramePack architectures. 
@@ -106,6 +111,12 @@ If you find this project helpful, please consider supporting its development via
 ### Recent Updates
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- May 22, 2025:
+    - In the inference script of FramePack, the following changes were made:
+        - **Breaking change**: When saving images in single frame inference, subdirectories are no longer created.
+        - Added support for batch and interactive modes. In batch mode, prompts are read from a file and generated. In interactive mode, prompts are specified from the command line. See [FramePack documentation](./docs/framepack.md#batch-and-interactive-modes--バッチモードとインタラクティブモード) for details.
+        - Added support for specifying multiple reference images in kisekaeichi method. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
 
 - May 17, 2025 update 1:
     - Fixed a bug where specifying `--max_data_loader_n_workers` as 2 or more caused data duplication or omission within a single epoch. PR [#287](https://github.com/kohya-ss/musubi-tuner/pull/287),  issue [#283](https://github.com/kohya-ss/musubi-tuner/issues/283)

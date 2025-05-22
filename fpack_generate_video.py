@@ -52,7 +52,7 @@ logger = BlissfulLogger(__name__, "green")
 class GenerationSettings:
     def __init__(self, device: torch.device, dit_weight_dtype: Optional[torch.dtype] = None):
         self.device = device
-        self.dit_weight_dtype = dit_weight_dtype
+        self.dit_weight_dtype = dit_weight_dtype  # not used currently because model may be optimized
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,6 +129,7 @@ def parse_args() -> argparse.Namespace:
         "--end_image_mask_path",
         type=str,
         default=None,
+        nargs="*",
         help="path to end (reference) image mask for one frame inference. If specified, it will be used as mask for end image.",
     )
     parser.add_argument("--fps", type=int, default=30, help="video fps, default is 30")
@@ -146,7 +147,7 @@ def parse_args() -> argparse.Namespace:
         "--guidance_scale",
         type=float,
         default=1.0,
-        help="Guidance scale for classifier free guidance. Default is 1.0, should not change.",
+        help="Guidance scale for classifier free guidance. Default is 1.0 (no guidance), should not change.",
     )
     parser.add_argument("--guidance_rescale", type=float, default=0.0, help="CFG Re-scale, default is 0.0. Should not change.")
     # parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
@@ -156,7 +157,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to image for image2video inference. If `;;;` is used, it will be used as section images. The notation is same as `--prompt`.",
     )
-    parser.add_argument("--end_image_path", type=str, default=None, help="path to end image for image2video inference")
+    parser.add_argument("--end_image_path", type=str, nargs="*", default=None, help="path to end image for image2video inference")
     parser.add_argument(
         "--latent_paddings",
         type=str,
@@ -252,6 +253,9 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
 
     # Create dictionary of overrides
     overrides = {"prompt": prompt}
+    # Initialize end_image_path and end_image_mask_path as a list to accommodate multiple paths
+    overrides["end_image_path"] = []
+    overrides["end_image_mask_path"] = []
 
     for part in parts[1:]:
         if not part.strip():
@@ -277,10 +281,26 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         #     overrides["flow_shift"] = float(value)
         elif option == "i":
             overrides["image_path"] = value
-        elif option == "cn":
-            overrides["control_path"] = value
+        elif option == "im":
+            overrides["image_mask_path"] = value
+        # elif option == "cn":
+        #     overrides["control_path"] = value
         elif option == "n":
             overrides["negative_prompt"] = value
+        elif option == "vs":  # video_sections
+            overrides["video_sections"] = int(value)
+        elif option == "ei":  # end_image_path
+            overrides["end_image_path"].append(value)
+        elif option == "eim":  # end_image_mask_path
+            overrides["end_image_mask_path"].append(value)
+        elif option == "of":  # one_frame_inference
+            overrides["one_frame_inference"] = value
+
+    # If no end_image_path was provided, remove the empty list
+    if not overrides["end_image_path"]:
+        del overrides["end_image_path"]
+    if not overrides["end_image_mask_path"]:
+        del overrides["end_image_mask_path"]
 
     return overrides
 
@@ -489,8 +509,7 @@ def prepare_i2v_inputs(
     args: argparse.Namespace,
     device: torch.device,
     vae: AutoencoderKLCausal3D,
-    encoded_context: Optional[Dict] = None,
-    encoded_context_n: Optional[Dict] = None,
+    shared_models: Optional[Dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
     """Prepare inputs for I2V
 
@@ -499,7 +518,7 @@ def prepare_i2v_inputs(
         config: model configuration
         device: device to use
         vae: VAE model, used for image encoding
-        encoded_context: Pre-encoded text context
+        shared_models: dictionary containing pre-loaded models
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
@@ -564,81 +583,88 @@ def prepare_i2v_inputs(
         img_tensor, img_np = preprocess_image(image_path)
         section_images[index] = (img_tensor, img_np)
 
-    if args.end_image_path is not None:
-        end_img_tensor, end_img_np = preprocess_image(args.end_image_path)
+    # check end images
+    if args.end_image_path is not None and len(args.end_image_path) > 0:
+        end_image_tensors = []
+        for end_img_path in args.end_image_path:
+            end_image_tensor, _ = preprocess_image(end_img_path)
+            end_image_tensors.append(end_image_tensor)
     else:
-        end_img_tensor, end_img_np = None, None
+        end_image_tensors = None
 
     # configure negative prompt
     n_prompt = args.negative_prompt if args.negative_prompt else ""
 
-    if encoded_context is None:
-        # parse section prompts
-        section_prompts = parse_section_strings(args.prompt)
+    # parse section prompts
+    section_prompts = parse_section_strings(args.prompt)
 
-        # load text encoder
+    # load text encoder
+    if shared_models is not None:
+        tokenizer1, text_encoder1 = shared_models["tokenizer1"], shared_models["text_encoder1"]
+        tokenizer2, text_encoder2 = shared_models["tokenizer2"], shared_models["text_encoder2"]
+        text_encoder1.to(device)
+    else:
         tokenizer1, text_encoder1 = load_text_encoder1(args, args.fp8_llm, device)
         tokenizer2, text_encoder2 = load_text_encoder2(args)
-        text_encoder2.to(device)
+    text_encoder2.to(device)
 
-        logger.info(f"Encoding prompt")
-        llama_vecs = {}
-        llama_attention_masks = {}
-        clip_l_poolers = {}
-        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
-            for index, prompt in section_prompts.items():
-                llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(
-                    prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
-                )
-                llama_vec = llama_vec.cpu()
-                clip_l_pooler = clip_l_pooler.cpu()
+    logger.info(f"Encoding prompt")
+    llama_vecs = {}
+    llama_attention_masks = {}
+    clip_l_poolers = {}
+    with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+        for index, prompt in section_prompts.items():
+            llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(
+                prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
+            )
+            llama_vec = llama_vec.cpu()
+            clip_l_pooler = clip_l_pooler.cpu()
 
-                llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
+            llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
 
-                llama_vecs[index] = llama_vec
-                llama_attention_masks[index] = llama_attention_mask
-                clip_l_poolers[index] = clip_l_pooler
+            llama_vecs[index] = llama_vec
+            llama_attention_masks[index] = llama_attention_mask
+            clip_l_poolers[index] = clip_l_pooler
 
-        if args.guidance_scale == 1.0:
-            llama_vec_n, clip_l_pooler_n = torch.zeros_like(llama_vecs[0]), torch.zeros_like(clip_l_poolers[0])
-        else:
-            with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
-                llama_vec_n, clip_l_pooler_n = hunyuan.encode_prompt_conds(
-                    n_prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
-                )
-                llama_vec_n = llama_vec_n.cpu()
-                clip_l_pooler_n = clip_l_pooler_n.cpu()
-
-        llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
-
-        # free text encoder and clean memory
-        del text_encoder1, text_encoder2, tokenizer1, tokenizer2
-        clean_memory_on_device(device)
-
-        # load image encoder
-        feature_extractor, image_encoder = load_image_encoders(args)
-        image_encoder.to(device)
-
-        # encode image with image encoder
-        section_image_encoder_last_hidden_states = {}
-        for index, (img_tensor, img_np) in section_images.items():
-            with torch.no_grad():
-                image_encoder_output = hf_clip_vision_encode(img_np, feature_extractor, image_encoder)
-            image_encoder_last_hidden_state = image_encoder_output.last_hidden_state.cpu()
-            section_image_encoder_last_hidden_states[index] = image_encoder_last_hidden_state
-
-        # free image encoder and clean memory
-        del image_encoder, feature_extractor
-        clean_memory_on_device(device)
+    if args.guidance_scale == 1.0:
+        llama_vec_n, clip_l_pooler_n = torch.zeros_like(llama_vecs[0]), torch.zeros_like(clip_l_poolers[0])
     else:
-        # Use pre-encoded context
-        llama_vecs = encoded_context["llama_vecs"]
-        llama_attention_masks = encoded_context["llama_attention_masks"]
-        clip_l_poolers = encoded_context["clip_l_poolers"]
-        llama_vec_n = encoded_context_n["llama_vec"]
-        llama_attention_mask_n = encoded_context_n["llama_attention_mask"]
-        clip_l_pooler_n = encoded_context_n["clip_l_pooler"]
-        image_encoder_last_hidden_state = encoded_context["image_encoder_last_hidden_state"]
+        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+            llama_vec_n, clip_l_pooler_n = hunyuan.encode_prompt_conds(
+                n_prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
+            )
+            llama_vec_n = llama_vec_n.cpu()
+            clip_l_pooler_n = clip_l_pooler_n.cpu()
+
+    llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
+
+    # free text encoder and clean memory
+    if shared_models is not None:  # if shared models are used, do not free them but move to CPU
+        text_encoder1.to("cpu")
+        text_encoder2.to("cpu")
+    del tokenizer1, text_encoder1, tokenizer2, text_encoder2  # do not free shared models
+    clean_memory_on_device(device)
+
+    # load image encoder
+    if shared_models is not None:
+        feature_extractor, image_encoder = shared_models["feature_extractor"], shared_models["image_encoder"]
+    else:
+        feature_extractor, image_encoder = load_image_encoders(args)
+    image_encoder.to(device)
+
+    # encode image with image encoder
+    section_image_encoder_last_hidden_states = {}
+    for index, (img_tensor, img_np) in section_images.items():
+        with torch.no_grad():
+            image_encoder_output = hf_clip_vision_encode(img_np, feature_extractor, image_encoder)
+        image_encoder_last_hidden_state = image_encoder_output.last_hidden_state.cpu()
+        section_image_encoder_last_hidden_states[index] = image_encoder_last_hidden_state
+
+    # free image encoder and clean memory
+    if shared_models is not None:
+        image_encoder.to("cpu")
+    del image_encoder, feature_extractor
+    clean_memory_on_device(device)
 
     # VAE encoding
     logger.info(f"Encoding image to latent space")
@@ -649,7 +675,14 @@ def prepare_i2v_inputs(
         start_latent = hunyuan.vae_encode(img_tensor, vae).cpu()
         section_start_latents[index] = start_latent
 
-    end_latent = hunyuan.vae_encode(end_img_tensor, vae).cpu() if end_img_tensor is not None else None
+    # end_latent = hunyuan.vae_encode(end_image_tensor, vae).cpu() if end_image_tensor is not None else None
+    if end_image_tensors is not None:
+        end_latents = []
+        for end_image_tensor in end_image_tensors:
+            end_latent = hunyuan.vae_encode(end_image_tensor, vae).cpu()
+            end_latents.append(end_latent)
+    else:
+        end_latents = None
 
     vae.to("cpu")  # move VAE to CPU to save memory
     clean_memory_on_device(device)
@@ -686,7 +719,7 @@ def prepare_i2v_inputs(
         }
         arg_c_img[index] = arg_c_img_i
 
-    return height, width, video_seconds, arg_c, arg_null, arg_c_img, end_latent
+    return height, width, video_seconds, arg_c, arg_null, arg_c_img, end_latents
 
 
 # def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> Tuple[Any, torch.Tensor]:
@@ -884,15 +917,17 @@ def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, 
     return new_lora_sd
 
 
-def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_models: Optional[Dict] = None) -> torch.Tensor:
+def generate(
+    args: argparse.Namespace, gen_settings: GenerationSettings, shared_models: Optional[Dict] = None
+) -> tuple[AutoencoderKLCausal3D, torch.Tensor]:
     """main function for generation
 
     Args:
         args: command line arguments
-        shared_models: dictionary containing pre-loaded models and encoded data
+        shared_models: dictionary containing pre-loaded models
 
     Returns:
-        torch.Tensor: generated latent
+        tuple: (AutoencoderKLCausal3D model (vae), torch.Tensor generated latent)
     """
     device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
 
@@ -904,33 +939,38 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
     if shared_models is not None:
         # Use shared models and encoded data
         vae = shared_models.get("vae")
-        model = shared_models.get("model")
-        encoded_context = shared_models.get("encoded_contexts", {}).get(args.prompt)
-        n_prompt = args.negative_prompt if args.negative_prompt else ""
-        encoded_context_n = shared_models.get("encoded_contexts", {}).get(n_prompt)
-
-        height, width, video_seconds, context, context_null, context_img, end_latent = prepare_i2v_inputs(
-            args, device, vae, encoded_context, encoded_context_n
+        height, width, video_seconds, context, context_null, context_img, end_latents = prepare_i2v_inputs(
+            args, device, vae, shared_models
         )
     else:
         # prepare inputs without shared models
         vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device)
-        height, width, video_seconds, context, context_null, context_img, end_latent = prepare_i2v_inputs(args, device, vae)
+        height, width, video_seconds, context, context_null, context_img, end_latents = prepare_i2v_inputs(args, device, vae)
 
+    if shared_models is None or "model" not in shared_models:
         # load DiT model
         model = load_dit_model(args, device)
 
         # merge LoRA weights
         if args.lora_weight is not None and len(args.lora_weight) > 0:
-            merge_lora_weights(
-                lora_framepack, model, args, device, convert_lora_for_framepack
-            )  # ugly hack to common merge_lora_weights function
+            # ugly hack to common merge_lora_weights function
+            merge_lora_weights(lora_framepack, model, args, device, convert_lora_for_framepack)
+
             # if we only want to save the model, we can skip the rest
             if args.save_merged_model:
                 return None, None
 
         # optimize model: fp8 conversion, block swap etc.
         optimize_model(model, args, device)
+
+        if shared_models is not None:
+            shared_models["model"] = model
+    else:
+        # use shared model
+        model: HunyuanVideoTransformer3DModelPacked = shared_models["model"]
+        model.move_to_device_except_swap_blocks(device)
+        model.prepare_block_swap_before_forward()
+
     if args.preview_latent_every:
         previewer = LatentPreviewer(args, None, None, model.device, model.dtype, model_type="framepack")
     # sampling
@@ -959,9 +999,10 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
     # prepare history latents
     history_latents = torch.zeros((1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=torch.float32)
-    if end_latent is not None and not f1_mode:
-        logger.info(f"Use end image: {args.end_image_path}")
-        history_latents[:, :, 0:1] = end_latent.to(history_latents)
+    if end_latents is not None and not f1_mode:
+        logger.info(f"Use end image(s): {args.end_image_path}")
+        for i, end_latent in enumerate(end_latents):
+            history_latents[:, :, i + 1 : i + 2] = end_latent.to(history_latents)
 
     # prepare clean latents and indices
     if not f1_mode:
@@ -1069,6 +1110,12 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
             )
             clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
 
+            if end_latents is not None:
+                clean_latents = torch.cat([clean_latents_pre, history_latents[:, :, : len(end_latents)]], dim=2)
+                clean_latent_indices_extended = torch.zeros(1, 1 + len(end_latents), dtype=clean_latent_indices.dtype)
+                clean_latent_indices_extended[:, :2] = clean_latent_indices
+                clean_latent_indices = clean_latent_indices_extended
+
         else:
             # F1 mode
             indices = torch.arange(0, sum([1, 16, 2, 1, latent_window_size])).unsqueeze(0)
@@ -1136,20 +1183,36 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
                 mask_image = get_latent_mask(args.image_mask_path)
                 logger.info(f"Apply mask for clean latents (start image): {args.image_mask_path}, shape: {mask_image.shape}")
                 clean_latents[:, :, 0, :, :] = clean_latents[:, :, 0, :, :] * mask_image
-            if args.end_image_mask_path is not None:
-                mask_image = get_latent_mask(args.end_image_mask_path)
-                logger.info(f"Apply mask for clean latents 1x (end image): {args.end_image_mask_path}, shape: {mask_image.shape}")
-                clean_latents[:, :, 1, :, :] = clean_latents[:, :, 1, :, :] * mask_image
+            if args.end_image_mask_path is not None and len(args.end_image_mask_path) > 0:
+                # # apply mask for clean latents 1x (end image)
+                count = min(len(args.end_image_mask_path), len(end_latents))
+                for i in range(count):
+                    mask_image = get_latent_mask(args.end_image_mask_path[i])
+                    logger.info(
+                        f"Apply mask for clean latents 1x (end image) for {i+1}: {args.end_image_mask_path[i]}, shape: {mask_image.shape}"
+                    )
+                    clean_latents[:, :, i + 1 : i + 2, :, :] = clean_latents[:, :, i + 1 : i + 2, :, :] * mask_image
 
             for one_frame_param in one_frame_inference:
                 if one_frame_param.startswith("target_index="):
                     target_index = int(one_frame_param.split("=")[1])
                     latent_indices[:, 0] = target_index
-                    logger.info(f"Set index for clean latents (start image): {target_index}")
+                    logger.info(f"Set index for target: {target_index}")
+                elif one_frame_param.startswith("start_index="):
+                    start_index = int(one_frame_param.split("=")[1])
+                    clean_latent_indices[:, 0] = start_index
+                    logger.info(f"Set index for clean latent pre (start image): {start_index}")
                 elif one_frame_param.startswith("history_index="):
-                    history_index = int(one_frame_param.split("=")[1])
-                    clean_latent_indices[:, 1] = history_index
-                    logger.info(f"Set index for clean latents 1x (end image): {history_index}")
+                    history_indices = one_frame_param.split("=")[1].split(";")
+                    i = 0
+                    while i < len(history_indices) and i < len(end_latents):
+                        history_index = int(history_indices[i])
+                        clean_latent_indices[:, 1 + i] = history_index
+                        i += 1
+                    while i < len(end_latents):
+                        clean_latent_indices[:, 1 + i] = history_index
+                        i += 1
+                    logger.info(f"Set index for clean latent post (end image): {history_indices}")
 
             if "no_2x" in one_frame_inference:
                 clean_latents_2x = None
@@ -1169,7 +1232,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
                 logger.info(f"Zero out clean_latents post")
 
             logger.info(
-                f"One frame inference. latent_indices: {latent_indices}, clean_latent_indices: {clean_latent_indices}, num_frames: {sample_num_frames}"
+                f"One frame inference. clean_latent: {clean_latents.shape} latent_indices: {latent_indices}, clean_latent_indices: {clean_latent_indices}, num_frames: {sample_num_frames}"
             )
 
         generated_latents = sample_hunyuan(
@@ -1243,10 +1306,11 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
     # Only clean up shared models if they were created within this function
     if shared_models is None:
-        # free memory
-        del model
-        # del scheduler
+        del model  # free memory
         synchronize_device(device)
+    else:
+        # move model to CPU to save memory
+        model.to("cpu")
 
     # wait for 5 seconds until block swap is done
     logger.info("Waiting for 5 seconds to finish block swap")
@@ -1355,7 +1419,8 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     image_name = f"{time_flag}_{seed}{original_name}"
     sample = sample.unsqueeze(0)
-    save_images_grid(sample, save_path, image_name, rescale=True)
+    one_frame_mode = args.one_frame_inference is not None
+    save_images_grid(sample, save_path, image_name, rescale=True, create_subdir=not one_frame_mode)
     logger.info(f"Sample images saved to: {save_path}/{image_name}")
 
     return f"{save_path}/{image_name}"
@@ -1427,6 +1492,143 @@ def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Na
         prompts_data.append(prompt_data)
 
     return prompts_data
+
+
+def load_shared_models(args: argparse.Namespace) -> Dict:
+    """Load shared models for batch processing or interactive mode.
+    Models are loaded to CPU to save memory.
+
+    Args:
+        args: Base command line arguments
+
+    Returns:
+        Dict: Dictionary of shared models
+    """
+    shared_models = {}
+    tokenizer1, text_encoder1 = load_text_encoder1(args, args.fp8_llm, "cpu")
+    tokenizer2, text_encoder2 = load_text_encoder2(args)
+    feature_extractor, image_encoder = load_image_encoders(args)
+    vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, "cpu")
+    shared_models["tokenizer1"] = tokenizer1
+    shared_models["text_encoder1"] = text_encoder1
+    shared_models["tokenizer2"] = tokenizer2
+    shared_models["text_encoder2"] = text_encoder2
+    shared_models["feature_extractor"] = feature_extractor
+    shared_models["image_encoder"] = image_encoder
+    shared_models["vae"] = vae
+
+    return shared_models
+
+
+def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) -> None:
+    """Process multiple prompts with model reuse
+
+    Args:
+        prompts_data: List of prompt data dictionaries
+        args: Base command line arguments
+    """
+    if not prompts_data:
+        logger.warning("No valid prompts found")
+        return
+
+    # 1. Load configuration
+    gen_settings = get_generation_settings(args)
+    device = gen_settings.device
+
+    # 2. Load models to CPU in advance except for VAE and DiT
+    shared_models = load_shared_models(args)
+
+    # 3. Generate for each prompt
+    all_latents = []
+    all_prompt_args = []
+
+    with torch.no_grad():
+        for prompt_data in prompts_data:
+            prompt = prompt_data["prompt"]
+            prompt_args = apply_overrides(args, prompt_data)
+            logger.info(f"Processing prompt: {prompt}")
+
+            try:
+                vae, latent = generate(prompt_args, gen_settings, shared_models)
+
+                # Save latent if needed
+                if args.output_type == "latent" or args.output_type == "both" or args.output_type == "latent_images":
+                    height, width = latent.shape[-2], latent.shape[-1]  # BCTHW
+                    height *= 8
+                    width *= 8
+                    save_latent(latent, prompt_args, height, width)
+
+                all_latents.append(latent)
+                all_prompt_args.append(prompt_args)
+            except Exception as e:
+                logger.error(f"Error processing prompt: {prompt}. Error: {e}")
+                continue
+
+    # 4. Free models
+    if "model" in shared_models:
+        del shared_models["model"]
+    del shared_models["tokenizer1"]
+    del shared_models["text_encoder1"]
+    del shared_models["tokenizer2"]
+    del shared_models["text_encoder2"]
+    del shared_models["feature_extractor"]
+    del shared_models["image_encoder"]
+
+    clean_memory_on_device(device)
+    synchronize_device(device)
+
+    # 5. Decode latents if needed
+    if args.output_type != "latent":
+        logger.info("Decoding latents to videos/images")
+        vae.to(device)
+
+        for i, (latent, prompt_args) in enumerate(zip(all_latents, all_prompt_args)):
+            logger.info(f"Decoding output {i+1}/{len(all_latents)}")
+
+            # avoid saving latents again (ugly hack)
+            if prompt_args.output_type == "both":
+                prompt_args.output_type = "video"
+            elif prompt_args.output_type == "latent_images":
+                prompt_args.output_type = "images"
+
+            save_output(prompt_args, vae, latent[0], device)
+
+
+def process_interactive(args: argparse.Namespace) -> None:
+    """Process prompts in interactive mode
+
+    Args:
+        args: Base command line arguments
+    """
+    gen_settings = get_generation_settings(args)
+    device = gen_settings.device
+    shared_models = load_shared_models(args)
+
+    print("Interactive mode. Enter prompts (Ctrl+D or Ctrl+Z (Windows) to exit):")
+
+    try:
+        while True:
+            try:
+                line = input("> ")
+                if not line.strip():
+                    continue
+
+                # Parse prompt
+                prompt_data = parse_prompt_line(line)
+                prompt_args = apply_overrides(args, prompt_data)
+
+                # Generate latent
+                vae, latent = generate(prompt_args, gen_settings, shared_models)
+
+                # Save latent and video
+                save_output(prompt_args, vae, latent[0], device)
+
+            except KeyboardInterrupt:
+                print("\nInterrupted. Continue (Ctrl+D or Ctrl+Z (Windows) to exit)")
+                continue
+
+    except EOFError:
+        print("\nExiting interactive mode")
 
 
 def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
@@ -1513,13 +1715,11 @@ def main():
 
         # Process prompts
         prompts_data = preprocess_prompts_for_batch(prompt_lines, args)
-        # process_batch_prompts(prompts_data, args)
-        raise NotImplementedError("Batch mode is not implemented yet.")
+        process_batch_prompts(prompts_data, args)
 
     elif args.interactive:
         # Interactive mode
-        # process_interactive(args)
-        raise NotImplementedError("Interactive mode is not implemented yet.")
+        process_interactive(args)
 
     else:
         # Single prompt mode (original behavior)
