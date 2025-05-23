@@ -297,7 +297,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder_2.eval()
 
     # encode prompt
-    logger.info("Encoding prompt with text encoder 1")
+    logger.info("Encoding with text encoder 1")
     text_encoder.to(device=device)
     if fp8_llm:
         with accelerator.autocast():
@@ -307,7 +307,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder = None
     clean_memory_on_device(device)
 
-    logger.info("Encoding prompt with text encoder 2")
+    logger.info("Encoding with text encoder 2")
     text_encoder_2.to(device=device)
     if args.prompt_2:
         prompt = args.prompt_2
@@ -559,7 +559,7 @@ def main():
         height, width, video_length = check_inputs(args)
 
         # encode prompt with LLM and Text Encoder
-        logger.info(f"Encoding prompt: {prompt}")
+        logger.info(f"Encoding prompt: '{prompt}'")
         do_classifier_free_guidance = args.guidance_scale != 1.0 or args.cfg_schedule is not None
         if do_classifier_free_guidance:
             if args.cfg_schedule is not None:
@@ -574,7 +574,7 @@ def main():
             if negative_prompt is None:
                 logger.info("Negative prompt is not provided, using empty prompt")
                 negative_prompt = ""
-            logger.info(f"Encoding negative prompt: {negative_prompt}")
+            logger.info(f"Encoding negative prompt: '{negative_prompt}'")
             prompt = [negative_prompt, prompt] if args.perp_neg is None else ["", negative_prompt, prompt]
         else:
             if args.negative_prompt is not None:
@@ -623,7 +623,6 @@ def main():
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
         loading_device = "cpu"  # if blocks_to_swap > 0 else device
 
-        logger.info(f"Loading DiT model from {args.dit}")
         if args.attn_mode == "sdpa":
             args.attn_mode = "torch"
 
@@ -719,7 +718,7 @@ def main():
                     param.to(dtype=dtype_to_use)
                 convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
         else:
-            transformer.scale_to_fp8(device, args.fp8_fast)
+            transformer.scale_to_fp8(device, loading_device, args.fp8_fast)
 
         if args.te_multiplier:
             llm_multiplier, clip_multiplier = args.te_multiplier

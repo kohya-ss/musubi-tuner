@@ -181,12 +181,12 @@ def prepare_v2v_noise(
     # 4) Build a [1, C, T, H_px, W_px] video tensor
     frame_tensors = []
     for arr in raw_frames:
-        t = TF.to_tensor(arr)                                   # [C, H_px, W_px], 0–1
+        t = TF.to_tensor(arr)                                   # [C, H, W], 0–1
         t = TF.resize(t, [computed_height, computed_width], interpolation=TF.InterpolationMode.BICUBIC)
         t = t.sub_(0.5).div_(0.5).to(device)                     # normalize to [-1,1]
         frame_tensors.append(t)
-    video = torch.stack(frame_tensors, dim=0)                   # [T, C, H_px, W_px]
-    video = video.permute(1, 0, 2, 3).unsqueeze(0)              # [1, C, T, H_px, W_px]
+    video = torch.stack(frame_tensors, dim=0)                   # [F, C, H, W]
+    video = video.permute(1, 0, 2, 3).unsqueeze(0)              # [1, C, F, H, W]
 
     # 5) Encode the entire video in one go to latent space
     vae.to_device(device)

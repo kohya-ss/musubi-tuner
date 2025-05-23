@@ -352,7 +352,6 @@ class FramePackNetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        logger.info(f"Loading DiT model from {dit_path}")
         device = accelerator.device
         model = load_packed_model(device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn)
         return model

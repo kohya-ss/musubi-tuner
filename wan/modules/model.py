@@ -110,6 +110,7 @@ def rope_apply_inplace_cached(x, grid_sizes, freqs_list):
 
     return x
 
+
 class WanRMSNorm(nn.Module):
 
     def __init__(self, dim, eps=1e-5):
@@ -663,7 +664,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.enable_gradient_checkpointing()
 
-        logger.info(f"WanModel: Gradient checkpointing enabled.")
+        logger.info("WanModel: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -671,7 +672,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-        logger.info(f"WanModel: Gradient checkpointing disabled.")
+        logger.info("WanModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
         self.blocks_to_swap = blocks_to_swap
@@ -692,13 +693,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            logger.info(f"WanModel: Block swap set to forward only.")
+            logger.info("WanModel: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            logger.info(f"WanModel: Block swap set to forward and backward.")
+            logger.info("WanModel: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -906,8 +907,13 @@ def load_wan_model(
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
+    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
+    wan_loading_device = torch.device("cpu") if fp8_scaled else loading_device
     with init_empty_weights():
-        logger.info(f"Initialize WanModel with rope_func={rope_func} and riflex_index={riflex_index}")
+        logger.info(f"Initialize WanModel from {dit_path}")
+        logger.info(f"    load_device={wan_loading_device}, compute_device={device}, dtype={dit_weight_dtype}")
+        logger.info(f"    attention_mode={attn_mode} (split_attn={split_attn})")
+        logger.info(f"    rope_func={rope_func}, riflex_index={riflex_index}")
         model = WanModel(
             model_type="i2v" if config.i2v else "t2v",
             dim=config.dim,
@@ -928,10 +934,6 @@ def load_wan_model(
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
 
-    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
-    wan_loading_device = torch.device("cpu") if fp8_scaled else loading_device
-    logger.info(f"Loading DiT model from {dit_path}, device={wan_loading_device}, dtype={dit_weight_dtype}")
-
     # load model weights with the specified dtype or as is
     sd = load_safetensors(dit_path, wan_loading_device, disable_mmap=True, dtype=dit_weight_dtype)
 
@@ -942,7 +944,7 @@ def load_wan_model(
 
     if fp8_scaled:
         # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
-        logger.info(f"Optimizing model weights to fp8. This may take a while.")
+        logger.info("Optimizing model weights to fp8. This may take a while.")
         sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
 
         if loading_device.type != "cpu":

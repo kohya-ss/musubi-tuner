@@ -20,7 +20,7 @@ from hunyuan_model.posemb_layers import get_nd_rotary_pos_embed
 from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.blissful_logger import BlissfulLogger
 from utils.safetensors_utils import MemoryEfficientSafeOpen
-logger = BlissfulLogger(__name__, "#8e00ed")
+logger = BlissfulLogger(__name__, "green")
 
 
 class MMDoubleStreamBlock(nn.Module):
@@ -536,7 +536,6 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
 
         self.attn_mode = attn_mode
         self.split_attn = split_attn
-        logger.info(f"Using {self.attn_mode} attention mode, split_attn: {self.split_attn}")
 
         # image projection
         self.img_in = PatchEmbed(self.patch_size, self.in_channels, self.hidden_size, **factory_kwargs)
@@ -624,13 +623,23 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def scale_to_fp8(self, device: torch.device, use_mmscaled: bool = False):
+    def scale_to_fp8(
+            self,
+            device: torch.device,
+            load_device: torch.device,
+            use_mmscaled: Optional[bool] = False):
+        move_to_device = str(load_device) != "cpu"
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
         logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if use_mmscaled else ''}...")
         state_dict = self.state_dict()
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=False)
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_mmscaled)
-        self.load_state_dict(state_dict, strict=True, assign=True)
+        if move_to_device:
+            logger.info(f"Moving weights to {load_device}")
+            for key in state_dict.keys():
+                state_dict[key] = state_dict[key].to(load_device)
+        info = self.load_state_dict(state_dict, strict=True, assign=True)
+        logger.info(f"FP8 optimization: {info}")
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -640,7 +649,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.double_blocks + self.single_blocks:
             block.enable_gradient_checkpointing()
 
-        logger.info(f"HYVideoDiffusionTransformer: Gradient checkpointing enabled.")
+        logger.info("HYVideoDiffusionTransformer: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -650,7 +659,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.double_blocks + self.single_blocks:
             block.disable_gradient_checkpointing()
 
-        logger.info(f"HYVideoDiffusionTransformer: Gradient checkpointing disabled.")
+        logger.info("HYVideoDiffusionTransformer: Gradient checkpointing disabled.")
 
     def enable_img_in_txt_in_offloading(self):
         self._enable_img_in_txt_in_offloading = True
@@ -682,14 +691,14 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self.offloader_double.set_forward_only(True)
             self.offloader_single.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            logger.info(f"HYVideoDiffusionTransformer: Block swap set to forward only.")
+            logger.info("HYVideoDiffusionTransformer: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader_double.set_forward_only(False)
             self.offloader_single.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            logger.info(f"HYVideoDiffusionTransformer: Block swap set to forward and backward.")
+            logger.info("HYVideoDiffusionTransformer: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -982,7 +991,9 @@ def load_transformer(dit_path, attn_mode, split_attn, load_device, main_device, 
     factor_kwargs = {"device": load_device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
     out_channels = latent_channels
-    logger.info(f"Initialize HYVideoDiffusionTransformer from {dit_path} with dtype {dtype}")
+    logger.info(f"Loading HYVideoDiffusionTransformer from {dit_path}")
+    logger.info(f"    load_device={load_device}, compute_device={main_device}, dtype={dtype}")
+    logger.info(f"    attention_mode={attn_mode} (split_attn={split_attn})")
     with accelerate.init_empty_weights():
         transformer = load_dit_model(
             text_states_dim=4096,
@@ -1003,11 +1014,12 @@ def load_transformer(dit_path, attn_mode, split_attn, load_device, main_device, 
                 # if k.startswith("model.model."):
                 #     k = convert_comfy_model_key(k)
                 state_dict[k] = tensor
-        transformer.load_state_dict(state_dict, strict=True, assign=True)
+        info = transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
         transformer = load_state_dict(transformer, dit_path)
     if fp8_scaled:
-        transformer.scale_to_fp8(main_device, fp8_fast)
+        transformer.scale_to_fp8(main_device, load_device, fp8_fast)
+    logger.info(f"Loaded DiT model from {dit_path}, info={info}")
     return transformer
 
 

@@ -1466,7 +1466,6 @@ class NetworkTrainer:
         self.blocks_to_swap = blocks_to_swap
         loading_device = "cpu" if blocks_to_swap > 0 else accelerator.device
 
-        #logger.info(f"Loading DiT model from {args.dit}")
         if args.sdpa:
             attn_mode = "torch"
         elif args.flash_attn:
@@ -1481,7 +1480,7 @@ class NetworkTrainer:
             raise ValueError(
                 "either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
             )
-        logger.info(f"DiT parameters: attn_mode: {attn_mode}, split_attn: {args.split_attn}")
+
         transformer = self.load_transformer(
             accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
         )

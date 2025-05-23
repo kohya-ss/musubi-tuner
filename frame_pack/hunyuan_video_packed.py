@@ -1961,9 +1961,12 @@ def load_packed_model(
         # sort by name and take the first one
         safetensor_files.sort()
         dit_path = safetensor_files[0]
-
+    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
+    dit_loading_device = torch.device("cpu") if fp8_scaled else loading_device
+    logger.info(f"Loading HunyuanVideoTransformer3DModelPacked from {dit_path}")
+    logger.info(f"    load_device={dit_loading_device}, compute_device={device}")
+    logger.info(f"    attention_mode={attn_mode} (split_attn={split_attn})")
     with init_empty_weights():
-        logger.info(f"Creating HunyuanVideoTransformer3DModelPacked")
         model = HunyuanVideoTransformer3DModelPacked(
             attention_head_dim=128,
             guidance_embeds=True,
@@ -1988,16 +1991,12 @@ def load_packed_model(
             split_attn=split_attn,
         )
 
-    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
-    dit_loading_device = torch.device("cpu") if fp8_scaled else loading_device
-    logger.info(f"Loading DiT model from {dit_path}, device={dit_loading_device}")
-
     # load model weights with the specified dtype or as is
     sd = load_split_weights(dit_path, device=dit_loading_device, disable_mmap=True)
 
     if fp8_scaled:
         # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
-        logger.info(f"Optimizing model weights to fp8. This may take a while.")
+        logger.info("Optimizing model weights to fp8. This may take a while.")
         sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
 
         if loading_device.type != "cpu":
