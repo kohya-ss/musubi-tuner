@@ -87,12 +87,12 @@ def main():
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(label, row, 0)
 
-        if key == "BT_PROMPT":
+        if key in ["BT_PROMPT", "BT_NEGATIVE_PROMPT"]:
             editor = QTextEdit()
             editor.setPlainText(metadata[key])
             # approximate height for 3 lines
             fh = editor.fontMetrics().lineSpacing()
-            editor.setFixedHeight(fh * 3 + 10)
+            editor.setFixedHeight(fh * 4 + 10)
         else:
             editor = QLineEdit(metadata[key])
 
