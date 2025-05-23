@@ -7,30 +7,34 @@ import torch.nn.functional as F
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
+
 try:
     import flash_attn
     from flash_attn.flash_attn_interface import _flash_attn_forward
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
     from flash_attn.flash_attn_interface import flash_attn_func
+    logger.info("Flash Attention is installed!")
 except ImportError:
+    logger.info("Flash Attention is not installed!")
     flash_attn = None
     flash_attn_varlen_func = None
     _flash_attn_forward = None
     flash_attn_func = None
 
 try:
-    logger.info(f"Trying to import sageattention")
     from sageattention import sageattn_varlen, sageattn
 
-    logger.info("Successfully imported sageattention")
+    logger.info("Sage Attention is installed!")
 except ImportError:
-    logger.warning(f"Failed to import sageattention")
+    logger.info("Sage Attention is not installed!")
     sageattn_varlen = None
     sageattn = None
 
 try:
     import xformers.ops as xops
+    logger.info("Xformers is installed!")
 except ImportError:
+    logger.info("Xformers is not installed!")
     xops = None
 
 MEMORY_LAYOUT = {

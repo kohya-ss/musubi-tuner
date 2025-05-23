@@ -25,18 +25,18 @@ try:
     # raise NotImplementedError
     from xformers.ops import memory_efficient_attention as xformers_attn_func
 
-    logger.info("Xformers is installed!")
+    # logger.info("Xformers is installed!")
 except:
-    logger.info("Xformers is not installed!")
+    # logger.info("Xformers is not installed!")
     xformers_attn_func = None
 
 try:
     # raise NotImplementedError
     from flash_attn import flash_attn_varlen_func, flash_attn_func
 
-    logger.info("Flash Attn is installed!")
+    # logger.info("Flash Attn is installed!")
 except:
-    logger.info("Flash Attn is not installed!")
+    # logger.info("Flash Attn is not installed!")
     flash_attn_varlen_func = None
     flash_attn_func = None
 
@@ -44,9 +44,9 @@ try:
     # raise NotImplementedError
     from sageattention import sageattn_varlen, sageattn
 
-    logger.info("Sage Attn is installed!")
+    # logger.info("Sage Attn is installed!")
 except:
-    logger.info("Sage Attn is not installed!")
+    # logger.info("Sage Attn is not installed!")
     sageattn_varlen = None
     sageattn = None
 

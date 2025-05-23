@@ -683,7 +683,7 @@ class LoRANetwork(torch.nn.Module):
         for future in futures:
             future.result()
 
-        logger.info(f"weights are merged")
+        #logger.info(f"weights are merged")
 
     def set_loraplus_lr_ratio(self, loraplus_lr_ratio):  # , loraplus_unet_lr_ratio, loraplus_text_encoder_lr_ratio):
         self.loraplus_lr_ratio = loraplus_lr_ratio
