@@ -24,7 +24,8 @@ parser.add_argument(
 )
 parser.add_argument("--convert", type=str, default=None)
 parser.add_argument("--inspect", action="store_true")
-parser.add_argument("--key_target", type=str)
+parser.add_argument("--target_keys", nargs="*", type=str, default=None)
+parser.add_argument("--exclude_keys", nargs="*", type=str, default=None)
 parser.add_argument("--weights_only", type=str, default="true")
 parser.add_argument("--dtype", type=str)
 args = parser.parse_args()
@@ -90,25 +91,29 @@ if args.convert is not None and os.path.exists(args.convert):
         exit()
 
 converted_state_dict = {}
-keys_to_process = (
-    [k for k in checkpoint if args.key_target in k] if args.key_target else checkpoint.keys()
-)
+keys_to_process = checkpoint.keys()
 dtypes_in_model = {}
 for key in tqdm(keys_to_process, desc="Processing tensors"):
+    is_target = args.target_keys is None or any(pattern in key for pattern in args.target_keys)
+    is_excluded = args.exclude_keys is not None and any(pattern in key for pattern in args.exclude_keys)
+    is_target = is_target and not is_excluded
     value = checkpoint[key]
-    if args.inspect:
+    if args.inspect and is_target:
         print(f"{key}: {value.shape} ({value.dtype})")
+
     dtype_to_use = (
         dtype_mapping.get(args.dtype.lower(), value.dtype)
         if args.dtype
         else value.dtype
     )
-    if dtype_to_use not in dtypes_in_model:
-        dtypes_in_model[dtype_to_use] = 1
-    else:
-        dtypes_in_model[dtype_to_use] += 1
+    final_dtype = dtype_to_use if is_target else value.dtype
     if args.convert:
-        converted_state_dict[key] = value.to(dtype_to_use)
+        print(f"{key} {final_dtype}")
+        converted_state_dict[key] = value.to(final_dtype)
+    if final_dtype not in dtypes_in_model:
+        dtypes_in_model[final_dtype] = 1
+    else:
+        dtypes_in_model[final_dtype] += 1
 
 
 print(f"Dtypes in model: {dtypes_in_model}")

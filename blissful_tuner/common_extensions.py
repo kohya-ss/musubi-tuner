@@ -9,6 +9,7 @@ import os
 import argparse
 import threading
 from typing import Tuple, Optional, Any
+from pynput import keyboard
 import torch
 import numpy as np
 from einops import rearrange
@@ -22,6 +23,27 @@ from blissful_tuner.video_processing_common import BlissfulVideoProcessor
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "#8e00ed")
+
+
+class BlissfulKeyboardManager():
+    def __init__(self):
+        self.early_exit_requested = False
+        self.listener = keyboard.Listener(
+            on_press=self.on_key_pressed
+        )
+        self.listener.start()
+        logger.info("Keyboard manager initialized!")
+
+    @property
+    def exit_requested(self):
+        return self.early_exit_requested
+
+    def on_key_pressed(self, key, injected):
+        if key == keyboard.Key.esc:
+            self.early_exit_requested = True
+            logger.info("Early exit requested! Will exit after this step completes!")
+            self.listener = None
+            return False  # Tells the keyboard thread to quit
 
 
 class BlissfulThreadManager():

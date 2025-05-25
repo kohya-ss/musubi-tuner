@@ -46,7 +46,7 @@ from blissful_tuner.utils import string_to_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
-from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata
+from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata, BlissfulKeyboardManager
 from dataset.image_video_dataset import load_video
 
 logger = BlissfulLogger(__name__, "green")
@@ -1077,6 +1077,7 @@ def run_sampling(
     latent = latent.to(latent_storage_device)
     if args.preview_latent_every:
         previewer = LatentPreviewer(args, noise, timesteps, model.device, model.dtype, model_type="wan")
+    km = BlissfulKeyboardManager()
     # cfg skip
     apply_cfg_array = []
     num_timesteps = len(timesteps)
@@ -1157,7 +1158,7 @@ def run_sampling(
                 skip_block_indices = None if not apply_slg else args.slg_layers  # If so set slg else None(implicit none anyway)
                 noise_pred_uncond = model(latent_model_input, timestep, skip_block_indices=skip_block_indices, **arg_null)[0].to(latent_storage_device)  # uncond
 
-                if args.perp_neg is not None:  # Are we using perpendicular negative?
+                if args.perp_neg is not None and not km.early_exit_requested:  # Are we using perpendicular negative?
                     noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond)[0].to(latent_storage_device)  # Then calculate nocond
                     noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)  # And update the noise_pred
                 elif args.cfgzerostar_scaling:  # No perp_neg, so CFGZero* scaling instead? (mutually exclusive)
@@ -1167,7 +1168,7 @@ def run_sampling(
 
                 if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
                     noise_pred *= 0  # Zero this step
-                elif apply_slg and args.slg_mode == "original":  # No need do traditional slg on zeroed steps so make it an elif
+                elif apply_slg and args.slg_mode == "original" and not km.eearly_exit_requested:  # No need do traditional slg on zeroed steps so make it an elif
                     # SLG original mode uses 3 model passes, cond, uncond, and uncond with layer skip
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
                     noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
@@ -1181,7 +1182,9 @@ def run_sampling(
 
             # update latent
             latent = temp_x0.squeeze(0)
-
+            if km.early_exit_requested:
+                latent = None
+                break
             if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
                 previewer.preview(latent, i)
 
@@ -1934,13 +1937,13 @@ def main():
         gc.collect()
         clean_memory_on_device(args.device)
 
-        # Save latent and video
-        if args.save_merged_model:
-            return
-
-        # Add batch dimension
-        latent = latent.unsqueeze(0)
-        save_output(latent[0], args, WAN_CONFIGS[args.task], height, width)
+        if latent is not None:
+            # Save latent and video
+            if args.save_merged_model:
+                return
+            # Add batch dimension
+            latent = latent.unsqueeze(0)
+            save_output(latent[0], args, WAN_CONFIGS[args.task], height, width)
 
     logger.info("Done!")
 

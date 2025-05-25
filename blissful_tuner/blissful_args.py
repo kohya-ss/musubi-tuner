@@ -7,6 +7,7 @@ Created on Sat Apr 26 15:11:58 2025
 """
 import sys
 import os
+import gc
 import argparse
 import random
 import torch
@@ -16,7 +17,7 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import process_wildcards
 logger = BlissfulLogger(__name__, "#8e00ed")
 
-BLISSFUL_VERSION = "0.7.66"
+BLISSFUL_VERSION = "0.8.66"
 
 CFG_SCHEDULE_HELP = """
 Comma-separated list of steps/ranges where CFG should be applied.
@@ -68,7 +69,9 @@ def get_current_version():
 def blissful_prefunc(args: argparse.Namespace):
     """Simple function to print about version, environment, and things"""
     cuda_list = [f"PyTorch: {torch.__version__}"]
+    gc.collect()
     if torch.cuda.is_available():
+        torch.cuda.empty_cache()
         allocator = torch.cuda.get_allocator_backend()
         cuda = torch.cuda.get_device_properties(0)
         cuda_list[0] += f", CUDA: {torch.version.cuda} CC: {cuda.major}.{cuda.minor}"
