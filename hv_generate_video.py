@@ -36,7 +36,7 @@ from utils.safetensors_utils import mem_eff_save_file
 from dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata
+from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata, BlissfulKeyboardManager
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
@@ -829,6 +829,7 @@ def main():
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
         if args.preview_latent_every:
             previewer = LatentPreviewer(args, original_latents=latents, timesteps=timesteps, device=device, dtype=dit_dtype, model_type="hunyuan")
+        km = BlissfulKeyboardManager()
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
@@ -890,6 +891,8 @@ def main():
                     batch_size = 1 if args.split_uncond else latents_input.shape[0]
                     noise_pred_list = []
                     for j in range(0, latents_input.shape[0], batch_size):
+                        if km.exit_requested:
+                            break
                         # pick the “cond” index (1) instead of uncond (0) when do_classifier_free_guidance is True but do_cfg_for_step is False
                         slice_idx = (j + 1) if (do_classifier_free_guidance and not do_cfg_for_step) else j
                         slice_end = slice_idx + batch_size
@@ -943,48 +946,52 @@ def main():
 
                 if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
                     previewer.preview(latents, i)
-
+                if km.early_exit_requested:
+                    latent = None
+                    break
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
-        latents = latents.detach().cpu()
+        latents = latents.detach().cpu() if latents is not None else None
         transformer = None
         clean_memory_on_device(device)
+        km.terminate()
 
-    # Save samples
-    output_type = args.output_type
-    save_path = args.save_path  # if args.save_path_suffix == "" else f"{args.save_path}_{args.save_path_suffix}"
-    os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+    if not km.early_exit_requested:
+        # Save samples
+        output_type = args.output_type
+        save_path = args.save_path  # if args.save_path_suffix == "" else f"{args.save_path}_{args.save_path_suffix}"
+        os.makedirs(save_path, exist_ok=True)
+        time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
 
-    if output_type == "latent" or output_type == "both":
-        # save latent
-        for i, latent in enumerate(latents):
-            latent_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}_latent.safetensors"
-            metadata = prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
-            sd = {"latent": latent}
-            save_file(sd, latent_path, metadata=metadata)
-            logger.info(f"Latent save to: {latent_path}")
+        if output_type == "latent" or output_type == "both":
+            # save latent
+            for i, latent in enumerate(latents):
+                latent_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}_latent.safetensors"
+                metadata = prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
+                sd = {"latent": latent}
+                save_file(sd, latent_path, metadata=metadata)
+                logger.info(f"Latent save to: {latent_path}")
 
-    if output_type == "video" or output_type == "both":
-        # save video
-        videos = decode_latents(args, latents, device)
-        for i, sample in enumerate(videos):
-            original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
-            sample = sample.unsqueeze(0)
-            video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            metadata = meta_keep[i] if meta_keep is not None else prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
-            save_videos_grid_advanced(sample, video_path, args, metadata=metadata)
-            logger.info(f"Sample save to: {video_path}")
-    elif output_type == "images":
-        # save images
-        videos = decode_latents(args, latents, device)
-        for i, sample in enumerate(videos):
-            original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
-            sample = sample.unsqueeze(0)
-            image_name = f"{time_flag}_{i}_{seeds[i]}{original_name}"
-            save_images_grid(sample, save_path, image_name)
-            logger.info(f"Sample images save to: {save_path}/{image_name}")
+        if output_type == "video" or output_type == "both":
+            # save video
+            videos = decode_latents(args, latents, device)
+            for i, sample in enumerate(videos):
+                original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
+                sample = sample.unsqueeze(0)
+                video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
+                metadata = meta_keep[i] if meta_keep is not None else prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
+                save_videos_grid_advanced(sample, video_path, args, metadata=metadata)
+                logger.info(f"Sample save to: {video_path}")
+        elif output_type == "images":
+            # save images
+            videos = decode_latents(args, latents, device)
+            for i, sample in enumerate(videos):
+                original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
+                sample = sample.unsqueeze(0)
+                image_name = f"{time_flag}_{i}_{seeds[i]}{original_name}"
+                save_images_grid(sample, save_path, image_name)
+                logger.info(f"Sample images save to: {save_path}/{image_name}")
 
     logger.info("Done!")
 
