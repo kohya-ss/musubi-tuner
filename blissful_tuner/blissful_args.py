@@ -107,6 +107,7 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
+        parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer")
         parser.add_argument("--v2v_extra_noise", type=float, default=None, help="Extra latent noise for v2v. Low values are best e.g. 0.015. Can help add fine details, especially when upscaling(output res > input res)")
         parser.add_argument("--i2v_extra_noise", type=float, default=None, help="Extra latent noise for i2v. Low values are best e.g. 0.025. Can help add fine details, especially when upscaling(output res > input res)")
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (prompt weighting:1.2)")

@@ -654,7 +654,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, original_weight_dtype=self.dtype)
 
         return state_dict
 

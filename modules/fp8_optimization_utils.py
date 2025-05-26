@@ -7,7 +7,6 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 from tqdm import tqdm
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 from utils.device_utils import clean_memory_on_device
 

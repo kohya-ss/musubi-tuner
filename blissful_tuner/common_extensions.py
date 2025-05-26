@@ -25,25 +25,42 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 
-class BlissfulKeyboardManager():
+class BlissfulKeyboardManager:
     def __init__(self):
         self.early_exit_requested = False
+        self.hotkey = keyboard.HotKey(
+            keyboard.HotKey.parse("<ctrl>+q"),
+            self.request_exit
+        )
+
         self.listener = keyboard.Listener(
-            on_press=self.on_key_pressed
+            on_press=self._on_press,
+            on_release=self._on_release
         )
         self.listener.start()
-        logger.info("Keyboard manager initialized!")
+        logger.info("Keyboard manager initialized! Press CTRL+Q for early exit!")
 
     @property
     def exit_requested(self):
         return self.early_exit_requested
 
-    def on_key_pressed(self, key, injected):
-        if key == keyboard.Key.esc:
-            self.early_exit_requested = True
-            logger.info("Early exit requested! Will exit after this step completes!")
-            self.listener = None
-            return False  # Tells the keyboard thread to quit
+    def _on_press(self, key):
+        # Feed every key press into the HotKey
+        self.hotkey.press(key)
+
+    def _on_release(self, key):
+        # And feed every release too (HotKey needs both)
+        self.hotkey.release(key)
+
+    def terminate(self):
+        if self.listener is not None:
+            self.listener.stop()
+
+    def request_exit(self):
+        # This method will be called when <ctrl>+q is hit
+        self.early_exit_requested = True
+        logger.info("Early exit requested! Will exit after this step completes!")
+        self.listener.stop()
 
 
 class BlissfulThreadManager():

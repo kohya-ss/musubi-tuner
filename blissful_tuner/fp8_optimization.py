@@ -95,7 +95,7 @@ def quantize_tensor_to_fp8(tensor, scale, exp_bits=4, mantissa_bits=3, sign_bits
         tuple: (quantized_tensor, scale_factor)
     """
     # Create scaled tensor
-    scaled_tensor = tensor / scale
+    scaled_tensor = tensor / scale  # Both are torch.float32 at this point regardless of base dtype for calculation precision
 
     # Calculate FP8 parameters
     bias = 2 ** (exp_bits - 1) - 1
@@ -164,6 +164,7 @@ def optimize_state_dict_with_fp8(
 
     optimized_count = 0
     average_quantization_error = 0.0
+    per_tensor_quantization_error = []
 
     # Find target keys for Linear layer weights
     target_state_dict_keys = []
@@ -188,10 +189,11 @@ def optimize_state_dict_with_fp8(
             value = value.to(calc_device)
 
         # Calculate scale factor based on the maximum absolute value in the tensor
-        scale = torch.max(torch.abs(value.flatten())) / max_value
+        value_32 = value.to(torch.float32)  # Upcast value so the scale calculation happens in high precision
+        scale = torch.max(torch.abs(value_32.flatten())) / max_value
 
         # Quantize weight to FP8 format
-        quantized_weight, _ = quantize_tensor_to_fp8(value, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
+        quantized_weight, _ = quantize_tensor_to_fp8(value_32, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
 
         # Otherwise, store the quantized weight and corresponding scale value.
         fp8_key = key  # Use the original key for the quantized weight
@@ -200,15 +202,15 @@ def optimize_state_dict_with_fp8(
         quantized_weight = quantized_weight.to(fp8_dtype)
 
         # Reconstruct tensor by scaling back up
-        reconstructed = quantized_weight.to(original_dtype) * scale
+        reconstructed_32 = (quantized_weight.to(torch.float32) * scale).to(original_dtype)
 
         # Calculate the mean relative error (in percent)
-        average_quantization_error += (torch.mean(torch.abs(value - reconstructed)) / (torch.mean(torch.abs(value)) + 1e-8)) * 100  # Adding a small epsilon to avoid division by zero issues if necessary.
-
+        average_quantization_error_this_tensor = (torch.mean(torch.abs(value_32 - reconstructed_32)) / (torch.mean(torch.abs(value_32)) + 1e-8)) * 100  # Adding a small epsilon to avoid division by zero issues if necessary.
+        per_tensor_quantization_error.append(average_quantization_error_this_tensor)
         if not move_to_device:
             quantized_weight = quantized_weight.to(original_device)
 
-        scale_tensor = torch.tensor([scale], dtype=original_dtype, device=quantized_weight.device)
+        scale_tensor = torch.tensor([scale], dtype=torch.float32, device=quantized_weight.device)
 
         state_dict[fp8_key] = quantized_weight
         state_dict[scale_key] = scale_tensor
@@ -219,9 +221,12 @@ def optimize_state_dict_with_fp8(
         if calc_device is not None and optimized_count % 16 == 0:
             torch.cuda.empty_cache()
     if optimized_count > 0:
-        average_quantization_error /= optimized_count
+        per_tensor_quantization_error = torch.Tensor(per_tensor_quantization_error)
+        average_quantization_error = torch.mean(per_tensor_quantization_error)
+        max_error = torch.max(per_tensor_quantization_error)
+        min_error = torch.min(per_tensor_quantization_error)
         logger.info(f"Number of optimized Linear layers: {optimized_count}")
-        logger.info(f"Mean quantization error: {average_quantization_error:.2f}%")
+        logger.info(f"Mean quant error: {average_quantization_error:.4f}%; Max quant error: {max_error:.4f}%; Min quant error: {min_error:.4f}%")
     else:
         logger.info("optimize_state_dict_with_fp8 didn't optimize any layers! Maybe check your include/exclude keys?")
     return state_dict
@@ -242,7 +247,7 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
     """
     if use_scaled_mm and x.ndim == 3:
         input_dtype = x.dtype
-        original_weight_dtype = self.scale_weight.dtype
+        original_weight_dtype = self.original_dtype_enum
         weight_dtype = self.weight.dtype
         assert weight_dtype in [torch.float8_e4m3fn, torch.float8_e5m2], "Only FP8 E4M3FN/E5M2 format is supported"
         target_dtype = torch.float8_e5m2 if weight_dtype == torch.float8_e4m3fn else torch.float8_e4m3fn
@@ -274,9 +279,11 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         return o.reshape(original_shape[0], original_shape[1], -1)
 
     else:
+
         # Dequantize the weight
-        original_dtype = self.scale_weight.dtype
-        dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
+        original_dtype = self.original_dtype_enum
+        # Explicit upcast weight before dequant calculation to ensure accuracy, then back to original dtype for linear
+        dequantized_weight = (self.scale_weight * self.weight.to(torch.float32)).to(original_dtype)
 
         # Perform linear transformation
         if self.bias is not None:
@@ -287,7 +294,7 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         return output
 
 
-def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False, scale_input_tensor=None):
+def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False, scale_input_tensor=None, original_weight_dtype=None):
     """
     Apply monkey patching to a model using FP8 optimized state dict.
 
@@ -304,7 +311,8 @@ def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False, sca
         setattr(model, "fp8_matmul_enabled", True)
         if scale_input_tensor is not None:
             max_value = calculate_fp8_maxval(4, 3) if "e4m3" in scale_input_tensor else calculate_fp8_maxval(5, 2) if "e5m2" in scale_input_tensor else None
-
+    original_weight_dtype = original_weight_dtype if original_weight_dtype is not None else torch.float32
+    logger.info(f"Weights will be dequantized to {original_weight_dtype}")
     # Find all scale keys to identify FP8-optimized layers
     scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
 
@@ -325,7 +333,8 @@ def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False, sca
         # Apply patch if it's a Linear layer with FP8 scale
         if isinstance(module, nn.Linear) and has_scale:
             # register the scale_weight as a buffer to load the state_dict
-            module.register_buffer("scale_weight", torch.tensor(1.0, dtype=module.weight.dtype))
+            module.register_buffer("scale_weight", torch.tensor(1.0, dtype=torch.float32))
+            module.original_dtype_enum = original_weight_dtype
 
             # Create a new forward method with the patched version.
             def new_forward(self, x):

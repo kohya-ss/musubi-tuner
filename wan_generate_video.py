@@ -495,6 +495,8 @@ def load_dit_model(
     loading_weight_dtype = dit_weight_dtype
     if args.fp8_scaled or args.lora_weight is not None:
         loading_weight_dtype = dit_dtype  # load as-is
+    if args.mixed_precision_transformer:
+        loading_weight_dtype = None
 
     # do not fp8 optimize because we will merge LoRA weights
     model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False, rope_func=args.rope_func, riflex_index=args.riflex_index, num_frames=args.video_length)
@@ -1187,7 +1189,7 @@ def run_sampling(
                 break
             if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
                 previewer.preview(latent, i)
-
+    km.terminate()
     return latent
 
 
@@ -1809,7 +1811,7 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
     cfg = WAN_CONFIGS[args.task]
 
     # select dtype
-    dit_dtype = detect_wan_sd_dtype(args.dit) if args.dit is not None else torch.bfloat16
+    dit_dtype = torch.float32 if args.mixed_precision_transformer else detect_wan_sd_dtype(args.dit) if args.dit is not None else torch.bfloat16
     if dit_dtype.itemsize == 1:
         # if weight is in fp8, use bfloat16 for DiT (input/output)
         dit_dtype = torch.bfloat16
@@ -1819,7 +1821,7 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
             )
 
     dit_weight_dtype = dit_dtype  # default
-    if args.fp8_scaled:
+    if args.fp8_scaled or args.mixed_precision_transformer:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
     elif args.fp8:
         dit_weight_dtype = torch.float8_e4m3fn
