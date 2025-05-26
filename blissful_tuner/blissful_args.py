@@ -107,7 +107,7 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
-        parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer")
+        parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
         parser.add_argument("--v2v_extra_noise", type=float, default=None, help="Extra latent noise for v2v. Low values are best e.g. 0.015. Can help add fine details, especially when upscaling(output res > input res)")
         parser.add_argument("--i2v_extra_noise", type=float, default=None, help="Extra latent noise for i2v. Low values are best e.g. 0.025. Can help add fine details, especially when upscaling(output res > input res)")
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (prompt weighting:1.2)")
@@ -158,6 +158,10 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--keep_pngs", action="store_true", help="Save frames as PNGs in addition to output video")
     parser.add_argument("--codec", choices=["prores", "h264", "h265"], default="h264", help="Codec to use, choose from 'prores', 'h264', or 'h265'")
     parser.add_argument("--container", choices=["mkv", "mp4"], default="mp4", help="Container format to use, choose from 'mkv' or 'mp4'. Note prores can only go in MKV!")
+    parser.add_argument(
+        "--upcast_linear", action="store_true", help="If supplied, upcast linear transformations to fp32."
+        "Only for fp8_scaled and not active during mm_scaled. Can potentially increase accuracy at little cost to speed."
+    )
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
     parser.add_argument(
         "--optimized", action="store_true",
@@ -192,6 +196,8 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
             logger.error("RIFLEx can only be used with rope_func == 'comfy'!")
             raise ValueError("RIFLEx can only be used with rope_func =='comfy'!")
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
+        if args.upcast_linear and not args.fp8_scaled:
+            error_out(argparse.ArgumentTypeError, "--upcast_linear is only for --fp8_scaled")
         if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
             if args.guidance_scale == 1 and not args.cfg_schedule:
                 error_out(AttributeError, "Requested CFGZero* but CFG is not enabled so it will have no effect!")

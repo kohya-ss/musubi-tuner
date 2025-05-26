@@ -612,7 +612,7 @@ def optimize_model(
 
         # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
         move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear)
 
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded FP8 optimized weights: {info}")

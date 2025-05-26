@@ -627,13 +627,14 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self,
             device: torch.device,
             load_device: torch.device,
-            use_mmscaled: Optional[bool] = False):
+            use_mmscaled: bool = False,
+            upcast_linear: bool = False):
         move_to_device = str(load_device) != "cpu"
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
         logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if use_mmscaled else ''}...")
         state_dict = self.state_dict()
         state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_mmscaled, original_weight_dtype=self.dtype)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_mmscaled, original_weight_dtype=self.dtype, upcast_linear=upcast_linear)
         if move_to_device:
             logger.info(f"Moving weights to {load_device}")
             for key in state_dict.keys():

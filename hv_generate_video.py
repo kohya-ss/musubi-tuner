@@ -516,7 +516,7 @@ def main():
     dit_dtype = torch.bfloat16
     dit_weight_dtype = torch.float8_e4m3fn if args.fp8 and not args.fp8_scaled else dit_dtype
     logger.info(f"Using device: {device}, DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}")
-
+    km = BlissfulKeyboardManager()
     original_base_names = None
     if args.latent_path is not None and len(args.latent_path) > 0:
         original_base_names = []
@@ -718,7 +718,7 @@ def main():
                     param.to(dtype=dtype_to_use)
                 convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
         else:
-            transformer.scale_to_fp8(device, loading_device, args.fp8_fast)
+            transformer.scale_to_fp8(device, loading_device, args.fp8_fast, upcast_linear=args.upcast_linear)
 
         if args.te_multiplier:
             llm_multiplier, clip_multiplier = args.te_multiplier
@@ -829,7 +829,6 @@ def main():
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
         if args.preview_latent_every:
             previewer = LatentPreviewer(args, original_latents=latents, timesteps=timesteps, device=device, dtype=dit_dtype, model_type="hunyuan")
-        km = BlissfulKeyboardManager()
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
@@ -892,7 +891,7 @@ def main():
                     noise_pred_list = []
                     for j in range(0, latents_input.shape[0], batch_size):
                         if km.exit_requested:
-                            break
+                            break  # this allows breaking between batches
                         # pick the “cond” index (1) instead of uncond (0) when do_classifier_free_guidance is True but do_cfg_for_step is False
                         slice_idx = (j + 1) if (do_classifier_free_guidance and not do_cfg_for_step) else j
                         slice_end = slice_idx + batch_size
@@ -947,7 +946,6 @@ def main():
                 if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
                     previewer.preview(latents, i)
                 if km.early_exit_requested:
-                    latent = None
                     break
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
