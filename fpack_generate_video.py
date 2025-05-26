@@ -118,7 +118,7 @@ def parse_args() -> argparse.Namespace:
         "--one_frame_inference",
         type=str,
         default=None,
-        help="one frame inference, default is None, comma separated values from 'default', 'no_2x', 'no_4x' and 'no_post'.",
+        help="one frame inference, default is None, comma separated values from 'zero_post', 'no_2x', 'no_4x' and 'no_post'.",
     )
     parser.add_argument(
         "--image_mask_path",
