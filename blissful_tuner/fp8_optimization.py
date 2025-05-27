@@ -271,12 +271,12 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         scale_weight = self.scale_weight
 
         if self.bias is not None:
-            # float32 is not supported with bias in scaled_mm - out_dtype must match bias.dtype
+            # out_dtype must match bias.dtype
             o = torch._scaled_mm(x, weight, out_dtype=self.original_dtype_enum, bias=self.bias, scale_a=scale_x, scale_b=scale_weight)
         else:
             o = torch._scaled_mm(x, weight, out_dtype=input_dtype, scale_a=scale_x, scale_b=scale_weight)
 
-        return o.reshape(original_shape[0], original_shape[1], -1).to(input_dtype)  # Cast back to input dtype if we changed it
+        return o.reshape(original_shape[0], original_shape[1], -1)  # Cast back to input dtype if we changed it
 
     else:
 
@@ -302,7 +302,6 @@ def apply_fp8_monkey_patch(
         model: nn.Module,
         optimized_state_dict: dict,
         use_scaled_mm: bool = False,
-        original_weight_dtype: Optional[torch.dtype] = None,
         upcast_linear: Optional[bool] = False,
         scale_input_tensor: Optional[str] = None
 ) -> nn.Module:
@@ -313,7 +312,6 @@ def apply_fp8_monkey_patch(
         model (nn.Module): Model instance to patch
         optimized_state_dict (dict): FP8 optimized state dict
         use_scaled_mm (bool): Use scaled_mm for FP8 Linear layers, requires SM 8.9+ (RTX 40 series)
-        original_weight_dtype: Dtype of model before any quantization or casting
         upcast_linear: (bool): Whether to upcast the linear transformation or do it in original_weight_dtype, default is model.dtype
         scale_input_tensor (str): If not none, either e4m3 or e5m2 to set datatype to scale input tensor to for mm_scaled
 
@@ -325,8 +323,6 @@ def apply_fp8_monkey_patch(
         setattr(model, "fp8_matmul_enabled", True)
         if scale_input_tensor is not None:
             max_value = calculate_fp8_maxval(4, 3) if "e4m3" in scale_input_tensor else calculate_fp8_maxval(5, 2) if "e5m2" in scale_input_tensor else None
-    original_weight_dtype = original_weight_dtype if original_weight_dtype is not None else model.dtype
-    logger.info(f"Weights will be dequantized to {original_weight_dtype}")
     if upcast_linear:
         logger.info("Linear transformations for scaled layers will be upcast to float32 except when using mm_scaled")
     # Find all scale keys to identify FP8-optimized layers
@@ -350,7 +346,7 @@ def apply_fp8_monkey_patch(
         if isinstance(module, nn.Linear) and has_scale:
             # register the scale_weight as a buffer to load the state_dict
             module.register_buffer("scale_weight", torch.tensor(1.0, dtype=torch.float32))
-            module.original_dtype_enum = original_weight_dtype
+            module.original_dtype_enum = module.weight.dtype
             module.upcast_linear = upcast_linear
 
             # Create a new forward method with the patched version.

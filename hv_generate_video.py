@@ -910,7 +910,8 @@ def main():
                         noise_pred_list.append(noise_pred)
 
                     noise_pred = torch.cat(noise_pred_list, dim=0)
-
+                if km.early_exit_requested:
+                    break
                 # perform classifier free guidance
                 if do_cfg_for_step:
                     if args.cfgzerostar_scaling:
@@ -945,8 +946,7 @@ def main():
 
                 if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
                     previewer.preview(latents, i)
-                if km.early_exit_requested:
-                    break
+
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
