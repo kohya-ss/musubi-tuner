@@ -184,11 +184,6 @@ def prepare_v2v_noise(
         logger.info(f"Modifying timestep schedule to add as close to {args.v2v_denoise * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%")
     args.infer_steps = len(timesteps)
 
-    if args.cfg_schedule is not None:
-        invalid_steps = [step for step in args.cfg_schedule.keys() if int(step) > args.infer_steps]
-        for step in invalid_steps:
-            args.cfg_schedule.pop(step, None)
-
     output_height, output_width = args.video_size
     output_video_area = output_height * output_width
     aspect_ratio = output_height / output_width
