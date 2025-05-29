@@ -1224,6 +1224,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
     # setup scheduler
     scheduler, timesteps = setup_scheduler(args, cfg, device)
     # Check if we have shared models
+    arg_nocond = None  # Perp neg is only available for T2V currently
     if shared_models is not None:
         # Use shared models and encoded data
         vae = shared_models.get("vae")

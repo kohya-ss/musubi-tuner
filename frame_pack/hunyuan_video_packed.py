@@ -16,7 +16,7 @@ import numpy as np
 
 from modules.custom_offloading_utils import ModelOffloader
 from utils.safetensors_utils import load_split_weights
-from modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from accelerate import init_empty_weights
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
@@ -1914,7 +1914,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         return (hidden_states,)
 
     def fp8_optimization(
-        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
+        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False, upcast_linear: bool = False
     ) -> dict[str, torch.Tensor]:  # Return type hint added
         """
         Optimize the model state_dict with fp8.
@@ -1928,6 +1928,8 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
                 Whether to move the weight to the device after optimization.
             use_scaled_mm (bool):
                 Whether to use scaled matrix multiplication for FP8.
+            upscale_llinear (bool):
+                Whether to upcast linear transformations to fp32 or not
         """
         TARGET_KEYS = ["transformer_blocks", "single_transformer_blocks"]
         EXCLUDE_KEYS = ["norm"]  # Exclude norm layers (e.g., LayerNorm, RMSNorm) from FP8
@@ -1936,7 +1938,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear)
 
         return state_dict
 
