@@ -168,7 +168,7 @@ class BlissfulVideoProcessor:
             if os.path.exists(self.frame_dir):
                 while os.path.exists(self.frame_dir):
                     self.frame_dir += "_"
-            logger.info(f"Output will be saved to: {self.output_file_path} using {self.codec}!")
+            #logger.info(f"Output will be saved to: {self.output_file_path} using {self.codec}!")
         else:
             if output_file_path is not None:
                 logger.info(f"Will write output to {output_file_path}!")

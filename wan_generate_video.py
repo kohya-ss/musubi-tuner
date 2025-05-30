@@ -1383,7 +1383,6 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     video = video.unsqueeze(0)
     metadata = prepare_metadata(args) if metadata is None else metadata
     save_videos_grid_advanced(video, video_path, args, rescale=True, metadata=metadata)
-    logger.info(f"Video saved to: {video_path}")
 
     return video_path
 
@@ -1757,7 +1756,8 @@ def process_interactive(args: argparse.Namespace) -> None:
 
                 # Move model to CPU after generation
                 model.to("cpu")
-
+                if latent is None:  # None is sentinel for early exit
+                    raise KeyboardInterrupt
                 # Save latent if needed
                 height, width, _ = check_inputs(prompt_args)
                 if prompt_args.output_type == "latent" or prompt_args.output_type == "both":

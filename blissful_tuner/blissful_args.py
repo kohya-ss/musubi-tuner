@@ -181,15 +181,12 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if args.cfgzerostar_scaling and args.perp_neg is not None:
             error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
     blissful_prefunc(args)
-    if not getattr(args, "interactive", False):
-        args.seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
-        try:
-            args.seed = int(args.seed)
-        except ValueError:
-            args.seed = string_to_seed(args.seed, bits=32)
-        power_seed(args.seed)
-    else:
-        logger.info("Skip global seed for interactive generation!")
+    args.seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
+    try:
+        args.seed = int(args.seed)
+    except ValueError:
+        args.seed = string_to_seed(args.seed, bits=32)
+
     if args.prompt_wildcards is not None:
         args.prompt = process_wildcards(args.prompt, args.prompt_wildcards) if args.prompt is not None else None
         args.negative_prompt = process_wildcards(args.negative_prompt, args.prompt_wildcards) if args.negative_prompt is not None else None
