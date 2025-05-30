@@ -375,7 +375,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         loading_device = device
 
     # do not fp8 optimize because we will merge LoRA weights
-    model = load_packed_model(device, args.dit, args.attn_mode, loading_device)
+    model = load_packed_model(device, args.dit, args.attn_mode, loading_device, quant_dtype=torch.float32 if args.upcast_quantization else None)
     return model
 
 
@@ -390,11 +390,7 @@ def optimize_model(model: HunyuanVideoTransformer3DModelPacked, args: argparse.N
     if args.fp8_scaled:
         # load state dict as-is and optimize to fp8
         state_dict = model.state_dict()
-
-        # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
-        move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear)
-
+        state_dict = model.fp8_optimization(state_dict, device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded FP8 optimized weights: {info}")
 

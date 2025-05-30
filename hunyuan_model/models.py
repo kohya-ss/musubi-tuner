@@ -623,24 +623,19 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def scale_to_fp8(
-            self,
-            device: torch.device,
-            load_device: torch.device,
-            use_mmscaled: bool = False,
-            upcast_linear: bool = False):
-        move_to_device = str(load_device) != "cpu"
+    def fp8_optimization(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        device: torch.device,
+        use_scaled_mm: bool = False,
+        upcast_linear: bool = False,
+        quant_dtype: Optional[torch.dtype] = None
+    ) -> dict[str, torch.Tensor]:
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
-        logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if use_mmscaled else ''}...")
-        state_dict = self.state_dict()
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, move_to_device=move_to_device)
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_mmscaled, upcast_linear=upcast_linear)
-        if move_to_device:
-            logger.info(f"Moving weights to {load_device}")
-            for key in state_dict.keys():
-                state_dict[key] = state_dict[key].to(load_device)
-        info = self.load_state_dict(state_dict, strict=True, assign=True)
-        logger.info(f"FP8 optimization: {info}")
+        logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if use_scaled_mm else ''}...")
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, quant_dtype=quant_dtype)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear, quant_dtype=quant_dtype)
+        return state_dict
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -987,7 +982,17 @@ def load_state_dict(model, model_path):
     return model
 
 
-def load_transformer(dit_path, attn_mode, split_attn, load_device, main_device, dtype, in_channels=16, fp8_scaled: bool = False, fp8_fast: bool = False) -> HYVideoDiffusionTransformer:
+def load_transformer(
+        dit_path: str,
+        attn_mode: str,
+        split_attn: bool,
+        load_device: torch.device,
+        main_device: torch.device,
+        dtype: torch.dtype,
+        in_channels: int = 16,
+        fp8_scaled: bool = False,
+        fp8_fast: bool = False,
+        quant_dtype: Optional[torch.dtype] = None) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
     factor_kwargs = {"device": load_device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
@@ -1018,8 +1023,15 @@ def load_transformer(dit_path, attn_mode, split_attn, load_device, main_device, 
         info = transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
         transformer = load_state_dict(transformer, dit_path)
+
     if fp8_scaled:
-        transformer.scale_to_fp8(main_device, load_device, fp8_fast)
+        sd = transformer.state_dict()
+        sd = transformer.fp8_optimization(sd, main_device, use_scaled_mm=fp8_fast, quant_dtype=quant_dtype)
+        # make sure all the model weights are on the loading_device
+        for key in sd.keys():
+            sd[key] = sd[key].to(load_device)
+        transformer.load_state_dict(sd, strict=True, assign=True)
+
     logger.info(f"Loaded DiT model from {dit_path}, info={info}")
     return transformer
 

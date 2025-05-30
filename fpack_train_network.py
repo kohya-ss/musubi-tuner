@@ -353,7 +353,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         device = accelerator.device
-        model = load_packed_model(device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn)
+        model = load_packed_model(device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn, quant_dtype=torch.float32 if args.upcast_quantization else None)
         return model
 
     def scale_shift_latents(self, latents):

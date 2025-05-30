@@ -609,11 +609,7 @@ def optimize_model(
     if args.fp8_scaled:
         # load state dict as-is and optimize to fp8
         state_dict = model.state_dict()
-
-        # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
-        move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear)
-
+        state_dict = model.fp8_optimization(state_dict, device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded FP8 optimized weights: {info}")
 
@@ -1812,7 +1808,7 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
     cfg = WAN_CONFIGS[args.task]
 
     # select dtype
-    dit_dtype = torch.float32 if args.mixed_precision_transformer else detect_wan_sd_dtype(args.dit) if args.dit is not None else torch.bfloat16
+    dit_dtype = detect_wan_sd_dtype(args.dit) if args.dit is not None else torch.bfloat16
     if dit_dtype.itemsize == 1:
         # if weight is in fp8, use bfloat16 for DiT (input/output)
         dit_dtype = torch.bfloat16

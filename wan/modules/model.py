@@ -625,7 +625,12 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         return next(self.parameters()).device
 
     def fp8_optimization(
-        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False, upcast_linear: bool = False
+        self,
+        state_dict: dict[str, torch.Tensor],
+        device: torch.device,
+        use_scaled_mm: bool = False,
+        upcast_linear: bool = False,
+        quant_dtype: Optional[torch.dtype] = None
     ) -> dict[str, torch.Tensor]:
         """
         Optimize the model state_dict with fp8.
@@ -651,10 +656,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         ]
 
         # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, quant_dtype=quant_dtype)
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear, quant_dtype=quant_dtype)
 
         return state_dict
 
@@ -900,7 +905,8 @@ def load_wan_model(
     fp8_scaled: bool = False,
     rope_func: str = "default",
     riflex_index: int = 0,
-    num_frames: int = 81
+    num_frames: int = 81,
+    quant_dtype: Optional[torch.dtype] = None
 ) -> WanModel:
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -945,13 +951,11 @@ def load_wan_model(
     if fp8_scaled:
         # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
         logger.info("Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
+        sd = model.fp8_optimization(sd, device, quant_dtype=quant_dtype)
 
-        if loading_device.type != "cpu":
-            # make sure all the model weights are on the loading_device
-            logger.info(f"Moving weights to {loading_device}")
-            for key in sd.keys():
-                sd[key] = sd[key].to(loading_device)
+        # make sure all the model weights are on the loading_device
+        for key in sd.keys():
+            sd[key] = sd[key].to(loading_device)
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded DiT model from {dit_path}, info={info}")

@@ -162,6 +162,10 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         "--upcast_linear", action="store_true", help="If supplied, upcast linear transformations to fp32."
         "Only for fp8_scaled and not active during mm_scaled. Can potentially increase accuracy at little cost to speed."
     )
+    parser.add_argument(
+        "--upcast_quantization", action="store_true", help="If supplied, upcast quantization steps to fp32 for better accuracy."
+        "Will improve quantization accuracy a bit at a small VRAM cost. Only for fp8_scaled"
+    )
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
     parser.add_argument(
         "--optimized", action="store_true",

@@ -718,8 +718,9 @@ def main():
                     param.to(dtype=dtype_to_use)
                 convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
         else:
-            transformer.scale_to_fp8(device, loading_device, args.fp8_fast, upcast_linear=args.upcast_linear)
-
+            sd = transformer.state_dict()
+            sd = transformer.fp8_optimization(sd, device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
+            transformer.load_state_dict(sd, strict=True, assign=True)
         if args.te_multiplier:
             llm_multiplier, clip_multiplier = args.te_multiplier
             transformer = rescale_text_encoders_hunyuan(llm_multiplier, clip_multiplier, transformer)
@@ -908,10 +909,11 @@ def main():
                             return_dict=True,
                         )["x"]
                         noise_pred_list.append(noise_pred)
-
-                    noise_pred = torch.cat(noise_pred_list, dim=0)
                 if km.early_exit_requested:
                     break
+                else:
+                    noise_pred = torch.cat(noise_pred_list, dim=0)
+
                 # perform classifier free guidance
                 if do_cfg_for_step:
                     if args.cfgzerostar_scaling:
