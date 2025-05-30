@@ -26,7 +26,7 @@ The `--network_args` option is an option for specifying detailed arguments to Lo
 If you specify it on the command line, write as follows. / コマンドラインで指定する場合は以下のように記述します。
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py --dit ... 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --dit ... 
     --network_module networks.lora --network_dim 32 
     --network_args "key1=value1" "key2=value2" ...
 ```
@@ -60,7 +60,7 @@ LoRA+は、LoRAのUP側（LoRA-B）の学習率を上げることで学習速度
 ### Example / 記述例
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py --dit ... 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --dit ... 
     --network_module networks.lora --network_dim 32 --network_args "loraplus_lr_ratio=4" ...
 ```
 
@@ -257,12 +257,12 @@ The `--dynamo_dynamic` option has been reported to have many problems based on t
 ### Usage example:
 
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode default
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode default
 ```
 
 For more aggressive optimization:
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
 ```
 
 Note: The best combination of options may depend on your specific model and hardware. Experimentation may be necessary to find the optimal configuration.
@@ -304,12 +304,12 @@ __利用可能なオプション：__
 __使用例：__
 
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode default
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode default
 ```
 
 より積極的な最適化の場合：
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
 ```
 
 注意：最適なオプションの組み合わせは、特定のモデルとハードウェアに依存する場合があります。最適な構成を見つけるために実験が必要かもしれません。
