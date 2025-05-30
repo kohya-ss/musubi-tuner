@@ -6,17 +6,17 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from dataset import config_utils
-from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.dataset import config_utils
+from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 import accelerate
 
-from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, BaseDataset, ItemInfo, save_text_encoder_output_cache
-from hunyuan_model import text_encoder as text_encoder_module
-from hunyuan_model.text_encoder import TextEncoder
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, BaseDataset, ItemInfo, save_text_encoder_output_cache
+from musubi_tuner.hunyuan_model import text_encoder as text_encoder_module
+from musubi_tuner.hunyuan_model.text_encoder import TextEncoder
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 
-from utils.model_utils import str_to_dtype
+from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = BlissfulLogger(__name__, "green")
  

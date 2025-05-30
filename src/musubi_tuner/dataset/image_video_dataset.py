@@ -15,8 +15,8 @@ from PIL import Image
 import cv2
 import av
 
-from utils import safetensors_utils
-from utils.model_utils import dtype_to_str
+from musubi_tuner.utils import safetensors_utils
+from musubi_tuner.utils.model_utils import dtype_to_str
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 

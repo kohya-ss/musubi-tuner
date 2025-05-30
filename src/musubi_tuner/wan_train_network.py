@@ -9,23 +9,23 @@ import torchvision.transforms.functional as TF
 from tqdm import tqdm
 from accelerate import Accelerator, init_empty_weights
 
-from dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL, load_video
-from hv_generate_video import resize_image_to_bucket
-from hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL, load_video
+from musubi_tuner.hv_generate_video import resize_image_to_bucket
+from musubi_tuner.hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
  
 
-from utils import model_utils
-from utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
-from wan.configs import WAN_CONFIGS
-from wan.modules.clip import CLIPModel
-from wan.modules.model import WanModel, detect_wan_sd_dtype, load_wan_model
-from wan.modules.t5 import T5EncoderModel
-from wan.modules.vae import WanVAE
-from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
+from musubi_tuner.wan.configs import WAN_CONFIGS
+from musubi_tuner.wan.modules.clip import CLIPModel
+from musubi_tuner.wan.modules.model import WanModel, detect_wan_sd_dtype, load_wan_model
+from musubi_tuner.wan.modules.t5 import T5EncoderModel
+from musubi_tuner.wan.modules.vae import WanVAE
+from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 
 class WanNetworkTrainer(NetworkTrainer):

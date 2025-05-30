@@ -16,24 +16,22 @@ from einops import rearrange
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from PIL import Image
-from hunyuan_model import vae
-from hunyuan_model.text_encoder import TextEncoder
-from hunyuan_model.text_encoder import PROMPT_TEMPLATE
-from hunyuan_model.vae import load_vae
-from hunyuan_model.models import load_transformer
-
-from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
-from networks import lora
-
+from musubi_tuner.hunyuan_model import vae
+from musubi_tuner.hunyuan_model.text_encoder import TextEncoder
+from musubi_tuner.hunyuan_model.text_encoder import PROMPT_TEMPLATE
+from musubi_tuner.hunyuan_model.vae import load_vae
+from musubi_tuner.hunyuan_model.models import load_transformer
+from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+from musubi_tuner.networks import lora
 try:
     from lycoris.kohya import create_network_from_weights
 except ImportError:
     pass
 from rich_argparse import RichHelpFormatter
 from convert_lora import convert_from_diffusers
-from utils.model_utils import str_to_dtype
-from utils.safetensors_utils import mem_eff_save_file
-from dataset.image_video_dataset import load_video, resize_image_to_bucket
+from musubi_tuner.utils.model_utils import str_to_dtype
+from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
+from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata, BlissfulKeyboardManager
@@ -42,7 +40,6 @@ from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
-
 logger = BlissfulLogger(__name__, "green")
 
 

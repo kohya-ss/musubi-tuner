@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tokenizers import HuggingfaceTokenizer
+from musubi_tuner.wan.modules.tokenizers import HuggingfaceTokenizer
 from accelerate import init_empty_weights
 from safetensors.torch import load_file
 
@@ -423,7 +423,7 @@ def _t5(
 
     # init tokenizer
     if return_tokenizer:
-        from .tokenizers import HuggingfaceTokenizer
+        from musubi_tuner.wan.modules.tokenizers import HuggingfaceTokenizer
 
         tokenizer = HuggingfaceTokenizer(f"google/{name}", **tokenizer_kwargs)
         return model, tokenizer

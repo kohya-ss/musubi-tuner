@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 logger = BlissfulLogger(__name__, "green")
 
-from utils.device_utils import clean_memory_on_device
+from musubi_tuner.utils.device_utils import clean_memory_on_device
 
 
 def calculate_fp8_maxval(exp_bits=4, mantissa_bits=3, sign_bits=1):

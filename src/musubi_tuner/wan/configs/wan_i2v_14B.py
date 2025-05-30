@@ -2,7 +2,7 @@
 import torch
 from easydict import EasyDict
 
-from .shared_config import wan_shared_cfg
+from musubi_tuner.wan.configs.shared_config import wan_shared_cfg
 
 # ------------------------ Wan I2V 14B ------------------------#
 

@@ -10,7 +10,7 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
  
 
-import networks.lora as lora
+import musubi_tuner.networks.lora as lora
 
 
 WAN_TARGET_REPLACE_MODULES = ["WanAttentionBlock"]

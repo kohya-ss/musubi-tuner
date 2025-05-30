@@ -638,7 +638,7 @@ def load_text_encoder_2(
 
 if __name__ == "__main__":
     import argparse
-    from utils.model_utils import str_to_dtype
+    from musubi_tuner.utils.model_utils import str_to_dtype
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

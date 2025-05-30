@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple, Union
 import safetensors
 from blissful_tuner.blissful_logger import BlissfulLogger
 
-from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN, ARCHITECTURE_FRAMEPACK
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN, ARCHITECTURE_FRAMEPACK
 
 logger = BlissfulLogger(__name__, "green")
 

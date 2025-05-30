@@ -6,8 +6,8 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from .modulate_layers import modulate
-from .helpers import to_2tuple
+from musubi_tuner.hunyuan_model.modulate_layers import modulate
+from musubi_tuner.hunyuan_model.helpers import to_2tuple
 
 
 class MLP(nn.Module):

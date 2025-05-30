@@ -766,7 +766,7 @@ class LoRANetwork(torch.nn.Module):
 
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import save_file
-            from utils import model_utils
+            from musubi_tuner.utils import model_utils
 
             # Precalculate model hashes to save time on indexing
             if metadata is None:

@@ -5,8 +5,8 @@ import torch
 
 # from diffusers.pipelines.hunyuan_video.pipeline_hunyuan_video import DEFAULT_PROMPT_TEMPLATE
 # from diffusers_helper.utils import crop_or_pad_yield_mask
-from hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
-from hunyuan_model.text_encoder import PROMPT_TEMPLATE
+from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
+from musubi_tuner.hunyuan_model.text_encoder import PROMPT_TEMPLATE
 
 
 @torch.no_grad()

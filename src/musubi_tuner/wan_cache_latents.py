@@ -7,18 +7,18 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from dataset import config_utils
-from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.dataset import config_utils
+from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from PIL import Image
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 
-from dataset.image_video_dataset import ItemInfo, save_latent_cache_wan, ARCHITECTURE_WAN
-from utils.model_utils import str_to_dtype
-from wan.configs import wan_i2v_14B
-from wan.modules.vae import WanVAE
-from wan.modules.clip import CLIPModel
-import cache_latents
+from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_latent_cache_wan, ARCHITECTURE_WAN
+from musubi_tuner.utils.model_utils import str_to_dtype
+from musubi_tuner.wan.configs import wan_i2v_14B
+from musubi_tuner.wan.modules.vae import WanVAE
+from musubi_tuner.wan.modules.clip import CLIPModel
+import musubi_tuner.cache_latents
 
 logger = BlissfulLogger(__name__, "green")
  

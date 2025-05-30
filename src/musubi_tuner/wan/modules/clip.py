@@ -1,6 +1,5 @@
 # Modified from ``https://github.com/openai/CLIP'' and ``https://github.com/mlfoundations/open_clip''
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-from blissful_tuner.blissful_logger import BlissfulLogger
 import math
 import os
 
@@ -10,12 +9,13 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from accelerate import init_empty_weights
 
-from .attention import flash_attention
-from .tokenizers import HuggingfaceTokenizer
-from .xlm_roberta import XLMRoberta
-
-from utils.safetensors_utils import load_safetensors
+from musubi_tuner.wan.modules.attention import flash_attention
+from musubi_tuner.wan.modules.tokenizers import HuggingfaceTokenizer
+from musubi_tuner.wan.modules.xlm_roberta import XLMRoberta
+from musubi_tuner.utils.safetensors_utils import load_safetensors
+from blissful_tuner.blissful_logger import BlissfulLogger
 logging = BlissfulLogger(__name__, "green")
+
 __all__ = [
     "XLMRobertaCLIP",
     "clip_xlm_roberta_vit_h_14",

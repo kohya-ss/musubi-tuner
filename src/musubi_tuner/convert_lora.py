@@ -3,7 +3,7 @@ import argparse
 import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
-from utils import model_utils
+from musubi_tuner.utils import model_utils
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 

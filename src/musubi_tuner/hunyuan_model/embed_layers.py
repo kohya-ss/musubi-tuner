@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from .helpers import to_2tuple
+from musubi_tuner.hunyuan_model.helpers import to_2tuple
 
 class PatchEmbed(nn.Module):
     """2D Image to Patch Embedding

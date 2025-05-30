@@ -2,9 +2,9 @@ import argparse
 from blissful_tuner.blissful_logger import BlissfulLogger
 import torch
 from safetensors.torch import load_file
-from networks import lora
-from utils.safetensors_utils import mem_eff_save_file
-from hunyuan_model.models import load_transformer
+from musubi_tuner.networks import lora
+from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
+from musubi_tuner.hunyuan_model.models import load_transformer
 
 logger = BlissfulLogger(__name__, "green")
  

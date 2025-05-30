@@ -7,16 +7,16 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from dataset import config_utils
-from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.dataset import config_utils
+from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from PIL import Image
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 
-from dataset.image_video_dataset import BaseDataset, ItemInfo, save_latent_cache, ARCHITECTURE_HUNYUAN_VIDEO
-from hunyuan_model.vae import load_vae
-from hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
-from utils.model_utils import str_to_dtype
+from musubi_tuner.dataset.image_video_dataset import BaseDataset, ItemInfo, save_latent_cache, ARCHITECTURE_HUNYUAN_VIDEO
+from musubi_tuner.hunyuan_model.vae import load_vae
+from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
+from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = BlissfulLogger(__name__, "green")
  

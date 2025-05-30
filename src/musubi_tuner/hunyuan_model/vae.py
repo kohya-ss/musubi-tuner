@@ -10,7 +10,7 @@ import torch.nn as nn
 from diffusers.utils import BaseOutput, is_torch_version
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.models.attention_processor import SpatialNorm
-from modules.unet_causal_3d_blocks import CausalConv3d, UNetMidBlockCausal3D, get_down_block3d, get_up_block3d
+from musubi_tuner.modules.unet_causal_3d_blocks import CausalConv3d, UNetMidBlockCausal3D, get_down_block3d, get_up_block3d
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 
@@ -83,7 +83,7 @@ def load_vae(
     config = json.loads(CONFIG_JSON)
 
     # import here to avoid circular import
-    from .autoencoder_kl_causal_3d import AutoencoderKLCausal3D
+    from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 
     if sample_size:
         vae = AutoencoderKLCausal3D.from_config(config, sample_size=sample_size)

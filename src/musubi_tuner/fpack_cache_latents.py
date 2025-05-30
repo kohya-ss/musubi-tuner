@@ -11,14 +11,14 @@ from tqdm import tqdm
 from transformers import SiglipImageProcessor, SiglipVisionModel
 from PIL import Image
 
-from dataset import config_utils
-from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from dataset.image_video_dataset import BaseDataset, ItemInfo, save_latent_cache_framepack, ARCHITECTURE_FRAMEPACK
-from frame_pack import hunyuan
-from frame_pack.framepack_utils import load_image_encoders, load_vae
-from hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
-from frame_pack.clip_vision import hf_clip_vision_encode
-import cache_latents
+from musubi_tuner.dataset import config_utils
+from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.dataset.image_video_dataset import BaseDataset, ItemInfo, save_latent_cache_framepack, ARCHITECTURE_FRAMEPACK
+from musubi_tuner.frame_pack import hunyuan
+from musubi_tuner.frame_pack.framepack_utils import load_image_encoders, load_vae
+from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
+from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
+import musubi_tuner.cache_latents as cache_latents
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

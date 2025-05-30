@@ -34,16 +34,16 @@ from diffusers.optimization import (
 )
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
-from dataset import config_utils
-from hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape, HYVideoDiffusionTransformer
-import hunyuan_model.text_encoder as text_encoder_module
-from hunyuan_model.vae import load_vae, VAE_VER
-import hunyuan_model.vae as vae_module
-from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
-import networks.lora as lora_module
-from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
-from hv_generate_video import save_images_grid, save_videos_grid, resize_image_to_bucket, encode_to_latents
+from musubi_tuner.dataset import config_utils
+from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape, HYVideoDiffusionTransformer
+import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
+from musubi_tuner.hunyuan_model.vae import load_vae, VAE_VER
+import musubi_tuner.hunyuan_model.vae as vae_module
+from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+import musubi_tuner.networks.lora as lora_module
+from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
+from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, resize_image_to_bucket, encode_to_latents
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 

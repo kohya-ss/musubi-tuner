@@ -33,19 +33,19 @@ from diffusers.optimization import (
 )
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
-from dataset import config_utils
-from hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape
-import hunyuan_model.text_encoder as text_encoder_module
-from hunyuan_model.vae import load_vae
-import hunyuan_model.vae as vae_module
-from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
-import networks.lora as lora_module
-from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
+from musubi_tuner.dataset import config_utils
+from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape
+import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
+from musubi_tuner.hunyuan_model.vae import load_vae
+import musubi_tuner.hunyuan_model.vae as vae_module
+from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+import musubi_tuner.networks.lora as lora_module
+from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 
-from utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
 
 logger = BlissfulLogger(__name__, "green")
  
