@@ -343,6 +343,7 @@ class WanNetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
+        dit_weight_dtype = None if args.mixed_precision_transformer else dit_weight_dtype
         model = load_wan_model(
             self.config, accelerator.device, dit_path, attn_mode, split_attn,
             loading_device, dit_weight_dtype, args.fp8_scaled, rope_func=args.rope_func,
@@ -429,6 +430,7 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     )
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
     parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
+    parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
     return parser
 
 

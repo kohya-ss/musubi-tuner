@@ -909,7 +909,7 @@ def load_wan_model(
     quant_dtype: Optional[torch.dtype] = None
 ) -> WanModel:
     # dit_weight_dtype is None for fp8_scaled
-    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+    #assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
