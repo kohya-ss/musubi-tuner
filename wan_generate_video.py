@@ -1693,10 +1693,10 @@ def process_interactive(args: argparse.Namespace) -> None:
                 with torch.no_grad():
                     if args.fp8_t5:
                         with torch.amp.autocast(device_type=device.type, dtype=cfg.t5_dtype):
-                            context = text_encoder([args.prompt], device)
+                            context = text_encoder([prompt_data["prompt"]], device)
                             context_null = text_encoder([n_prompt], device)
                     else:  # original behavior
-                        context = text_encoder([args.prompt], device)
+                        context = text_encoder([prompt_data["prompt"]], device)
                         context_null = text_encoder([n_prompt], device)
 
                 encoded_context = {"context": context, "context_null": context_null}

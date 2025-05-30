@@ -325,7 +325,7 @@ def apply_fp8_monkey_patch(
         if scale_input_tensor is not None:
             max_value = calculate_fp8_maxval(4, 3) if "e4m3" in scale_input_tensor else calculate_fp8_maxval(5, 2) if "e5m2" in scale_input_tensor else None
     if upcast_linear:
-        logger.info("Linear transformations for scaled layers will be upcast to float32 except when using mm_scaled")
+        logger.info(f"Linear transformations for scaled layers will be upcast to float32 {'except when using scaled_mm' if use_scaled_mm else ''}")
     logger.info(f"Quantization done in {quant_dtype if quant_dtype is not None else 'model\'s base dtype'}")
     # Find all scale keys to identify FP8-optimized layers
     scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
