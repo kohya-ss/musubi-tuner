@@ -1125,6 +1125,7 @@ class HunyuanVideoRotaryPosEmbed(nn.Module):
         super().__init__()
         self.DT, self.DY, self.DX = rope_dim
         self.theta = theta
+        self.h_w_scaling_factor = 1.0
 
     @torch.no_grad()
     def get_frequency(self, dim, pos):
@@ -1137,8 +1138,8 @@ class HunyuanVideoRotaryPosEmbed(nn.Module):
     def forward_inner(self, frame_indices, height, width, device):
         GT, GY, GX = torch.meshgrid(
             frame_indices.to(device=device, dtype=torch.float32),
-            torch.arange(0, height, device=device, dtype=torch.float32),
-            torch.arange(0, width, device=device, dtype=torch.float32),
+            torch.arange(0, height, device=device, dtype=torch.float32) * self.h_w_scaling_factor,
+            torch.arange(0, width, device=device, dtype=torch.float32) * self.h_w_scaling_factor,
             indexing="ij",
         )
 
@@ -1557,6 +1558,10 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         self.offloader_double = None
         self.offloader_single = None
 
+        # RoPE scaling
+        self.rope_scaling_timestep_threshold: Optional[int] = None  # scale RoPE above this timestep
+        self.rope_scaling_factor: float = 1.0  # RoPE scaling factor
+
     @property
     def device(self):
         return next(self.parameters()).device
@@ -1662,6 +1667,17 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         self.offloader_double.prepare_block_devices_before_forward(self.transformer_blocks)
         self.offloader_single.prepare_block_devices_before_forward(self.single_transformer_blocks)
 
+    def enable_rope_scaling(self, timestep_threshold: Optional[int], rope_scaling_factor: float = 1.0):
+        if timestep_threshold is not None and rope_scaling_factor > 0:
+            self.rope_scaling_timestep_threshold = timestep_threshold
+            self.rope_scaling_factor = rope_scaling_factor
+            logger.info(f"RoPE scaling enabled: threshold={timestep_threshold}, scaling_factor={rope_scaling_factor}.")
+        else:
+            self.rope_scaling_timestep_threshold = None
+            self.rope_scaling_factor = 1.0
+            self.rope.h_w_scaling_factor = 1.0  # reset to default
+            logger.info("RoPE scaling disabled.")
+
     def process_input_hidden_states(
         self,
         latents,
@@ -1751,6 +1767,13 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
 
         if attention_kwargs is None:
             attention_kwargs = {}
+
+        # RoPE scaling: must be done before processing hidden states
+        if self.rope_scaling_timestep_threshold is not None:
+            if timestep >= self.rope_scaling_timestep_threshold:
+                self.rope.h_w_scaling_factor = self.rope_scaling_factor
+            else:
+                self.rope.h_w_scaling_factor = 1.0
 
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
         p, p_t = self.config_patch_size, self.config_patch_size_t

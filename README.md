@@ -112,9 +112,16 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- May 30, 2025:
+    - Fixed a bug where the resizing of images and videos during dataset loading was not performed correctly. Please recreate the cache.  Thank you sdbds for PR [#312](https://github.com/kohya-ss/musubi-tuner/issues/312). 
+        - The bug occurred when the width or height of the image before resizing matched the bucket's width or height, but the other dimension was different (for example, if the original image was 640x480 and the bucket was 640x360).
+    - Updated the code for FramePack's one frame inference and training. The code has been significantly improved. See [FramePack's one frame inference documentation](./docs/framepack_1f.md) for details.
+        - **Breaking change**: The dataset format, training options, and inference options for one frame training have changed. Please follow the documentation to update your dataset configuration, recreate the cache, and modify your training and inference options.
+    - Added documentation for FramePack's one frame inference and training. See the [documentation](./docs/framepack_1f.md) for details.
+
 - May 22, 2025:
     - In the inference script of FramePack, the following changes were made:
-        - **Breaking change**: When saving images in single frame inference, subdirectories are no longer created.
+        - **Breaking change**: When saving images in one frame (single frame) inference, subdirectories are no longer created.
         - Added support for batch and interactive modes. In batch mode, prompts are read from a file and generated. In interactive mode, prompts are specified from the command line. See [FramePack documentation](./docs/framepack.md#batch-and-interactive-modes--バッチモードとインタラクティブモード) for details.
         - Added support for specifying multiple reference images in kisekaeichi method. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
 
@@ -124,13 +131,13 @@ If you find this project helpful, please consider supporting its development via
         - The initialization of the dataset was inappropriate, causing each DataSet to return data in different orders, and this caused problems when using multiple DataLoaders. The initialization has been fixed so that all DataSets return data in the same order.
 
 - May 17, 2025:
-    - Added support for kisekaeichi method in FramePack's single frame inference. This new inference method proposed by furusu allows controlling the generated image by setting the reference image in post latent. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
+    - Added support for kisekaeichi method in FramePack's one frame inference. This new inference method proposed by furusu allows controlling the generated image by setting the reference image in post latent. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
 
 - May 11, 2025:
-    - Added support for single frame training in FramePack. This is an experimental feature that allows training for single frame inference. See [FramePack documentation](./docs/framepack.md#single-frame-training--1フレーム学習) for details.
+    - Added support for one frame training in FramePack. This is an experimental feature that allows training for one frame inference. See [FramePack documentation](./docs/framepack.md#single-frame-training--1フレーム学習) for details.
 
 - May 9, 2025 update 2:
-    - Added support for single frame inference in FramePack. This is a unique feature of this repository that generates an image after time progression according to the prompt, rather than a video. In other words, it allows limited natural language editing of images. See [FramePack documentation](./docs/framepack.md#single-frame-inference--単一フレーム推論) for details.
+    - Added support for one frame inference in FramePack. This is a unique feature of this repository that generates an image after time progression according to the prompt, rather than a video. In other words, it allows limited natural language editing of images. See [FramePack documentation](./docs/framepack.md#single-frame-inference--単一フレーム推論) for details.
     - Added `--video_sections` option to specify the length of the generated video in terms of sections instead of seconds in the inference code of FramePack. Also added `--output_type latent_images` (saves both latent and images).
 
 - May 9, 2025:

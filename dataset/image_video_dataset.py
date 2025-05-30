@@ -5,7 +5,7 @@ import math
 import os
 import random
 import time
-from typing import Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -124,23 +124,21 @@ def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: t
         return np.array(image) if is_pil_image else image
 
     bucket_width, bucket_height = bucket_reso
-    if bucket_width == image_width or bucket_height == image_height:
-        image = np.array(image) if is_pil_image else image
-    else:
-        # resize the image to the bucket resolution to match the short side
-        scale_width = bucket_width / image_width
-        scale_height = bucket_height / image_height
-        scale = max(scale_width, scale_height)
-        image_width = int(image_width * scale + 0.5)
-        image_height = int(image_height * scale + 0.5)
 
-        if scale > 1:
-            image = Image.fromarray(image) if not is_pil_image else image
-            image = image.resize((image_width, image_height), Image.LANCZOS)
-            image = np.array(image)
-        else:
-            image = np.array(image) if is_pil_image else image
-            image = cv2.resize(image, (image_width, image_height), interpolation=cv2.INTER_AREA)
+    # resize the image to the bucket resolution to match the short side
+    scale_width = bucket_width / image_width
+    scale_height = bucket_height / image_height
+    scale = max(scale_width, scale_height)
+    image_width = int(image_width * scale + 0.5)
+    image_height = int(image_height * scale + 0.5)
+
+    if scale > 1:
+        image = Image.fromarray(image) if not is_pil_image else image
+        image = image.resize((image_width, image_height), Image.LANCZOS)
+        image = np.array(image)
+    else:
+        image = np.array(image) if is_pil_image else image
+        image = cv2.resize(image, (image_width, image_height), interpolation=cv2.INTER_AREA)
 
     # crop the image to the bucket resolution
     crop_left = (image_width - bucket_width) // 2
@@ -155,7 +153,7 @@ class ItemInfo:
         item_key: str,
         caption: str,
         original_size: tuple[int, int],
-        bucket_size: Optional[Union[tuple[int, int], tuple[int, int, int]]] = None,
+        bucket_size: Optional[tuple[Any]] = None,
         frame_count: Optional[int] = None,
         content: Optional[np.ndarray] = None,
         latent_cache_path: Optional[str] = None,
@@ -168,7 +166,15 @@ class ItemInfo:
         self.content = content
         self.latent_cache_path = latent_cache_path
         self.text_encoder_output_cache_path: Optional[str] = None
-        self.control_content: Optional[np.ndarray] = None
+
+        # np.ndarray for video, list[np.ndarray] for image with multiple controls
+        self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
+
+        # FramePack architecture specific
+        self.fp_latent_window_size: Optional[int] = None
+        self.fp_1f_clean_indices: Optional[list[int]] = None  # indices of clean latents for 1f
+        self.fp_1f_target_index: Optional[int] = None  # target index for 1f clean latents
+        self.fp_1f_no_post: Optional[bool] = None  # whether to add zero values as clean latent post
 
     def __str__(self) -> str:
         return (
@@ -246,11 +252,15 @@ def save_latent_cache_framepack(
     sd[f"image_embeddings_{dtype_str}"] = image_embeddings.detach().cpu()  # image embeddings dtype is same as latents dtype
     sd[f"latent_indices_{indices_dtype_str}"] = latent_indices.detach().cpu()
     sd[f"clean_latent_indices_{indices_dtype_str}"] = clean_latent_indices.detach().cpu()
-    sd[f"clean_latent_2x_indices_{indices_dtype_str}"] = clean_latent_2x_indices.detach().cpu()
-    sd[f"clean_latent_4x_indices_{indices_dtype_str}"] = clean_latent_4x_indices.detach().cpu()
     sd[f"latents_clean_{F}x{H}x{W}_{dtype_str}"] = clean_latents.detach().cpu().contiguous()
-    sd[f"latents_clean_2x_{F}x{H}x{W}_{dtype_str}"] = clean_latents_2x.detach().cpu().contiguous()
-    sd[f"latents_clean_4x_{F}x{H}x{W}_{dtype_str}"] = clean_latents_4x.detach().cpu().contiguous()
+    if clean_latent_2x_indices is not None:
+        sd[f"clean_latent_2x_indices_{indices_dtype_str}"] = clean_latent_2x_indices.detach().cpu()
+    if clean_latents_2x is not None:
+        sd[f"latents_clean_2x_{F}x{H}x{W}_{dtype_str}"] = clean_latents_2x.detach().cpu().contiguous()
+    if clean_latent_4x_indices is not None:
+        sd[f"clean_latent_4x_indices_{indices_dtype_str}"] = clean_latent_4x_indices.detach().cpu()
+    if clean_latents_4x is not None:
+        sd[f"latents_clean_4x_{F}x{H}x{W}_{dtype_str}"] = clean_latents_4x.detach().cpu().contiguous()
 
     # for key, value in sd.items():
     #     print(f"{key}: {value.shape}")
@@ -542,20 +552,20 @@ def load_video(
 
 class BucketBatchManager:
 
-    def __init__(self, bucketed_item_info: dict[Union[tuple[int, int], tuple[int, int, int]], list[ItemInfo]], batch_size: int):
+    def __init__(self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
         self.bucket_resos = list(self.buckets.keys())
         self.bucket_resos.sort()
 
         # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
-        self.bucket_batch_indices: list[tuple[Union[tuple[int, int], tuple[int, int, int], int]]] = []
+        self.bucket_batch_indices: list[tuple[tuple[Any], int]] = []
         for bucket_reso in self.bucket_resos:
             bucket = self.buckets[bucket_reso]
             num_batches = math.ceil(len(bucket) / self.batch_size)
             for i in range(num_batches):
                 self.bucket_batch_indices.append((bucket_reso, i))
-        
+
         # do no shuffle here to avoid multiple datasets have different order
         # self.shuffle()
 
@@ -660,11 +670,18 @@ class ImageDatasource(ContentDatasource):
 
 
 class ImageDirectoryDatasource(ImageDatasource):
-    def __init__(self, image_directory: str, caption_extension: Optional[str] = None, control_directory: Optional[str] = None):
+    def __init__(
+        self,
+        image_directory: str,
+        caption_extension: Optional[str] = None,
+        control_directory: Optional[str] = None,
+        control_count_per_image: int = 1,
+    ):
         super().__init__()
         self.image_directory = image_directory
         self.caption_extension = caption_extension
         self.control_directory = control_directory
+        self.control_count_per_image = control_count_per_image
         self.current_idx = 0
 
         # glob images
@@ -679,20 +696,33 @@ class ImageDirectoryDatasource(ImageDatasource):
             self.control_paths = {}
             for image_path in self.image_paths:
                 image_basename = os.path.basename(image_path)
-                control_path = os.path.join(self.control_directory, image_basename)
-                if os.path.exists(control_path):
-                    self.control_paths[image_path] = control_path
-                else:
-                    # another extension for control path
-                    # for example: image_path = "img/image.png" -> control_path = "control/image.jpg"
-                    image_basename_no_ext = os.path.splitext(image_basename)[0]
-                    for ext in IMAGE_EXTENSIONS:
-                        potential_path = os.path.join(self.control_directory, image_basename_no_ext + ext)
-                        if os.path.exists(potential_path):
-                            self.control_paths[image_path] = potential_path
-                            break
+                image_basename_no_ext = os.path.splitext(image_basename)[0]
+                potential_paths = glob.glob(os.path.join(self.control_directory, os.path.splitext(image_basename)[0] + "*.*"))
+                if potential_paths:
+                    # sort by the digits (`_0000`) suffix, prefer the one without the suffix
+                    def sort_key(path):
+                        basename = os.path.basename(path)
+                        basename_no_ext = os.path.splitext(basename)[0]
+                        if image_basename_no_ext == basename_no_ext:  # prefer the one without suffix
+                            return 0
+                        digits_suffix = basename_no_ext.rsplit("_", 1)[-1]
+                        if not digits_suffix.isdigit():
+                            raise ValueError(f"Invalid digits suffix in {basename_no_ext}")
+                        return int(digits_suffix) + 1
 
+                    potential_paths.sort(key=sort_key)
+                    if len(potential_paths) < control_count_per_image:
+                        logger.error(
+                            f"Not enough control images for {image_path}: found {len(potential_paths)}, expected {control_count_per_image}"
+                        )
+                        raise ValueError(
+                            f"Not enough control images for {image_path}: found {len(potential_paths)}, expected {control_count_per_image}"
+                        )
+
+                    # take the first `control_count_per_image` paths
+                    self.control_paths[image_path] = potential_paths[:control_count_per_image]
             logger.info(f"found {len(self.control_paths)} matching control images")
+
             missing_controls = len(self.image_paths) - len(self.control_paths)
             if missing_controls > 0:
                 missing_control_paths = set(self.image_paths) - set(self.control_paths.keys())
@@ -711,12 +741,16 @@ class ImageDirectoryDatasource(ImageDatasource):
 
         _, caption = self.get_caption(idx)
 
-        control = None
+        controls = None
         if self.has_control:
-            control_path = self.control_paths[image_path]
-            control = Image.open(control_path).convert("RGB")
+            controls = []
+            for control_path in self.control_paths[image_path]:
+                control = Image.open(control_path)
+                if control.mode != "RGB" and control.mode != "RGBA":
+                    control = control.convert("RGB")
+                controls.append(control)
 
-        return image_path, image, caption, control
+        return image_path, image, caption, controls
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
@@ -754,9 +788,10 @@ class ImageDirectoryDatasource(ImageDatasource):
 
 
 class ImageJsonlDatasource(ImageDatasource):
-    def __init__(self, image_jsonl_file: str):
+    def __init__(self, image_jsonl_file: str, control_count_per_image: int = 1):
         super().__init__()
         self.image_jsonl_file = image_jsonl_file
+        self.control_count_per_image = control_count_per_image
         self.current_idx = 0
 
         # load jsonl
@@ -772,15 +807,30 @@ class ImageJsonlDatasource(ImageDatasource):
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} images")
 
+        # Normalize control paths
+        for item in self.data:
+            if "control_path" in item:
+                item["control_path_0"] = item.pop("control_path")
+
+            # Ensure control paths are named consistently, from control_path_0000 to control_path_0, control_path_1, etc.
+            control_path_keys = [key for key in item.keys() if key.startswith("control_path_")]
+            control_path_keys.sort(lambda x: int(x.split("_")[-1]))
+            for i, key in enumerate(control_path_keys):
+                if key != f"control_path_{i}":
+                    item[f"control_path_{i}"] = item.pop(key)
+
         # Check if there are control paths in the JSONL
-        self.has_control = any("control_path" in item for item in self.data)
+        self.has_control = any("control_path_0" in item for item in self.data)
         if self.has_control:
-            control_count = sum(1 for item in self.data if "control_path" in item)
-            if control_count < len(self.data):
-                missing_control_images = [item["image_path"] for item in self.data if "control_path" not in item]
+            missing_control_images = [
+                item["image_path"]
+                for item in self.data
+                if sum(f"control_path_{i}" not in item for i in range(self.control_count_per_image)) > 0
+            ]
+            if missing_control_images:
                 logger.error(f"Some images do not have control paths in JSONL data: {missing_control_images}")
                 raise ValueError(f"Some images do not have control paths in JSONL data: {missing_control_images}")
-            logger.info(f"found {control_count} control images in JSONL data")
+            logger.info(f"found {len(self.data)} images with {self.control_count_per_image} control images per image in JSONL data")
 
     def is_indexable(self):
         return True
@@ -788,19 +838,24 @@ class ImageJsonlDatasource(ImageDatasource):
     def __len__(self):
         return len(self.data)
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str, Optional[Image.Image]]:
+    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str, Optional[list[Image.Image]]]:
         data = self.data[idx]
         image_path = data["image_path"]
         image = Image.open(image_path).convert("RGB")
 
         caption = data["caption"]
 
-        control = None
+        controls = None
         if self.has_control:
-            control_path = data["control_path"]
-            control = Image.open(control_path).convert("RGB")
+            controls = []
+            for i in range(self.control_count_per_image):
+                control_path = data[f"control_path_{i}"]
+                control = Image.open(control_path)
+                if control.mode != "RGB" and control.mode != "RGBA":
+                    control = control.convert("RGB")
+                controls.append(control)
 
-        return image_path, image, caption, control
+        return image_path, image, caption, controls
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]
@@ -1271,6 +1326,10 @@ class ImageDataset(BaseDataset):
         image_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
+        fp_latent_window_size: Optional[int] = 9,
+        fp_1f_clean_indices: Optional[list[int]] = None,
+        fp_1f_target_index: Optional[int] = None,
+        fp_1f_no_post: Optional[bool] = False,
         debug_dataset: bool = False,
         architecture: str = "no_default",
     ):
@@ -1288,10 +1347,21 @@ class ImageDataset(BaseDataset):
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
         self.control_directory = control_directory
+        self.fp_latent_window_size = fp_latent_window_size
+        self.fp_1f_clean_indices = fp_1f_clean_indices
+        self.fp_1f_target_index = fp_1f_target_index
+        self.fp_1f_no_post = fp_1f_no_post
+
+        control_count_per_image = 1
+        if fp_1f_clean_indices is not None:
+            control_count_per_image = len(fp_1f_clean_indices)
+
         if image_directory is not None:
-            self.datasource = ImageDirectoryDatasource(image_directory, caption_extension, control_directory)
+            self.datasource = ImageDirectoryDatasource(
+                image_directory, caption_extension, control_directory, control_count_per_image
+            )
         elif image_jsonl_file is not None:
-            self.datasource = ImageJsonlDatasource(image_jsonl_file)
+            self.datasource = ImageJsonlDatasource(image_jsonl_file, control_count_per_image)
         else:
             raise ValueError("image_directory or image_jsonl_file must be specified")
 
@@ -1335,15 +1405,27 @@ class ImageDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_size, item_key, image, caption, control = future.result()
+                    original_size, item_key, image, caption, controls = future.result()
                     bucket_height, bucket_width = image.shape[:2]
                     bucket_reso = (bucket_width, bucket_height)
 
                     item_info = ItemInfo(item_key, caption, original_size, bucket_reso, content=image)
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
+                    item_info.fp_latent_window_size = self.fp_latent_window_size
+                    item_info.fp_1f_clean_indices = self.fp_1f_clean_indices
+                    item_info.fp_1f_target_index = self.fp_1f_target_index
+                    item_info.fp_1f_no_post = self.fp_1f_no_post
 
-                    if control is not None:
-                        item_info.control_content = control
+                    if self.architecture == ARCHITECTURE_FRAMEPACK:
+                        # we need to split the bucket with latent window size and optional 1f clean indices, zero post
+                        bucket_reso = list(bucket_reso) + [self.fp_latent_window_size]
+                        if self.fp_1f_clean_indices is not None:
+                            bucket_reso.append(len(self.fp_1f_clean_indices))
+                            bucket_reso.append(self.fp_1f_no_post)
+                        bucket_reso = tuple(bucket_reso)
+
+                    if controls is not None:
+                        item_info.control_content = controls
 
                     if bucket_reso not in batches:
                         batches[bucket_reso] = []
@@ -1367,15 +1449,19 @@ class ImageDataset(BaseDataset):
 
             # fetch and resize image in a separate thread
             def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image]]:
-                image_key, image, caption, control = op()
+                image_key, image, caption, controls = op()
                 image: Image.Image
                 image_size = image.size
 
                 bucket_reso = buckset_selector.get_bucket_resolution(image_size)
-                image = resize_image_to_bucket(image, bucket_reso)
-                if control is not None:
-                    control = resize_image_to_bucket(control, bucket_reso)
-                return image_size, image_key, image, caption, control
+                image = resize_image_to_bucket(image, bucket_reso) # returns np.ndarray
+                if controls is not None:
+                    resized_controls = []
+                    for control in controls:
+                        resized_control = resize_image_to_bucket(control, bucket_reso) # returns np.ndarray
+                        resized_controls.append(resized_control)
+
+                return image_size, image_key, image, caption, resized_controls
 
             future = executor.submit(fetch_and_resize, fetch_op)
             futures.append(future)
@@ -1420,6 +1506,15 @@ class ImageDataset(BaseDataset):
                 continue
 
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
+
+            if self.architecture == ARCHITECTURE_FRAMEPACK:
+                # we need to split the bucket with latent window size and optional 1f clean indices, zero post
+                bucket_reso = list(bucket_reso) + [self.fp_latent_window_size]
+                if self.fp_1f_clean_indices is not None:
+                    bucket_reso.append(len(self.fp_1f_clean_indices))
+                    bucket_reso.append(self.fp_1f_no_post)
+                bucket_reso = tuple(bucket_reso)
+
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
 
@@ -1471,6 +1566,7 @@ class VideoDataset(BaseDataset):
         video_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
+        fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
         architecture: str = "no_default",
     ):
@@ -1493,6 +1589,7 @@ class VideoDataset(BaseDataset):
         self.frame_sample = frame_sample
         self.max_frames = max_frames
         self.source_fps = source_fps
+        self.fp_latent_window_size = fp_latent_window_size
 
         if self.architecture == ARCHITECTURE_HUNYUAN_VIDEO:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
@@ -1566,8 +1663,8 @@ class VideoDataset(BaseDataset):
 
         executor = ThreadPoolExecutor(max_workers=num_workers)
 
-        # key: (width, height, frame_count), value: [ItemInfo]
-        batches: dict[tuple[int, int, int], list[ItemInfo]] = {}
+        # key: (width, height, frame_count) and optional latent_window_size, value: [ItemInfo]
+        batches: dict[tuple[Any], list[ItemInfo]] = {}
         futures = []
 
         def aggregate_future(consume_all: bool = False):
@@ -1638,6 +1735,10 @@ class VideoDataset(BaseDataset):
                         item_key = f"{body}_{crop_pos:05d}-{target_frame:03d}{ext}"
                         batch_key = (*bucket_reso, target_frame)  # bucket_reso with frame_count
 
+                        if self.architecture == ARCHITECTURE_FRAMEPACK:
+                            # add latent window size to bucket resolution
+                            batch_key = (*batch_key, self.fp_latent_window_size)
+
                         # crop control video if available
                         cropped_control = None
                         if control_video is not None:
@@ -1648,6 +1749,7 @@ class VideoDataset(BaseDataset):
                         )
                         item_info.latent_cache_path = self.get_latent_cache_path(item_info)
                         item_info.control_content = cropped_control  # None is allowed
+                        item_info.fp_latent_window_size = self.fp_latent_window_size
 
                         batch = batches.get(batch_key, [])
                         batch.append(item_info)

@@ -2,13 +2,14 @@ import argparse
 import logging
 import math
 import os
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import SiglipImageProcessor, SiglipVisionModel
+from PIL import Image
 
 from dataset import config_utils
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -28,14 +29,19 @@ def encode_and_save_batch(
     feature_extractor: SiglipImageProcessor,
     image_encoder: SiglipVisionModel,
     batch: List[ItemInfo],
-    latent_window_size: int,
     vanilla_sampling: bool = False,
     one_frame: bool = False,
+    one_frame_no_2x: bool = False,
+    one_frame_no_4x: bool = False,
 ):
     """Encode a batch of original RGB videos and save FramePack section caches."""
     if one_frame:
-        encode_and_save_batch_one_frame(vae, feature_extractor, image_encoder, batch, latent_window_size, vanilla_sampling)
+        encode_and_save_batch_one_frame(
+            vae, feature_extractor, image_encoder, batch, vanilla_sampling, one_frame_no_2x, one_frame_no_4x
+        )
         return
+
+    latent_window_size = batch[0].fp_latent_window_size  # all items should have the same window size
 
     # Stack batch into tensor (B,C,F,H,W) in RGB order
     contents = torch.stack([torch.from_numpy(item.content) for item in batch])
@@ -238,34 +244,68 @@ def encode_and_save_batch_one_frame(
     feature_extractor: SiglipImageProcessor,
     image_encoder: SiglipVisionModel,
     batch: List[ItemInfo],
-    latent_window_size: int,
     vanilla_sampling: bool = False,
+    one_frame_no_2x: bool = False,
+    one_frame_no_4x: bool = False,
 ):
     # item.content: target image (H, W, C)
-    # item.control_content: start image (H, W, C)
+    # item.control_content: list of images (H, W, C)
 
-    # Stack batch into tensor (B,F,H,W,C) in RGB order.
-    contents = torch.stack(
-        [torch.stack([torch.from_numpy(item.control_content), torch.from_numpy(item.content)]) for item in batch]
-    )
+    # Stack batch into tensor (B,F,H,W,C) in RGB order. The numbers of control content for each item are the same.
+    contents = []
+    content_masks: list[list[Optional[torch.Tensor]]] = []
+    for item in batch:
+        item_contents = item.control_content + [item.content]
+
+        item_masks = []
+        for i, c in enumerate(item_contents):
+            if c.shape[-1] == 4:  # RGBA
+                item_contents[i] = c[..., :3]  # remove alpha channel from content
+
+                alpha = c[..., 3]  # extract alpha channel
+                mask_image = Image.fromarray(alpha, mode="L")
+                width, height = mask_image.size
+                mask_image = mask_image.resize((width // 8, height // 8), Image.LANCZOS)
+                mask_image = np.array(mask_image)  # PIL to numpy, HWC
+                mask_image = torch.from_numpy(mask_image).float() / 255.0  # 0 to 1.0, HWC
+                mask_image = mask_image.squeeze(-1)  # HWC -> HW
+                mask_image = mask_image.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # HW -> 111HW (BCFHW)
+                mask_image = mask_image.to(torch.float32)
+                content_mask = mask_image
+            else:
+                content_mask = None
+
+            item_masks.append(content_mask)
+
+        item_contents = [torch.from_numpy(c) for c in item_contents]
+        contents.append(torch.stack(item_contents, dim=0))  # list of [F, H, W, C]
+        content_masks.append(item_masks)
+
+    contents = torch.stack(contents, dim=0)  # B, F, H, W, C. F is control frames + target frame
 
     contents = contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
     contents = contents.to(vae.device, dtype=vae.dtype)
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 
-    height, width = contents.shape[3], contents.shape[4]
+    height, width = contents.shape[-2], contents.shape[-1]
     if height < 8 or width < 8:
         item = batch[0]  # other items should have the same size
         raise ValueError(f"Image or video size too small: {item.item_key} and {len(batch) - 1} more, size: {item.original_size}")
 
-    # VAE encode (list of tensor -> stack)
-    start_latents = hunyuan.vae_encode(contents[:, :, 0:1], vae)  # include scaling factor
-    start_latents = start_latents.to("cpu")  # (B, C, 1, H/8, W/8)
-    latents = hunyuan.vae_encode(contents[:, :, 1:], vae)  # include scaling factor
-    latents = latents.to("cpu")  # (B, C, 1, H/8, W/8)
+    # VAE encode: we need to encode one frame at a time because VAE encoder has stride=4 for the time dimension except for the first frame.
+    latents = [hunyuan.vae_encode(contents[:, :, idx : idx + 1], vae).to("cpu") for idx in range(contents.shape[2])]
+    latents = torch.cat(latents, dim=2)  # B, C, F, H/8, W/8
+
+    # apply alphas to latents
+    for b, item in enumerate(batch):
+        for i, content_mask in enumerate(content_masks[b]):
+            if content_mask is not None:
+                # apply mask to the latents
+                # print(f"Applying content mask for item {item.item_key}, frame {i}")
+                latents[b : b + 1, :, i : i + 1] *= content_mask
 
     # Vision encoding per‑item (once): use control content because it is the start image
-    images = [item.control_content for item in batch]  # list of [H, W, C]
+    images = [item.control_content[0] for item in batch]  # list of [H, W, C]
 
     # encode image with image encoder
     image_embeddings = []
@@ -276,56 +316,74 @@ def encode_and_save_batch_one_frame(
     image_embeddings = torch.cat(image_embeddings, dim=0)  # B, LEN, 1152
     image_embeddings = image_embeddings.to("cpu")  # Save memory
 
-    # history latents is always zeroes for one frame training
-    history_latents = torch.zeros(
-        (1, latents.shape[1], 1 + 2 + 16, latents.shape[3], latents.shape[4]), dtype=latents.dtype
-    )  # C=16 for HY
-
-    # indices generation (same as inference)
-    indices = torch.arange(0, sum([1, latent_window_size, 1, 2, 16])).unsqueeze(0)
-    (
-        clean_latent_indices_pre,  # Index for start_latent
-        latent_indices,  # Indices for the target latents to predict
-        clean_latent_indices_post,  # Index for the most recent history frame
-        clean_latent_2x_indices,  # Indices for the next 2 history frames
-        clean_latent_4x_indices,  # Indices for the next 16 history frames
-    ) = indices.split([1, latent_window_size, 1, 2, 16], dim=1)
-
-    # Indices for clean_latents (start + recent history)
-    latent_indices = latent_indices[:, -1:]  # Only the last index is used for one frame training
-    clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
-
-    # clean latents preparation for all items (emulating inference)
-    clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split([1, 2, 16], dim=2)
-
+    # save cache for each item in the batch
     for b, item in enumerate(batch):
-        original_latent_cache_path = item.latent_cache_path
+        # indices generation (same as inference): each item may have different clean_latent_indices, so we generate them per item
+        clean_latent_indices = item.fp_1f_clean_indices  # list of indices for clean latents
+        if clean_latent_indices is None or len(clean_latent_indices) == 0:
+            logger.warning(
+                f"Item {item.item_key} has no clean_latent_indices defined, using default indices for one frame training."
+            )
+            clean_latent_indices = [0]
+
+        if not item.fp_1f_no_post:
+            clean_latent_indices = clean_latent_indices + [1 + item.fp_latent_window_size]
+        clean_latent_indices = torch.Tensor(clean_latent_indices).long()  #  N
+
+        latent_index = torch.Tensor([item.fp_1f_target_index]).long()  #  1
+
+        # zero values is not needed to cache even if one_frame_no_2x or 4x is False
+        clean_latents_2x = None
+        clean_latents_4x = None
+
+        if one_frame_no_2x:
+            clean_latent_2x_indices = None
+        else:
+            index = 1 + item.fp_latent_window_size + 1
+            clean_latent_2x_indices = torch.arange(index, index + 2)  #  2
+
+        if one_frame_no_4x:
+            clean_latent_4x_indices = None
+        else:
+            index = 1 + item.fp_latent_window_size + 1 + 2
+            clean_latent_4x_indices = torch.arange(index, index + 16)  #  16
 
         # clean latents preparation (emulating inference)
-        clean_latents_pre = start_latents[b : b + 1]
-        clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)  # Combine start frame + placeholder
+        clean_latents = latents[b, :, :-1]  # C, F, H, W
+        if not item.fp_1f_no_post:
+            # If zero post is enabled, we need to add a zero frame at the end
+            clean_latents = F.pad(clean_latents, (0, 0, 0, 0, 0, 1), value=0.0)  # C, F+1, H, W
 
         # Target latents for this section (ground truth)
-        target_latents = latents[b : b + 1]
+        target_latents = latents[b, :, -1:]  # C, 1, H, W
+
+        print(f"Saving cache for item {item.item_key} at {item.latent_cache_path}. no_post: {item.fp_1f_no_post}")
+        print(f"  Clean latent indices: {clean_latent_indices}, latent index: {latent_index}")
+        print(f"  Clean latents: {clean_latents.shape}, target latents: {target_latents.shape}")
+        print(f"  Clean latents 2x indices: {clean_latent_2x_indices}, clean latents 4x indices: {clean_latent_4x_indices}")
+        print(
+            f"  Clean latents 2x: {clean_latents_2x.shape if clean_latents_2x is not None else 'None'}, "
+            f"Clean latents 4x: {clean_latents_4x.shape if clean_latents_4x is not None else 'None'}"
+        )
+        print(f"  Image embeddings: {image_embeddings[b].shape}")
 
         # save cache (file path is inside item.latent_cache_path pattern), remove batch dim
         save_latent_cache_framepack(
             item_info=item,
-            latent=target_latents.squeeze(0),  # Ground truth for this section
-            latent_indices=latent_indices.squeeze(0),  # Indices for the ground truth section
-            clean_latents=clean_latents.squeeze(0),  # Start frame + history placeholder
-            clean_latent_indices=clean_latent_indices.squeeze(0),  # Indices for start frame + history placeholder
-            clean_latents_2x=clean_latents_2x.squeeze(0),  # History placeholder
-            clean_latent_2x_indices=clean_latent_2x_indices.squeeze(0),  # Indices for history placeholder
-            clean_latents_4x=clean_latents_4x.squeeze(0),  # History placeholder
-            clean_latent_4x_indices=clean_latent_4x_indices.squeeze(0),  # Indices for history placeholder
+            latent=target_latents,  # Ground truth for this section
+            latent_indices=latent_index,  # Indices for the ground truth section
+            clean_latents=clean_latents,  # Start frame + history placeholder
+            clean_latent_indices=clean_latent_indices,  # Indices for start frame + history placeholder
+            clean_latents_2x=clean_latents_2x,  # History placeholder
+            clean_latent_2x_indices=clean_latent_2x_indices,  # Indices for history placeholder
+            clean_latents_4x=clean_latents_4x,  # History placeholder
+            clean_latent_4x_indices=clean_latent_4x_indices,  # Indices for history placeholder
             image_embeddings=image_embeddings[b],
         )
 
 
 def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--image_encoder", type=str, required=True, help="Image encoder (CLIP) checkpoint path or directory")
-    parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
     parser.add_argument(
         "--f1",
         action="store_true",
@@ -335,6 +393,16 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
         "--one_frame",
         action="store_true",
         help="Generate cache for one frame training (single frame, single section). latent_window_size is used as the index of the target frame.",
+    )
+    parser.add_argument(
+        "--one_frame_no_2x",
+        action="store_true",
+        help="Do not use clean_latents_2x and clean_latent_2x_indices for one frame training.",
+    )
+    parser.add_argument(
+        "--one_frame_no_4x",
+        action="store_true",
+        help="Do not use clean_latents_4x and clean_latent_4x_indices for one frame training.",
     )
     return parser
 
@@ -373,7 +441,9 @@ def main(args: argparse.Namespace):
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, feature_extractor, image_encoder, batch, args.latent_window_size, args.f1, args.one_frame)
+        encode_and_save_batch(
+            vae, feature_extractor, image_encoder, batch, args.f1, args.one_frame, args.one_frame_no_2x, args.one_frame_no_4x
+        )
 
     # reuse core loop from cache_latents with no change
     encode_datasets_framepack(datasets, encode, args)
@@ -403,7 +473,7 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
                     all_existing = os.path.exists(item.latent_cache_path)
                 else:
                     latent_f = (item.frame_count - 1) // 4 + 1
-                    num_sections = max(1, math.floor((latent_f - 1) / args.latent_window_size))  # min 1 section
+                    num_sections = max(1, math.floor((latent_f - 1) / item.fp_latent_window_size))  # min 1 section
                     all_existing = True
                     for sec in range(num_sections):
                         p = append_section_idx_to_latent_cache_path(item.latent_cache_path, sec)

@@ -242,6 +242,20 @@ def line_to_prompt_dict(line: str) -> dict:
                 prompt_dict["control_video_path"] = m.group(1)
                 continue
 
+            m = re.match(r"ci (.+)", parg, re.IGNORECASE)
+            if m:
+                # can be multiple control images
+                control_image_path = m.group(1)
+                if "control_image_path" not in prompt_dict:
+                    prompt_dict["control_image_path"] = []
+                prompt_dict["control_image_path"].append(control_image_path)
+                continue
+
+            m = re.match(r"of (.+)", parg, re.IGNORECASE)
+            if m:  # output folder
+                prompt_dict["one_frame"] = m.group(1)
+                continue
+
         except ValueError as ex:
             logger.error(f"Exception in parsing / 解析エラー: {parg}")
             logger.error(ex)

@@ -43,6 +43,12 @@ class ImageDatasetParams(BaseDatasetParams):
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
 
+    # FramePack dependent parameters
+    fp_latent_window_size: Optional[int] = 9
+    fp_1f_clean_indices: Optional[Sequence[int]] = None
+    fp_1f_target_index: Optional[int] = None
+    fp_1f_no_post: Optional[bool] = False
+
 
 @dataclass
 class VideoDatasetParams(BaseDatasetParams):
@@ -55,6 +61,9 @@ class VideoDatasetParams(BaseDatasetParams):
     frame_sample: Optional[int] = 1
     max_frames: Optional[int] = 129
     source_fps: Optional[float] = None
+
+    # FramePack dependent parameters
+    fp_latent_window_size: Optional[int] = 9
 
 
 @dataclass
@@ -104,6 +113,10 @@ class ConfigSanitizer:
         "image_jsonl_file": str,
         "cache_directory": str,
         "control_directory": str,
+        "fp_latent_window_size": int,
+        "fp_1f_clean_indices": [int],
+        "fp_1f_target_index": int,
+        "fp_1f_no_post": bool,
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -285,7 +298,10 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                     f"""\
         image_directory: "{dataset.image_directory}"
         image_jsonl_file: "{dataset.image_jsonl_file}"
-        control_directory: "{dataset.control_directory}"
+        fp_latent_window_size: {dataset.fp_latent_window_size}
+        fp_1f_clean_indices: {dataset.fp_1f_clean_indices}
+        fp_1f_target_index: {dataset.fp_1f_target_index}
+        fp_1f_no_post: {dataset.fp_1f_no_post}
     \n"""
                 ),
                 "    ",

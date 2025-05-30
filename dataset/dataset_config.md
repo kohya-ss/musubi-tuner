@@ -291,26 +291,42 @@ video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 
 ### Sample for Image Dataset with Control Images
 
-The dataset with control images is used for training the single frame training for FramePack.
+The dataset with control images. This is used for training the one frame training for FramePack.
 
 The dataset configuration with caption text files is similar to the image dataset, but with an additional `control_directory` parameter.
 
 The control images are used from the `control_directory` with the same filename (or different extension) as the image, for example, `image_dir/image1.jpg` and `control_dir/image1.png`. The images in `image_directory` should be the target images (the images to be generated during inference, the changed images). The `control_directory` should contain the starting images for inference. The captions should be stored in `image_directory`.
+
+If multiple control images are specified, the filenames of the control images should be numbered (excluding the extension). For example, specify `image_dir/image1.jpg` and `control_dir/image1_0.png`, `control_dir/image1_1.png`. You can also specify the numbers with four digits, such as `image1_0000.png`, `image1_0001.png`.
 
 The metadata JSONL file format is the same as the image dataset, but with an additional `control_path` parameter.
 
 ```json
 {"image_path": "/path/to/image1.jpg", "control_path": "/path/to/control1.png", "caption": "A caption for image1"}
 {"image_path": "/path/to/image2.jpg", "control_path": "/path/to/control2.png", "caption": "A caption for image2"}
+
+If multiple control images are specified, the attribute names should be `control_path_0`, `control_path_1`, etc.
+
+```json
+{"image_path": "/path/to/image1.jpg", "control_path_0": "/path/to/control1_0.png", "control_path_1": "/path/to/control1_1.png", "caption": "A caption for image1"}
+{"image_path": "/path/to/image2.jpg", "control_path_0": "/path/to/control2_0.png", "control_path_1": "/path/to/control2_1.png", "caption": "A caption for image2"}
 ```
+
+The control images can also have an alpha channel. In this case, the alpha channel of the image is used as a mask for the latent.
 
 <details>
 <summary>日本語</summary>
-制御画像を持つデータセットです。FramePackの単一フレーム学習に使用します。
 
-キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御用画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションは`image_directory`へ格納してください。
+制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習に使用します。
 
-メタデータJSONLファイルを使用する場合は、`control_path`を追加してください。
+キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションは`image_directory`へ格納してください。
+
+複数枚の制御画像が指定可能です。この場合、制御画像のファイル名（拡張子を除く）へ数字を付与してください。例えば、`image_dir/image1.jpg`と`control_dir/image1_0.png`, `control_dir/image1_1.png`のように指定します。`image1_0000.png`, `image1_0001.png`のように数字を4桁で指定することもできます。
+
+メタデータJSONLファイルを使用する場合は、`control_path`を追加してください。複数枚の制御画像を指定する場合は、`control_path_0`, `control_path_1`のように数字を付与してください。
+
+制御画像はアルファチャンネルを持つこともできます。この場合、画像のアルファチャンネルはlatentへのマスクとして使用されます。
+
 </details>
 
 ### Sample for Video Dataset with Control Images
@@ -339,11 +355,107 @@ The dataset configuration with metadata JSONL file is  same as the video dataset
 
 <details>
 <summary>日本語</summary>
+
 制御動画を持つデータセットです。ControlNetモデルの学習に使用します。
 
 キャプションを用いる場合のデータセット設定は動画データセットと似ていますが、`control_directory`パラメータが追加されています。上にある例を参照してください。ある動画に対する制御用動画として、動画と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある動画が使用されます（例：`video_dir/video1.mp4`と`control_dir/video1.mp4`または`control_dir/video1.mov`）。また、拡張子なしのディレクトリ内の、複数枚の画像を制御用動画として使用することもできます（例：`video_dir/video1.mp4`と`control_dir/video1`）。
 
 データセット設定でメタデータJSONLファイルを使用する場合は、動画と制御用動画のパスを含める必要があります。制御用動画のパスは、複数枚の画像を含むディレクトリのパスでも構いません。
+
+</details>
+
+## Architecture-specific Settings / アーキテクチャ固有の設定
+
+The dataset configuration is shared across all architectures. However, some architectures may require additional settings or have specific requirements for the dataset.
+
+### FramePack
+
+For FramePack, you can set the latent window size for training. It is recommended to set it to 9 for FramePack training. The default value is 9, so you can usually omit this setting.
+
+```toml
+[[datasets]]
+fp_latent_window_size = 9
+```
+
+<details>
+<summary>日本語</summary>
+
+学習時のlatent window sizeを指定できます。FramePackの学習においては、9を指定することを推奨します。省略時は9が使用されますので、通常は省略して構いません。
+
+</details>
+
+### FramePack One Frame Training
+
+For the default one frame training of FramePack, you need to set the following parameters in the dataset configuration:
+
+```toml
+[[datasets]]
+fp_1f_clean_indices = [0]
+fp_1f_target_index = 9
+fp_1f_no_post = false
+```
+
+**Advanced Settings:**
+
+**Note that these parameters are still experimental, and the optimal values are not yet known.** The parameters may also change in the future.
+
+`fp_1f_clean_indices` sets the `clean_indices` value passed to the FramePack model. You can specify multiple indices. `fp_1f_target_index` sets the index of the frame to be trained (generated). `fp_1f_no_post` sets whether to add a zero value as `clean_latent_post`, default is `false` (add zero value).
+
+The number of control images should match the number of indices specified in `fp_1f_clean_indices`.
+
+The default values mean that the first image (control image) is at index `0`, and the target image (the changed image) is at index `9`.
+
+For training with 1f-mc, set `fp_1f_clean_indices` to `[0, 1]` and `fp_1f_target_index` to `9` (or another value). This allows you to use multiple control images to train a single generated image. The control images will be two in this case.
+
+```toml
+[[datasets]]
+fp_1f_clean_indices = [0, 1]
+fp_1f_target_index = 9
+fp_1f_no_post = false
+```
+
+For training with kisekaeichi, set `fp_1f_clean_indices` to `[0, 10]` and `fp_1f_target_index` to `1` (or another value). This allows you to use the starting image (the image just before the generation section) and the image following the generation section (equivalent to `clean_latent_post`) to train the first image of the generated video. The control images will be two in this case. `fp_1f_no_post` should be set to `true`.
+
+```toml
+[[datasets]]
+fp_1f_clean_indices = [0, 10]
+fp_1f_target_index = 1
+fp_1f_no_post = true
+```
+
+With `fp_1f_clean_indices` and `fp_1f_target_index`, you can specify any number of control images and any index of the target image for training.
+
+If you set `fp_1f_no_post` to `false`, the `clean_latent_post_index` will be `1 + fp1_latent_window_size`.
+
+You can also set the `no_2x` and `no_4x` options for cache scripts to disable the clean latents 2x and 4x.
+
+The 2x indices are `1 + fp1_latent_window_size + 1` for two indices (usually `11, 12`), and the 4x indices are `1 + fp1_latent_window_size + 1 + 2` for sixteen indices (usually `13, 14, ..., 28`), regardless of `fp_1f_no_post` and `no_2x`, `no_4x` settings.
+
+<details>
+<summary>日本語</summary>
+
+※ **以下のパラメータは研究中で最適値はまだ不明です。** またパラメータ自体も変更される可能性があります。
+
+デフォルトの1フレーム学習を行う場合、`fp_1f_clean_indices`に`[0]`を、`fp_1f_target_index`に`9`（または5から15程度の値）を、`no_post`に`false`を設定してください。（記述例は英語版ドキュメントを参照、以降同じ。）
+
+**より高度な設定：**
+
+`fp_1f_clean_indices`は、FramePackモデルに渡される `clean_indices` の値を設定します。複数指定が可能です。`fp_1f_target_index`は、学習（生成）対象のフレームのインデックスを設定します。`fp_1f_no_post`は、`clean_latent_post` をゼロ値で追加するかどうかを設定します（デフォルトは`false`で、ゼロ値で追加します）。
+
+制御画像の枚数は`fp_1f_clean_indices`に指定したインデックスの数とあわせてください。
+
+デフォルトの1フレーム学習では、開始画像（制御画像）1枚をインデックス`0`、生成対象の画像（変化後の画像）をインデックス`9`に設定しています。
+
+1f-mcの学習を行う場合は、`fp_1f_clean_indices`に `[0, 1]`を、`fp_1f_target_index`に`9`を設定してください。これにより動画の先頭の2枚の制御画像を使用して、後続の1枚の生成画像を学習します。制御画像は2枚になります。
+
+kisekaeichiの学習を行う場合は、`fp_1f_clean_indices`に `[0, 10]`を、`fp_1f_target_index`に`1`（または他の値）を設定してください。これは、開始画像（生成セクションの直前の画像）（`clean_latent_pre`に相当）と、生成セクションに続く1枚の画像（`clean_latent_post`に相当）を使用して、生成動画の先頭の画像（`target_index=1`）を学習します。制御画像は2枚になります。`f1_1f_no_post`は`true`に設定してください。
+
+`fp_1f_clean_indices`と`fp_1f_target_index`を応用することで、任意の枚数の制御画像を、任意のインデックスを指定して学習することが可能です。
+
+`fp_1f_no_post`を`false`に設定すると、`clean_latent_post_index`は `1 + fp1_latent_window_size` になります。
+
+推論時の `no_2x`、`no_4x`に対応する設定は、キャッシュスクリプトの引数で行えます。なお、2xのindexは `1 + fp1_latent_window_size + 1` からの2個（通常は`11, 12`）、4xのindexは `1 + fp1_latent_window_size + 1 + 2` からの16個になります（通常は`13, 14, ..., 28`）です。これらの値は`fp_1f_no_post`や`no_2x`, `no_4x`の設定に関わらず、常に同じです。
+
 </details>
 
 ## Specifications
@@ -424,63 +536,3 @@ The metadata with .json file will be supported in the near future.
 
 
 
-<!--
-
-```toml
-# general configurations
-[general]
-resolution = [960, 544] # optional, [W, H], default is None. This is the default resolution for all datasets
-caption_extension = ".txt" # optional, default is None. This is the default caption extension for all datasets
-batch_size = 1 # optional, default is 1. This is the default batch size for all datasets
-enable_bucket = true # optional, default is false. Enable bucketing for datasets
-bucket_no_upscale = false # optional, default is false. Disable upscaling for bucketing. Ignored if enable_bucket is false
-
-# sample image dataset with caption text files
-[[datasets]]
-image_directory = "/path/to/image_dir"
-caption_extension = ".txt" # required for caption text files, if general caption extension is not set
-resolution = [960, 544] # required if general resolution is not set
-batch_size = 4 # optional, overwrite the default batch size
-enable_bucket = false # optional, overwrite the default bucketing setting
-bucket_no_upscale = true # optional, overwrite the default bucketing setting
-cache_directory = "/path/to/cache_directory" # optional, default is None to use the same directory as the image directory. NOTE: caching is always enabled
-
-# sample image dataset with metadata **jsonl** file
-[[datasets]]
-image_jsonl_file = "/path/to/metadata.jsonl" # includes pairs of image files and captions
-resolution = [960, 544] # required if general resolution is not set
-cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
-# caption_extension is not required for metadata jsonl file
-# batch_size, enable_bucket, bucket_no_upscale are also available for metadata jsonl file
-
-# sample video dataset with caption text files
-[[datasets]]
-video_directory = "/path/to/video_dir"
-caption_extension = ".txt" # required for caption text files, if general caption extension is not set
-resolution = [960, 544] # required if general resolution is not set
-target_frames = [1, 25, 79] # required for video dataset. list of video lengths to extract frames. each element must be N*4+1 (N=0,1,2,...)
-frame_extraction = "head" # optional, "head" or "chunk", "slide", "uniform". Default is "head"
-frame_stride = 1 # optional, default is 1, available for "slide" frame extraction
-frame_sample = 4 # optional, default is 1 (same as "head"), available for "uniform" frame extraction
-# batch_size, enable_bucket, bucket_no_upscale, cache_directory are also available for video dataset
-
-# sample video dataset with metadata jsonl file
-[[datasets]]
-video_jsonl_file = "/path/to/metadata.jsonl" # includes pairs of video files and captions
-target_frames = [1, 79]
-cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
-# frame_extraction, frame_stride, frame_sample are also available for metadata jsonl file
-```
-
-# sample image dataset with lance
-[[datasets]]
-image_lance_dataset = "/path/to/lance_dataset"
-resolution = [960, 544] # required if general resolution is not set
-# batch_size, enable_bucket, bucket_no_upscale, cache_directory are also available for lance dataset
-
-The metadata with .json file will be supported in the near future.
-
-
-
-
--->

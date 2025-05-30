@@ -36,6 +36,7 @@ def get_sanitized_config_or_none(args: argparse.Namespace):
         "vae",
         "text_encoder1",
         "text_encoder2",
+        "image_encoder",
         "base_weights",
         "network_weights",
         "output_dir",
