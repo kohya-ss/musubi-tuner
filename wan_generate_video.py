@@ -931,10 +931,10 @@ def prepare_i2v_inputs(
         extra_noise = torch.randn(
             y.shape,
             generator=seed_g,
-            device=y.device,
+            device=y.device if not args.cpu_noise else "cpu",
             dtype=y.dtype
         ) * args.i2v_extra_noise
-        y = y + extra_noise
+        y = y + extra_noise.to(y.device)
 
     # Fun-Control: encode control video to latent space
     if config.is_fun_control:
