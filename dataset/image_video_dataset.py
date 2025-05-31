@@ -1455,6 +1455,7 @@ class ImageDataset(BaseDataset):
 
                 bucket_reso = buckset_selector.get_bucket_resolution(image_size)
                 image = resize_image_to_bucket(image, bucket_reso) # returns np.ndarray
+                resized_controls = None
                 if controls is not None:
                     resized_controls = []
                     for control in controls:
