@@ -1332,7 +1332,7 @@ def generate_with_one_frame_inference(
             logger.info(
                 f"Apply mask for clean latents 1x for {i + 1}: {args.control_image_mask_path[i]}, shape: {mask_image.shape}"
             )
-        elif control_mask_images[i] is not None:
+        elif control_mask_images is not None and i < len(control_mask_images) and control_mask_images[i] is not None:
             mask_image = get_latent_mask(control_mask_images[i])
             logger.info(f"Apply mask for clean latents 1x for {i + 1} with alpha channel: {mask_image.shape}")
         if mask_image is not None:
@@ -1351,7 +1351,7 @@ def generate_with_one_frame_inference(
                 clean_latent_indices[:, i] = control_index
                 i += 1
             logger.info(f"Set index for clean latent 1x: {control_indices}")
-    
+
     # "default" option does nothing, so we can skip it
     if "default" in one_frame_inference:
         pass
