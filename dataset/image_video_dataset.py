@@ -814,7 +814,7 @@ class ImageJsonlDatasource(ImageDatasource):
 
             # Ensure control paths are named consistently, from control_path_0000 to control_path_0, control_path_1, etc.
             control_path_keys = [key for key in item.keys() if key.startswith("control_path_")]
-            control_path_keys.sort(lambda x: int(x.split("_")[-1]))
+            control_path_keys.sort(key=lambda x: int(x.split("_")[-1]))
             for i, key in enumerate(control_path_keys):
                 if key != f"control_path_{i}":
                     item[f"control_path_{i}"] = item.pop(key)
@@ -1454,12 +1454,12 @@ class ImageDataset(BaseDataset):
                 image_size = image.size
 
                 bucket_reso = buckset_selector.get_bucket_resolution(image_size)
-                image = resize_image_to_bucket(image, bucket_reso) # returns np.ndarray
+                image = resize_image_to_bucket(image, bucket_reso)  # returns np.ndarray
                 resized_controls = None
                 if controls is not None:
                     resized_controls = []
                     for control in controls:
-                        resized_control = resize_image_to_bucket(control, bucket_reso) # returns np.ndarray
+                        resized_control = resize_image_to_bucket(control, bucket_reso)  # returns np.ndarray
                         resized_controls.append(resized_control)
 
                 return image_size, image_key, image, caption, resized_controls
