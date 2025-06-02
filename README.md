@@ -183,7 +183,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 Install the required dependencies using the following command:
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 Optionally, you can use FlashAttention and SageAttention (**for inference only**; see [SageAttention Installation](#sageattention-installation) for installation instructions).

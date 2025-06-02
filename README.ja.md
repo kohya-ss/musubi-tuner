@@ -175,7 +175,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 以下のコマンドを使用して、必要な依存関係をインストールします。
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 オプションとして、FlashAttention、SageAttention（**推論にのみ使用できます**、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
