@@ -1363,15 +1363,16 @@ def generate_with_one_frame_inference(
     else:
         clean_latents_2x = torch.zeros((1, 16, 2, height // 8, width // 8), dtype=torch.float32)
         index = 1 + latent_window_size + 1
-        clean_latent_2x_indices = torch.arange(index, index + 2)  #  2
+        clean_latent_2x_indices = torch.arange(index, index + 2).unsqueeze(0)  #  2
 
     if "no_4x" in one_frame_inference:
         clean_latents_4x = None
         clean_latent_4x_indices = None
         logger.info(f"No clean_latents_4x")
     else:
+        clean_latents_4x = torch.zeros((1, 16, 16, height // 8, width // 8), dtype=torch.float32)
         index = 1 + latent_window_size + 1 + 2
-        clean_latent_4x_indices = torch.arange(index, index + 16)  #  16
+        clean_latent_4x_indices = torch.arange(index, index + 16).unsqueeze(0)  #  16
 
     logger.info(
         f"One frame inference. clean_latent: {clean_latents.shape} latent_indices: {latent_indices}, clean_latent_indices: {clean_latent_indices}, num_frames: {sample_num_frames}"
