@@ -13,12 +13,13 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 すべてのモデル向けの拡張機能：
 - latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0）
 - 高速で高品質な生成のための最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）
-- 生成メタデータを動画/画像に保存(`--container mkv` では自動、`--no-metadata` では無効化、`--container mp4` では利用不可)
+- 動画/画像に生成メタデータを保存します (`--container mkv` で自動、`--no-metadata` で無効化、`--container mp4` では使用できません。`blissful_tuner/metaview.py some_video.mkv` でこのようなメタデータを表示/コピーできます)
 - 美しくリッチなログ出力、豊富な引数解析、そして豊富なトレースバック
 - 拡張された保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートの知覚的ロスレス) を `--container mkv` に保存、または `h264`、`h265` のいずれかを `mp4` または `mkv` に保存可能)
 - FP16 積算 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも機能します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、fp8_fast/mmscaled とほぼ同等の速度になります。精度の低下は抑えられています！fp8スケールモードにも対応しています！
 - シードとして文字列を使用するのは良いでしょう！覚えやすいのも魅力です！
 - プロンプトでワイルドカードを使用すると、バリエーションが増えます！（`--prompt_wildcards /path/to/wildcard/directory` のように指定します。例えば、プロンプトで `__color__` と指定すると、そのディレクトリ内の color.txt が検索されます。ワイルドカードファイルの形式は、1行につき1つの置換文字列で、red:2.0 や "some long string:0.5" のように相対的な重みを任意で付加できます。ワイルドカード自体にワイルドカードを含めることも可能で、再帰回数の制限は50回です！）
+- 精度向上のため、量子化/線形変換をアップキャストします (`--upcast_quantization` は推論とトレーニングの両方ですべてのモデルで使用可能で、わずかな VRAM コストで fp8_scaled 量子化の精度をわずかに向上します。`--upcast_linear` は推論中(トレーニングは近日中に)にすべてのモデルで使用可能で、fp8_scaled を使用すると、乗算ヘッドルームのために線形変換を fp32 にアップキャストします。ペナルティはほとんど発生せず、品質がわずかに向上します。scaled_mm (fp8_fast) が有効になっているレイヤーには適用されません)
 
 Wan/Hunyuan 拡張機能：
 - 拡散パイプ形式の LoRA を、事前に変換することなく推論用に読み込みます。
@@ -38,6 +39,7 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 - プロンプトの重み付け（`--prompt_weighting` を指定し、プロンプトで「(large:1.4) の赤いボールで遊ぶ猫」のように記述することで、「large」の効果を強調できます。[this] または (this) に注意してください。はサポートされておらず、(this:1.0) のみサポートされています。また、重み付けのダウンウェイトには奇妙な効果があります。
 - 複素数を使用しない ComfyUI から移植された ROPE。`--compile` と併用すると VRAM を大幅に節約できます！(`--rope_func comfy`)
 - I2V/V2V 用のオプションの潜在ノイズ (`--v2v_extra_noise 0.02 --i2v_extra_noise 0.02`、0.04 未満の値を推奨。これにより V2V/I2V のディテールとテクスチャが向上しますが、値が大きすぎるとアーティファクトや影の動きが発生します。V2V では 0.01～0.02、I2V では 0.02～0.04 程度を使用しています)
+- 混合精度トランスフォーマーをロードします (推論またはトレーニングの場合は `--mixed_precision_transformer` を使用します。このようなトランスフォーマーの作成方法とその理由については、https://github.com/kohya-ss/musubi-tuner/discussions/232#discussioncomment-13284677 を参照してください)。
 
 フレームパックのみの拡張機能:
 - Torch.compile (`--compile`、Wan と Hunyuan が既に使用している構文と同じ)
