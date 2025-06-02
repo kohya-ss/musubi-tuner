@@ -278,7 +278,7 @@ If you have installed with `uv`, you can use `uv run` to run the script. Other s
 uv run src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-For additional options, use `python cache_latents.py --help`.
+For additional options, use `python src/musubi_tuner/cache_latents.py --help`.
 
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size`.
 
