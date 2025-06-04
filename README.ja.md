@@ -13,7 +13,7 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 すべてのモデル向けの拡張機能：
 - latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0）
 - 高速で高品質な生成のための最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）
-- 動画/画像に生成メタデータを保存します (`--container mkv` で自動、`--no-metadata` で無効化、`--container mp4` では使用できません。`blissful_tuner/metaview.py some_video.mkv` でこのようなメタデータを表示/コピーできます)
+- 動画/画像に生成メタデータを保存します (`--container mkv` で自動的に保存され、PNG を保存する場合は `--no-metadata` で無効になり、`--container mp4` では使用できません。`blissful_tuner/metaview.py some_video.mkv` を使用すると、このようなメタデータを簡単に表示/コピーできます)
 - 美しくリッチなログ出力、豊富な引数解析、そして豊富なトレースバック
 - 拡張された保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートの知覚的ロスレス) を `--container mkv` に保存、または `h264`、`h265` のいずれかを `mp4` または `mkv` に保存可能)
 - FP16 積算 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも機能します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、fp8_fast/mmscaled とほぼ同等の速度になります。精度の低下は抑えられています！fp8スケールモードにも対応しています！
@@ -35,7 +35,8 @@ Hunyuan 専用の拡張機能:
 - https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyanに基づいてテキストエンコーダーを再スケール（`--te_multiplier llm clip`、例えば`--te_multiplier 0.9 1.2`のように、LLMをわずかに重み付け下げ、CLIPをわずかに重み付け上げます）
 
 WAN 専用拡張機能（ワンショットモードとインタラクティブモードの両方をサポート）：
-- V2V 推論（`--video_path /path/to/input/video --v2v_denoise amount` で、amount は 0.0 - 1.0 の浮動小数点数で、ソースビデオに追加するノイズの強度を制御します。`--v2v_noise_mode Traditional` の場合、他の実装と同様に、タイムステップスケジュールの最後の (amount * 100) パーセントを実行します。`--v2v_noise_mode direct` の場合、タイムステップスケジュール内でその値に最も近い場所から開始し、そこから処理を進めることで、追加するノイズの量を可能な限り正確に直接制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。 `--video_length` が入力より長い場合、`--v2v_pad_mode` の設定に応じて、最初のフレームまたは最後のフレームが繰り返され、長さが調整されます。T2V または I2V の `--task` モードとモデルを使用できます（個人的には i2v モードの方が品質が良いと思います）。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去の場合と同じ値にする必要があります。例えば、T2V の場合はデフォルトで 50、I2V の場合は 40 です。これは、完全なスケジュールから変更する必要があるためです。実際のステップ数は `--v2v_noise_mode` の設定に依存します。
+- V2V 推論 (`--video_path /path/to/input/video --denoise_strength amount`、amount は 0.0 - 1.0 の浮動小数点数で、ソース ビデオに追加されるノイズの強さを制御します。`--noise_mode traditional` の場合、他の実装と同様に、タイム ステップ スケジュールの最後の (amount * 100) パーセントが実行されます。`--noise_mode direct` の場合、タイム ステップ スケジュール内でその値に最も近い場所から開始して、追加されるノイズの量を可能な限り直接制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。`--video_length` が入力より長い場合、最初のフレームまたは最後のフレームが繰り返され、長さが埋められます。 `--v2v_pad_mode` に依存します。T2V または I2V の `--task` モードとモデルを使用できます（個人的には i2v モードの方が品質が良いと思います）。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去と同じ値にする必要があります。例えば、T2V の場合はデフォルトで 50、I2V の場合は 40 です。これは、完全なスケジュールから変更する必要があるためです。実際のステップ数は `--noise_mode` に依存します。
+- I2I推論 (`--i2i_path /path/to/image` - T2IモードでT2Vモデルと共に使用し、`--denoise_strength`で強度を指定します。潜在ノイズの増強のための`--i2_extra_noise`もサポートします)
 - プロンプトの重み付け（`--prompt_weighting` を指定し、プロンプトで「(large:1.4) の赤いボールで遊ぶ猫」のように記述することで、「large」の効果を強調できます。[this] または (this) に注意してください。はサポートされておらず、(this:1.0) のみサポートされています。また、重み付けのダウンウェイトには奇妙な効果があります。
 - 複素数を使用しない ComfyUI から移植された ROPE。`--compile` と併用すると VRAM を大幅に節約できます！(`--rope_func comfy`)
 - I2V/V2V 用のオプションの潜在ノイズ (`--v2v_extra_noise 0.02 --i2v_extra_noise 0.02`、0.04 未満の値を推奨。これにより V2V/I2V のディテールとテクスチャが向上しますが、値が大きすぎるとアーティファクトや影の動きが発生します。V2V では 0.01～0.02、I2V では 0.02～0.04 程度を使用しています)
