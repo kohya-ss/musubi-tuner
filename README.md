@@ -180,10 +180,10 @@ PyTorch 2.5.1 or later is required (see [note](#PyTorch-version)).
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
-Install the required dependencies using the following command:
+Install the required dependencies using the following command. If CUDA 12.8 is supported, `cu124` can be replaced with `cu128`:
 
 ```bash
-pip install -e .
+pip install -e ".[cu124]" --extra-index-url https://download.pytorch.org/whl/cu124
 ```
 
 Optionally, you can use FlashAttention and SageAttention (**for inference only**; see [SageAttention Installation](#sageattention-installation) for installation instructions).
@@ -272,10 +272,10 @@ If you have installed using pip:
 python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-If you have installed with `uv`, you can use `uv run` to run the script. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
+If you have installed with `uv`, you can use `uv run --extra cu124` to run the script. If CUDA 12.8 is supported, `uv run --extra cu128` is also available. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
 
 ```bash
-uv run src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
+uv run --extra cu124 src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
 For additional options, use `python src/musubi_tuner/cache_latents.py --help`.
@@ -301,7 +301,7 @@ python src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/t
 or for uv:
 
 ```bash
-uv run src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
+uv run --extra cu124 src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
 ```
 
 For additional options, use `python src/musubi_tuner/cache_text_encoder_outputs.py --help`.
@@ -349,7 +349,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 or for uv:
 
 ```bash
-uv run accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
+uv run --extra cu124 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
     --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
@@ -402,7 +402,7 @@ python src/musubi_tuner/merge_lora.py \
 or for uv:
 
 ```bash
-uv run src/musubi_tuner/merge_lora.py \
+uv run --extra cu124 src/musubi_tuner/merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
     --lora_weight path/to/lora.safetensors \
     --save_merged_model path/to/merged_model.safetensors \
@@ -432,7 +432,7 @@ python src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_
 or for uv:
 
 ```bash
-uv run src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
+uv run --extra cu124 src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
@@ -509,7 +509,7 @@ python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors 
 or for uv:
 
 ```bash
-uv run src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
+uv run --extra cu124 src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
 ```
 
 Specify the input and output file paths with `--input` and `--output`, respectively.

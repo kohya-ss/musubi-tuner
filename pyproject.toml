@@ -19,14 +19,32 @@ dependencies = [
     "sageattention>=1.0.6",
     "tensorboard>=2.18.0",
     "toml>=0.10.2",
-    "torch>=2.5.1",
-    "torchvision>=0.20.1",
     "tqdm>=4.66.5",
     "transformers>=4.46.3",
     "voluptuous>=0.15.2",
     # Wan2.1
     "ftfy==6.3.1",
     "easydict==1.13",
+]
+
+[project.optional-dependencies]
+cu124 = [
+    "pytorch-triton>=3.3.0",
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
+]
+cu128 = [
+    "pytorch-triton>=3.3.0",
+    "torch>=2.7.1",
+    "torchvision>=0.22.1",
+]
+
+[tool.uv]
+conflicts = [
+  [
+    { extra = "cu124" },
+    { extra = "cu128" },
+  ],
 ]
 
 [dependency-groups]
@@ -61,14 +79,25 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv.sources]
+pytorch-triton = [
+  { index = "pytorch-cu124", extra = "cu124" },
+  { index = "pytorch-cu128", extra = "cu128" }
+]
 torch = [
-  { index = "pytorch-cu124" },
+  { index = "pytorch-cu124", extra = "cu124" },
+  { index = "pytorch-cu128", extra = "cu128" },
 ]
 torchvision = [
-  { index = "pytorch-cu124" },
+  { index = "pytorch-cu124", extra = "cu124" },
+  { index = "pytorch-cu128", extra = "cu128" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu124"
 url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
