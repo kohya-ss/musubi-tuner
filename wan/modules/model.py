@@ -906,7 +906,8 @@ def load_wan_model(
     rope_func: str = "default",
     riflex_index: int = 0,
     num_frames: int = 81,
-    quant_dtype: Optional[torch.dtype] = None
+    upcast_linear: bool = False,
+    quant_dtype: Optional[torch.dtype] = None,
 ) -> WanModel:
     # dit_weight_dtype is None for fp8_scaled
     #assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -951,7 +952,7 @@ def load_wan_model(
     if fp8_scaled:
         # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
         logger.info("Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, quant_dtype=quant_dtype)
+        sd = model.fp8_optimization(sd, device, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
 
         # make sure all the model weights are on the loading_device
         for key in sd.keys():

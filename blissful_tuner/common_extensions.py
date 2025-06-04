@@ -8,11 +8,13 @@ Created on Thu May  1 13:01:35 2025
 import os
 import argparse
 import threading
+from datetime import datetime
 from typing import Tuple, Optional, Any
 from pynput import keyboard
 import torch
 import numpy as np
 from einops import rearrange
+from PIL import Image
 import torchvision
 import torchvision.transforms.functional as TF
 from easydict import EasyDict
@@ -103,10 +105,13 @@ class BlissfulThreadManager():
 
 def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:
     seed = args.seed if seed_override is None else seed_override
-    attr_list = ["prompt", "infer_steps", "guidance_scale", "flow_shift", "fps", "task", "embedded_cfg_scale", "negative_prompt", "cfg_schedule"]
+    attr_list = ["prompt", "infer_steps", "guidance_scale", "flow_shift",
+                 "hidden_state_skip_layer", "apply_final_norm",
+                 "fps", "task", "embedded_cfg_scale", "negative_prompt", "cfg_schedule"]
     metadata = {
         "bt_model_type": f"{get_current_model_type()}",
         "bt_seeds": f"{seed}",
+        "bt_creation_timestamp": f"{datetime.now()}",
         "bt_tunerver": f"{get_current_version()}"
     }
 
@@ -155,6 +160,86 @@ def save_videos_grid_advanced(
     VideoProcessor.write_np_images_to_output(outputs, args.fps, args.keep_pngs, metadata=metadata)
 
 
+def prepare_i2i_noise(
+    base_noise: torch.Tensor,
+    args: argparse.Namespace,
+    config: EasyDict,
+    timesteps: torch.Tensor,
+    device: torch.device,
+    vae: WanVAE
+) -> torch.Tensor:
+    """
+    Prepare (noise, timesteps) for Wan Video-to-Video.
+
+    Returns:
+      - noise:      [C, F, H_lat, W_lat] latent-space tensor
+      - timesteps:  possibly shortened timesteps tensor
+    """
+    # 1) Possibly shorten the schedule
+    if args.denoise_strength > 1.0:
+        raise ValueError("--denoise must be < 1.0!")
+    if args.noise_mode.lower() == "traditional":
+        steps = int(args.infer_steps * args.denoise_strength)
+        timesteps = timesteps[-(steps):]
+        logger.info(f"Modifying timestep schedule to run {args.denoise_strength * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%")
+    elif args.noise_mode.lower() == "direct":
+        normalized_ts = timesteps.float() / 1000
+        start_idx = torch.argmin(torch.abs(normalized_ts - args.denoise_strength))
+        timesteps = timesteps[start_idx:]
+        logger.info(f"Modifying timestep schedule to add as close to {args.denoise_strength * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%")
+    args.infer_steps = len(timesteps)
+
+    output_height, output_width = args.video_size
+    output_video_area = output_height * output_width
+    aspect_ratio = output_height / output_width
+
+    latent_height = int(
+        round(
+            np.sqrt(output_video_area * aspect_ratio)
+            / config.vae_stride[1]
+            / config.patch_size[1]
+            * config.patch_size[1]
+        )
+    )
+    latent_width = int(
+        round(
+            np.sqrt(output_video_area / aspect_ratio)
+            / config.vae_stride[2]
+            / config.patch_size[2]
+            * config.patch_size[2]
+        )
+    )
+    computed_height = latent_height * config.vae_stride[1]
+    computed_width = latent_width * config.vae_stride[2]
+
+    # 3) Load raw frames
+    img = Image.open(args.i2i_path).convert("RGB")
+
+    # 4) Build a [1, C, T, H_px, W_px] video tensor
+    t = TF.to_tensor(img)                                   # [C, H, W], 0–1
+    t = TF.resize(t, [computed_height, computed_width], interpolation=TF.InterpolationMode.BICUBIC)
+    t = t.sub_(0.5).div_(0.5).to(device)                     # normalize to [-1,1]
+    t = t.unsqueeze(1)
+
+    # 5) Encode the entire video in one go to latent space
+    vae.to_device(device)
+    logger.info("Encoding input image to latent space for i2i")
+    with torch.autocast(device_type=str(device), dtype=vae.dtype), torch.no_grad():
+        latent_list = vae.encode([t])           # returns list of length B=1
+    input_samples = latent_list[0]                # [C, T, H_lat, W_lat]
+    vae.to_device("cpu")
+
+    # 8) Blend noise & input according to updated timestep schedule
+    timestep_noise_percent = timesteps[:1].to(base_noise) / 1000
+    noise = base_noise * timestep_noise_percent + (1 - timestep_noise_percent) * input_samples
+    if args.i2_extra_noise is not None:
+        logger.info((f"Adding {100 * args.i2_extra_noise}% extra noise to i2i image"))
+        noise += args.i2_extra_noise * base_noise
+
+    clean_memory_on_device(device)
+    return noise, timesteps
+
+
 def prepare_v2v_noise(
     base_noise: torch.Tensor,
     args: argparse.Namespace,
@@ -171,17 +256,17 @@ def prepare_v2v_noise(
       - timesteps:  possibly shortened timesteps tensor
     """
     # 1) Possibly shorten the schedule
-    if args.v2v_denoise > 1.0:
-        raise ValueError("--v2v_denoise must be < 1.0!")
-    if args.v2v_noise_mode.lower() == "traditional":
-        steps = int(args.infer_steps * args.v2v_denoise)
+    if args.denoise_strength > 1.0:
+        raise ValueError("--denoise must be < 1.0!")
+    if args.noise_mode.lower() == "traditional":
+        steps = int(args.infer_steps * args.denoise_strength)
         timesteps = timesteps[-(steps):]
-        logger.info(f"Modifying timestep schedule to run {args.v2v_denoise * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%")
-    elif args.v2v_noise_mode.lower() == "direct":
+        logger.info(f"Modifying timestep schedule to run {args.denoise_strength * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%")
+    elif args.noise_mode.lower() == "direct":
         normalized_ts = timesteps.float() / 1000
-        start_idx = torch.argmin(torch.abs(normalized_ts - args.v2v_denoise))
+        start_idx = torch.argmin(torch.abs(normalized_ts - args.denoise_strength))
         timesteps = timesteps[start_idx:]
-        logger.info(f"Modifying timestep schedule to add as close to {args.v2v_denoise * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%")
+        logger.info(f"Modifying timestep schedule to add as close to {args.denoise_strength * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%")
     args.infer_steps = len(timesteps)
 
     output_height, output_width = args.video_size
@@ -255,9 +340,9 @@ def prepare_v2v_noise(
     # 8) Blend noise & input according to updated timestep schedule
     timestep_noise_percent = timesteps[:1].to(base_noise) / 1000
     noise = base_noise * timestep_noise_percent + (1 - timestep_noise_percent) * input_samples
-    if args.v2v_extra_noise is not None:
-        logger.info((f"Adding {100 * args.v2v_extra_noise}% extra noise to V2V frames"))
-        noise += args.v2v_extra_noise * base_noise
+    if args.v2_extra_noise is not None:
+        logger.info((f"Adding {100 * args.v2_extra_noise}% extra noise to V2V frames"))
+        noise += args.v2_extra_noise * base_noise
 
     clean_memory_on_device(device)
     return noise, timesteps

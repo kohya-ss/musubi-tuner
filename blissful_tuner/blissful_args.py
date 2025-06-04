@@ -107,25 +107,25 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
-        parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
-        parser.add_argument("--v2v_extra_noise", type=float, default=None, help="Extra latent noise for v2v. Low values are best e.g. 0.015. Can help add fine details, especially when upscaling(output res > input res)")
-        parser.add_argument("--i2v_extra_noise", type=float, default=None, help="Extra latent noise for i2v. Low values are best e.g. 0.025. Can help add fine details, especially when upscaling(output res > input res)")
+        parser.add_argument("--i2i_path", type=str, default=None, help="path to an image for image2image inference. Use with T2V model and T2I task.")
+        parser.add_argument("--v2_extra_noise", type=float, default=None, help="Extra latent noise for v2v. Low values are best e.g. 0.015. Can help add fine details, especially when upscaling(output res > input res)")
+        parser.add_argument("--i2_extra_noise", type=float, default=None, help="Extra latent noise for i2v. Low values are best e.g. 0.025. Can help add fine details, especially when upscaling(output res > input res)")
+        parser.add_argument("--denoise_strength", type=float, default=0.5, help="Amount of denoising to do for V2V or I2I, 0.0-1.0")
+        parser.add_argument(
+            "--noise_mode", choices=["traditional", "direct"], default="traditional",
+            help="Controls how --denoise_strength value works. Traditional is like usual and controls what percent of the timestep schedule to run. "
+            "Direct allows you to directly control how much noise will be added."
+        )
+        parser.add_argument(
+            "--v2v_pad_mode", type=str, choices=["front", "end"], default="end",
+            help="Padding mode for when V2V input is shorter than requested output"
+        )
         parser.add_argument("--prompt_weighting", action="store_true", help="Enable (prompt weighting:1.2)")
         parser.add_argument(
             "--rope_func", type=str, choices=["default", "comfy"], default="default",
             help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile to enable BIG VRAM savings"
         )
-        parser.add_argument("--v2v_denoise", type=float, default=0.5, help="Amount of denoising to do for V2V, 0.0-1.0")
-        parser.add_argument(
-            "--v2v_pad_mode", type=str, choices=["front", "end"], default="end",
-            help="Padding mode for when V2V input is shorter than requested output"
-        )
-        parser.add_argument(
-            "--v2v_noise_mode", choices=["traditional", "direct"], default="traditional",
-            help="Controls how --v2v_denoise value works. Traditional is like usual and controls what percent of the timestep schedule to run. "
-            "Direct allows you to directly control how much noise will be added."
-        )
-
+        parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
     elif DIFFUSION_MODEL == "hunyuan":
         parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2. Think 'clip skip' for the LLM")
         parser.add_argument("--apply_final_norm", action="store_true", help="Apply final norm for LLM. Default is False. Usually makes things worse.")

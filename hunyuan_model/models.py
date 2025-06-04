@@ -992,6 +992,7 @@ def load_transformer(
         in_channels: int = 16,
         fp8_scaled: bool = False,
         fp8_fast: bool = False,
+        upcast_linear: bool = False,
         quant_dtype: Optional[torch.dtype] = None) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
     factor_kwargs = {"device": load_device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
@@ -1026,7 +1027,7 @@ def load_transformer(
 
     if fp8_scaled:
         sd = transformer.state_dict()
-        sd = transformer.fp8_optimization(sd, main_device, use_scaled_mm=fp8_fast, quant_dtype=quant_dtype)
+        sd = transformer.fp8_optimization(sd, main_device, use_scaled_mm=fp8_fast, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
         # make sure all the model weights are on the loading_device
         for key in sd.keys():
             sd[key] = sd[key].to(load_device)

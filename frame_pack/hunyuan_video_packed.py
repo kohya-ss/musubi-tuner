@@ -1978,6 +1978,7 @@ def load_packed_model(
     loading_device: Union[str, torch.device],
     fp8_scaled: bool = False,
     split_attn: bool = False,
+    upcast_linear: bool = False,
     quant_dtype: Optional[torch.dtype] = None
 ) -> HunyuanVideoTransformer3DModelPacked:
     # TODO support split_attn
@@ -2028,7 +2029,7 @@ def load_packed_model(
     if fp8_scaled:
         # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
         logger.info("Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, quant_dtype=quant_dtype)
+        sd = model.fp8_optimization(sd, device, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
 
         # make sure all the model weights are on the loading_device
         for key in sd.keys():

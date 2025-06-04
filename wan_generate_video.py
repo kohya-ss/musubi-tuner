@@ -46,7 +46,7 @@ from blissful_tuner.utils import string_to_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
-from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_metadata, BlissfulKeyboardManager
+from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_i2i_noise, prepare_metadata, BlissfulKeyboardManager
 from dataset.image_video_dataset import load_video
 
 logger = BlissfulLogger(__name__, "green")
@@ -926,14 +926,14 @@ def prepare_i2v_inputs(
     y = torch.concat([msk, y])
     logger.info("Encoding complete")
 
-    if args.i2v_extra_noise not in (None, 0.0):
-        logger.info(f"Adding {100 * args.i2v_extra_noise:.1f}% extra noise to I2V conditioning latents")
+    if args.i2_extra_noise not in (None, 0.0):
+        logger.info(f"Adding {100 * args.i2_extra_noise:.1f}% extra noise to I2V conditioning latents")
         extra_noise = torch.randn(
             y.shape,
             generator=seed_g,
             device=y.device if not args.cpu_noise else "cpu",
             dtype=y.dtype
-        ) * args.i2v_extra_noise
+        ) * args.i2_extra_noise
         y = y + extra_noise.to(y.device)
 
     # Fun-Control: encode control video to latent space
@@ -1185,6 +1185,8 @@ def run_sampling(
                 break
             if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
                 previewer.preview(latent, i)
+            elif args.preview_latent_every is not None and i + 1 == len(timesteps):
+                del previewer  # Free memory in prepartion for return e.g. interactive
     km.terminate()
     return latent
 
@@ -1245,13 +1247,15 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         else:
             # T2V: need text encoder
             vae = None
-            if cfg.is_fun_control or args.video_path is not None:
+            if cfg.is_fun_control or args.video_path is not None or args.i2i_path is not None:
                 # Fun-Control: need VAE for encoding control video
                 vae = load_vae(args, cfg, device, vae_dtype)
             noise, context, context_null, inputs, arg_nocond = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
 
         if args.video_path is not None:
             noise, timesteps = prepare_v2v_noise(noise, args, cfg, timesteps, device, vae)
+        elif args.i2i_path is not None:
+            noise, timesteps = prepare_i2i_noise(noise, args, cfg, timesteps, device, vae)
         # load DiT model
         model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
 

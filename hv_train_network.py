@@ -1329,6 +1329,7 @@ class NetworkTrainer:
             dit_path, attn_mode, split_attn,
             loading_device, accelerator.device, dit_weight_dtype,
             args.dit_in_channels, fp8_scaled=args.fp8_scaled,
+            upcast_linear=args.upcast_linear,
             quant_dtype=torch.float32 if args.upcast_quantization else None)
 
         if args.img_in_txt_in_offloading:
@@ -2630,6 +2631,10 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument(
         "--upcast_quantization", action="store_true", help="If supplied, upcast quantization steps to fp32 for better accuracy."
         "Will improve quantization accuracy a bit at a small VRAM cost. Only for fp8_scaled"
+    )
+    parser.add_argument(
+        "--upcast_linear", action="store_true", help="If supplied, upcast linear transformations to fp32."
+        "Only for fp8_scaled and not active during mm_scaled. Can potentially increase accuracy at little cost to speed."
     )
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")

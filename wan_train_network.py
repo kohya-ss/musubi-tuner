@@ -347,7 +347,7 @@ class WanNetworkTrainer(NetworkTrainer):
         model = load_wan_model(
             self.config, accelerator.device, dit_path, attn_mode, split_attn,
             loading_device, dit_weight_dtype, args.fp8_scaled, rope_func=args.rope_func,
-            quant_dtype=torch.float32 if args.upcast_quantization else None
+            quant_dtype=torch.float32 if args.upcast_quantization else None, upcast_linear=args.upcast_linear
         )
         return model
 
