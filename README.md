@@ -180,10 +180,10 @@ PyTorch 2.5.1 or later is required (see [note](#PyTorch-version)).
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
-Install the required dependencies using the following command. If CUDA 12.8 is supported, `cu124` can be replaced with `cu128`:
+Install the required dependencies using the following command.
 
 ```bash
-pip install -e ".[cu124]" --extra-index-url https://download.pytorch.org/whl/cu124
+pip install -e .
 ```
 
 Optionally, you can use FlashAttention and SageAttention (**for inference only**; see [SageAttention Installation](#sageattention-installation) for installation instructions).

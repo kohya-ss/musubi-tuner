@@ -172,10 +172,10 @@ PyTorchはバージョン2.5.1以上を使用してください（[補足](#PyTo
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
-以下のコマンドを使用して、必要な依存関係をインストールします。CUDA 12.8に対応している場合は、`cu124`を`cu128`に置き換えることが可能です。
+以下のコマンドを使用して、必要な依存関係をインストールします。
 
 ```bash
-pip install -e ".[cu124]" --extra-index-url https://download.pytorch.org/whl/cu124
+pip install -e .
 ```
 
 オプションとして、FlashAttention、SageAttention（**推論にのみ使用できます**、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
