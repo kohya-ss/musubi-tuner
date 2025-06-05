@@ -271,8 +271,8 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         scale_weight = self.scale_weight.to(torch.float32)
 
         if self.bias is not None:
-            # out_dtype must match bias.dtype
-            o = torch._scaled_mm(x, weight, out_dtype=self.original_dtype_enum, bias=self.bias, scale_a=scale_x, scale_b=scale_weight)
+            # out_dtype must match bias.dtype and not be float32 in scaled_mm
+            o = torch._scaled_mm(x, weight, out_dtype=self.original_dtype_enum, bias=self.bias.to(self.original_dtype_enum), scale_a=scale_x, scale_b=scale_weight)
         else:
             o = torch._scaled_mm(x, weight, out_dtype=input_dtype, scale_a=scale_x, scale_b=scale_weight)
 
@@ -281,13 +281,12 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
     else:
 
         # Dequantize the weight
-        original_dtype = self.original_dtype_enum
         if self.upcast_linear:
             # Upcast for dequantization and linear transformation
             x = x.to(torch.float32)
             dequantized_weight = self.weight.to(torch.float32) * self.scale_weight.to(torch.float32)
         else:
-            dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
+            dequantized_weight = self.weight.to(self.original_dtype_enum) * self.scale_weight
 
         # Perform linear transformation
         if self.bias is not None:
@@ -295,7 +294,7 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         else:
             output = F.linear(x, dequantized_weight)
 
-        return output.to(original_dtype)  # Back to original dtype in case we upcasted, otherwise nop
+        return output.to(self.original_dtype_enum)  # Back to original dtype in case we upcasted, otherwise nop
 
 
 def apply_fp8_monkey_patch(

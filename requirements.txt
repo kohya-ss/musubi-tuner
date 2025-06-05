@@ -32,6 +32,7 @@ rich-argparse>=1.5.0
 rich-tracebacks>=1.0.0
 lpips==0.1.4
 ultralytics>=8.3.0
+prompt_toolkit>=3.0.0
 
 # optional dependencies
 # ascii-magic==2.3.0

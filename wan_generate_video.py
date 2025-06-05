@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
-
+from prompt_toolkit import PromptSession
 from networks import lora_wan
 from utils.safetensors_utils import mem_eff_save_file
 from wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
@@ -784,9 +784,9 @@ def prepare_i2v_inputs(
             (noise, context, context_null, y, (arg_c, arg_null))
     """
     # get video dimensions
-    height, width = args.video_size
+    v_height, v_width = args.video_size
     frames = args.video_length
-    max_area = width * height
+    max_area = v_width * v_height
     if args.image_path is not None:
         # classic I2V path
         img = Image.open(args.image_path).convert("RGB")
@@ -818,15 +818,16 @@ def prepare_i2v_inputs(
     has_end_image = end_img is not None
 
     # calculate latent dimensions: keep aspect ratio
-    height, width = img_tensor.shape[1:]
-    aspect_ratio = height / width
+    i_height, i_width = img_tensor.shape[1:]
+    logger.info(f"Input image res: '{i_width}x{i_height}' will be rescaled to requested video res '{v_width}x{v_height}' (width x height @ frames)")
+    aspect_ratio = v_height / v_width
     lat_h = int(round(np.sqrt(max_area * aspect_ratio) / config.vae_stride[1] / config.patch_size[1] * config.patch_size[1]))
     lat_w = int(round(np.sqrt(max_area / aspect_ratio) / config.vae_stride[2] / config.patch_size[2] * config.patch_size[2]))
     height = lat_h * config.vae_stride[1]
     width = lat_w * config.vae_stride[2]
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
     max_seq_len = (lat_f + (1 if has_end_image else 0)) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
-
+    logger.info(f"Latent dimensions: '{lat_w}x{lat_h}@{lat_f}' <- '{width}x{height}@{frames}' (width x height @ frames)")
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     if not args.cpu_noise:
@@ -1664,12 +1665,13 @@ def process_interactive(args: argparse.Namespace) -> None:
     model = None
     clip = None
 
+    session = PromptSession()
     print("Interactive mode. Enter prompts (Ctrl+D to exit):")
 
     try:
         while True:
             try:
-                line = input("> ")
+                line = session.prompt("> ")
                 if not line.strip():
                     continue
 
