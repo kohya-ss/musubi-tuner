@@ -821,8 +821,8 @@ def prepare_i2v_inputs(
     i_height, i_width = img_tensor.shape[1:]
     logger.info(f"Input image res: '{i_width}x{i_height}' will be rescaled to requested video res '{v_width}x{v_height}' (width x height @ frames)")
     aspect_ratio = v_height / v_width
-    lat_h = int(round(np.sqrt(max_area * aspect_ratio) / config.vae_stride[1] / config.patch_size[1] * config.patch_size[1]))
-    lat_w = int(round(np.sqrt(max_area / aspect_ratio) / config.vae_stride[2] / config.patch_size[2] * config.patch_size[2]))
+    lat_h = int(round(np.sqrt(max_area * aspect_ratio) // config.vae_stride[1] // config.patch_size[1] * config.patch_size[1]))
+    lat_w = int(round(np.sqrt(max_area / aspect_ratio) // config.vae_stride[2] // config.patch_size[2] * config.patch_size[2]))
     height = lat_h * config.vae_stride[1]
     width = lat_w * config.vae_stride[2]
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
