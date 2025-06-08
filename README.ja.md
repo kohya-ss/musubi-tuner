@@ -108,6 +108,10 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/06/08
+    - wan_generate_video.pyとfpack_generate_video.pyのinteractiveモードで、`prompt-toolkit`がインストールされている場合、それを使用するようになりました。これにより、特にLinux環境でプロンプトの編集や補完が用意になります。PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/312) 
+        - この機能はオプションです。有効にするには、`pip install prompt-toolkit`でインストールしてください。インストールしてある場合は自動的に有効になります。
+
 - 2025/05/30
     - データセットの読み込み時にリサイズが正しく行われない場合がある不具合を修正しました。キャッシュの再作成をお願いします。PR [#312](https://github.com/kohya-ss/musubi-tuner/issues/312) sdbds 氏に感謝します。
         - リサイズ前の画像の幅または高さがバケットの幅または高さと一致していて、かつもう片方が異なる場合（具体的には、たとえば元画像が640\*480で、バケットが640\*360の場合など）に不具合が発生していました。
@@ -129,29 +133,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - 2025/05/17
     - FramePackの1フレーム推論でkisekaeichi方式に対応しました。furusu氏の提案したこの新しい推論方式は、post latentに参照画像を設定することで生成される画像を制御するものです。詳細は[FramePackのドキュメント](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション)を参照してください。
-
-- 2025/05/11
-    - FramePackの学習で1フレーム推論用の学習に対応しました（実験的機能）。詳細は[FramePackのドキュメント](./docs/framepack.md#single-frame-training--1フレーム学習)を参照してください。
-    
-- 2025/05/09 update 2
-    - FramePackの推論コードで、1フレーム推論に対応しました。これは当リポジトリの独自の機能で、動画ではなく、プロンプトに従って時間経過した後の画像を生成するものです。つまり、限定的ですが画像の自然言語による編集が可能です。詳細は[FramePackのドキュメント](./docs/framepack.md#single-frame-inference--単一フレーム推論)を参照してください。
-    - FramePackの推論コードに、生成する動画長を秒数ではなくセクション数で指定する`--video_sections`オプションを追加しました。また`--output_type latent_images`（latentと画像の両方を保存）が追加されました。
-
-- 2025/05/09 
-    - FramePackの推論コードで、HunyuanVideo用のLoRAを適用できるようになりました。当リポジトリのLoRAとdiffusion-pipeのLoRAの両方が適用可能です。詳細は[FramePackのドキュメント](./docs/framepack.md#inference)を参照してください。
-
-- 2025/05/04
-    - FramePack-F1の学習および推論を追加しました（実験的機能）。詳細は[FramePackのドキュメント](./docs/framepack.md)を参照してください。
-        - FramePack-F1用に、`--f1`オプションを指定してlatentのキャッシュを再作成してください（`--vanilla_sampling`が`--f1`に変わり、仕様も変わっています）。FramePack-F1はFramePackとは互換性がありません。FramePackとFramePack-F1のキャッシュファイルは共有できないため、別の`.toml`ファイルを使用して別のキャッシュディレクトリを指定してください。
-
-- 2025/05/01
-    - FramePackの推論コードに、latent padding指定、カスタムプロンプト指定等の機能を追加しました。詳細は[FramePackのドキュメント](./docs/framepack.md#inference)を参照してください。
-        - セクション開始画像を指定したときの振る舞いが変わりました（latent paddingを自動的に0に指定しなくなったため、開始画像は参照画像として用いられます）。以前と同じ振る舞い（セクション開始画像を強制）にするには、`--latent_padding 0,0,0,0`（セクション数だけ0を指定）としてください。
-- 2025/04/26
-    - FramePackの推論およびLoRA学習を追加しました。PR [#230](https://github.com/kohya-ss/musubi-tuner/pull/230) 詳細は[FramePackのドキュメント](./docs/framepack.md)を参照してください。
-    
-- 2025/04/18
-    - Wan2.1の推論時に、ファイルからプロンプトを読み込んで生成する一括生成モードと、コマンドラインからプロンプトを指定して生成するインタラクティブモードを追加しました。詳細は[こちら](./docs/wan.md#interactive-mode--インタラクティブモード)を参照してください。
 
 ### リリースについて
 
@@ -195,11 +176,14 @@ pip install -r requirements.txt
 
 オプションとして、FlashAttention、SageAttention（**推論にのみ使用できます**、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
 
-また、`ascii-magic`（データセットの確認に使用）、`matplotlib`（timestepsの可視化に使用）、`tensorboard`（学習ログの記録に使用）を必要に応じてインストールしてください。
+また、`ascii-magic`（データセットの確認に使用）、`matplotlib`（timestepsの可視化に使用）、`tensorboard`（学習ログの記録に使用）、`prompt-toolkit`を必要に応じてインストールしてください。
+
+`prompt-toolkit`をインストールするとWan2.1およびFramePackのinteractive modeでの編集に、自動的に使用されます。特にLinux環境でプロンプトの編集が容易になります。
 
 ```bash
-pip install ascii-magic matplotlib tensorboard
+pip install ascii-magic matplotlib tensorboard prompt-toolkit
 ```
+
 ### uvによるインストール
 
 uvを使用してインストールすることもできますが、uvによるインストールは試験的なものです。フィードバックを歓迎します。

@@ -20,7 +20,6 @@ import cv2
 import numpy as np
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
-from prompt_toolkit import PromptSession
 from networks import lora_wan
 from utils.safetensors_utils import mem_eff_save_file
 from wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
@@ -1665,15 +1664,33 @@ def process_interactive(args: argparse.Namespace) -> None:
     model = None
     clip = None
 
-    session = PromptSession()
-    print("Interactive mode. Enter prompts (Ctrl+D to exit):")
+    print("Interactive mode. Enter prompts (Ctrl+D or Ctrl+Z (Windows) to exit):")
+
+    try:
+        import prompt_toolkit
+    except ImportError:
+        logger.warning("prompt_toolkit not found. Using basic input instead.")
+        prompt_toolkit = None
+
+    if prompt_toolkit:
+        session = prompt_toolkit.PromptSession()
+
+        def input_line(prompt: str) -> str:
+            return session.prompt(prompt)
+
+    else:
+
+        def input_line(prompt: str) -> str:
+            return input(prompt)
 
     try:
         while True:
             try:
-                line = session.prompt("> ")
+                line = input_line("> ")
                 if not line.strip():
                     continue
+                if len(line.strip()) == 1 and line.strip() in ["\x04", "\x1a"]:  # Ctrl+D or Ctrl+Z with prompt_toolkit
+                    raise EOFError  # Exit on Ctrl+D or Ctrl+Z
 
                 # Parse prompt
                 prompt_data = parse_prompt_line(line, args.prompt_wildcards)
