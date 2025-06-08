@@ -325,7 +325,6 @@ def apply_fp8_monkey_patch(
             max_value = calculate_fp8_maxval(4, 3) if "e4m3" in scale_input_tensor else calculate_fp8_maxval(5, 2) if "e5m2" in scale_input_tensor else None
     if upcast_linear:
         logger.info(f"Linear transformations for scaled layers will be upcast to float32 {'except when using scaled_mm' if use_scaled_mm else ''}")
-    logger.info(f"Quantization done in {quant_dtype if quant_dtype is not None else 'model\'s base dtype'}")
     # Find all scale keys to identify FP8-optimized layers
     scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
 
@@ -337,7 +336,7 @@ def apply_fp8_monkey_patch(
         patched_module_paths.add(module_path)
 
     patched_count = 0
-
+    q_dtype = None
     # Apply monkey patch to each layer with FP8 weights
     for name, module in model.named_modules():
         # Check if this module has a corresponding scale_weight
@@ -359,6 +358,6 @@ def apply_fp8_monkey_patch(
             module.forward = new_forward.__get__(module, type(module))
 
             patched_count += 1
-
+    logger.info(f"Quantization done in {q_dtype}")
     logger.info(f"Number of monkey-patched Linear layers: {patched_count}")
     return model

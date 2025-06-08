@@ -1021,7 +1021,7 @@ def load_transformer(
                 # if k.startswith("model.model."):
                 #     k = convert_comfy_model_key(k)
                 state_dict[k] = tensor
-        info = transformer.load_state_dict(state_dict, strict=True, assign=True)
+        transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
         transformer = load_state_dict(transformer, dit_path)
 
@@ -1033,7 +1033,7 @@ def load_transformer(
             sd[key] = sd[key].to(load_device)
         transformer.load_state_dict(sd, strict=True, assign=True)
 
-    logger.info(f"Loaded DiT model from {dit_path}, info={info}")
+    logger.info(f"Loaded DiT model from {dit_path}")
     return transformer
 
 
