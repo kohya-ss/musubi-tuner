@@ -115,6 +115,10 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 8, 2025:
+    - Added support for interactive mode in `wan_generate_video.py` and `fpack_generate_video.py`. If `prompt-toolkit` is installed, it will be used for prompt editing and completion, especially useful in Linux environments. PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/330)
+        - This feature is optional. To enable it, install `prompt-toolkit` with `pip install prompt-toolkit`. If installed, it will be automatically enabled.
+
 - May 30, 2025:
     - Fixed a bug where the resizing of images and videos during dataset loading was not performed correctly. Please recreate the cache.  Thank you sdbds for PR [#312](https://github.com/kohya-ss/musubi-tuner/issues/312). 
         - The bug occurred when the width or height of the image before resizing matched the bucket's width or height, but the other dimension was different (for example, if the original image was 640x480 and the bucket was 640x360).
@@ -135,31 +139,6 @@ If you find this project helpful, please consider supporting its development via
 
 - May 17, 2025:
     - Added support for kisekaeichi method in FramePack's one frame inference. This new inference method proposed by furusu allows controlling the generated image by setting the reference image in post latent. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
-
-- May 11, 2025:
-    - Added support for one frame training in FramePack. This is an experimental feature that allows training for one frame inference. See [FramePack documentation](./docs/framepack.md#single-frame-training--1フレーム学習) for details.
-
-- May 9, 2025 update 2:
-    - Added support for one frame inference in FramePack. This is a unique feature of this repository that generates an image after time progression according to the prompt, rather than a video. In other words, it allows limited natural language editing of images. See [FramePack documentation](./docs/framepack.md#single-frame-inference--単一フレーム推論) for details.
-    - Added `--video_sections` option to specify the length of the generated video in terms of sections instead of seconds in the inference code of FramePack. Also added `--output_type latent_images` (saves both latent and images).
-
-- May 9, 2025:
-    - Added support for applying LoRA for HunyuanVideo in the inference code of FramePack. Both LoRA from this repository and diffusion-pipe can be applied. See [FramePack documentation](./docs/framepack.md#inference) for details.
-
-- May 4, 2025:
-    - Added training and inference for FramePack-F1 (experimental feature). See [FramePack documentation](./docs/framepack.md) for details. 
-        - Please re-cache the latents for FramePack-F1 with `--f1` option (`--vanilla_sampling` is changed to `--f1`, and the behavior is changed). The cache files are not compatible with FramePack. The cache files cannot be shared between FramePack and FramePack-F1, so please specify a different `.toml` file for another cache directory. 
-
-- May 1, 2025:
-    - Added features to the inference code of FramePack, such as latent padding specification and custom prompt specification. See [FramePack documentation](./docs/framepack.md#inference) for details.
-        - The behavior when specifying the section start image has changed (it no longer automatically sets latent padding to 0, so the start image is used as a reference image). To maintain the previous behavior (force the section start image), specify `--latent_padding 0,0,0,0` (specify 0 for each section).
-        
-- Apr 26, 2025:
-    - Added inference and LoRA training for FramePack. PR [#230](https://github.com/kohya-ss/musubi-tuner/pull/230). See [FramePack documentation](./docs/framepack.md) for details.
-
-- Apr 18, 2025:
-    - Added batch generation mode that reads prompts from a file and generates them during Wan2.1 inference, as well as interactive mode that specifies prompts from the command line. See [here](./docs/wan.md#interactive-mode--インタラクティブモード) for details.
-
 
 ### Releases
 
@@ -207,9 +186,10 @@ Optional dependencies for additional features:
 - `ascii-magic`: Used for dataset verification
 - `matplotlib`: Used for timestep visualization
 - `tensorboard`: Used for logging training progress
+- `prompt-toolkit`: Used for interactive prompt editing in Wan2.1 and FramePack inference scripts. If installed, it will be automatically used in interactive mode. Especially useful in Linux environments for easier prompt editing.
 
 ```bash
-pip install ascii-magic matplotlib tensorboard
+pip install ascii-magic matplotlib tensorboard prompt-toolkit
 ```
 
 ### uv based installation (experimenal)
