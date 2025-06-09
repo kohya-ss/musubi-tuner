@@ -376,9 +376,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 control_alpha = control_alphas[i]
                 if control_alpha is not None:
                     latent_mask = get_latent_mask(control_alpha)
-                    logger.info(
-                        f"Apply mask for clean latents 1x for {i+1}: shape: {latent_mask.shape}"
-                    )
+                    logger.info(f"Apply mask for clean latents 1x for {i+1}: shape: {latent_mask.shape}")
                     clean_latents[:, :, i : i + 1, :, :] = clean_latents[:, :, i : i + 1, :, :] * latent_mask
 
             for one_frame_param in one_frame_inference:
@@ -402,15 +400,16 @@ class FramePackNetworkTrainer(NetworkTrainer):
             else:
                 clean_latents_2x = torch.zeros((1, 16, 2, height // 8, width // 8), dtype=torch.float32)
                 index = 1 + latent_window_size + 1
-                clean_latent_2x_indices = torch.arange(index, index + 2)  #  2
+                clean_latent_2x_indices = torch.arange(index, index + 2).unsqueeze(0)  #  2
 
             if "no_4x" in one_frame_inference:
                 clean_latents_4x = None
                 clean_latent_4x_indices = None
                 logger.info(f"No clean_latents_4x")
             else:
+                clean_latents_4x = torch.zeros((1, 16, 16, height // 8, width // 8), dtype=torch.float32)
                 index = 1 + latent_window_size + 1 + 2
-                clean_latent_4x_indices = torch.arange(index, index + 16)  #  16
+                clean_latent_4x_indices = torch.arange(index, index + 16).unsqueeze(0)  #  16
 
             logger.info(
                 f"One frame inference. clean_latent: {clean_latents.shape} latent_indices: {latent_indices}, clean_latent_indices: {clean_latent_indices}, num_frames: {sample_num_frames}"
@@ -427,9 +426,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 llama_vec_n = sample_parameter["negative_llama_vec"].to(device, dtype=torch.bfloat16)
                 llama_attention_mask_n = sample_parameter["negative_llama_attention_mask"].to(device)
                 clip_l_pooler_n = sample_parameter["negative_clip_l_pooler"].to(device, dtype=torch.bfloat16)
-            image_encoder_last_hidden_state = sample_parameter["image_encoder_last_hidden_state"].to(
-                device, dtype=torch.bfloat16
-            )
+            image_encoder_last_hidden_state = sample_parameter["image_encoder_last_hidden_state"].to(device, dtype=torch.bfloat16)
 
             generated_latents = sample_hunyuan(
                 transformer=model,
