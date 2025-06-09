@@ -115,6 +115,10 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 9, 2025:
+    - Added documentation for `--control_image_path` in FramePack's one frame inference documentation. See [FramePack's one frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論) for details.
+    - Fixed a bug in FramePack's one frame training where sample image generation would crash if `no_4x` was not specified. PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
+
 - June 8, 2025:
     - Added support for interactive mode in `wan_generate_video.py` and `fpack_generate_video.py`. If `prompt-toolkit` is installed, it will be used for prompt editing and completion, especially useful in Linux environments. PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/330)
         - This feature is optional. To enable it, install `prompt-toolkit` with `pip install prompt-toolkit`. If installed, it will be automatically enabled.

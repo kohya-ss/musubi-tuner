@@ -953,6 +953,10 @@ class NetworkTrainer:
         cfg_scale = sample_parameter.get("cfg_scale", None)  # None for architecture default
         negative_prompt = sample_parameter.get("negative_prompt", None)
 
+        # round width and height to multiples of 8
+        width = (width // 8) * 8
+        height = (height // 8) * 8
+
         frame_count = (frame_count - 1) // 4 * 4 + 1  # 1, 5, 9, 13, ... For HunyuanVideo and Wan2.1
 
         if self.i2v_training:

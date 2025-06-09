@@ -108,6 +108,10 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/06/09
+    - FramePackの1フレーム推論のドキュメントに `--control_image_path` についての説明を追加しました。詳細は[1フレーム推論のドキュメント](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論)を参照してください。
+    - FramePackの1フレーム学習で、no_4xを指定しないとサンプル画像生成がクラッシュする不具合を修正しました。PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
+
 - 2025/06/08
     - wan_generate_video.pyとfpack_generate_video.pyのinteractiveモードで、`prompt-toolkit`がインストールされている場合、それを使用するようになりました。これにより、特にLinux環境でプロンプトの編集や補完が用意になります。PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/312) 
         - この機能はオプションです。有効にするには、`pip install prompt-toolkit`でインストールしてください。インストールしてある場合は自動的に有効になります。

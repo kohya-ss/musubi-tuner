@@ -165,8 +165,10 @@ Theoretically, it generates an image after a specified time from the starting im
 To perform one frame inference, specify some option in the `--one_frame_inference` option. Here is an example:
 
 ```bash
---video_sections 1 --output_type latent_images --one_frame_inference default
+--video_sections 1 --output_type latent_images --one_frame_inference default --image_path start_image.png --control_image_path start_image.png
 ```
+
+The `--image_path` is used to obtain the SIGCLIP features for one frame inference. Normally, you should specify the starting image. The `--control_image_path` is newly used to specify the control image, but for normal one frame inference, you should also specify the starting image.
 
 The `--one_frame_inference` option is recommended to be set to `default` or `no_2x,no_4x`. If you specify `--output_type` as `latent_images`, both the latent and image will be saved.
 
@@ -199,8 +201,10 @@ The `--end_image_path` is ignored for one frame inference.
 単一画像推論を行うには`--one_frame_inference`オプションに、何らかのオプションを指定してください。記述例は以下の通りです。
 
 ```bash
---video_sections 1 --output_type latent_images --one_frame_inference default
+--video_sections 1 --output_type latent_images --one_frame_inference default --image_path start_image.png --control_image_path start_image.png
 ```
+
+`--image_path`は、1フレーム推論ではSIGCLIPの特徴量を取得するために用いられます。通常は開始画像を指定してください。`--control_image_path`は新しく追加された引数で、制御用画像を指定するために用いられますが、通常は開始画像を指定してください。
 
 `--one_frame_inference`のオプションは、`default`または `no_2x,no_4x`を推奨します。`--output_type`に`latent_images`を指定するとlatentと画像の両方が保存されます。
 
