@@ -1711,7 +1711,7 @@ def read_config_from_file(args: argparse.Namespace, parser: argparse.ArgumentPar
     return args
 
 
-if __name__ == "__main__":
+def main():
     parser = setup_parser()
 
     args = parser.parse_args()
@@ -1719,3 +1719,7 @@ if __name__ == "__main__":
 
     trainer = FineTuningTrainer()
     trainer.train(args)
+
+
+if __name__ == "__main__":
+    main()

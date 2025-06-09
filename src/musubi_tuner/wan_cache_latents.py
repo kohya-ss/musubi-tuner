@@ -18,7 +18,7 @@ from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.wan.configs import wan_i2v_14B
 from musubi_tuner.wan.modules.vae import WanVAE
 from musubi_tuner.wan.modules.clip import CLIPModel
-import musubi_tuner.cache_latents
+import musubi_tuner.cache_latents as cache_latents
 
 logger = BlissfulLogger(__name__, "green")
  
@@ -117,7 +117,12 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], batch: list[It
         save_latent_cache_wan(item, l, cctx, y_i, control_latent_i)
 
 
-def main(args):
+def main():
+    parser = cache_latents.setup_parser_common()
+    parser = wan_setup_parser(parser)
+
+    args = parser.parse_args()
+
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
@@ -170,8 +175,4 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
 
 if __name__ == "__main__":
-    parser = cache_latents.setup_parser_common()
-    parser = wan_setup_parser(parser)
-
-    args = parser.parse_args()
-    main(args)
+    main()

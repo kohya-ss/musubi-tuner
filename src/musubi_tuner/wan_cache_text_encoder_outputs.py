@@ -34,7 +34,12 @@ def encode_and_save_batch(
         save_text_encoder_output_cache_wan(item, ctx)
 
 
-def main(args):
+def main():
+    parser = cache_text_encoder_outputs.setup_parser_common()
+    parser = wan_setup_parser(parser)
+
+    args = parser.parse_args()
+
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
@@ -90,8 +95,4 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
 
 
 if __name__ == "__main__":
-    parser = cache_text_encoder_outputs.setup_parser_common()
-    parser = wan_setup_parser(parser)
-
-    args = parser.parse_args()
-    main(args)
+    main()

@@ -45,7 +45,12 @@ def encode_and_save_batch(
         save_text_encoder_output_cache_framepack(item, llama_vec, llama_attention_mask, clip_l_pooler)
 
 
-def main(args):
+def main():
+    parser = cache_text_encoder_outputs.setup_parser_common()
+    parser = framepack_setup_parser(parser)
+
+    args = parser.parse_args()
+
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
@@ -94,8 +99,4 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
 
 
 if __name__ == "__main__":
-    parser = cache_text_encoder_outputs.setup_parser_common()
-    parser = framepack_setup_parser(parser)
-
-    args = parser.parse_args()
-    main(args)
+    main()

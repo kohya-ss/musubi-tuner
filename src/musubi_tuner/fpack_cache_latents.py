@@ -407,7 +407,19 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     return parser
 
 
-def main(args: argparse.Namespace):
+def main():
+    parser = cache_latents.setup_parser_common()
+    parser = cache_latents.hv_setup_parser(parser)  # VAE
+    parser = framepack_setup_parser(parser)
+
+    args = parser.parse_args()
+
+    if args.vae_dtype is not None:
+        raise ValueError("VAE dtype is not supported in FramePack")
+    # if args.batch_size != 1:
+    #     args.batch_size = 1
+    #     logger.info("Batch size is set to 1 for FramePack.")
+
     device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)
 
@@ -509,16 +521,4 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
 
 
 if __name__ == "__main__":
-    parser = cache_latents.setup_parser_common()
-    parser = cache_latents.hv_setup_parser(parser)  # VAE
-    parser = framepack_setup_parser(parser)
-
-    args = parser.parse_args()
-
-    if args.vae_dtype is not None:
-        raise ValueError("VAE dtype is not supported in FramePack")
-    # if args.batch_size != 1:
-    #     args.batch_size = 1
-    #     logger.info("Batch size is set to 1 for FramePack.")
-
-    main(args)
+    main()

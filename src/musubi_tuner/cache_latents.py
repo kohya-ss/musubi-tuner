@@ -249,7 +249,12 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
                     logger.info(f"Removed old cache file: {cache_file}")
 
 
-def main(args):
+def main():
+    parser = setup_parser_common()
+    parser = hv_setup_parser(parser)
+
+    args = parser.parse_args()
+
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
@@ -332,8 +337,4 @@ def hv_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
-    parser = setup_parser_common()
-    parser = hv_setup_parser(parser)
-
-    args = parser.parse_args()
-    main(args)
+    main()

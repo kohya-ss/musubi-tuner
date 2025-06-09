@@ -584,7 +584,7 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     return parser
 
 
-if __name__ == "__main__":
+def main():
     parser = setup_parser_common()
     parser = framepack_setup_parser(parser)
 
@@ -599,3 +599,7 @@ if __name__ == "__main__":
 
     trainer = FramePackNetworkTrainer()
     trainer.train(args)
+
+
+if __name__ == "__main__":
+    main()
