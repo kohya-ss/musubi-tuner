@@ -305,7 +305,25 @@ def encode_and_save_batch_one_frame(
                 latents[b : b + 1, :, i : i + 1] *= content_mask
 
     # Vision encoding per‑item (once): use control content because it is the start image
-    images = [item.control_content[0] for item in batch]  # list of [H, W, C]
+    # images = [item.control_content[0] for item in batch]  # list of [H, W, C]
+    images = []
+    for item in batch:
+        # print(f"Processing item {item.item_key} with image embedding source: {item.fp_1f_image_embedding_source}")
+        if item.fp_1f_image_embedding_source == "target":
+            images.append(item.content)  # Use target image
+        elif item.fp_1f_image_embedding_source is None or item.fp_1f_image_embedding_source.startswith("control"):
+            image_embedding_source = item.fp_1f_image_embedding_source or "control_0"
+            control_index = int(image_embedding_source.split("_")[-1])
+            # print(f"  Using control index: {control_index} for item {item.item_key}")
+            if control_index < len(item.control_content):
+                images.append(item.control_content[control_index])
+            else:
+                raise ValueError(
+                    f"Control index {control_index} out of range for item {item.item_key}, available: {len(item.control_content)}"
+                )
+        else:
+            raise ValueError(f"Unknown image embedding source: {item.fp_1f_image_embedding_source}")
+        # print(f"  Using image embedding source: {item.fp_1f_image_embedding_source}, image shape: {images[-1].shape}")
 
     # encode image with image encoder
     image_embeddings = []

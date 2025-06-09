@@ -405,6 +405,8 @@ The number of control images should match the number of indices specified in `fp
 
 The default values mean that the first image (control image) is at index `0`, and the target image (the changed image) is at index `9`.
 
+`fp_1f_image_embedding_source` sets where to get the embedding of the control image. `control_0` means to get it from the first control image, `control1` means to get it from the second control image (and so on). `target` means to get it from the target image. If not specified, it defaults to `control_0`.
+
 For training with 1f-mc, set `fp_1f_clean_indices` to `[0, 1]` and `fp_1f_target_index` to `9` (or another value). This allows you to use multiple control images to train a single generated image. The control images will be two in this case.
 
 ```toml
@@ -416,11 +418,14 @@ fp_1f_no_post = false
 
 For training with kisekaeichi, set `fp_1f_clean_indices` to `[0, 10]` and `fp_1f_target_index` to `1` (or another value). This allows you to use the starting image (the image just before the generation section) and the image following the generation section (equivalent to `clean_latent_post`) to train the first image of the generated video. The control images will be two in this case. `fp_1f_no_post` should be set to `true`.
 
+It is recommended to set `fp_1f_image_embedding_source` to `target` for training kisekaeichi (however, if the inference environment always gets the image embedding from the first control image, you can set it to `control_0`).
+
 ```toml
 [[datasets]]
 fp_1f_clean_indices = [0, 10]
 fp_1f_target_index = 1
 fp_1f_no_post = true
+fp_1f_image_embedding_source = "target" # recommended for kisekaeichi training
 ```
 
 With `fp_1f_clean_indices` and `fp_1f_target_index`, you can specify any number of control images and any index of the target image for training.
@@ -446,9 +451,13 @@ The 2x indices are `1 + fp1_latent_window_size + 1` for two indices (usually `11
 
 デフォルトの1フレーム学習では、開始画像（制御画像）1枚をインデックス`0`、生成対象の画像（変化後の画像）をインデックス`9`に設定しています。
 
+`fp_1f_image_embedding_source`は、制御画像の埋め込みをどこから取得するかを設定します。`control_0`を指定すると、制御画像の最初の画像から取得し、`control_1`を指定すると2枚目の制御画像から取得します（以下同様）。`target`を指定すると生成対象の画像から取得します。未指定時は`control_0`となります。
+
 1f-mcの学習を行う場合は、`fp_1f_clean_indices`に `[0, 1]`を、`fp_1f_target_index`に`9`を設定してください。これにより動画の先頭の2枚の制御画像を使用して、後続の1枚の生成画像を学習します。制御画像は2枚になります。
 
 kisekaeichiの学習を行う場合は、`fp_1f_clean_indices`に `[0, 10]`を、`fp_1f_target_index`に`1`（または他の値）を設定してください。これは、開始画像（生成セクションの直前の画像）（`clean_latent_pre`に相当）と、生成セクションに続く1枚の画像（`clean_latent_post`に相当）を使用して、生成動画の先頭の画像（`target_index=1`）を学習します。制御画像は2枚になります。`f1_1f_no_post`は`true`に設定してください。
+
+kisekaeichiの学習では、`fp_1f_image_embedding_source`は`target`に設定することをお勧めします（ただし推論環境によってはimage embeddingを常に最初の制御画像から取得する場合もあり、それらの環境を前提とする場合は`control_0`に設定してください）。
 
 `fp_1f_clean_indices`と`fp_1f_target_index`を応用することで、任意の枚数の制御画像を、任意のインデックスを指定して学習することが可能です。
 
