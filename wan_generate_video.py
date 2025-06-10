@@ -1,3 +1,4 @@
 from musubi_tuner.wan_generate_video import main
 
-main()
+if __name__ == "__main__":
+    main()

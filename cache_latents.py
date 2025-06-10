@@ -1,3 +1,4 @@
 from musubi_tuner.cache_latents import main
 
-main()
+if __name__ == "__main__":
+    main()
