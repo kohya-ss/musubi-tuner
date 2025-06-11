@@ -108,6 +108,9 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/06/12
+    - LoRAモデルのPost Hoc EMAを行う`lora_post_hoc_ema.py`を追加しました。LoRAモデルの学習後に、Post Hoc EMAを適用してモデルの精度を向上させることができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
+
 - 2025/06/11
     - リポジトリのパッケージングに関するPRをマージしました。xhiroga氏に感謝します。PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)
         - `pyproject.toml`を導入し、インストール方法を更新しました。既存の環境からの移行方法については、[このディスカッションの投稿](https://github.com/kohya-ss/musubi-tuner/discussions/345)を参照してください。

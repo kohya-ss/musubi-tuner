@@ -117,6 +117,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 12, 2025:
+    - Added `lora_post_hoc_ema.py` for Post Hoc EMA of LoRA models. This allows you to apply Post Hoc EMA after training a LoRA model to improve accuracy. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
+
 - June 11, 2025:
     - Merged the pull request for packaging the repository. Thank you for xhiroga for PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)! This introduces `pyproject.toml` and updates installation instructions. For details on migrating your existing environment, please refer to [this discussion post](https://github.com/kohya-ss/musubi-tuner/discussions/345).
     - Updated `README.md` to reflect the new installation methods using `pip` and `uv` with `pyproject.toml`.
