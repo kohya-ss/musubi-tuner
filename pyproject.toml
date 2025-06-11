@@ -26,14 +26,10 @@ dependencies = [
 
 [project.optional-dependencies]
 cu124 = [
-    "pytorch-triton>=3.3.0 ; sys_platform == 'linux'",
-    "triton-windows>=3.3.0.post19 ; sys_platform == 'win32'",
     "torch>=2.5.1",
     "torchvision>=0.20.1",
 ]
 cu128 = [
-    "pytorch-triton>=3.3.0 ; sys_platform == 'linux'",
-    "triton-windows>=3.3.0.post19 ; sys_platform == 'win32'",
     "torch>=2.7.1",
     "torchvision>=0.22.1",
 ]
@@ -78,10 +74,6 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv.sources]
-pytorch-triton = [
-  { index = "pytorch-cu124", extra = "cu124" },
-  { index = "pytorch-cu128", extra = "cu128" }
-]
 torch = [
   { index = "pytorch-cu124", extra = "cu124" },
   { index = "pytorch-cu128", extra = "cu128" },
