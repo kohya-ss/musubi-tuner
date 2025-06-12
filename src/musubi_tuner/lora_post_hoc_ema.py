@@ -11,9 +11,11 @@ from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 
-def merge_lora_weights_with_post_hoc_ema(path: list[str], beta1: float, beta2: float, output_file: str):
+def merge_lora_weights_with_post_hoc_ema(path: list[str], no_sort: bool, beta1: float, beta2: float, output_file: str):
     # Sort the files by modification time
-    path.sort(key=lambda x: os.path.getmtime(x))
+    if not no_sort:
+        print("Sorting files by modification time...")
+        path.sort(key=lambda x: os.path.getmtime(x))
 
     # Load metadata from the last file
     print(f"Loading metadata from {path[-1]}")
@@ -91,6 +93,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Merge LoRA weights with Post-Hoc EMA method.")
     parser.add_argument("path", nargs="+", help="List of paths to the LoRA weight files.")
+    parser.add_argument("--no_sort", action="store_true", help="Do not sort the files by modification time.")
     parser.add_argument("--beta", type=float, default=0.95, help="Decay rate for merging weights.")
     parser.add_argument("--beta2", type=float, default=None, help="Decay rate for merging weights for linear interpolation.")
     parser.add_argument("--output_file", type=str, required=True, help="Output file path for merged weights.")
@@ -98,7 +101,7 @@ def main():
     args = parser.parse_args()
 
     beta2 = args.beta if args.beta2 is None else args.beta2
-    merge_lora_weights_with_post_hoc_ema(args.path, args.beta, beta2, args.output_file)
+    merge_lora_weights_with_post_hoc_ema(args.path, args.no_sort, args.beta, beta2, args.output_file)
 
 
 if __name__ == "__main__":

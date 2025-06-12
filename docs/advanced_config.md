@@ -371,6 +371,9 @@ path [path ...]
 
 --output_file OUTPUT_FILE
     Output file path for the merged weights (required)
+
+--no_sort
+    Disable sorting of checkpoint files (merge in specified order)
 ```
 
 ### Examples:
@@ -388,11 +391,36 @@ python src/musubi_tuner/lora_post_hoc_ema.py \
 Using linear interpolation between two decay rates:
 ```bash
 python src/musubi_tuner/lora_post_hoc_ema.py \
-    checkpoint_*.safetensors \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
     --output_file lora_ema_interpolated.safetensors \
-    --beta 0.95 \
+    --beta 0.90 \
     --beta2 0.95
 ```
+
+### Recommended settings example (after training for 30 epochs)
+
+If you're unsure which settings to try, start with the following "General Recommended Settings".
+
+#### 1. General Recommended Settings (start with these combinations)
+
+- **Target Epochs:** `15-30` (the latter half of training)
+- **beta:** `0.9` (a balanced value)
+
+#### 2. If training converged early
+
+- **Situation:** Loss dropped early and stabilized afterwards.
+- **Target Epochs:** `10-30` (from the epoch where loss stabilized to the end)
+- **beta:** `0.95` (wider range, smoother)
+
+#### 3. If you want to avoid overfitting
+
+- **Situation:** In the latter part of training, generated results are too similar to training data.
+- **Target Epochs:** `15-25` (focus on the peak performance range)
+- **beta:** `0.8` (more emphasis on the latter part of the range while maintaining diversity)
+
+**Note:** The optimal values may vary depending on the model and dataset. It's recommended to experiment with multiple `beta` values (e.g., 0.8, 0.9, 0.95) and compare the generated results.
 
 ### Notes:
 
@@ -459,6 +487,9 @@ path [path ...]
 
 --output_file OUTPUT_FILE
     マージされた重みの出力ファイルパス（必須）
+
+--no_sort
+    チェックポイントファイルのソートを無効にする（指定した順序でマージ）
 ```
 
 ### 例：
@@ -476,11 +507,33 @@ python src/musubi_tuner/lora_post_hoc_ema.py \
 2つの減衰率間の線形補間を使用：
 ```bash
 python src/musubi_tuner/lora_post_hoc_ema.py \
-    checkpoint_*.safetensors \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
     --output_file lora_ema_interpolated.safetensors \
-    --beta 0.95 \
+    --beta 0.90 \
     --beta2 0.95
 ```
+
+### 推奨設定の例 (30エポック学習した場合)
+
+どの設定から試せば良いか分からない場合は、まず以下の「**一般的な推奨設定**」から始めてみてください。
+
+#### 1. 一般的な推奨設定 (まず試すべき組み合わせ)
+- **対象エポック:** `15-30` (学習の後半半分)
+- **beta:** `0.9` (バランスの取れた値)
+
+#### 2. 早期に学習が収束した場合
+- **状況:** lossが早い段階で下がり、その後は安定している。
+- **対象エポック:** `10-30` (lossが安定し始めたエポックから最後まで)
+- **beta:** `0.95` (対象範囲が広いので、より滑らかにする)
+
+#### 3. 過学習を避けたい場合
+- **状況:** 学習の最後の方で、生成結果が学習データに似すぎている。
+- **対象エポック:** `15-25` (性能のピークと思われる範囲に絞る)
+- **beta:** `0.8` (範囲の終盤を重視しつつ、多様性を残す)
+
+**ヒント:** 最適な値はモデルやデータセットによって異なります。複数の`beta`（例: 0.8, 0.9, 0.95）を試して、生成結果を比較することをお勧めします。
 
 ### 注意点：
 
