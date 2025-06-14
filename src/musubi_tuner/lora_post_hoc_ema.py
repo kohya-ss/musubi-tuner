@@ -5,13 +5,29 @@
 # 4. Save the final merged weights to a new file. The metadata is updated to reflect the new file
 
 import os
+from typing import Optional
+import numpy as np
 import torch
 from safetensors.torch import save_file
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 
-def merge_lora_weights_with_post_hoc_ema(path: list[str], no_sort: bool, beta1: float, beta2: float, output_file: str):
+def sigma_rel_to_gamma(sigma_rel):
+    """Implementation of Algorithm 2 from the paper: https://arxiv.org/pdf/2312.02696"""
+    # solve the cubic equation γ^3 + 7γ^2 + (16 - 1/σ_rel^2)γ + (12 - 1/σ_rel^2) = 0
+    t = sigma_rel**-2
+    # coefficients [1, 7, 16-t, 12-t]
+    coeffs = [1, 7, 16 - t, 12 - t]
+    # positive real root is γ
+    roots = np.roots(coeffs)
+    gamma = roots[np.isreal(roots) & (roots.real >= 0)].real.max()
+    return gamma
+
+
+def merge_lora_weights_with_post_hoc_ema(
+    path: list[str], no_sort: bool, beta1: float, beta2: float, sigma_rel: Optional[float], output_file: str
+):
     # Sort the files by modification time
     if not no_sort:
         print("Sorting files by modification time...")
@@ -44,8 +60,19 @@ def merge_lora_weights_with_post_hoc_ema(path: list[str], no_sort: bool, beta1: 
 
     # Iterate through the remaining files, loading and merging their weights with decay rate beta
     ema_count = len(path) - 1
+    if sigma_rel is not None:
+        gamma = sigma_rel_to_gamma(sigma_rel)
+    else:
+        gamma = None
+
     for i, file in enumerate(path[1:]):
-        beta = beta1 + (beta2 - beta1) * (i / (ema_count - 1)) if ema_count > 1 else beta1
+        if sigma_rel is not None:
+            # Calculate beta using Power Function EMA
+            t = i + 1
+            beta = (1 - 1 / t) ** (gamma + 1)
+        else:
+            beta = beta1 + (beta2 - beta1) * (i / (ema_count - 1)) if ema_count > 1 else beta1
+
         print(f"Loading weights from {file} for merging with beta={beta:.4f}")
         with MemoryEfficientSafeOpen(file) as f:
             for key in f.keys():
@@ -96,12 +123,18 @@ def main():
     parser.add_argument("--no_sort", action="store_true", help="Do not sort the files by modification time.")
     parser.add_argument("--beta", type=float, default=0.95, help="Decay rate for merging weights.")
     parser.add_argument("--beta2", type=float, default=None, help="Decay rate for merging weights for linear interpolation.")
+    parser.add_argument(
+        "--sigma_rel",
+        type=float,
+        default=None,
+        help="Relative sigma for Power Function EMA, default is None (linear interpolation).",
+    )
     parser.add_argument("--output_file", type=str, required=True, help="Output file path for merged weights.")
 
     args = parser.parse_args()
 
     beta2 = args.beta if args.beta2 is None else args.beta2
-    merge_lora_weights_with_post_hoc_ema(args.path, args.no_sort, args.beta, beta2, args.output_file)
+    merge_lora_weights_with_post_hoc_ema(args.path, args.no_sort, args.beta, beta2, args.sigma_rel, args.output_file)
 
 
 if __name__ == "__main__":
