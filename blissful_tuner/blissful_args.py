@@ -12,7 +12,7 @@ import argparse
 import random
 import torch
 from rich.traceback import install as install_rich_tracebacks
-from blissful_tuner.utils import string_to_seed, error_out, power_seed
+from blissful_tuner.utils import string_to_seed, error_out
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import process_wildcards
 logger = BlissfulLogger(__name__, "#8e00ed")
