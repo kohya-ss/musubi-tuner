@@ -369,6 +369,12 @@ path [path ...]
     If specified, the decay rate will linearly interpolate from beta to beta2
     across the merging process
 
+--sigma_rel SIGMA_REL
+    Relative sigma for Power Function EMA (optional, mutually exclusive with beta/beta2)
+    This resolves the issue where the first checkpoint has a disproportionately large influence when beta is specified.
+    If specified, beta is calculated using the Power Function EMA method from the paper:
+    https://arxiv.org/pdf/2312.02696. This overrides beta and beta2.
+
 --output_file OUTPUT_FILE
     Output file path for the merged weights (required)
 
@@ -399,7 +405,22 @@ python src/musubi_tuner/lora_post_hoc_ema.py \
     --beta2 0.95
 ```
 
-### Recommended settings example (after training for 30 epochs)
+Using Power Function EMA with `sigma_rel`:
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
+    --output_file lora_power_ema_merged.safetensors \
+    --sigma_rel 0.2
+```
+
+
+#### betas for different σ-rel values:
+
+![beta-sigma_rel-graph](./betas_for_sigma_rel.png)
+
+### Recommended settings example (after training for 30 epochs, using  `--beta`)
 
 If you're unsure which settings to try, start with the following "General Recommended Settings".
 
@@ -422,11 +443,33 @@ If you're unsure which settings to try, start with the following "General Recomm
 
 **Note:** The optimal values may vary depending on the model and dataset. It's recommended to experiment with multiple `beta` values (e.g., 0.8, 0.9, 0.95) and compare the generated results.
 
+### Recommended Settings Example (30 epochs training, using `--sigma_rel`)
+
+When using `--sigma_rel`, the beta decay schedule is determined by the Power Function EMA method. Here are some starting points:
+
+#### 1. General Recommended Settings
+- **Target Epochs:** All epochs (from the first to the last).
+- **sigma_rel:** `0.2` (a general starting point).
+
+#### 2. If training converged early
+- **Situation:** Loss dropped early and stabilized afterwards.
+- **Target Epochs:** All epochs.
+- **sigma_rel:** `0.25` (gives more weight to earlier checkpoints, suitable for early convergence).
+
+#### 3. If you want to avoid overfitting
+- **Situation:** In the latter part of training, generated results are too similar to training data.
+- **Target Epochs:** From the first epoch, omitting the last few potentially overfitted epochs.
+- **sigma_rel:** `0.15` (gives more weight to later (but not the very last) checkpoints, helping to mitigate overfitting from the final stages).
+
+**Note:** The optimal `sigma_rel` value can depend on the dataset, model, and training duration. Experimentation is encouraged. Values typically range from 0.1 to 0.5. A graph showing the relationship between `sigma_rel` and the calculated `beta` values over epochs will be provided later to help understand its behavior.
+
 ### Notes:
 
 - Files are automatically sorted by modification time, so the order in the command line doesn't matter
+- The `--sigma_rel` option is mutually exclusive with `--beta` and `--beta2`. If `--sigma_rel` is provided, it will determine the beta values, and any provided `--beta` or `--beta2` will be ignored.
 - All checkpoint files to be merged should be from the same training run, saved per epoch or step
     - Merging is possible if shapes match, but may not work correctly as Post Hoc EMA
+- All checkpoint files must have the same alpha value
 - The merged model will have updated hash values in its metadata 
 - The metadata of the merged model will be taken from the last checkpoint, with only the hash value recalculated
 - Non-float tensors (long, int, bool, etc.) are not merged and will use the first checkpoint's values
@@ -485,6 +528,12 @@ path [path ...]
     線形補間のための第2減衰率（オプション）
     指定された場合、減衰率はマージプロセス全体でbetaからbeta2へ線形補間される
 
+--sigma_rel SIGMA_REL
+    Power Function EMAのための相対シグマ（オプション、beta/beta2と同時に指定できません）
+    betaを指定した場合の、最初のチェックポイントが相対的に大きな影響を持つ欠点を解決します
+    指定された場合、betaは次の論文に基づいてPower Function EMA法で計算されます：
+    https://arxiv.org/pdf/2312.02696. これによりbetaとbeta2が上書きされます。
+
 --output_file OUTPUT_FILE
     マージされた重みの出力ファイルパス（必須）
 
@@ -515,29 +564,63 @@ python src/musubi_tuner/lora_post_hoc_ema.py \
     --beta2 0.95
 ```
 
-### 推奨設定の例 (30エポック学習した場合)
+`シグマ_rel`を使用したPower Function EMA：
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
+    --output_file lora_power_ema_merged.safetensors \
+    --sigma_rel 0.2
+```
+
+### 推奨設定の例 (30エポック学習し、 `--beta`を使用する場合)
 
 どの設定から試せば良いか分からない場合は、まず以下の「**一般的な推奨設定**」から始めてみてください。
 
 #### 1. 一般的な推奨設定 (まず試すべき組み合わせ)
+
 - **対象エポック:** `15-30` (学習の後半半分)
 - **beta:** `0.9` (バランスの取れた値)
 
 #### 2. 早期に学習が収束した場合
+
 - **状況:** lossが早い段階で下がり、その後は安定している。
 - **対象エポック:** `10-30` (lossが安定し始めたエポックから最後まで)
 - **beta:** `0.95` (対象範囲が広いので、より滑らかにする)
 
 #### 3. 過学習を避けたい場合
+
 - **状況:** 学習の最後の方で、生成結果が学習データに似すぎている。
 - **対象エポック:** `15-25` (性能のピークと思われる範囲に絞る)
 - **beta:** `0.8` (範囲の終盤を重視しつつ、多様性を残す)
 
 **ヒント:** 最適な値はモデルやデータセットによって異なります。複数の`beta`（例: 0.8, 0.9, 0.95）を試して、生成結果を比較することをお勧めします。
 
+### 推奨設定の例 (30エポック学習し、 `--sigma_rel`を使用する場合)
+
+`--sigma_rel` を使用する場合、betaの減衰スケジュールはPower Function EMA法によって決定されます。以下はいくつかの開始点です。
+
+#### 1. 一般的な推奨設定
+- **対象エポック:** 全てのエポック（最初から最後まで）
+- **sigma_rel:** `0.2` （一般的な開始点）
+
+#### 2. 早期に学習が収束した場合
+- **状況:** lossが早い段階で下がり、その後は安定している。
+- **対象エポック:** 全てのエポック
+- **sigma_rel:** `0.25` （初期のチェックポイントに重きを置くため、早期収束に適しています）
+
+#### 3. 過学習を避けたい場合
+- **状況:** 学習の最後の方で、生成結果が学習データに似すぎている。
+- **対象エポック:** 最初のエポックから、過学習の可能性がある最後の数エポックを除外
+- **sigma_rel:** `0.15` （終盤（ただし最後の最後ではない）のチェックポイントに重きを置き、最終段階での過学習を軽減するのに役立ちます）
+
+**ヒント:** 最適な `sigma_rel` の値は、データセット、モデル、学習期間によって異なる場合があります。実験を推奨します。値は通常0.1から0.5の範囲です。`sigma_rel` とエポックごとの計算された `beta` 値の関係を示すグラフは、その挙動を理解するのに役立つよう後ほど提供する予定です。
+
 ### 注意点：
 
 - ファイルは修正時刻で自動的にソートされるため、コマンドラインでの順序は関係ありません
+- `--sigma_rel`オプションは`--beta`および`--beta2`と相互に排他的です。`--sigma_rel`が指定された場合、それがベータ値を決定し、指定された`--beta`または`--beta2`は無視されます。
 - マージする全てのチェックポイントファイルは、ひとつの学習で、エポックごと、またはステップごとに保存されたモデルである必要があります
     - 形状が一致していればマージはできますが、Post Hoc EMAとしては正しく動作しません
 - alpha値はすべてのチェックポイントで同じである必要があります

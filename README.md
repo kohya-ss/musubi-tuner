@@ -117,6 +117,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 13, 2025:
+    - Added `--sima_rel` option to `lora_post_hoc_ema.py`. This allows you to use Power Function EMA when applying Post Hoc EMA. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
+
 - June 12, 2025:
     - Added `lora_post_hoc_ema.py` for Post Hoc EMA of LoRA models. This allows you to apply Post Hoc EMA after training a LoRA model to improve accuracy. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
 
