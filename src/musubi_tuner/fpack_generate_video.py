@@ -36,6 +36,46 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
+def parse_section_strings(input_string: str) -> dict[int, str]:
+    section_strings = {}
+    if input_string is None:  # handle None input for image_path etc.
+        return section_strings
+    if ";;;" in input_string:
+        split_section_strings = input_string.split(";;;")
+        for section_str in split_section_strings:
+            if ":" not in section_str:
+                start = end = 0
+                section_str = section_str.strip()
+            else:
+                index_str, section_str = section_str.split(":", 1)
+                index_str = index_str.strip()
+                section_str = section_str.strip()
+
+                m = re.match(r"^(-?\d+)(-\d+)?$", index_str)
+                if m:
+                    start = int(m.group(1))
+                    end = int(m.group(2)[1:]) if m.group(2) is not None else start
+                else:
+                    start = end = 0
+                    section_str = section_str.strip()
+            for i in range(start, end + 1):
+                section_strings[i] = section_str
+    else:
+        section_strings[0] = input_string
+
+    if not section_strings:  # If input_string was empty or only separators
+        return section_strings
+
+    if 0 not in section_strings:
+        indices = list(section_strings.keys())
+        if all(i < 0 for i in indices):
+            section_index = min(indices)
+        else:
+            section_index = min(i for i in indices if i >= 0)
+        section_strings[0] = section_strings[section_index]
+    return section_strings
+
+
 class GenerationSettings:
     def __init__(self, device: torch.device, dit_weight_dtype: Optional[torch.dtype] = None):
         self.device = device
@@ -156,13 +196,13 @@ def parse_args() -> argparse.Namespace:
     # )
     # parser.add_argument("--trim_tail_frames", type=int, default=0, help="trim tail N frames from the video before saving")
 
-    # # Flow Matching
-    # parser.add_argument(
-    #     "--flow_shift",
-    #     type=float,
-    #     default=None,
-    #     help="Shift factor for flow matching schedulers. Default depends on task.",
-    # )
+    # Flow Matching
+    parser.add_argument(
+        "--flow_shift",
+        type=float,
+        default=None,
+        help="Shift factor for flow matching schedulers. Default is None (FramePack default).",
+    )
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -275,8 +315,8 @@ def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict
             overrides["infer_steps"] = int(value)
         elif option == "g" or option == "l":
             overrides["guidance_scale"] = float(value)
-        # elif option == "fs":
-        #     overrides["flow_shift"] = float(value)
+        elif option == "fs":
+            overrides["flow_shift"] = float(value)
         elif option == "i":
             overrides["image_path"] = value
         # elif option == "im":
@@ -508,65 +548,14 @@ def decode_latent(
     return history_pixels[0]  # remove batch dimension
 
 
-def prepare_i2v_inputs(
+def prepare_image_inputs(
     args: argparse.Namespace,
     device: torch.device,
     vae: AutoencoderKLCausal3D,
     shared_models: Optional[Dict] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
-    """Prepare inputs for I2V
-
-    Args:
-        args: command line arguments
-        config: model configuration
-        device: device to use
-        vae: VAE model, used for image encoding
-        shared_models: dictionary containing pre-loaded models
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
-            (noise, context, context_null, y, (arg_c, arg_null))
-    """
-
+) -> Dict[str, Any]:
+    """Prepare image-related inputs for I2V: VAE encoding and image encoder features."""
     height, width, video_seconds = check_inputs(args)
-
-    # define parsing function
-    def parse_section_strings(input_string: str) -> dict[int, str]:
-        section_strings = {}
-        if ";;;" in input_string:
-            split_section_strings = input_string.split(";;;")
-            for section_str in split_section_strings:
-                if ":" not in section_str:
-                    start = end = 0
-                    section_str = section_str.strip()
-                else:
-                    index_str, section_str = section_str.split(":", 1)
-                    index_str = index_str.strip()
-                    section_str = section_str.strip()
-
-                    m = re.match(r"^(-?\d+)(-\d+)?$", index_str)
-                    if m:
-                        start = int(m.group(1))
-                        end = int(m.group(2)[1:]) if m.group(2) is not None else start
-                    else:
-                        start = end = 0
-                        section_str = section_str.strip()
-                for i in range(start, end + 1):
-                    section_strings[i] = section_str
-        else:
-            section_strings[0] = input_string
-
-        # assert 0 in section_prompts, "Section prompts must contain section 0"
-        if 0 not in section_strings:
-            # use smallest section index. prefer positive index over negative index
-            # if all section indices are negative, use the smallest negative index
-            indices = list(section_strings.keys())
-            if all(i < 0 for i in indices):
-                section_index = min(indices)
-            else:
-                section_index = min(i for i in indices if i >= 0)
-            section_strings[0] = section_strings[section_index]
-        return section_strings
 
     # prepare image
     def preprocess_image(image_path: str):
@@ -587,9 +576,16 @@ def prepare_i2v_inputs(
     section_image_paths = parse_section_strings(args.image_path)
 
     section_images = {}
-    for index, image_path in section_image_paths.items():
-        img_tensor, img_np, _ = preprocess_image(image_path)
-        section_images[index] = (img_tensor, img_np)
+    if section_image_paths:
+        for index, image_path in section_image_paths.items():
+            img_tensor, img_np, _ = preprocess_image(image_path)
+            section_images[index] = (img_tensor, img_np)
+    else:
+        # image_path should be given, if not, we create a placeholder image (black image)
+        placeholder_img_np = np.zeros((height, width, 3), dtype=np.uint8)  # Placeholder
+        placeholder_img_tensor = torch.zeros(1, 3, 1, height, width)
+        section_images[0] = (placeholder_img_tensor, placeholder_img_np)
+        section_image_paths[0] = "placeholder_image"
 
     # check end image
     if args.end_image_path is not None:
@@ -597,7 +593,7 @@ def prepare_i2v_inputs(
     else:
         end_image_tensor = None
 
-    # check end images
+    # check control images
     if args.control_image_path is not None and len(args.control_image_path) > 0:
         control_image_tensors = []
         control_mask_images = []
@@ -606,70 +602,18 @@ def prepare_i2v_inputs(
             control_image_tensors.append(control_image_tensor)
             control_mask_images.append(control_mask)
     else:
-        control_image_tensors = None
+        control_image_tensors = None  # Keep as None if not provided
         control_mask_images = None
 
-    # configure negative prompt
-    n_prompt = args.negative_prompt if args.negative_prompt else ""
-
-    # parse section prompts
-    section_prompts = parse_section_strings(args.prompt)
-
-    # load text encoder
-    if shared_models is not None:
-        tokenizer1, text_encoder1 = shared_models["tokenizer1"], shared_models["text_encoder1"]
-        tokenizer2, text_encoder2 = shared_models["tokenizer2"], shared_models["text_encoder2"]
-        text_encoder1.to(device)
-    else:
-        tokenizer1, text_encoder1 = load_text_encoder1(args, args.fp8_llm, device)
-        tokenizer2, text_encoder2 = load_text_encoder2(args)
-    text_encoder2.to(device)
-
-    logger.info(f"Encoding prompt")
-    llama_vecs = {}
-    llama_attention_masks = {}
-    clip_l_poolers = {}
-    with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
-        for index, prompt in section_prompts.items():
-            llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(
-                prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
-            )
-            llama_vec = llama_vec.cpu()
-            clip_l_pooler = clip_l_pooler.cpu()
-
-            llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
-
-            llama_vecs[index] = llama_vec
-            llama_attention_masks[index] = llama_attention_mask
-            clip_l_poolers[index] = clip_l_pooler
-
-    if args.guidance_scale == 1.0:
-        llama_vec_n, clip_l_pooler_n = torch.zeros_like(llama_vecs[0]), torch.zeros_like(clip_l_poolers[0])
-    else:
-        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
-            llama_vec_n, clip_l_pooler_n = hunyuan.encode_prompt_conds(
-                n_prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
-            )
-            llama_vec_n = llama_vec_n.cpu()
-            clip_l_pooler_n = clip_l_pooler_n.cpu()
-
-    llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
-
-    # free text encoder and clean memory
-    if shared_models is not None:  # if shared models are used, do not free them but move to CPU
-        text_encoder1.to("cpu")
-        text_encoder2.to("cpu")
-    del tokenizer1, text_encoder1, tokenizer2, text_encoder2  # do not free shared models
-    clean_memory_on_device(device)
-
     # load image encoder
-    if shared_models is not None:
+    # VAE is passed as an argument, assume it's on the correct device or handled by caller
+    if shared_models is not None and "feature_extractor" in shared_models and "image_encoder" in shared_models:
         feature_extractor, image_encoder = shared_models["feature_extractor"], shared_models["image_encoder"]
     else:
         feature_extractor, image_encoder = load_image_encoders(args)
-    image_encoder.to(device)
 
-    # encode image with image encoder
+    image_encoder_original_device = image_encoder.device
+    image_encoder.to(device)
 
     section_image_encoder_last_hidden_states = {}
     for index, (img_tensor, img_np) in section_images.items():
@@ -678,36 +622,167 @@ def prepare_i2v_inputs(
         image_encoder_last_hidden_state = image_encoder_output.last_hidden_state.cpu()
         section_image_encoder_last_hidden_states[index] = image_encoder_last_hidden_state
 
-    # free image encoder and clean memory
-    if shared_models is not None:
-        image_encoder.to("cpu")
-    del image_encoder, feature_extractor
+    if not (shared_models and "image_encoder" in shared_models):  # if loaded locally
+        del image_encoder, feature_extractor
+    else:  # if shared, move back to original device (likely CPU)
+        image_encoder.to(image_encoder_original_device)
+
     clean_memory_on_device(device)
 
     # VAE encoding
-    logger.info(f"Encoding image to latent space")
+    logger.info(f"Encoding image to latent space with VAE")
+    vae_original_device = vae.device
     vae.to(device)
 
     section_start_latents = {}
     for index, (img_tensor, img_np) in section_images.items():
-        start_latent = hunyuan.vae_encode(img_tensor, vae).cpu()
+        start_latent = hunyuan.vae_encode(img_tensor.to(device), vae).cpu()  # ensure tensor is on device
         section_start_latents[index] = start_latent
 
-    end_latent = hunyuan.vae_encode(end_image_tensor, vae).cpu() if end_image_tensor is not None else None
+    end_latent = hunyuan.vae_encode(end_image_tensor.to(device), vae).cpu() if end_image_tensor is not None else None
 
     control_latents = None
     if control_image_tensors is not None:
         control_latents = []
         for ctrl_image_tensor in control_image_tensors:
-            control_latent = hunyuan.vae_encode(ctrl_image_tensor, vae).cpu()
+            control_latent = hunyuan.vae_encode(ctrl_image_tensor.to(device), vae).cpu()
             control_latents.append(control_latent)
 
-    vae.to("cpu")  # move VAE to CPU to save memory
+    vae.to(vae_original_device)  # Move VAE back to its original device
     clean_memory_on_device(device)
 
-    # prepare model input arguments
+    arg_c_img = {}
+    for index in section_images.keys():
+        image_encoder_last_hidden_state = section_image_encoder_last_hidden_states[index]
+        start_latent = section_start_latents[index]
+        arg_c_img_i = {
+            "image_encoder_last_hidden_state": image_encoder_last_hidden_state,
+            "start_latent": start_latent,
+            "image_path": section_image_paths.get(index, "placeholder_image"),
+        }
+        arg_c_img[index] = arg_c_img_i
+
+    return {
+        "height": height,
+        "width": width,
+        "video_seconds": video_seconds,
+        "context_img": arg_c_img,
+        "end_latent": end_latent,
+        "control_latents": control_latents,
+        "control_mask_images": control_mask_images,
+    }
+
+
+def prepare_text_inputs(
+    args: argparse.Namespace,
+    device: torch.device,
+    shared_models: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """Prepare text-related inputs for I2V: LLM and TextEncoder encoding."""
+
+    n_prompt = args.negative_prompt if args.negative_prompt else ""
+    section_prompts = parse_section_strings(args.prompt if args.prompt else " ")  # Ensure prompt is not None
+
+    # load text encoder: conds_cache holds cached encodings for prompts without padding
+    conds_cache = {}
+    if shared_models is not None:
+        tokenizer1, text_encoder1 = shared_models.get("tokenizer1"), shared_models.get("text_encoder1")
+        tokenizer2, text_encoder2 = shared_models.get("tokenizer2"), shared_models.get("text_encoder2")
+        if "conds_cache" in shared_models:  # Use shared cache if available
+            conds_cache = shared_models["conds_cache"]
+        # text_encoder1 and text_encoder2 are on device (batched inference) or CPU (interactive inference)
+    else:  # Load if not in shared_models
+        tokenizer1, text_encoder1 = load_text_encoder1(args, args.fp8_llm, device)  # Load to GPU
+        tokenizer2, text_encoder2 = load_text_encoder2(args)  # Load to CPU
+        text_encoder2.to(device)  # Move text_encoder2 to the same device as text_encoder1
+
+    # Store original devices to move back later if they were shared. This does nothing if shared_models is None
+    text_encoder1_original_device = text_encoder1.device if text_encoder1 else None
+    text_encoder2_original_device = text_encoder2.device if text_encoder2 else None
+
+    logger.info(f"Encoding prompt with Text Encoders")
+    llama_vecs = {}
+    llama_attention_masks = {}
+    clip_l_poolers = {}
+
+    # Ensure text_encoder1 and text_encoder2 are not None before proceeding
+    if not text_encoder1 or not text_encoder2 or not tokenizer1 or not tokenizer2:
+        raise ValueError("Text encoders or tokenizers are not loaded properly.")
+
+    # Define a function to move models to device if needed
+    # This is to avoid moving models if not needed, especially in interactive mode
+    model_is_moved = False
+
+    def move_models_to_device_if_needed():
+        nonlocal model_is_moved
+        nonlocal shared_models
+
+        if model_is_moved:
+            return
+        model_is_moved = True
+
+        logger.info(f"Moving DiT and Text Encoders to appropriate device: {device} or CPU")
+        if shared_models and "model" in shared_models:  # DiT model is shared
+            if args.blocks_to_swap > 0:
+                logger.info("Waiting for 5 seconds to finish block swap")
+                time.sleep(5)
+            model = shared_models["model"]
+            model.to("cpu")
+            clean_memory_on_device(device)  # clean memory on device before moving models
+
+        text_encoder1.to(device)
+        text_encoder2.to(device)
+
+    with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+        for index, prompt in section_prompts.items():
+            if prompt in conds_cache:
+                llama_vec, clip_l_pooler = conds_cache[prompt]
+            else:
+                move_models_to_device_if_needed()
+                llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(
+                    prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
+                )
+                llama_vec = llama_vec.cpu()
+                clip_l_pooler = clip_l_pooler.cpu()
+                conds_cache[prompt] = (llama_vec, clip_l_pooler)
+
+            llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
+            llama_vecs[index] = llama_vec
+            llama_attention_masks[index] = llama_attention_mask
+            clip_l_poolers[index] = clip_l_pooler
+
+    if args.guidance_scale == 1.0:
+        # llama_vecs[0] should always exist because prompt is guaranteed to be non-empty
+        first_llama_vec = llama_vecs.get(0)  # this is cropped or padded, but it's okay for null context
+        first_clip_l_pooler = clip_l_poolers.get(0)
+        llama_vec_n, clip_l_pooler_n = torch.zeros_like(first_llama_vec), torch.zeros_like(first_clip_l_pooler)
+
+    else:
+        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+            if n_prompt in conds_cache:
+                llama_vec_n, clip_l_pooler_n = conds_cache[n_prompt]
+            else:
+                move_models_to_device_if_needed()
+                llama_vec_n, clip_l_pooler_n = hunyuan.encode_prompt_conds(
+                    n_prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2, custom_system_prompt=args.custom_system_prompt
+                )
+                llama_vec_n = llama_vec_n.cpu()
+                clip_l_pooler_n = clip_l_pooler_n.cpu()
+                conds_cache[n_prompt] = (llama_vec_n, clip_l_pooler_n)
+
+    llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
+
+    if not (shared_models and "text_encoder1" in shared_models):  # if loaded locally
+        del tokenizer1, text_encoder1, tokenizer2, text_encoder2
+    else:  # if shared, move back to original device (likely CPU)
+        if text_encoder1:
+            text_encoder1.to(text_encoder1_original_device)
+        if text_encoder2:
+            text_encoder2.to(text_encoder2_original_device)
+
+    clean_memory_on_device(device)
+
     arg_c = {}
-    arg_null = {}
     for index in llama_vecs.keys():
         llama_vec = llama_vecs[index]
         llama_attention_mask = llama_attention_masks[index]
@@ -716,7 +791,7 @@ def prepare_i2v_inputs(
             "llama_vec": llama_vec,
             "llama_attention_mask": llama_attention_mask,
             "clip_l_pooler": clip_l_pooler,
-            "prompt": section_prompts[index],  # for debugging
+            "prompt": section_prompts[index],
         }
         arg_c[index] = arg_c_i
 
@@ -726,18 +801,34 @@ def prepare_i2v_inputs(
         "clip_l_pooler": clip_l_pooler_n,
     }
 
-    arg_c_img = {}
-    for index in section_images.keys():
-        image_encoder_last_hidden_state = section_image_encoder_last_hidden_states[index]
-        start_latent = section_start_latents[index]
-        arg_c_img_i = {
-            "image_encoder_last_hidden_state": image_encoder_last_hidden_state,
-            "start_latent": start_latent,
-            "image_path": section_image_paths[index],
-        }
-        arg_c_img[index] = arg_c_img_i
+    return {
+        "context": arg_c,
+        "context_null": arg_null,
+    }
 
-    return height, width, video_seconds, arg_c, arg_null, arg_c_img, end_latent, control_latents, control_mask_images
+
+def prepare_i2v_inputs(
+    args: argparse.Namespace,
+    device: torch.device,
+    vae: AutoencoderKLCausal3D,  # VAE is now explicitly passed
+    shared_models: Optional[Dict] = None,
+) -> Tuple[int, int, float, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
+    """Prepare inputs for I2V by calling image and text preparation functions."""
+
+    image_data = prepare_image_inputs(args, device, vae, shared_models)
+    text_data = prepare_text_inputs(args, device, shared_models)
+
+    return (
+        image_data["height"],
+        image_data["width"],
+        image_data["video_seconds"],
+        text_data["context"],
+        text_data["context_null"],
+        image_data["context_img"],
+        image_data["end_latent"],
+        image_data["control_latents"],
+        image_data["control_mask_images"],
+    )
 
 
 # def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> Tuple[Any, torch.Tensor]:
@@ -936,35 +1027,56 @@ def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, 
 
 
 def generate(
-    args: argparse.Namespace, gen_settings: GenerationSettings, shared_models: Optional[Dict] = None
-) -> tuple[AutoencoderKLCausal3D, torch.Tensor]:
+    args: argparse.Namespace,
+    gen_settings: GenerationSettings,
+    shared_models: Optional[Dict] = None,
+    precomputed_image_data: Optional[Dict] = None,
+    precomputed_text_data: Optional[Dict] = None,
+) -> tuple[Optional[AutoencoderKLCausal3D], torch.Tensor]:  # VAE can be Optional
     """main function for generation
 
     Args:
         args: command line arguments
-        shared_models: dictionary containing pre-loaded models
+        shared_models: dictionary containing pre-loaded models (mainly for DiT)
+        precomputed_image_data: Optional dictionary with precomputed image data
+        precomputed_text_data: Optional dictionary with precomputed text data
 
     Returns:
-        tuple: (AutoencoderKLCausal3D model (vae), torch.Tensor generated latent)
+        tuple: (AutoencoderKLCausal3D model (vae) or None, torch.Tensor generated latent)
     """
     device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
+    vae_instance_for_return = None
 
     # prepare seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     args.seed = seed  # set seed to args for saving
 
-    # Check if we have shared models
-    if shared_models is not None:
-        # Use shared models and encoded data
-        vae = shared_models.get("vae")
-        height, width, video_seconds, context, context_null, context_img, end_latent, control_latents, control_mask_images = (
-            prepare_i2v_inputs(args, device, vae, shared_models)
-        )
+    if precomputed_image_data is not None and precomputed_text_data is not None:
+        logger.info("Using precomputed image and text data.")
+        height = precomputed_image_data["height"]
+        width = precomputed_image_data["width"]
+        video_seconds = precomputed_image_data["video_seconds"]
+        context_img = precomputed_image_data["context_img"]
+        end_latent = precomputed_image_data["end_latent"]
+        control_latents = precomputed_image_data["control_latents"]
+        control_mask_images = precomputed_image_data["control_mask_images"]
+
+        context = precomputed_text_data["context"]
+        context_null = precomputed_text_data["context_null"]
+        # VAE is not loaded here if data is precomputed; decoding VAE is handled by caller (e.g., process_batch_prompts)
+        # vae_instance_for_return remains None
     else:
-        # prepare inputs without shared models
-        vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device)
+        # Load VAE if not precomputed (for single/interactive mode)
+        # shared_models for single/interactive might contain text/image encoders, but not VAE after `load_shared_models` change.
+        # So, VAE will be loaded here for single/interactive.
+        logger.info("No precomputed data. Preparing image and text inputs.")
+        if shared_models and "vae" in shared_models:  # Should not happen with new load_shared_models
+            vae_instance_for_return = shared_models["vae"]
+        else:
+            vae_instance_for_return = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device)
+
         height, width, video_seconds, context, context_null, context_img, end_latent, control_latents, control_mask_images = (
-            prepare_i2v_inputs(args, device, vae)
+            prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)  # Pass VAE
         )
 
     if shared_models is None or "model" not in shared_models:
@@ -988,7 +1100,7 @@ def generate(
     else:
         # use shared model
         model: HunyuanVideoTransformer3DModelPacked = shared_models["model"]
-        model.move_to_device_except_swap_blocks(device)
+        model.move_to_device_except_swap_blocks(device)  # Handles block swap correctly
         model.prepare_block_swap_before_forward()
 
     if args.preview_latent_every:
@@ -1189,7 +1301,7 @@ def generate(
                 real_guidance_scale=args.guidance_scale,
                 distilled_guidance_scale=args.embedded_cfg_scale,
                 guidance_rescale=args.guidance_rescale,
-                # shift=3.0,
+                shift=args.flow_shift,
                 num_inference_steps=args.infer_steps,
                 generator=seed_g,
                 prompt_embeds=llama_vec,
@@ -1247,22 +1359,21 @@ def generate(
             # print(f"Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}")
 
     # Only clean up shared models if they were created within this function
-    if shared_models is None:
-        del model  # free memory
+    wait_for_clean_memory = False
+    if not (shared_models and "model" in shared_models) and "model" in locals():  # if model was loaded locally
+        del model
         synchronize_device(device)
-    else:
-        # move model to CPU to save memory
-        model.to("cpu")
+        wait_for_clean_memory = True
 
     # wait for 5 seconds until block swap is done
-    if args.blocks_to_swap > 0:
+    if wait_for_clean_memory and args.blocks_to_swap > 0:
         logger.info("Waiting for 5 seconds to finish block swap")
         time.sleep(5)
 
     gc.collect()
     clean_memory_on_device(device)
 
-    return vae, real_history_latents
+    return vae_instance_for_return, real_history_latents
 
 
 def generate_with_one_frame_inference(
@@ -1390,7 +1501,7 @@ def generate_with_one_frame_inference(
         real_guidance_scale=args.guidance_scale,
         distilled_guidance_scale=args.embedded_cfg_scale,
         guidance_rescale=args.guidance_rescale,
-        # shift=3.0,
+        shift=args.flow_shift,
         num_inference_steps=args.infer_steps,
         generator=seed_g,
         prompt_embeds=llama_vec,
@@ -1433,6 +1544,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
 
     seed = args.seed
     video_seconds = args.video_seconds
+
     latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
 
     if args.no_metadata:
@@ -1521,7 +1633,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
 
 def save_output(
     args: argparse.Namespace,
-    vae: AutoencoderKLCausal3D,
+    vae: AutoencoderKLCausal3D,  # Expect a VAE instance for decoding
     latent: torch.Tensor,
     device: torch.device,
     original_base_names: Optional[List[str]] = None,
@@ -1543,6 +1655,10 @@ def save_output(
         # save latent
         save_latent(latent, args, height, width)
     if args.output_type == "latent":
+        return
+
+    if vae is None:
+        logger.error("VAE is None, cannot decode latents for saving video/images.")
         return
 
     total_latent_sections = (args.video_seconds * 30) / (args.latent_window_size * 4)
@@ -1589,32 +1705,34 @@ def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Na
 
 def load_shared_models(args: argparse.Namespace) -> Dict:
     """Load shared models for batch processing or interactive mode.
-    Models are loaded to CPU to save memory.
+    Models are loaded to CPU to save memory. VAE is NOT loaded here.
+    DiT model is also NOT loaded here, handled by process_batch_prompts or generate.
 
     Args:
         args: Base command line arguments
 
     Returns:
-        Dict: Dictionary of shared models
+        Dict: Dictionary of shared models (text/image encoders)
     """
     shared_models = {}
+    # Load text encoders to CPU
     tokenizer1, text_encoder1 = load_text_encoder1(args, args.fp8_llm, "cpu")
-    tokenizer2, text_encoder2 = load_text_encoder2(args)
-    feature_extractor, image_encoder = load_image_encoders(args)
-    vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, "cpu")
+    tokenizer2, text_encoder2 = load_text_encoder2(args)  # Assumes it loads to CPU or handles device internally
+    # Load image encoders to CPU
+    feature_extractor, image_encoder = load_image_encoders(args)  # Assumes it loads to CPU or handles device internally
+
     shared_models["tokenizer1"] = tokenizer1
     shared_models["text_encoder1"] = text_encoder1
     shared_models["tokenizer2"] = tokenizer2
     shared_models["text_encoder2"] = text_encoder2
     shared_models["feature_extractor"] = feature_extractor
     shared_models["image_encoder"] = image_encoder
-    shared_models["vae"] = vae
 
     return shared_models
 
 
 def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) -> None:
-    """Process multiple prompts with model reuse
+    """Process multiple prompts with model reuse and batched precomputation
 
     Args:
         prompts_data: List of prompt data dictionaries
@@ -1624,67 +1742,156 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         logger.warning("No valid prompts found")
         return
 
-    # 1. Load configuration
     gen_settings = get_generation_settings(args)
     device = gen_settings.device
 
-    # 2. Load models to CPU in advance except for VAE and DiT
-    shared_models = load_shared_models(args)
+    # 1. Precompute Image Data (VAE and Image Encoders)
+    logger.info("Loading VAE and Image Encoders for batch image preprocessing...")
+    vae_for_batch = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, "cpu")
+    feature_extractor_batch, image_encoder_batch = load_image_encoders(args)  # Assume loads to CPU
 
-    # 3. Generate for each prompt
+    all_precomputed_image_data = []
+    all_prompt_args_list = [apply_overrides(args, pd) for pd in prompts_data]  # Create all arg instances first
+
+    logger.info("Preprocessing images and VAE encoding for all prompts...")
+
+    # VAE and Image Encoder to device for this phase, because we do not want to offload them to CPU
+    vae_for_batch.to(device)
+    image_encoder_batch.to(device)
+
+    # Pass models via a temporary shared_models dict for prepare_image_inputs
+    # This ensures prepare_image_inputs can use them if it expects them in shared_models
+    # Or it can load them if this dict is empty (though here we provide them)
+    temp_shared_models_img = {"feature_extractor": feature_extractor_batch, "image_encoder": image_encoder_batch}
+
+    for i, prompt_args_item in enumerate(all_prompt_args_list):
+        logger.info(f"Image preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        # prepare_image_inputs will move vae/image_encoder to device temporarily
+        image_data = prepare_image_inputs(prompt_args_item, device, vae_for_batch, temp_shared_models_img)
+        all_precomputed_image_data.append(image_data)
+
+    # Models should be back on GPU because prepare_image_inputs moved them to the original device
+    del feature_extractor_batch, image_encoder_batch, temp_shared_models_img
+    vae_for_batch.to("cpu")  # Move VAE back to CPU
+    clean_memory_on_device(device)
+
+    # 2. Precompute Text Data (Text Encoders)
+    logger.info("Loading Text Encoders for batch text preprocessing...")
+    # Text Encoders loaded to CPU by load_text_encoder1/2
+    tokenizer1_batch, text_encoder1_batch = load_text_encoder1(args, args.fp8_llm, device)
+    tokenizer2_batch, text_encoder2_batch = load_text_encoder2(args)
+
+    # Text Encoders to device for this phase
+    text_encoder2_batch.to(device)  # Moved into prepare_text_inputs logic
+
+    all_precomputed_text_data = []
+    conds_cache_batch = {}
+
+    logger.info("Preprocessing text and LLM/TextEncoder encoding for all prompts...")
+    temp_shared_models_txt = {
+        "tokenizer1": tokenizer1_batch,
+        "text_encoder1": text_encoder1_batch,  # on GPU
+        "tokenizer2": tokenizer2_batch,
+        "text_encoder2": text_encoder2_batch,  # on GPU
+        "conds_cache": conds_cache_batch,
+    }
+
+    for i, prompt_args_item in enumerate(all_prompt_args_list):
+        logger.info(f"Text preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        # prepare_text_inputs will move text_encoders to device temporarily
+        text_data = prepare_text_inputs(prompt_args_item, device, temp_shared_models_txt)
+        all_precomputed_text_data.append(text_data)
+
+    # Models should be removed from device after prepare_text_inputs
+    del tokenizer1_batch, text_encoder1_batch, tokenizer2_batch, text_encoder2_batch, temp_shared_models_txt, conds_cache_batch
+    clean_memory_on_device(device)
+
+    # 3. Load DiT Model once
+    logger.info("Loading DiT model for batch generation...")
+    # Use args from the first prompt for DiT loading (LoRA etc. should be consistent for a batch)
+    first_prompt_args = all_prompt_args_list[0]
+    dit_model = load_dit_model(first_prompt_args, device)  # Load directly to target device if possible
+    if first_prompt_args.lora_weight is not None and len(first_prompt_args.lora_weight) > 0:
+        logger.info("Merging LoRA weights into DiT model...")
+        merge_lora_weights(lora_framepack, dit_model, first_prompt_args, device, convert_lora_for_framepack)
+        if first_prompt_args.save_merged_model:
+            logger.info("Merged DiT model saved. Skipping generation.")
+            del dit_model
+            clean_memory_on_device(device)
+            return
+    logger.info("Optimizing DiT model...")
+    optimize_model(dit_model, first_prompt_args, device)  # Handles device placement, fp8 etc.
+
+    shared_models_for_generate = {"model": dit_model}  # Pass DiT via shared_models
+
     all_latents = []
-    all_prompt_args = []
 
+    logger.info("Generating latents for all prompts...")
     with torch.no_grad():
-        for prompt_data in prompts_data:
-            prompt = prompt_data["prompt"]
-            prompt_args = apply_overrides(args, prompt_data)
-            logger.info(f"Processing prompt: {prompt}")
+        for i, prompt_args_item in enumerate(all_prompt_args_list):
+            current_image_data = all_precomputed_image_data[i]
+            current_text_data = all_precomputed_text_data[i]
 
+            logger.info(f"Generating latent for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             try:
-                vae, latent = generate(prompt_args, gen_settings, shared_models)
+                # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
+                # It will use the DiT model from shared_models_for_generate.
+                # The VAE instance returned by generate will be None here.
+                _, latent = generate(
+                    prompt_args_item, gen_settings, shared_models_for_generate, current_image_data, current_text_data
+                )
 
-                # Save latent if needed
-                if args.output_type == "latent" or args.output_type == "both" or args.output_type == "latent_images":
-                    height, width = latent.shape[-2], latent.shape[-1]  # BCTHW
-                    height *= 8
-                    width *= 8
-                    save_latent(latent, prompt_args, height, width)
+                if latent is None and prompt_args_item.save_merged_model:  # Should be caught earlier
+                    continue
+
+                # Save latent if needed (using data from precomputed_image_data for H/W)
+                if prompt_args_item.output_type in ["latent", "both", "latent_images"]:
+                    height = current_image_data["height"]
+                    width = current_image_data["width"]
+                    save_latent(latent, prompt_args_item, height, width)
 
                 all_latents.append(latent)
-                all_prompt_args.append(prompt_args)
             except Exception as e:
-                logger.error(f"Error processing prompt: {prompt}. Error: {e}")
+                logger.error(f"Error generating latent for prompt: {prompt_args_item.prompt}. Error: {e}", exc_info=True)
+                all_latents.append(None)  # Add placeholder for failed generations
                 continue
 
-    # 4. Free models
-    if "model" in shared_models:
-        del shared_models["model"]
-    del shared_models["tokenizer1"]
-    del shared_models["text_encoder1"]
-    del shared_models["tokenizer2"]
-    del shared_models["text_encoder2"]
-    del shared_models["feature_extractor"]
-    del shared_models["image_encoder"]
-
+    # Free DiT model
+    logger.info("Releasing DiT model from memory...")
+    del shared_models_for_generate["model"]
+    del dit_model
     clean_memory_on_device(device)
-    synchronize_device(device)
+    synchronize_device(device)  # Ensure memory is freed before loading VAE for decoding
 
-    # 5. Decode latents if needed
+    # 4. Decode latents and save outputs (using vae_for_batch)
     if args.output_type != "latent":
-        logger.info("Decoding latents to videos/images")
-        vae.to(device)
+        logger.info("Decoding latents to videos/images using batched VAE...")
+        vae_for_batch.to(device)  # Move VAE to device for decoding
 
-        for i, (latent, prompt_args) in enumerate(zip(all_latents, all_prompt_args)):
-            logger.info(f"Decoding output {i+1}/{len(all_latents)}")
+        for i, latent in enumerate(all_latents):
+            if latent is None:  # Skip failed generations
+                logger.warning(f"Skipping decoding for prompt {i+1} due to previous error.")
+                continue
 
-            # avoid saving latents again (ugly hack)
-            if prompt_args.output_type == "both":
-                prompt_args.output_type = "video"
-            elif prompt_args.output_type == "latent_images":
-                prompt_args.output_type = "images"
+            current_args = all_prompt_args_list[i]
+            logger.info(f"Decoding output {i+1}/{len(all_latents)} for prompt: {current_args.prompt}")
 
-            save_output(prompt_args, vae, latent[0], device)
+            # if args.output_type is "both" or "latent_images", we already saved latent above.
+            # so we skip saving latent here.
+            if current_args.output_type == "both":
+                current_args.output_type = "video"
+            elif current_args.output_type == "latent_images":
+                current_args.output_type = "images"
+
+            # save_output expects latent to be [BCTHW] or [CTHW]. generate returns [BCTHW] (batch size 1).
+            # latent[0] is correct if generate returns it with batch dim.
+            # The latent from generate is (1, C, T, H, W)
+            save_output(current_args, vae_for_batch, latent[0], device)  # Pass vae_for_batch
+
+        vae_for_batch.to("cpu")  # Move VAE back to CPU
+
+    del vae_for_batch
+    clean_memory_on_device(device)
 
 
 def process_interactive(args: argparse.Namespace) -> None:
@@ -1696,6 +1903,7 @@ def process_interactive(args: argparse.Namespace) -> None:
     gen_settings = get_generation_settings(args)
     device = gen_settings.device
     shared_models = load_shared_models(args)
+    shared_models["conds_cache"] = {}  # Initialize empty cache for interactive mode
 
     print("Interactive mode. Enter prompts (Ctrl+D or Ctrl+Z (Windows) to exit):")
 
@@ -1730,10 +1938,21 @@ def process_interactive(args: argparse.Namespace) -> None:
                 prompt_args = apply_overrides(args, prompt_data)
 
                 # Generate latent
-                vae, latent = generate(prompt_args, gen_settings, shared_models)
+                # For interactive, precomputed data is None. shared_models contains text/image encoders.
+                # generate will load VAE internally.
+                returned_vae, latent = generate(prompt_args, gen_settings, shared_models)
+
+                # If not one_frame_inference, move DiT model to CPU after generation
+                if not prompt_args.one_frame_inference:
+                    if prompt_args.blocks_to_swap > 0:
+                        logger.info("Waiting for 5 seconds to finish block swap")
+                        time.sleep(5)
+                    model = shared_models.get("model")
+                    model.to("cpu")  # Move DiT model to CPU after generation
 
                 # Save latent and video
-                save_output(prompt_args, vae, latent[0], device)
+                # returned_vae from generate will be used for decoding here.
+                save_output(prompt_args, returned_vae, latent[0], device)
 
             except KeyboardInterrupt:
                 print("\nInterrupted. Continue (Ctrl+D or Ctrl+Z (Windows) to exit)")
@@ -1838,13 +2057,16 @@ def main():
 
         # Generate latent
         gen_settings = get_generation_settings(args)
-        vae, latent = generate(args, gen_settings)
+        # For single mode, precomputed data is None, shared_models is None.
+        # generate will load all necessary models (VAE, Text/Image Encoders, DiT).
+        returned_vae, latent = generate(args, gen_settings)
         # print(f"Generated latent shape: {latent.shape}")
         if args.save_merged_model:
             return
 
         # Save latent and video
-        save_output(args, vae, latent[0], device)
+        # returned_vae from generate will be used for decoding here.
+        save_output(args, returned_vae, latent[0], device)
 
     logger.info("Done!")
 
