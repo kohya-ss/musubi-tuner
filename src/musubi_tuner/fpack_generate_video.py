@@ -1858,6 +1858,10 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # Free DiT model
     logger.info("Releasing DiT model from memory...")
+    if args.blocks_to_swap > 0:
+        logger.info("Waiting for 5 seconds to finish block swap")
+        time.sleep(5)
+
     del shared_models_for_generate["model"]
     del dit_model
     clean_memory_on_device(device)
