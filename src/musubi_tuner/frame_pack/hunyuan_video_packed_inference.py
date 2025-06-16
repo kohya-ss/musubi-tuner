@@ -250,10 +250,11 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
                 self.accumulated_err = 0
 
         if skip_forward:
-            print(
-                f"Skipping forward pass at step {self.cnt}, accumulated ratio: {self.accumulated_ratio:.4f}, "
-                f"accumulated error: {self.accumulated_err:.4f}, accumulated steps: {self.accumulated_steps}"
-            )
+            # uncomment the following line to debug
+            # print(
+            #     f"Skipping forward pass at step {self.cnt}, accumulated ratio: {self.accumulated_ratio:.4f}, "
+            #     f"accumulated error: {self.accumulated_err:.4f}, accumulated steps: {self.accumulated_steps}"
+            # )
             hidden_states = hidden_states + self.residual_cache
         else:
             ori_hidden_states = hidden_states

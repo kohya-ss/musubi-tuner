@@ -630,3 +630,98 @@ python src/musubi_tuner/lora_post_hoc_ema.py \
 
 </details>
 
+## MagCache
+
+The following is quoted from the [MagCache github repository](https://github.com/Zehong-Ma/MagCache) "Magnitude-aware Cache (MagCache) for Video Diffusion Models":
+
+> We introduce Magnitude-aware Cache (MagCache), a training-free caching approach that estimates and leverages the fluctuating differences among model outputs across timesteps based on the robust magnitude observations, thereby accelerating the inference. MagCache works well for Video Diffusion Models, Image Diffusion models. 
+
+We have implemented the MagCache feature in Musubi Tuner. Some of the code is based on the MagCache repository. It is available for `fpack_generate_video.py` for now.
+
+### Usage
+
+1. Calibrate the mag ratios
+   - Run the inference script as normal, but with the `--magcache_calibration` option to calibrate the mag ratios. You will get a following output:
+
+   ```
+   INFO:musubi_tuner.fpack_generate_video:Copy and paste following values to --magcache_mag_ratios argument to use them:
+   1.00000,1.26562,1.08594,1.02344,1.00781,1.01562,1.01562,1.03125,1.04688,1.00781,1.03125,1.00000,1.01562,1.01562,1.02344,1.01562,0.98438,1.05469,0.98438,0.97266,1.03125,0.96875,0.93359,0.95703,0.77734
+   ```
+   - It is recommended to run the calibration with your custom prompt and model.
+   - If you inference the multi-section video, you will get the mag ratios for each section. You can use the one of the sections or average them.
+
+2. Use the mag ratios
+   - Run the inference script with the `--magcache_mag_ratios` option to use the mag ratios. For example:
+
+   ```bash
+   python fpack_generate_video.py --magcache_mag_ratios 1.00000,1.26562,1.08594,1.02344,1.00781,1.01562,1.01562,1.03125,1.04688,1.00781,1.03125,1.00000,1.01562,1.01562,1.02344,1.01562,0.98438,1.05469,0.98438,0.97266,1.03125,0.96875,0.93359,0.95703,0.77734
+   ```
+
+   - Specify `--magcache_mag_ratios 0` to use the default mag ratios from the MagCache repository.
+   - It is recommended to use the same steps as the calibration. If the steps are different, the mag ratios is interpolated to the specified steps. 
+   - You can also specify the `--magcache_retention_ratio`, `--magcache_threshold`, and `--magcache_k` options to control the MagCache behavior. The default values are 0.2, 0.24, and 6, respectively (same as the MagCache repository).
+
+    ```bash
+    python fpack_generate_video.py --magcache_retention_ratio 0.2 --magcache_threshold 0.24 --magcache_k 6
+    ```
+
+    - The `--magcache_retention_ratio` option controls the ratio of the steps not to cache. For example, if you set it to 0.2, the first 20% of the steps will not be cached. The default value is 0.2.
+    - The `--magcache_threshold` option controls the threshold whether to use the cached output or not. If the accumulated error is less than the threshold, the cached output will be used. The default value is 0.24.
+        - The error is calculated by the accumulated error multiplied by the mag ratio.
+    - The `--magcache_k` option controls the number of steps to use for the cache. The default value is 6, which means the consecutive 6 steps will be used for the cache. The default value 6 is recommended for 50 steps, so you may want to lower it for smaller number of steps.
+
+### Generated video example
+
+Without MagCache, approximately 90 seconds are required to generate single section video with 25 steps (without VAE decoding) in my environment.
+
+
+With MagCache, default settings, approximately 30 seconds are required to generate with the same settings.
+
+
+With MagCache, `--magcache_retention_ratio 0.2 --magcache_threshold 0.12 --magcache_k 3`, approximately 35 seconds are required to generate with the same settings.
+
+
+<details>
+<summary>日本語</summary>
+
+以下は、[MagCache githubリポジトリ](https://github.com/Zehong-Ma/MagCache) "Magnitude-aware Cache (MagCache) for Video Diffusion Models"からの引用の拙訳です：
+
+> Magnitude-aware Cache (MagCache)は、トレーニング不要のキャッシングアプローチで、堅牢なマグニチュード観測に基づいてタイムステップ間のモデル出力の変動差を推定および活用し、推論を加速します。MagCacheは、ビデオ拡散モデル、画像拡散モデルに適しています。
+
+Musubi TunerにMagCache機能を実装しました。一部のコードはMagCacheリポジトリのコードを基にしています。現在は`fpack_generate_video.py`でのみ利用可能です。
+
+### 使用方法
+
+1. mag_ratiosのキャリブレーション
+   - `--magcache_calibration`オプションを指定して、それ以外は通常通り推論スクリプトを実行し、mag ratiosをキャリブレーションします。以下のような出力が得られます：
+
+   ```
+   INFO:musubi_tuner.fpack_generate_video:Copy and paste following values to --magcache_mag_ratios argument to use them:
+   1.00000,1.26562,1.08594,1.02344,1.00781,1.01562,1.01562,1.03125,1.04688,1.00781,1.03125,1.00000,1.01562,1.01562,1.02344,1.01562,0.98438,1.05469,0.98438,0.97266,1.03125,0.96875,0.93359,0.95703,0.77734
+   ```
+   - カスタムプロンプトとモデルでキャリブレーションを実行することをお勧めします。
+   - 複数セクションビデオを推論する場合、各セクションのmag ratiosが出力されます。どれか一つ、またはそれらを平均した値を使ってください。
+
+2. mag ratiosの使用
+   - `--magcache_mag_ratios`オプションでmag ratiosを指定して推論スクリプトを実行します。例：
+
+   ```bash
+    python fpack_generate_video.py --magcache_mag_ratios 1.00000,1.26562,1.08594,1.02344,1.00781,1.01562,1.01562,1.03125,1.04688,1.00781,1.03125,1.00000,1.01562,1.01562,1.02344,1.01562,0.98438,1.05469,0.98438,0.97266,1.03125,0.96875,0.93359,0.95703,0.77734
+    ```
+
+    - `--magcache_mag_ratios 0`を指定すると、MagCacheリポジトリのデフォルトのmag ratiosが使用されます。
+    - mag ratiosの数はキャリブレーションした時と同じステップ数を指定することをお勧めします。ステップ数が異なる場合、mag ratiosは指定されたステップ数に合うように補間されます。
+    - `--magcache_retention_ratio`, `--magcache_threshold`, `--magcache_k`オプションを指定してMagCacheの動作を制御できます。デフォルト値は0.2、0.24、6です（MagCacheリポジトリと同じです）。
+    
+     ```bash
+    python fpack_generate_video.py --magcache_retention_ratio 0.2 --magcache_threshold 0.24 --magcache_k 6
+    ```
+
+    - `--magcache_retention_ratio`オプションは、キャッシュしないステップの割合を制御します。例えば、0.2に設定すると、最初の20%のステップはキャッシュされません。デフォルト値は0.2です。
+    - `--magcache_threshold`オプションは、キャッシュされた出力を使用するかどうかの閾値を制御します。累積誤差がこの閾値未満の場合、キャッシュされた出力が使用されます。デフォルト値は0.24です。
+        - 誤差は、累積誤差にmag ratioを掛けたものとして計算されます。
+    - `--magcache_k`オプションは、キャッシュに使用するステップ数を制御します。デフォルト値は6で、これは連続する6ステップがキャッシュに使用されることを意味します。デフォルト値6は恐らく50ステップの場合の推奨値のため、ステップ数が少ない場合は減らすことを検討してください。
+
+生成サンプルは英語での説明を参照してください。
+
+</details>

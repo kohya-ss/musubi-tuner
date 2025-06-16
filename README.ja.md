@@ -108,6 +108,10 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/06/17
+    - FramePackの推論スクリプトで [MagCache](https://github.com/Zehong-Ma/MagCache) をサポートしました。詳しくは[高度な設定](./docs/advanced_config.md#magcache)を参照してください。
+    - FramePackの推論スクリプトで、対話モードおよびバッチモードでText Encoderの出力をキャッシュするようにしました。また処理順を見直し、モデルオフロードのタイミングを調整することで、連続生成時の処理時間を短縮しました。
+
 - 2025/06/13
     - `lora_post_hoc_ema.py`に`--sima_rel`オプションを追加しました。これにより、Post Hoc EMAの適用時にPower Function EMAを使用することができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
     
@@ -133,21 +137,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
     - FramePackの1フレーム推論、学習のコードを大幅に改良しました。詳細は[FramePackの1フレーム推論のドキュメント](./docs/framepack_1f.md)を参照してください。
         - **破壊的変更**: 1フレーム学習のデータセット形式、学習オプション、推論オプションが変更されました。ドキュメントに従って、データセット設定の変更、キャッシュの再作成、学習・推論オプションの変更を行ってください。
     - FramePackの1フレーム推論と学習についてのドキュメントを追加しました。詳細は[前述のドキュメント](./docs/framepack_1f.md)を参照してください。
-
-- 2025/05/22
-    - FramePackの推論スクリプトで、以下の対応を行いました。
-        - **破壊的変更**: 1フレーム推論で画像を保存する場合、サブディレクトリを作成しなくなりました。
-        - バッチモードとインタラクティブモードに対応しました。
-            - バッチモードでは、プロンプトをファイルから読み込んで生成します。インタラクティブモードでは、コマンドラインからプロンプトを指定して生成します。詳細は[FramePackのドキュメント](./docs/framepack.md#batch-and-interactive-modes--バッチモードとインタラクティブモード)を参照してください。
-        - kisekaeichi方式の参照画像を複数指定できるようになりました。詳細は[FramePackのドキュメント](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション)を参照してください。
-
-- 2025/05/17 update 1
-    - `--max_data_loader_n_workers`に2以上を指定するとひとつのエポック内でデータの重複や欠落が起きる不具合を修正しました。PR [#287](https://github.com/kohya-ss/musubi-tuner/pull/287),  issue [#283](https://github.com/kohya-ss/musubi-tuner/issues/283)
-        - 長期的には全てのデータが学習されますが、短期的にはデータの偏りが起きていました。
-        - データセットの初期化が不適切でそれぞれのDataSetが異なる順番でデータを返していたため、複数のDataLoaderの使用時に不具合が起きていました。初期化を修正してすべてのDataSetが同じ順番でデータを返すよう修正しました。
-
-- 2025/05/17
-    - FramePackの1フレーム推論でkisekaeichi方式に対応しました。furusu氏の提案したこの新しい推論方式は、post latentに参照画像を設定することで生成される画像を制御するものです。詳細は[FramePackのドキュメント](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション)を参照してください。
 
 ### リリースについて
 
