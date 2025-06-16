@@ -12,6 +12,7 @@
 - [FP8 weight optimization for models](#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化)
 - [PyTorch Dynamo optimization for model training](#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)
 - [LoRA Post-Hoc EMA merging](#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)
+- [MagCache](#magcache)
 
 ## How to specify `network_args` / `network_args`の指定方法
 
