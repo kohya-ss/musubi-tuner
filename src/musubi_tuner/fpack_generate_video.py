@@ -18,8 +18,10 @@ from rich_argparse import RichHelpFormatter
 from musubi_tuner.networks import lora_framepack
 from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 from musubi_tuner.frame_pack import hunyuan
-from musubi_tuner.frame_pack.hunyuan_video_packed import HunyuanVideoTransformer3DModelPacked, load_packed_model
-from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, soft_append_bcthw
+from musubi_tuner.frame_pack.hunyuan_video_packed import load_packed_model
+from musubi_tuner.frame_pack.hunyuan_video_packed_inference import HunyuanVideoTransformer3DModelPackedInference
+from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, resize_and_center_crop, soft_append_bcthw
+from musubi_tuner.frame_pack.bucket_tools import find_nearest_bucket
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
@@ -253,6 +255,20 @@ def parse_args() -> argparse.Namespace:
         help="Torch.compile settings",
     )
 
+    # MagCache
+    parser.add_argument(
+        "--magcache_mag_ratios",
+        type=str,
+        default=None,
+        help="Enable MagCache for inference with specified ratios, comma separated values. Example: `1.0,1.06971,1.29073,...`. "
+        + "It is recommended to use same count of ratios as as inference steps."
+        + "Default is None (disabled), if `0` is specified, it will use default ratios for 50 steps.",
+    )
+    parser.add_argument("--magcache_retention_ratio", type=float, default=0.2, help="MagCache retention ratio, default is 0.2")
+    parser.add_argument("--magcache_threshold", type=float, default=0.24, help="MagCache threshold, default is 0.24")
+    parser.add_argument("--magcache_k", type=int, default=6, help="MagCache k value, default is 6")
+    parser.add_argument("--magcache_calibration", action="store_true", help="Enable MagCache calibration")
+
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
@@ -335,6 +351,13 @@ def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict
             overrides["control_image_mask_path"].append(value)
         elif option == "of":  # one_frame_inference
             overrides["one_frame_inference"] = value
+        # magcache
+        elif option == "mcrr":  # magcache retention ratio
+            overrides["magcache_retention_ratio"] = float(value)
+        elif option == "mct":  # magcache threshold
+            overrides["magcache_threshold"] = float(value)
+        elif option == "mck":  # magcache k
+            overrides["magcache_k"] = int(value)
 
     # If no control_image_path was provided, remove the empty list
     if not overrides["control_image_path"]:
@@ -393,7 +416,7 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int, int]:
 # region DiT model
 
 
-def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVideoTransformer3DModelPacked:
+def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVideoTransformer3DModelPackedInference:
     """load DiT model
 
     Args:
@@ -403,14 +426,14 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         dit_weight_dtype: data type for the model weights. None for as-is
 
     Returns:
-        HunyuanVideoTransformer3DModelPacked: DiT model
+        HunyuanVideoTransformer3DModelPackedInference: DiT model
     """
     loading_device = "cpu"
     if args.blocks_to_swap == 0 and not args.fp8_scaled and args.lora_weight is None:
         loading_device = device
 
     # do not fp8 optimize because we will merge LoRA weights
-    model = load_packed_model(device, args.dit, args.attn_mode, loading_device, quant_dtype=torch.float32 if args.upcast_quantization else None)
+    model = load_packed_model(device, args.dit, args.attn_mode, loading_device, for_inference=True, quant_dtype=torch.float32 if args.upcast_quantization else None)
 
     # apply RoPE scaling factor
     if args.rope_scaling_timestep_threshold is not None:
@@ -418,10 +441,14 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
             f"Applying RoPE scaling factor {args.rope_scaling_factor} for timesteps >= {args.rope_scaling_timestep_threshold}"
         )
         model.enable_rope_scaling(args.rope_scaling_timestep_threshold, args.rope_scaling_factor)
+
+    # magcache
+    initialize_magcache(args, model)
+
     return model
 
 
-def optimize_model(model: HunyuanVideoTransformer3DModelPacked, args: argparse.Namespace, device: torch.device) -> None:
+def optimize_model(model: HunyuanVideoTransformer3DModelPackedInference, args: argparse.Namespace, device: torch.device) -> None:
     """optimize the model (FP8 conversion, device move etc.)
 
     Args:
@@ -1026,6 +1053,55 @@ def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, 
     return new_lora_sd
 
 
+def initialize_magcache(args: argparse.Namespace, model: HunyuanVideoTransformer3DModelPackedInference) -> None:
+    if args.magcache_mag_ratios is None and not args.magcache_calibration:
+        return
+
+    # parse mag_ratios
+    mag_ratios = None  # calibration mode
+    if args.magcache_mag_ratios is not None:
+        mag_ratios = [float(ratio) for ratio in args.magcache_mag_ratios.split(",")]
+        if len(mag_ratios) == 1 and mag_ratios[0] == 0:
+            # use default mag_ratios
+            mag_ratios = None
+
+    logger.info(
+        f"Initializing MagCache with mag_ratios: {mag_ratios}, retention_ratio: {args.magcache_retention_ratio}, "
+        f"magcache_thresh: {args.magcache_threshold}, K: {args.magcache_k}, calibration: {args.magcache_calibration}"
+    )
+    model.initialize_magcache(
+        enable=True,
+        retention_ratio=args.magcache_retention_ratio,
+        mag_ratios=mag_ratios,
+        magcache_thresh=args.magcache_threshold,
+        K=args.magcache_k,
+        calibration=args.magcache_calibration,
+    )
+
+
+def preprocess_magcache(args: argparse.Namespace, model: HunyuanVideoTransformer3DModelPackedInference) -> None:
+    if args.magcache_mag_ratios is None and not args.magcache_calibration:
+        return
+
+    model.reset_magcache(args.infer_steps)
+
+
+def postprocess_magcache(args: argparse.Namespace, model: HunyuanVideoTransformer3DModelPackedInference) -> None:
+    if args.magcache_mag_ratios is None and not args.magcache_calibration:
+        return
+    if not args.magcache_calibration:
+        return
+
+    # print mag ratios
+    norm_ratio, norm_std, cos_dis = model.get_calibration_data()
+    logger.info(f"MagCache calibration data:")
+    logger.info(f"  - norm_ratio: {norm_ratio}")
+    logger.info(f"  - norm_std: {norm_std}")
+    logger.info(f"  - cos_dis: {cos_dis}")
+    logger.info(f"Copy and paste following values to --magcache_mag_ratios argument to use them:")
+    print(",".join([f"{ratio:.5f}" for ratio in [1] + norm_ratio]))
+
+
 def generate(
     args: argparse.Namespace,
     gen_settings: GenerationSettings,
@@ -1099,7 +1175,7 @@ def generate(
             shared_models["model"] = model
     else:
         # use shared model
-        model: HunyuanVideoTransformer3DModelPacked = shared_models["model"]
+        model: HunyuanVideoTransformer3DModelPackedInference = shared_models["model"]
         model.move_to_device_except_swap_blocks(device)  # Handles block swap correctly
         model.prepare_block_swap_before_forward()
 
@@ -1292,6 +1368,8 @@ def generate(
             llama_attention_mask_n = context_null["llama_attention_mask"].to(device)
             clip_l_pooler_n = context_null["clip_l_pooler"].to(device, dtype=torch.bfloat16)
 
+            preprocess_magcache(args, model)
+
             generated_latents = sample_hunyuan(
                 transformer=model,
                 sampler=args.sample_solver,
@@ -1321,6 +1399,7 @@ def generate(
                 clean_latents_4x=clean_latents_4x,
                 clean_latent_4x_indices=clean_latent_4x_indices,
             )
+            postprocess_magcache(args, model)
 
             # concatenate generated latents
             total_generated_latent_frames += int(generated_latents.shape[2])
@@ -1378,7 +1457,7 @@ def generate(
 
 def generate_with_one_frame_inference(
     args: argparse.Namespace,
-    model: HunyuanVideoTransformer3DModelPacked,
+    model: HunyuanVideoTransformer3DModelPackedInference,
     context: Dict[int, Dict[str, torch.Tensor]],
     context_null: Dict[str, torch.Tensor],
     context_img: Dict[int, Dict[str, torch.Tensor]],
@@ -1492,6 +1571,8 @@ def generate_with_one_frame_inference(
     llama_attention_mask_n = context_null["llama_attention_mask"].to(device)
     clip_l_pooler_n = context_null["clip_l_pooler"].to(device, dtype=torch.bfloat16)
 
+    preprocess_magcache(args, model)
+
     generated_latents = sample_hunyuan(
         transformer=model,
         sampler=args.sample_solver,
@@ -1521,6 +1602,8 @@ def generate_with_one_frame_inference(
         clean_latents_4x=clean_latents_4x,
         clean_latent_4x_indices=clean_latent_4x_indices,
     )
+
+    postprocess_magcache(args, model)
 
     real_history_latents = generated_latents.to(clean_latents)
     return real_history_latents
