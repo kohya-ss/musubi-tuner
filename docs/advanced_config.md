@@ -672,14 +672,17 @@ We have implemented the MagCache feature in Musubi Tuner. Some of the code is ba
 
 ### Generated video example
 
-Without MagCache, approximately 90 seconds are required to generate single section video with 25 steps (without VAE decoding) in my environment.
+Using F1-model, without MagCache, approximately 90 seconds are required to generate single section video with 25 steps (without VAE decoding) in my environment.
 
+https://github.com/user-attachments/assets/30b8d05e-9bd6-42bf-997f-5ba5b3dde876
 
 With MagCache, default settings, approximately 30 seconds are required to generate with the same settings.
 
+https://github.com/user-attachments/assets/080076ea-4088-443c-8138-4eeb00694ec5
 
 With MagCache, `--magcache_retention_ratio 0.2 --magcache_threshold 0.12 --magcache_k 3`, approximately 35 seconds are required to generate with the same settings.
 
+https://github.com/user-attachments/assets/27d6c7ff-e3db-4c52-8668-9a887441acef
 
 <details>
 <summary>日本語</summary>
