@@ -237,7 +237,12 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
             raise NotImplementedError("TEACache is not implemented for inference model.")
 
         skip_forward = False
-        if self.enable_magcache and not calibration and self.cnt >= max(int(self.retention_ratio * self.num_steps), 1):
+        if (
+            self.enable_magcache
+            and not calibration
+            and self.cnt >= max(int(self.retention_ratio * self.num_steps), 1)
+            and self.cnt < self.num_steps - 1
+        ):
             cur_mag_ratio = self.mag_ratios[self.cnt]
             self.accumulated_ratio = self.accumulated_ratio * cur_mag_ratio
             cur_skip_err = np.abs(1 - self.accumulated_ratio)
