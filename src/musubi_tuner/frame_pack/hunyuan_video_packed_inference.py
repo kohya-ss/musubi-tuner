@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DModelPacked):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.enable_magcache = False
 
     def initialize_magcache(
         self,
