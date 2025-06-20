@@ -4,16 +4,14 @@
 
 Blissful extension of Musubi Tuner by Blyss Sarania
 
-*Please see [here](https://github.com/kohya-ss/musubi-tuner/discussions/232#discussioncomment-13469998) regarding future development
-
-Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place! Note for best performance and compatibility, Python 3.12 with PyTorch 2.7.0 or later is recommended! Additional requirements have been added to 'requirements.txt' so if you're coming from regular Musubi, you'll need to `pip install -r requirements.txt` again! While development is done in Python 3.12, efforts are made to maintain compatibility back to 3.10 as well.
+Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place! Note for best performance and compatibility, Python 3.12 with PyTorch 2.7.0 or later is recommended! While development is done in Python 3.12, efforts are made to maintain compatibility back to 3.10 as well.
 
 Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do not post about issues with this version on the main Musubi Github repo but rather use this repo's issues section!
 
 Extensions for all models:
 - Latent preview during generation with either latent2RGB or TAEHV (`--preview_latent_every N` where N is a number of steps(or sections for framepack). By default uses latent2rgb, TAE can be enabled with `--preview_vae /path/to/model` models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
 - Optimized generation settings for fast, high quality gens (`--optimized`, enables various optimizations and settings based on the model. Requires SageAttention, Triton, PyTorch 2.7.0 or higher)
-- Save generation metadata in videos/images (automatic with `--container mkv` and when saving PNG, disable with `--no-metadata`, not available with `--container mp4` You can conveniently view/copy such metadata with `blissful_tuner/metaview.py some_video.mkv`)
+- Save generation metadata in videos/images (automatic with `--container mkv` and when saving PNG, disable with `--no-metadata`, not available with `--container mp4` You can conveniently view/copy such metadata with `src/blissful_tuner/metaview.py some_video.mkv`)
 - Beautiful rich logging, rich argparse and rich tracebacks
 - Extended saving options (`--codec codec --container container`, can save Apple ProRes(`--codec prores`, super high bitrate perceptually lossless) into `--container mkv`, or either of `h264`, `h265` into `mp4` or `mkv`)
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
@@ -47,10 +45,10 @@ Framepack only extensions:
 - FP8 fast/mm_scaled (`--fp8_fast`, increased speed on 40xx cards with a mild hit to quality, Wan and Hunyuan have this already in native Musubi!)
 
 Non model specific extras:
-- GIMM-VFI framerate interpolation (`blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
-- Upscaling with SwinIR or ESRGAN type models (`blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )
+- GIMM-VFI framerate interpolation (`src/blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
+- Upscaling with SwinIR or ESRGAN type models (`src/blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )
 - Face blurring script based on Yolo - helpful for training non face altering LoRA! ( `blissful_tuner/yolo_blur.py`, please see it's `--help` for usage. Recommended model: https://www.dropbox.com/scl/fi/44xdsohltv2kofxrirvrj/yolo.7z?rlkey=zk6bv5iw3ic1pbgo4e8cblbw1&st=kwm6fzgk&dl=0 )
-- Face restoration with CodeFormer/GFPGAN (`blissful_tuner/facefix.py`, per usual please have a look at the `--help`! Models: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
+- Face restoration with CodeFormer/GFPGAN (`src/blissful_tuner/facefix.py`, per usual please have a look at the `--help`! Models: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
 
 Also a related project of mine ( https://github.com/Sarania/Envious ) is useful for managing Nvidia GPUs from the terminal on Linux. It requires nvidia-ml-py and supports realtime monitoring, over/underclocking, power limit adjustment, fan control, profiles, and more. It also has a little process monitor for the GPU VRAM! Basically it's like nvidia-smi except not bad 😂
 
