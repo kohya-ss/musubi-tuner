@@ -3,7 +3,7 @@ name = "musubi-tuner"
 version = "0.1.0"
 description = "Musubi Tuner by kohya_ss"
 readme = "README.md"
-requires-python = ">=3.10, <3.11"
+requires-python = ">=3.10, <3.13"
 dependencies = [
     "accelerate>=1.6.0",
     "av==14.0.1",

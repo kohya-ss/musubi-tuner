@@ -28,7 +28,7 @@ try:
 except ImportError:
     pass
 from rich_argparse import RichHelpFormatter
-from convert_lora import convert_from_diffusers
+from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
