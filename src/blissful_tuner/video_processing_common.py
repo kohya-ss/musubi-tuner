@@ -45,7 +45,7 @@ def setup_parser_video_common(description: Optional[str] = None, model_help: Opt
     parser.add_argument("--keep_pngs", action="store_true", help="Also keep individual frames as PNGs")
     parser.add_argument(
         "--codec", choices=["h264", "h265", "prores"], default="h264",
-        help="Codec to use when saving videos, choose from 'prores', 'h264', or 'h265'. Default is 'h264'"
+        help="Codec to use when saving videos, choose from 'prores', 'h264', or 'h265'. Default is 'h264' and this setting is ignored for images."
     )
     parser.add_argument(
         "--container", choices=["mkv", "mp4"], default="mp4",
