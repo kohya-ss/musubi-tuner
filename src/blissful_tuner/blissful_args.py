@@ -156,8 +156,14 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         "Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.")
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument("--keep_pngs", action="store_true", help="Save frames as PNGs in addition to output video")
-    parser.add_argument("--codec", choices=["prores", "h264", "h265"], default="h264", help="Codec to use, choose from 'prores', 'h264', or 'h265'")
-    parser.add_argument("--container", choices=["mkv", "mp4"], default="mp4", help="Container format to use, choose from 'mkv' or 'mp4'. Note prores can only go in MKV!")
+    parser.add_argument(
+        "--codec", choices=["h264", "h265", "prores"], default="h264",
+        help="Codec to use when saving videos, choose from 'prores', 'h264', or 'h265'. Default is 'h264'"
+    )
+    parser.add_argument(
+        "--container", choices=["mkv", "mp4"], default="mp4",
+        help="Container format to use for output, choose from 'mkv' or 'mp4'. Default is 'mp4' and note that 'prores' can only go in 'mkv'! Ignored for images."
+    )
     parser.add_argument(
         "--upcast_linear", action="store_true", help="If supplied, upcast linear transformations to fp32."
         "Only for fp8_scaled and not active during mm_scaled. Can potentially increase accuracy at little cost to speed."
