@@ -13,10 +13,10 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from rich.traceback import install as install_rich_tracebacks
-from swinir.network_swinir import SwinIR
 from spandrel import ImageModelDescriptor, ModelLoader
-from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
-from utils import setup_compute_context, load_torch_file, BlissfulLogger, power_seed
+from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from blissful_tuner.utils import setup_compute_context, load_torch_file, BlissfulLogger, power_seed
+from blissful_tuner.swinir.network_swinir import SwinIR
 logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 

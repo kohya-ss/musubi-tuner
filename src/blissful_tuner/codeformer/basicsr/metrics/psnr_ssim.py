@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 
-from codeformer.basicsr.metrics.metric_util import reorder_image, to_y_channel
-from codeformer.basicsr.utils.registry import METRIC_REGISTRY
+from blissful_tuner.codeformer.basicsr.metrics.metric_util import reorder_image, to_y_channel
+from blissful_tuner.codeformer.basicsr.utils.registry import METRIC_REGISTRY
 
 
 @METRIC_REGISTRY.register()

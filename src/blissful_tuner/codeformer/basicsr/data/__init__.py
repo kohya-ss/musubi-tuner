@@ -7,10 +7,10 @@ from copy import deepcopy
 from functools import partial
 from os import path as osp
 
-from codeformer.basicsr.data.prefetch_dataloader import PrefetchDataLoader
-from codeformer.basicsr.utils import get_root_logger, scandir
-from codeformer.basicsr.utils.dist_util import get_dist_info
-from codeformer.basicsr.utils.registry import DATASET_REGISTRY
+from blissful_tuner.codeformer.basicsr.data.prefetch_dataloader import PrefetchDataLoader
+from blissful_tuner.codeformer.basicsr.utils import get_root_logger, scandir
+from blissful_tuner.codeformer.basicsr.utils.dist_util import get_dist_info
+from blissful_tuner.codeformer.basicsr.utils.registry import DATASET_REGISTRY
 
 __all__ = ['build_dataset', 'build_dataloader']
 
@@ -19,7 +19,7 @@ __all__ = ['build_dataset', 'build_dataloader']
 data_folder = osp.dirname(osp.abspath(__file__))
 dataset_filenames = [osp.splitext(osp.basename(v))[0] for v in scandir(data_folder) if v.endswith('_dataset.py')]
 # import all the dataset modules
-_dataset_modules = [importlib.import_module(f'codeformer.basicsr.data.{file_name}') for file_name in dataset_filenames]
+_dataset_modules = [importlib.import_module(f'blissful_tuner.codeformer.basicsr.data.{file_name}') for file_name in dataset_filenames]
 
 
 def build_dataset(dataset_opt):

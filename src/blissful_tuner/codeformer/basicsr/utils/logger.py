@@ -149,7 +149,7 @@ def get_env_info():
     import torch
     import torchvision
 
-    from codeformer.basicsr.version import __version__
+    from blissful_tuner.codeformer.basicsr.version import __version__
     msg = r"""
                 ____                _       _____  ____
                / __ ) ____ _ _____ (_)_____/ ___/ / __ \

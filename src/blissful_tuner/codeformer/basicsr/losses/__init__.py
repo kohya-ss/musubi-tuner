@@ -1,7 +1,7 @@
 from copy import deepcopy
 
-from codeformer.basicsr.utils import get_root_logger
-from codeformer.basicsr.utils.registry import LOSS_REGISTRY
+from blissful_tuner.codeformer.basicsr.utils import get_root_logger
+from blissful_tuner.codeformer.basicsr.utils.registry import LOSS_REGISTRY
 from .losses import (CharbonnierLoss, GANLoss, L1Loss, MSELoss, PerceptualLoss, WeightedTVLoss, g_path_regularize,
                      gradient_penalty_loss, r1_penalty)
 

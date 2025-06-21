@@ -2,8 +2,8 @@ import importlib
 from copy import deepcopy
 from os import path as osp
 
-from codeformer.basicsr.utils import get_root_logger, scandir
-from codeformer.basicsr.utils.registry import ARCH_REGISTRY
+from blissful_tuner.codeformer.basicsr.utils import get_root_logger, scandir
+from blissful_tuner.codeformer.basicsr.utils.registry import ARCH_REGISTRY
 
 __all__ = ['build_network']
 
@@ -13,7 +13,7 @@ __all__ = ['build_network']
 arch_folder = osp.dirname(osp.abspath(__file__))
 arch_filenames = [osp.splitext(osp.basename(v))[0] for v in scandir(arch_folder) if v.endswith('_arch.py')]
 # import all the arch modules
-_arch_modules = [importlib.import_module(f'codeformer.basicsr.archs.{file_name}') for file_name in arch_filenames]
+_arch_modules = [importlib.import_module(f'blissful_tuner.codeformer.basicsr.archs.{file_name}') for file_name in arch_filenames]
 
 
 def build_network(opt):

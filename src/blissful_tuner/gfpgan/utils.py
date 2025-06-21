@@ -6,9 +6,9 @@ from basicsr.utils.download_util import load_file_from_url
 from facexlib.utils.face_restoration_helper import FaceRestoreHelper
 from torchvision.transforms.functional import normalize
 
-from gfpgan.archs.gfpgan_bilinear_arch import GFPGANBilinear
-from gfpgan.archs.gfpganv1_arch import GFPGANv1
-from gfpgan.archs.gfpganv1_clean_arch import GFPGANv1Clean
+from blissful_tuner.gfpgan.archs.gfpgan_bilinear_arch import GFPGANBilinear
+from blissful_tuner.gfpgan.archs.gfpganv1_arch import GFPGANv1
+from blissful_tuner.gfpgan.archs.gfpganv1_clean_arch import GFPGANv1Clean
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -73,7 +73,7 @@ class GFPGANer():
                 narrow=1,
                 sft_half=True)
         elif arch == 'RestoreFormer':
-            from gfpgan.archs.restoreformer_arch import RestoreFormer
+            from blissful_tuner.gfpgan.archs.restoreformer_arch import RestoreFormer
             self.gfpgan = RestoreFormer()
         # initialize face helper
         self.face_helper = FaceRestoreHelper(

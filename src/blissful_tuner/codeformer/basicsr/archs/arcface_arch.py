@@ -1,5 +1,5 @@
 import torch.nn as nn
-from codeformer.basicsr.utils.registry import ARCH_REGISTRY
+from blissful_tuner.codeformer.basicsr.utils.registry import ARCH_REGISTRY
 
 
 def conv3x3(inplanes, outplanes, stride=1):

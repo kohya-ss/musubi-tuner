@@ -33,15 +33,15 @@ from omegaconf import OmegaConf
 from rich.traceback import install as install_rich_tracebacks
 
 # Importing necessary modules from our project
-from gimmvfi.generalizable_INR.gimmvfi_r import GIMMVFI_R
-from gimmvfi.generalizable_INR.gimmvfi_f import GIMMVFI_F
-from gimmvfi.generalizable_INR.configs import GIMMVFIConfig
-from gimmvfi.generalizable_INR.raft import RAFT
-from gimmvfi.generalizable_INR.flowformer.core.FlowFormer.LatentCostFormer.transformer import FlowFormer
-from gimmvfi.generalizable_INR.flowformer.configs.submission import get_cfg
-from gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
-from utils import load_torch_file, setup_compute_context, power_seed
-from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from blissful_tuner.gimmvfi.generalizable_INR.gimmvfi_r import GIMMVFI_R
+from blissful_tuner.gimmvfi.generalizable_INR.gimmvfi_f import GIMMVFI_F
+from blissful_tuner.gimmvfi.generalizable_INR.configs import GIMMVFIConfig
+from blissful_tuner.gimmvfi.generalizable_INR.raft import RAFT
+from blissful_tuner.gimmvfi.generalizable_INR.flowformer.core.FlowFormer.LatentCostFormer.transformer import FlowFormer
+from blissful_tuner.gimmvfi.generalizable_INR.flowformer.configs.submission import get_cfg
+from blissful_tuner.gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
+from blissful_tuner.utils import load_torch_file, setup_compute_context, power_seed
+from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
 warnings.filterwarnings("ignore")
 install_rich_tracebacks()
 

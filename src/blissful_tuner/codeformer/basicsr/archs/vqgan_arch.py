@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
-from codeformer.basicsr.utils import get_root_logger
-from codeformer.basicsr.utils.registry import ARCH_REGISTRY
+from blissful_tuner.codeformer.basicsr.utils import get_root_logger
+from blissful_tuner.codeformer.basicsr.utils.registry import ARCH_REGISTRY
 
 def normalize(in_channels):
     return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)

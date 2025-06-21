@@ -2,8 +2,8 @@ import importlib
 from copy import deepcopy
 from os import path as osp
 
-from codeformer.basicsr.utils import get_root_logger, scandir
-from codeformer.basicsr.utils.registry import MODEL_REGISTRY
+from blissful_tuner.codeformer.basicsr.utils import get_root_logger, scandir
+from blissful_tuner.codeformer.basicsr.utils.registry import MODEL_REGISTRY
 
 __all__ = ['build_model']
 
@@ -13,7 +13,7 @@ __all__ = ['build_model']
 model_folder = osp.dirname(osp.abspath(__file__))
 model_filenames = [osp.splitext(osp.basename(v))[0] for v in scandir(model_folder) if v.endswith('_model.py')]
 # import all the model modules
-_model_modules = [importlib.import_module(f'codeformer.basicsr.models.{file_name}') for file_name in model_filenames]
+_model_modules = [importlib.import_module(f'blissful_tuner.codeformer.basicsr.models.{file_name}') for file_name in model_filenames]
 
 
 def build_model(opt):

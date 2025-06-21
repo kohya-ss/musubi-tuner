@@ -23,22 +23,17 @@ dependencies = [
     "ftfy==6.3.1",
     "easydict==1.13",
     #blissful stuff
-    "basicsr==1.4.2",
-    "facexlib==0.3.0",
     "ffmpeg-python>=0.1.18",
     "PySide6>=6.7.0",
     "omegaconf>=2.2.2",
-    "cupy>=13.3.0",
     "timm>=1.0.0",
     "yacs>=0.1.8",
-    "spandrel>=0.4.0",
     "loguru>=0.7.0",
     "rich>=12.0.0",
     "rich-argparse>=1.5.0",
     "rich-tracebacks>=1.0.0",
-    "lpips==0.1.4",
-    "ultralytics>=8.3.0",
     "pynput>=1.7.0",
+    "prompt-toolkit==3.0.51",
 ]
 
 [project.optional-dependencies]
@@ -64,7 +59,15 @@ dev = [
   "ascii-magic==2.3.0",
   "matplotlib==3.10.0",
   "tensorboard",
-  "prompt-toolkit==3.0.51",
+]
+
+postprocess = [
+    "basicsr==1.4.2",
+    "facexlib==0.3.0",
+    "cupy-cuda12x>=13.3.0",
+    "spandrel>=0.4.0",
+    "lpips==0.1.4",
+    "ultralytics>=8.3.0",
 ]
 
 [build-system]

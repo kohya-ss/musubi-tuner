@@ -25,15 +25,15 @@ except ImportError:
 
 from rich.traceback import install as install_rich_tracebacks
 from tqdm import tqdm
-from gfpgan import GFPGANer
 import torch
 from torchvision.transforms.functional import normalize
 from facexlib.utils.face_restoration_helper import FaceRestoreHelper
-from codeformer.basicsr.utils.registry import ARCH_REGISTRY
-from basicsr.utils import img2tensor, tensor2img
-from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
-from utils import power_seed
-from blissful_logger import BlissfulLogger
+from blissful_tuner.codeformer.basicsr.utils.registry import ARCH_REGISTRY
+from blissful_tuner.codeformer.basicsr.utils import img2tensor, tensor2img
+from blissful_tuner.gfpgan import GFPGANer
+from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from blissful_tuner.utils import power_seed
+from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 

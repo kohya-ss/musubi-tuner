@@ -1,10 +1,10 @@
 from torch.utils import data as data
 from torchvision.transforms.functional import normalize
 
-from codeformer.basicsr.data.data_util import paired_paths_from_folder, paired_paths_from_lmdb, paired_paths_from_meta_info_file
-from codeformer.basicsr.data.transforms import augment, paired_random_crop
-from codeformer.basicsr.utils import FileClient, imfrombytes, img2tensor
-from codeformer.basicsr.utils.registry import DATASET_REGISTRY
+from blissful_tuner.codeformer.basicsr.data.data_util import paired_paths_from_folder, paired_paths_from_lmdb, paired_paths_from_meta_info_file
+from blissful_tuner.codeformer.basicsr.data.transforms import augment, paired_random_crop
+from blissful_tuner.codeformer.basicsr.utils import FileClient, imfrombytes, img2tensor
+from blissful_tuner.codeformer.basicsr.utils.registry import DATASET_REGISTRY
 
 
 @DATASET_REGISTRY.register()

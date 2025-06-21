@@ -5,8 +5,8 @@ from torch import autograd as autograd
 from torch import nn as nn
 from torch.nn import functional as F
 
-from codeformer.basicsr.archs.vgg_arch import VGGFeatureExtractor
-from codeformer.basicsr.utils.registry import LOSS_REGISTRY
+from blissful_tuner.codeformer.basicsr.archs.vgg_arch import VGGFeatureExtractor
+from blissful_tuner.codeformer.basicsr.utils.registry import LOSS_REGISTRY
 from .loss_util import weighted_loss
 
 _reduction_modes = ['none', 'mean', 'sum']
