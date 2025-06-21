@@ -11,9 +11,9 @@ import cv2
 from tqdm import tqdm
 from rich.traceback import install as install_rich_tracebacks
 from ultralytics import YOLO
-from video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
-from utils import setup_compute_context
-from blissful_logger import BlissfulLogger
+from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from blissful_tuner.utils import setup_compute_context
+from blissful_tuner.blissful_logger import BlissfulLogger
 
 
 logger = BlissfulLogger(__name__, "#8e00ed")
