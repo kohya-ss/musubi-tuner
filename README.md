@@ -4,16 +4,14 @@
 
 Blissful extension of Musubi Tuner by Blyss Sarania
 
-*Please see [here](https://github.com/kohya-ss/musubi-tuner/discussions/232#discussioncomment-13469998) regarding future development
-
-Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place! Note for best performance and compatibility, Python 3.12 with PyTorch 2.7.0 or later is recommended! Additional requirements have been added to 'requirements.txt' so if you're coming from regular Musubi, you'll need to `pip install -r requirements.txt` again! While development is done in Python 3.12, efforts are made to maintain compatibility back to 3.10 as well.
+Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place! Note for best performance and compatibility, Python 3.12 with PyTorch 2.7.0 or later is recommended! While development is done in Python 3.12, efforts are made to maintain compatibility back to 3.10 as well.
 
 Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do not post about issues with this version on the main Musubi Github repo but rather use this repo's issues section!
 
 Extensions for all models:
 - Latent preview during generation with either latent2RGB or TAEHV (`--preview_latent_every N` where N is a number of steps(or sections for framepack). By default uses latent2rgb, TAE can be enabled with `--preview_vae /path/to/model` models: https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0)
 - Optimized generation settings for fast, high quality gens (`--optimized`, enables various optimizations and settings based on the model. Requires SageAttention, Triton, PyTorch 2.7.0 or higher)
-- Save generation metadata in videos/images (automatic with `--container mkv` and when saving PNG, disable with `--no-metadata`, not available with `--container mp4` You can conveniently view/copy such metadata with `blissful_tuner/metaview.py some_video.mkv`)
+- Save generation metadata in videos/images (automatic with `--container mkv` and when saving PNG, disable with `--no-metadata`, not available with `--container mp4` You can conveniently view/copy such metadata with `src/blissful_tuner/metaview.py some_video.mkv`)
 - Beautiful rich logging, rich argparse and rich tracebacks
 - Extended saving options (`--codec codec --container container`, can save Apple ProRes(`--codec prores`, super high bitrate perceptually lossless) into `--container mkv`, or either of `h264`, `h265` into `mp4` or `mkv`)
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
@@ -47,10 +45,10 @@ Framepack only extensions:
 - FP8 fast/mm_scaled (`--fp8_fast`, increased speed on 40xx cards with a mild hit to quality, Wan and Hunyuan have this already in native Musubi!)
 
 Non model specific extras:
-- GIMM-VFI framerate interpolation (`blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
-- Upscaling with SwinIR or ESRGAN type models (`blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )
+- GIMM-VFI framerate interpolation (`src/blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
+- Upscaling with SwinIR or ESRGAN type models (`src/blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )
 - Face blurring script based on Yolo - helpful for training non face altering LoRA! ( `blissful_tuner/yolo_blur.py`, please see it's `--help` for usage. Recommended model: https://www.dropbox.com/scl/fi/44xdsohltv2kofxrirvrj/yolo.7z?rlkey=zk6bv5iw3ic1pbgo4e8cblbw1&st=kwm6fzgk&dl=0 )
-- Face restoration with CodeFormer/GFPGAN (`blissful_tuner/facefix.py`, per usual please have a look at the `--help`! Models: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
+- Face restoration with CodeFormer/GFPGAN (`src/blissful_tuner/facefix.py`, per usual please have a look at the `--help`! Models: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
 
 Also a related project of mine ( https://github.com/Sarania/Envious ) is useful for managing Nvidia GPUs from the terminal on Linux. It requires nvidia-ml-py and supports realtime monitoring, over/underclocking, power limit adjustment, fan control, profiles, and more. It also has a little process monitor for the GPU VRAM! Basically it's like nvidia-smi except not bad 😂
 
@@ -117,6 +115,20 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 17, 2025:
+    - Added support for [MagCache](https://github.com/Zehong-Ma/MagCache) in FramePack's inference script. See [Advanced Configuration](./docs/advanced_config.md#magcache) for details.
+    - Implemented caching of Text Encoder outputs in both interactive and batch modes in FramePack's inference script. Additionally, we reviewed the processing order and adjusted the timing of model offloading to reduce processing time during continuous generation.
+
+- June 13, 2025:
+    - Added `--sima_rel` option to `lora_post_hoc_ema.py`. This allows you to use Power Function EMA when applying Post Hoc EMA. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
+
+- June 12, 2025:
+    - Added `lora_post_hoc_ema.py` for Post Hoc EMA of LoRA models. This allows you to apply Post Hoc EMA after training a LoRA model to improve accuracy. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
+
+- June 11, 2025:
+    - Merged the pull request for packaging the repository. Thank you for xhiroga for PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)! This introduces `pyproject.toml` and updates installation instructions. For details on migrating your existing environment, please refer to [this discussion post](https://github.com/kohya-ss/musubi-tuner/discussions/345).
+    - Updated `README.md` to reflect the new installation methods using `pip` and `uv` with `pyproject.toml`.
+
 - June 9, 2025:
     - Added documentation for `--control_image_path` in FramePack's one frame inference documentation. See [FramePack's one frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論) for details.
     - Fixed a bug in FramePack's one frame training where sample image generation would crash if `no_4x` was not specified. PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
@@ -131,20 +143,6 @@ If you find this project helpful, please consider supporting its development via
     - Updated the code for FramePack's one frame inference and training. The code has been significantly improved. See [FramePack's one frame inference documentation](./docs/framepack_1f.md) for details.
         - **Breaking change**: The dataset format, training options, and inference options for one frame training have changed. Please follow the documentation to update your dataset configuration, recreate the cache, and modify your training and inference options.
     - Added documentation for FramePack's one frame inference and training. See the [documentation](./docs/framepack_1f.md) for details.
-
-- May 22, 2025:
-    - In the inference script of FramePack, the following changes were made:
-        - **Breaking change**: When saving images in one frame (single frame) inference, subdirectories are no longer created.
-        - Added support for batch and interactive modes. In batch mode, prompts are read from a file and generated. In interactive mode, prompts are specified from the command line. See [FramePack documentation](./docs/framepack.md#batch-and-interactive-modes--バッチモードとインタラクティブモード) for details.
-        - Added support for specifying multiple reference images in kisekaeichi method. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
-
-- May 17, 2025 update 1:
-    - Fixed a bug where specifying `--max_data_loader_n_workers` as 2 or more caused data duplication or omission within a single epoch. PR [#287](https://github.com/kohya-ss/musubi-tuner/pull/287),  issue [#283](https://github.com/kohya-ss/musubi-tuner/issues/283)
-        - In the long term, all data will be trained, but in the short term, data bias occurred.
-        - The initialization of the dataset was inappropriate, causing each DataSet to return data in different orders, and this caused problems when using multiple DataLoaders. The initialization has been fixed so that all DataSets return data in the same order.
-
-- May 17, 2025:
-    - Added support for kisekaeichi method in FramePack's one frame inference. This new inference method proposed by furusu allows controlling the generated image by setting the reference image in post latent. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
 
 ### Releases
 
@@ -180,10 +178,10 @@ PyTorch 2.5.1 or later is required (see [note](#PyTorch-version)).
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
-Install the required dependencies using the following command:
+Install the required dependencies using the following command.
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 Optionally, you can use FlashAttention and SageAttention (**for inference only**; see [SageAttention Installation](#sageattention-installation) for installation instructions).
@@ -269,16 +267,16 @@ Latent pre-caching is required. Create the cache using the following command:
 If you have installed using pip:
 
 ```bash
-python cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
+python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-If you have installed with `uv`, you can use `uv run` to run the script. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
+If you have installed with `uv`, you can use `uv run --extra cu124` to run the script. If CUDA 12.8 is supported, `uv run --extra cu128` is also available. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
 
 ```bash
-uv run cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
+uv run --extra cu124 src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-For additional options, use `python cache_latents.py --help`.
+For additional options, use `python src/musubi_tuner/cache_latents.py --help`.
 
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size`.
 
@@ -295,16 +293,16 @@ By default, cache files not included in the dataset are automatically deleted. Y
 Text Encoder output pre-caching is required. Create the cache using the following command:
 
 ```bash
-python cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
+python src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
 ```
 
 or for uv:
 
 ```bash
-uv run cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
+uv run --extra cu124 src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
 ```
 
-For additional options, use `python cache_text_encoder_outputs.py --help`.
+For additional options, use `python src/musubi_tuner/cache_text_encoder_outputs.py --help`.
 
 Adjust `--batch_size` according to your available VRAM.
 
@@ -335,7 +333,7 @@ Run `accelerate config` to configure Accelerate. Choose appropriate values for e
 Start training using the following command (input as a single line):
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
     --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
@@ -349,7 +347,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_trai
 or for uv:
 
 ```bash
-uv run accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
+uv run --extra cu124 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
     --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
@@ -364,7 +362,7 @@ __Update__: Changed the sample training settings to a learning rate of 2e-4, `--
 
 However, the training settings are still experimental. Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
 
-For additional options, use `python hv_train_network.py --help` (note that many options are unverified).
+For additional options, use `python src/musubi_tuner/hv_train_network.py --help` (note that many options are unverified).
 
 Specifying `--fp8_base` runs DiT in fp8 mode. Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality. If `--fp8_base` is not specified, 24GB or more VRAM is recommended. Use `--blocks_to_swap` as needed.
 
@@ -391,7 +389,7 @@ For sample image generation during training, refer to [this document](./docs/sam
 Note: Wan2.1 is not supported for merging LoRA weights.
 
 ```bash
-python merge_lora.py \
+python src/musubi_tuner/merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
     --lora_weight path/to/lora.safetensors \
     --save_merged_model path/to/merged_model.safetensors \
@@ -402,7 +400,7 @@ python merge_lora.py \
 or for uv:
 
 ```bash
-uv run merge_lora.py \
+uv run --extra cu124 src/musubi_tuner/merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
     --lora_weight path/to/lora.safetensors \
     --save_merged_model path/to/merged_model.safetensors \
@@ -419,7 +417,7 @@ Specify the LoRA weights to merge with `--lora_weight` and the multiplier for th
 Generate videos using the following command:
 
 ```bash
-python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
+python src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
@@ -432,7 +430,7 @@ python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_
 or for uv:
 
 ```bash
-uv run hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
+uv run --extra cu124 src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
@@ -442,7 +440,7 @@ uv run hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_
     --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
 ```
 
-For additional options, use `python hv_generate_video.py --help`.
+For additional options, use `python src/musubi_tuner/hv_generate_video.py --help`.
 
 Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory consumption but may impact output quality.
 
@@ -503,13 +501,13 @@ You can also perform image2video inference with SkyReels V1 I2V model. Specify t
 You can convert LoRA to a format compatible with ComfyUI (presumed to be Diffusion-pipe) using the following command:
 
 ```bash
-python convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
+python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
 ```
 
 or for uv:
 
 ```bash
-uv run convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
+uv run --extra cu124 src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
 ```
 
 Specify the input and output file paths with `--input` and `--output`, respectively.

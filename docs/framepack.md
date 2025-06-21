@@ -96,7 +96,7 @@ HunyuanVideoの推論をComfyUIですでに行っている場合、いくつか�
 
 ## Pre-caching / 事前キャッシング
 
-The default resolution for FramePack is 640x640. See [the source code](../frame_pack/bucket_tools.py) for the default resolution of each bucket. 
+The default resolution for FramePack is 640x640. See [the source code](../src/musubi_tuner/frame_pack/bucket_tools.py) for the default resolution of each bucket. 
 
 The dataset for training must be a video dataset. Image datasets are not supported. You can train on videos of any length. Specify `frame_extraction` as `full` and set `max_frames` to a sufficiently large value. However, if the video is too long, you may run out of VRAM during VAE encoding.
 
@@ -105,7 +105,7 @@ The dataset for training must be a video dataset. Image datasets are not support
 Latent pre-caching uses a dedicated script for FramePack. You **must** provide the Image Encoder model.
 
 ```bash
-python fpack_cache_latents.py \
+python src/musubi_tuner/fpack_cache_latents.py \
     --dataset_config path/to/toml \
     --vae path/to/vae_model.safetensors \
     --image_encoder path/to/image_encoder_model.safetensors \
@@ -132,7 +132,7 @@ By default, the sampling method used is Inverted anti-drifting (the same as duri
 <details>
 <summary>日本語</summary>
 
-FramePackのデフォルト解像度は640x640です。各バケットのデフォルト解像度については、[ソースコード](../frame_pack/bucket_tools.py)を参照してください。
+FramePackのデフォルト解像度は640x640です。各バケットのデフォルト解像度については、[ソースコード](../src/musubi_tuner/frame_pack/bucket_tools.py)を参照してください。
 
 画像データセットでの学習は行えません。また動画の長さによらず学習可能です。 `frame_extraction` に `full` を指定して、`max_frames` に十分に大きな値を指定してください。ただし、あまりにも長いとVAEのencodeでVRAMが不足する可能性があります。
 
@@ -159,7 +159,7 @@ FramePack-F1の学習を行う場合は`--f1`を指定してください。こ�
 Text encoder output pre-caching also uses a dedicated script.
 
 ```bash
-python fpack_cache_text_encoder_outputs.py \
+python src/musubi_tuner/fpack_cache_text_encoder_outputs.py \
     --dataset_config path/to/toml \
     --text_encoder1 path/to/text_encoder1 \
     --text_encoder2 path/to/text_encoder2 \
@@ -193,7 +193,7 @@ HunyuanVideoのキャッシングとの主な違いは次のとおりです。
 Training uses a dedicated script `fpack_train_network.py`. Remember FramePack only supports I2V training.
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 fpack_train_network.py \
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/fpack_train_network.py \
     --dit path/to/dit_model \
     --vae path/to/vae_model.safetensors \
     --text_encoder1 path/to/text_encoder1 \
@@ -254,7 +254,7 @@ HunyuanVideoの学習との主な違いは次のとおりです。
 Inference uses a dedicated script `fpack_generate_video.py`.
 
 ```bash
-python fpack_generate_video.py \
+python src/musubi_tuner/fpack_generate_video.py \
     --dit path/to/dit_model \
     --vae path/to/vae_model.safetensors \
     --text_encoder1 path/to/text_encoder1 \
@@ -288,7 +288,7 @@ Key differences from HunyuanVideo inference:
 -   `--sample_solver` (default `unipc`) is available but only `unipc` is implemented.
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
 - `--latent_paddings` option overrides the default padding for each section. Specify it as a comma-separated list of integers, e.g., `--latent_paddings 0,0,0,0`. This option is ignored if `--f1` is specified.
-- `--custom_system_prompt` option overrides the default system prompt for the LLaMA Text Encoder 1. Specify it as a string. See [here](../hunyuan_model/text_encoder.py#L152) for the default system prompt.
+- `--custom_system_prompt` option overrides the default system prompt for the LLaMA Text Encoder 1. Specify it as a string. See [here](../src/musubi_tunerhunyuan_model/text_encoder.py#L152) for the default system prompt.
 - `--rope_scaling_timestep_threshold` option is the RoPE scaling timestep threshold, default is None (disabled). If set, RoPE scaling is applied only when the timestep exceeds the threshold. Start with around 800 and adjust as needed. This option is intended for one-frame inference and may not be suitable for other cases.
 - `--rope_scaling_factor` option is the RoPE scaling factor, default is 0.5, assuming a resolution of 2x. For 1.5x resolution, around 0.7 is recommended.
 
@@ -323,7 +323,7 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  `--sample_solver`（デフォルト`unipc`）は利用可能ですが、`unipc`のみが実装されています。
 -  `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
 - `--latent_paddings`オプションは、各セクションのデフォルトのパディングを上書きします。カンマ区切りの整数リストとして指定します。例：`--latent_paddings 0,0,0,0`。`--f1`を指定した場合は無視されます。
-- `--custom_system_prompt`オプションは、LLaMA Text Encoder 1のデフォルトのシステムプロンプトを上書きします。文字列として指定します。デフォルトのシステムプロンプトは[こちら](../hunyuan_model/text_encoder.py#L152)を参照してください。
+- `--custom_system_prompt`オプションは、LLaMA Text Encoder 1のデフォルトのシステムプロンプトを上書きします。文字列として指定します。デフォルトのシステムプロンプトは[こちら](../src/musubi_tuner/hunyuan_model/text_encoder.py#L152)を参照してください。
 - `--rope_scaling_timestep_threshold`オプションはRoPEスケーリングのタイムステップ閾値で、デフォルトはNone（無効）です。設定すると、タイムステップが閾値以上の場合にのみRoPEスケーリングが適用されます。800程度から初めて調整してください。1フレーム推論時での使用を想定しており、それ以外の場合は想定していません。
 - `--rope_scaling_factor`オプションはRoPEスケーリング係数で、デフォルトは0.5で、解像度が2倍の場合を想定しています。1.5倍なら0.7程度が良いでしょう。
 
@@ -343,7 +343,7 @@ In addition to single video generation, FramePack now supports batch generation 
 Generate multiple videos from prompts stored in a text file:
 
 ```bash
-python fpack_generate_video.py --from_file prompts.txt 
+python src/musubi_tuner/fpack_generate_video.py --from_file prompts.txt 
 --dit path/to/dit_model --vae path/to/vae_model.safetensors 
 --text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
 --image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
@@ -382,7 +382,7 @@ In batch mode, models are loaded once and reused for all prompts, significantly 
 Interactive command-line interface for entering prompts:
 
 ```bash
-python fpack_generate_video.py --interactive
+python src/musubi_tuner/fpack_generate_video.py --interactive
 --dit path/to/dit_model --vae path/to/vae_model.safetensors 
 --text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
 --image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
@@ -404,7 +404,7 @@ In interactive mode:
 テキストファイルに保存されたプロンプトから複数の動画を生成します：
 
 ```bash
-python fpack_generate_video.py --from_file prompts.txt 
+python src/musubi_tuner/fpack_generate_video.py --from_file prompts.txt 
 --dit path/to/dit_model --vae path/to/vae_model.safetensors 
 --text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
 --image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
@@ -438,7 +438,7 @@ python fpack_generate_video.py --from_file prompts.txt
 プロンプトを入力するためのインタラクティブなコマンドラインインターフェース：
 
 ```bash
-python fpack_generate_video.py --interactive
+python src/musubi_tuner/fpack_generate_video.py --interactive
 --dit path/to/dit_model --vae path/to/vae_model.safetensors 
 --text_encoder1 path/to/text_encoder1 --text_encoder2 path/to/text_encoder2 
 --image_encoder path/to/image_encoder_model.safetensors --save_path output_directory
@@ -502,7 +502,7 @@ This option is ignored if `--f1` is specified. The end image is not used in the 
 Generating a 3-section video of "A dog runs towards a thrown ball, catches it, and runs back":
 
 ```bash
-python fpack_generate_video.py \
+python src/musubi_tuner/fpack_generate_video.py \
  --prompt "0:A dog runs towards a thrown ball, catches it, and runs back;;;1:The dog catches the ball and then runs back towards the viewer;;;2:The dog runs back towards the viewer holding the ball" \
  --image_path "0:./img_start_running.png;;;1:./img_catching.png;;;2:./img_running_back.png" \
  --end_image_path ./img_returned.png \

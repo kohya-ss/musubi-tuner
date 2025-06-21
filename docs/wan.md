@@ -77,7 +77,7 @@ T2VやI2V、解像度、モデルサイズなどにより適切な重みを選�
 Latent pre-caching is almost the same as in HunyuanVideo. Create the cache using the following command:
 
 ```bash
-python wan_cache_latents.py --dataset_config path/to/toml --vae path/to/wan_2.1_vae.safetensors
+python src/musubi_tuner/wan_cache_latents.py --dataset_config path/to/toml --vae path/to/wan_2.1_vae.safetensors
 ```
 
 If you train I2V models, add `--clip path/to/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth` to specify the CLIP model. If not specified, the training will raise an error.
@@ -102,7 +102,7 @@ Fun-Controlモデルを学習する場合は、制御用動画の設定が必要
 Text encoder output pre-caching is also almost the same as in HunyuanVideo. Create the cache using the following command:
 
 ```bash
-python wan_cache_text_encoder_outputs.py --dataset_config path/to/toml  --t5 path/to/models_t5_umt5-xxl-enc-bf16.pth --batch_size 16 
+python src/musubi_tuner/wan_cache_text_encoder_outputs.py --dataset_config path/to/toml  --t5 path/to/models_t5_umt5-xxl-enc-bf16.pth --batch_size 16 
 ```
 
 Adjust `--batch_size` according to your available VRAM.
@@ -125,7 +125,7 @@ VRAMが限られているシステム（約16GB未満）の場合は、T5をfp8�
 Start training using the following command (input as a single line):
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 wan_train_network.py 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/wan_train_network.py 
     --task t2v-1.3B 
     --dit path/to/wan2.1_xxx_bf16.safetensors 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
@@ -138,7 +138,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 wan_tra
 ```
 The above is an example. The appropriate values for `timestep_sampling` and `discrete_flow_shift` need to be determined by experimentation.
 
-For additional options, use `python wan_train_network.py --help` (note that many options are unverified).
+For additional options, use `python src/musubi_tuner/wan_train_network.py --help` (note that many options are unverified).
 
 `--task` is one of `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` (for Wan2.1 official models), `t2v-1.3B-FC`, `t2v-14B-FC`, and `i2v-14B-FC` (for Wan2.1 Fun Control model). Specify the DiT weights for the task with `--dit`.
 
@@ -152,7 +152,7 @@ Use `convert_lora.py` for converting the LoRA weights after training, as in Huny
 <summary>日本語</summary>
 `timestep_sampling`や`discrete_flow_shift`は一例です。どのような値が適切かは実験が必要です。
 
-その他のオプションについては `python wan_train_network.py --help` を使用してください（多くのオプションは未検証です）。
+その他のオプションについては `python src/musubi_tuner/wan_train_network.py --help` を使用してください（多くのオプションは未検証です）。
 
 `--task` には `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` （これらはWan2.1公式モデル）、`t2v-1.3B-FC`, `t2v-14B-FC`, `i2v-14B-FC`（Wan2.1-Fun Controlモデル）を指定します。`--dit`に、taskに応じたDiTの重みを指定してください。
 
@@ -207,7 +207,7 @@ bf16/fp16 > fp8_scaled > fp8 >> fp8_fast
 The following is an example of T2V inference (input as a single line):
 
 ```bash
-python wan_generate_video.py --fp8 --task t2v-1.3B --video_size  832 480 --video_length 81 --infer_steps 20 
+python src/musubi_tuner/wan_generate_video.py --fp8 --task t2v-1.3B --video_size  832 480 --video_length 81 --infer_steps 20 
 --prompt "prompt for the video" --save_path path/to/save.mp4 --output_type both 
 --dit path/to/wan2.1_t2v_1.3B_bf16_etc.safetensors --vae path/to/wan_2.1_vae.safetensors 
 --t5 path/to/models_t5_umt5-xxl-enc-bf16.pth 
@@ -399,7 +399,7 @@ SD 3.5の実装は[こちら](https://github.com/Stability-AI/sd3.5/blob/main/sd
 The following is an example of I2V inference (input as a single line):
 
 ```bash
-python wan_generate_video.py --fp8 --task i2v-14B --video_size 832 480 --video_length 81 --infer_steps 20 
+python src/musubi_tuner/wan_generate_video.py --fp8 --task i2v-14B --video_size 832 480 --video_length 81 --infer_steps 20 
 --prompt "prompt for the video" --save_path path/to/save.mp4 --output_type both 
 --dit path/to/wan2.1_i2v_480p_14B_bf16_etc.safetensors --vae path/to/wan_2.1_vae.safetensors 
 --t5 path/to/models_t5_umt5-xxl-enc-bf16.pth --clip path/to/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth 
@@ -434,7 +434,7 @@ In addition to single video generation, Wan 2.1 now supports batch generation fr
 Generate multiple videos from prompts stored in a text file:
 
 ```bash
-python wan_generate_video.py --from_file prompts.txt --task t2v-14B 
+python src/musubi_tuner/wan_generate_video.py --from_file prompts.txt --task t2v-14B 
 --dit path/to/model.safetensors --vae path/to/vae.safetensors 
 --t5 path/to/t5_model.pth --save_path output_directory
 ```
@@ -468,7 +468,7 @@ In batch mode, models are loaded once and reused for all prompts, significantly 
 Interactive command-line interface for entering prompts:
 
 ```bash
-python wan_generate_video.py --interactive --task t2v-14B 
+python src/musubi_tuner/wan_generate_video.py --interactive --task t2v-14B 
 --dit path/to/model.safetensors --vae path/to/vae.safetensors 
 --t5 path/to/t5_model.pth --save_path output_directory
 ```
@@ -488,7 +488,7 @@ In interactive mode:
 テキストファイルに保存されたプロンプトから複数の動画を生成します：
 
 ```bash
-python wan_generate_video.py --from_file prompts.txt --task t2v-14B 
+python src/musubi_tuner/wan_generate_video.py --from_file prompts.txt --task t2v-14B 
 --dit path/to/model.safetensors --vae path/to/vae.safetensors 
 --t5 path/to/t5_model.pth --save_path output_directory
 ```
@@ -517,7 +517,7 @@ python wan_generate_video.py --from_file prompts.txt --task t2v-14B
 プロンプトを入力するためのインタラクティブなコマンドラインインターフェース：
 
 ```bash
-python wan_generate_video.py --interactive --task t2v-14B 
+python src/musubi_tuner/wan_generate_video.py --interactive --task t2v-14B 
 --dit path/to/model.safetensors --vae path/to/vae.safetensors 
 --t5 path/to/t5_model.pth --save_path output_directory
 ```
