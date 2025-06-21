@@ -12,22 +12,37 @@ import argparse
 import torch
 import safetensors
 from safetensors.torch import save_file
+from rich_argparse import RichHelpFormatter
+from rich.traceback import install as install_rich_tracebacks
 from tqdm import tqdm
+install_rich_tracebacks()
 
 parser = argparse.ArgumentParser(
-    description="Convert any model checkpoint (single file or shard directory) to safetensors with dtype cast."
+    description="Utility for inspecting model structure and converting between dtypes. Supports loading single safetensors or sharded, saving is single safetensors",
+    formatter_class=RichHelpFormatter
 )
 parser.add_argument(
     "--input",
     required=True,
     help="Checkpoint file or directory of shards to convert/inspect"
 )
-parser.add_argument("--convert", type=str, default=None)
-parser.add_argument("--inspect", action="store_true")
-parser.add_argument("--target_keys", nargs="*", type=str, default=None)
-parser.add_argument("--exclude_keys", nargs="*", type=str, default=None)
-parser.add_argument("--weights_only", type=str, default="true")
-parser.add_argument("--dtype", type=str)
+parser.add_argument(
+    "--convert", type=str, default=None,
+    help="/path/to/output.safetensors, If provided, the model will be loaded, processed and written to this file"
+)
+parser.add_argument("--inspect", action="store_true", help="If provided, will print out the keys in the model's state dict along with their dtype and shape")
+parser.add_argument("--target_keys", nargs="*", type=str, default=None, help="Keys to target for dtype conversion")
+parser.add_argument("--exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude for dtype conversion")
+parser.add_argument(
+    "--weights_only", action="store_false",
+    help="Whether to load the model using 'weights_only' which can be safer. Default is true, don't change unless needed"
+)
+parser.add_argument(
+    "--dtype", type=str,
+    help="Datatype to convert tensors to when using --convert. "
+    "If --target_keys or --exclude_keys is specified, only target keys that aren't excluded will have their dtype converted. "
+    "This can be useful for creating mixed precision models!"
+)
 args = parser.parse_args()
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "blissful-tuner"
-version = "0.1.0"
+version = "0.9.66"
 description = "Musubi Tuner by kohya_ss extended to Blissful Tuner by Sarania"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
@@ -22,7 +22,7 @@ dependencies = [
     # Wan2.1
     "ftfy==6.3.1",
     "easydict==1.13",
-    #blissful stuff
+    # Blissful stuff
     "ffmpeg-python>=0.1.18",
     "PySide6>=6.7.0",
     "omegaconf>=2.2.2",

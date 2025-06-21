@@ -17,7 +17,7 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import process_wildcards
 logger = BlissfulLogger(__name__, "#8e00ed")
 
-BLISSFUL_VERSION = "0.8.66"
+BLISSFUL_VERSION = "0.9.66"
 
 CFG_SCHEDULE_HELP = """
 Comma-separated list of steps/ranges where CFG should be applied.
