@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
     parser.add_argument("--task", type=str, default="t2v-14B", choices=list(WAN_CONFIGS.keys()), help="The task to run.")
     parser.add_argument(
-        "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla"], help="The solver used to sample."
+        "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla", "lcm"], help="The solver used to sample."
     )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path")
@@ -643,7 +643,7 @@ def optimize_model(
             )
 
     if args.blocks_to_swap > 0:
-        logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
+        # logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
         model.enable_block_swap(args.blocks_to_swap, device, supports_backward=False)
         model.move_to_device_except_swap_blocks(device)
         model.prepare_block_swap_before_forward()
@@ -1007,6 +1007,11 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False)
         scheduler.set_timesteps(args.infer_steps, device=device, shift=args.flow_shift)
         timesteps = scheduler.timesteps
+    elif args.sample_solver.lower() == "lcm":
+        from diffusers.schedulers.scheduling_flow_match_lcm import FlowMatchLCMScheduler
+        scheduler = FlowMatchLCMScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
+        scheduler.set_timesteps(args.infer_steps)
+        timesteps = scheduler.timesteps
     elif args.sample_solver == "dpm++":
         scheduler = FlowDPMSolverMultistepScheduler(
             num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False
@@ -1129,9 +1134,11 @@ def run_sampling(
         logger.info(f"CFG Schedule: {step_str}")
         logger.info(f"Total CFG steps: {len(included_steps)}")
 
-    else:
+    elif args.guidance_scale > 1.0:
         # Apply CFG on all steps
         apply_cfg_array = [True] * num_timesteps
+    else:
+        apply_cfg_array = [False] * num_timesteps
 
     if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
         logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
@@ -1174,7 +1181,7 @@ def run_sampling(
 
             # step
             latent_input = latent.unsqueeze(0)
-            temp_x0 = scheduler.step(noise_pred.unsqueeze(0), t, latent_input, return_dict=False, generator=seed_g)[0]
+            temp_x0 = scheduler.step(noise_pred.unsqueeze(0), t, latent_input, return_dict=False, generator=seed_g if args.sample_solver.lower() != "lcm" else None)[0]  # FlowMatchLCMScheduler doesn't like our seed_g somewhy
 
             # update latent
             latent = temp_x0.squeeze(0)
@@ -1945,7 +1952,7 @@ def main():
         height, width, video_length = check_inputs(args)
 
         logger.info(
-            f"Video size: {height}x{width}@{video_length} (HxW@F), fps: {args.fps}, "
+            f"Video size: '{height}x{width}@{video_length}' (HxW@F), fps: {args.fps}, "
             f"infer_steps: {args.infer_steps}, flow_shift: {args.flow_shift}"
         )
 
