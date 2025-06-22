@@ -87,8 +87,7 @@ def load_torch_file(ckpt, weights_only=True, device=None, return_metadata=False)
 
 
 print("Loading checkpoint...")
-weights_only = args.weights_only.lower() == "true"
-checkpoint = load_torch_file(args.input, weights_only)
+checkpoint = load_torch_file(args.input, args.weights_only)
 
 dtype_mapping = {
     "fp16": torch.float16,

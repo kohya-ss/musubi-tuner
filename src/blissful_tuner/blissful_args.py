@@ -68,7 +68,7 @@ def get_current_version():
 
 def blissful_prefunc(args: argparse.Namespace):
     """Simple function to print about version, environment, and things"""
-    cuda_list = [f"PyTorch: {torch.__version__}"]
+    cuda_list = [f"Python: {sys.version.split(" ")[0]}"]
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -77,7 +77,7 @@ def blissful_prefunc(args: argparse.Namespace):
         cuda_list[0] += f", CUDA: {torch.version.cuda} CC: {cuda.major}.{cuda.minor}"
         cuda_list.append(f"Device: '{cuda.name}', VRAM: '{cuda.total_memory // 1024 ** 2}MB'")
     logger.info(f"Blissful Tuner version {BLISSFUL_VERSION} extended from Musubi Tuner!")
-    logger.info(f"Memory allocation: '{allocator}'")
+    logger.info(f"PyTorch: {torch.__version__}, Memory allocation: '{allocator}'")
     for string in cuda_list:
         logger.info(string)
     if args.optimized and MODE == "generate":
