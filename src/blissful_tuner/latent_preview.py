@@ -26,21 +26,25 @@ class LatentPreviewer():
         self,
         args: argparse.Namespace,
         original_latents: torch.Tensor,
-        timesteps: torch.Tensor,
+        scheduler: any,
         device: torch.device,
         dtype: torch.dtype,
         model_type: str = "hunyuan"
     ) -> None:
         self.mode = "latent2rgb" if args.preview_vae is None else "taehv"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")
-        self.subtract_noise = True if model_type != "framepack" else False
+        self.subtract_noise = False
         self.args = args
+        self.noise_remaining = 1.00
         self.model_type = model_type
         self.device = device
         self.dtype = dtype if dtype != torch.float8_e4m3fn else torch.float16
-        if model_type != "framepack" and original_latents is not None and timesteps is not None:
+        if model_type != "framepack" and original_latents is not None and scheduler is not None:
             self.original_latents = original_latents.to(self.device)
-            self.timesteps_percent = timesteps / 1000
+            self.sigmas = scheduler.sigmas
+            self.scheduler = scheduler
+            self.subtract_noise = True
+
         if self.model_type not in ["hunyuan", "wan", "framepack"]:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
@@ -60,14 +64,13 @@ class LatentPreviewer():
             self.fps = int(args.fps / 4)
 
     @torch.inference_mode()
-    def preview(self, noisy_latents: torch.Tensor, current_step: Optional[int] = None) -> None:
-        if self.device == "cuda" or self.device == torch.device("cuda"):
-            torch.cuda.empty_cache()
+    def preview(self, noisy_latents: torch.Tensor) -> None:
+        self.clean_cache()
         if self.model_type == "wan":
             noisy_latents = noisy_latents.unsqueeze(0)  # F, C, H, W -> B, F, C, H, W
         elif self.model_type in ["hunyuan", "framepack"]:
             pass  # already B, F, C, H, W
-        denoisy_latents = self.subtract_original_and_normalize(noisy_latents, current_step) if self.subtract_noise else noisy_latents
+        denoisy_latents = self.subtract_original_and_normalize(noisy_latents) if self.subtract_noise else noisy_latents
         decoded = self.decoder(denoisy_latents)  # returned as F, C, H, W
 
         # Upscale if we used latent2rgb so output is same size as expected
@@ -83,15 +86,23 @@ class LatentPreviewer():
 
         _, _, h, w = upscaled.shape
         self.write_preview(upscaled, w, h)
+        self.clean_cache()
+
+    def clean_cache(self):
+        if self.device == "cuda" or self.device == torch.device("cuda"):
+            torch.cuda.empty_cache()
 
     @torch.inference_mode()
-    def subtract_original_and_normalize(self, noisy_latents: torch.Tensor, current_step: int):
-        # Compute what percent of original noise is remaining
-        noise_remaining = self.timesteps_percent[current_step].to(device=noisy_latents.device)
+    def subtract_original_and_normalize(self, noisy_latents: torch.Tensor):
+        device = noisy_latents.device
+        noise_remaining = self.sigmas[self.scheduler.step_index]  # get step directly from scheduler
         # Subtract the portion of original latents
-        denoisy_latents = noisy_latents - (self.original_latents.to(device=noisy_latents.device) * noise_remaining)
-        # Normalize
-        normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-8)
+        if hasattr(self.scheduler, "_last_noise"):
+            noise = self.scheduler._last_noise  # Some schedulers e.g. LCM change the noise/use additional noise.
+        else:
+            noise = self.original_latents
+        denoisy_latents = noisy_latents - (noise.to(device) * noise_remaining)
+        normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-9)
         return normalized_denoisy_latents
 
     @torch.inference_mode()

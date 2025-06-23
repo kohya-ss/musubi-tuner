@@ -826,7 +826,7 @@ def main():
 
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
         if args.preview_latent_every:
-            previewer = LatentPreviewer(args, original_latents=latents, timesteps=timesteps, device=device, dtype=dit_dtype, model_type="hunyuan")
+            previewer = LatentPreviewer(args, original_latents=latents, scheduler=scheduler, device=device, dtype=dit_dtype, model_type="hunyuan")
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
@@ -943,8 +943,8 @@ def main():
                     if progress_bar is not None:
                         progress_bar.update()
 
-                if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-                    previewer.preview(latents, i)
+                if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
+                    previewer.preview(latents)
 
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))

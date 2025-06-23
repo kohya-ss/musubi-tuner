@@ -1008,9 +1008,9 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         scheduler.set_timesteps(args.infer_steps, device=device, shift=args.flow_shift)
         timesteps = scheduler.timesteps
     elif args.sample_solver.lower() == "lcm":
-        from diffusers.schedulers.scheduling_flow_match_lcm import FlowMatchLCMScheduler
+        from blissful_tuner.scheduling_flow_match_lcm import FlowMatchLCMScheduler
         scheduler = FlowMatchLCMScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
-        scheduler.set_timesteps(args.infer_steps)
+        scheduler.set_timesteps(args.infer_steps, device=device)
         timesteps = scheduler.timesteps
     elif args.sample_solver == "dpm++":
         scheduler = FlowDPMSolverMultistepScheduler(
@@ -1077,7 +1077,7 @@ def run_sampling(
     latent_storage_device = device if not use_cpu_offload else "cpu"
     latent = latent.to(latent_storage_device)
     if args.preview_latent_every:
-        previewer = LatentPreviewer(args, noise, timesteps, model.device, model.dtype, model_type="wan")
+        previewer = LatentPreviewer(args, noise, scheduler, model.device, model.dtype, model_type="wan")
     km = BlissfulKeyboardManager()
     # cfg skip
     apply_cfg_array = []
@@ -1181,16 +1181,16 @@ def run_sampling(
 
             # step
             latent_input = latent.unsqueeze(0)
-            temp_x0 = scheduler.step(noise_pred.unsqueeze(0), t, latent_input, return_dict=False, generator=seed_g if args.sample_solver.lower() != "lcm" else None)[0]  # FlowMatchLCMScheduler doesn't like our seed_g somewhy
+            temp_x0 = scheduler.step(noise_pred.unsqueeze(0), t, latent_input, return_dict=False, generator=seed_g)[0]
 
             # update latent
             latent = temp_x0.squeeze(0)
             if km.early_exit_requested:
                 latent = None
                 break
-            if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0 and i + 1 != len(timesteps):
-                previewer.preview(latent, i)
-            elif args.preview_latent_every is not None and i + 1 == len(timesteps):
+            if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
+                previewer.preview(latent)
+            if args.preview_latent_every is not None and i + 1 == len(timesteps):
                 del previewer  # Free memory in prepartion for return e.g. interactive
     km.terminate()
     return latent
