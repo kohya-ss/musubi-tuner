@@ -92,6 +92,8 @@ def encode_and_save_batch(
     image_embeddings = []
     with torch.no_grad():
         for image in images:
+            if image.shape[-1] == 4:
+                image = image[..., :3]
             image_encoder_output = hf_clip_vision_encode(image, feature_extractor, image_encoder)
             image_embeddings.append(image_encoder_output.last_hidden_state)
     image_embeddings = torch.cat(image_embeddings, dim=0)  # B, LEN, 1152
@@ -311,6 +313,8 @@ def encode_and_save_batch_one_frame(
     image_embeddings = []
     with torch.no_grad():
         for image in images:
+            if image.shape[-1] == 4:
+                image = image[..., :3]
             image_encoder_output = hf_clip_vision_encode(image, feature_extractor, image_encoder)
             image_embeddings.append(image_encoder_output.last_hidden_state)
     image_embeddings = torch.cat(image_embeddings, dim=0)  # B, LEN, 1152
