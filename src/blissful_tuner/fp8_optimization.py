@@ -301,9 +301,10 @@ def apply_fp8_monkey_patch(
         model: nn.Module,
         optimized_state_dict: dict,
         use_scaled_mm: bool = False,
-        upcast_linear: Optional[bool] = False,
+        upcast_linear: bool = False,
         scale_input_tensor: Optional[str] = None,
-        quant_dtype: Optional[torch.dtype] = None
+        quant_dtype: Optional[torch.dtype] = None,
+        exclude_ffn_from_scaled_mm: bool = False
 ) -> nn.Module:
     """
     Apply monkey patching to a model using FP8 optimized state dict.
@@ -323,6 +324,8 @@ def apply_fp8_monkey_patch(
         setattr(model, "fp8_matmul_enabled", True)
         if scale_input_tensor is not None:
             max_value = calculate_fp8_maxval(4, 3) if "e4m3" in scale_input_tensor else calculate_fp8_maxval(5, 2) if "e5m2" in scale_input_tensor else None
+        if exclude_ffn_from_scaled_mm:
+            logger.info("FFNs will be excluded from scaled_mm patching (Wan mode)")
     if upcast_linear:
         logger.info(f"Linear transformations for scaled layers will be upcast to float32 {'except when using scaled_mm' if use_scaled_mm else ''}")
     # Find all scale keys to identify FP8-optimized layers
@@ -351,8 +354,12 @@ def apply_fp8_monkey_patch(
             module.upcast_linear = upcast_linear
 
             # Create a new forward method with the patched version.
+            really_use_scaled_mm = use_scaled_mm
+            if exclude_ffn_from_scaled_mm and "ffn" in name:
+                really_use_scaled_mm = False
+
             def new_forward(self, x):
-                return fp8_linear_forward_patch(self, x, use_scaled_mm, max_value)
+                return fp8_linear_forward_patch(self, x, really_use_scaled_mm, max_value)
 
             # Bind method to module
             module.forward = new_forward.__get__(module, type(module))

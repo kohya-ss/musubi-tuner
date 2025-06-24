@@ -642,6 +642,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 The device to calculate the weight.
             move_to_device (bool):
                 Whether to move the weight to the device after optimization.
+            upcast_linear (bool):
+                Whether to upcast the linear transformations to fp32
+            quant_dtype Optional(torch.dtype):
+                Dtype to do quantization calculations in. Model dtype is used by default.
         """
         TARGET_KEYS = ["blocks"]
         EXCLUDE_KEYS = [
@@ -659,7 +663,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, quant_dtype=quant_dtype)
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear, quant_dtype=quant_dtype)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear, quant_dtype=quant_dtype, exclude_ffn_from_scaled_mm=True)
 
         return state_dict
 

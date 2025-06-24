@@ -1130,15 +1130,11 @@ def run_sampling(
         scale_per_step = parse_scheduled_cfg(args.cfg_schedule, num_timesteps, args.guidance_scale)
         apply_cfg_array = [(i + 1) in scale_per_step for i in range(num_timesteps)]
         included_steps = sorted(scale_per_step.keys())
-        step_str = ", ".join(f"{step}:{scale_per_step[step]}" for step in included_steps)
+        step_str = ", ".join(f"{step}: {scale_per_step[step]}" for step in included_steps)
         logger.info(f"CFG Schedule: {step_str}")
         logger.info(f"Total CFG steps: {len(included_steps)}")
-
-    elif args.guidance_scale > 1.0:
-        # Apply CFG on all steps
-        apply_cfg_array = [True] * num_timesteps
     else:
-        apply_cfg_array = [False] * num_timesteps
+        apply_cfg_array = [args.guidance_scale > 1.0] * num_timesteps
 
     if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
         logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
