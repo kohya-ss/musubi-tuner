@@ -11,7 +11,7 @@ Blyss Sarania による Musubi Tuner の Blissful な拡張機能
 Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコードを移植したHunyuanVideoWrapperとWanVideoWrapperを開発してくださったkijaiさん、そしてオープンソース生成AIコミュニティの開発者の皆様に心より感謝申し上げます。多くの変更は実験的なものであるため、修正前のMusubiと同じように動作しない部分もあることをご了承ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題は、MusubiのメインGithubリポジトリではなく、このリポジトリのIssuesセクションに投稿してください。
 
 すべてのモデル向けの拡張機能：
-- latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://www.dropbox.com/scl/fi/fxkluga9uxu5x6xa94vky/taehv.7z?rlkey=ux1vmcg1yk78gv7iy4iqznpn7&st=4181tzkp&dl=0）
+- latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv ）
 - 高速で高品質な生成のための最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）
 - 動画/画像に生成メタデータを保存します (`--container mkv` で自動的に保存され、PNG を保存する場合は `--no-metadata` で無効になり、`--container mp4` では使用できません。`blissful_tuner/metaview.py some_video.mkv` を使用すると、このようなメタデータを簡単に表示/コピーできます)
 - 美しくリッチなログ出力、豊富な引数解析、そして豊富なトレースバック
@@ -48,10 +48,10 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 - FP8 fast/mm_scaled (`--fp8_fast` は、40xx カードで若干の品質低下を伴いますが、速度が向上します。Wan と Hunyuan は既にネイティブ Musubi でこの機能を搭載しています！)
 
 機種に依存しない追加機能:
-- GIMM-VFI フレームレート補間 (`blissful_tuner/GIMMVFI.py`。使用方法については `--help` を参照してください。対応モデル: https://www.dropbox.com/scl/fi/tcq68jxr52o2gi47eup37/gimm-vfi.7z?rlkey=skvzwxi9lv9455py5wrxv6r5j&st=gu5einkd&dl=0 )
-- SwinIR または ESRGAN タイプのモデルによるアップスケーリング (`blissful_tuner/upscaler.py`。使用方法については `--help` を参照してください。対応モデル: https://www.dropbox.com/scl/fi/wh5hw55o8rofg5mal9uek/upscale.7z?rlkey=oom3osa1zo0pf55092xcfnjp1&st=dozwpzwk&dl=0 )
-- Yoloベースの顔ぼかしスクリプト - 顔の改変を伴わないLoRAのトレーニングに役立ちます！(`blissful_tuner/yolo_blur.py`、使用方法については`--help`をご覧ください。推奨モデル: https://www.dropbox.com/scl/fi/44xdsohltv2kofxrirvrj/yolo.7z?rlkey=zk6bv5iw3ic1pbgo4e8cblbw1&st=kwm6fzgk&dl=0 )
-- CodeFormer/GFPGANによる顔の修復 (`blissful_tuner/facefix.py`、いつものように`--help` を見てください! モデル: https://www.dropbox.com/scl/fi/0ylqy170w0lpwwvb4acvx/facefix.7z?rlkey=25bljmfw95p9pn899upres0d7&st=ho29pd6d&dl=0 )
+- GIMM-VFI フレームレート補間 (`blissful_tuner/GIMMVFI.py`。使用方法については `--help` を参照してください。対応モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/VFI )
+- SwinIR または ESRGAN タイプのモデルによるアップスケーリング (`blissful_tuner/upscaler.py`。使用方法については `--help` を参照してください。対応モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/upscaling )
+- Yoloベースの顔ぼかしスクリプト - 顔の改変を伴わないLoRAのトレーニングに役立ちます！(`blissful_tuner/yolo_blur.py`、使用方法については`--help`をご覧ください。推奨モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/yolo )
+- CodeFormer/GFPGANによる顔の修復 (`blissful_tuner/facefix.py`、いつものように`--help` を見てください! モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/face_restoration )
 
 また、私の関連プロジェクト（ https://github.com/Sarania/Envious ）は、LinuxのターミナルからNvidia GPUを管理するのに便利です。nvidia-ml-pyが必要ですが、リアルタイムモニタリング、オーバークロック/アンダークロック、電力制限調整、ファン制御、プロファイルなどをサポートしています。GPU VRAM用の小さなプロセスモニターも付いています！nvidia-smiがダメな場合のnvidia-smiのようなものです😂
 
