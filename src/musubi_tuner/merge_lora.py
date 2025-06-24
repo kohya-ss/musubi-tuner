@@ -7,7 +7,6 @@ from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.hunyuan_model.models import load_transformer
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 def parse_args():

@@ -41,21 +41,19 @@ Note: The list is processed left to right, so modulus ranges should come first a
 """
 
 ROOT_SCRIPT = os.path.basename(sys.argv[0]).lower()
+DIFFUSION_MODEL = None
 if "hv_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "hunyuan"
 elif "wan_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "wan"
 elif "fpack_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "framepack"
-else:
-    raise ValueError("Unsupported root_script for Blissful Extension")
 
+MODE = None
 if "generate" in ROOT_SCRIPT:
     MODE = "generate"
 elif "train" in ROOT_SCRIPT:
     MODE = "train"
-else:
-    raise ValueError("Unsupported root script for Blissful Extension!")
 
 
 def get_current_model_type():

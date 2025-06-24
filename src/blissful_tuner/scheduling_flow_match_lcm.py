@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Flow matching LCM scheduler for Blissful Tuner, extended from huggingface version
+License: Apache 2.0
+Created on Mon Jun 23 16:47:29 2025
+
+@author: blyss
+"""
 # Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -96,7 +105,6 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
         num_train_timesteps: int = 1000,
         shift: float = 1.0,
         use_dynamic_shifting: bool = False,
-        device: torch.device = torch.device("cuda"),
         base_shift: Optional[float] = 0.5,
         max_shift: Optional[float] = 1.15,
         base_image_seq_len: Optional[int] = 256,

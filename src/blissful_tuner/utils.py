@@ -67,8 +67,7 @@ def load_torch_file(
 
 # Below here, Blyss wrote it!
 
-def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dtype: Optional[Union[torch.dtype, str]] = None) -> Tuple[torch.device, torch.dtype]:
-    logger = BlissfulLogger(__name__, "#8e00ed")
+def str_to_dtype(dtype_str: str):
     dtype_mapping = {
         "fp16": torch.float16,
         "float16": torch.float16,
@@ -76,9 +75,19 @@ def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dty
         "bfloat16": torch.bfloat16,
         "fp32": torch.float32,
         "float32": torch.float32,
+        "float": torch.float32,
         "fp8": torch.float8_e4m3fn,
         "float8": torch.float8_e4m3fn
     }
+    if dtype_str in dtype_mapping:
+        return dtype_mapping[dtype_str]
+    else:
+        error_out(ValueError, f"Unknown dtype string '{dtype_str}'")
+
+
+def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dtype: Optional[Union[torch.dtype, str]] = None) -> Tuple[torch.device, torch.dtype]:
+    logger = BlissfulLogger(__name__, "#8e00ed")
+
     if device is None:
         device = torch.device("cpu")
         if torch.cuda.is_available():
@@ -91,9 +100,7 @@ def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dty
     if dtype is None:
         dtype = torch.float32
     elif isinstance(dtype, str):
-        if dtype not in dtype_mapping:
-            error_out(ValueError, f"Unknown dtype string '{dtype}'")
-        dtype = dtype_mapping[dtype]
+        dtype = str_to_dtype(dtype)
 
     torch.set_float32_matmul_precision('high')
     if dtype == torch.float16 or dtype == torch.bfloat16:
