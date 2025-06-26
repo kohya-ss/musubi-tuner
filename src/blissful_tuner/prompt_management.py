@@ -187,7 +187,7 @@ class MiniT5Wrapper():
             for text, weight in weights.items():
                 logger.info(f"Applying weight ({weight}) to promptchunk: '{text}'")
                 if len(weights) > 0:
-                    context[i] = context[i] * weight
+                    context[0][i] = context[0][i] * weight
         self.times_called += 1
         return context
 

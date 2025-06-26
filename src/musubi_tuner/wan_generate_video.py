@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
     parser.add_argument("--task", type=str, default="t2v-14B", choices=list(WAN_CONFIGS.keys()), help="The task to run.")
     parser.add_argument(
-        "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla", "lcm"], help="The solver used to sample."
+        "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla", "lcm", "dpm++sde"], help="The solver used to sample."
     )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path")
@@ -1012,9 +1012,9 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         scheduler = FlowMatchLCMScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
         scheduler.set_timesteps(args.infer_steps, device=device)
         timesteps = scheduler.timesteps
-    elif args.sample_solver == "dpm++":
+    elif "dpm++" in args.sample_solver:
         scheduler = FlowDPMSolverMultistepScheduler(
-            num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False
+            num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False, algorithm_type="sde-dpmsolver++" if "sde" in args.sample_solver else "dpmsolver++"
         )
         sampling_sigmas = get_sampling_sigmas(args.infer_steps, args.flow_shift)
         timesteps, _ = retrieve_timesteps(scheduler, device=device, sigmas=sampling_sigmas)
@@ -1167,7 +1167,7 @@ def run_sampling(
 
                 if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
                     noise_pred *= 0  # Zero this step
-                elif apply_slg and args.slg_mode == "original" and not km.eearly_exit_requested:  # No need do traditional slg on zeroed steps so make it an elif
+                elif apply_slg and args.slg_mode == "original" and not km.early_exit_requested:  # No need do traditional slg on zeroed steps so make it an elif
                     # SLG original mode uses 3 model passes, cond, uncond, and uncond with layer skip
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
                     noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg

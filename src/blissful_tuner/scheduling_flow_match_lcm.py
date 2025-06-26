@@ -141,7 +141,7 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
         self._begin_index = None
 
         self._shift = shift
-
+        self.last_noise = None
         self._init_size = None
         self._scale_factors = scale_factors
         self._upscale_mode = upscale_mode
@@ -343,7 +343,6 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
             sigmas = self.time_shift(mu, 1.0, sigmas)
         else:
             sigmas = self.shift * sigmas / (1 + (self.shift - 1) * sigmas)
-
         # 3. If required, stretch the sigmas schedule to terminate at the configured `shift_terminal` value
         if self.config.shift_terminal:
             sigmas = self.stretch_shift_to_terminal(sigmas)
@@ -467,7 +466,7 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
                 size = [round(self._scale_factors[self._step_index] * size) for size in self._init_size]
                 x0_pred = torch.nn.functional.interpolate(x0_pred, size=size, mode=self._upscale_mode)
         noise = randn_tensor(x0_pred.shape, generator=generator, device=x0_pred.device, dtype=x0_pred.dtype)
-        self._last_noise = noise
+        self.last_noise = noise
         prev_sample = (1 - sigma_next) * x0_pred + sigma_next * noise
 
         # upon completion increase step index by one

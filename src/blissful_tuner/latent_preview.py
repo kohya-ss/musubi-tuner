@@ -9,7 +9,7 @@ Created on Mon Mar 10 16:47:29 2025
 """
 import argparse
 import os
-from typing import Optional, List
+from typing import List
 import torch
 import av
 from PIL import Image
@@ -97,8 +97,8 @@ class LatentPreviewer():
         device = noisy_latents.device
         noise_remaining = self.sigmas[self.scheduler.step_index]  # get step directly from scheduler
         # Subtract the portion of original latents
-        if hasattr(self.scheduler, "_last_noise"):
-            noise = self.scheduler._last_noise  # Some schedulers e.g. LCM change the noise/use additional noise.
+        if hasattr(self.scheduler, "last_noise") and self.scheduler.last_noise is not None:
+            noise = self.scheduler.last_noise  # Some schedulers e.g. LCM change the noise/use additional noise.
         else:
             noise = self.original_latents
         denoisy_latents = noisy_latents - (noise.to(device) * noise_remaining)

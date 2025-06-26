@@ -763,15 +763,15 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             noise = randn_tensor(
                 model_output.shape,
                 generator=generator,
-                device=model_output.device,
-                dtype=torch.float32)
+                device=generator.device,
+                dtype=torch.float32).to(sample.device)
         elif self.config.algorithm_type in ["sde-dpmsolver", "sde-dpmsolver++"]:
             noise = variance_noise.to(
                 device=model_output.device,
                 dtype=torch.float32)  # pyright: ignore
         else:
             noise = None
-
+        self.last_noise = noise
         if self.config.solver_order == 1 or self.lower_order_nums < 1 or lower_order_final:
             prev_sample = self.dpm_solver_first_order_update(
                 model_output, sample=sample, noise=noise)
