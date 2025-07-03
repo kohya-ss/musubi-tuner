@@ -51,7 +51,7 @@ def svd(
 ):
 
     calc_dtype = torch.float
-    save_dtype = str_to_dtype(save_precision)
+    save_dtype = str_to_dtype(save_precision) if save_precision is not None else None
     store_device = "cpu"
 
     # open models
@@ -68,7 +68,7 @@ def svd(
             keys.append(key)
 
         with safe_open(model_tuned, framework="pt") as f_tuned:
-            for key in tqdm(keys):
+            for key in tqdm(keys, desc="Extracting LoRA"):
                 key2 = key if key in f_tuned.keys() else 'model.diffusion_model.' + key
 
                 if key2 not in f_tuned.keys():

@@ -49,7 +49,7 @@ def main():
     args = parser.parse_args()
     logger.info("Loading input...")
     VideoProcessor = BlissfulVideoProcessor(device, torch.float32)
-    VideoProcessor.prepare_files_and_path(args.input, args.output, args.mode.upper())
+    VideoProcessor.prepare_files_and_path(args.input, args.output, args.mode.upper(), overwrite_all=args.yes)
     frames, fps, _, _ = VideoProcessor.load_frames()
     power_seed(args.seed)
     if args.mode.lower() == "gfpgan":

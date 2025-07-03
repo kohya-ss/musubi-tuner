@@ -924,7 +924,7 @@ def main():
                         noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 if i <= args.cfgzerostar_init_steps - 1:  # CFGZero* zero init
-                    noise_pred *= 0
+                    noise_pred *= args.cfgzerostar_multiplier
 
                     # # SkyReels' rescale noise config is omitted for now
                     # if guidance_rescale > 0.0:

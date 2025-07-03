@@ -138,6 +138,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
         parser.add_argument("--riflex_index", type=int, default=0, help="Frequency for RifleX extension. 4 is good for Hunyuan, 6 is good for Wan. Only 'comfy' rope_func supports this with Wan!")
         parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
+        parser.add_argument("--cfgzerostar_multiplier", type=float, default=0, help="Multiplier used for cfgzerostar_init. Default is 0 which zeroes the step. 1 would be like not using zero init.")
         parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps. 2 is good for Wan T2V, 1 for I2V")
         parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps. If --preview_vae is not specified it will use latent2rgb")
         parser.add_argument("--cfg_schedule", type=str, help=CFG_SCHEDULE_HELP)
@@ -203,7 +204,4 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
         if args.upcast_linear and not args.fp8_scaled:
             error_out(argparse.ArgumentTypeError, "--upcast_linear is only for --fp8_scaled")
-        if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
-            if args.guidance_scale == 1 and not args.cfg_schedule:
-                error_out(AttributeError, "Requested CFGZero* but CFG is not enabled so it will have no effect!")
     return args

@@ -1154,7 +1154,10 @@ def run_sampling(
                     args.guidance_scale = scale_per_step[i + 1]  # Then reset the guidance scale for this step
 
                 apply_slg = args.slg_mode is not None and i >= slg_start_step and i < slg_end_step  # Do we do SLG this step
-                skip_block_indices = None if not apply_slg else args.slg_layers  # If so set slg else None(implicit none anyway)
+                do_slg_pass = apply_slg and args.slg_mode == "original"
+                skip_block_indices = None
+                if apply_slg and not do_slg_pass:  # args.slg_mode != "original" so args.slg_mode == "uncond"
+                    skip_block_indices = args.slg_layerss
                 noise_pred_uncond = model(latent_model_input, timestep, skip_block_indices=skip_block_indices, **arg_null)[0].to(latent_storage_device)  # uncond
 
                 if args.perp_neg is not None and not km.early_exit_requested:  # Are we using perpendicular negative?
@@ -1165,15 +1168,16 @@ def run_sampling(
                 else:  # Neither perp_neg nor scaling so normal CFG formula
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
-                if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
-                    noise_pred *= 0  # Zero this step
-                elif apply_slg and args.slg_mode == "original" and not km.early_exit_requested:  # No need do traditional slg on zeroed steps so make it an elif
+                if do_slg_pass and not km.early_exit_requested:
                     # SLG original mode uses 3 model passes, cond, uncond, and uncond with layer skip
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
                     noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
 
             else:  # No CFG shenanigans at all
                 noise_pred = noise_pred_cond
+
+            if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
+                noise_pred *= args.cfgzerostar_multiplier  # Zero this step
 
             # step
             latent_input = latent.unsqueeze(0)

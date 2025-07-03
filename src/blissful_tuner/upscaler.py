@@ -137,7 +137,7 @@ def main() -> None:
     # Map string → torch.dtype
     device, dtype = setup_compute_context(None, args.dtype)
     VideoProcessor = BlissfulVideoProcessor(device, dtype)
-    VideoProcessor.prepare_files_and_path(args.input, args.output, args.mode.upper())
+    VideoProcessor.prepare_files_and_path(args.input, args.output, args.mode.upper(), overwrite_all=args.yes)
 
     frames, fps, w, h = VideoProcessor.load_frames(make_rgb=True)
     power_seed(args.seed)

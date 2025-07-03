@@ -188,7 +188,7 @@ def main():
     args = parser.parse_args()
     device, dtype = setup_compute_context(None, args.dtype)
     VideoProcessor = BlissfulVideoProcessor(device, dtype)
-    VideoProcessor.prepare_files_and_path(args.input, args.output, "VFI", args.codec, args.container)
+    VideoProcessor.prepare_files_and_path(args.input, args.output, "VFI", args.codec, args.container, overwrite_all=args.yes)
     model = load_model(args.model, device, dtype, args.mode)
     frames, fps, _, _ = VideoProcessor.load_frames(make_rgb=True)
     frames = VideoProcessor.np_image_to_tensor(frames)

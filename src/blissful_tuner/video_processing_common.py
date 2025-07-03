@@ -51,6 +51,7 @@ def setup_parser_video_common(description: Optional[str] = None, model_help: Opt
         "--container", choices=["mkv", "mp4"], default="mp4",
         help="Container format to use for output, choose from 'mkv' or 'mp4'. Default is 'mp4' and note that 'prores' can only go in 'mkv'! Ignored for images."
     )
+    parser.add_argument("--yes", "-y", action="store_true", help="Overwrite existing without prompting")
     return parser
 
 
@@ -90,6 +91,7 @@ class BlissfulVideoProcessor:
         modifier: str = "",
         codec: str = "prores",
         container: str = "mkv",
+        overwrite_all: bool = False
     ) -> Tuple[str, str]:
         """
         Determine and confirm input/output paths, generating a default output
@@ -151,7 +153,7 @@ class BlissfulVideoProcessor:
                 #logger.warning(f"Extension '{o_ext[-3:]}' not valid for output! Updating to '{self.new_ext[-3:]}'...")
                 output_file_path = os.path.join(o_output_dir, f"{o_name}{self.new_ext}")
 
-            if os.path.exists(output_file_path):
+            if os.path.exists(output_file_path) and not overwrite_all:
                 choice = input(f"{output_file_path} exists. F for 'fix' by appending _! Overwrite?[y/N/f]: ").strip().lower()
                 if choice == 'f':
                     base = o_name
@@ -168,7 +170,6 @@ class BlissfulVideoProcessor:
             if os.path.exists(self.frame_dir):
                 while os.path.exists(self.frame_dir):
                     self.frame_dir += "_"
-            #logger.info(f"Output will be saved to: {self.output_file_path} using {self.codec}!")
         else:
             if output_file_path is not None:
                 logger.info(f"Will write output to {output_file_path}!")
