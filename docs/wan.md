@@ -84,7 +84,7 @@ If you train I2V models, add `--clip path/to/models_clip_open-clip-xlm-roberta-l
 
 If you're running low on VRAM, specify `--vae_cache_cpu` to use the CPU for the VAE internal cache, which will reduce VRAM usage somewhat.
 
-The control video settings are required for training the Fun-Control model. Please refer to [Dataset Settings](/dataset/dataset_config.md#sample-for-video-dataset-with-control-images) for details.
+The control video settings are required for training the Fun-Control model. Please refer to [Dataset Settings](/src/musubi_tuner/dataset/dataset_config.md#sample-for-video-dataset-with-control-images) for details.
 
 <details>
 <summary>日本語</summary>
@@ -94,7 +94,7 @@ I2Vモデルを学習する場合は、`--clip path/to/models_clip_open-clip-xlm
 
 VRAMが不足している場合は、`--vae_cache_cpu` を指定するとVAEの内部キャッシュにCPUを使うことで、使用VRAMを多少削減できます。
 
-Fun-Controlモデルを学習する場合は、制御用動画の設定が必要です。[データセット設定](/dataset/dataset_config.md#sample-for-video-dataset-with-control-images)を参照してください。
+Fun-Controlモデルを学習する場合は、制御用動画の設定が必要です。[データセット設定](/src/musubi_tuner/dataset/dataset_config.md#sample-for-video-dataset-with-control-images)を参照してください。
 </details>
 
 ### Text Encoder Output Pre-caching

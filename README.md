@@ -259,7 +259,7 @@ For the Text Encoder, use the models provided by ComfyUI. Refer to [ComfyUI's pa
 
 ### Dataset Configuration
 
-Please refer to [dataset configuration guide](./dataset/dataset_config.md).
+Please refer to [dataset configuration guide](./src/musubi_tuner/dataset/dataset_config.md).
 
 ### Latent Pre-caching
 
