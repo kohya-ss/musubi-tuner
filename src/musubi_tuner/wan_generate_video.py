@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
     parser.add_argument("--task", type=str, default="t2v-14B", choices=list(WAN_CONFIGS.keys()), help="The task to run.")
     parser.add_argument(
-        "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla", "lcm", "dpm++sde"], help="The solver used to sample."
+        "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla", "lcm", "dpm++sde", "euler_a"], help="The solver used to sample."
     )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path")
@@ -1007,9 +1007,15 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False)
         scheduler.set_timesteps(args.infer_steps, device=device, shift=args.flow_shift)
         timesteps = scheduler.timesteps
-    elif args.sample_solver.lower() == "lcm":
-        from blissful_tuner.scheduling_flow_match_lcm import FlowMatchLCMScheduler
+    elif args.sample_solver == "lcm":
+        from blissful_tuner.scheduling import FlowMatchLCMScheduler
         scheduler = FlowMatchLCMScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
+        scheduler.set_timesteps(args.infer_steps, device=device)
+        timesteps = scheduler.timesteps
+    elif args.sample_solver == "euler_a":
+        logger.warning("!!!!!!!!!!!!!!!!!!!Euler A is not fully working yet!!!!!!!!!!!!!!!!!!!")
+        from blissful_tuner.scheduling import FlowMatchEulerAncestralDiscreteScheduler
+        scheduler = FlowMatchEulerAncestralDiscreteScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
         scheduler.set_timesteps(args.infer_steps, device=device)
         timesteps = scheduler.timesteps
     elif "dpm++" in args.sample_solver:
@@ -1038,7 +1044,7 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         scheduler.step = step_wrapper
     else:
         raise NotImplementedError("Unsupported solver.")
-
+    logger.info(f"Prepared scheduler {scheduler.__class__.__name__}")
     return scheduler, timesteps
 
 
@@ -1128,9 +1134,9 @@ def run_sampling(
         logger.info(f"CFG skip mode: {args.cfg_skip_mode}, apply ratio: {args.cfg_apply_ratio}, pattern: {pattern}")
     elif args.cfg_schedule is not None:
         scale_per_step = parse_scheduled_cfg(args.cfg_schedule, num_timesteps, args.guidance_scale)
-        apply_cfg_array = [(i + 1) in scale_per_step for i in range(num_timesteps)]
+        apply_cfg_array = [(i + 1) in scale_per_step and scale_per_step[i + 1] != 1.0 for i in range(num_timesteps)]
         included_steps = sorted(scale_per_step.keys())
-        step_str = ", ".join(f"{step}: {scale_per_step[step]}" for step in included_steps)
+        step_str = ", ".join(f"{step}: {scale_per_step[step]}" for step in included_steps if scale_per_step[step] != 1.0)
         logger.info(f"CFG Schedule: {step_str}")
         logger.info(f"Total CFG steps: {len(included_steps)}")
     else:
@@ -1143,8 +1149,12 @@ def run_sampling(
     slg_end_step = int(args.slg_end * num_timesteps)
     for i, t in enumerate(tqdm(timesteps)):
         # latent is on CPU if use_cpu_offload is True
-        latent_model_input = [latent.to(device)]
         timestep = torch.stack([t]).to(device)
+        if args.sample_solver == "euler_a":  # Need scale model input only for euler ancestral
+            latent_input = scheduler.scale_model_input(latent, t)
+        else:
+            latent_input = latent
+        latent_model_input = [latent_input.to(device)]
 
         with accelerator.autocast(), torch.no_grad():
             noise_pred_cond = model(latent_model_input, t=timestep, **arg_c)[0].to(latent_storage_device)  # Cond is always the same

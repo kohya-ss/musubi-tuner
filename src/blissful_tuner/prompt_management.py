@@ -157,7 +157,7 @@ class MiniT5Wrapper():
         self.dtype = dtype
         self.t5 = t5
         self.model = t5.model
-        self.tokenizer = t5.tokenizer.tokenizer
+        self.tokenizer = t5.tokenizer.tokenizer  # Unwrap the tokenizer so we can access it's internal properties and methods directly
         self.times_called = 0
 
     def __call__(
@@ -186,7 +186,7 @@ class MiniT5Wrapper():
 
         for text, w in zip(parts, weights):
             if w != 1.0:
-                logger.info(f"{'Upweight' if w > 1.0 else 'Downweight'} promptchunk '{text}' to {w}x")
+                logger.info(f"{'Upweight' if w > 1.0 else 'Downweight' if w > 0.0 else 'Invert'} promptchunk '{text}' to '{w}x'")
             ids = self.tokenizer.encode(
                 text,
                 add_special_tokens=False,     # add EOS once at the end
@@ -228,11 +228,12 @@ class MiniT5Wrapper():
         Supports:
           • `(text:1.3)`   → explicit weight 1.3
           • `(text)`       → implicit “emphasis” weight 1.1
+          • '(text:-2.0)'  → inversion weight
           • bare text      → default weight 1.0
         Everything is returned in the order it appears so `parts[i]` lines up with `weights[i]`.
         """
         # 1️ find every (…) group, where the :weight part is optional
-        token_re = re.compile(r'\(([^:()]+?)(?::([\d.]+))?\)')
+        token_re = re.compile(r'\(([^:()]+?)(?::([+-]?\d*\.?\d+))?\)')
 
         parts: List[str] = []
         weights: List[float] = []
@@ -263,5 +264,6 @@ class MiniT5Wrapper():
                 if seg:
                     parts.append(seg)
                     weights.append(1.0)
-
+        logger.info(parts)
+        logger.info(weights)
         return parts, weights
