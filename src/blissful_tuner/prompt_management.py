@@ -264,6 +264,4 @@ class MiniT5Wrapper():
                 if seg:
                     parts.append(seg)
                     weights.append(1.0)
-        logger.info(parts)
-        logger.info(weights)
         return parts, weights
