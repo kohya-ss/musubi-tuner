@@ -157,54 +157,111 @@ class MiniT5Wrapper():
         self.dtype = dtype
         self.t5 = t5
         self.model = t5.model
+        self.tokenizer = t5.tokenizer.tokenizer
         self.times_called = 0
 
     def __call__(
-        self,
-        prompt: Union[str, List[str]],
-        device: torch.device,
-        max_len: int = None
+            self,
+            prompt: Union[str, List[str]],
+            device: torch.device,
+            max_len: int | None = None
     ) -> List[torch.Tensor]:
+
+        # ----- 0. normalise the input ------------------------------------------------
         if isinstance(prompt, list):
             if len(prompt) != 1:
-                raise ValueError("MiniT5Wrapper expects a single prompt at a time (wrapped as a list). Got multiple prompts.")
+                raise ValueError("MiniT5Wrapper expects exactly one prompt at a time")
             prompt = prompt[0]
-        if self.times_called == 0:  # Only print this notice once even if called multiple times
-            logger.info("Weighting prompts...")
-        # Split positive prompts and process each with weights
-        prompts_raw = [p.strip() for p in prompt.split('|')]
-        prompts = []
-        all_weights = []
 
-        for p in prompts_raw:
-            cleaned_prompt, weights = self.parse_prompt_weights(p)
-            prompts.append(cleaned_prompt)
-            all_weights.append(weights)
-        context = self.t5(prompts, device)
-
-        # Apply weights to embeddings if any were extracted
-        for i, weights in enumerate(all_weights):
-            for text, weight in weights.items():
-                logger.info(f"Applying weight ({weight}) to promptchunk: '{text}'")
-                if len(weights) > 0:
-                    context[0][i] = context[0][i] * weight
+        if self.times_called == 0:  # only once for noisy logs
+            logger.info("Weighting prompts…")
         self.times_called += 1
-        return context
 
-    def parse_prompt_weights(self, prompt: str) -> Tuple[str, dict]:
-        """Extract text and weights from prompts with (text:weight) format"""
-        # Parse all instances of (text:weight) in the prompt
-        pattern = r'\((.*?):([\d\.]+)\)'
-        matches = re.findall(pattern, prompt)
+        # ----- 1. split “(text:weight)” chunks ---------------------------------------
+        parts, weights = self.parse_prompt_weights(prompt)
 
-        # Replace each match with just the text part
-        cleaned_prompt = prompt
-        weights = {}
+        # ----- 2. tokenise each chunk so we know its span --------------------------
+        all_ids: list[int] = []
+        tok_weights: list[float] = []
 
-        for match in matches:
-            text, weight = match
-            orig_text = f"({text}:{weight})"
-            cleaned_prompt = cleaned_prompt.replace(orig_text, text)
-            weights[text] = float(weight)
+        for text, w in zip(parts, weights):
+            if w != 1.0:
+                logger.info(f"Weighted promptchunk '{text}' by {w}")
+            ids = self.tokenizer.encode(
+                text,
+                add_special_tokens=False,     # add EOS once at the end
+                return_attention_mask=False
+            )
+            all_ids.extend(ids)
+            tok_weights.extend([w] * len(ids))
 
-        return cleaned_prompt, weights
+        # truncate / crop if user asked for it
+        if max_len is not None:
+            all_ids = all_ids[: max_len - 1]        # leave room for EOS
+            tok_weights = tok_weights[: max_len - 1]
+
+        # final EOS token (T5 has no BOS; PAD is 0)
+        eos_id = self.tokenizer.eos_token_id           # usually "1"
+        all_ids.append(eos_id)
+        tok_weights.append(1.0)                        # EOS should stay neutral
+
+        # ----- 3. build tensors ------------------------------------------------------
+        ids = torch.tensor(all_ids, dtype=torch.long, device=device).unsqueeze(0)
+        mask = ids.ne(self.tokenizer.pad_token_id).int()                       # 1 where real
+
+        weight_vec = torch.tensor(tok_weights, dtype=self.dtype, device=device)
+        weight_vec = weight_vec.unsqueeze(0).unsqueeze(-1)   # shape [1, seq, 1]
+
+        # ----- 4. encode & apply weights --------------------------------------------
+        # T5 expects (ids, mask) and spits out hidden-states of shape [B, L, D]
+        context = self.model(ids, mask)                       # same as baseline
+        context = context * weight_vec                        # scale token-wise
+
+        # ----- 5. trim to actual length & wrap the list Wan wants -------------------
+        seq_len = mask.sum(dim=1).long().item()              # number of *real* tokens
+        return [context[0, :seq_len]]
+
+    def parse_prompt_weights(self, prompt: str) -> Tuple[List[str], List[float]]:
+        """
+        Split a diffusion prompt into (text, weight) pairs.
+
+        Supports:
+          • `(text:1.3)`   → explicit weight 1.3
+          • `(text)`       → implicit “emphasis” weight 1.1
+          • bare text      → default weight 1.0
+        Everything is returned in the order it appears so `parts[i]` lines up with `weights[i]`.
+        """
+        # 1️ find every (…) group, where the :weight part is optional
+        token_re = re.compile(r'\(([^:()]+?)(?::([\d.]+))?\)')
+
+        parts: List[str] = []
+        weights: List[float] = []
+
+        idx = 0  # keeps track of how far we’ve scanned
+        for m in token_re.finditer(prompt):
+            # text that sits *before* this (…) block → default 1.0 weight
+            if m.start() > idx:
+                for seg in prompt[idx:m.start()].split(','):
+                    seg = seg.strip()
+                    if seg:
+                        parts.append(seg)
+                        weights.append(1.0)
+
+            inner, w = m.group(1).strip(), m.group(2)
+            parts.append(inner)
+            if w is None:                       # “(something)” with no :weight
+                weights.append(1.1)
+            else:
+                weights.append(float(w))        # user-supplied weight
+
+            idx = m.end()
+
+        # tail text after the final (…) block
+        if idx < len(prompt):
+            for seg in prompt[idx:].split(','):
+                seg = seg.strip()
+                if seg:
+                    parts.append(seg)
+                    weights.append(1.0)
+
+        return parts, weights
