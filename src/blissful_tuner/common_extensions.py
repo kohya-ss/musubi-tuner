@@ -106,7 +106,7 @@ class BlissfulThreadManager():
 def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:
     seed = args.seed if seed_override is None else seed_override
     attr_list = ["prompt", "infer_steps", "guidance_scale", "flow_shift",
-                 "hidden_state_skip_layer", "apply_final_norm",
+                 "hidden_state_skip_layer", "apply_final_norm", "sample_solver",
                  "fps", "task", "embedded_cfg_scale", "negative_prompt", "cfg_schedule"]
     metadata = {
         "bt_model_type": f"{get_current_model_type()}",

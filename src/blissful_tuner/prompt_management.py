@@ -186,7 +186,7 @@ class MiniT5Wrapper():
 
         for text, w in zip(parts, weights):
             if w != 1.0:
-                logger.info(f"Weighted promptchunk '{text}' by {w}")
+                logger.info(f"{'Upweight' if w > 1.0 else 'Downweight'} promptchunk '{text}' to {w}x")
             ids = self.tokenizer.encode(
                 text,
                 add_special_tokens=False,     # add EOS once at the end
