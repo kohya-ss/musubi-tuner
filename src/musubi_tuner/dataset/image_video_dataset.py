@@ -815,7 +815,9 @@ class ImageJsonlDatasource(ImageDatasource):
         # Normalize control paths
         for item in self.data:
             if "control_path" in item:
-                item["control_path_0"] = item.pop("control_path")
+                control_paths = [control_path.strip() for control_path in item.pop("control_path").split(",")]
+                for i, control_path in enumerate(control_paths):
+                    item[f"control_path_{i}"] = control_path
 
             # Ensure control paths are named consistently, from control_path_0000 to control_path_0, control_path_1, etc.
             control_path_keys = [key for key in item.keys() if key.startswith("control_path_")]
