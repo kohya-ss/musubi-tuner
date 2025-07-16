@@ -1369,7 +1369,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
 
     seed = args.seed
     latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
@@ -1394,7 +1394,7 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
@@ -1419,7 +1419,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"

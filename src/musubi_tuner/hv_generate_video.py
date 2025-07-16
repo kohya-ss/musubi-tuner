@@ -959,7 +959,7 @@ def main():
         output_type = args.output_type
         save_path = args.save_path  # if args.save_path_suffix == "" else f"{args.save_path}_{args.save_path_suffix}"
         os.makedirs(save_path, exist_ok=True)
-        time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+        time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
 
         if output_type == "latent" or output_type == "both":
             # save latent
