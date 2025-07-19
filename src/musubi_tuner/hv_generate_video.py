@@ -61,6 +61,10 @@ def synchronize_device(device: torch.device):
         torch.mps.synchronize()
 
 
+def get_time_flag():
+    return datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+
+
 def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, fps=24):
     """save videos by video tensor
        copy from https://github.com/guoyww/AnimateDiff/blob/e92bd5671ba62c0d774a32951453e328018b7c5b/animatediff/utils/util.py#L61
@@ -959,7 +963,7 @@ def main():
         output_type = args.output_type
         save_path = args.save_path  # if args.save_path_suffix == "" else f"{args.save_path}_{args.save_path_suffix}"
         os.makedirs(save_path, exist_ok=True)
-        time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        time_flag = get_time_flag()
 
         if output_type == "latent" or output_type == "both":
             # save latent

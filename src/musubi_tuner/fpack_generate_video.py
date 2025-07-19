@@ -1,5 +1,4 @@
 import argparse
-from datetime import datetime
 import gc
 import random
 import os
@@ -20,13 +19,12 @@ from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCau
 from musubi_tuner.frame_pack import hunyuan
 from musubi_tuner.frame_pack.hunyuan_video_packed import load_packed_model
 from musubi_tuner.frame_pack.hunyuan_video_packed_inference import HunyuanVideoTransformer3DModelPackedInference
-from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, resize_and_center_crop, soft_append_bcthw
-from musubi_tuner.frame_pack.bucket_tools import find_nearest_bucket
+from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, soft_append_bcthw
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import save_images_grid, synchronize_device
+from musubi_tuner.hv_generate_video import save_images_grid, synchronize_device, get_time_flag
 from musubi_tuner.wan_generate_video import merge_lora_weights
 from musubi_tuner.frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
@@ -1623,7 +1621,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    time_flag = get_time_flag()
 
     seed = args.seed
     video_seconds = args.video_seconds
@@ -1673,7 +1671,7 @@ def save_video(
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    time_flag = get_time_flag()
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
@@ -1701,7 +1699,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    time_flag = get_time_flag()
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"

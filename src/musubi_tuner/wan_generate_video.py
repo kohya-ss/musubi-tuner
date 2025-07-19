@@ -1,5 +1,4 @@
 import argparse
-from datetime import datetime
 import gc
 import random
 import os
@@ -37,7 +36,7 @@ except ImportError:
     pass
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import save_images_grid, synchronize_device
+from musubi_tuner.hv_generate_video import save_images_grid, synchronize_device, get_time_flag
 from musubi_tuner.dataset.image_video_dataset import load_video
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
@@ -1369,7 +1368,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    time_flag = get_time_flag()
 
     seed = args.seed
     latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
@@ -1394,7 +1393,7 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    time_flag = get_time_flag()
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
@@ -1419,7 +1418,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    time_flag = get_time_flag()
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
