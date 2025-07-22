@@ -1674,7 +1674,7 @@ def save_video(
     time_flag = get_time_flag()
 
     seed = args.seed
-    original_name = "" if original_base_name is None else f"_{original_base_name}"
+    original_name = "" if original_base_name is None or len(original_base_name) == 0 else f"_{original_base_name}"
     latent_frames = "" if latent_frames is None else f"_{latent_frames}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}{latent_frames}.mp4"
 
@@ -1702,7 +1702,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     time_flag = get_time_flag()
 
     seed = args.seed
-    original_name = "" if original_base_name is None else f"_{original_base_name}"
+    original_name = "" if original_base_name is None or len(original_base_name) == 0 else f"_{original_base_name}"
     image_name = f"{time_flag}_{seed}{original_name}"
     sample = sample.unsqueeze(0)
     one_frame_mode = args.one_frame_inference is not None
@@ -1750,12 +1750,12 @@ def save_output(
 
     if args.output_type == "video" or args.output_type == "both":
         # save video
-        original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
+        original_name = "" if original_base_names is None or len(original_base_names[0]) == 0 else f"_{original_base_names[0]}"
         save_video(video, args, original_name)
 
     elif args.output_type == "images" or args.output_type == "latent_images":
         # save images
-        original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
+        original_name = "" if original_base_names is None or len(original_base_names[0]) == 0 else f"_{original_base_names[0]}"
         save_images(video, args, original_name)
 
 

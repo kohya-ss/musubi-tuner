@@ -1396,7 +1396,7 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     time_flag = get_time_flag()
 
     seed = args.seed
-    original_name = "" if original_base_name is None else f"_{original_base_name}"
+    original_name = "" if original_base_name is None or len(original_base_name) == 0 else f"_{original_base_name}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
     video = video.unsqueeze(0)
     metadata = prepare_metadata(args) if metadata is None else metadata
@@ -1421,7 +1421,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     time_flag = get_time_flag()
 
     seed = args.seed
-    original_name = "" if original_base_name is None else f"_{original_base_name}"
+    original_name = "" if original_base_name is None or len(original_base_name) == 0 else f"_{original_base_name}"
     image_name = f"{time_flag}_{seed}{original_name}"
     sample = sample.unsqueeze(0)
     save_images_grid(sample, save_path, image_name, rescale=True)
@@ -1456,7 +1456,7 @@ def save_output(
     if args.output_type != "latent":
         # save video
         sample = decode_latent(latent.unsqueeze(0), args, cfg)
-        original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
+        original_name = "" if original_base_names is None or len(original_base_names[0]) == 0 else f"_{original_base_names[0]}"
         save_video(sample, args, original_name, metadata)
 
 

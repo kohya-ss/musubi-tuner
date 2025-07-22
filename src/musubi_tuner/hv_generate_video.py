@@ -978,7 +978,7 @@ def main():
             # save video
             videos = decode_latents(args, latents, device)
             for i, sample in enumerate(videos):
-                original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
+                original_name = "" if original_base_names is None or len(original_base_names[i]) == 0 else f"_{original_base_names[i]}"
                 sample = sample.unsqueeze(0)
                 video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
                 metadata = meta_keep[i] if meta_keep is not None else prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
@@ -988,7 +988,7 @@ def main():
             # save images
             videos = decode_latents(args, latents, device)
             for i, sample in enumerate(videos):
-                original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
+                original_name = "" if original_base_names is None or len(original_base_names[i]) == 0 else f"_{original_base_names[i]}"
                 sample = sample.unsqueeze(0)
                 image_name = f"{time_flag}_{i}_{seeds[i]}{original_name}"
                 save_images_grid(sample, save_path, image_name)
