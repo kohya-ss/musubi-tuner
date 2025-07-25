@@ -764,14 +764,17 @@ def main():
             transformer.enable_img_in_txt_in_offloading()
 
         # load scheduler
-        logger.info("Loading scheduler")
-        scheduler = FlowMatchDiscreteScheduler(shift=args.flow_shift, reverse=True, solver="euler")
+        if "dpm" in args.scheduler:
+            from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler
+            scheduler = FlowDPMSolverMultistepScheduler(shift=args.flow_shift, use_dynamic_shifting=False, algorithm_type="sde-dpmsolver++" if "sde" in args.scheduler else "dpmsolver++")
+        else:
+            scheduler = FlowMatchDiscreteScheduler(shift=args.flow_shift, reverse=True, solver="euler")
 
         # Prepare timesteps
         num_inference_steps = args.infer_steps
         scheduler.set_timesteps(num_inference_steps, device=device)  # n_tokens is not used in FlowMatchDiscreteScheduler
         timesteps = scheduler.timesteps
-
+        logger.info(f"Prepared scheduler {scheduler.__class__.__name__}")
         # Prepare generator
         num_videos_per_prompt = 1  # args.num_videos # currently only support 1 video per prompt, this is a batch size
         seed = args.seed
@@ -906,7 +909,7 @@ def main():
                             text_states_2=prompt_embeds_2[slice_idx: slice_end],
                             freqs_cos=freqs_cos,
                             freqs_sin=freqs_sin,
-                            guidance=guidance_expand[slice_idx: slice_end],
+                            guidance=None if do_cfg_for_step and args.disable_embedded_for_cfg else guidance_expand[slice_idx: slice_end],
                             return_dict=True,
                         )["x"]
                         noise_pred_list.append(noise_pred)

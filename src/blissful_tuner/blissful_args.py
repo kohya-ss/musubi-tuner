@@ -125,6 +125,8 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         )
         parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
     elif DIFFUSION_MODEL == "hunyuan":
+        parser.add_argument("--scheduler", type=str, choices=["default", "dpm++", "dpm++sde"], default="default")
+        parser.add_argument("--disable_embedded_for_cfg", action="store_true", help="Fully disable embedded guidance when doing CFG. Allows higher CFG scale and better control.")
         parser.add_argument("--hidden_state_skip_layer", type=int, default=2, help="Hidden state skip layer for LLM. Default is 2. Think 'clip skip' for the LLM")
         parser.add_argument("--apply_final_norm", action="store_true", help="Apply final norm for LLM. Default is False. Usually makes things worse.")
         parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")

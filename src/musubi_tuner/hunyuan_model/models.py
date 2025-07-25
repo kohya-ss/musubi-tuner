@@ -755,10 +755,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         vec = vec + self.vector_in(text_states_2)
 
         # guidance modulation
-        if self.guidance_embed:
-            if guidance is None:
-                raise ValueError("Didn't get guidance strength for guidance distilled model.")
-
+        if self.guidance_embed and guidance is not None:  # If guidance is None, this is an embedded-free CFG step so skip embedded guidance
             # our timestep_embedding is merged into guidance_in(TimestepEmbedder)
             vec = vec + self.guidance_in(guidance)
 

@@ -763,7 +763,7 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             noise = randn_tensor(
                 model_output.shape,
                 generator=generator,
-                device=generator.device,
+                device=generator.device if generator is not None else sample.device,
                 dtype=torch.float32).to(sample.device)
         elif self.config.algorithm_type in ["sde-dpmsolver", "sde-dpmsolver++"]:
             noise = variance_noise.to(
