@@ -72,12 +72,12 @@ A line starting with `#` is a comment.
 * `--f` specifies the number of frames. The default is 1, which generates a still image.
 * `--d` specifies the seed. The default is random.
 * `--s` specifies the number of steps in generation. The default is 20.
-* `--g` specifies the embedded guidance scale (not CFG scale). The default is 6.0 for HunyuanVideo, 10.0 for FramePack, which is the default value during inference of each architecture. Specify 1.0 for SkyReels V1 models. Ignore this option for Wan2.1 models.
-* `--fs` specifies the discrete flow shift. The default is 14.5, which corresponds to the number of steps 20. In the HunyuanVideo paper, 7.0 is recommended for 50 steps, and 17.0 is recommended for less than 20 steps (e.g. 10). Ignore this option for FramePack models (it uses 10.0).
+* `--g` specifies the embedded guidance scale (not CFG scale). The default is 6.0 for HunyuanVideo, 10.0 for FramePack, 2.5 for FLUX.1 Kontext which is the default value during inference of each architecture. Specify 1.0 for SkyReels V1 models. Ignore this option for Wan2.1 models.
+* `--fs` specifies the discrete flow shift. The default is 14.5, which corresponds to the number of steps 20. In the HunyuanVideo paper, 7.0 is recommended for 50 steps, and 17.0 is recommended for less than 20 steps (e.g. 10). Ignore this option for FramePack models (it uses 10.0). Set 0 to use 'flux_shift' for FLUX.1 Kontext models.
 
 If you train I2V models, you must add the following option.
 
-* `--i path/to/image.png`: the image path for image2video inference.
+* `--i path/to/image.png`: the image path for image2video inference. PNG, JPG and other formats are supported.
 
 If you train Wan2.1-Fun-Control models, you must add the following option.
 
@@ -87,6 +87,10 @@ If you train the model with classifier free guidance (such as Wan2.1), you can u
 
 *`--n negative prompt...`: the negative prompt for the classifier free guidance. The default prompt for each model is used if omitted.
 *`--l 6.0`: the classifier free guidance scale. Should be set to 6.0 for SkyReels V1 models. 5.0 is the default value for Wan2.1 (if omitted).
+
+If you train the model with control images (such as FramePack one frame inference or FLUX.1 Kontext), you can use the additional options below.
+
+* `--ci path/to/control_image.jpg`: the control image path for inference. If you specify this option, the control image is used for inference. PNG, JPG and other formats are supported.
 
 <details>
 <summary>日本語</summary>
@@ -98,12 +102,12 @@ If you train the model with classifier free guidance (such as Wan2.1), you can u
 * `--f` フレーム数を指定します。省略時は1で、静止画を生成します。
 * `--d` シードを指定します。省略時はランダムです。
 * `--s` 生成におけるステップ数を指定します。省略時は20です。
-* `--g` embedded guidance scaleを指定します（CFG scaleではありません）。省略時はHunyuanVideoは6.0、FramePackは10.0で、各アーキテクチャの推論時のデフォルト値です。SkyReels V1モデルの場合は1.0を指定してください。Wan2.1モデルの場合はこのオプションは無視されます。
-* `--fs` discrete flow shiftを指定します。省略時は14.5で、ステップ数20の場合に対応した値です。HunyuanVideoの論文では、ステップ数50の場合は7.0、ステップ数20未満（10など）で17.0が推奨されています。FramePackモデルはこのオプションは無視され、10.0が使用されます。
+* `--g` embedded guidance scaleを指定します（CFG scaleではありません）。省略時はHunyuanVideoは6.0、FramePackは10.0で、各アーキテクチャの推論時のデフォルト値です。SkyReels V1モデルの場合は1.0を指定してください。FLUX.1 Kontextの場合は2.5を指定してください。Wan2.1モデルの場合はこのオプションは無視されます。
+* `--fs` discrete flow shiftを指定します。省略時は14.5で、ステップ数20の場合に対応した値です。HunyuanVideoの論文では、ステップ数50の場合は7.0、ステップ数20未満（10など）で17.0が推奨されています。FramePackモデルはこのオプションは無視され、10.0が使用されます。FLUX.1 Kontextモデルでは、0を指定すると `flux_shift` が使用されます。
 
 I2Vモデルを学習する場合、以下のオプションを追加してください。
 
-* `--i path/to/image.png`: image2video推論用の画像パス。
+* `--i path/to/image.png`: image2video推論用の画像パス。PNG、JPGなどの形式がサポートされています。
 
 Wan2.1-Fun-Controlモデルを学習する場合、以下のオプションを追加してください。
 
@@ -113,4 +117,9 @@ classifier free guidance（ネガティブプロンプト）を必要とする�
 
 *`--n negative prompt...`: classifier free guidance用のネガティブプロンプト。省略時はモデルごとのデフォルトプロンプトが使用されます。
 *`--l 6.0`: classifier free guidance scale。SkyReels V1モデルの場合は6.0に設定してください。Wan2.1の場合はデフォルト値が5.0です（省略時）。
+
+制御画像を使用するモデル（FramePackの1フレーム推論やFLUX.1 Kontextなど）を学習する場合、以下の追加オプションを使用できます。
+
+* `--ci path/to/control_image.jpg`: 推論用の制御画像パス。このオプションを指定すると、制御画像が推論に使用されます。PNG、JPGなどの形式がサポートされています。
+
 </details>

@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     # )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
-    parser.add_argument("--ae", type=str, default=None, help="AE directory or path")
+    parser.add_argument("--vae", type=str, default=None, help="AE directory or path")
     parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 (T5) directory or path")
     parser.add_argument("--text_encoder2", type=str, required=True, help="Text Encoder 2 (CLIP-L) directory or path")
 
@@ -561,7 +561,7 @@ def generate(
             vae_instance_for_return = shared_models["ae"]
         else:
             # the dtype of VAE weights is float32, but we can load it as bfloat16 for better performance in future
-            vae_instance_for_return = flux_utils.load_ae(args.ae, dtype=torch.float32, device=device, disable_mmap=True)
+            vae_instance_for_return = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
 
         height, width, context, control_latent = prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)
 
@@ -854,7 +854,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # 1. Precompute Image Data (VAE and Image Encoders)
     logger.info("Loading VAE and Image Encoders for batch image preprocessing...")
-    vae_for_batch = flux_utils.load_ae(args.ae, dtype=torch.float32, device=device, disable_mmap=True)
+    vae_for_batch = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
 
     all_precomputed_image_data = []
     all_prompt_args_list = [apply_overrides(args, pd) for pd in prompts_data]  # Create all arg instances first
@@ -1148,7 +1148,7 @@ def main():
         for i, latent in enumerate(latents_list):
             args.seed = seeds[i]
 
-            ae = flux_utils.load_ae(args.ae, dtype=torch.float32, device=device, disable_mmap=True)
+            ae = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
             save_output(args, ae, latent, device, original_base_names)
 
     elif args.from_file:

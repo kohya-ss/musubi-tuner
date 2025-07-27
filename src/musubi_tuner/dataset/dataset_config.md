@@ -471,6 +471,14 @@ flux_kontext_no_resize_control = false # optional, default is false. Disable res
 
 `fp_1f_*` settings are not used in FLUX.1 Kontext. Masks are also not used.
 
+The technical details of `flux_kontext_no_resize_control`:
+
+When this option is specified, the control image is trimmed to a multiple of 16 pixels and converted to latent and passed to the model. Each element in the batch may have a different resolution, but in that case, the attention is calculated by decomposing each element in the batch during the attention calculation (no attention mask is used). This allows the model to work correctly even if the control images have different resolutions.
+
+However, since the attention calculation is split, the speed may be reduced.
+
+Also, since FLUX.1 Kontext assumes a fixed [resolution of control images](https://github.com/black-forest-labs/flux/blob/1371b2bc70ac80e1078446308dd5b9a2ebc68c87/src/flux/util.py#L584), it may be better to prepare the control images in advance to match these resolutions.
+
 <details>
 <summary>日本語</summary>
 
@@ -479,6 +487,14 @@ FLUX.1 Kontextのデータセット設定は、制御画像を持つ画像デー
 また、`flux_kontext_no_resize_control`を設定すると、制御画像のリサイズを無効にします。デフォルトでは、制御画像は画像と同じ解像度にリサイズされます。
 
 `fp_1f_*`の設定はFLUX.1 Kontextでは使用しません。またマスクも使用されません。
+
+`flux_kontext_no_resize_control` の技術的詳細：
+
+このオプションを指定すると、制御画像は16ピクセル単位にトリミングされ、latentに変換されてモデルに渡されます。バッチの各要素が異なる解像度を持つ可能性がありますが、そのときはattentionの計算時に、バッチの各要素が分解されて計算されます（attention maskは使用しません）。これにより、制御画像の解像度が異なる場合でも、モデルは正しく動作します。
+
+ただしattention計算が分割されるため、速度は低下する可能性があります。
+
+またFLUX.1 Kontextが前提とする[制御画像の解像度](https://github.com/black-forest-labs/flux/blob/1371b2bc70ac80e1078446308dd5b9a2ebc68c87/src/flux/util.py#L584)は一定のため、あらかじめ制御画像の解像度をこれらに合わせておいた方が良いかもしれません。
 
 </details>
 
