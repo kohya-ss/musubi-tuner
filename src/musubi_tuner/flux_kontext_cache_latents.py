@@ -34,10 +34,14 @@ def preprocess_contents_flux_kontext(batch: List[ItemInfo]) -> tuple[torch.Tenso
     controls = []
     for item in batch:
         contents.append(torch.from_numpy(item.content))  # target image
-        control_image = item.control_content[0]  # PIL.Image
-        control_image = control_image.convert("RGB")  # convert to RGB if RGBA
+
+        if isinstance(item.control_content[0], np.ndarray):
+            control_image = item.control_content[0]  # np.ndarray
+        else:
+            control_image = item.control_content[0]  # PIL.Image
+            control_image = control_image.convert("RGB")  # convert to RGB if RGBA
         controls.append(torch.from_numpy(np.array(control_image)))
-        
+
     contents = torch.stack(contents, dim=0)  # B, H, W, C
     contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
