@@ -7,7 +7,12 @@ from typing import List, Optional, Tuple, Union
 import safetensors
 from blissful_tuner.blissful_logger import BlissfulLogger
 
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN, ARCHITECTURE_FRAMEPACK
+from musubi_tuner.dataset.image_video_dataset import (
+    ARCHITECTURE_HUNYUAN_VIDEO,
+    ARCHITECTURE_WAN,
+    ARCHITECTURE_FRAMEPACK,
+    ARCHITECTURE_FLUX_KONTEXT,
+)
 
 logger = BlissfulLogger(__name__, "green")
 
@@ -65,6 +70,7 @@ ADAPTER_LORA = "lora"
 IMPL_HUNYUAN_VIDEO = "https://github.com/Tencent/HunyuanVideo"
 IMPL_WAN = "https://github.com/Wan-Video/Wan2.1"
 IMPL_FRAMEPACK = "https://github.com/lllyasviel/FramePack"
+IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -131,6 +137,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_FRAMEPACK:
         arch = ARCH_FRAMEPACK
         impl = IMPL_FRAMEPACK
+    elif architecture == ARCHITECTURE_FLUX_KONTEXT:
+        arch = ARCHITECTURE_FLUX_KONTEXT
+        impl = IMPL_FLUX_KONTEXT
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

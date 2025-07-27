@@ -48,6 +48,7 @@ class ImageDatasetParams(BaseDatasetParams):
     fp_1f_clean_indices: Optional[Sequence[int]] = None
     fp_1f_target_index: Optional[int] = None
     fp_1f_no_post: Optional[bool] = False
+    flux_kontext_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
 
 
 @dataclass
@@ -117,6 +118,7 @@ class ConfigSanitizer:
         "fp_1f_clean_indices": [int],
         "fp_1f_target_index": int,
         "fp_1f_no_post": bool,
+        "flux_kontext_no_resize_control": bool,  
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -302,6 +304,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         fp_1f_clean_indices: {dataset.fp_1f_clean_indices}
         fp_1f_target_index: {dataset.fp_1f_target_index}
         fp_1f_no_post: {dataset.fp_1f_no_post}
+        flux_kontext_no_resize_control: {dataset.flux_kontext_no_resize_control}
     \n"""
                 ),
                 "    ",

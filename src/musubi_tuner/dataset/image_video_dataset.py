@@ -78,6 +78,8 @@ ARCHITECTURE_WAN = "wan"
 ARCHITECTURE_WAN_FULL = "wan"
 ARCHITECTURE_FRAMEPACK = "fp"
 ARCHITECTURE_FRAMEPACK_FULL = "framepack"
+ARCHITECTURE_FLUX_KONTEXT = "fk"
+ARCHITECTURE_FLUX_KONTEXT_FULL = "flux_kontext"
 
 
 def glob_images(directory, base="*"):
@@ -175,6 +177,7 @@ class ItemInfo:
         self.fp_1f_clean_indices: Optional[list[int]] = None  # indices of clean latents for 1f
         self.fp_1f_target_index: Optional[int] = None  # target index for 1f clean latents
         self.fp_1f_no_post: Optional[bool] = None  # whether to add zero values as clean latent post
+        self.flux_kontext_no_resize_control: Optional[bool] = None  # whether to resize control images to the bucket resolution
 
     def __str__(self) -> str:
         return (
@@ -267,6 +270,24 @@ def save_latent_cache_framepack(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FRAMEPACK_FULL)
 
 
+def save_latent_cache_flux_kontext(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    control_latent: torch.Tensor,
+):
+    """FLUX.1 Kontext architecture only"""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+
+    _, H, W = latent.shape
+    F = 1
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    sd[f"varlen_control_{dtype_str}"] = control_latent.detach().cpu().contiguous()
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -331,6 +352,18 @@ def save_text_encoder_output_cache_framepack(
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FRAMEPACK_FULL)
 
 
+def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: torch.Tensor, clip_l_pooler: torch.Tensor):
+    """Flux Kontext architecture only."""
+
+    sd = {}
+    dtype_str = dtype_to_str(t5_vec.dtype)
+    sd[f"t5_vec_{dtype_str}"] = t5_vec.detach().cpu()
+    dtype_str = dtype_to_str(clip_l_pooler.dtype)
+    sd[f"clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
+
+
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
@@ -371,6 +404,7 @@ class BucketSelector:
     RESOLUTION_STEPS_HUNYUAN = 16
     RESOLUTION_STEPS_WAN = 16
     RESOLUTION_STEPS_FRAMEPACK = 16
+    RESOLUTION_STEPS_FLUX_KONTEXT = 16
 
     def __init__(
         self, resolution: Tuple[int, int], enable_bucket: bool = True, no_upscale: bool = False, architecture: str = "no_default"
@@ -385,6 +419,8 @@ class BucketSelector:
             self.reso_steps = BucketSelector.RESOLUTION_STEPS_WAN
         elif self.architecture == ARCHITECTURE_FRAMEPACK:
             self.reso_steps = BucketSelector.RESOLUTION_STEPS_FRAMEPACK
+        elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
+            self.reso_steps = BucketSelector.RESOLUTION_STEPS_FLUX_KONTEXT
         else:
             raise ValueError(f"Invalid architecture: {self.architecture}")
 
@@ -1330,6 +1366,7 @@ class ImageDataset(BaseDataset):
         fp_1f_clean_indices: Optional[list[int]] = None,
         fp_1f_target_index: Optional[int] = None,
         fp_1f_no_post: Optional[bool] = False,
+        flux_kontext_no_resize_control: Optional[bool] = False,
         debug_dataset: bool = False,
         architecture: str = "no_default",
     ):
@@ -1351,6 +1388,7 @@ class ImageDataset(BaseDataset):
         self.fp_1f_clean_indices = fp_1f_clean_indices
         self.fp_1f_target_index = fp_1f_target_index
         self.fp_1f_no_post = fp_1f_no_post
+        self.flux_kontext_no_resize_control = flux_kontext_no_resize_control
 
         control_count_per_image = 1
         if fp_1f_clean_indices is not None:
@@ -1415,6 +1453,7 @@ class ImageDataset(BaseDataset):
                     item_info.fp_1f_clean_indices = self.fp_1f_clean_indices
                     item_info.fp_1f_target_index = self.fp_1f_target_index
                     item_info.fp_1f_no_post = self.fp_1f_no_post
+                    item_info.flux_kontext_no_resize_control = self.flux_kontext_no_resize_control
 
                     if self.architecture == ARCHITECTURE_FRAMEPACK:
                         # we need to split the bucket with latent window size and optional 1f clean indices, zero post
@@ -1455,12 +1494,15 @@ class ImageDataset(BaseDataset):
 
                 bucket_reso = buckset_selector.get_bucket_resolution(image_size)
                 image = resize_image_to_bucket(image, bucket_reso)  # returns np.ndarray
-                resized_controls = None
+
                 if controls is not None:
-                    resized_controls = []
-                    for control in controls:
-                        resized_control = resize_image_to_bucket(control, bucket_reso)  # returns np.ndarray
-                        resized_controls.append(resized_control)
+                    if self.flux_kontext_no_resize_control:
+                        resized_controls = controls
+                    else:
+                        resized_controls = []
+                        for control in controls:
+                            resized_control = resize_image_to_bucket(control, bucket_reso)  # returns np.ndarray
+                            resized_controls.append(resized_control)
 
                 return image_size, image_key, image, caption, resized_controls
 
@@ -1548,6 +1590,7 @@ class VideoDataset(BaseDataset):
     TARGET_FPS_HUNYUAN = 24.0
     TARGET_FPS_WAN = 16.0
     TARGET_FPS_FRAMEPACK = 30.0
+    TARGET_FPS_FLUX_KONTEXT = 1.0  # VideoDataset is not used for Flux Kontext, but this is a placeholder
 
     def __init__(
         self,
@@ -1598,6 +1641,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_WAN
         elif self.architecture == ARCHITECTURE_FRAMEPACK:
             self.target_fps = VideoDataset.TARGET_FPS_FRAMEPACK
+        elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
+            self.target_fps = VideoDataset.TARGET_FPS_FLUX_KONTEXT
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 

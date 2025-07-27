@@ -2,6 +2,7 @@ import argparse
 from blissful_tuner.blissful_logger import BlissfulLogger
 import os
 import shutil
+from typing import Callable
 
 import accelerate
 import torch
@@ -176,3 +177,8 @@ def save_state_on_train_end(args: argparse.Namespace, accelerator: accelerate.Ac
         logger.info("uploading last state to huggingface.")
         huggingface_utils.upload(args, state_dir, "/" + LAST_STATE_NAME.format(model_name))
 
+
+def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15) -> Callable[[float], float]:
+    m = (y2 - y1) / (x2 - x1)
+    b = y1 - m * x1
+    return lambda x: m * x + b

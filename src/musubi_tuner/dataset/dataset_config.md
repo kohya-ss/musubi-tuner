@@ -291,7 +291,7 @@ video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 
 ### Sample for Image Dataset with Control Images
 
-The dataset with control images. This is used for training the one frame training for FramePack.
+The dataset with control images. This is used for training the one frame training for FramePack and FLUX.1 Kontext training.
 
 The dataset configuration with caption text files is similar to the image dataset, but with an additional `control_directory` parameter.
 
@@ -312,12 +312,12 @@ If multiple control images are specified, the attribute names should be `control
 {"image_path": "/path/to/image2.jpg", "control_path_0": "/path/to/control2_0.png", "control_path_1": "/path/to/control2_1.png", "caption": "A caption for image2"}
 ```
 
-The control images can also have an alpha channel. In this case, the alpha channel of the image is used as a mask for the latent.
+The control images can also have an alpha channel. In this case, the alpha channel of the image is used as a mask for the latent. FLUX.1 Kontext does not use masks.
 
 <details>
 <summary>日本語</summary>
 
-制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習に使用します。
+制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習およびFLUX.1 Kontext学習に使用します。
 
 キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションは`image_directory`へ格納してください。
 
@@ -325,7 +325,7 @@ The control images can also have an alpha channel. In this case, the alpha chann
 
 メタデータJSONLファイルを使用する場合は、`control_path`を追加してください。複数枚の制御画像を指定する場合は、`control_path_0`, `control_path_1`のように数字を付与してください。
 
-制御画像はアルファチャンネルを持つこともできます。この場合、画像のアルファチャンネルはlatentへのマスクとして使用されます。
+制御画像はアルファチャンネルを持つこともできます。この場合、画像のアルファチャンネルはlatentへのマスクとして使用されます。FLUX.1 Kontextではマスクは使用されません。
 
 </details>
 
@@ -455,6 +455,30 @@ kisekaeichiの学習を行う場合は、`fp_1f_clean_indices`に `[0, 10]`を�
 `fp_1f_no_post`を`false`に設定すると、`clean_latent_post_index`は `1 + fp1_latent_window_size` になります。
 
 推論時の `no_2x`、`no_4x`に対応する設定は、キャッシュスクリプトの引数で行えます。なお、2xのindexは `1 + fp1_latent_window_size + 1` からの2個（通常は`11, 12`）、4xのindexは `1 + fp1_latent_window_size + 1 + 2` からの16個になります（通常は`13, 14, ..., 28`）です。これらの値は`fp_1f_no_post`や`no_2x`, `no_4x`の設定に関わらず、常に同じです。
+
+</details>
+
+### FLUX.1 Kontext [dev]
+
+The FLUX.1 Kontext dataset configuration uses an image dataset with control images. However, only one control image can be used.
+
+If you set `flux_kontext_no_resize_control`, it disables resizing of the control image. By default, the control image is resized to the same resolution as the image.
+
+```toml
+[[datasets]]
+flux_kontext_no_resize_control = false # optional, default is false. Disable resizing of control image
+```
+
+`fp_1f_*` settings are not used in FLUX.1 Kontext. Masks are also not used.
+
+<details>
+<summary>日本語</summary>
+
+FLUX.1 Kontextのデータセット設定は、制御画像を持つ画像データセットを使用します。ただし、制御画像は1枚しか使用できません。
+
+また、`flux_kontext_no_resize_control`を設定すると、制御画像のリサイズを無効にします。デフォルトでは、制御画像は画像と同じ解像度にリサイズされます。
+
+`fp_1f_*`の設定はFLUX.1 Kontextでは使用しません。またマスクも使用されません。
 
 </details>
 

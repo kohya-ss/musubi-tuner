@@ -754,7 +754,12 @@ class NetworkTrainer:
     ):
         batch_size = noise.shape[0]
 
-        if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid" or args.timestep_sampling == "shift":
+        if (
+            args.timestep_sampling == "uniform"
+            or args.timestep_sampling == "sigmoid"
+            or args.timestep_sampling == "shift"
+            or args.timestep_sampling == "flux_shift"
+        ):
             if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
                 # Simple random t-based noise sampling
                 if args.timestep_sampling == "sigmoid":
@@ -762,8 +767,17 @@ class NetworkTrainer:
                 else:
                     t = torch.rand((batch_size,), device=device)
 
-            elif args.timestep_sampling == "shift":
-                shift = args.discrete_flow_shift
+            elif args.timestep_sampling == "shift" or args.timestep_sampling == "flux_shift":
+                if args.timestep_sampling == "shift":
+                    shift = args.discrete_flow_shift
+                else:  # flux_shift
+                    h, w = latents.shape[-2:]
+                    # we are pre-packed so must adjust for packed size
+                    mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                    # def time_shift(mu: float, sigma: float, t: torch.Tensor):
+                    #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
+                    shift = math.exp(mu)
+
                 logits_norm = torch.randn(batch_size, device=device)
                 logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
                 t = logits_norm.sigmoid()
@@ -776,7 +790,7 @@ class NetworkTrainer:
             t = t * (t_max - t_min) + t_min  # scale to [t_min, t_max], default [0, 1]
 
             timesteps = t * 1000.0
-            t = t.view(-1, 1, 1, 1, 1)
+            t = t.view(-1, 1, 1, 1, 1) if latents.ndim == 5 else t.view(-1, 1, 1, 1)
             noisy_model_input = (1 - t) * latents + t * noise
 
             timesteps += 1  # 1 to 1000
@@ -2370,10 +2384,10 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timestep_sampling",
-        choices=["sigma", "uniform", "sigmoid", "shift"],
+        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift"],
         default="sigma",
-        help="Method to sample timesteps: sigma-based, uniform random, sigmoid of random normal and shift of sigmoid."
-        " / タイムステップをサンプリングする方法：sigma、random uniform、random normalのsigmoid、sigmoidのシフト。",
+        help="Method to sample timesteps: sigma-based, uniform random, sigmoid of random normal, shift of sigmoid and flux shift."
+        " / タイムステップをサンプリングする方法：sigma、random uniform、random normalのsigmoid、sigmoidのシフト、flux shift。",
     )
     parser.add_argument(
         "--discrete_flow_shift",
