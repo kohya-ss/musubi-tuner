@@ -819,7 +819,14 @@ def main():
             zero_latents[:, :, :1, :, :] = image_latents
             image_latents = zero_latents
 
-        if args.video_path is not None:
+        if args.from_latent is not None:
+            logger.info(f"Loading latent '{args.from_latent}'")
+            sd = load_file(args.from_latent, device=str(device))
+            from_latent = sd["latent"]
+            video_latents = torchvision.transforms.functional.resize(from_latent, (latents.shape[3], latents.shape[4]), interpolation=torchvision.transforms.functional.InterpolationMode.BICUBIC)
+            video_latents = video_latents.unsqueeze(0)
+            logger.info(f"Latent2Video: noise shape {latents.shape}, video_latents shape {video_latents.shape}")
+        if args.video_path is not None or args.from_latent is not None:
             # v2v inference
             noise = latents
             assert noise.shape == video_latents.shape, f"noise shape {noise.shape} != video_latents shape {video_latents.shape}"
