@@ -951,7 +951,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
                     continue
 
                 # Save latent if needed (using data from precomputed_image_data for H/W)
-                if prompt_args_item.output_type in ["latent", "both", "latent_images"]:
+                if prompt_args_item.output_type in ["latent", "latent_images"]:
                     height = current_image_data["height"]
                     width = current_image_data["width"]
                     save_latent(latent, prompt_args_item, height, width)
@@ -986,11 +986,9 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             current_args = all_prompt_args_list[i]
             logger.info(f"Decoding output {i+1}/{len(all_latents)} for prompt: {current_args.prompt}")
 
-            # if args.output_type is "both" or "latent_images", we already saved latent above.
+            # if args.output_type is "latent_images", we already saved latent above.
             # so we skip saving latent here.
-            if current_args.output_type == "both":
-                current_args.output_type = "video"
-            elif current_args.output_type == "latent_images":
+            if current_args.output_type == "latent_images":
                 current_args.output_type = "images"
 
             # save_output expects latent to be [BCTHW] or [CTHW]. generate returns [BCTHW] (batch size 1).
