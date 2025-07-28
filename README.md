@@ -116,6 +116,10 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+=======
+- July 28, 2025:
+    - Added LoRA training for FLUX.1 Kontext \[dev\]. For details, see the [FLUX.1 Kontext LoRA training documentation](./docs/flux_kontext.md).
+
 - June 17, 2025:
     - Added support for [MagCache](https://github.com/Zehong-Ma/MagCache) in FramePack's inference script. See [Advanced Configuration](./docs/advanced_config.md#magcache) for details.
     - Implemented caching of Text Encoder outputs in both interactive and batch modes in FramePack's inference script. Additionally, we reviewed the processing order and adjusted the timing of model offloading to reduce processing time during continuous generation.
@@ -137,13 +141,6 @@ If you find this project helpful, please consider supporting its development via
 - June 8, 2025:
     - Added support for interactive mode in `wan_generate_video.py` and `fpack_generate_video.py`. If `prompt-toolkit` is installed, it will be used for prompt editing and completion, especially useful in Linux environments. PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/330)
         - This feature is optional. To enable it, install `prompt-toolkit` with `pip install prompt-toolkit`. If installed, it will be automatically enabled.
-
-- May 30, 2025:
-    - Fixed a bug where the resizing of images and videos during dataset loading was not performed correctly. Please recreate the cache.  Thank you sdbds for PR [#312](https://github.com/kohya-ss/musubi-tuner/issues/312). 
-        - The bug occurred when the width or height of the image before resizing matched the bucket's width or height, but the other dimension was different (for example, if the original image was 640x480 and the bucket was 640x360).
-    - Updated the code for FramePack's one frame inference and training. The code has been significantly improved. See [FramePack's one frame inference documentation](./docs/framepack_1f.md) for details.
-        - **Breaking change**: The dataset format, training options, and inference options for one frame training have changed. Please follow the documentation to update your dataset configuration, recreate the cache, and modify your training and inference options.
-    - Added documentation for FramePack's one frame inference and training. See the [documentation](./docs/framepack_1f.md) for details.
 
 ### Releases
 
