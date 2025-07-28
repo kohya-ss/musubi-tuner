@@ -361,6 +361,7 @@ def decode_latent(ae: flux_models.AutoEncoder, latent: torch.Tensor, device: tor
 
 def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flux_models.AutoEncoder) -> Dict[str, Any]:
     """Prepare image-related inputs for Kontext: AE encoding."""
+    height, width = check_inputs(args)
 
     from musubi_tuner.utils.image_utils import preprocess_image
 
@@ -383,7 +384,7 @@ def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flu
     else:
         control_latent = None
 
-    return {"control_latent": control_latent}
+    return {"height": height, "width": width, "control_latent": control_latent}
 
 
 def prepare_text_inputs(
@@ -505,8 +506,6 @@ def prepare_i2v_inputs(
     Returns:
         Tuple[int, int, Dict[str, Any], Optional[torch.Tensor]]: (height, width, context, end_latent)
     """
-    height, width = check_inputs(args)
-
     # prepare image inputs
     image_inputs = prepare_image_inputs(args, device, ae)
     control_latent = image_inputs["control_latent"]
@@ -514,7 +513,7 @@ def prepare_i2v_inputs(
     # prepare text inputs
     context = prepare_text_inputs(args, device, shared_models)
 
-    return height, width, context, control_latent
+    return image_inputs["height"], image_inputs["width"], context, control_latent
 
 
 def generate(
@@ -548,7 +547,7 @@ def generate(
         width = precomputed_image_data["width"]
         control_latent = precomputed_image_data["control_latent"]
 
-        context = precomputed_text_data["context"]
+        context = precomputed_text_data
 
         # VAE is not loaded here if data is precomputed; decoding VAE is handled by caller (e.g., process_batch_prompts)
         # vae_instance_for_return remains None
@@ -852,33 +851,26 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     gen_settings = get_generation_settings(args)
     device = gen_settings.device
 
-    # 1. Precompute Image Data (VAE and Image Encoders)
-    logger.info("Loading VAE and Image Encoders for batch image preprocessing...")
-    vae_for_batch = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
+    # 1. Precompute Image Data (AE and Image Encoders)
+    logger.info("Loading AE and Image Encoders for batch image preprocessing...")
+    ae_for_batch = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
 
     all_precomputed_image_data = []
     all_prompt_args_list = [apply_overrides(args, pd) for pd in prompts_data]  # Create all arg instances first
 
-    logger.info("Preprocessing images and VAE encoding for all prompts...")
+    logger.info("Preprocessing images and AE encoding for all prompts...")
 
-    # VAE and Image Encoder to device for this phase, because we do not want to offload them to CPU
-    vae_for_batch.to(device)
-    image_encoder_batch.to(device)
-
-    # Pass models via a temporary shared_models dict for prepare_image_inputs
-    # This ensures prepare_image_inputs can use them if it expects them in shared_models
-    # Or it can load them if this dict is empty (though here we provide them)
-    temp_shared_models_img = {"feature_extractor": feature_extractor_batch, "image_encoder": image_encoder_batch}
+    # AE and Image Encoder to device for this phase, because we do not want to offload them to CPU
+    ae_for_batch.to(device)
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
         logger.info(f"Image preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
-        # prepare_image_inputs will move vae/image_encoder to device temporarily
-        image_data = prepare_image_inputs(prompt_args_item, device, vae_for_batch, temp_shared_models_img)
+        # prepare_image_inputs will move ae/image_encoder to device temporarily
+        image_data = prepare_image_inputs(prompt_args_item, device, ae_for_batch)
         all_precomputed_image_data.append(image_data)
 
     # Models should be back on GPU because prepare_image_inputs moved them to the original device
-    del feature_extractor_batch, image_encoder_batch, temp_shared_models_img
-    vae_for_batch.to("cpu")  # Move VAE back to CPU
+    ae_for_batch.to("cpu")  # Move AE back to CPU
     clean_memory_on_device(device)
 
     # 2. Precompute Text Data (Text Encoders)
@@ -889,7 +881,9 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     tokenizer1_batch, text_encoder1_batch = flux_utils.load_t5xxl(
         args.text_encoder1, dtype=t5_dtype, device=device, disable_mmap=True
     )
-    tokenizer2_batch, text_encoder2_batch = flux_utils.load_clip_l(args.text_encoder2, device=device, disable_mmap=True)
+    tokenizer2_batch, text_encoder2_batch = flux_utils.load_clip_l(
+        args.text_encoder2, dtype=torch.bfloat16, device=device, disable_mmap=True
+    )
 
     # Text Encoders to device for this phase
     text_encoder2_batch.to(device)  # Moved into prepare_text_inputs logic
@@ -982,7 +976,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     # 4. Decode latents and save outputs (using vae_for_batch)
     if args.output_type != "latent":
         logger.info("Decoding latents to videos/images using batched VAE...")
-        vae_for_batch.to(device)  # Move VAE to device for decoding
+        ae_for_batch.to(device)  # Move VAE to device for decoding
 
         for i, latent in enumerate(all_latents):
             if latent is None:  # Skip failed generations
@@ -1002,11 +996,11 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             # save_output expects latent to be [BCTHW] or [CTHW]. generate returns [BCTHW] (batch size 1).
             # latent[0] is correct if generate returns it with batch dim.
             # The latent from generate is (1, C, T, H, W)
-            save_output(current_args, vae_for_batch, latent[0], device)  # Pass vae_for_batch
+            save_output(current_args, ae_for_batch, latent[0], device)  # Pass vae_for_batch
 
-        vae_for_batch.to("cpu")  # Move VAE back to CPU
+        ae_for_batch.to("cpu")  # Move VAE back to CPU
 
-    del vae_for_batch
+    del ae_for_batch
     clean_memory_on_device(device)
 
 
