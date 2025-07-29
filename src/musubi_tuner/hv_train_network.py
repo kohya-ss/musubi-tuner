@@ -1464,6 +1464,9 @@ class NetworkTrainer:
         blueprint = blueprint_generator.generate(user_config, args, architecture=self.architecture)
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, training=True)
 
+        if train_dataset_group.num_train_items == 0:
+            raise ValueError("No training items found in the dataset / データセットに学習データがありません")
+        
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
