@@ -16,17 +16,17 @@ This feature is experimental.
 
 ## Download the model / モデルのダウンロード
 
-You need to download the DiT, VAE, Text Encoder 1 (T5-XXL), and Text Encoder 2 (CLIP-L) models.
+You need to download the DiT, AE, Text Encoder 1 (T5-XXL), and Text Encoder 2 (CLIP-L) models.
 
-- **DiT, VAE**: Download from the [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) repository.
+- **DiT, AE**: Download from the [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) repository. Use `flux1-kontext-dev.safetensors` and `ae.safetensors`. The weights in the subfolder are in Diffusers format and cannot be used.
 - **Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L)**: Download from the [ComfyUI FLUX Text Encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) repository. Please use `t5xxl_fp16.safetensors` for T5-XXL. Thanks to ComfyUI for providing these models.
 
 <details>
 <summary>日本語</summary>
 
-DiT, VAE, Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L) のモデルをダウンロードする必要があります。
+DiT, AE, Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L) のモデルをダウンロードする必要があります。
 
-- **DiT, VAE**: [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) リポジトリからダウンロードしてください。
+- **DiT, AE**: [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) リポジトリからダウンロードしてください。`flux1-kontext-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusres形式なので使用できません。
 - **Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L)**: [ComfyUIのFLUX Text Encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) リポジトリからダウンロードしてください。T5-XXLには`t5xxl_fp16.safetensors`を使用してください。これらのモデルをご提供いただいたComfyUIに感謝します。
 </details>
 

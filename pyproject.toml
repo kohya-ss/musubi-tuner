@@ -34,6 +34,9 @@ dependencies = [
     "rich-tracebacks>=1.0.0",
     "pynput>=1.7.0",
     "prompt-toolkit==3.0.51",
+    # FLUX.1 Kontext
+    "sentencepiece==0.2.0",
+>>>>>>> fd837ea (fix: add sentencepiece dependency for FLUX.1 Kontext LoRA training)
 ]
 
 [project.optional-dependencies]

@@ -96,7 +96,7 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 
 このリポジトリは、HunyuanVideo、Wan2.1、FramePackのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1、FramePackのリポジトリとは関係ありません。
 
-Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を参照してください。
+Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
 
 *リポジトリは開発中です。*
 
@@ -108,6 +108,13 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 ### 最近の更新
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2025/07/29
+    - 依存関係が不足していてFLUX.1 KontextのLoRA学習ができない不具合を修正しました。`sentencepiece`が必要です。
+        - `pyproject.toml`に`sentencepiece`を追加しました。
+
+- 2025/07/28
+    - FLUX.1 KontextのLoRA学習を追加しました。詳細は[FLUX.1 KontextのLoRA学習のドキュメント](./docs/flux_kontext.md)を参照してください。
 
 - 2025/06/17
     - FramePackの推論スクリプトで [MagCache](https://github.com/Zehong-Ma/MagCache) をサポートしました。詳しくは[高度な設定](./docs/advanced_config.md#magcache)を参照してください。
