@@ -26,7 +26,7 @@ You need to download the DiT, AE, Text Encoder 1 (T5-XXL), and Text Encoder 2 (C
 
 DiT, AE, Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L) のモデルをダウンロードする必要があります。
 
-- **DiT, AE**: [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) リポジトリからダウンロードしてください。`flux1-kontext-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusres形式なので使用できません。
+- **DiT, AE**: [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) リポジトリからダウンロードしてください。`flux1-kontext-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusers形式なので使用できません。
 - **Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L)**: [ComfyUIのFLUX Text Encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) リポジトリからダウンロードしてください。T5-XXLには`t5xxl_fp16.safetensors`を使用してください。これらのモデルをご提供いただいたComfyUIに感謝します。
 </details>
 
