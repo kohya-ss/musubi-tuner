@@ -156,24 +156,12 @@ def save_images_grid(
 
 
 def encode_prompt(
-    prompt: Union[str, list[str]],
+    prompt: str,
     device: torch.device,
     num_videos_per_prompt: int,
     text_encoder: TextEncoder,
 ):
-    # If we got multiple prompts, just call ourselves on each one separately
-    if isinstance(prompt, list) and len(prompt) > 1:
-        embeds, masks = [], []
-        for single in prompt:
-            emb, mask = encode_prompt(single, device, num_videos_per_prompt, text_encoder)  # Avoids infinite loop b/c called with string so misses this logic
-            embeds.append(emb)
-            if mask is not None:
-                masks.append(mask)
-        # concatenate along the batch axis
-        prompt_embeds = torch.cat(embeds, dim=0)
-        attention_mask = torch.cat(masks, dim=0) if masks else None
-        return prompt_embeds, attention_mask
-
+    assert isinstance(prompt, str), "prompt must be a str!"
     # --- from here down, `prompt` is a single str ---
     data_type = "video"  # video only, image is not supported
 
@@ -212,7 +200,7 @@ def encode_prompt(
     return prompt_embeds, attention_mask
 
 
-def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=False, accelerator=None):
+def encode_input_prompt(conditioning_dict: dict, args, device, fp8_llm=False, accelerator=None):
     # constants
     prompt_template_video = "dit-llm-encode-video"
     prompt_template = "dit-llm-encode"
@@ -298,32 +286,42 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder_2.eval()
 
     # encode prompt
-    logger.info("Encoding with text encoder 1")
     text_encoder.to(device=device)
-    if fp8_llm:
-        with accelerator.autocast():
-            prompt_embeds, prompt_mask = encode_prompt(prompt, device, num_videos, text_encoder)
-    else:
-        prompt_embeds, prompt_mask = encode_prompt(prompt, device, num_videos, text_encoder)
+    logger.info("Encoding for LLM")
+    for prompt_type, prompt_dict in conditioning_dict.items():  # prompt_type is a dict containing "prompt": prompt now
+        prompt = prompt_dict["prompt"]
+        if prompt is not None:
+            logger.info(f"Processing {prompt_type} prompt")
+            logger.info(f"{prompt}")
+            logger.info("------------------------------")
+            if fp8_llm:
+                with accelerator.autocast():
+                    prompt_embeds, prompt_mask = encode_prompt(prompt, device, num_videos, text_encoder)
+            else:
+                prompt_embeds, prompt_mask = encode_prompt(prompt, device, num_videos, text_encoder)
+            conditioning_dict[prompt_type]["conditioning"] = prompt_embeds.to("cpu")
+            conditioning_dict[prompt_type]["mask"] = prompt_mask.to("cpu")
     text_encoder = None
     clean_memory_on_device(device)
 
-    logger.info("Encoding with text encoder 2")
     text_encoder_2.to(device=device)
-    if args.prompt_2:
-        prompt = args.prompt_2
-        logger.info("Using separate prompt for CLIP...")
-    prompt_embeds_2, prompt_mask_2 = encode_prompt(prompt, device, num_videos, text_encoder_2)
-
-    prompt_embeds = prompt_embeds.to("cpu")
-    prompt_mask = prompt_mask.to("cpu")
-    prompt_embeds_2 = prompt_embeds_2.to("cpu")
-    prompt_mask_2 = prompt_mask_2.to("cpu")
+    logger.info("Encoding for CLIP")
+    for prompt_type, prompt_dict in conditioning_dict.items():
+        clip_prompt = prompt_dict["prompt"]
+        if prompt_type == "positive" and args.prompt_2 is not None:
+            clip_prompt = args.prompt_2
+            logger.info("Using separate prompt for CLIP...")
+        if clip_prompt is not None:
+            logger.info(f"Processing {prompt_type} prompt")
+            logger.info(f"{clip_prompt}")
+            logger.info("------------------------------")
+            prompt_embeds_2, prompt_mask_2 = encode_prompt(clip_prompt, device, num_videos, text_encoder_2)
+            conditioning_dict[prompt_type]["clip_conditioning"] = prompt_embeds_2.to("cpu")
+            conditioning_dict[prompt_type]["clip_mask"] = prompt_mask_2.to("cpu")
 
     text_encoder_2 = None
     clean_memory_on_device(device)
-
-    return prompt_embeds, prompt_mask, prompt_embeds_2, prompt_mask_2
+    return conditioning_dict
 
 
 # endregion
@@ -571,18 +569,14 @@ def main():
                 logger.info(f"Total CFG steps: {len(included_steps)}")
             else:
                 logger.info("Full CFG enabled!")
-            negative_prompt = args.negative_prompt
-            if negative_prompt is None:
-                logger.info("Negative prompt is not provided, using empty prompt")
-                negative_prompt = ""
-            logger.info(f"Encoding negative prompt: '{negative_prompt}'")
-            prompt = [negative_prompt, prompt] if args.perp_neg is None else ["", negative_prompt, prompt]
-        else:
-            if args.negative_prompt is not None:
-                logger.warning("Negative prompt is provided but guidance_scale is 1.0, negative prompt will be ignored.")
+        negative_prompt = args.negative_prompt
+        if negative_prompt is None:
+            logger.info("Negative prompt is not provided, using empty prompt")
+            negative_prompt = ""
+        conditioning_dict = {"positive": {"prompt": prompt}, "negative": {"prompt": negative_prompt}, "nocond": {"prompt": None if args.perp_neg is None else ""}}
 
-        prompt_embeds, prompt_mask, prompt_embeds_2, prompt_mask_2 = encode_input_prompt(
-            prompt, args, device, args.fp8_llm, accelerator
+        conditioning_dict = encode_input_prompt(
+            conditioning_dict, args, device, args.fp8_llm, accelerator
         )
 
         # encode latents for video2video inference
@@ -847,19 +841,17 @@ def main():
         if embedded_guidance_scale is not None:
             guidance_expand = torch.tensor([embedded_guidance_scale * 1000.0] * latents.shape[0], dtype=torch.float32, device="cpu")
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
-            if args.perp_neg is not None:
-                guidance_expand = torch.cat([guidance_expand, guidance_expand, guidance_expand], dim=0)
-            elif do_classifier_free_guidance:
-                guidance_expand = torch.cat([guidance_expand, guidance_expand], dim=0)
 
         freqs_cos, freqs_sin = get_rotary_pos_embed_riflex(vae_ver, transformer, video_length, height, width, args.riflex_index)
         # n_tokens = freqs_cos.shape[0]
 
         # move and cast all inputs to the correct device and dtype
-        prompt_embeds = prompt_embeds.to(device=device, dtype=dit_dtype)
-        prompt_mask = prompt_mask.to(device=device)
-        prompt_embeds_2 = prompt_embeds_2.to(device=device, dtype=dit_dtype)
-        prompt_mask_2 = prompt_mask_2.to(device=device)
+        for prompt_type, prompt_dict in conditioning_dict.items():
+            if prompt_dict["prompt"] is not None:
+                prompt_dict["conditioning"] = prompt_dict["conditioning"].to(device, dit_dtype)
+                prompt_dict["mask"] = prompt_dict["mask"].to(device)
+                prompt_dict["clip_conditioning"] = prompt_dict["clip_conditioning"].to(device, dit_dtype)
+                prompt_dict["clip_mask"] = prompt_dict["clip_mask"].to(device)
 
         freqs_cos = freqs_cos.to(device=device, dtype=dit_dtype)
         freqs_sin = freqs_sin.to(device=device, dtype=dit_dtype)
@@ -873,7 +865,7 @@ def main():
         do_cfg_for_step = do_classifier_free_guidance         # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
         if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
             logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
-        # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
+
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if do_classifier_free_guidance and args.cfg_schedule is not None:
@@ -882,72 +874,39 @@ def main():
                         args.guidance_scale = scale_per_step[i + 1]
 
                 latents = scheduler.scale_model_input(latents, t)
-
-                def latent_helper(_latents):
-                    if not do_cfg_for_step:
-                        _latents_input = _latents
-                    elif args.perp_neg is None:
-                        _latents_input = torch.cat([_latents, _latents], dim=0)
-                    else:
-                        _latents_input = torch.cat([_latents, _latents, _latents], dim=0)
-                    return _latents_input
-
                 # predict the noise residual
                 with torch.no_grad(), accelerator.autocast():
-                    latents_input = latent_helper(latents)
+                    latents_input = latents
                     if image_latents is not None:
-                        latents_image_input = latent_helper(image_latents)
-                        latents_input = torch.cat([latents_input, latents_image_input], dim=1)  # 1 or 2, C*2, F, H, W
-
-                    batch_size = 1 if args.split_uncond else latents_input.shape[0]
-                    noise_pred_list = []
-                    for j in range(0, latents_input.shape[0], batch_size):
-                        if km.exit_requested:
-                            break  # this allows breaking between batches
-                        # pick the “cond” index (1) instead of uncond (0) when do_classifier_free_guidance is True but do_cfg_for_step is False
-                        slice_idx = (j + 1) if (do_classifier_free_guidance and not do_cfg_for_step) else j
-                        slice_end = slice_idx + batch_size
-
-                        noise_pred = transformer(
-                            latents_input[j: j + batch_size],
+                        latents_input = torch.cat([latents, image_latents], dim=1)
+                    batch_size = latents_input.shape[0]
+                    for prompt_type, prompt_dict in conditioning_dict.items():
+                        if (prompt_type == "negative" and not do_cfg_for_step) or prompt_dict["prompt"] is None:
+                            continue
+                        prompt_dict["transformer_out"] = transformer(
+                            latents_input,
                             t.repeat(batch_size).to(device=device, dtype=dit_dtype),
-                            text_states=prompt_embeds[slice_idx: slice_end],
-                            text_mask=prompt_mask[slice_idx: slice_end],
-                            text_states_2=prompt_embeds_2[slice_idx: slice_end],
+                            text_states=prompt_dict["conditioning"],
+                            text_mask=prompt_dict["mask"],
+                            text_states_2=prompt_dict["clip_conditioning"],
                             freqs_cos=freqs_cos,
                             freqs_sin=freqs_sin,
-                            guidance=None if do_cfg_for_step and args.disable_embedded_for_cfg else guidance_expand[slice_idx: slice_end],
+                            guidance=None if do_cfg_for_step and args.disable_embedded_for_cfg else guidance_expand,
                             return_dict=True,
                         )["x"]
-                        noise_pred_list.append(noise_pred)
-                if km.early_exit_requested:
-                    break
-                else:
-                    noise_pred = torch.cat(noise_pred_list, dim=0)
 
                 # perform classifier free guidance
                 if do_cfg_for_step:
                     if args.cfgzerostar_scaling:
-                        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                        noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)
+                        noise_pred = apply_zerostar_scaling(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], args.guidance_scale)
                     elif args.perp_neg is not None:
-                        noise_pred_nocond, noise_pred_uncond, noise_pred_cond = noise_pred.chunk(3)
-                        noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)
+                        noise_pred = perpendicular_negative_cfg(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], conditioning_dict["nocond"]["transformer_out"], args.perp_neg, args.guidance_scale)
                     else:
-                        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
+                        noise_pred = conditioning_dict["negative"]["transformer_out"] + args.guidance_scale * (conditioning_dict["positive"]["transformer_out"] - conditioning_dict["negative"]["transformer_out"])
+                else:
+                    noise_pred = conditioning_dict["positive"]["transformer_out"]
                 if i <= args.cfgzerostar_init_steps - 1:  # CFGZero* zero init
                     noise_pred *= args.cfgzerostar_multiplier
-
-                    # # SkyReels' rescale noise config is omitted for now
-                    # if guidance_rescale > 0.0:
-                    #     # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    #     noise_pred = rescale_noise_cfg(
-                    #         noise_pred,
-                    #         noise_pred_cond,
-                    #         guidance_rescale=self.guidance_rescale,
-                    #     )
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
@@ -959,9 +918,6 @@ def main():
 
                 if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
                     previewer.preview(latents)
-
-        # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
-        # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
         latents = latents.detach().cpu() if latents is not None else None
         transformer = None

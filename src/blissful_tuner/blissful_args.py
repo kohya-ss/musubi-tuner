@@ -132,7 +132,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         parser.add_argument("--apply_final_norm", action="store_true", help="Apply final norm for LLM. Default is False. Usually makes things worse.")
         parser.add_argument("--reproduce", action="store_true", help="Enable reproducible output(Same seed = same result. Default is False.")
         parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization. Better quality/accuracy with slightly more VRAM usage.")
-        parser.add_argument("--prompt_2", type=str, required=False, help="Optional different prompt for CLIP")
+        parser.add_argument("--prompt_2", type=str, default=None, help="Optional different prompt for CLIP")
         parser.add_argument("--te_multiplier", nargs=2, metavar=("llm_multiplier", "clip_multiplier"), help="Scale clip and llm influence")
     elif DIFFUSION_MODEL == "framepack":
         parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N sections. If --preview_vae is not specified it will use latent2rgb")
