@@ -946,6 +946,7 @@ def load_wan_model(
     fp8_scaled: bool = False,
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
+    lora_file_paths: Optional[List[str]] = None,
     use_scaled_mm: bool = False,
 ) -> WanModel:
     """
@@ -1004,6 +1005,7 @@ def load_wan_model(
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        lora_file_paths=lora_file_paths,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix
