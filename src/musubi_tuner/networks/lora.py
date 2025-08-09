@@ -515,23 +515,19 @@ class LoRANetwork(torch.nn.Module):
                             lora_name = f"{pfx}.{original_name}".replace(".", "_")
 
                             # exclude/include filter
-                            excluded = False
-                            for pattern in exclude_re_patterns:
-                                if pattern.match(original_name):
-                                    excluded = True
-                                    break
-                            included = False
-                            for pattern in include_re_patterns:
-                                if pattern.match(original_name):
-                                    included = True
-                                    break
-                            if excluded and not included:
-                                if verbose:
-                                    logger.info(f"exclude: {original_name}")
-                                continue
+                            if include_re_patterns:
+                                included = any(pattern.match(original_name) for pattern in include_re_patterns)
+                                if not included:
+                                    if verbose:
+                                        logger.info(f"Skipping module (not in include list): {original_name}")
+                                    continue
 
-                            # filter by name (not used in the current implementation)
-                            if filter is not None and not filter in lora_name:
+                            # 2. Exclusion check: If the module passes the inclusion check (or if no include list was provided),
+                            # check if it should be excluded by the blacklist.
+                            excluded = any(pattern.match(original_name) for pattern in exclude_re_patterns)
+                            if excluded:
+                                if verbose:
+                                    logger.info(f"Excluding module: {original_name}")
                                 continue
 
                             dim = None
@@ -771,6 +767,12 @@ class LoRANetwork(torch.nn.Module):
             # Precalculate model hashes to save time on indexing
             if metadata is None:
                 metadata = {}
+            
+            # Inject LORAID metadata if available
+            if hasattr(self, '_loraid_value') and self._loraid_value is not None:
+                metadata["ss_loraid"] = str(self._loraid_value)
+                logger.info(f"Added LORAID {self._loraid_value} to saved model metadata")
+            
             model_hash, legacy_hash = model_utils.precalculate_safetensors_hashes(state_dict, metadata)
             metadata["sshs_model_hash"] = model_hash
             metadata["sshs_legacy_hash"] = legacy_hash
