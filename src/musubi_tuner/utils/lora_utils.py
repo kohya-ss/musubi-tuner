@@ -15,6 +15,66 @@ from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
 
 
+def extract_loraid_from_lora_metadata(lora_sd: Dict[str, torch.Tensor], lora_path: str = None) -> Optional[int]:
+    """
+    Extract LORAID from LoRA state dict metadata.
+    
+    Args:
+        lora_sd: LoRA state dictionary
+        lora_path: Optional path to LoRA file (for loading metadata directly)
+        
+    Returns:
+        LORAID if found, None otherwise
+    """
+    # Try to get metadata from file if path provided
+    if lora_path and os.path.exists(lora_path):
+        try:
+            from safetensors import safe_open
+            with safe_open(lora_path, framework="pt") as f:
+                metadata = f.metadata()
+                if metadata and "ss_loraid" in metadata:
+                    return int(metadata["ss_loraid"])
+        except Exception as e:
+            logger.warning(f"Failed to extract LORAID from {lora_path}: {e}")
+    
+    return None
+
+
+def validate_loraid_compatibility(lora_weights_list: List[Dict[str, torch.Tensor]], lora_paths: List[str] = None) -> bool:
+    """
+    Validate LoRA compatibility and log LORAIDs. For single LoRA: logs LORAID. For multiple LoRAs: checks for conflicts.
+    
+    Args:
+        lora_weights_list: List of LoRA state dictionaries
+        lora_paths: Optional list of LoRA file paths
+        
+    Returns:
+        True if compatible, False otherwise
+    """
+    if not lora_weights_list:
+        return True
+        
+    loraids = []
+    paths = lora_paths or [None] * len(lora_weights_list)
+    logger.info(f"DEBUG: Validating {len(lora_weights_list)} LoRAs with paths: {paths}")
+    
+    for i, (lora_sd, path) in enumerate(zip(lora_weights_list, paths)):
+        logger.info(f"DEBUG: Processing LoRA {i}: path={path}")
+        loraid = extract_loraid_from_lora_metadata(lora_sd, path)
+        logger.info(f"DEBUG: Extracted LORAID: {loraid}")
+        if loraid is not None:
+            loraids.append(loraid)
+            
+    # Check for duplicate LORAIDs (which would indicate conflicting parameter spaces)
+    unique_loraids = set(loraids)
+    if len(loraids) != len(unique_loraids):
+        logger.error(f"Duplicate LORAIDs detected: {loraids}. This would cause parameter conflicts!")
+        return False
+        
+    logger.info(f"LORAID compatibility check passed. LORAIDs: {loraids}")
+    return True
+
+
 def filter_lora_state_dict(
     weights_sd: Dict[str, torch.Tensor],
     include_pattern: Optional[str] = None,
@@ -53,6 +113,7 @@ def load_safetensors_with_lora_and_fp8(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
+    lora_file_paths: Optional[List[str]] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -66,6 +127,7 @@ def load_safetensors_with_lora_and_fp8(
         move_to_device (bool): Whether to move tensors to the calculation device after loading.
         target_keys (Optional[List[str]]): Keys to target for optimization.
         exclude_keys (Optional[List[str]]): Keys to exclude from optimization.
+        lora_file_paths (Optional[List[str]]): Original LoRA file paths for metadata extraction.
     """
 
     # if the file name ends with 00001-of-00004 etc, we need to load the files with the same prefix
@@ -99,6 +161,42 @@ def load_safetensors_with_lora_and_fp8(
         lora_multipliers = []
         list_of_lora_weight_keys = []
     else:
+        # Validate LORAID compatibility and log LORAIDs (works for single and multi-LoRA loading)
+        logger.info(f"DEBUG: About to validate {len(lora_weights_list)} LoRAs with file paths: {lora_file_paths}")
+        
+        # DEBUG: Check what blocks each LoRA actually contains and detect overlaps
+        all_lora_blocks = {}
+        overlapping_blocks = set()
+        
+        for i, lora_sd in enumerate(lora_weights_list):
+            blocks = set()
+            for key in lora_sd.keys():
+                if "lora_unet_blocks_" in key:
+                    # Extract block number from key like "lora_unet_blocks_5_self_attn_q.lora_down.weight"
+                    try:
+                        block_part = key.split("lora_unet_blocks_")[1].split("_")[0]
+                        blocks.add(int(block_part))
+                    except (IndexError, ValueError):
+                        pass
+            all_lora_blocks[i] = blocks
+            logger.info(f"DEBUG: LoRA {i} contains parameters for blocks: {sorted(blocks)}")
+        
+        # Check for overlapping blocks between LoRAs
+        for i in range(len(all_lora_blocks)):
+            for j in range(i + 1, len(all_lora_blocks)):
+                overlap = all_lora_blocks[i].intersection(all_lora_blocks[j])
+                if overlap:
+                    logger.error(f"CRITICAL: LoRA {i} and LoRA {j} have overlapping blocks: {sorted(overlap)}!")
+                    overlapping_blocks.update(overlap)
+        
+        if overlapping_blocks:
+            logger.error(f"CRITICAL: Total overlapping blocks detected: {sorted(overlapping_blocks)}. This WILL cause blending!")
+        else:
+            logger.info("DEBUG: No block overlaps detected - LoRAs should be independent")
+        
+        if not validate_loraid_compatibility(lora_weights_list, lora_file_paths):
+            raise ValueError("LORAID compatibility check failed. Cannot load LoRAs with conflicting parameter spaces.")
+            
         list_of_lora_weight_keys = []
         for lora_sd in lora_weights_list:
             lora_weight_keys = set(lora_sd.keys())
@@ -125,7 +223,7 @@ def load_safetensors_with_lora_and_fp8(
             if original_device != calc_device:
                 model_weight = model_weight.to(calc_device)  # to make calculation faster
 
-            for lora_weight_keys, lora_sd, multiplier in zip(list_of_lora_weight_keys, lora_weights_list, lora_multipliers):
+            for lora_idx, (lora_weight_keys, lora_sd, multiplier) in enumerate(zip(list_of_lora_weight_keys, lora_weights_list, lora_multipliers)):
                 # check if this weight has LoRA weights
                 lora_name = model_weight_key.rsplit(".", 1)[0]  # remove trailing ".weight"
                 lora_name = "lora_unet_" + lora_name.replace(".", "_")
@@ -134,6 +232,16 @@ def load_safetensors_with_lora_and_fp8(
                 alpha_key = lora_name + ".alpha"
                 if down_key not in lora_weight_keys or up_key not in lora_weight_keys:
                     continue
+                    
+                # DEBUG: Log when a LoRA is being applied
+                if "blocks_0_" in lora_name or "blocks_12_" in lora_name:
+                    logger.info(f"DEBUG: Applying LoRA {lora_idx} to {lora_name} (multiplier: {multiplier})")
+                
+                # CRITICAL DEBUG: Check for potential issues (commented out - too spammy)
+                # if len(lora_weights_list) > 1:
+                #     # Log the before/after weight changes for multi-LoRA scenarios
+                #     original_weight_norm = model_weight.norm().item()
+                #     logger.info(f"DEBUG: Before applying LoRA {lora_idx} to {lora_name}: weight norm = {original_weight_norm:.6f}")
 
                 # get LoRA weights
                 down_weight = lora_sd[down_key]
@@ -142,6 +250,10 @@ def load_safetensors_with_lora_and_fp8(
                 dim = down_weight.size()[0]
                 alpha = lora_sd.get(alpha_key, dim)
                 scale = alpha / dim
+                
+                # DEBUG: Log alpha values for multi-LoRA scenarios (commented out - too spammy)
+                # if len(lora_weights_list) > 1 and ("blocks_0_" in lora_name or "blocks_12_" in lora_name):
+                #     logger.info(f"DEBUG: LoRA {lora_idx} {lora_name}: dim={dim}, alpha={alpha}, scale={scale:.4f}")
 
                 down_weight = down_weight.to(calc_device)
                 up_weight = up_weight.to(calc_device)
@@ -152,20 +264,27 @@ def load_safetensors_with_lora_and_fp8(
                     if len(up_weight.size()) == 4:  # use linear projection mismatch
                         up_weight = up_weight.squeeze(3).squeeze(2)
                         down_weight = down_weight.squeeze(3).squeeze(2)
-                    model_weight = model_weight + multiplier * (up_weight @ down_weight) * scale
+                    lora_delta = multiplier * (up_weight @ down_weight) * scale
+                    model_weight = model_weight + lora_delta
                 elif down_weight.size()[2:4] == (1, 1):
                     # conv2d 1x1
-                    model_weight = (
-                        model_weight
-                        + multiplier
+                    lora_delta = (
+                        multiplier
                         * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
                         * scale
                     )
+                    model_weight = model_weight + lora_delta
                 else:
                     # conv2d 3x3
                     conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
-                    # logger.info(conved.size(), weight.size(), module.stride, module.padding)
-                    model_weight = model_weight + multiplier * conved * scale
+                    lora_delta = multiplier * conved * scale
+                    model_weight = model_weight + lora_delta
+                
+                # CRITICAL DEBUG: Log the delta magnitude for multi-LoRA scenarios (commented out - too spammy)
+                # if len(lora_weights_list) > 1 and ("blocks_0_" in lora_name or "blocks_12_" in lora_name):
+                #     delta_norm = lora_delta.norm().item()
+                #     final_weight_norm = model_weight.norm().item()
+                #     logger.info(f"DEBUG: After applying LoRA {lora_idx}: delta norm = {delta_norm:.6f}, final weight norm = {final_weight_norm:.6f}")
 
                 # remove LoRA keys from set
                 lora_weight_keys.remove(down_key)
