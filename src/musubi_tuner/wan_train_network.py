@@ -35,6 +35,33 @@ from musubi_tuner.wan.modules.vae import WanVAE
 from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 
+def parse_loraid_args(args) -> Optional[int]:
+    """
+    Parse LORAID arguments supporting both formats:
+    --LORAID 1 2 3 OR --LORAID 1 --LORAID 2 --LORAID 3
+    For training, only the first LORAID is used.
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        First LORAID integer or None
+    """
+    if not hasattr(args, 'LORAID') or args.LORAID is None:
+        return None
+        
+    # Flatten nested lists from nargs="*" + action="append"
+    target_loraids = []
+    for loraid_list in args.LORAID:
+        if isinstance(loraid_list, list):
+            target_loraids.extend(loraid_list)
+        else:
+            target_loraids.append(loraid_list)
+    
+    # For training, only use the first LORAID
+    return target_loraids[0] if target_loraids else None
+
+
 class WanNetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
@@ -48,6 +75,79 @@ class WanNetworkTrainer(NetworkTrainer):
     @property
     def architecture_full_name(self) -> str:
         return ARCHITECTURE_WAN_FULL
+
+    def get_loraid_parameter_patterns(self, loraid: int) -> tuple[list[str], list[str]]:
+        """
+        Get include and exclude patterns for LORAID parameter space allocation.
+        Each LORAID targets different transformer blocks to prevent parameter overlap.
+        
+        Based on CLAUDE.md model analysis:
+        - 240 cross_attn layers
+        - 240 self_attn layers  
+        - 480 total attn layers
+        - Blocks numbered 0-239
+        
+        Args:
+            loraid: LoRA ID (1, 2, 3, etc.)
+            
+        Returns:
+            tuple: (include_patterns, exclude_patterns) for regex matching
+        """
+        if loraid is None:
+            return None, None
+            
+        # Model has 240 blocks total (blocks.0 through blocks.239)
+        total_blocks = 240
+        
+        # Calculate parameter space allocation based on LORAID
+        # For 200+ LoRAs support, use smaller chunks: 12 blocks per LORAID
+        # This allows for 20 LORAIDs (240/12), expandable as needed
+        blocks_per_loraid = 12
+        start_block = (loraid - 1) * blocks_per_loraid
+        end_block = min(start_block + blocks_per_loraid - 1, total_blocks - 1)
+        
+        if start_block >= total_blocks:
+            logger.warning(f"LORAID {loraid}: start block {start_block} exceeds model blocks (0-{total_blocks-1})")
+            return None, None
+        
+        # Create include patterns for this LORAID's block range
+        include_patterns = []
+        for block_idx in range(start_block, end_block + 1):
+            # Target all attention and FFN layers in these blocks
+            include_patterns.extend([
+                f"blocks\\.{block_idx}\\.self_attn\\.",
+                f"blocks\\.{block_idx}\\.cross_attn\\.", 
+                f"blocks\\.{block_idx}\\.ffn\\."
+            ])
+        
+        # No exclude patterns needed since we're being specific with includes
+        exclude_patterns = None
+        
+        logger.info(f"LORAID {loraid}: targeting blocks {start_block}-{end_block} ({end_block-start_block+1} blocks)")
+        logger.info(f"LORAID {loraid}: include patterns: {len(include_patterns)} patterns")
+        
+        return include_patterns, exclude_patterns
+
+    def apply_loraid_filtering(self, args, net_kwargs: dict):
+        """
+        Apply LORAID parameter filtering to network kwargs.
+        
+        Args:
+            args: Training arguments containing LORAID
+            net_kwargs: Network keyword arguments to modify
+        """
+        if args.LORAID is not None:
+            include_patterns, exclude_patterns = self.get_loraid_parameter_patterns(args.LORAID)
+            
+            if include_patterns:
+                # Convert patterns to regex strings for network module
+                include_regex = "|".join(include_patterns)
+                net_kwargs["loraid_include_pattern"] = include_regex
+                logger.info(f"Applied LORAID {args.LORAID} parameter filtering")
+                
+            if exclude_patterns:
+                exclude_regex = "|".join(exclude_patterns)
+                net_kwargs["loraid_exclude_pattern"] = exclude_regex
 
     def handle_model_specific_args(self, args):
         self.config = WAN_CONFIGS[args.task]
@@ -95,6 +195,74 @@ class WanNetworkTrainer(NetworkTrainer):
             logger.info(f"Converted timestep_boundary to 0 to 1 range: {self.timestep_boundary}")
 
         self.default_guidance_scale = 1.0  # not used
+        
+        # Store LORAID for later use
+        self.loraid = args.LORAID
+        
+    def prepare_network_args(self, args, net_kwargs: dict):
+        """
+        Prepare network arguments with LORAID filtering if specified.
+        This method is called during network creation to modify net_kwargs.
+        
+        Args:
+            args: Training arguments
+            net_kwargs: Network keyword arguments to modify
+        """
+        # Apply LORAID parameter filtering
+        self.apply_loraid_filtering(args, net_kwargs)
+        
+        return net_kwargs
+
+    def add_loraid_to_metadata(self, metadata: dict, args):
+        """
+        Add LORAID information to training metadata for persistence.
+        
+        Args:
+            metadata: Existing metadata dictionary to modify
+            args: Training arguments containing LORAID
+        """
+        if hasattr(args, 'LORAID') and args.LORAID is not None:
+            metadata["ss_loraid"] = str(args.LORAID)
+            
+            # Also store the parameter space allocation for this LORAID
+            include_patterns, exclude_patterns = self.get_loraid_parameter_patterns(args.LORAID)
+            if include_patterns:
+                metadata["ss_loraid_include_patterns"] = "|".join(include_patterns)
+            if exclude_patterns:
+                metadata["ss_loraid_exclude_patterns"] = "|".join(exclude_patterns)
+                
+            logger.info(f"Added LORAID {args.LORAID} to metadata")
+            
+    def train(self, args):
+        """
+        Override train method to inject LORAID functionality.
+        """
+        # Use network_args to pass LORAID information to the network module
+        loraid = parse_loraid_args(args)
+        if loraid is not None:
+            # Add LORAID information to network_args so it gets passed to create_arch_network
+            if args.network_args is None:
+                args.network_args = []
+            
+            # Add LORAID patterns to network_args
+            include_patterns, exclude_patterns = self.get_loraid_parameter_patterns(loraid)
+            if include_patterns:
+                include_regex = "|".join(include_patterns)
+                args.network_args.append(f"loraid_include_pattern={include_regex}")
+                logger.info(f"Added LORAID {loraid} include pattern to network_args")
+            
+            if exclude_patterns:
+                exclude_regex = "|".join(exclude_patterns)
+                args.network_args.append(f"loraid_exclude_pattern={exclude_regex}")
+                
+        # Store LORAID for metadata injection via monkey patching
+        if loraid is not None:
+            # Add LORAID to network_args for persistence
+            args.network_args.append(f"loraid_value={loraid}")
+            logger.info(f"LORAID {loraid} will be saved in model metadata")
+        
+        # Call parent train method
+        return super().train(args)
 
     def process_sample_prompts(
         self,
@@ -705,6 +873,16 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "--offload_inactive_dit",
         action="store_true",
         help="Offload inactive DiT model to CPU. Cannot be used with block swap / アクティブではないDiTモデルをCPUにオフロードします。ブロックスワップと併用できません",
+    )
+    
+    # LORAID system arguments
+    parser.add_argument(
+        "--LORAID",
+        type=int,
+        nargs="*",
+        action="append",
+        default=None,
+        help="LoRA ID for deterministic parameter space allocation. Supports both formats: '--LORAID 1 2 3' or '--LORAID 1 --LORAID 2 --LORAID 3'"
     )
 
     return parser

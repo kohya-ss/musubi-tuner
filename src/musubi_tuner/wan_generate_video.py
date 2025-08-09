@@ -82,8 +82,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--t5", type=str, default=None, help="text encoder (T5) checkpoint path")
     parser.add_argument("--clip", type=str, default=None, help="text encoder (CLIP) checkpoint path")
     # LoRA
-    parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
-    parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier")
+    parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path(s). Supports multiple formats: '--lora_weight file1.safetensors file2.safetensors' or '--lora_weight file1.safetensors,file2.safetensors'. When using --LORAID, provide multiple LoRA files that correspond to the specified LORAIDs")
+    parser.add_argument("--lora_multiplier", type=float, nargs="*", action="append", default=None, help="LoRA multipliers. Supports both formats: '--lora_multiplier 1.0 0.5' or '--lora_multiplier 1.0 --lora_multiplier 0.5'. Should correspond to LoRA files order.")
     parser.add_argument("--lora_weight_high_noise", type=str, nargs="*", default=None, help="LoRA weight path for high noise")
     parser.add_argument("--lora_multiplier_high_noise", type=float, nargs="*", default=None, help="LoRA multiplier for high noise")
     parser.add_argument("--include_patterns", type=str, nargs="*", default=None, help="LoRA module include patterns")
@@ -93,6 +93,16 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Save merged model to path. If specified, no inference will be performed.",
+    )
+    
+    # LORAID system arguments
+    parser.add_argument(
+        "--LORAID",
+        type=int,
+        nargs="*",
+        action="append",
+        default=None,
+        help="LoRA IDs to load for inference. Supports both formats: '--LORAID 1 2 3' or '--LORAID 1 --LORAID 2 --LORAID 3'"
     )
 
     # inference
@@ -550,7 +560,14 @@ def load_dit_models(
     Returns:
         Tuple[WanModel, ...]: loaded DiT models. If args.dit_high_noise is specified, returns a tuple with two models: high noise and low noise.
     """
-    model = load_dit_model(args, args.dit, args.lora_weight, args.lora_multiplier, config, device, dit_weight_dtype)
+    # Parse lora arguments to support both formats
+    lora_weights = parse_lora_weight_args(args)
+    lora_multipliers = parse_lora_multiplier_args(args)
+    
+    logger.info(f"DEBUG: Parsed LoRA weights: {lora_weights}")
+    logger.info(f"DEBUG: Parsed LoRA multipliers: {lora_multipliers}")
+    
+    model = load_dit_model(args, args.dit, lora_weights, lora_multipliers, config, device, dit_weight_dtype)
 
     if args.dit_high_noise is not None and len(args.dit_high_noise) > 0:
         if args.offload_inactive_dit:
@@ -558,11 +575,12 @@ def load_dit_models(
             model.to("cpu")
 
         logger.info(f"Loading high noise DiT model from {args.dit_high_noise}")
+        # For high noise model, use the original args format since they don't need the new parsing
         dit_high_noise = load_dit_model(
             args,
             args.dit_high_noise,
-            args.lora_weight_high_noise,
-            args.lora_multiplier_high_noise,
+            args.lora_weight_high_noise if args.lora_weight_high_noise else [],
+            args.lora_multiplier_high_noise if args.lora_multiplier_high_noise else [],
             config,
             device,
             dit_weight_dtype,
@@ -570,6 +588,161 @@ def load_dit_models(
         return (dit_high_noise, model)
 
     return (model,)
+
+
+def parse_lora_multiplier_args(args) -> List[float]:
+    """
+    Parse lora_multiplier arguments supporting both formats:
+    --lora_multiplier 1.0 0.5 OR --lora_multiplier 1.0 --lora_multiplier 0.5
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        List of lora multiplier floats
+    """
+    if not hasattr(args, 'lora_multiplier') or args.lora_multiplier is None:
+        return []
+        
+    # Flatten nested lists from nargs="*" + action="append"
+    multipliers = []
+    for multiplier_list in args.lora_multiplier:
+        if isinstance(multiplier_list, list):
+            multipliers.extend(multiplier_list)
+        else:
+            multipliers.append(multiplier_list)
+    
+    return multipliers
+
+
+def parse_loraid_args(args) -> Optional[List[int]]:
+    """
+    Parse LORAID arguments supporting both formats:
+    --LORAID 1 2 3 OR --LORAID 1 --LORAID 2 --LORAID 3
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        List of LORAID integers or None
+    """
+    if not hasattr(args, 'LORAID') or args.LORAID is None:
+        return None
+        
+    # Flatten nested lists from nargs="*" + action="append"
+    target_loraids = []
+    for loraid_list in args.LORAID:
+        if isinstance(loraid_list, list):
+            target_loraids.extend(loraid_list)
+        else:
+            target_loraids.append(loraid_list)
+    
+    # Remove duplicates while preserving order
+    return list(dict.fromkeys(target_loraids)) if target_loraids else None
+
+
+def parse_lora_weight_args(args) -> List[str]:
+    """
+    Parse lora_weight arguments supporting both formats:
+    --lora_weight file1.safetensors file2.safetensors OR --lora_weight file1.safetensors,file2.safetensors
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        List of LoRA weight file paths
+    """
+    if not hasattr(args, 'lora_weight') or args.lora_weight is None:
+        return []
+        
+    lora_weights = []
+    for weight_arg in args.lora_weight:
+        # Check if comma-separated
+        if ',' in weight_arg:
+            lora_weights.extend([w.strip() for w in weight_arg.split(',') if w.strip()])
+        else:
+            lora_weights.append(weight_arg)
+    
+    return lora_weights
+
+
+def extract_loraid_from_metadata(lora_path: str) -> Optional[int]:
+    """
+    Extract LORAID from LoRA metadata.
+    
+    Args:
+        lora_path: Path to LoRA safetensors file
+        
+    Returns:
+        LORAID if found, None otherwise
+    """
+    try:
+        with safe_open(lora_path, framework="pt") as f:
+            metadata = f.metadata()
+            if metadata and "ss_loraid" in metadata:
+                return int(metadata["ss_loraid"])
+    except Exception as e:
+        logger.warning(f"Failed to extract LORAID from {lora_path}: {e}")
+    
+    return None
+
+
+def load_loraid_filtered_loras(
+    args: argparse.Namespace,
+    lora_weights: List[str],
+    lora_multipliers: List[float],
+    target_loraids: Optional[List[int]] = None
+) -> tuple[List[Dict], List[float], List[str]]:
+    """
+    Load LoRA weights with LORAID filtering.
+    
+    Args:
+        args: Command line arguments
+        lora_weights: List of LoRA weight paths
+        lora_multipliers: List of LoRA multipliers
+        target_loraids: List of target LORAIDs to load (if None, load all)
+        
+    Returns:
+        tuple: (filtered_lora_weights_list, filtered_multipliers, filtered_lora_paths)
+    """
+    if not lora_weights:
+        return [], [], []
+        
+    lora_weights_list = []
+    filtered_multipliers = []
+    filtered_lora_paths = []
+    
+    for i, lora_weight in enumerate(lora_weights):
+        logger.info(f"Loading LoRA weight from: {lora_weight}")
+        
+        # Extract LORAID from metadata
+        lora_loraid = extract_loraid_from_metadata(lora_weight)
+        
+        # Check if this LoRA should be loaded based on LORAID filtering
+        if target_loraids is not None:
+            if lora_loraid is None:
+                logger.warning(f"LoRA {lora_weight} has no LORAID metadata, skipping")
+                continue
+            elif lora_loraid not in target_loraids:
+                logger.info(f"LoRA {lora_weight} has LORAID {lora_loraid}, not in target list {target_loraids}, skipping")
+                continue
+                
+        logger.info(f"Loading LoRA {lora_weight} with LORAID {lora_loraid}")
+        
+        # Load the LoRA state dict
+        lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
+        lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+        lora_weights_list.append(lora_sd)
+        
+        # Get corresponding multiplier
+        multiplier = lora_multipliers[i] if i < len(lora_multipliers) else 1.0
+        filtered_multipliers.append(multiplier)
+        
+        # Add the file path to filtered paths
+        filtered_lora_paths.append(lora_weight)
+        
+    logger.info(f"Loaded {len(lora_weights_list)} LoRA weights with LORAID filtering")
+    return lora_weights_list, filtered_multipliers, filtered_lora_paths
 
 
 def load_dit_model(
@@ -604,21 +777,24 @@ def load_dit_model(
     if args.blocks_to_swap == 0 and not args.lycoris:
         loading_device = device
 
-    # load LoRA weights
+    # load LoRA weights with LORAID filtering
     if not args.lycoris and lora_weights is not None and len(lora_weights) > 0:
-        lora_weights_list = []
-        for lora_weight in lora_weights:
-            logger.info(f"Loading LoRA weight from: {lora_weight}")
-            lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
-            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
-            lora_weights_list.append(lora_sd)
+        # Apply LORAID filtering if specified
+        target_loraids = parse_loraid_args(args)
+        lora_weights_list, filtered_multipliers, filtered_lora_paths = load_loraid_filtered_loras(
+            args, lora_weights, lora_multipliers, target_loraids
+        )
+        # Update multipliers to the filtered ones
+        lora_multipliers = filtered_multipliers
     else:
         lora_weights_list = None
+        filtered_lora_paths = None
 
     loading_weight_dtype = dit_weight_dtype
     if args.fp8_scaled and not args.lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
 
+    logger.info(f"DEBUG: About to call load_wan_model with lora_file_paths: {filtered_lora_paths}")
     model = load_wan_model(
         config,
         device,
@@ -630,12 +806,14 @@ def load_dit_model(
         args.fp8_scaled and not args.lycoris,
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
+        lora_file_paths=filtered_lora_paths,
         use_scaled_mm=args.fp8_fast,
     )
 
     # merge LoRA weights
     if args.lycoris:
         if lora_weights is not None and len(lora_weights) > 0:
+            target_loraids = parse_loraid_args(args)
             merge_lora_weights(
                 lora_wan,
                 model,
@@ -646,6 +824,7 @@ def load_dit_model(
                 device,
                 lycoris=True,
                 save_merged_model=args.save_merged_model,
+                target_loraids=target_loraids,
             )
 
         if args.fp8_scaled:
@@ -659,8 +838,16 @@ def load_dit_model(
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
 
-    # if we only want to save the model, we can skip the rest
-    if args.save_merged_model:
+    # For non-LyCORIS LoRA merging, we need to handle save_merged_model here
+    elif args.save_merged_model:
+        if lora_weights is not None and len(lora_weights) > 0:
+            logger.info(f"Saving merged model with non-LyCORIS LoRAs to {args.save_merged_model}")
+        else:
+            logger.info(f"Saving base model (no LoRAs) to {args.save_merged_model}")
+        # Save the model (with merged LoRAs if any were loaded, or just base model)
+        from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
+        mem_eff_save_file(model.state_dict(), args.save_merged_model)
+        logger.info("Model saved")
         return None
 
     if not args.fp8_scaled:
@@ -719,6 +906,7 @@ def merge_lora_weights(
     lycoris: bool = False,
     save_merged_model: Optional[str] = None,
     converter: Optional[callable] = None,
+    target_loraids: Optional[List[int]] = None,
 ) -> None:
     """merge LoRA weights to the model
 
@@ -738,6 +926,16 @@ def merge_lora_weights(
         return
 
     for i, lora_weight in enumerate(lora_weights):
+        # Check LORAID filtering if specified
+        if target_loraids is not None:
+            lora_loraid = extract_loraid_from_metadata(lora_weight)
+            if lora_loraid is None:
+                logger.warning(f"LoRA {lora_weight} has no LORAID metadata, skipping merge")
+                continue
+            elif lora_loraid not in target_loraids:
+                logger.info(f"LoRA {lora_weight} has LORAID {lora_loraid}, not in target list {target_loraids}, skipping merge")
+                continue
+                
         if lora_multipliers is not None and len(lora_multipliers) > i:
             lora_multiplier = lora_multipliers[i]
         else:
@@ -2158,6 +2356,35 @@ def main():
     device = torch.device(device)
     logger.info(f"Using device: {device}")
     args.device = device
+    
+    # Parse and validate LORAID and LoRA weight arguments
+    target_loraids = parse_loraid_args(args)
+    lora_weights = parse_lora_weight_args(args)
+    
+    # Validate LORAID-LoRA weight correspondence
+    if target_loraids is not None and lora_weights:
+        if len(lora_weights) != len(target_loraids):
+            raise ValueError(
+                f"Number of LoRA weight files ({len(lora_weights)}) must match number of LORAIDs ({len(target_loraids)}). "
+                f"LORAIDs: {target_loraids}, LoRA files: {lora_weights}"
+            )
+            
+        # Validate that each LoRA file has the corresponding LORAID
+        for i, (loraid, lora_path) in enumerate(zip(target_loraids, lora_weights)):
+            if not os.path.exists(lora_path):
+                raise FileNotFoundError(f"LoRA weight file not found: {lora_path}")
+                
+            file_loraid = extract_loraid_from_metadata(lora_path)
+            if file_loraid != loraid:
+                raise ValueError(
+                    f"LoRA file {lora_path} has LORAID {file_loraid}, expected {loraid} (position {i+1}). "
+                    f"LoRA files must be provided in the same order as LORAIDs."
+                )
+                
+        logger.info(f"Validated {len(lora_weights)} LoRA files with LORAIDs: {target_loraids}")
+        
+    # Update args with parsed values
+    args.lora_weight = lora_weights if lora_weights else args.lora_weight
 
     if latents_mode:
         # Original latent decode mode
