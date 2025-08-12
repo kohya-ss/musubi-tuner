@@ -9,6 +9,8 @@ t2v_1_3B = EasyDict(__name__="Config: Wan T2V 1.3B")
 t2v_1_3B.update(wan_shared_cfg)
 t2v_1_3B.i2v = False
 t2v_1_3B.is_fun_control = False
+t2v_1_3B.flf2v = False
+t2v_1_3B.v2_2 = False
 
 # t5
 t2v_1_3B.t5_checkpoint = "models_t5_umt5-xxl-enc-bf16.pth"
@@ -30,3 +32,9 @@ t2v_1_3B.window_size = (-1, -1)
 t2v_1_3B.qk_norm = True
 t2v_1_3B.cross_attn_norm = True
 t2v_1_3B.eps = 1e-6
+
+# inference
+t2v_1_3B.sample_shift = 5.0
+t2v_1_3B.sample_steps = 50
+t2v_1_3B.boundary = None
+t2v_1_3B.sample_guide_scale = (5.0,)

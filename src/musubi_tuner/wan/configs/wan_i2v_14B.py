@@ -10,6 +10,8 @@ i2v_14B = EasyDict(__name__="Config: Wan I2V 14B")
 i2v_14B.update(wan_shared_cfg)
 i2v_14B.i2v = True
 i2v_14B.is_fun_control = False
+i2v_14B.flf2v = False
+i2v_14B.v2_2 = False
 
 i2v_14B.t5_checkpoint = "models_t5_umt5-xxl-enc-bf16.pth"
 i2v_14B.t5_tokenizer = "google/umt5-xxl"
@@ -36,3 +38,9 @@ i2v_14B.window_size = (-1, -1)
 i2v_14B.qk_norm = True
 i2v_14B.cross_attn_norm = True
 i2v_14B.eps = 1e-6
+
+# inference
+i2v_14B.sample_shift = 5.0  # 3.0 if size is 832*480
+i2v_14B.sample_steps = 40
+i2v_14B.boundary = None
+i2v_14B.sample_guide_scale = (5.0,)

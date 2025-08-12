@@ -240,7 +240,7 @@ class ModelOffloader(Offloader):
             weighs_to_device(b, self.device)  # make sure weights are on device
 
         for b in blocks[self.num_blocks - self.blocks_to_swap :]:
-            b.to(self.device)  # move block to device first
+            b.to(self.device)  # move block to device first. this makes sure that buffers (non weights) are on the device
             weighs_to_device(b, "cpu")  # make sure weights are on cpu
 
         synchronize_device(self.device)
@@ -256,7 +256,7 @@ class ModelOffloader(Offloader):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
 
-        # if supports_backward and backward is enabled, we swap blocks more than blocks_to_swap in backward pass
+        # if backward is enabled, we do not swap blocks in forward pass more than blocks_to_swap, because it should be on GPU
         if not self.forward_only and block_idx >= self.blocks_to_swap:
             return
 

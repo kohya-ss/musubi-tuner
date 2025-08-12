@@ -219,18 +219,18 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
                 # If they are not same, then their impls are wrong. Ours are always the correct one.
                 text_len = encoder_attention_mask.sum().item()
                 encoder_hidden_states = encoder_hidden_states[:, :text_len]
-                attention_mask = None, None, None, None
+                attention_mask = None, None, None, None, None
             else:
                 img_seq_len = hidden_states.shape[1]
                 txt_seq_len = encoder_hidden_states.shape[1]
 
-                cu_seqlens_q = get_cu_seqlens(encoder_attention_mask, img_seq_len)
+                cu_seqlens_q, seq_len = get_cu_seqlens(encoder_attention_mask, img_seq_len)
                 cu_seqlens_kv = cu_seqlens_q
                 max_seqlen_q = img_seq_len + txt_seq_len
                 max_seqlen_kv = max_seqlen_q
 
-                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
-                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv  # free memory
+                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len
+                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len  # free memory
         del encoder_attention_mask  # free memory
 
         if self.enable_teacache:

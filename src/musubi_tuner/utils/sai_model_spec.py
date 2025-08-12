@@ -12,6 +12,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_WAN,
     ARCHITECTURE_FRAMEPACK,
     ARCHITECTURE_FLUX_KONTEXT,
+    ARCHITECTURE_QWEN_IMAGE,
 )
 
 logger = BlissfulLogger(__name__, "green")
@@ -71,6 +72,7 @@ IMPL_HUNYUAN_VIDEO = "https://github.com/Tencent/HunyuanVideo"
 IMPL_WAN = "https://github.com/Wan-Video/Wan2.1"
 IMPL_FRAMEPACK = "https://github.com/lllyasviel/FramePack"
 IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
+IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -140,6 +142,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_FLUX_KONTEXT:
         arch = ARCHITECTURE_FLUX_KONTEXT
         impl = IMPL_FLUX_KONTEXT
+    elif architecture == ARCHITECTURE_QWEN_IMAGE:
+        arch = ARCHITECTURE_QWEN_IMAGE
+        impl = IMPL_QWEN_IMAGE
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

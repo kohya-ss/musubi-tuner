@@ -1,22 +1,31 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
-from einops import repeat
+
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
+
 from musubi_tuner.utils.device_utils import clean_memory_on_device
+
 from musubi_tuner.wan.modules.attention import flash_attention
+from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
-from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+
+__all__ = ["WanModel"]
+
+# blissful start
+from einops import repeat
 from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
-__all__ = ["WanModel"]
-
+# blissful adds kwargs to pass through RoPE/RIFLe
+# blissful end
 
 def sinusoidal_embedding_1d(dim, position):
     # preprocess
@@ -47,6 +56,7 @@ def rope_apply(x, grid_sizes, freqs):
 
         # split freqs
         freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
         # loop over samples
         output = []
         for i, (f, h, w) in enumerate(grid_sizes.tolist()):
@@ -72,12 +82,20 @@ def rope_apply(x, grid_sizes, freqs):
         return torch.stack(output).float()
 
 
-def calculate_freqs_i(fhw, c, freqs):
-    f, h, w = fhw
+def calculate_freqs_i(fhw, c, freqs, f_indices=None):
+    """f_indices is used to select specific frames for rotary embedding. e.g. [0,8] (with start image) or [0,8,20] (with start and end images)"""
+    f, h, w = fhw[:3]
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+    if f_indices is None:
+        freqs_f = freqs[0][:f]
+    else:
+        logger.info(f"Using f_indices: {f_indices} for rotary embedding. fhw: {fhw}")
+        freqs_f = freqs[0][f_indices]
+
     freqs_i = torch.cat(
         [
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs_f.view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
         ],
@@ -163,7 +181,17 @@ class WanLayerNorm(nn.LayerNorm):
 
 class WanSelfAttention(nn.Module):
 
-    def __init__(self, dim, num_heads, window_size=(-1, -1), qk_norm=True, eps=1e-6, attn_mode="torch", split_attn=False, rope_func="default"):
+    def __init__(
+            self,
+            dim,
+            num_heads,
+            window_size=(-1, -1),
+            qk_norm=True,
+            eps=1e-6,
+            attn_mode="torch",
+            split_attn=False,
+            **kwargs,
+        ):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -174,7 +202,7 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
         self.attn_mode = attn_mode
         self.split_attn = split_attn
-        self.rope_func = rope_func
+        self.rope_func = kwargs.get("rope_func") if kwargs and kwargs.get("rope_func") is not None else "default"
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -213,6 +241,7 @@ class WanSelfAttention(nn.Module):
         q = q.view(b, s, n, d)
         k = k.view(b, s, n, d)
         v = v.view(b, s, n, d)
+
         if self.rope_func == "comfy":
             q, k = apply_rope_comfy(q, k, freqs)
         else:
@@ -230,7 +259,7 @@ class WanSelfAttention(nn.Module):
         return x
 
 
-class WanT2VCrossAttention(WanSelfAttention):
+class WanCrossAttention(WanSelfAttention):
 
     def forward(self, x, context, context_lens):
         r"""
@@ -326,8 +355,9 @@ class WanI2VCrossAttention(WanSelfAttention):
         return x
 
 
+# For v2.1
 WAN_CROSSATTENTION_CLASSES = {
-    "t2v_cross_attn": WanT2VCrossAttention,
+    "t2v_cross_attn": WanCrossAttention,
     "i2v_cross_attn": WanI2VCrossAttention,
 }
 
@@ -346,7 +376,8 @@ class WanAttentionBlock(nn.Module):
         eps=1e-6,
         attn_mode="torch",
         split_attn=False,
-        rope_func="default"
+        model_version="2.1",  # New!
+        **kwargs,
     ):
         super().__init__()
         self.dim = dim
@@ -356,13 +387,19 @@ class WanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
-        self.rope_func = rope_func
+        self.model_version = model_version  # New!
+        self.rope_func = kwargs.get("rope_func") if kwargs.get("rope_func") is not None else "default"
 
         # layers
+        if model_version == "2.1":
+            cross_attn_class = WAN_CROSSATTENTION_CLASSES[cross_attn_type]
+        elif model_version == "2.2":
+            cross_attn_class = WanCrossAttention  # For Wan2.2, we use the same cross-attention class
+
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, attn_mode, split_attn, rope_func)
+        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, attn_mode, split_attn, **kwargs)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
+        self.cross_attn = cross_attn_class(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim))
 
@@ -381,42 +418,46 @@ class WanAttentionBlock(nn.Module):
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
-            e(Tensor): Shape [B, 6, C]
+            e(Tensor): Shape [B, 6, C] for 2.1, [B, L, 6, C] for 2.2
             seq_lens(Tensor): Shape [B], length of each sequence in batch
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         assert e.dtype == torch.float32
-        # with amp.autocast(dtype=torch.float32):
-        #     e = (self.modulation + e).chunk(6, dim=1)
-        # support fp8
-        e = self.modulation.to(torch.float32) + e
-        e = e.chunk(6, dim=1)
-        assert e[0].dtype == torch.float32
+        if self.model_version == "2.1":
+            e = self.modulation.to(torch.float32) + e
+            e = e.chunk(6, dim=1)
+            assert e[0].dtype == torch.float32
 
-        # self-attention
-        y = self.self_attn(self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes, freqs)
-        # with amp.autocast(dtype=torch.float32):
-        #     x = x + y * e[2]
-        x = x + y.to(torch.float32) * e[2]
-        del y
+            # self-attention
+            y = self.self_attn(self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes, freqs)
+            x = x + y.to(torch.float32) * e[2]
+            del y
 
-        # cross-attention & ffn function
-        # def cross_attn_ffn(x, context, context_lens, e):
-        #     x += self.cross_attn(self.norm3(x), context, context_lens)
-        #     y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
-        #     # with amp.autocast(dtype=torch.float32):
-        #     #     x = x + y * e[5]
-        #     x += y.to(torch.float32) * e[5]
-        #     return x
-        # x = cross_attn_ffn(x, context, context_lens, e)
+            # cross-attention & ffn
+            x = x + self.cross_attn(self.norm3(x), context, context_lens)
+            del context
+            y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
+            x = x + y.to(torch.float32) * e[5]
+            del y
+        else:  # For Wan2.2
+            e = self.modulation.to(torch.float32) + e
+            e = e.chunk(6, dim=2)  # e is [B, L, 6, C] for 2.2
+            assert e[0].dtype == torch.float32
 
-        # x += self.cross_attn(self.norm3(x), context, context_lens) # backward error
-        x = x + self.cross_attn(self.norm3(x), context, context_lens)
-        del context
-        y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
-        x = x + y.to(torch.float32) * e[5]
-        del y
+            # self-attention
+            y = self.self_attn(self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2), seq_lens, grid_sizes, freqs)
+            x = x + y.to(torch.float32) * e[2].squeeze(2)
+            del y
+
+            # cross-attention & ffn
+            x = x + self.cross_attn(self.norm3(x), context, context_lens)
+            del context
+            y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
+            x = x + y.to(torch.float32) * e[5].squeeze(2)
+
+            del y
+
         return x
 
     def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
@@ -427,12 +468,13 @@ class WanAttentionBlock(nn.Module):
 
 class Head(nn.Module):
 
-    def __init__(self, dim, out_dim, patch_size, eps=1e-6):
+    def __init__(self, dim, out_dim, patch_size, eps=1e-6, model_version="2.1"):  # New!
         super().__init__()
         self.dim = dim
         self.out_dim = out_dim
         self.patch_size = patch_size
         self.eps = eps
+        self.model_version = model_version  # New!
 
         # layers
         out_dim = math.prod(patch_size) * out_dim
@@ -445,22 +487,26 @@ class Head(nn.Module):
     def forward(self, x, e):
         r"""
         Args:
-            x(Tensor): Shape [B, L1, C]
-            e(Tensor): Shape [B, C]
+            x(Tensor): Shape [B, L, C]
+            e(Tensor): Shape [B, C] for 2.1, [B, L, 6, C] for 2.2
         """
         assert e.dtype == torch.float32
-        # with amp.autocast(dtype=torch.float32):
-        #     e = (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
-        #     x = self.head(self.norm(x) * (1 + e[1]) + e[0])
-        # support fp8
-        e = (self.modulation.to(torch.float32) + e.unsqueeze(1)).chunk(2, dim=1)
-        x = self.head(self.norm(x) * (1 + e[1]) + e[0])
+        if self.model_version == "2.1":
+            e = (self.modulation.to(torch.float32) + e.unsqueeze(1)).chunk(2, dim=1)
+            x = self.head(self.norm(x) * (1 + e[1]) + e[0])
+        else:  # For Wan2.2
+            e = (self.modulation.unsqueeze(0).to(torch.float32) + e.unsqueeze(2)).chunk(2, dim=2)
+            x = self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2))
+
         return x
+
+
+FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER = 257 * 2
 
 
 class MLPProj(torch.nn.Module):
 
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, in_dim, out_dim, flf_pos_emb=False):
         super().__init__()
 
         self.proj = torch.nn.Sequential(
@@ -470,10 +516,31 @@ class MLPProj(torch.nn.Module):
             torch.nn.Linear(in_dim, out_dim),
             torch.nn.LayerNorm(out_dim),
         )
+        if flf_pos_emb:  # NOTE: we only use this for `flf2v`
+            self.emb_pos = nn.Parameter(torch.zeros(1, FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER, 1280))
+        else:
+            self.emb_pos = None
 
     def forward(self, image_embeds):
+        if self.emb_pos is not None:  # for `flf2v`
+            bs, n, d = image_embeds.shape
+            image_embeds = image_embeds.view(-1, 2 * n, d)
+            image_embeds = image_embeds + self.emb_pos
         clip_extra_context_tokens = self.proj(image_embeds)
         return clip_extra_context_tokens
+
+
+FP8_OPTIMIZATION_TARGET_KEYS = ["blocks"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = [
+    "norm",
+    "patch_embedding",
+    "text_embedding",
+    "time_embedding",
+    "time_projection",
+    "head",
+    "modulation",
+    "img_emb",
+]
 
 
 class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
@@ -488,6 +555,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
     def __init__(
         self,
         model_type="t2v",
+        model_version="2.1",  # New!
         patch_size=(1, 2, 2),
         text_len=512,
         in_dim=16,
@@ -504,9 +572,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         eps=1e-6,
         attn_mode=None,
         split_attn=False,
-        rope_func="default",
-        riflex_index=0,
-        num_frames=81
+        **kwargs,
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -514,6 +580,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         Args:
             model_type (`str`, *optional*, defaults to 't2v'):
                 Model variant - 't2v' (text-to-video) or 'i2v' (image-to-video)
+            model_version (`str`, *optional*, defaults to '2.1'):
+                Version of the model, e.g., '2.1' or '2.2'. This is used to determine the modulation strategy.
             patch_size (`tuple`, *optional*, defaults to (1, 2, 2)):
                 3D patch dimensions for video embedding (t_patch, h_patch, w_patch)
             text_len (`int`, *optional*, defaults to 512):
@@ -546,8 +614,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         super().__init__()
 
-        assert model_type in ["t2v", "i2v"]
+        assert model_type in ["t2v", "i2v", "flf2v"], f"Invalid model_type: {model_type}. Must be one of ['t2v', 'i2v', 'flf2v']."
         self.model_type = model_type
+        self.model_version = model_version  # New!
 
         self.patch_size = patch_size
         self.text_len = text_len
@@ -565,7 +634,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.eps = eps
         self.attn_mode = attn_mode if attn_mode is not None else "torch"
         self.split_attn = split_attn
-        self.rope_func = rope_func
+        self.rope_func = kwargs.get("rope_func") if kwargs.get("rope_func") is not None else "default"
+        self.riflex_index = kwargs.get("riflex_index", 0)
+        self.num_frames = kwargs.get("num_frames", 81)
 
         # embeddings
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -579,22 +650,34 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.blocks = nn.ModuleList(
             [
                 WanAttentionBlock(
-                    cross_attn_type, dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps, attn_mode, split_attn, rope_func
+                    cross_attn_type,
+                    dim,
+                    ffn_dim,
+                    num_heads,
+                    window_size,
+                    qk_norm,
+                    cross_attn_norm,
+                    eps,
+                    attn_mode,
+                    split_attn,
+                    model_version=self.model_version,  # New!
+                    **kwargs,
                 )
                 for _ in range(num_layers)
             ]
         )
-        if rope_func == "comfy":
+        if self.rope_func == "comfy":
             d = self.dim // self.num_heads
             self.rope_embedder = EmbedND_RifleX(
                 d,
                 10000.0,
                 [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)],
-                num_frames=num_frames,
-                k=riflex_index,
+                num_frame=self.num_frames,
+                k=self.riflex_index
             )
+
         # head
-        self.head = Head(dim, out_dim, patch_size, eps)
+        self.head = Head(dim, out_dim, patch_size, eps, model_version=self.model_version)  # New!
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
@@ -604,8 +687,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         )
         self.freqs_fhw = {}
 
-        if model_type == "i2v":
-            self.img_emb = MLPProj(1280, dim)
+        if self.model_version == "2.1" and (model_type == "i2v" or model_type == "flf2v"):
+            self.img_emb = MLPProj(1280, dim, flf_pos_emb=model_type == "flf2v")
 
         # initialize weights
         self.init_weights()
@@ -618,20 +701,15 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
     @property
     def dtype(self):
-        return next(self.parameters()).dtype
+        return self.patch_embedding.weight.dtype
 
     @property
     def device(self):
-        return next(self.parameters()).device
+        return self.patch_embedding.weight.device
 
     def fp8_optimization(
-        self,
-        state_dict: dict[str, torch.Tensor],
-        device: torch.device,
-        use_scaled_mm: bool = False,
-        upcast_linear: bool = False,
-        quant_dtype: Optional[torch.dtype] = None
-    ) -> dict[str, torch.Tensor]:
+        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
+    ) -> int:
         """
         Optimize the model state_dict with fp8.
 
@@ -642,28 +720,14 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 The device to calculate the weight.
             move_to_device (bool):
                 Whether to move the weight to the device after optimization.
-            upcast_linear (bool):
-                Whether to upcast the linear transformations to fp32
-            quant_dtype Optional(torch.dtype):
-                Dtype to do quantization calculations in. Model dtype is used by default.
         """
-        TARGET_KEYS = ["blocks"]
-        EXCLUDE_KEYS = [
-            "norm",
-            "patch_embedding",
-            "text_embedding",
-            "time_embedding",
-            "time_projection",
-            "head",
-            "modulation",
-            "img_emb",
-        ]
-
         # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, quant_dtype=quant_dtype)
+        state_dict = optimize_state_dict_with_fp8(
+            state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device
+        )
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear, quant_dtype=quant_dtype, exclude_ffn_from_scaled_mm=True)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
 
         return state_dict
 
@@ -673,7 +737,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.enable_gradient_checkpointing()
 
-        logger.info("WanModel: Gradient checkpointing enabled.")
+        print(f"WanModel: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -681,7 +745,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-        logger.info("WanModel: Gradient checkpointing disabled.")
+        print(f"WanModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
         self.blocks_to_swap = blocks_to_swap
@@ -694,7 +758,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.offloader = ModelOffloader(
             "wan_attn_block", self.blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device  # , debug=True
         )
-        logger.info(
+        print(
             f"WanModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. Supports backward: {supports_backward}"
         )
 
@@ -702,13 +766,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            logger.info("WanModel: Block swap set to forward only.")
+            print(f"WanModel: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            logger.info("WanModel: Block swap set to forward and backward.")
+            print(f"WanModel: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -726,7 +790,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             return
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
-    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None):
+    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None):
         r"""
         Forward pass through the diffusion model
 
@@ -743,6 +807,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 CLIP image features for image-to-video mode
             y (List[Tensor], *optional*):
                 Conditional video inputs for image-to-video mode, same shape as x
+            skip_block_indices (List[int], *optional*):
+                Indices of blocks to skip during forward pass
+            f_indices (List[List[int]], *optional*):
+                Indices of frames used for rotary embeddings, list of lists for each video in the batch
 
         Returns:
             List[Tensor]:
@@ -762,20 +830,25 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             y = None
 
         # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
-        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
+        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]  # x[0].shape = [1, 5120, F, H, W]
+        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])  # list of [F, H, W]
+
+        freqs_list = []
         if self.rope_func == "default":
-            freqs_list = []
-            for fhw in grid_sizes:
+            for i, fhw in enumerate(grid_sizes):
                 fhw = tuple(fhw.tolist())
+                if f_indices is not None:
+                    fhw = tuple(list(fhw) + f_indices[i])  # add f_indices to fhw for cache key
                 if fhw not in self.freqs_fhw:
                     c = self.dim // self.num_heads // 2
-                    self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs)
+                    self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs, None if f_indices is None else f_indices[i])
                 freqs_list.append(self.freqs_fhw[fhw])
+
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len, f"Sequence length exceeds maximum allowed length {seq_len}. Got {seq_lens.max()}"
         x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
+
         if self.rope_func == "comfy":
             f_len = ((F + (self.patch_size[0] // 2)) // self.patch_size[0])
             h_len = ((H + (self.patch_size[1] // 2)) // self.patch_size[1])
@@ -790,9 +863,18 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # time embeddings
         # with amp.autocast(dtype=torch.float32):
         with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
-            e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
-            e0 = self.time_projection(e).unflatten(1, (6, self.dim))
-            assert e.dtype == torch.float32 and e0.dtype == torch.float32
+            if self.model_version == "2.1":
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
+                e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+            else:  # For Wan2.2
+                if t.dim() == 1:
+                    # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
+                    t = t.unsqueeze(1).expand(-1, seq_len)
+                bt = t.size(0)
+                t = t.flatten()
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float())
+                e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+        assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
         # context
         context_lens = None
@@ -812,7 +894,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         if self.blocks_to_swap:
             clean_memory_on_device(device)
 
-        # logger.info(f"x: {x.shape}, e: {e0.shape}, context: {context.shape}, seq_lens: {seq_lens}")
+        # print(f"x: {x.shape}, e: {e0.shape}, context: {context.shape}, seq_lens: {seq_lens}")
         for block_idx, block in enumerate(self.blocks):
             is_block_skipped = skip_block_indices is not None and block_idx in skip_block_indices
 
@@ -907,26 +989,40 @@ def load_wan_model(
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype],
     fp8_scaled: bool = False,
-    rope_func: str = "default",
-    riflex_index: int = 0,
-    num_frames: int = 81,
-    upcast_linear: bool = False,
-    quant_dtype: Optional[torch.dtype] = None,
+    lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[List[float]] = None,
+    use_scaled_mm: bool = False,
+    **kwargs,
 ) -> WanModel:
+    """
+    Load a WAN model from the specified checkpoint.
+
+    Args:
+        config (any): Configuration object containing model parameters.
+        device (Union[str, torch.device]): Device to load the model on.
+        dit_path (str): Path to the DiT model checkpoint.
+        attn_mode (str): Attention mode to use, e.g., "torch", "flash", etc.
+        split_attn (bool): Whether to use split attention.
+        loading_device (Union[str, torch.device]): Device to load the model weights on.
+        dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
+            If None, it will be loaded as is (same as the state_dict) or scaled for fp8. if not None, model weights will be casted to this dtype.
+        fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
+        lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
+        lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+    """
     # dit_weight_dtype is None for fp8_scaled
-    #assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
-    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
-    wan_loading_device = torch.device("cpu") if fp8_scaled else loading_device
+
     with init_empty_weights():
-        logger.info(f"Initialize WanModel from {dit_path}")
-        logger.info(f"    load_device={wan_loading_device}, compute_device={device}, dtype={dit_weight_dtype}")
-        logger.info(f"    attention_mode={attn_mode} (split_attn={split_attn})")
-        logger.info(f"    rope_func={rope_func}, riflex_index={riflex_index}")
+        logger.info(
+            f"Creating WanModel. I2V: {config.i2v}, FLF2V: {config.flf2v}, V2.2: {config.v2_2}, device: {device}, loading_device: {loading_device}, fp8_scaled: {fp8_scaled}"
+        )
         model = WanModel(
-            model_type="i2v" if config.i2v else "t2v",
+            model_type="i2v" if config.i2v else ("flf2v" if config.flf2v else "t2v"),
+            model_version="2.1" if not config.v2_2 else "2.2",
             dim=config.dim,
             eps=config.eps,
             ffn_dim=config.ffn_dim,
@@ -938,15 +1034,24 @@ def load_wan_model(
             text_len=config.text_len,
             attn_mode=attn_mode,
             split_attn=split_attn,
-            rope_func=rope_func,
-            riflex_index=riflex_index,
-            num_frames=num_frames
+            **kwargs,
         )
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
 
-    # load model weights with the specified dtype or as is
-    sd = load_safetensors(dit_path, wan_loading_device, disable_mmap=True, dtype=dit_weight_dtype)
+    # load model weights with dynamic fp8 optimization and LoRA merging if needed
+    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+
+    sd = load_safetensors_with_lora_and_fp8(
+        model_files=dit_path,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=fp8_scaled,
+        calc_device=device,
+        move_to_device=(loading_device == device),
+        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+    )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix
     for key in list(sd.keys()):
@@ -954,15 +1059,19 @@ def load_wan_model(
             sd[key[22:]] = sd.pop(key)
 
     if fp8_scaled:
-        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
-        logger.info("Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm)
 
-        # make sure all the model weights are on the loading_device
-        for key in sd.keys():
-            sd[key] = sd[key].to(loading_device)
+        if loading_device.type != "cpu":
+            # make sure all the model weights are on the loading_device
+            logger.info(f"Moving weights to {loading_device}")
+            for key in sd.keys():
+                sd[key] = sd[key].to(loading_device)
 
     info = model.load_state_dict(sd, strict=True, assign=True)
+    if dit_weight_dtype is not None:
+        # cast model weights to the specified dtype. This makes sure that the model is in the correct dtype
+        logger.info(f"Casting model weights to {dit_weight_dtype}")
+        model = model.to(dit_weight_dtype)
     logger.info(f"Loaded DiT model from {dit_path}, info={info}")
 
     return model

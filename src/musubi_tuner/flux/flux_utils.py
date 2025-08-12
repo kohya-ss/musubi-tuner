@@ -138,7 +138,7 @@ def load_flow_model(
         loading_device = device
 
     device = torch.device(device)
-    loading_device = loading_device if loading_device is not None else device
+    loading_device = torch.device(loading_device) if loading_device is not None else device
     flux_kontext_loading_device = loading_device if not fp8_scaled else torch.device("cpu")
 
     # build model
