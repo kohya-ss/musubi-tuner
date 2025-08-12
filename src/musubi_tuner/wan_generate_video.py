@@ -1563,8 +1563,8 @@ def run_sampling(
     latent = noise
     latent_storage_device = device if not use_cpu_offload else "cpu"
     latent = latent.to(latent_storage_device)
-    if args.preview_latent_every:
-        previewer = LatentPreviewer(args, noise, scheduler, model.device, model.dtype, model_type="wan")
+    if args.preview_latent_every: # blissful
+        previewer = LatentPreviewer(args, noise, scheduler, models[0].device, models[0].dtype, model_type="wan")
     km = BlissfulKeyboardManager()
     # cfg skip
     apply_cfg_array = []
