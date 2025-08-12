@@ -631,13 +631,17 @@ def load_dit_model(
     else:
         lora_weights_list = None
 
-    loading_weight_dtype = None if args.mixed_precision_transformer else dit_weight_dtype
-    if not args.mixed_precision_transformer and (args.fp8_scaled or args.lora_weight is not None):
-        loading_weight_dtype = dit_dtype  # load as-is
-
+    loading_weight_dtype = dit_weight_dtype
     if args.fp8_scaled and not args.lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
+    if args.mixed_precision_transformer: # blissful
+        loading_weight_dtype = None
 
+    blissful_kwargs = {
+        "rope_func": args.rope_func if hasattr(args, "rope_func") else "default",
+        "riflex_index": args.riflex_index if hasattr(args, "riflex_index") else 0,
+        "num_frames": args.video_length if hasattr(args, "video_length") else 81,
+    }
     model = load_wan_model(
         config,
         device,
@@ -650,9 +654,7 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
         use_scaled_mm=args.fp8_fast,
-        rope_func=args.rope_func,
-        riflex_index=args.riflex_index,
-        num_frames=args.video_length,
+        **blissful_kwargs
     )
 
     # merge LoRA weights

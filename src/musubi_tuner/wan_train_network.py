@@ -464,10 +464,15 @@ class WanNetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         dit_weight_dtype = None if args.mixed_precision_transformer else dit_weight_dtype
+        blissful_kwargs = {
+            "rope_func": args.rope_func if hasattr(args, "rope_func") else "default",
+            "riflex_index": args.riflex_index if hasattr(args, "riflex_index") else 0,
+            "num_frames": args.video_length if hasattr(args, "video_length") else 81,
+        }
         model = load_wan_model(
             self.config, accelerator.device, dit_path, attn_mode, split_attn,
-            loading_device, dit_weight_dtype, args.fp8_scaled, rope_func=args.rope_func,
-            quant_dtype=torch.float32 if args.upcast_quantization else None, upcast_linear=args.upcast_linear
+            loading_device, dit_weight_dtype, args.fp8_scaled,
+            **blissful_kwargs
         )
         if self.high_low_training:
             # load high noise model
