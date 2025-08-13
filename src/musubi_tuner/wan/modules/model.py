@@ -8,24 +8,24 @@ from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
 
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 
 from musubi_tuner.wan.modules.attention import flash_attention
-from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
-from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
 __all__ = ["WanModel"]
 
 # blissful start
 from einops import repeat
+from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 # blissful adds kwargs to pass through RoPE/RIFLe
 # blissful end
+
 
 def sinusoidal_embedding_1d(dim, position):
     # preprocess
@@ -672,7 +672,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 d,
                 10000.0,
                 [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)],
-                num_frame=self.num_frames,
+                num_frames=self.num_frames,
                 k=self.riflex_index
             )
 
@@ -1051,6 +1051,7 @@ def load_wan_model(
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        quant_dtype=kwargs.get("quant_dtype", None)
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

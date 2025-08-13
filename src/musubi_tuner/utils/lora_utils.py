@@ -3,16 +3,12 @@ import re
 from typing import Dict, List, Optional, Union
 import torch
 
-import logging
-
 from tqdm import tqdm
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-
-from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization, optimize_state_dict_with_fp8
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+from blissful_tuner.fp8_optimization import load_safetensors_with_fp8_optimization
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def filter_lora_state_dict(
@@ -53,6 +49,7 @@ def load_safetensors_with_lora_and_fp8(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
+    quant_dtype: torch.dtype = None
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -187,6 +184,7 @@ def load_safetensors_with_lora_and_fp8(
         target_keys,
         exclude_keys,
         weight_hook=weight_hook,
+        quant_dtype=quant_dtype,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -208,6 +206,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
     weight_hook: callable = None,
+    quant_dtype: torch.dtype = None
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
@@ -216,7 +215,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
         logger.info(f"Loading state dict with FP8 optimization. Hook enabled: {weight_hook is not None}")
         # dit_weight_dtype is not used because we use fp8 optimization
         state_dict = load_safetensors_with_fp8_optimization(
-            model_files, calc_device, target_keys, exclude_keys, move_to_device=move_to_device, weight_hook=weight_hook
+            model_files, calc_device, target_keys, exclude_keys, move_to_device=move_to_device, weight_hook=weight_hook, quant_dtype=quant_dtype
         )
     else:
         logger.info(f"Loading state dict without FP8 optimization. Hook enabled: {weight_hook is not None}")

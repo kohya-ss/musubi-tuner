@@ -1,8 +1,10 @@
-from typing import Optional
+import os
+from typing import Optional, List, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+from musubi_tuner.utils.device_utils import clean_memory_on_device
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 from tqdm import tqdm
@@ -368,3 +370,106 @@ def apply_fp8_monkey_patch(
     logger.info(f"Quantization done in {q_dtype}")
     logger.info(f"Number of monkey-patched Linear layers: {patched_count}")
     return model
+
+
+def load_safetensors_with_fp8_optimization(
+    model_files: List[str],
+    calc_device: Union[str, torch.device],
+    target_layer_keys=None,
+    exclude_layer_keys=None,
+    exp_bits=4,
+    mantissa_bits=3,
+    move_to_device=False,
+    weight_hook=None,
+    quant_dtype=None,
+):
+    """
+    Load weight tensors from safetensors files and merge LoRA weights into the state dict with explicit FP8 optimization.
+
+    Args:
+        model_files (list[str]): List of model files to load
+        calc_device (str or torch.device): Device to quantize tensors on
+        target_layer_keys (list, optional): Layer key patterns to target for optimization (None for all Linear layers)
+        exclude_layer_keys (list, optional): Layer key patterns to exclude from optimization
+        exp_bits (int): Number of exponent bits
+        mantissa_bits (int): Number of mantissa bits
+        move_to_device (bool): Move optimized tensors to the calculating device
+        weight_hook (callable, optional): Function to apply to each weight tensor before optimization
+
+    Returns:
+        dict: FP8 optimized state dict
+    """
+    if exp_bits == 4 and mantissa_bits == 3:
+        fp8_dtype = torch.float8_e4m3fn
+    elif exp_bits == 5 and mantissa_bits == 2:
+        fp8_dtype = torch.float8_e5m2
+    else:
+        raise ValueError(f"Unsupported FP8 format: E{exp_bits}M{mantissa_bits}")
+
+    # Calculate FP8 max value
+    max_value = calculate_fp8_maxval(exp_bits, mantissa_bits)
+    min_value = -max_value  # this function supports only signed FP8
+
+    # Define function to determine if a key is a target key. target means fp8 optimization, not for weight hook.
+    def is_target_key(key):
+        # Check if weight key matches target patterns and does not match exclude patterns
+        is_target = (target_layer_keys is None or any(pattern in key for pattern in target_layer_keys)) and key.endswith(".weight")
+        is_excluded = exclude_layer_keys is not None and any(pattern in key for pattern in exclude_layer_keys)
+        return is_target and not is_excluded
+
+    # Create optimized state dict
+    optimized_count = 0
+
+    # Process each file
+    state_dict = {}
+    for model_file in model_files:
+        with MemoryEfficientSafeOpen(model_file) as f:
+            keys = f.keys()
+            for key in tqdm(keys, desc=f"Loading {os.path.basename(model_file)}", unit="key"):
+                value = f.get_tensor(key)
+                if weight_hook is not None:
+                    # Apply weight hook if provided
+                    value = weight_hook(key, value)
+
+                if not is_target_key(key):
+                    state_dict[key] = value
+                    continue
+
+                # Save original device and dtype
+                original_device = value.device
+                original_dtype = value.dtype
+                quant_dtype = quant_dtype if quant_dtype is not None else original_dtype
+                # Move to calculation device
+                if calc_device is not None:
+                    value = value.to(calc_device)
+                value_q = value.to(quant_dtype)
+                # Calculate scale factor
+                scale = torch.max(torch.abs(value.flatten())) / max_value
+                # print(f"Optimizing {key} with scale: {scale}")
+
+                # Quantize weight to FP8
+                quantized_weight, _ = quantize_tensor_to_fp8(value_q, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
+
+                # Add to state dict using original key for weight and new key for scale
+                fp8_key = key  # Maintain original key
+                scale_key = key.replace(".weight", ".scale_weight")
+                assert fp8_key != scale_key, "FP8 key and scale key must be different"
+
+                quantized_weight = quantized_weight.to(fp8_dtype)
+
+                if not move_to_device:
+                    quantized_weight = quantized_weight.to(original_device)
+
+                scale_tensor = torch.tensor([scale], dtype=original_dtype, device=quantized_weight.device)
+
+                state_dict[fp8_key] = quantized_weight
+                state_dict[scale_key] = scale_tensor
+
+                optimized_count += 1
+
+                if calc_device is not None and optimized_count % 10 == 0:
+                    # free memory on calculation device
+                    clean_memory_on_device(calc_device)
+
+    logger.info(f"Number of optimized Linear layers: {optimized_count}")
+    return state_dict

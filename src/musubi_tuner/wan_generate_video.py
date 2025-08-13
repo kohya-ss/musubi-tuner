@@ -641,6 +641,7 @@ def load_dit_model(
         "rope_func": args.rope_func if hasattr(args, "rope_func") else "default",
         "riflex_index": args.riflex_index if hasattr(args, "riflex_index") else 0,
         "num_frames": args.video_length if hasattr(args, "video_length") else 81,
+        "quant_dtype": torch.float32 if hasattr(args, "upcast_quantization") and args.upcast_quantization else None
     }
     model = load_wan_model(
         config,
@@ -1564,7 +1565,7 @@ def run_sampling(
     latent_storage_device = device if not use_cpu_offload else "cpu"
     latent = latent.to(latent_storage_device)
     if args.preview_latent_every: # blissful
-        previewer = LatentPreviewer(args, noise, scheduler, models[0].device, models[0].dtype, model_type="wan")
+        previewer = LatentPreviewer(args, noise, scheduler, device, torch.float16, model_type="wan")
     km = BlissfulKeyboardManager()
     # cfg skip
     apply_cfg_array = []
@@ -1830,8 +1831,7 @@ def generate(
         elif args.i2i_path is not None:
             noise, timesteps = prepare_i2i_noise(noise, args, cfg, timesteps, device, vae)
         # load DiT model
-        model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
-
+        models = load_dit_models(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
         # if we only want to save the model, we can skip the rest
         if args.save_merged_model:
             return None
@@ -1841,7 +1841,7 @@ def generate(
     seed_g.manual_seed(seed)
 
     # run sampling
-    latent = run_sampling(model, noise, scheduler, timesteps, args, inputs, device, seed_g, accelerator, is_i2v, arg_nocond=arg_nocond)
+    latent = run_sampling(models, noise, scheduler, timesteps, args, gen_settings, inputs, device, seed_g, accelerator, is_i2v, arg_nocond=arg_nocond)
     if one_frame_inference_index is not None:
         latent = latent[:, one_frame_inference_index : one_frame_inference_index + 1, :]
         latent = latent.contiguous()  # safetensors requires contiguous tensors :(
