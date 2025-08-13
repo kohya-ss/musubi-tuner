@@ -211,7 +211,6 @@ def optimize_state_dict_with_fp8(
         per_tensor_quantization_error.append(average_quantization_error_this_tensor)
 
         quantized_weight = quantized_weight.to(original_device)  # Offload it for now
-
         scale_tensor = torch.tensor([scale], dtype=quant_dtype, device=quantized_weight.device)
 
         state_dict[fp8_key] = quantized_weight
@@ -350,9 +349,8 @@ def apply_fp8_monkey_patch(
         # Apply patch if it's a Linear layer with FP8 scale
         if isinstance(module, nn.Linear) and has_scale:
             # register the scale_weight as a buffer to load the state_dict
-            q_dtype = quant_dtype if quant_dtype is not None else module.weight.dtype
+            module.original_dtype_enum = q_dtype = optimized_state_dict[f"{name}.scale_weight"].dtype
             module.register_buffer("scale_weight", torch.tensor(1.0, dtype=q_dtype))
-            module.original_dtype_enum = module.weight.dtype
             module.upcast_linear = upcast_linear
 
             # Create a new forward method with the patched version.
@@ -460,7 +458,7 @@ def load_safetensors_with_fp8_optimization(
                 if not move_to_device:
                     quantized_weight = quantized_weight.to(original_device)
 
-                scale_tensor = torch.tensor([scale], dtype=original_dtype, device=quantized_weight.device)
+                scale_tensor = torch.tensor([scale], dtype=quant_dtype, device=quantized_weight.device)
 
                 state_dict[fp8_key] = quantized_weight
                 state_dict[scale_key] = scale_tensor

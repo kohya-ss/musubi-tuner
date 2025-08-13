@@ -1570,7 +1570,7 @@ def run_sampling(
     # cfg skip
     apply_cfg_array = []
     num_timesteps = len(timesteps)
-
+    
     if args.cfg_skip_mode != "none" and args.cfg_apply_ratio is not None:
         # Kohya's method
         # Calculate thresholds based on cfg_apply_ratio

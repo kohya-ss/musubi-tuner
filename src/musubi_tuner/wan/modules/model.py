@@ -727,7 +727,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         )
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True)
 
         return state_dict
 
@@ -1060,7 +1060,7 @@ def load_wan_model(
             sd[key[22:]] = sd.pop(key)
 
     if fp8_scaled:
-        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm)
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True)
 
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device
