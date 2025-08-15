@@ -166,7 +166,7 @@ Start training using the following command (input as a single line):
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/wan_train_network.py \
     --task t2v-1.3B \
     --dit path/to/wan2.1_xxx_bf16.safetensors \
-    --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base \
+    --dataset_config path/to/toml --attn_mode sdpa --mixed_precision bf16 --fp8_base \
     --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing \
     --max_data_loader_n_workers 2 --persistent_data_loader_workers \
     --network_module networks.lora_wan --network_dim 32 \
