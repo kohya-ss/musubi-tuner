@@ -708,7 +708,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         return self.patch_embedding.weight.device
 
     def fp8_optimization(
-        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
+        self,
+        state_dict: dict[str, torch.Tensor],
+        device: torch.device,
+        move_to_device: bool,
+        use_scaled_mm: bool = False,
+        quant_dtype: Optional[torch.dtype] = None,
+        upcast_linear: bool = False
     ) -> int:
         """
         Optimize the model state_dict with fp8.
@@ -727,7 +733,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         )
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
 
         return state_dict
 
@@ -737,7 +743,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.enable_gradient_checkpointing()
 
-        print(f"WanModel: Gradient checkpointing enabled.")
+        logger.info("WanModel: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -745,7 +751,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-        print(f"WanModel: Gradient checkpointing disabled.")
+        logger.info("WanModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
         self.blocks_to_swap = blocks_to_swap
@@ -758,7 +764,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.offloader = ModelOffloader(
             "wan_attn_block", self.blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device  # , debug=True
         )
-        print(
+        logger.info(
             f"WanModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. Supports backward: {supports_backward}"
         )
 
@@ -766,13 +772,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            print(f"WanModel: Block swap set to forward only.")
+            logger.info("WanModel: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            print(f"WanModel: Block swap set to forward and backward.")
+            logger.info("WanModel: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -894,7 +900,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         if self.blocks_to_swap:
             clean_memory_on_device(device)
 
-        # print(f"x: {x.shape}, e: {e0.shape}, context: {context.shape}, seq_lens: {seq_lens}")
+        # logger.info(f"x: {x.shape}, e: {e0.shape}, context: {context.shape}, seq_lens: {seq_lens}")
         for block_idx, block in enumerate(self.blocks):
             is_block_skipped = skip_block_indices is not None and block_idx in skip_block_indices
 
@@ -1060,7 +1066,7 @@ def load_wan_model(
             sd[key[22:]] = sd.pop(key)
 
     if fp8_scaled:
-        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True)
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True, quant_dtype=kwargs.get("quant_dtype", None), upcast_linear=kwargs.get("upcast_linear", False))
 
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device

@@ -23,7 +23,7 @@ from tqdm import tqdm
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.networks import lora_wan
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
-from musubi_tuner.utils.safetensors_utils import mem_eff_save_file, load_safetensors
+from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
 from musubi_tuner.wan.modules.model import WanModel, load_wan_model, detect_wan_sd_dtype
 from musubi_tuner.wan.modules.vae import WanVAE
@@ -39,7 +39,7 @@ except ImportError:
     pass
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, save_videos_grid, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.dataset.image_video_dataset import load_video
 
 # blissful start
@@ -52,6 +52,7 @@ from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_i2i_noise, prepare_metadata, BlissfulKeyboardManager
 logger = BlissfulLogger(__name__, "green")
 # blissful end
+
 
 class GenerationSettings:
     def __init__(
@@ -563,14 +564,14 @@ def load_dit_models(
     """
     use_high_model = args.dit_high_noise is not None and len(args.dit_high_noise) > 0
     if use_high_model and args.lazy_loading:
-        logger.info(f"Using lazy loading")
+        logger.info("Using lazy loading")
         return [None, None]  # lazy loading will load models on demand
 
     model = load_dit_model(args, args.dit, args.lora_weight, args.lora_multiplier, config, device, dit_weight_dtype)
 
     if use_high_model:
         if args.offload_inactive_dit:
-            logger.warning(f"Offloading low noise DiT model to CPU, high noise DiT will be loaded on GPU")
+            logger.warning("Offloading low noise DiT model to CPU, high noise DiT will be loaded on GPU")
             model.to("cpu")
 
         logger.info(f"Loading high noise DiT model from {args.dit_high_noise}")
@@ -634,14 +635,15 @@ def load_dit_model(
     loading_weight_dtype = dit_weight_dtype
     if args.fp8_scaled and not args.lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
-    if args.mixed_precision_transformer: # blissful
+    if args.mixed_precision_transformer:  # blissful
         loading_weight_dtype = None
 
     blissful_kwargs = {
         "rope_func": args.rope_func if hasattr(args, "rope_func") else "default",
         "riflex_index": args.riflex_index if hasattr(args, "riflex_index") else 0,
         "num_frames": args.video_length if hasattr(args, "video_length") else 81,
-        "quant_dtype": torch.float32 if hasattr(args, "upcast_quantization") and args.upcast_quantization else None
+        "quant_dtype": torch.float32 if hasattr(args, "upcast_quantization") and args.upcast_quantization else None,
+        "upcast_linear": args.upcast_linear if hasattr(args, "upcast_linear") else False
     }
     model = load_wan_model(
         config,
@@ -679,7 +681,7 @@ def load_dit_model(
 
             # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
             move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
 
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
@@ -708,7 +710,7 @@ def load_dit_model(
         logger.info(
             f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
         )
-        torch._dynamo.config.cache_size_limit = 32
+        torch._dynamo.config.cache_size_limit = 64
         for i in range(len(model.blocks)):
             model.blocks[i] = torch.compile(
                 model.blocks[i],
@@ -1073,7 +1075,7 @@ def prepare_one_frame_inference(
     control_latents = []
     if control_image_tensors is not None:
         # encode image to latent space with VAE
-        logger.info(f"Encoding image to latent space")
+        logger.info("Encoding image to latent space")
 
         for ctrl_image_tensor in control_image_tensors:
             # encode image one by one
@@ -1207,7 +1209,7 @@ def prepare_i2v_inputs(
             clip.model.to(device)
 
             # encode image to CLIP context
-            logger.info(f"Encoding image to CLIP context")
+            logger.info("Encoding image to CLIP context")
             with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
                 clip_context = clip.visual([img_tensor[:, None, :, :]])
                 # I2V end image is not officially supported, so no additional CLIP context
@@ -1215,7 +1217,7 @@ def prepare_i2v_inputs(
                     end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
                     end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
                     clip_context = torch.concat([clip_context, end_clip_context], dim=0)
-            logger.info(f"Encoding complete")
+            logger.info("Encoding complete")
 
             # free CLIP model and clean memory
             del clip
@@ -1238,7 +1240,7 @@ def prepare_i2v_inputs(
         one_frame_inference_index, f_indices = None, None
 
         # encode image to latent space with VAE
-        logger.info(f"Encoding image to latent space")
+        logger.info("Encoding image to latent space")
         vae.to_device(device)
 
         # resize image
@@ -1281,12 +1283,12 @@ def prepare_i2v_inputs(
                 y = vae.encode([img_resized])[0]
 
         y = torch.concat([msk, y])
-        logger.info(f"Encoding complete")
+        logger.info("Encoding complete")
 
         # Fun-Control: encode control video to latent space
         if config.is_fun_control:
             # TODO use same resizing as for image
-            logger.info(f"Encoding control video to latent space")
+            logger.info("Encoding control video to latent space")
             # C, F, H, W
             control_video = load_control_video(args.control_path, frames + (1 if has_end_image else 0), height, width).to(device)
             with accelerator.autocast(), torch.no_grad():
@@ -1348,7 +1350,7 @@ def prepare_i2v_inputs(
             clip.model.to(device)
 
             # encode image to CLIP context
-            logger.info(f"Encoding image to CLIP context")
+            logger.info("Encoding image to CLIP context")
             with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
                 clip_context = clip.visual([img_tensor[:, None, :, :]])
                 # I2V end image is not officially supported, so no additional CLIP context
@@ -1356,7 +1358,7 @@ def prepare_i2v_inputs(
                     end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
                     end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
                     clip_context = torch.concat([clip_context, end_clip_context], dim=0)
-            logger.info(f"Encoding complete")
+            logger.info("Encoding complete")
 
         # free CLIP model and clean memory
         del clip
@@ -1564,13 +1566,13 @@ def run_sampling(
     latent = noise
     latent_storage_device = device if not use_cpu_offload else "cpu"
     latent = latent.to(latent_storage_device)
-    if args.preview_latent_every: # blissful
+    if args.preview_latent_every:  # blissful
         previewer = LatentPreviewer(args, noise, scheduler, device, torch.float16, model_type="wan")
     km = BlissfulKeyboardManager()
     # cfg skip
     apply_cfg_array = []
     num_timesteps = len(timesteps)
-    
+
     if args.cfg_skip_mode != "none" and args.cfg_apply_ratio is not None:
         # Kohya's method
         # Calculate thresholds based on cfg_apply_ratio
@@ -1659,7 +1661,7 @@ def run_sampling(
                     time.sleep(5)
 
                 if args.offload_inactive_dit:
-                    logger.info(f"Switching model to CPU/GPU for both low and high noise models")
+                    logger.info("Switching model to CPU/GPU for both low and high noise models")
                     models[0].to("cpu")
 
                     if args.blocks_to_swap > 0:
@@ -1711,35 +1713,15 @@ def run_sampling(
                     noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)  # And update the noise_pred
                 elif args.cfgzerostar_scaling:  # No perp_neg, so CFGZero* scaling instead? (mutually exclusive)
                     noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)  # does CFG with scaling inside, returns noise_pred after CFG formula
-                else:
-                     # Neither perp_neg nor scaling so normal CFG formula
-                    # apply guidance
-                    # SD3 formula: scaled = neg_out + (pos_out - neg_out) * cond_scale
+                else:  # Neither perp_neg nor scaling so normal CFG formula
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 if do_slg_pass and not km.early_exit_requested:
                     # SLG original mode uses 3 model passes, cond, uncond, and uncond with layer skip
                     skip_layer_out = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
+                    noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
 
-                    # apply skip layer guidance
-                    # SD3 formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
-                    noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)
-                elif args.slg_mode == "uncond" and apply_slg:
-                    # noise_pred_uncond is skip layer out
-                    noise_pred_uncond = model(latent_model_input, t=timestep, skip_block_indices=args.slg_layers, **arg_null)[0].to(
-                        latent_storage_device
-                    )
-
-                    # apply guidance
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                else:
-                    # normal guidance
-                    noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null)[0].to(latent_storage_device)
-
-                    # apply guidance
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-            else:
+            else:  # No CFG shenanigans at all
                 noise_pred = noise_pred_cond
 
             if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
@@ -1906,8 +1888,6 @@ def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg) -> torch.
     video = videos[0]
     del videos
     video = video.to(torch.float32).cpu()
-
-    logger.info(f"Decoding complete")
     return video
 
 

@@ -1,5 +1,5 @@
 import os
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -349,13 +349,14 @@ def apply_fp8_monkey_patch(
         # Apply patch if it's a Linear layer with FP8 scale
         if isinstance(module, nn.Linear) and has_scale:
             # register the scale_weight as a buffer to load the state_dict
-            module.original_dtype_enum = q_dtype = optimized_state_dict[f"{name}.scale_weight"].dtype
+            module.original_dtype_enum = module.weight.dtype  # We will dequantize to this
+            q_dtype = optimized_state_dict[f"{name}.scale_weight"].dtype
             module.register_buffer("scale_weight", torch.tensor(1.0, dtype=q_dtype))
             module.upcast_linear = upcast_linear
 
             # Create a new forward method with the patched version.
             really_use_scaled_mm = use_scaled_mm
-            if exclude_ffn_from_scaled_mm and "ffn" in name:
+            if exclude_ffn_from_scaled_mm and "ffn" in name:  # exclude FFN from scaled_mm, helpful especially for Wan models where scaled_mm significantly degrades quality when applied to feedforwards.
                 really_use_scaled_mm = False
 
             def new_forward(self, x):
@@ -373,13 +374,13 @@ def apply_fp8_monkey_patch(
 def load_safetensors_with_fp8_optimization(
     model_files: List[str],
     calc_device: Union[str, torch.device],
-    target_layer_keys=None,
-    exclude_layer_keys=None,
-    exp_bits=4,
-    mantissa_bits=3,
-    move_to_device=False,
-    weight_hook=None,
-    quant_dtype=None,
+    target_layer_keys: Optional[dict] = None,
+    exclude_layer_keys: Optional[dict] = None,
+    exp_bits: int = 4,
+    mantissa_bits: int = 3,
+    move_to_device: bool = False,
+    weight_hook: Optional[Callable] = None,
+    quant_dtype: Optional[torch.dtype] = None
 ):
     """
     Load weight tensors from safetensors files and merge LoRA weights into the state dict with explicit FP8 optimization.
