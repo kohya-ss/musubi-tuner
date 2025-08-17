@@ -441,23 +441,40 @@ class WanAttentionBlock(nn.Module):
             x = x + y.to(torch.float32) * e[5]
             del y
         else:  # For Wan2.2
-            e = self.modulation.to(torch.float32) + e
-            e = e.chunk(6, dim=2)  # e is [B, L, 6, C] for 2.2
-            assert e[0].dtype == torch.float32
+            comp_dtype = x.dtype  # bf16/fp16
 
-            # self-attention
-            y = self.self_attn(self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2), seq_lens, grid_sizes, freqs)
-            x = x + y.to(torch.float32) * e[2].squeeze(2)
+            # Keep in compute dtype; don't create fp32 monsters
+            m = self.modulation.to(comp_dtype)   # [1, 6, C]
+            e = e.to(comp_dtype)                 # [B, L, 6, C]
+
+            # Split the "6" axis without keeping a singleton dim
+            m0, m1, m2, m3, m4, m5 = m.unbind(dim=1)   # each [1, C]
+            e0, e1, e2, e3, e4, e5 = e.unbind(dim=2)   # each [B, L, C]
+
+            # Per-slot sums (broadcast m* onto [B, L, C]); avoids building [B, L, 6, C]
+            s0 = e0 + m0      # [B, L, C]
+            s1 = e1 + m1
+            s2 = e2 + m2
+            s3 = e3 + m3
+            s4 = e4 + m4
+            s5 = e5 + m5
+
+            # Self-attention (no .float(); keep bf16/fp16 so Sage/SDPA uses the lean kernel)
+            q_in = self.norm1(x).to(comp_dtype)
+            y = self.self_attn((q_in * (1 + s1) + s0).contiguous(),
+                               seq_lens, grid_sizes, freqs)
+            x = x + y.to(comp_dtype) * s2
             del y
 
-            # cross-attention & ffn
-            x = x + self.cross_attn(self.norm3(x), context, context_lens)
+            # Cross-attn
+            x = x + self.cross_attn(self.norm3(x).to(comp_dtype), context, context_lens)
             del context
-            y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
-            x = x + y.to(torch.float32) * e[5].squeeze(2)
 
+            # FFN
+            ff_in = self.norm2(x).to(comp_dtype)
+            y = self.ffn((ff_in * (1 + s4) + s3).contiguous())
+            x = x + y.to(comp_dtype) * s5
             del y
-
         return x
 
     def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
