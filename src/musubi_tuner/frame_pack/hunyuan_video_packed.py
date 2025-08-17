@@ -6,15 +6,18 @@ import math
 import numbers
 import os
 from types import SimpleNamespace
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import torch
 import einops
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.safetensors_utils import load_split_weights
-from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from accelerate import init_empty_weights
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
@@ -722,7 +725,8 @@ def get_cu_seqlens(text_mask, img_len):
         cu_seqlens[2 * i + 1] = s1
         cu_seqlens[2 * i + 2] = s2
 
-    return cu_seqlens
+    seq_len = text_len + img_len
+    return cu_seqlens, seq_len
 
 
 def apply_rotary_emb_transposed(x, freqs_cis):
@@ -734,7 +738,8 @@ def apply_rotary_emb_transposed(x, freqs_cis):
     return (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 
 
-def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, attn_mode=None, split_attn=False):
+def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len, attn_mode=None, split_attn=False):
+    # q,k,v: [batch_size, seqlen, heads, head_dim]
     if cu_seqlens_q is None and cu_seqlens_kv is None and max_seqlen_q is None and max_seqlen_kv is None:
         if attn_mode == "sageattn" or attn_mode is None and sageattn is not None:
             x = sageattn(q, k, v, tensor_layout="NHD")
@@ -754,29 +759,52 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         return x
     if split_attn:
         if attn_mode == "sageattn" or attn_mode is None and sageattn is not None:
-            x = torch.empty_like(q)
+            x = []
             for i in range(q.size(0)):
-                x[i : i + 1] = sageattn(q[i : i + 1], k[i : i + 1], v[i : i + 1], tensor_layout="NHD")
+                seq_len_i = seq_len[i]
+                x_i = sageattn(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i], tensor_layout="NHD")
+                if seq_len_i < max_seqlen_q:
+                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
+                x.append(x_i)
+            x = torch.cat(x, dim=0)
             return x
 
         if attn_mode == "flash" or attn_mode is None and flash_attn_func is not None:
-            x = torch.empty_like(q)
+            x = []
             for i in range(q.size(0)):
-                x[i : i + 1] = flash_attn_func(q[i : i + 1], k[i : i + 1], v[i : i + 1])
+                seq_len_i = seq_len[i]
+                x_i = flash_attn_func(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i])
+                if seq_len_i < max_seqlen_q:
+                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
+                x.append(x_i)
+            x = torch.cat(x, dim=0)
             return x
 
         if attn_mode == "xformers" or attn_mode is None and xformers_attn_func is not None:
-            x = torch.empty_like(q)
+            x = []
             for i in range(q.size(0)):
-                x[i : i + 1] = xformers_attn_func(q[i : i + 1], k[i : i + 1], v[i : i + 1])
+                seq_len_i = seq_len[i]
+                x_i = xformers_attn_func(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i])
+                if seq_len_i < max_seqlen_q:
+                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
+                x.append(x_i)
+            x = torch.cat(x, dim=0)
             return x
 
+        assert attn_mode is None or attn_mode == "torch", f"Unsupported attention mode: {attn_mode}. Supported modes: 'sageattn', 'flash', 'xformers', 'torch'."
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        x = torch.empty_like(q)
+        x = []
         for i in range(q.size(0)):
-            x[i : i + 1] = torch.nn.functional.scaled_dot_product_attention(q[i : i + 1], k[i : i + 1], v[i : i + 1])
+            seq_len_i = seq_len[i]
+            x_i = torch.nn.functional.scaled_dot_product_attention(
+                q[i : i + 1, :, :seq_len_i], k[i : i + 1, :, :seq_len_i], v[i : i + 1, :, :seq_len_i]
+            )
+            if seq_len_i < max_seqlen_q:
+                x_i = torch.nn.functional.pad(x_i, (0, 0, 0, max_seqlen_q - seq_len_i, 0, 0), mode="constant", value=0.0)
+            x.append(x_i)
+        x = torch.cat(x, dim=0)
         x = x.transpose(1, 2)
         return x
 
@@ -792,7 +820,7 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         del q, k, v  # free memory
     else:
         raise NotImplementedError("No Attn Installed or batch_size > 1 is not supported in this configuration. Try `--split_attn`.")
-    x = x.view(batch_size, max_seqlen_q, *x.shape[2:])
+    x = x.view(batch_size, max_seqlen_q, *x.shape[1:])
     return x
 
 
@@ -807,7 +835,7 @@ class HunyuanAttnProcessorFlashAttnDouble:
         attn_mode: Optional[str] = None,
         split_attn: Optional[bool] = False,
     ):
-        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv = attention_mask
+        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len = attention_mask
 
         # Project image latents
         query = attn.to_q(hidden_states)
@@ -847,7 +875,16 @@ class HunyuanAttnProcessorFlashAttnDouble:
         del encoder_query, encoder_key, encoder_value  # free memory
 
         hidden_states_attn = attn_varlen_func(
-            query, key, value, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, attn_mode=attn_mode, split_attn=split_attn
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            seq_len,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
         del query, key, value  # free memory
         hidden_states_attn = hidden_states_attn.flatten(-2)
@@ -874,7 +911,7 @@ class HunyuanAttnProcessorFlashAttnSingle:
         attn_mode: Optional[str] = None,
         split_attn: Optional[bool] = False,
     ):
-        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv = attention_mask
+        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len = attention_mask
         txt_length = encoder_hidden_states.shape[1]  # Store text length
 
         # Concatenate image and context inputs
@@ -899,7 +936,16 @@ class HunyuanAttnProcessorFlashAttnSingle:
         del image_rotary_emb  # free memory
 
         hidden_states = attn_varlen_func(
-            query, key, value, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, attn_mode=attn_mode, split_attn=split_attn
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            seq_len,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
         del query, key, value  # free memory
         hidden_states = hidden_states.flatten(-2)
@@ -1453,6 +1499,10 @@ class HunyuanVideoPatchEmbedForCleanLatents(nn.Module):
         return
 
 
+FP8_OPTIMIZATION_TARGET_KEYS = ["transformer_blocks", "single_transformer_blocks"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm"]  # Exclude norm layers (e.g., LayerNorm, RMSNorm) from FP8
+
+
 class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin, GenerationMixin,
     # ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
     # @register_to_config
@@ -1501,6 +1551,8 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         self.rope = HunyuanVideoRotaryPosEmbed(rope_axes_dim, rope_theta)
 
         # 3. Dual stream transformer blocks
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
         self.transformer_blocks = nn.ModuleList(
             [
                 HunyuanVideoTransformerBlock(
@@ -1636,14 +1688,14 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             self.offloader_double.set_forward_only(True)
             self.offloader_single.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            logger.info(f"HunyuanVideoTransformer3DModelPacked: Block swap set to forward only.")
+            logger.info("HunyuanVideoTransformer3DModelPacked: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap and self.blocks_to_swap > 0:
             self.offloader_double.set_forward_only(False)
             self.offloader_single.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            logger.info(f"HunyuanVideoTransformer3DModelPacked: Block swap set to forward and backward.")
+            logger.info("HunyuanVideoTransformer3DModelPacked: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -1820,23 +1872,24 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             del extra_encoder_hidden_states, extra_attention_mask  # free memory
 
         with torch.no_grad():
-            if batch_size == 1:
+            if batch_size == 1 and not self.split_attn:
                 # When batch size is 1, we do not need any masks or var-len funcs since cropping is mathematically same to what we want
                 # If they are not same, then their impls are wrong. Ours are always the correct one.
                 text_len = encoder_attention_mask.sum().item()
                 encoder_hidden_states = encoder_hidden_states[:, :text_len]
-                attention_mask = None, None, None, None
+                attention_mask = None, None, None, None, None
             else:
+                # If batch size = 1 and split_attn is True, it will be same as above
                 img_seq_len = hidden_states.shape[1]
                 txt_seq_len = encoder_hidden_states.shape[1]
 
-                cu_seqlens_q = get_cu_seqlens(encoder_attention_mask, img_seq_len)
+                cu_seqlens_q, seq_len = get_cu_seqlens(encoder_attention_mask, img_seq_len)
                 cu_seqlens_kv = cu_seqlens_q
                 max_seqlen_q = img_seq_len + txt_seq_len
                 max_seqlen_kv = max_seqlen_q
 
-                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
-                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv  # free memory
+                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len
+                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len  # free memory
         del encoder_attention_mask  # free memory
 
         if self.enable_teacache:
@@ -1935,12 +1988,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         return (hidden_states,)
 
     def fp8_optimization(
-        self,
-        state_dict: dict[str, torch.Tensor],
-        device: torch.device,
-        use_scaled_mm: bool = False,
-        upcast_linear: bool = False,
-        quant_dtype: Optional[torch.dtype] = None
+        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
     ) -> dict[str, torch.Tensor]:  # Return type hint added
         """
         Optimize the model state_dict with fp8.
@@ -1954,17 +2002,15 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
                 Whether to move the weight to the device after optimization.
             use_scaled_mm (bool):
                 Whether to use scaled matrix multiplication for FP8.
-            upscale_llinear (bool):
-                Whether to upcast linear transformations to fp32 or not
         """
-        TARGET_KEYS = ["transformer_blocks", "single_transformer_blocks"]
-        EXCLUDE_KEYS = ["norm"]  # Exclude norm layers (e.g., LayerNorm, RMSNorm) from FP8
 
         # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, quant_dtype=quant_dtype)
+        state_dict = optimize_state_dict_with_fp8(
+            state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device
+        )
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear, quant_dtype=quant_dtype)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
 
         return state_dict
 
@@ -1977,9 +2023,28 @@ def load_packed_model(
     fp8_scaled: bool = False,
     split_attn: bool = False,
     for_inference: bool = False,
-    upcast_linear: bool = False,
-    quant_dtype: Optional[torch.dtype] = None
+    lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[List[float]] = None,
 ) -> HunyuanVideoTransformer3DModelPacked:
+    """
+    Load a packed DiT model from a given path.
+    If fp8_scaled is True, the model will be optimized to fp8 dynamically.
+
+    Args:
+        device (Union[str, torch.device]): The device to calculate etc. (usually "cuda").
+        dit_path (str): The path to the DiT model file or directory.
+        attn_mode (str): The attention mode to use.
+        loading_device (Union[str, torch.device]): The device to load the model weights to.
+        fp8_scaled (bool): Whether to optimize the model weights to fp8.
+        split_attn (bool): Whether to use split attention.
+        for_inference (bool): Whether to create the model for inference.
+        lora_weights_list (Optional[Dict[str, torch.Tensor]]): List of state_dicts for LoRA weights.
+        lora_multipliers (Optional[List[float]]): List of multipliers for LoRA weights.
+
+    Returns:
+        HunyuanVideoTransformer3DModelPacked: The loaded DiT model.
+    """
+
     # TODO support split_attn
     device = torch.device(device)
     loading_device = torch.device(loading_device)
@@ -1992,17 +2057,17 @@ def load_packed_model(
         # sort by name and take the first one
         safetensor_files.sort()
         dit_path = safetensor_files[0]
-    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
-    dit_loading_device = torch.device("cpu") if fp8_scaled else loading_device
+
     logger.info(f"Loading HunyuanVideoTransformer3DModelPacked from {dit_path}")
-    logger.info(f"    load_device={dit_loading_device}, compute_device={device}")
+    logger.info(f"    compute_device={device}")
     logger.info(f"    attention_mode={attn_mode} (split_attn={split_attn})")
     with init_empty_weights():
-        logger.info("Creating HunyuanVideoTransformer3DModelPacked")
-        model_class = HunyuanVideoTransformer3DModelPacked
-        if for_inference:  # import here to avoid circular import issues
-            from musubi_tuner.frame_pack.hunyuan_video_packed_inference import HunyuanVideoTransformer3DModelPackedInference
-            model_class = HunyuanVideoTransformer3DModelPackedInference
+        logger.info(f"Creating HunyuanVideoTransformer3DModelPacked")
+
+        # import here to avoid circular import issues
+        from musubi_tuner.frame_pack.hunyuan_video_packed_inference import HunyuanVideoTransformer3DModelPackedInference
+
+        model_class = HunyuanVideoTransformer3DModelPackedInference if for_inference else HunyuanVideoTransformer3DModelPacked
         model = model_class(
             attention_head_dim=128,
             guidance_embeds=True,
@@ -2027,17 +2092,29 @@ def load_packed_model(
             split_attn=split_attn,
         )
 
-    # load model weights with the specified dtype or as is
-    sd = load_split_weights(dit_path, device=dit_loading_device, disable_mmap=True)
+    # load model weights with dynamic fp8 optimization and LoRA merging if needed
+    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+
+    sd = load_safetensors_with_lora_and_fp8(
+        model_files=dit_path,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=fp8_scaled,
+        calc_device=device,
+        move_to_device=(loading_device == device),
+        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+    )
 
     if fp8_scaled:
-        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
         logger.info("Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
 
-        # make sure all the model weights are on the loading_device
-        for key in sd.keys():
-            sd[key] = sd[key].to(loading_device)
+        if loading_device.type != "cpu":
+            # make sure all the model weights are on the loading_device
+            logger.info(f"Moving weights to {loading_device}")
+            for key in sd.keys():
+                sd[key] = sd[key].to(loading_device)
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded DiT model from {dit_path}, info={info}")

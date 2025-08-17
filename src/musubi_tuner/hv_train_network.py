@@ -233,8 +233,13 @@ def line_to_prompt_dict(line: str) -> dict:
                 continue
 
             m = re.match(r"i (.+)", parg, re.IGNORECASE)
-            if m:  # negative prompt
+            if m:  # image path
                 prompt_dict["image_path"] = m.group(1)
+                continue
+
+            m = re.match(r"ei (.+)", parg, re.IGNORECASE)
+            if m:  # end image path
+                prompt_dict["end_image_path"] = m.group(1)
                 continue
 
             m = re.match(r"cn (.+)", parg, re.IGNORECASE)
@@ -759,35 +764,118 @@ class NetworkTrainer:
             or args.timestep_sampling == "sigmoid"
             or args.timestep_sampling == "shift"
             or args.timestep_sampling == "flux_shift"
+            or args.timestep_sampling == "qwen_shift"
+            or args.timestep_sampling == "logsnr"
+            or args.timestep_sampling == "qinglong_flux"
+            or args.timestep_sampling == "qinglong_qwen"
         ):
-            if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
-                # Simple random t-based noise sampling
-                if args.timestep_sampling == "sigmoid":
-                    t = torch.sigmoid(args.sigmoid_scale * torch.randn((batch_size,), device=device))
-                else:
-                    t = torch.rand((batch_size,), device=device)
 
-            elif args.timestep_sampling == "shift" or args.timestep_sampling == "flux_shift":
-                if args.timestep_sampling == "shift":
-                    shift = args.discrete_flow_shift
-                else:  # flux_shift
-                    h, w = latents.shape[-2:]
-                    # we are pre-packed so must adjust for packed size
-                    mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
-                    # def time_shift(mu: float, sigma: float, t: torch.Tensor):
-                    #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
-                    shift = math.exp(mu)
+            def get_timesteps():
+                if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
+                    # Simple random t-based noise sampling
+                    if args.timestep_sampling == "sigmoid":
+                        t = torch.sigmoid(args.sigmoid_scale * torch.randn((batch_size,), device=device))
+                    else:
+                        t = torch.rand((batch_size,), device=device)
 
-                logits_norm = torch.randn(batch_size, device=device)
-                logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
-                t = logits_norm.sigmoid()
-                t = (t * shift) / (1 + (shift - 1) * t)
+                elif args.timestep_sampling.endswith("shift"):
+                    if args.timestep_sampling == "shift":
+                        shift = args.discrete_flow_shift
+                    else:
+                        h, w = latents.shape[-2:]
+                        # we are pre-packed so must adjust for packed size
+                        if args.timestep_sampling == "flux_shift":
+                            mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                        elif args.timestep_sampling == "qwen_shift":
+                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)((h // 2) * (w // 2))
+                        # def time_shift(mu: float, sigma: float, t: torch.Tensor):
+                        #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
+                        shift = math.exp(mu)
+
+                    logits_norm = torch.randn(batch_size, device=device)
+                    logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
+                    t = logits_norm.sigmoid()
+                    t = (t * shift) / (1 + (shift - 1) * t)
+
+                elif args.timestep_sampling == "logsnr":
+                    # https://arxiv.org/abs/2411.14793v3
+                    logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(batch_size,), device=device)
+                    t = torch.sigmoid(-logsnr / 2)
+
+                elif args.timestep_sampling.startswith("qinglong"):
+                    # Qinglong triple hybrid sampling: mid_shift:logsnr:logsnr2 = .80:.075:.125
+                    # First decide which method to use for each sample independently
+                    decision_t = torch.rand((batch_size,), device=device)
+
+                    # Create masks based on decision_t: .80 for mid_shift, 0.075 for logsnr, and 0.125 for logsnr2
+                    mid_mask = decision_t < 0.80  # 80% for mid_shift
+                    logsnr_mask = (decision_t >= 0.80) & (decision_t < 0.875)  # 7.5% for logsnr
+                    logsnr_mask2 = decision_t >= 0.875  # 12.5% for logsnr with -logit_mean
+
+                    # Initialize output tensor
+                    t = torch.zeros((batch_size,), device=device)
+
+                    # Generate mid_shift samples for selected indices (80%)
+                    if mid_mask.any():
+                        mid_count = mid_mask.sum().item()
+                        h, w = latents.shape[-2:]
+                        if args.timestep_sampling == "qinglong_flux":
+                            mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                        elif args.timestep_sampling == "qinglong_qwen":
+                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)((h // 2) * (w // 2))
+                        shift = math.exp(mu)
+                        logits_norm_mid = torch.randn(mid_count, device=device)
+                        logits_norm_mid = logits_norm_mid * args.sigmoid_scale
+                        t_mid = logits_norm_mid.sigmoid()
+                        t_mid = (t_mid * shift) / (1 + (shift - 1) * t_mid)
+
+                        t[mid_mask] = t_mid
+
+                    # Generate logsnr samples for selected indices (7.5%)
+                    if logsnr_mask.any():
+                        logsnr_count = logsnr_mask.sum().item()
+                        logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(logsnr_count,), device=device)
+                        t_logsnr = torch.sigmoid(-logsnr / 2)
+
+                        t[logsnr_mask] = t_logsnr
+
+                    # Generate logsnr2 samples with -logit_mean for selected indices (12.5%)
+                    if logsnr_mask2.any():
+                        logsnr2_count = logsnr_mask2.sum().item()
+                        logsnr2 = torch.normal(mean=5.36, std=1.0, size=(logsnr2_count,), device=device)
+                        t_logsnr2 = torch.sigmoid(-logsnr2 / 2)
+
+                        t[logsnr_mask2] = t_logsnr2
+
+                return t  # 0 to 1
 
             t_min = args.min_timestep if args.min_timestep is not None else 0
             t_max = args.max_timestep if args.max_timestep is not None else 1000.0
             t_min /= 1000.0
             t_max /= 1000.0
-            t = t * (t_max - t_min) + t_min  # scale to [t_min, t_max], default [0, 1]
+
+            if not args.preserve_distribution_shape:
+                t = get_timesteps()
+                t = t * (t_max - t_min) + t_min  # scale to [t_min, t_max], default [0, 1]
+            else:
+                max_loops = 1000
+                available_t = []
+                for i in range(max_loops):
+                    t = get_timesteps()
+                    for t_i in t:
+                        if t_min <= t_i <= t_max:
+                            available_t.append(t_i)
+                        if len(available_t) == batch_size:
+                            break
+                    if len(available_t) == batch_size:
+                        break
+                if len(available_t) < batch_size:
+                    logger.warning(
+                        f"Could not sample {batch_size} valid timesteps in {max_loops} loops / {max_loops}ループで{batch_size}個の有効なタイムステップをサンプリングできませんでした"
+                    )
+                    available_t = get_timesteps()
+                else:
+                    t = torch.stack(available_t, dim=0)  # [batch_size, ]
 
             timesteps = t * 1000.0
             t = t.view(-1, 1, 1, 1, 1) if latents.ndim == 5 else t.view(-1, 1, 1, 1)
@@ -826,7 +914,7 @@ class NetworkTrainer:
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
         # print(f"Noise scheduler timesteps: {noise_scheduler.timesteps}")
 
-        latents = torch.zeros(BATCH_SIZE, 1, 1, 1, 1, dtype=torch.float16)
+        latents = torch.zeros(BATCH_SIZE, 1, 1, 1024 // 8, 1024 // 8, dtype=torch.float16)
         noise = torch.ones_like(latents)
 
         # sample timesteps
@@ -1056,10 +1144,27 @@ class NetworkTrainer:
         save_path = (
             f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{prompt_idx:02d}_{ts_str}{seed_suffix}"
         )
+
+        wandb_tracker = None
+        try:
+            wandb_tracker = accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
+            try:
+                import wandb
+            except ImportError:
+                raise ImportError("No wandb / wandb がインストールされていないようです")
+        except:  # wandb 無効時
+            wandb = None
+
         if video.shape[2] == 1:
-            save_images_grid(video, save_dir, save_path, create_subdir=False)
+            image_paths = save_images_grid(video, save_dir, save_path, create_subdir=False)
+            if wandb_tracker is not None and wandb is not None:
+                for image_path in image_paths:
+                    wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)
         else:
-            save_videos_grid(video, os.path.join(save_dir, save_path) + ".mp4")
+            video_path = os.path.join(save_dir, save_path) + ".mp4"
+            save_videos_grid(video, video_path)
+            if wandb_tracker is not None and wandb is not None:
+                wandb_tracker.log({f"sample_{prompt_idx}": wandb.Video(video_path)}, step=steps)
 
         # Move models back to initial state
         vae.to("cpu")
@@ -1466,7 +1571,6 @@ class NetworkTrainer:
 
         if train_dataset_group.num_train_items == 0:
             raise ValueError("No training items found in the dataset / データセットに学習データがありません")
-        
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
@@ -2387,7 +2491,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timestep_sampling",
-        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift"],
+        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift", "qwen_shift", "logsnr", "qinglong_flux", "qinglong_qwen"],
         default="sigma",
         help="Method to sample timesteps: sigma-based, uniform random, sigmoid of random normal, shift of sigmoid and flux shift."
         " / タイムステップをサンプリングする方法：sigma、random uniform、random normalのsigmoid、sigmoidのシフト、flux shift。",
@@ -2441,6 +2545,15 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="set maximum time step for training (1~1000, default is 1000) / 学習時のtime stepの最大値を設定する（1~1000で指定、省略時はデフォルト値(1000)）",
+    )
+    parser.add_argument(
+        "--preserve_distribution_shape",
+        action="store_true",
+        help="If specified, constrains timestep sampling to [min_timestep, max_timestep] "
+        "using rejection sampling, preserving the original distribution shape. "
+        "By default, the [0, 1] range is scaled, which distorts the distribution. Only effective when `timestep_sampling` is not 'sigma'."
+        " / 指定すると、タイムステップのサンプリングを[最小タイムステップ、最大タイムステップ]に制約し、元の分布形状を保持します。"
+        "デフォルトでは、[0, 1]の範囲がスケーリングされ、分布が歪むことがあります。timestep_samplingがsigma以外で有効です。",
     )
 
     parser.add_argument(

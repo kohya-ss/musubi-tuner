@@ -94,9 +94,9 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 
 ## はじめに
 
-このリポジトリは、HunyuanVideo、Wan2.1、FramePackのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1、FramePackのリポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 KontextのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1/2.2、FramePack、FLUX.1 Kontextのリポジトリとは関係ありません。
 
-Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
+Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
 
 *リポジトリは開発中です。*
 
@@ -109,6 +109,33 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/08/11
+    - `--timestep_sampling`に`qwen_shift`が追加されました。これはQwen-Imageの推論時と同じ方法で、各画像の解像度に基づいた動的シフト値を使用します。またこれに伴い`qinglong`は`qinglong_flux`と`qinglong_qwen`に分割されました。PR [#428](https://github.com/kohya-ss/musubi-tuner/pull/428) sdbds氏に感謝します。詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md#timestep_sampling--タイムステップのサンプリング)および[高度な設定](./docs/advanced_config.md#style-friendly-snr-sampler)を参照してください。
+    - `wan_generate_video.py` でWan2.2のhigh/lowモデルを使用するときに、遅延読み込みを行う`--lazy_loading`オプションを追加しました。PR [#427](https://github.com/kohya-ss/musubi-tuner/pull/427) 詳細は[こちら](./docs/wan.md#inference--推論)を参照してください。
+
+- 2025/08/10
+    - Qwen-Imageに対応しました。PR [#408](https://github.com/kohya-ss/musubi-tuner/pull/408) 詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md)を参照してください。
+    
+- 2025/08/09
+    - wandbにログ出力用設定しているとき、サンプル生成画像もwandbに出力されるようになりました。PR [#420](https://github.com/kohya-ss/musubi-tuner/pull/420) xhiroga 氏に感謝します。
+
+- 2025/08/08
+    - Wan2.2に対応しました。PR [#399](https://github.com/kohya-ss/musubi-tuner/pull/399) 詳細は[Wan2.1/2.2のドキュメント](./docs/wan.md)を参照してください。
+    
+        Wan2.2はhigh noiseとlow noiseの二つのモデルから構成され、LoRAの学習時にどちらか一方、または両方を選択することができます。それに伴いtimestepの指定が必要になりますので、ドキュメントをご確認ください。
+
+- 2025/08/07
+    - タイムステップのサンプリングに新しく `logsnr` と `qinglong` のサンプリング手法を追加しました。PR [#407](https://github.com/kohya-ss/musubi-tuner/pull/407) でsdbds氏により提案されました。sdbds氏に感謝します。logsnrはスタイルの学習に特化し、qinglongはスタイル学習、モデルの安定性、ディテールの再現性を考慮したハイブリッドサンプリング手法です。詳細は[こちらのドキュメント](./docs/advanced_config.md#style-friendly-snr-sampler)を参照してください。
+
+- 2025/08/02
+    - `--fp8_scaled`を指定したときのFramePack、Wan2.1のモデル読み込みのピークメモリ使用量を削減しました。これにより、学習、推論前のモデル読み込み時のVRAM使用量が削減されます。
+
+- 2025/08/01
+    - FLUX. KontextのLoRA学習でblock swapが動作しない不具合を修正しました。[PR #402](https://github.com/kohya-ss/musubi-tuner/pull/402) および [PR #403](https://github.com/kohya-ss/musubi-tuner/pull/403) sdbds氏に感謝します。
+
+- 2025/07/31
+    - [AI コーディングエージェントを使用する開発者の方へのセクション](#aiコーディングエージェントを使用する開発者の方へ)を追加しました。AIエージェントを利用する場合はご一読ください。
+
 - 2025/07/29
     - 依存関係が不足していてFLUX.1 KontextのLoRA学習ができない不具合を修正しました。`sentencepiece`が必要です。
         - `pyproject.toml`に`sentencepiece`を追加しました。
@@ -120,37 +147,36 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
     - FramePackの推論スクリプトで [MagCache](https://github.com/Zehong-Ma/MagCache) をサポートしました。詳しくは[高度な設定](./docs/advanced_config.md#magcache)を参照してください。
     - FramePackの推論スクリプトで、対話モードおよびバッチモードでText Encoderの出力をキャッシュするようにしました。また処理順を見直し、モデルオフロードのタイミングを調整することで、連続生成時の処理時間を短縮しました。
 
-- 2025/06/13
-    - `lora_post_hoc_ema.py`に`--sima_rel`オプションを追加しました。これにより、Post Hoc EMAの適用時にPower Function EMAを使用することができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
-    
-- 2025/06/12
-    - LoRAモデルのPost Hoc EMAを行う`lora_post_hoc_ema.py`を追加しました。LoRAモデルの学習後に、Post Hoc EMAを適用してモデルの精度を向上させることができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
-
-- 2025/06/11
-    - リポジトリのパッケージングに関するPRをマージしました。xhiroga氏に感謝します。PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)
-        - `pyproject.toml`を導入し、インストール方法を更新しました。既存の環境からの移行方法については、[このディスカッションの投稿](https://github.com/kohya-ss/musubi-tuner/discussions/345)を参照してください。
-    - `README.md`を更新し、`pyproject.toml`を使用した新しいインストール方法を反映しました。
-
-- 2025/06/09
-    - FramePackの1フレーム推論のドキュメントに `--control_image_path` についての説明を追加しました。詳細は[1フレーム推論のドキュメント](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論)を参照してください。
-    - FramePackの1フレーム学習で、no_4xを指定しないとサンプル画像生成がクラッシュする不具合を修正しました。PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
-
-- 2025/06/08
-    - wan_generate_video.pyとfpack_generate_video.pyのinteractiveモードで、`prompt-toolkit`がインストールされている場合、それを使用するようになりました。これにより、特にLinux環境でプロンプトの編集や補完が用意になります。PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/312) 
-        - この機能はオプションです。有効にするには、`pip install prompt-toolkit`でインストールしてください。インストールしてある場合は自動的に有効になります。
-
-- 2025/05/30
-    - データセットの読み込み時にリサイズが正しく行われない場合がある不具合を修正しました。キャッシュの再作成をお願いします。PR [#312](https://github.com/kohya-ss/musubi-tuner/issues/312) sdbds 氏に感謝します。
-        - リサイズ前の画像の幅または高さがバケットの幅または高さと一致していて、かつもう片方が異なる場合（具体的には、たとえば元画像が640\*480で、バケットが640\*360の場合など）に不具合が発生していました。
-    - FramePackの1フレーム推論、学習のコードを大幅に改良しました。詳細は[FramePackの1フレーム推論のドキュメント](./docs/framepack_1f.md)を参照してください。
-        - **破壊的変更**: 1フレーム学習のデータセット形式、学習オプション、推論オプションが変更されました。ドキュメントに従って、データセット設定の変更、キャッシュの再作成、学習・推論オプションの変更を行ってください。
-    - FramePackの1フレーム推論と学習についてのドキュメントを追加しました。詳細は[前述のドキュメント](./docs/framepack_1f.md)を参照してください。
-
 ### リリースについて
 
 Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組んでくださる方々に感謝いたします。このプロジェクトは開発中のため、互換性のない変更や機能追加が起きる可能性があります。想定外の互換性問題を避けるため、参照用として[リリース](https://github.com/kohya-ss/musubi-tuner/releases)をお使いください。
 
 最新のリリースとバージョン履歴は[リリースページ](https://github.com/kohya-ss/musubi-tuner/releases)で確認できます。
+
+### AIコーディングエージェントを使用する開発者の方へ
+
+このリポジトリでは、ClaudeやGeminiのようなAIエージェントが、プロジェクトの概要や構造を理解しやすくするためのエージェント向け文書（プロンプト）を用意しています。
+
+これらを使用するためには、プロジェクトのルートディレクトリに各エージェント向けの設定ファイルを作成し、明示的に読み込む必要があります。
+
+**セットアップ手順:**
+
+1.  プロジェクトのルートに `CLAUDE.md` や `GEMINI.md` ファイルを作成します。
+2.  `CLAUDE.md` に以下の行を追加して、リポジトリが推奨するプロンプトをインポートします（現在、両者はほぼ同じ内容です）：
+
+    ```markdown
+    @./.ai/claude.prompt.md
+    ```
+
+    Geminiの場合はこちらです：
+
+    ```markdown
+    @./.ai/gemini.prompt.md
+    ```
+
+3.  インポートした行の後に、必要な指示を適宜追加してください（例：`Always respond in Japanese.`）。
+
+このアプローチにより、共有されたプロジェクトのコンテキストを活用しつつ、エージェントに与える指示を各ユーザーが自由に制御できます。`CLAUDE.md` と `GEMINI.md` はすでに `.gitignore` に記載されているため、リポジトリにコミットされることはありません。
 
 ## 概要
 
@@ -346,7 +372,9 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 学習されるLoRAの形式は、`sd-scripts`と同じです。
 
-`--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。
+`--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](./docs/advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)を参照してください。
+
+`--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。（`flux_shift`と`qwen_shift`を使用する場合は画像の解像度が1024x1024の場合の分布になります。）
 
 学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
 

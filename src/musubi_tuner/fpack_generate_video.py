@@ -23,8 +23,15 @@ from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, soft_append_bc
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
+from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+
+try:
+    from lycoris.kohya import create_network_from_weights
+except:
+    pass
+
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import save_images_grid, synchronize_device, get_time_flag
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, save_videos_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 from musubi_tuner.frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
@@ -420,18 +427,40 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
     Args:
         args: command line arguments
         device: device to use
-        dit_dtype: data type for the model
-        dit_weight_dtype: data type for the model weights. None for as-is
 
     Returns:
         HunyuanVideoTransformer3DModelPackedInference: DiT model
     """
+    # If LyCORIS is enabled, we will load the model to CPU and then merge LoRA weights (static method)
+
     loading_device = "cpu"
-    if args.blocks_to_swap == 0 and not args.fp8_scaled and args.lora_weight is None:
+    if args.blocks_to_swap == 0 and not args.lycoris:
         loading_device = device
 
-    # do not fp8 optimize because we will merge LoRA weights
-    model = load_packed_model(device, args.dit, args.attn_mode, loading_device, for_inference=True, quant_dtype=torch.float32 if args.upcast_quantization else None)
+    # load LoRA weights
+    if not args.lycoris and args.lora_weight is not None and len(args.lora_weight) > 0:
+        lora_weights_list = []
+        for lora_weight in args.lora_weight:
+            logger.info(f"Loading LoRA weight from: {lora_weight}")
+            lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
+            lora_sd = convert_lora_for_framepack(lora_sd)
+            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            lora_weights_list.append(lora_sd)
+    else:
+        lora_weights_list = None
+
+    # load DiT model
+    logger.info(f"Loading DiT model from: {args.dit}")
+    model: HunyuanVideoTransformer3DModelPackedInference = load_packed_model(
+        device,
+        args.dit,
+        args.attn_mode,
+        loading_device,
+        args.fp8_scaled and not args.lycoris,
+        for_inference=True,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=args.lora_multiplier,
+    )
 
     # apply RoPE scaling factor
     if args.rope_scaling_timestep_threshold is not None:
@@ -443,27 +472,38 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
     # magcache
     initialize_magcache(args, model)
 
-    return model
+    if args.lycoris:
+        # merge LoRA weights statically
+        if args.lora_weight is not None and len(args.lora_weight) > 0:
+            # ugly hack to common merge_lora_weights function
+            merge_lora_weights(
+                lora_framepack,
+                model,
+                args.lora_weight,
+                args.lora_multiplier,
+                args.include_patterns,
+                args.exclude_patterns,
+                device,
+                lycoris=True,
+                save_merged_model=args.save_merged_model,
+                converter=convert_lora_for_framepack,
+            )
 
+        if args.fp8_scaled:
+            state_dict = model.state_dict()  # bf16 state dict
 
-def optimize_model(model: HunyuanVideoTransformer3DModelPackedInference, args: argparse.Namespace, device: torch.device) -> None:
-    """optimize the model (FP8 conversion, device move etc.)
+            # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
+            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=False)  # args.fp8_fast)
 
-    Args:
-        model: dit model
-        args: command line arguments
-        device: device to use
-    """
-    if args.fp8_scaled:
-        # load state dict as-is and optimize to fp8
-        state_dict = model.state_dict()
-        state_dict = model.fp8_optimization(state_dict, device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
-        info = model.load_state_dict(state_dict, strict=True, assign=True)
-        logger.info(f"Loaded FP8 optimized weights: {info}")
+            info = model.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded FP8 optimized weights: {info}")
 
-        if args.blocks_to_swap == 0:
-            model.to(device)  # make sure all parameters are on the right device (e.g. RoPE etc.)
-    else:
+    # if we only want to save the model, we can skip the rest
+    if args.save_merged_model:
+        return model
+
+    if not args.fp8_scaled:
         # simple cast to dit_dtype
         target_dtype = None  # load as-is (dit_weight_dtype == dtype of the weights in state_dict)
         target_device = None
@@ -508,6 +548,8 @@ def optimize_model(model: HunyuanVideoTransformer3DModelPackedInference, args: a
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
+
+    return model
 
 
 # endregion
@@ -799,6 +841,7 @@ def prepare_text_inputs(
 
     if not (shared_models and "text_encoder1" in shared_models):  # if loaded locally
         del tokenizer1, text_encoder1, tokenizer2, text_encoder2
+        gc.collect()  # transformer==4.54.1 seems to need this to free memory
     else:  # if shared, move back to original device (likely CPU)
         if text_encoder1:
             text_encoder1.to(text_encoder1_original_device)
@@ -1154,20 +1197,10 @@ def generate(
         )
 
     if shared_models is None or "model" not in shared_models:
-        # load DiT model
         model = load_dit_model(args, device)
-
-        # merge LoRA weights
-        if args.lora_weight is not None and len(args.lora_weight) > 0:
-            # ugly hack to common merge_lora_weights function
-            merge_lora_weights(lora_framepack, model, args, device, convert_lora_for_framepack)
-
-            # if we only want to save the model, we can skip the rest
-            if args.save_merged_model:
-                return None, None
-
-        # optimize model: fp8 conversion, block swap etc.
-        optimize_model(model, args, device)
+        if args.save_merged_model:
+            # If we only want to save the model, we can skip the rest
+            return model, None
 
         if shared_models is not None:
             shared_models["model"] = model
@@ -1885,23 +1918,20 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # Models should be removed from device after prepare_text_inputs
     del tokenizer1_batch, text_encoder1_batch, tokenizer2_batch, text_encoder2_batch, temp_shared_models_txt, conds_cache_batch
+    gc.collect()  # transformer==4.54.1 seems to need this to free memory
     clean_memory_on_device(device)
 
     # 3. Load DiT Model once
     logger.info("Loading DiT model for batch generation...")
     # Use args from the first prompt for DiT loading (LoRA etc. should be consistent for a batch)
     first_prompt_args = all_prompt_args_list[0]
+
     dit_model = load_dit_model(first_prompt_args, device)  # Load directly to target device if possible
-    if first_prompt_args.lora_weight is not None and len(first_prompt_args.lora_weight) > 0:
-        logger.info("Merging LoRA weights into DiT model...")
-        merge_lora_weights(lora_framepack, dit_model, first_prompt_args, device, convert_lora_for_framepack)
-        if first_prompt_args.save_merged_model:
-            logger.info("Merged DiT model saved. Skipping generation.")
-            del dit_model
-            clean_memory_on_device(device)
-            return
-    logger.info("Optimizing DiT model...")
-    optimize_model(dit_model, first_prompt_args, device)  # Handles device placement, fp8 etc.
+    if first_prompt_args.save_merged_model:
+        logger.info("Merged DiT model saved. Skipping generation.")
+        del dit_model
+        clean_memory_on_device(device)
+        return
 
     shared_models_for_generate = {"model": dit_model}  # Pass DiT via shared_models
 
@@ -2065,6 +2095,8 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
 def main():
     # Parse arguments
     args = parse_args()
+
+    assert (not args.save_merged_model) or (not args.fp8_scaled), "Save merged model is not compatible with fp8_scaled"
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0

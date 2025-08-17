@@ -128,7 +128,7 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
 
 def save_images_grid(
     videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1, create_subdir=True
-):
+) -> list[str]:
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
     for x in videos:
@@ -146,11 +146,14 @@ def save_images_grid(
         output_dir = parent_dir
 
     os.makedirs(output_dir, exist_ok=True)
+    image_paths = []
     for i, x in enumerate(outputs):
         image_path = os.path.join(output_dir, f"{image_name}_{i:03d}.png")
+        image_paths.append(image_path)
         image = Image.fromarray(x)
         image.save(image_path)
 
+    return image_paths
 
 # region Encoding prompt
 

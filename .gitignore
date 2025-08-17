@@ -1,4 +1,17 @@
 __pycache__/
+.venv
+venv/
+logs/
+uv.lock
+main.exp
+main.lib
+main.obj
+CLAUDE.md
+GEMINI.md
+.claude/
+.gemini/
+
+# START blissful-tuner (may be)
 .pylintrc
 *venv
 *logs
@@ -10,8 +23,5 @@ __pycache__/
 *.sh
 yamls
 settings.json
-uv.lock
-main.exp
-main.lib
-main.obj
 previewflag
+# END blissful-tuner

@@ -949,10 +949,10 @@ class Flux(nn.Module):
         )
 
         self.offloader_double = ModelOffloader(
-            "double", self.num_double_blocks, self.double_blocks, double_blocks_to_swap, supports_backward, device  # , debug=True
+            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device  # , debug=True
         )
         self.offloader_single = ModelOffloader(
-            "single", self.num_single_blocks, self.single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
+            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
         )
         print(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
@@ -1026,7 +1026,7 @@ class Flux(nn.Module):
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe, control_lengths=control_lengths)
 
             if self.blocks_to_swap:
-                self.offloader_double.submit_move_blocks(self.double_blocks, block_idx)
+                self.offloader_double.submit_move_blocks_forward(self.double_blocks, block_idx)
 
         img = torch.cat((txt, img), 1)
 
@@ -1037,7 +1037,7 @@ class Flux(nn.Module):
             img = block(img, vec=vec, pe=pe, control_lengths=control_lengths)
 
             if self.blocks_to_swap:
-                self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
+                self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
 
         img = img[:, txt.shape[1] :, ...]
 

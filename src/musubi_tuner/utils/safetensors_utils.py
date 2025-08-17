@@ -194,7 +194,7 @@ def load_safetensors(
 
 
 def load_split_weights(
-    file_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False
+    file_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False, dtype: Optional[torch.dtype] = None
 ) -> Dict[str, torch.Tensor]:
     """
     Load split weights from a file. If the file name ends with 00001-of-00004 etc, it will load all files with the same prefix.
@@ -213,9 +213,9 @@ def load_split_weights(
             filename = f"{prefix}{i+1:05d}-of-{count:05d}.safetensors"
             filepath = os.path.join(os.path.dirname(file_path), filename)
             if os.path.exists(filepath):
-                state_dict.update(load_safetensors(filepath, device=device, disable_mmap=disable_mmap))
+                state_dict.update(load_safetensors(filepath, device=device, disable_mmap=disable_mmap, dtype=dtype))
             else:
                 raise FileNotFoundError(f"File {filepath} not found")
     else:
-        state_dict = load_safetensors(file_path, device=device, disable_mmap=disable_mmap)
+        state_dict = load_safetensors(file_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
     return state_dict

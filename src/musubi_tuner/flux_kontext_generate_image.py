@@ -570,8 +570,17 @@ def generate(
 
         # merge LoRA weights
         if args.lora_weight is not None and len(args.lora_weight) > 0:
-            # ugly hack to common merge_lora_weights function
-            merge_lora_weights(lora_flux, model, args, device)
+            merge_lora_weights(
+                lora_flux,
+                model,
+                args.lora_weight,
+                args.lora_multiplier,
+                args.include_patterns,
+                args.exclude_patterns,
+                device,
+                args.lycoris,
+                args.save_merged_model,
+            )
 
             # if we only want to save the model, we can skip the rest
             if args.save_merged_model:
@@ -918,7 +927,17 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     if first_prompt_args.lora_weight is not None and len(first_prompt_args.lora_weight) > 0:
         logger.info("Merging LoRA weights into DiT model...")
-        merge_lora_weights(lora_flux, dit_model, first_prompt_args, device)
+        merge_lora_weights(
+            lora_flux,
+            dit_model,
+            first_prompt_args.lora_weight,
+            first_prompt_args.lora_multiplier,
+            first_prompt_args.include_patterns,
+            first_prompt_args.exclude_patterns,
+            device,
+            first_prompt_args.lycoris,
+            first_prompt_args.save_merged_model,
+        )
         if first_prompt_args.save_merged_model:
             logger.info("Merged DiT model saved. Skipping generation.")
             del dit_model
