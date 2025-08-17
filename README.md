@@ -116,6 +116,15 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- August 16, 2025:
+    - Added a tool for captioning images using Qwen-Image VLM. PR [#460](https://github.com/kohya-ss/musubi-tuner/pull/460) See [here](./docs/tools.md#image-captioning-with-qwen25-vl-srcmusubi_tunercaption_images_by_qwen_vlpy) for more details.
+
+- August 15, 2025:
+    - The Timestep Bucketing feature has been added, which allows for a more uniform distribution of timesteps and stabilizes training. See PR [#418](https://github.com/kohya-ss/musubi-tuner/pull/418) and the [Timestep Bucketing documentation](./docs/advanced_config.md#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing) for details.
+
+- August 14, 2025:
+    - `convert_lora.py` now supports conversion for Qwen-Image LoRA models with Diffusers format. PR [#444](https://github.com/kohya-ss/musubi-tuner/pull/444) See [here](#convert-lora-to-another-format) for more details.
+
 - August 11, 2025:
     - Added `--timestep_sampling` option with `qwen_shift`. This uses the same method as during inference for Qwen-Image, employing dynamic shift values based on the resolution of each image (typically around 2.2 for 1328x1328 images). Additionally, `qinglong` has been split into `qinglong_flux` and `qinglong_qwen`. Thanks to sdbds for [PR #428](https://github.com/kohya-ss/musubi-tuner/pull/428). 
     
@@ -142,37 +151,6 @@ If you find this project helpful, please consider supporting its development via
 
 - August 1, 2025:
     - Fixed the issue where block swapping did not work in FLUX. Kontext LoRA training. Thanks to sdbds for [PR #402](https://github.com/kohya-ss/musubi-tuner/pull/402). [PR #403](https://github.com/kohya-ss/musubi-tuner/pull/403).
-
-- July 31, 2025:
-    - Added [a section for developers using AI coding agents](#for-developers-using-ai-coding-agents). If you are using AI agents, please read this section.
-
-- July 29, 2025:
-    - Added `sentencepiece` to `pyproject.toml` to fix the issue where FLUX.1 Kontext LoRA training was not possible due to missing dependencies.
-
-- July 28, 2025:
-    - Added LoRA training for FLUX.1 Kontext \[dev\]. For details, see the [FLUX.1 Kontext LoRA training documentation](./docs/flux_kontext.md).
-
-- June 17, 2025:
-    - Added support for [MagCache](https://github.com/Zehong-Ma/MagCache) in FramePack's inference script. See [Advanced Configuration](./docs/advanced_config.md#magcache) for details.
-    - Implemented caching of Text Encoder outputs in both interactive and batch modes in FramePack's inference script. Additionally, we reviewed the processing order and adjusted the timing of model offloading to reduce processing time during continuous generation.
-
-- June 13, 2025:
-    - Added `--sima_rel` option to `lora_post_hoc_ema.py`. This allows you to use Power Function EMA when applying Post Hoc EMA. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
-
-- June 12, 2025:
-    - Added `lora_post_hoc_ema.py` for Post Hoc EMA of LoRA models. This allows you to apply Post Hoc EMA after training a LoRA model to improve accuracy. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
-
-- June 11, 2025:
-    - Merged the pull request for packaging the repository. Thank you for xhiroga for PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)! This introduces `pyproject.toml` and updates installation instructions. For details on migrating your existing environment, please refer to [this discussion post](https://github.com/kohya-ss/musubi-tuner/discussions/345).
-    - Updated `README.md` to reflect the new installation methods using `pip` and `uv` with `pyproject.toml`.
-
-- June 9, 2025:
-    - Added documentation for `--control_image_path` in FramePack's one frame inference documentation. See [FramePack's one frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論) for details.
-    - Fixed a bug in FramePack's one frame training where sample image generation would crash if `no_4x` was not specified. PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
-
-- June 8, 2025:
-    - Added support for interactive mode in `wan_generate_video.py` and `fpack_generate_video.py`. If `prompt-toolkit` is installed, it will be used for prompt editing and completion, especially useful in Linux environments. PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/330)
-        - This feature is optional. To enable it, install `prompt-toolkit` with `pip install prompt-toolkit`. If installed, it will be automatically enabled.
 
 ### Releases
 
@@ -556,7 +534,7 @@ You can also perform image2video inference with SkyReels V1 I2V model. Specify t
 
 ### Convert LoRA to another format
 
-You can convert LoRA to a format compatible with ComfyUI (presumed to be Diffusion-pipe) using the following command:
+You can convert LoRA to a format (presumed to be Diffusion-pipe) compatible with another inference environment (Diffusers, ComfyUI etc.) using the following command:
 
 ```bash
 python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
@@ -572,7 +550,7 @@ Specify the input and output file paths with `--input` and `--output`, respectiv
 
 Specify `other` for `--target`. Use `default` to convert from another format to the format of this repository.
 
-Wan2.1 is also supported. 
+Wan2.1 and Qwen-Image are also supported. `--diffusers_prefix transformers` may be required for Diffusers inference.
 
 ## Miscellaneous
 

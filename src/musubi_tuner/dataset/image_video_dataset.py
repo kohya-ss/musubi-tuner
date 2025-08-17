@@ -621,11 +621,15 @@ def load_video(
 
 class BucketBatchManager:
 
-    def __init__(self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int):
+    def __init__(
+        self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
+    ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
         self.bucket_resos = list(self.buckets.keys())
         self.bucket_resos.sort()
+        self.num_timestep_buckets = num_timestep_buckets
+        self.timestep_pool = None
 
         # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
         self.bucket_batch_indices: list[tuple[tuple[Any], int]] = []
@@ -652,6 +656,37 @@ class BucketBatchManager:
 
         # shuffle the order of batches
         random.shuffle(self.bucket_batch_indices)
+
+        if self.num_timestep_buckets is not None and self.num_timestep_buckets > 1:
+            # prepare timesteps for each timestep buckets
+
+            # 1. Calculate total number of timesteps needed for the entire epoch
+            num_batches = len(self.bucket_batch_indices)
+            total_timesteps_needed = num_batches * self.batch_size
+
+            # 2. Generate a single large pool of stratified timesteps
+            all_timesteps = []
+            samples_per_bucket = math.ceil(total_timesteps_needed / self.num_timestep_buckets)
+
+            for i in range(self.num_timestep_buckets):
+                min_t = i / self.num_timestep_buckets
+                max_t = (i + 1) / self.num_timestep_buckets
+                for _ in range(samples_per_bucket):
+                    all_timesteps.append(random.uniform(min_t, max_t))
+
+            # 3. Shuffle the entire pool thoroughly
+            random.shuffle(all_timesteps)
+
+            # Trim the excess timesteps to match the exact number needed
+            all_timesteps = all_timesteps[:total_timesteps_needed]
+
+            # 4. Create the final timestep pool by chunking the shuffled list
+            self.timestep_pool = []
+            for i in range(num_batches):
+                start_idx = i * self.batch_size
+                end_idx = start_idx + self.batch_size
+                self.timestep_pool.append(all_timesteps[start_idx:end_idx])
+                # print(f"timestep pool {i}: {self.timestep_pool[-1]}")
 
     def __len__(self):
         return len(self.bucket_batch_indices)
@@ -694,6 +729,11 @@ class BucketBatchManager:
         for key in batch_tensor_data.keys():
             if key not in varlen_keys:
                 batch_tensor_data[key] = torch.stack(batch_tensor_data[key])
+
+        if self.timestep_pool is not None:
+            batch_tensor_data["timesteps"] = self.timestep_pool[idx][: end - start]  # use the pre-generated timesteps
+        else:
+            batch_tensor_data["timesteps"] = None
 
         return batch_tensor_data
 
@@ -1292,7 +1332,7 @@ class BaseDataset(torch.utils.data.Dataset):
     def retrieve_text_encoder_output_cache_batches(self, num_workers: int):
         raise NotImplementedError
 
-    def prepare_for_training(self):
+    def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         pass
 
     def set_seed(self, seed: int):
@@ -1561,7 +1601,7 @@ class ImageDataset(BaseDataset):
     def retrieve_text_encoder_output_cache_batches(self, num_workers: int):
         return self._default_retrieve_text_encoder_output_cache_batches(self.datasource, self.batch_size, num_workers)
 
-    def prepare_for_training(self):
+    def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
@@ -1601,7 +1641,7 @@ class ImageDataset(BaseDataset):
             bucketed_item_info[bucket_reso] = bucket
 
         # prepare batch manager
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size)
+        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
         self.batch_manager.show_bucket_info()
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
@@ -1893,7 +1933,7 @@ class VideoDataset(BaseDataset):
     def retrieve_text_encoder_output_cache_batches(self, num_workers: int):
         return self._default_retrieve_text_encoder_output_cache_batches(self.datasource, self.batch_size, num_workers)
 
-    def prepare_for_training(self):
+    def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
@@ -1928,7 +1968,7 @@ class VideoDataset(BaseDataset):
             bucketed_item_info[bucket_reso] = bucket
 
         # prepare batch manager
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size)
+        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
         self.batch_manager.show_bucket_info()
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])

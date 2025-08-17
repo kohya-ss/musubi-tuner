@@ -11,6 +11,35 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
  
 
+# keys of Qwen-Image state dict
+QWEN_IMAGE_KEYS = [
+    "time_text_embed.timestep_embedder.linear_1",
+    "time_text_embed.timestep_embedder.linear_2",
+    "txt_norm",
+    "img_in",
+    "txt_in",
+    "transformer_blocks.*.img_mod.1",
+    "transformer_blocks.*.attn.norm_q",
+    "transformer_blocks.*.attn.norm_k",
+    "transformer_blocks.*.attn.to_q",
+    "transformer_blocks.*.attn.to_k",
+    "transformer_blocks.*.attn.to_v",
+    "transformer_blocks.*.attn.add_k_proj",
+    "transformer_blocks.*.attn.add_v_proj",
+    "transformer_blocks.*.attn.add_q_proj",
+    "transformer_blocks.*.attn.to_out.0",
+    "transformer_blocks.*.attn.to_add_out",
+    "transformer_blocks.*.attn.norm_added_q",
+    "transformer_blocks.*.attn.norm_added_k",
+    "transformer_blocks.*.img_mlp.net.0.proj",
+    "transformer_blocks.*.img_mlp.net.2",
+    "transformer_blocks.*.txt_mod.1",
+    "transformer_blocks.*.txt_mlp.net.0.proj",
+    "transformer_blocks.*.txt_mlp.net.2",
+    "norm_out.linear",
+    "proj_out",
+]
+
 
 def convert_from_diffusers(prefix, weights_sd):
     # convert from diffusers(?) to default LoRA
@@ -40,8 +69,21 @@ def convert_from_diffusers(prefix, weights_sd):
     return new_weights_sd
 
 
-def convert_to_diffusers(prefix, weights_sd):
+def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
     # convert from default LoRA to diffusers
+    if diffusers_prefix is None:
+        diffusers_prefix = "diffusion_model"
+
+    # make reverse map from LoRA name to base model module name
+    lora_name_to_module_name = {}
+    for key in QWEN_IMAGE_KEYS:
+        if "*" not in key:
+            lora_name = prefix + key.replace(".", "_")
+            lora_name_to_module_name[lora_name] = key
+        else:
+            lora_name = prefix + key.replace(".", "_")
+            for i in range(100):  # assume at most 100 transformer blocks
+                lora_name_to_module_name[lora_name.replace("*", str(i))] = key.replace("*", str(i))
 
     # get alphas
     lora_alphas = {}
@@ -59,23 +101,25 @@ def convert_to_diffusers(prefix, weights_sd):
 
             lora_name = key.split(".", 1)[0]  # before first dot
 
-            module_name = lora_name[len(prefix) :]  # remove "lora_unet_"
-            module_name = module_name.replace("_", ".")  # replace "_" with "."
-            if ".cross.attn." in module_name or ".self.attn." in module_name:
-                # Wan2.1 lora name to module name: ugly but works
-                module_name = module_name.replace("cross.attn", "cross_attn")  # fix cross attn
-                module_name = module_name.replace("self.attn", "self_attn")  # fix self attn
-                module_name = module_name.replace("k.img", "k_img")  # fix k img
-                module_name = module_name.replace("v.img", "v_img")  # fix v img
+            if lora_name in lora_name_to_module_name:
+                module_name = lora_name_to_module_name[lora_name]
             else:
-                # HunyuanVideo lora name to module name: ugly but works
-                module_name = module_name.replace("double.blocks.", "double_blocks.")  # fix double blocks
-                module_name = module_name.replace("single.blocks.", "single_blocks.")  # fix single blocks
-                module_name = module_name.replace("img.", "img_")  # fix img
-                module_name = module_name.replace("txt.", "txt_")  # fix txt
-                module_name = module_name.replace("attn.", "attn_")  # fix attn
+                module_name = lora_name[len(prefix) :]  # remove "lora_unet_"
+                module_name = module_name.replace("_", ".")  # replace "_" with "."
+                if ".cross.attn." in module_name or ".self.attn." in module_name:
+                    # Wan2.1 lora name to module name: ugly but works
+                    module_name = module_name.replace("cross.attn", "cross_attn")  # fix cross attn
+                    module_name = module_name.replace("self.attn", "self_attn")  # fix self attn
+                    module_name = module_name.replace("k.img", "k_img")  # fix k img
+                    module_name = module_name.replace("v.img", "v_img")  # fix v img
+                else:
+                    # HunyuanVideo lora name to module name: ugly but works
+                    module_name = module_name.replace("double.blocks.", "double_blocks.")  # fix double blocks
+                    module_name = module_name.replace("single.blocks.", "single_blocks.")  # fix single blocks
+                    module_name = module_name.replace("img.", "img_")  # fix img
+                    module_name = module_name.replace("txt.", "txt_")  # fix txt
+                    module_name = module_name.replace("attn.", "attn_")  # fix attn
 
-            diffusers_prefix = "diffusion_model"
             if "lora_down" in key:
                 new_key = f"{diffusers_prefix}.{module_name}.lora_A.weight"
                 dim = weight.shape[0]
@@ -100,7 +144,7 @@ def convert_to_diffusers(prefix, weights_sd):
     return new_weights_sd
 
 
-def convert(input_file, output_file, target_format):
+def convert(input_file, output_file, target_format, diffusers_prefix):
     logger.info(f"loading {input_file}")
     weights_sd = load_file(input_file)
     with safe_open(input_file, framework="pt") as f:
@@ -113,7 +157,7 @@ def convert(input_file, output_file, target_format):
         metadata = metadata or {}
         model_utils.precalculate_safetensors_hashes(new_weights_sd, metadata)
     elif target_format == "other":
-        new_weights_sd = convert_to_diffusers(prefix, weights_sd)
+        new_weights_sd = convert_to_diffusers(prefix, diffusers_prefix, weights_sd)
     else:
         raise ValueError(f"unknown target format: {target_format}")
 
@@ -128,13 +172,16 @@ def parse_args():
     parser.add_argument("--input", type=str, required=True, help="input model file")
     parser.add_argument("--output", type=str, required=True, help="output model file")
     parser.add_argument("--target", type=str, required=True, choices=["other", "default"], help="target format")
+    parser.add_argument(
+        "--diffusers_prefix", type=str, default=None, help="prefix for Diffusers weights, default is None (use `diffusion_model`)"
+    )
     args = parser.parse_args()
     return args
 
 
 def main():
     args = parse_args()
-    convert(args.input, args.output, args.target)
+    convert(args.input, args.output, args.target, args.diffusers_prefix)
 
 
 if __name__ == "__main__":

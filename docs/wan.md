@@ -185,7 +185,7 @@ For Wan2.2 models, if you want to train with either the high-noise model or the 
 
 If you want to train LoRA for both models simultaneously, you need to specify the low-noise model with `--dit` and the high-noise model with `--dit_high_noise`. The two models are switched at the timestep specified by `--timestep_boundary`. The default value is 0.9 for I2V and 0.875 for T2V. `--timestep_boundary` can be specified in the range of 0.0 to 1.0, or in the range of 0 to 1000.
 
-When training Wan2.2 high and low models, you can use `--offload_inactive_dit` to offload the inactive DiT model to the CPU, or `--lazy_loading` to enable lazy loading for DiT models, which can save VRAM. `--offload_inactive_dit` only works when `--blocks_to_swap` is not specified, so use `--lazy_loading` instead. Without these options, both models will remain on the GPU, which may use more VRAM.
+When training Wan2.2 high and low models, you can use `--offload_inactive_dit` to offload the inactive DiT model to the CPU, which can save VRAM (only works when `--blocks_to_swap` is not specified).
 
 For Wan2.2 models, `--discrete_flow_shift` may need to be adjusted based on I2V and T2V. According to the official implementation, the shift values in inference are 12.0 for T2V and 5.0 for I2V. The shift values during training do not necessarily have to match those during inference, but they may serve as a useful reference.
 
@@ -221,7 +221,7 @@ Wan2.2モデルの場合、高ノイズ用モデルまたは低ノイズ用モ�
 
 両方のモデルへのLoRAを学習する場合は、`--dit`に低ノイズ用モデルを、`--dit_high_noise`に高ノイズ用モデルを指定します。2つのモデルは`--timestep_boundary`で指定されたタイムステップで切り替わります。デフォルトはI2Vの場合は0.9、T2Vの場合は0.875です。`--timestep_boundary`は0.0から1.0の範囲の値、または0から1000の範囲の値で指定できます。
 
-またWan2.2モデルで両方のモデルを学習するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができます。また`--lazy_loading`を使用すると、DiTモデルの遅延読み込みを有効します。これらのオプションによりVRAMを節約できます。`--offload_inactive_dit`は`--blocks_to_swap`が指定されていない場合にのみ利用できます。`--block_to_swap`を使うときには`--lazy_loading`を使用してください。これらのオプションを指定しないと両方のモデルがGPUに置かれますので、VRAMを多く使用します。
+またWan2.2モデルで両方のモデルを学習するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができ、VRAMを節約できます（`--blocks_to_swap`未指定時のみ有効）。
 
 Wan2.2の場合、I2VとT2Vで`--discrete_flow_shift`を調整する必要があるかもしれません。公式実装によると、推論時のシフト値はT2Vで12.0、I2Vで5.0です。学習時のシフト値は推論時度必ずしも合わせる必要はありませんが、参考になるかもしれません。
 
@@ -290,6 +290,8 @@ python src/musubi_tuner/wan_generate_video.py --fp8 --task t2v-1.3B --video_size
 
 For Wan2.2 models, you can specify the low-noise model with `--dit` and the high-noise model with `--dit_high_noise`. The two models are switched at the timestep specified by `--timestep_boundary`. The default is described above. If you omit the high-noise model, the low-noise model will be used for all timesteps.
 
+When inferring Wan2 .2 high and low models, you can use `--offload_inactive_dit` to offload the inactive DiT model to the CPU, or `--lazy_loading` to enable lazy loading for DiT models, which can save VRAM. `--offload_inactive_dit` only works when `--blocks_to_swap` is not specified, so use `--lazy_loading` instead. Without these options, both models will remain on the GPU, which may use more VRAM.
+
 `--attn_mode` is `torch`, `sdpa` (same as `torch`), `xformers`, `sageattn`,`flash2`, `flash` (same as `flash2`) or `flash3`. `torch` is the default. Other options require the corresponding library to be installed. `flash3` (Flash attention 3) is not tested.
 
 Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory consumption but may impact output quality.
@@ -340,6 +342,8 @@ Other options are same as `hv_generate_video.py` (some options are not supported
 `--task` には `t2v-1.3B`, `t2v-14B`, `i2v-14B`, `t2i-14B` （これらはWan2.1公式モデル）、`t2v-1.3B-FC`, `t2v-14B-FC`, `i2v-14B-FC`（Wan2.1-Fun Controlモデル）、`t2v-A14B`, `i2v-A14B`（Wan2.2 14Bモデル）を指定します。
 
 Wan2.2モデルの場合、`--dit`に低ノイズ用モデルを、`--dit_high_noise`に高ノイズ用モデルを指定します。2つのモデルは`--timestep_boundary`で指定されたタイムステップで切り替わります。高ノイズ用モデルを省略した場合は、低ノイズ用モデルが全てのタイムステップで使用されます。
+
+またWan2.2モデルで両方のモデルを用いて推論するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができます。また`--lazy_loading`を使用すると、DiTモデルの遅延読み込みを有効します。これらのオプションによりVRAMを節約できます。`--offload_inactive_dit`は`--blocks_to_swap`が指定されていない場合にのみ利用できます。`--block_to_swap`を使うときには`--lazy_loading`を使用してください。これらのオプションを指定しないと両方のモデルがGPUに置かれますので、VRAMを多く使用します。
 
 `--attn_mode` には `torch`, `sdpa`（`torch`と同じ）、`xformers`, `sageattn`, `flash2`, `flash`（`flash2`と同じ）, `flash3` のいずれかを指定します。デフォルトは `torch` です。その他のオプションを使用する場合は、対応するライブラリをインストールする必要があります。`flash3`（Flash attention 3）は未テストです。
 

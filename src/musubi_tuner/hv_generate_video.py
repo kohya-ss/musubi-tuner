@@ -1,9 +1,9 @@
 import argparse
 from datetime import datetime
+import gc
 import random
 import os
 import time
-from typing import Union
 import numpy as np
 import torch
 import torchvision
@@ -155,6 +155,7 @@ def save_images_grid(
 
     return image_paths
 
+
 # region Encoding prompt
 
 
@@ -305,6 +306,7 @@ def encode_input_prompt(conditioning_dict: dict, args, device, fp8_llm=False, ac
             conditioning_dict[prompt_type]["conditioning"] = prompt_embeds.to("cpu")
             conditioning_dict[prompt_type]["mask"] = prompt_mask.to("cpu")
     text_encoder = None
+    gc.collect()  # transformers==4.54.1 needs this
     clean_memory_on_device(device)
 
     text_encoder_2.to(device=device)
@@ -323,6 +325,7 @@ def encode_input_prompt(conditioning_dict: dict, args, device, fp8_llm=False, ac
             conditioning_dict[prompt_type]["clip_mask"] = prompt_mask_2.to("cpu")
 
     text_encoder_2 = None
+    gc.collect()
     clean_memory_on_device(device)
     return conditioning_dict
 

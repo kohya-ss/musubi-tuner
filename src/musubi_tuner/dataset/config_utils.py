@@ -118,7 +118,7 @@ class ConfigSanitizer:
         "fp_1f_clean_indices": [int],
         "fp_1f_target_index": int,
         "fp_1f_no_post": bool,
-        "flux_kontext_no_resize_control": bool,  
+        "flux_kontext_no_resize_control": bool,
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -255,7 +255,9 @@ class BlueprintGenerator:
 
 
 # if training is True, it will return a dataset group for training, otherwise for caching
-def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlueprint, training: bool = False) -> DatasetGroup:
+def generate_dataset_group_by_blueprint(
+    dataset_group_blueprint: DatasetGroupBlueprint, training: bool = False, num_timestep_buckets: Optional[int] = None
+) -> DatasetGroup:
     datasets: List[Union[ImageDataset, VideoDataset]] = []
 
     for dataset_blueprint in dataset_group_blueprint.datasets:
@@ -337,7 +339,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         # logger.info(f"[Dataset {i}]")
         dataset.set_seed(seed)
         if training:
-            dataset.prepare_for_training()
+            dataset.prepare_for_training(num_timestep_buckets=num_timestep_buckets)
 
     return DatasetGroup(datasets)
 

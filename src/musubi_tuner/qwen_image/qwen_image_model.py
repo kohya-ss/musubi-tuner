@@ -395,6 +395,10 @@ class RMSNorm(nn.Module):
             # convert into half-precision if necessary
             if self.weight.dtype in [torch.float16, torch.bfloat16]:
                 hidden_states = hidden_states.to(self.weight.dtype)
+            elif self.weight.dtype == torch.float8_e4m3fn:  # fp8 support
+                hidden_states = hidden_states * self.weight.to(hidden_states.dtype)
+                return hidden_states + (self.bias.to(hidden_states.dtype) if self.bias is not None else 0)
+
             hidden_states = hidden_states * self.weight
             if self.bias is not None:
                 hidden_states = hidden_states + self.bias
@@ -1231,6 +1235,7 @@ def load_qwen_image_model(
         fp8_optimization=fp8_scaled,
         calc_device=device,
         move_to_device=(loading_device == device),
+        dit_weight_dtype=dit_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
     )

@@ -222,8 +222,8 @@ def load_qwen2_5_vl(
 
     if dtype is not None:
         if is_fp8(dtype):
-            logger.info(f"prepare Qwen2.5-VL for fp8: set to {dtype}")
-            org_dtype = qwen2_5_vl.dtype
+            org_dtype = torch.bfloat16  # model weight is fp8 in loading, but original dtype is bfloat16
+            logger.info(f"prepare Qwen2.5-VL for fp8: set to {dtype} from {org_dtype}")
             qwen2_5_vl.to(dtype)
 
             # prepare LLM for fp8
@@ -297,34 +297,11 @@ def load_qwen2_5_vl(
                     if module.__class__.__name__ in ["Qwen2_5_VLDecoderLayer"]:
                         # print("set", module.__class__.__name__, "hooks")
                         module.forward = decoder_forward_hook(module)
+                    if module.__class__.__name__ in ["Qwen2_5_VisionRotaryEmbedding"]:
+                        # print("set", module.__class__.__name__, "hooks")
+                        module.to(target_dtype)
 
             prepare_fp8(qwen2_5_vl, org_dtype)
-
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import rotate_half
-            import transformers.models.qwen2_5_vl as qwen2_5_vl_module
-
-            def create_fn():
-                def _apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
-                    mrope_section = mrope_section * 2
-                    cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
-                        unsqueeze_dim
-                    )
-                    sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
-                        unsqueeze_dim
-                    )
-
-                    input_dtype = q.dtype
-                    q = q.to(torch.float32)
-                    k = k.to(torch.float32)
-                    cos = cos.to(torch.float32)
-                    sin = sin.to(torch.float32)
-                    q_embed = (q * cos) + (rotate_half(q) * sin)
-                    k_embed = (k * cos) + (rotate_half(k) * sin)
-                    return q_embed.to(input_dtype), k_embed.to(input_dtype)
-
-                return _apply_multimodal_rotary_pos_emb
-
-            qwen2_5_vl_module.modeling_qwen2_5_vl.apply_multimodal_rotary_pos_emb = create_fn()
 
         else:
             logger.info(f"Setting Qwen2.5-VL to dtype: {dtype}")
@@ -555,7 +532,7 @@ def prepare_latents(batch_size, num_channels_latents, height, width, dtype, devi
     width = 2 * (int(width) // (vae_scale_factor * 2))
 
     # kohya-ss: This is original implementations, but it will be better (B, C, 1, H, W). The latents is packed to (B,S,D) though.
-    shape = (batch_size, 1, num_channels_latents, height, width) 
+    shape = (batch_size, 1, num_channels_latents, height, width)
 
     if isinstance(generator, list) and len(generator) != batch_size:
         raise ValueError(

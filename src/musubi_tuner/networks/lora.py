@@ -343,7 +343,7 @@ def create_network(
     neuron_dropout: Optional[float] = None,
     **kwargs,
 ):
-    """ architecture independent network creation """
+    """architecture independent network creation"""
     if network_dim is None:
         network_dim = 4  # default
     if network_alpha is None:
@@ -653,6 +653,13 @@ class LoRANetwork(torch.nn.Module):
             logger.info(f"enable LoRA for U-Net: {len(self.unet_loras)} modules")
         else:
             self.unet_loras = []
+
+        if len(self.text_encoder_loras) == 0 and len(self.unet_loras) == 0:
+            logger.error(
+                "No LoRA modules. Please check `--network_module` and `--network_args`"
+                " / LoRAモジュールがありません。`--network_module`と`--network_args`を確認してください"
+            )
+            raise RuntimeError("No LoRA modules found")
 
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.apply_to()

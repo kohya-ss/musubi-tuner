@@ -38,6 +38,8 @@ def encode_and_save_batch(
         if accelerator is not None:
             with accelerator.autocast():
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
+                if embed.dtype == torch.float8_e4m3fn:  # T5 returns bf16, but QwenVL-2.5 returns fp8
+                    embed = embed.to(torch.bfloat16)
 
         else:
             embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)

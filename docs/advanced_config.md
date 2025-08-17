@@ -15,6 +15,7 @@
 - [MagCache](#magcache)
 - [Style-Friendly SNR Sampler](#style-friendly-snr-sampler)
 - [Specify time step range for training](#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)
+- [Timestep Bucketing for Uniform Sampling](#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing)
 
 ## How to specify `network_args` / `network_args`の指定方法
 
@@ -883,4 +884,85 @@ When `--min_timestep 500` and `--max_timestep 100` are specified, and `--preserv
 3. `--min_timestep 500` と `--max_timestep 1000` が指定され、`--preserve_distribution_shape` が指定された場合
 
 の分布形状を示しています。
+</details>
+
+## Timestep Bucketing for Uniform Sampling / 均一なサンプリングのためのTimestep Bucketing
+
+This feature is experimental.
+
+When training with a small dataset or for a few epochs, the random sampling of timesteps can be biased, potentially leading to unstable training. To mitigate this, timestep bucketing ensures a more uniform distribution of timesteps throughout the training process.
+
+This feature works as follows:
+
+1. At the beginning of each epoch, it prepares a pool of timesteps equal to the number of items in the dataset for that epoch. These timesteps are calculated as follows:
+   - A specified number of buckets is created. Each bucket represents an equal interval of the `[0, 1]` range (e.g., with 5 buckets, the ranges are `[0, 0.2]`, `[0.2, 0.4]`, ... `[0.8, 1.0]`).
+   - Each bucket is filled with an equal number of randomly generated timesteps within its range.
+   - The number of timesteps in each bucket is calculated as "number of dataset items ÷ number of buckets".
+
+2. All timesteps from all buckets are then combined and shuffled.
+3. During training, instead of generating a random timestep for each item, one is drawn from this pre-shuffled pool.
+
+This ensures that the model sees a balanced distribution of timesteps in each epoch, which can improve training stability, especially for LoRA training or when using small datasets.
+
+This feature is enabled by specifying `--num_timestep_buckets`.
+
+<details>
+<summary>日本語</summary>
+
+この機能は実験的なものです。
+
+データセットが小さい場合や学習エポック数が少ない場合、タイムステップの乱数に偏りが生じることで、学習が不安定になる可能性があります。Timestep Bucketing機能は、この問題を軽減するための機能で、学習プロセス全体でタイムステップがより均一に分布するよう調整します。
+
+この機能は以下のように動作します：
+
+1. 各エポックの開始時に、あらかじめそのエポックのデータセットの件数と同じ数の、タイムステップを準備します。これらのタイムステップは以下のように計算されます。
+
+    - 指定された数のバケットを準備します。各バケットは `[0, 1]` の範囲を等分した区間を表します（例：5バケットの場合、`[0, 0.2]`、`[0.2, 0.4]` ... `[0.8, 1.0]`）。
+    - 各バケットに、その範囲内でランダムに生成されたタイムステップを配置します。
+    - それぞれのバケットのタイムステップの件数は、「データセットの件数÷バケット数」で計算されます。
+
+2. すべてのバケットのタイムステップが結合され、シャッフルされます。
+3. 学習時には、アイテムごとにランダムなタイムステップを生成する代わりに、この事前にシャッフルされたプールからタイムステップが取り出されます。
+
+これにより、各エポックでモデルがバランスの取れたタイムステップの分布を使用することになり、特にLoRAの学習や小規模なデータセットを使用する際の学習の安定性が向上します。
+
+この機能は `--num_timestep_buckets` を指定することで有効になります。
+
+</details>
+
+### How to use / 使用方法
+
+Specify the number of buckets with the `--num_timestep_buckets` option. A value of 2 or more enables this feature. If not specified, it is disabled.
+
+The community research is required to determine the optimal value, but starting with a value between `4` and `10` may be a good idea.
+
+<details>
+<summary>日本語</summary>
+
+`--num_timestep_buckets` オプションでバケット数を指定します。2以上の値を指定するとこの機能が有効になります。指定しない場合は無効です。
+
+最適な値に関してはコミュニティの検証が必要ですが、`4` から `10` 程度の値から始めると良いと思われます。
+
+</details>
+
+### Example / 記述例
+
+```bash
+accelerate launch ... \
+    --num_timestep_buckets 5
+```
+
+### Notes / 注意点
+
+- This feature may not work as expected when training with both high and low noise models simultaneously in `wan_train_network.py` (`--dit_high_noise` option) or when `--preserve_distribution_shape` is specified. Because the way timesteps are handled will differ in these cases.
+
+    Specifically, instead of selecting from pre-configured timestep buckets, the process involves determining buckets on-demand and generating random timesteps within the range each bucket covers. Therefore, the uniform sampling effect may not be achieved, but some improvement can be expected compared to completely random generation (within the `[0, 1]` range).
+
+<details>
+<summary>日本語</summary>
+
+- `wan_train_network.py` でhigh/lowノイズモデルを同時に学習する場合（`--dit_high_noise` オプション）、および、`--preserve_distribution_shape` を指定した場合、タイムステップの扱いが異なるため、この機能は期待通りに動作しない可能性があります。
+
+    具体的には、あらかじめ設定されたタイムステップのバケットから選択されるのではなく、都度、バケツの決定→範囲内でのランダムなタイムステップの生成が行われます。このため、均一なサンプリングの効果が得られない可能性がありますが、完全なランダム（`[0, 1]` の範囲での生成）に比べると、多少の改善が見込まれます。
+
 </details>

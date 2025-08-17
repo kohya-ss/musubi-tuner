@@ -213,13 +213,17 @@ def load_safetensors_with_fp8_optimization_and_hook(
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
     """
     if fp8_optimization:
-        logger.info(f"Loading state dict with FP8 optimization. Hook enabled: {weight_hook is not None}")
+        logger.info(
+            f"Loading state dict with FP8 optimization. Dtype of weight: {dit_weight_dtype}, hook enabled: {weight_hook is not None}"
+        )
         # dit_weight_dtype is not used because we use fp8 optimization
         state_dict = load_safetensors_with_fp8_optimization(
             model_files, calc_device, target_keys, exclude_keys, move_to_device=move_to_device, weight_hook=weight_hook, quant_dtype=quant_dtype
         )
     else:
-        logger.info(f"Loading state dict without FP8 optimization. Hook enabled: {weight_hook is not None}")
+        logger.info(
+            f"Loading state dict without FP8 optimization. Dtype of weight: {dit_weight_dtype}, hook enabled: {weight_hook is not None}"
+        )
         state_dict = {}
         for model_file in model_files:
             with MemoryEfficientSafeOpen(model_file) as f:

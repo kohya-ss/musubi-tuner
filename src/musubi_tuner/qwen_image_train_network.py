@@ -58,7 +58,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         prompts = load_prompts(sample_prompts)
 
         # Load Qwen2.5-VL
-        vl_dtype = torch.float8e4m3fn if args.fp8_vl else torch.bfloat16
+        vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
         tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(args.text_encoder, vl_dtype, device, disable_mmap=True)
 
         # Encode with T5 and CLIP text encoders

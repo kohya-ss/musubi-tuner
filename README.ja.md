@@ -109,6 +109,15 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/08/16
+    - Qwen-ImageのVLMを利用したキャプション生成ツールを追加しました。PR [#460](https://github.com/kohya-ss/musubi-tuner/pull/460) 詳細は[ドキュメント](./docs/tools.md#image-captioning-with-qwen25-vl-srcmusubi_tunercaption_images_by_qwen_vlpy)を参照してください。
+
+- 2025/08/15
+    - Timestep Bucketing機能が追加されました。これにより、タイムステップの分布がより均一になり、学習が安定します。PR [#418](https://github.com/kohya-ss/musubi-tuner/pull/418) 詳細は[Timestep Bucketingのドキュメント](./docs/advanced_config.md#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing)を参照してください。
+
+- 2025/08/14
+    - `convert_lora.py`がQwen-ImageのLoRAをサポートしました。PR [#444](https://github.com/kohya-ss/musubi-tuner/pull/444) Diffusers形式との相互変換が可能です。詳細は[LoRAの形式の変換](#loraの形式の変換)を参照してください。
+
 - 2025/08/11
     - `--timestep_sampling`に`qwen_shift`が追加されました。これはQwen-Imageの推論時と同じ方法で、各画像の解像度に基づいた動的シフト値を使用します。またこれに伴い`qinglong`は`qinglong_flux`と`qinglong_qwen`に分割されました。PR [#428](https://github.com/kohya-ss/musubi-tuner/pull/428) sdbds氏に感謝します。詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md#timestep_sampling--タイムステップのサンプリング)および[高度な設定](./docs/advanced_config.md#style-friendly-snr-sampler)を参照してください。
     - `wan_generate_video.py` でWan2.2のhigh/lowモデルを使用するときに、遅延読み込みを行う`--lazy_loading`オプションを追加しました。PR [#427](https://github.com/kohya-ss/musubi-tuner/pull/427) 詳細は[こちら](./docs/wan.md#inference--推論)を参照してください。
@@ -132,20 +141,6 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 - 2025/08/01
     - FLUX. KontextのLoRA学習でblock swapが動作しない不具合を修正しました。[PR #402](https://github.com/kohya-ss/musubi-tuner/pull/402) および [PR #403](https://github.com/kohya-ss/musubi-tuner/pull/403) sdbds氏に感謝します。
-
-- 2025/07/31
-    - [AI コーディングエージェントを使用する開発者の方へのセクション](#aiコーディングエージェントを使用する開発者の方へ)を追加しました。AIエージェントを利用する場合はご一読ください。
-
-- 2025/07/29
-    - 依存関係が不足していてFLUX.1 KontextのLoRA学習ができない不具合を修正しました。`sentencepiece`が必要です。
-        - `pyproject.toml`に`sentencepiece`を追加しました。
-
-- 2025/07/28
-    - FLUX.1 KontextのLoRA学習を追加しました。詳細は[FLUX.1 KontextのLoRA学習のドキュメント](./docs/flux_kontext.md)を参照してください。
-
-- 2025/06/17
-    - FramePackの推論スクリプトで [MagCache](https://github.com/Zehong-Ma/MagCache) をサポートしました。詳しくは[高度な設定](./docs/advanced_config.md#magcache)を参照してください。
-    - FramePackの推論スクリプトで、対話モードおよびバッチモードでText Encoderの出力をキャッシュするようにしました。また処理順を見直し、モデルオフロードのタイミングを調整することで、連続生成時の処理時間を短縮しました。
 
 ### リリースについて
 
@@ -470,7 +465,7 @@ SkyReels V1はclassifier free guidance（ネガティブプロンプト）を必
 
 ### LoRAの形式の変換
 
-ComfyUIで使用可能な形式（Diffusion-pipeと思われる）への変換は以下のコマンドで行えます。
+他の推論環境（DiffusersやComfyUI）で使用可能な形式（Diffusion-pipe または Diffusers と思われる）への変換は以下のコマンドで行えます。
 
 ```bash
 python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
@@ -480,7 +475,7 @@ python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors 
 
 `--target`には`other`を指定してください。`default`を指定すると、他の形式から当リポジトリの形式に変換できます。
 
-Wan2.1も対応済みです。
+Wan2.1およびQwen-Imageも対応済みです。Diffusersで推論する場合、`--diffusers_prefix transformers` が追加で必要かもしれません。
 
 ## その他
 
