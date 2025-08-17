@@ -131,6 +131,7 @@ class ConfigSanitizer:
         "max_frames": int,
         "cache_directory": str,
         "source_fps": float,
+        "fp_latent_window_size": int,
     }
 
     # options handled by argparse but not handled by user config
@@ -322,6 +323,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         frame_sample: {dataset.frame_sample}
         max_frames: {dataset.max_frames}
         source_fps: {dataset.source_fps}
+        fp_latent_window_size: {dataset.fp_latent_window_size}
     \n"""
                 ),
                 "    ",

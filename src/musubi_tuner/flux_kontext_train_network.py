@@ -179,6 +179,8 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         vae.eval()
 
         # prepare control latent
+        control_latent = None
+        control_latent_ids = None
         if "control_image_path" in sample_parameter:
             control_image_path = sample_parameter["control_image_path"][0]  # only use the first control image
             control_image_tensor, _, _ = flux_utils.preprocess_control_image(control_image_path, resize_to_prefered=False)

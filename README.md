@@ -100,11 +100,11 @@ My general code and Musubi Tuner code is licensed Apache 2.0. Other projects inc
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1 and FramePack architectures. 
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack and FLUX.1 Kontext architectures. 
 
-This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1/FramePack repositories. 
+This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1/2.2/FramePack/FLUX.1 Kontext repositories. 
 
-For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md). For FramePack, please also refer to [FramePack documentation](./docs/framepack.md). For FLUX.1 Kontext, please refer to [FLUX.1 Kontext documentation](./docs/flux_kontext.md).
+For Wan2.1/2.2, please also refer to [Wan2.1/2.2 documentation](./docs/wan.md). For FramePack, please also refer to [FramePack documentation](./docs/framepack.md). For FLUX.1 Kontext, please refer to [FLUX.1 Kontext documentation](./docs/flux_kontext.md).
 
 *This repository is under development.*
 
@@ -115,6 +115,36 @@ If you find this project helpful, please consider supporting its development via
 ### Recent Updates
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- August 11, 2025:
+    - Added `--timestep_sampling` option with `qwen_shift`. This uses the same method as during inference for Qwen-Image, employing dynamic shift values based on the resolution of each image (typically around 2.2 for 1328x1328 images). Additionally, `qinglong` has been split into `qinglong_flux` and `qinglong_qwen`. Thanks to sdbds for [PR #428](https://github.com/kohya-ss/musubi-tuner/pull/428). 
+    
+        For details, see the [Qwen-Image documentation](./docs/qwen_image.md#timestep_sampling--タイムステップのサンプリング) and [Advanced Configuration](./docs/advanced_config.md#style-friendly-snr-sampler).
+
+    - Added `--lazy_loading` option for delayed loading of DiT models when using Wan2.2 high/low models in `wan_generate_video.py`. [PR #427](https://github.com/kohya-ss/musubi-tuner/pull/427) See [Wan2.2 documentation](./docs/wan.md#inference--推論) for details.
+
+- August 10, 2025:
+    - Added support for Qwen-Image. See [Qwen-Image documentation](./docs/qwen_image.md) for details.
+
+- August 9, 2025:
+    - When logging to wandb, sample generation images are now also logged to wandb. Thanks to xhiroga for [PR #420](https://github.com/kohya-ss/musubi-tuner/pull/420).
+    
+- August 8, 2025:
+    - Added support for Wan2.2.  [PR #399](https://github.com/kohya-ss/musubi-tuner/pull/399). See [Wan2.1/2.2 documentation](./docs/wan.md). 
+
+        Wan2.2 consists of two models: high noise and low noise. During LoRA training, you can choose either one or both. Please refer to the documentation for details on specifying timesteps.
+
+- August 7, 2025:
+    - Added new sampling methods for timesteps: `logsnr` and `qinglong`. Thank you to sdbds for proposing this in [PR #407](https://github.com/kohya-ss/musubi-tuner/pull/407). `logsnr` is designed for style learning, while `qinglong` is a hybrid sampling method that considers style learning, model stability, and detail reproduction. For details, see the [Style-friendly SNR Sampler documentation](./docs/advanced_config.md#style-friendly-snr-sampler).
+
+- August 2, 2025:
+    - Reduced peak memory usage during model loading for FramePack and Wan2.1 when using `--fp8_scaled`. This reduces VRAM usage during model loading before training and inference.
+
+- August 1, 2025:
+    - Fixed the issue where block swapping did not work in FLUX. Kontext LoRA training. Thanks to sdbds for [PR #402](https://github.com/kohya-ss/musubi-tuner/pull/402). [PR #403](https://github.com/kohya-ss/musubi-tuner/pull/403).
+
+- July 31, 2025:
+    - Added [a section for developers using AI coding agents](#for-developers-using-ai-coding-agents). If you are using AI agents, please read this section.
 
 - July 29, 2025:
     - Added `sentencepiece` to `pyproject.toml` to fix the issue where FLUX.1 Kontext LoRA training was not possible due to missing dependencies.
@@ -149,6 +179,31 @@ If you find this project helpful, please consider supporting its development via
 We are grateful to everyone who has been contributing to the Musubi Tuner ecosystem through documentation and third-party tools. To support these valuable contributions, we recommend working with our [releases](https://github.com/kohya-ss/musubi-tuner/releases) as stable reference points, as this project is under active development and breaking changes may occur.
 
 You can find the latest release and version history in our [releases page](https://github.com/kohya-ss/musubi-tuner/releases).
+
+### For Developers Using AI Coding Agents
+
+This repository provides recommended instructions to help AI agents like Claude and Gemini understand our project context and coding standards.
+
+To use them, you need to opt-in by creating your own configuration file in the project root.
+
+**Quick Setup:**
+
+1.  Create a `CLAUDE.md` and/or `GEMINI.md` file in the project root.
+2.  Add the following line to your `CLAUDE.md` to import the repository's recommended prompt (currently they are the almost same):
+
+    ```markdown
+    @./.ai/claude.prompt.md
+    ```
+
+    or for Gemini:
+
+    ```markdown
+    @./.ai/gemini.prompt.md
+    ```
+
+3.  You can now add your own personal instructions below the import line (e.g., `Always respond in Japanese.`).
+
+This approach ensures that you have full control over the instructions given to your agent while benefiting from the shared project context. Your `CLAUDE.md` and `GEMINI.md` are already listed in `.gitignore`, so it won't be committed to the repository.
 
 ## Overview
 
@@ -376,7 +431,10 @@ Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for 
 
 The format of LoRA trained is the same as `sd-scripts`.
 
-`--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
+You can also specify the range of timesteps 
+with `--min_timestep` and `--max_timestep`. See [advanced configuration](./docs/advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定) for details.
+
+`--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training. (When using `flux_shift` and `qwen_shift`, the distribution will be for images with a resolution of 1024x1024.)
 
 You can record logs during training. Refer to [Save and view logs in TensorBoard format](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
 

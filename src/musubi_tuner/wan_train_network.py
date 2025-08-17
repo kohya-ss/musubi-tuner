@@ -2,7 +2,6 @@ import argparse
 from typing import Optional
 from PIL import Image
 
-
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -11,12 +10,16 @@ from accelerate import Accelerator, init_empty_weights
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL, load_video
 from musubi_tuner.hv_generate_video import resize_image_to_bucket
-from musubi_tuner.hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
+from musubi_tuner.hv_train_network import (
+    NetworkTrainer,
+    load_prompts,
+    clean_memory_on_device,
+    setup_parser_common,
+    read_config_from_file,
+)
+from musubi_tuner.modules.custom_offloading_utils import synchronize_device
+from musubi_tuner.wan_generate_video import parse_one_frame_inference_args
 
-from blissful_tuner.blissful_logger import BlissfulLogger
-
-logger = BlissfulLogger(__name__, "green")
- 
 
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
@@ -27,6 +30,10 @@ from musubi_tuner.wan.modules.t5 import T5EncoderModel
 from musubi_tuner.wan.modules.vae import WanVAE
 from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
+# blissful start
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
+# blissful end
 
 class WanNetworkTrainer(NetworkTrainer):
     def __init__(self):
@@ -44,7 +51,8 @@ class WanNetworkTrainer(NetworkTrainer):
 
     def handle_model_specific_args(self, args):
         self.config = WAN_CONFIGS[args.task]
-        self._i2v_training = "i2v" in args.task  # we cannot use config.i2v because Fun-Control T2V has i2v flag TODO refactor this
+        # we cannot use config.i2v because Fun-Control T2V has i2v flag TODO refactor this
+        self._i2v_training = "i2v" in args.task or "flf2v" in args.task
         self._control_training = self.config.is_fun_control
 
         self.dit_dtype = detect_wan_sd_dtype(args.dit)
@@ -64,6 +72,27 @@ class WanNetworkTrainer(NetworkTrainer):
             self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
 
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
+
+        # Wan2.2: Store timestep boundary
+        self.dit_high_noise_path = args.dit_high_noise
+        self.high_low_training = self.dit_high_noise_path is not None
+
+        if self.high_low_training:
+            if args.blocks_to_swap is not None and args.blocks_to_swap > 0:
+                assert (
+                    not args.offload_inactive_dit
+                ), "Block swap is not supported with offloading inactive DiT / 非アクティブDiTをオフロードする設定ではブロックスワップはサポートされていません"
+
+        self.timestep_boundary = args.timestep_boundary if args.timestep_boundary is not None else self.config.boundary  # may be None
+        if self.timestep_boundary is None and self.high_low_training:
+            raise ValueError(
+                "timestep_boundary is not specified for high noise model"
+                + " / high noiseモデルを使用する場合は、timestep_boundaryを指定する必要があります。"
+            )
+        if self.timestep_boundary is not None:
+            if self.timestep_boundary > 1:
+                self.timestep_boundary /= 1000.0  # convert to 0 to 1 range
+            logger.info(f"Converted timestep_boundary to 0 to 1 range: {self.timestep_boundary}")
 
         self.default_guidance_scale = 1.0  # not used
 
@@ -113,8 +142,10 @@ class WanNetworkTrainer(NetworkTrainer):
         for prompt_dict in prompts:
             if prompt_dict.get("image_path", None) is not None and self.i2v_training:
                 sample_prompts_image_embs[prompt_dict["image_path"]] = None  # this will be replaced with CLIP context
+            if prompt_dict.get("end_image_path", None) is not None and self.i2v_training:
+                sample_prompts_image_embs[prompt_dict["end_image_path"]] = None
 
-        if len(sample_prompts_image_embs) > 0:
+        if len(sample_prompts_image_embs) > 0 and not self.config.v2_2:  # Wan2.2 does not use CLIP for I2V training
             logger.info(f"loading CLIP: {clip_path}")
             assert clip_path is not None, "CLIP path is required for I2V training / I2V学習にはCLIPのパスが必要です"
             clip = CLIPModel(dtype=config.clip_dtype, device=device, weight_path=clip_path)
@@ -148,6 +179,10 @@ class WanNetworkTrainer(NetworkTrainer):
             if p is not None and self.i2v_training:
                 prompt_dict_copy["clip_embeds"] = sample_prompts_image_embs[p]
 
+            p = prompt_dict.get("end_image_path", None)
+            if p is not None and self.i2v_training:
+                prompt_dict_copy["end_image_clip_embeds"] = sample_prompts_image_embs[p]
+
             sample_parameters.append(prompt_dict_copy)
 
         clean_memory_on_device(accelerator.device)
@@ -177,12 +212,28 @@ class WanNetworkTrainer(NetworkTrainer):
         """architecture dependent inference"""
         model: WanModel = transformer
         device = accelerator.device
+
+        if self.high_low_training:
+            self.next_model_is_high_noise = False # We use low noise model to sample the video
+            self.swap_high_low_weights(args, accelerator, model)
+
+        # TODO support different cfg_scale for low and high noise models
         if cfg_scale is None:
-            cfg_scale = 5.0
+            cfg_scale = self.config.sample_guide_scale[0]  # use low noise guide scale by default
         do_classifier_free_guidance = do_classifier_free_guidance and cfg_scale != 1.0
 
-        # Calculate latent video length based on VAE version
-        latent_video_length = (frame_count - 1) // self.config["vae_stride"][0] + 1
+        # prepare parameters
+        one_frame_mode = args.one_frame
+        if one_frame_mode:
+            target_index, control_indices, f_indices, one_frame_inference_index = parse_one_frame_inference_args(
+                sample_parameter["one_frame"]
+            )
+            latent_video_length = len(f_indices)  # number of frames in the video
+        else:
+            target_index, control_indices, f_indices, one_frame_inference_index = None, None, None, None
+
+            # Calculate latent video length based on VAE version
+            latent_video_length = (frame_count - 1) // self.config["vae_stride"][0] + 1
 
         # Get embeddings
         context = sample_parameter["t5_embeds"].to(device=device)
@@ -204,7 +255,58 @@ class WanNetworkTrainer(NetworkTrainer):
         latents = torch.cat(latents, dim=2)
 
         image_latents = None
-        if self.i2v_training or self.control_training:
+
+        if one_frame_mode:
+            # One frame inference mode
+            logger.info(
+                f"One frame inference mode: target_index={target_index}, control_indices={control_indices}, f_indices={f_indices}"
+            )
+            vae.to(device)
+            vae.eval()
+
+            # prepare start and control latent
+            def encode_image(path):
+                image = Image.open(path)
+                if image.mode == "RGBA":
+                    alpha = image.split()[-1]
+                    image = image.convert("RGB")
+                else:
+                    alpha = None
+                image = resize_image_to_bucket(image, (width, height))  # returns a numpy array
+                image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(1).unsqueeze(0).float()  # 1, C, 1, H, W
+                image = image / 127.5 - 1  # -1 to 1
+                with torch.amp.autocast(device_type=device.type, dtype=vae.dtype), torch.no_grad():
+                    image = image.to(device=device)
+                    latent = vae.encode(image)[0]
+                return latent, alpha
+
+            control_latents = []
+            control_alphas = []
+            if "control_image_path" in sample_parameter:
+                for control_image_path in sample_parameter["control_image_path"]:
+                    control_latent, control_alpha = encode_image(control_image_path)
+                    control_latents.append(control_latent)
+                    control_alphas.append(control_alpha)
+
+            with torch.amp.autocast(device_type=device.type, dtype=vae.dtype), torch.no_grad():
+                black_image_latent = vae.encode([torch.zeros((3, 1, height, width), dtype=torch.float32, device=device)])[0]
+
+            # Create latent and mask for the required number of frames
+            image_latents = torch.zeros(4 + 16, len(f_indices), lat_h, lat_w, dtype=torch.float32, device=device)
+            ci = 0
+            for j, index in enumerate(f_indices):
+                if index == target_index:
+                    image_latents[4:, j : j + 1, :, :] = black_image_latent  # set black latent for the target frame
+                else:
+                    image_latents[:4, j, :, :] = 1.0  # set mask to 1.0 for the clean latent frames
+                    image_latents[4:, j : j + 1, :, :] = control_latents[ci]  # set control latent
+                    ci += 1
+            image_latents = image_latents.unsqueeze(0)  # add batch dim
+
+            vae.to("cpu")
+            clean_memory_on_device(device)
+
+        elif self.i2v_training or self.control_training:
             # Move VAE to the appropriate device for sampling: consider to cache image latents in CPU in advance
             vae.to(device)
             vae.eval()
@@ -272,9 +374,25 @@ class WanNetworkTrainer(NetworkTrainer):
         arg_c = {"context": [context], "seq_len": max_seq_len}
         arg_null = {"context": [context_null], "seq_len": max_seq_len}
 
-        if self.i2v_training:
-            arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
-            arg_null["clip_fea"] = arg_c["clip_fea"]
+        if self.i2v_training and not one_frame_mode:
+            if not self.config.v2_2:
+                arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
+                arg_null["clip_fea"] = arg_c["clip_fea"]
+
+        if one_frame_mode:
+            if not self.config.v2_2:
+                if "end_image_clip_embeds" in sample_parameter:
+                    arg_c["clip_fea"] = torch.cat(
+                        [sample_parameter["clip_embeds"], sample_parameter["end_image_clip_embeds"]], dim=0
+                    ).to(device=device, dtype=dit_dtype)
+                else:
+                    arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
+                arg_null["clip_fea"] = arg_c["clip_fea"]
+
+            arg_c["f_indices"] = [f_indices]
+            arg_null["f_indices"] = arg_c["f_indices"]
+            # print(f"One arg_c: {arg_c}, arg_null: {arg_null}")
+
         if self.i2v_training or self.control_training:
             arg_c["y"] = image_latents
             arg_null["y"] = image_latents
@@ -311,6 +429,8 @@ class WanNetworkTrainer(NetworkTrainer):
         latent = latent.unsqueeze(0)  # add batch dim
         latent = latent.to(device=device)
 
+        if one_frame_mode:
+            latent = latent[:, :, one_frame_inference_index : one_frame_inference_index + 1, :, :]  # select the one frame
         with torch.amp.autocast(device_type=device.type, dtype=vae.dtype), torch.no_grad():
             video = vae.decode(latent)[0]  # vae returns list
         video = video.unsqueeze(0)  # add batch dim
@@ -344,17 +464,158 @@ class WanNetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         dit_weight_dtype = None if args.mixed_precision_transformer else dit_weight_dtype
+        blissful_kwargs = {
+            "rope_func": args.rope_func if hasattr(args, "rope_func") else "default",
+            "riflex_index": args.riflex_index if hasattr(args, "riflex_index") else 0,
+            "num_frames": args.video_length if hasattr(args, "video_length") else 81,
+        }
         model = load_wan_model(
             self.config, accelerator.device, dit_path, attn_mode, split_attn,
-            loading_device, dit_weight_dtype, args.fp8_scaled, rope_func=args.rope_func,
-            quant_dtype=torch.float32 if args.upcast_quantization else None, upcast_linear=args.upcast_linear
+            loading_device, dit_weight_dtype, args.fp8_scaled,
+            **blissful_kwargs
         )
+        if self.high_low_training:
+            # load high noise model
+            logger.info(f"Loading high noise model from {self.dit_high_noise_path}")
+            model_high_noise = load_wan_model(
+                self.config,
+                accelerator.device,
+                self.dit_high_noise_path,
+                attn_mode,
+                split_attn,
+                "cpu" if args.offload_inactive_dit else loading_device,
+                dit_weight_dtype,
+                args.fp8_scaled,
+            )
+            if self.blocks_to_swap > 0:
+                # This moves the weights to the appropriate device
+                logger.info(f"Prepare block swap for high noise model, blocks_to_swap={self.blocks_to_swap}")
+                model_high_noise.enable_block_swap(self.blocks_to_swap, accelerator.device, supports_backward=True)
+                model_high_noise.move_to_device_except_swap_blocks(accelerator.device)
+                model_high_noise.prepare_block_swap_before_forward()
+
+            self.dit_inactive_state_dict = model_high_noise.state_dict()
+
+            self.current_model_is_high_noise = False
+            self.next_model_is_high_noise = False
+        else:
+            self.dit_inactive_state_dict = None
+            self.current_model_is_high_noise = False
+            self.next_model_is_high_noise = False
+
         return model
 
     def scale_shift_latents(self, latents):
         return latents
 
+    def get_noisy_model_input_and_timesteps(self, args, noise, latents, noise_scheduler, device, dtype):
+        if not self.high_low_training:
+            return super().get_noisy_model_input_and_timesteps(args, noise, latents, noise_scheduler, device, dtype)
+
+        # import time
+
+        # start_time = time.perf_counter()
+
+        # high-low training case
+        # call super to get the noisy model input and timesteps, and sample only the first one, and choose the model we want based on the timestep
+        noisy_model_input, timesteps = super().get_noisy_model_input_and_timesteps(
+            args, noise[0:1], latents[0:1], noise_scheduler, device, dtype
+        )
+        high_noise = timesteps[0] / 1000.0 >= self.timestep_boundary
+        self.next_model_is_high_noise = high_noise
+
+        # choose each member of latents for high or low noise model. because we want to train all the latents
+        num_max_calls = 100
+        final_noisy_model_inputs = []
+        final_timesteps_list = []
+        bsize = latents.shape[0]
+        for i in range(bsize):
+            for _ in range(num_max_calls):
+                noisy_model_input, timesteps = super().get_noisy_model_input_and_timesteps(
+                    args, noise[i : i + 1], latents[i : i + 1], noise_scheduler, device, dtype
+                )
+                if (
+                    (high_noise and timesteps[0] / 1000.0 >= self.timestep_boundary)
+                    or (not high_noise and timesteps[0] / 1000.0 < self.timestep_boundary)
+                ):
+                    final_noisy_model_inputs.append(noisy_model_input)
+                    final_timesteps_list.append(timesteps)
+                    break
+
+        if len(final_noisy_model_inputs) < bsize:
+            logger.warning(
+                f"No valid noisy model inputs found for bsize={bsize}, high_noise={high_noise}, timestep_boundary={self.timestep_boundary}"
+            )
+            return super().get_noisy_model_input_and_timesteps(
+                args, noise, latents, noise_scheduler, device, dtype
+            )  # fall back to the original method
+
+        # final noisy model input may have less than bsize elements, it will be fine for training
+        final_noisy_model_input = torch.cat(final_noisy_model_inputs, dim=0)
+        final_timesteps = torch.cat(final_timesteps_list, dim=0)
+
+        # end_time = time.perf_counter()
+        # print(f"get_noisy_model_input_and_timesteps took {end_time - start_time:.2f} seconds")
+        return final_noisy_model_input, final_timesteps
+
+    def swap_high_low_weights(self, args: argparse.Namespace, accelerator: Accelerator, model: WanModel):
+        if self.current_model_is_high_noise != self.next_model_is_high_noise:
+            # import time
+
+            # start_time = time.perf_counter()
+
+            if self.blocks_to_swap == 0:
+                # If offloading inactive DiT, move the model to CPU first
+                if args.offload_inactive_dit:
+                    model.to("cpu", non_blocking=True)
+                    synchronize_device(accelerator.device)  # wait for the CPU to finish
+                    clean_memory_on_device(accelerator.device)
+
+                state_dict = model.state_dict()  # CPU or accelerator.device
+
+                info = model.load_state_dict(self.dit_inactive_state_dict, strict=True, assign=True)
+                assert len(info.missing_keys) == 0, f"Missing keys: {info.missing_keys}"
+                assert len(info.unexpected_keys) == 0, f"Unexpected keys: {info.unexpected_keys}"
+
+                if args.offload_inactive_dit:
+                    model.to(accelerator.device, non_blocking=True)
+                    synchronize_device(accelerator.device)
+
+                self.dit_inactive_state_dict = state_dict  # swap the state dict
+            else:
+                # If block swap is enabled, we cannot use offloading inactive DiT, because weights are partially on CPU
+                state_dict = model.state_dict()  # CPU or accelerator.device
+
+                info = model.load_state_dict(self.dit_inactive_state_dict, strict=True, assign=True)
+                assert len(info.missing_keys) == 0, f"Missing keys: {info.missing_keys}"
+                assert len(info.unexpected_keys) == 0, f"Unexpected keys: {info.unexpected_keys}"
+
+                self.dit_inactive_state_dict = state_dict  # swap the state dict
+
+            self.current_model_is_high_noise = self.next_model_is_high_noise
+            # end_time = time.perf_counter()
+            # print(f"Model swap took {end_time - start_time:.2f} seconds")
+
     def call_dit(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        latents: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        noise: torch.Tensor,
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ):
+        if self.high_low_training:
+            # high-low training case
+            self.swap_high_low_weights(args, accelerator, transformer)
+
+        # Call the DiT model
+        return self._call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
+
+    def _call_dit(
         self,
         args: argparse.Namespace,
         accelerator: Accelerator,
@@ -374,8 +635,17 @@ class WanNetworkTrainer(NetworkTrainer):
         if self.i2v_training:
             image_latents = batch["latents_image"]
             image_latents = image_latents.to(device=accelerator.device, dtype=network_dtype)
-            clip_fea = batch["clip"]
-            clip_fea = clip_fea.to(device=accelerator.device, dtype=network_dtype)
+
+            if not self.config.v2_2:
+                clip_fea = batch["clip"]
+                clip_fea = clip_fea.to(device=accelerator.device, dtype=network_dtype)
+
+                # clip_fea is [B, N, D] (normal) or [B, 1, N, D] (one frame) for I2V, and [B, 2, N, D] for FLF2V, we need to reshape it to [B, N, D] for I2V and [B*2, N, D] for FLF2V
+                if clip_fea.shape[1] == 1:
+                    clip_fea = clip_fea.squeeze(1)
+                elif clip_fea.shape[1] == 2:
+                    clip_fea = clip_fea.view(-1, clip_fea.shape[2], clip_fea.shape[3])
+
         if self.control_training:
             control_latents = batch["latents_control"]
             control_latents = control_latents.to(device=accelerator.device, dtype=network_dtype)
@@ -417,7 +687,7 @@ class WanNetworkTrainer(NetworkTrainer):
 
 
 def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Wan2.1 specific parser setup"""
+    """Wan2.1/2.2 specific parser setup"""
     parser.add_argument("--task", type=str, default="t2v-14B", choices=list(WAN_CONFIGS.keys()), help="The task to run.")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--t5", type=str, default=None, help="text encoder (T5) checkpoint path")
@@ -426,11 +696,27 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "--clip",
         type=str,
         default=None,
-        help="text encoder (CLIP) checkpoint path, optional. If training I2V model, this is required",
+        help="text encoder (CLIP) checkpoint path, optional. If training Wan2.1 I2V model, this is required",
     )
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
+    parser.add_argument("--one_frame", action="store_true", help="Use one frame sampling method for sample generation")
+
+    # Wan2.2 specific arguments
+    parser.add_argument("--dit_high_noise", type=str, required=False, default=None, help="DiT checkpoint path for high noise model")
+    parser.add_argument(
+        "--timestep_boundary",
+        type=int,
+        default=None,
+        help="Timestep boundary for switching between high and low noise models, defaults to None (task specific) / 高ノイズモデルと低ノイズモデルを切り替えるタイムステップ境界。デフォルトはNone（タスク固有）",
+    )
+    parser.add_argument(
+        "--offload_inactive_dit",
+        action="store_true",
+        help="Offload inactive DiT model to CPU. Cannot be used with block swap / アクティブではないDiTモデルをCPUにオフロードします。ブロックスワップと併用できません",
+    )
     parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
     parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
+
     return parser
 
 

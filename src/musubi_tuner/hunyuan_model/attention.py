@@ -136,9 +136,9 @@ def attention(
     if type(q_or_qkv_list) == list:
         q_or_qkv_list.clear()
     split_attn = total_len is not None
-    if split_attn and mode == "sageattn":
+    if (split_attn or cu_seqlens_q is None) and mode == "sageattn":
         mode = "sageattn_fixlen"
-    elif split_attn and mode == "flash":
+    elif (split_attn or cu_seqlens_q is None) and mode == "flash":
         mode = "flash_fixlen"
     # print(f"Attention mode: {mode}, split_attn: {split_attn}")
     pre_attn_layout, post_attn_layout = MEMORY_LAYOUT[mode]
@@ -178,40 +178,56 @@ def attention(
     elif mode == "xformers":
         # B, M, H, K: M is the sequence length, H is the number of heads, K is the dimension of the heads -> it is same as input dimension
         # currently only support batch_size = 1
-        assert split_attn, "Xformers only supports splitting"
-        x = []
-        for i in range(len(q)):
-            x_i = xops.memory_efficient_attention(q[i], k[i], v[i], p=drop_rate)  # , causal=causal)
-            q[i], k[i], v[i] = None, None, None
-            x.append(x_i)
-        del q, k, v
+        assert split_attn or cu_seqlens_q is None, "Xformers only supports splitting"
+        if split_attn:
+            x = []
+            for i in range(len(q)):
+                x_i = xops.memory_efficient_attention(q[i], k[i], v[i], p=drop_rate)  # , causal=causal)
+                q[i], k[i], v[i] = None, None, None
+                x.append(x_i)
+            del q, k, v
+        else:
+            x = xops.memory_efficient_attention(q, k, v, p=drop_rate)
+            del q, k, v
 
     elif mode == "flash":
         x = flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         del q, k, v
         # x with shape [(bxs), a, d]
         x = x.view(batch_size, max_seqlen_q, x.shape[-2], x.shape[-1])  # reshape x to [b, s, a, d]
+
     elif mode == "flash_fixlen":
-        x = []
-        for i in range(len(q)):
-            # q: (batch_size, seqlen, nheads, headdim), k: (batch_size, seqlen, nheads_k, headdim), v: (batch_size, seqlen, nheads_k, headdim)
-            x_i = flash_attn_func(q[i], k[i], v[i], dropout_p=drop_rate, causal=causal)
-            q[i], k[i], v[i] = None, None, None
-            x.append(x_i)
-        del q, k, v
+        if split_attn:
+            x = []
+            for i in range(len(q)):
+                # q: (batch_size, seqlen, nheads, headdim), k: (batch_size, seqlen, nheads_k, headdim), v: (batch_size, seqlen, nheads_k, headdim)
+                x_i = flash_attn_func(q[i], k[i], v[i], dropout_p=drop_rate, causal=causal)
+                q[i], k[i], v[i] = None, None, None
+                x.append(x_i)
+            del q, k, v
+        else:
+            x = flash_attn_func(q, k, v, dropout_p=drop_rate, causal=causal)
+            del q, k, v
+
     elif mode == "sageattn":
         x = sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         del q, k, v
         # x with shape [(bxs), a, d]
         x = x.view(batch_size, max_seqlen_q, x.shape[-2], x.shape[-1])  # reshape x to [b, s, a, d]
+
     elif mode == "sageattn_fixlen":
-        x = []
-        for i in range(len(q)):
-            # HND seems to cause an error
-            x_i = sageattn(q[i], k[i], v[i])  # (batch_size, seq_len, head_num, head_dim)
-            q[i], k[i], v[i] = None, None, None
-            x.append(x_i)
-        del q, k, v
+        if split_attn:
+            x = []
+            for i in range(len(q)):
+                # HND seems to cause an error
+                x_i = sageattn(q[i], k[i], v[i])  # (batch_size, seq_len, head_num, head_dim)
+                q[i], k[i], v[i] = None, None, None
+                x.append(x_i)
+            del q, k, v
+        else:
+            x = sageattn(q, k, v)
+            del q, k, v
+
     elif mode == "vanilla":
         assert not split_attn, "Vanilla attention does not support trimming"
         scale_factor = 1 / math.sqrt(q.size(-1))
@@ -250,8 +266,8 @@ def attention(
         x = post_attn_layout(x)
 
     b, s, a, d = x.shape
-    out = x.reshape(b, s, -1)
-    return out
+    x = x.reshape(b, s, -1)
+    return x
 
 
 def parallel_attention(hybrid_seq_parallel_attn, q, k, v, img_q_len, img_kv_len, cu_seqlens_q, cu_seqlens_kv):
