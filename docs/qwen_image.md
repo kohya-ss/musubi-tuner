@@ -99,6 +99,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --weighting_scheme none --discrete_flow_shift 3.0 \
     --optimizer_type adamw8bit --learning_rate 1e-4 --gradient_checkpointing \
     --max_data_loader_n_workers 2 --persistent_data_loader_workers \
+    --network_module networks.lora_qwen_image \
     --network_dim 32 \
     --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
     --output_dir path/to/output_dir --output_name name-of-lora
@@ -106,7 +107,6 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 
 - Uses `qwen_image_train_network.py`.
 - **Requires** specifying `--dit`, `--vae`, and `--text_encoder`.
-- The LoRA network for Qwen-Image (`networks.lora_qwen_image`) is automatically selected.
 - `--mixed_precision bf16` is recommended for Qwen-Image training.
 - Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT), and `--fp8_vl` (for Text Encoder) are available. 
 - `--gradient_checkpointing` is available for memory savings.
@@ -120,6 +120,8 @@ If you specify `--split_attn`, the attention computation will be split, slightly
 `--timestep_sampling` allows you to choose the sampling method for the timesteps. `shift` with `--discrete_flow_shift` is the default. `qwen_shift` is also available. `qwen_shift` is a same method during inference. It uses the dynamic shift value based on the resolution of each image (typically around 2.2 for 1328x1328 images).
 
 `--discrete_flow_shift` is set quite low for Qwen-Image during inference (as described), so a lower value than other models may be preferable.
+
+Don't forget to specify `--network_module networks.lora_qwen_image`.
 
 The appropriate settings for each parameter are unknown. Feedback is welcome.
 
@@ -145,7 +147,6 @@ Qwen-Imageの学習は専用のスクリプト`qwen_image_train_network.py`を�
 
 - `qwen_image_train_network.py`を使用します。
 - `--dit`、`--vae`、`--text_encoder`を指定する必要があります。
-- Qwen-Image用のLoRAネットワーク（`networks.lora_qwen_image`）は自動的に選択されます。
 - Qwen-Imageの学習には`--mixed_precision bf16`を推奨します。
 - `--fp8_base`や`--fp8_scaled`（DiT用）、`--fp8_vl`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
@@ -159,6 +160,8 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 `--timestep_sampling` では、タイムステップのサンプリング方法を選択できます。`shift` と `--discrete_flow_shift` の組み合わせがデフォルトです。`qwen_shift` も利用可能です。`qwen_shift` は推論時と同じ方法で、各画像の解像度に基づいた動的シフト値を使用します（通常、1328x1328画像の場合は約2.2です）。
 
 `--discrete_flow_shift`は、Qwen-Imageでは前述のように推論時にかなり低めなため、他のモデルよりも低めが良いかもしれません。
+
+`--network_module networks.lora_qwen_image`を指定することを忘れないでください。
 
 それぞれのパラメータの適切な設定は不明です。フィードバックをお待ちしています。
 

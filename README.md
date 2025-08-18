@@ -116,6 +116,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- August 18, 2025:
+    - The option `--network_module networks.lora_qwen_image` was missing from the documentation for training with `qwen_image_train_network.py`. The [documentation](./docs/qwen_image.md#training--学習) has been fixed to include this information.
+
 - August 16, 2025:
     - Added a tool for captioning images using Qwen-Image VLM. PR [#460](https://github.com/kohya-ss/musubi-tuner/pull/460) See [here](./docs/tools.md#image-captioning-with-qwen25-vl-srcmusubi_tunercaption_images_by_qwen_vlpy) for more details.
 
