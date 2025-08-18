@@ -191,7 +191,7 @@ class WanSelfAttention(nn.Module):
             attn_mode="torch",
             split_attn=False,
             **kwargs,
-        ):
+    ):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -389,6 +389,7 @@ class WanAttentionBlock(nn.Module):
         self.eps = eps
         self.model_version = model_version  # New!
         self.rope_func = kwargs.get("rope_func") if kwargs.get("rope_func") is not None else "default"
+        self.lower_precision_attention = kwargs.get("lower_precision_attention") if kwargs.get("lower_precision_attention") is not None else False
 
         # layers
         if model_version == "2.1":
@@ -423,59 +424,43 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        assert e.dtype == torch.float32
-        if self.model_version == "2.1":
-            e = self.modulation.to(torch.float32) + e
-            e = e.chunk(6, dim=1)
-            assert e[0].dtype == torch.float32
+        x_orig_dtype = x.dtype
+        comp_dtype = torch.float16 if self.lower_precision_attention else torch.float32
+        split_dim = e.ndim - 2  # dim to split is 1 for 2.1, 2 for 2.2
+        m = self.modulation.to(comp_dtype, copy=False)   # [1, 6, C]
+        if e.ndim == 4:
+            m = m.unsqueeze(0)  # [1, 1, 6, C] for upcoming broadcast shape matching with e
+        e = e.to(comp_dtype, copy=False)  # [B, 6, C] for 2.1, [B, L, 6, C] for 2.2
 
-            # self-attention
-            y = self.self_attn(self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes, freqs)
-            x = x + y.to(torch.float32) * e[2]
-            del y
+        # Split the "6" axis
+        m0, m1, m2, m3, m4, m5 = m.unbind(dim=split_dim)   # each [1, C] for 2.1, [1, 1, C] for 2.2
+        e0, e1, e2, e3, e4, e5 = e.unbind(dim=split_dim)   # each [B, C] for 2.1, [B, L, C] for 2.2
 
-            # cross-attention & ffn
-            x = x + self.cross_attn(self.norm3(x), context, context_lens)
-            del context
-            y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
-            x = x + y.to(torch.float32) * e[5]
-            del y
-        else:  # For Wan2.2
-            comp_dtype = x.dtype  # bf16/fp16
+        # Per-slot sums, avoids operating on large tensor directly to save VRAM
+        s0 = e0 + m0      # All same shape as e - [B, C] for 2.1 and [B, L, C] for 2.2
+        s1 = e1 + m1
+        s2 = e2 + m2
+        s3 = e3 + m3
+        s4 = e4 + m4
+        s5 = e5 + m5
 
-            # Keep in compute dtype; don't create fp32 monsters
-            m = self.modulation.to(comp_dtype)   # [1, 6, C]
-            e = e.to(comp_dtype)                 # [B, L, 6, C]
+        # Self-attention
+        q_in = self.norm1(x).to(comp_dtype, copy=False)
+        fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()
+        y = self.self_attn(fi1, seq_lens, grid_sizes, freqs)
+        x = x + (y * s2).to(x.dtype, copy=False)
+        del y
 
-            # Split the "6" axis without keeping a singleton dim
-            m0, m1, m2, m3, m4, m5 = m.unbind(dim=1)   # each [1, C]
-            e0, e1, e2, e3, e4, e5 = e.unbind(dim=2)   # each [B, L, C]
+        # Cross-attn
+        x = x + self.cross_attn(self.norm3(x).to(comp_dtype, copy=False), context, context_lens)
+        del context
 
-            # Per-slot sums (broadcast m* onto [B, L, C]); avoids building [B, L, 6, C]
-            s0 = e0 + m0      # [B, L, C]
-            s1 = e1 + m1
-            s2 = e2 + m2
-            s3 = e3 + m3
-            s4 = e4 + m4
-            s5 = e5 + m5
-
-            # Self-attention (no .float(); keep bf16/fp16 so Sage/SDPA uses the lean kernel)
-            q_in = self.norm1(x).to(comp_dtype)
-            y = self.self_attn((q_in * (1 + s1) + s0).contiguous(),
-                               seq_lens, grid_sizes, freqs)
-            x = x + y.to(comp_dtype) * s2
-            del y
-
-            # Cross-attn
-            x = x + self.cross_attn(self.norm3(x).to(comp_dtype), context, context_lens)
-            del context
-
-            # FFN
-            ff_in = self.norm2(x).to(comp_dtype)
-            y = self.ffn((ff_in * (1 + s4) + s3).contiguous())
-            x = x + y.to(comp_dtype) * s5
-            del y
-        return x
+        # FFN
+        ff_in = self.norm2(x).to(comp_dtype, copy=False)
+        y = self.ffn((ff_in * (1 + s4) + s3).contiguous())
+        x = x + (y * s5).to(x.dtype, copy=False)
+        del y
+        return x.to(x_orig_dtype, copy=False)
 
     def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
         if self.training and self.gradient_checkpointing:
@@ -664,6 +649,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         # blocks
         cross_attn_type = "t2v_cross_attn" if model_type == "t2v" else "i2v_cross_attn"
+        if kwargs.get("lower_precision_attention", False):
+            logger.info("Attention calculations will be done in torch.float16 to save VRAM")
         self.blocks = nn.ModuleList(
             [
                 WanAttentionBlock(

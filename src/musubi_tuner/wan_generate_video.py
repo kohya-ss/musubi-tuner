@@ -633,17 +633,16 @@ def load_dit_model(
         lora_weights_list = None
 
     loading_weight_dtype = dit_weight_dtype
-    if args.fp8_scaled and not args.lycoris:
-        loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
-    if args.mixed_precision_transformer:  # blissful
-        loading_weight_dtype = None
+    if (args.fp8_scaled or args.mixed_precision_transformer) and not args.lycoris:
+        loading_weight_dtype = None  # we will load weights as-is
 
     blissful_kwargs = {
-        "rope_func": args.rope_func if hasattr(args, "rope_func") else "default",
-        "riflex_index": args.riflex_index if hasattr(args, "riflex_index") else 0,
-        "num_frames": args.video_length if hasattr(args, "video_length") else 81,
-        "quant_dtype": torch.float32 if hasattr(args, "upcast_quantization") and args.upcast_quantization else None,
-        "upcast_linear": args.upcast_linear if hasattr(args, "upcast_linear") else False
+        "rope_func": "default" if not hasattr(args, "rope_func") else args.rope_func,
+        "riflex_index": 0 if not hasattr(args, "riflex_index") else args.riflex_index,
+        "num_frames": 81 if not hasattr(args, "video_length") else args.video_length,
+        "quant_dtype": None if not hasattr(args, "upcast_quantization") else torch.float32 if args.upcast_quantization else None,
+        "upcast_linear": False if not hasattr(args, "upcast_linear") else args.upcast_linear,
+        "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention
     }
     model = load_wan_model(
         config,
