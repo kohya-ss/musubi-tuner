@@ -193,7 +193,9 @@ Don't forget to specify `--network_module networks.lora_wan`.
 
 Other options are mostly the same as `hv_train_network.py`.
 
-Use `convert_lora.py` for converting the LoRA weights after training, as in HunyuanVideo.
+~~Use `convert_lora.py` for converting the LoRA weights after training, as in HunyuanVideo.~~
+
+The trained LoRA weights are seemed to be compatible with ComfyUI (may depend on the nodes used).
 
 #### Recommended Min/Max Timestep Settings for Wan2.2
 
@@ -229,7 +231,9 @@ Wan2.2の場合、I2VとT2Vで`--discrete_flow_shift`を調整する必要があ
 
 その他のオプションは、ほぼ`hv_train_network.py`と同様です。
 
-学習後のLoRAの重みの変換は、HunyuanVideoと同様に`convert_lora.py`を使用してください。
+~~学習後のLoRAの重みの変換は、HunyuanVideoと同様に`convert_lora.py`を使用してください。~~
+
+学習後のLoRAの重みはそのままComfyUIで使用できるようです（用いるノードにもよります）。
 
 </details>
 

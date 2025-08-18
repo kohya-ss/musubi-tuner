@@ -109,6 +109,9 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/08/18
+    - `qwen_image_train_network.py`の訓練時の`--network_module networks.lora_qwen_image`の指定について、ドキュメントへの記載が漏れていました。[ドキュメント](./docs/qwen_image.md#training--学習)を修正しました。
+
 - 2025/08/16
     - Qwen-ImageのVLMを利用したキャプション生成ツールを追加しました。PR [#460](https://github.com/kohya-ss/musubi-tuner/pull/460) 詳細は[ドキュメント](./docs/tools.md#image-captioning-with-qwen25-vl-srcmusubi_tunercaption_images_by_qwen_vlpy)を参照してください。
 
