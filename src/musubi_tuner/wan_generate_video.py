@@ -627,8 +627,21 @@ def load_dit_model(
         for lora_weight in lora_weights:
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
-            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
-            lora_weights_list.append(lora_sd)
+            conversion_needed = False
+            for key, weight in lora_sd.items():
+                prefix, key_body = key.split(".", 1)
+                if prefix == "diffusion_model" or prefix == "transformer":
+                    conversion_needed = True
+                    break
+                elif "lora_unet" in prefix:
+                    conversion_needed = False
+                    break
+
+        if conversion_needed:
+            logger.info("Converting LoRA from foreign key naming format")
+            lora_sd = convert_from_diffusers("lora_unet_", lora_sd)
+        lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+        lora_weights_list.append(lora_sd)
     else:
         lora_weights_list = None
 
@@ -785,7 +798,7 @@ def merge_lora_weights(
                     break
 
         if conversion_needed:
-            logger.info("Converting LoRA from diffusers format")
+            logger.info("Converting LoRA from foreign key naming format")
             weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
         # apply include/exclude patterns
         original_key_count = len(weights_sd.keys())
@@ -1680,7 +1693,10 @@ def run_sampling(
             # lazy loading
             dit_path = args.dit_high_noise if is_high_noise else args.dit
             model = load_dit_model(
-                args, dit_path, args.lora_weight, args.lora_multiplier, gen_settings.cfg, device, gen_settings.dit_weight_dtype
+                args, dit_path,
+                args.lora_weight_high_noise if is_high_noise else args.lora_weight,
+                args.lora_multiplier_high_noise if is_high_noise else args.lora_multiplier,
+                gen_settings.cfg, device, gen_settings.dit_weight_dtype
             )
 
         prev_high_noise = is_high_noise
