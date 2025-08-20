@@ -807,7 +807,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             return
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
-    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None):
+    def forward(self, x, t, context, seq_len, km=None, clip_fea=None, y=None, skip_block_indices=None, f_indices=None):
         r"""
         Forward pass through the diffusion model
 
@@ -820,6 +820,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 List of text embeddings each with shape [L, C]
             seq_len (`int`):
                 Maximum sequence length for positional encoding
+            km ( KeyboardManager):
+                Allows user to break cleanly from inference between model calls
             clip_fea (Tensor, *optional*):
                 CLIP image features for image-to-video mode
             y (List[Tensor], *optional*):
@@ -833,6 +835,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
+        if km is not None and km.early_exit_requested:
+            return x  # If we don't return something useful other code will fail before we can break cleanly so just return x as is.
         # remove assertions to work with Fun-Control T2V
         # if self.model_type == "i2v":
         #     assert clip_fea is not None and y is not None
