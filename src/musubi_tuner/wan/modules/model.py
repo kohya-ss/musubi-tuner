@@ -109,7 +109,7 @@ def rope_apply_inplace_cached(x, grid_sizes, freqs_list):
     # with torch.amp.autocast(device_type=device_type, enabled=False):
     rope_dtype = torch.float64  # float32 does not reduce memory usage significantly
 
-    n, c = x.size(2), x.size(3) // 2
+    n, _ = x.size(2), x.size(3) // 2
 
     # loop over samples
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
@@ -202,7 +202,7 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
         self.attn_mode = attn_mode
         self.split_attn = split_attn
-        self.rope_func = kwargs.get("rope_func") if kwargs and kwargs.get("rope_func") is not None else "default"
+        self.rope_func = "default" if kwargs is None else kwargs.get("rope_func", "default")
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -388,8 +388,9 @@ class WanAttentionBlock(nn.Module):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.model_version = model_version  # New!
-        self.rope_func = kwargs.get("rope_func") if kwargs.get("rope_func") is not None else "default"
-        self.lower_precision_attention = kwargs.get("lower_precision_attention") if kwargs.get("lower_precision_attention") is not None else False
+        self.rope_func = kwargs.get("rope_func", "default")
+        lower_precision_attention = kwargs.get("lower_precision_attention", False)
+        self.attention_dtype = torch.float16 if lower_precision_attention else torch.float32
 
         # layers
         if model_version == "2.1":
@@ -425,12 +426,11 @@ class WanAttentionBlock(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         x_orig_dtype = x.dtype
-        comp_dtype = torch.float16 if self.lower_precision_attention else torch.float32
-        split_dim = e.ndim - 2  # dim to split is 1 for 2.1, 2 for 2.2
-        m = self.modulation.to(comp_dtype, copy=False)   # [1, 6, C]
+        split_dim = e.ndim - 2  # dim to split is 1 for 2.1 style modulation, 2 for 2.2 style modulation
+        m = self.modulation.to(self.attention_dtype, copy=False)   # [1, 6, C]
         if e.ndim == 4:
             m = m.unsqueeze(0)  # [1, 1, 6, C] for upcoming broadcast shape matching with e
-        e = e.to(comp_dtype, copy=False)  # [B, 6, C] for 2.1, [B, L, 6, C] for 2.2
+        e = e.to(self.attention_dtype, copy=False)  # [B, 6, C] for 2.1, [B, L, 6, C] for 2.2
 
         # Split the "6" axis
         m0, m1, m2, m3, m4, m5 = m.unbind(dim=split_dim)   # each [1, C] for 2.1, [1, 1, C] for 2.2
@@ -445,18 +445,18 @@ class WanAttentionBlock(nn.Module):
         s5 = e5 + m5
 
         # Self-attention
-        q_in = self.norm1(x).to(comp_dtype, copy=False)
+        q_in = self.norm1(x).to(self.attention_dtype, copy=False)
         fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()
         y = self.self_attn(fi1, seq_lens, grid_sizes, freqs)
         x = x + (y * s2).to(x.dtype, copy=False)
         del y
 
         # Cross-attn
-        x = x + self.cross_attn(self.norm3(x).to(comp_dtype, copy=False), context, context_lens)
+        x = x + self.cross_attn(self.norm3(x).to(self.attention_dtype, copy=False), context, context_lens)
         del context
 
         # FFN
-        ff_in = self.norm2(x).to(comp_dtype, copy=False)
+        ff_in = self.norm2(x).to(self.attention_dtype, copy=False)
         y = self.ffn((ff_in * (1 + s4) + s3).contiguous())
         x = x + (y * s5).to(x.dtype, copy=False)
         del y
@@ -470,13 +470,15 @@ class WanAttentionBlock(nn.Module):
 
 class Head(nn.Module):
 
-    def __init__(self, dim, out_dim, patch_size, eps=1e-6, model_version="2.1"):  # New!
+    def __init__(self, dim, out_dim, patch_size, eps=1e-6, model_version="2.1", lower_precision_attention=False, simple_modulation=False):
         super().__init__()
         self.dim = dim
         self.out_dim = out_dim
         self.patch_size = patch_size
         self.eps = eps
         self.model_version = model_version  # New!
+        self.simple_modulation = simple_modulation
+        self.attention_dtype = torch.float16 if lower_precision_attention else torch.float32
 
         # layers
         out_dim = math.prod(patch_size) * out_dim
@@ -492,12 +494,11 @@ class Head(nn.Module):
             x(Tensor): Shape [B, L, C]
             e(Tensor): Shape [B, C] for 2.1, [B, L, 6, C] for 2.2
         """
-        assert e.dtype == torch.float32
-        if self.model_version == "2.1":
-            e = (self.modulation.to(torch.float32) + e.unsqueeze(1)).chunk(2, dim=1)
+        if self.model_version == "2.1" or self.simple_modulation:
+            e = (self.modulation.to(self.attention_dtype) + e.unsqueeze(1)).chunk(2, dim=1)
             x = self.head(self.norm(x) * (1 + e[1]) + e[0])
         else:  # For Wan2.2
-            e = (self.modulation.unsqueeze(0).to(torch.float32) + e.unsqueeze(2)).chunk(2, dim=2)
+            e = (self.modulation.unsqueeze(0).to(self.attention_dtype) + e.unsqueeze(2)).chunk(2, dim=2)
             x = self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2))
 
         return x
@@ -636,7 +637,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.eps = eps
         self.attn_mode = attn_mode if attn_mode is not None else "torch"
         self.split_attn = split_attn
-        self.rope_func = kwargs.get("rope_func") if kwargs.get("rope_func") is not None else "default"
+        self.rope_func = kwargs.get("rope_func", "default")
         self.riflex_index = kwargs.get("riflex_index", 0)
         self.num_frames = kwargs.get("num_frames", 81)
 
@@ -649,8 +650,14 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         # blocks
         cross_attn_type = "t2v_cross_attn" if model_type == "t2v" else "i2v_cross_attn"
-        if kwargs.get("lower_precision_attention", False):
-            logger.info("Attention calculations will be done in torch.float16 to save VRAM")
+        self.lower_precision_attention = kwargs.get("lower_precision_attention", False)
+        self.e_dtype = torch.float32
+        if self.lower_precision_attention:
+            logger.info("Attention pre-calcs/e tensor in torch.float16 to save VRAM (lower_precision_attention)")
+            self.e_dtype = torch.float16
+        self.simple_modulation = kwargs.get("simple_modulation", False)
+        if self.model_version == "2.2" and self.simple_modulation:
+            logger.info("Using simple (Wan 2.1 style) modulation strategy to save lots of VRAM")
         self.blocks = nn.ModuleList(
             [
                 WanAttentionBlock(
@@ -681,7 +688,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             )
 
         # head
-        self.head = Head(dim, out_dim, patch_size, eps, model_version=self.model_version)  # New!
+        self.head = Head(dim, out_dim, patch_size, eps, model_version=self.model_version, lower_precision_attention=self.lower_precision_attention, simple_modulation=self.simple_modulation)  # New!
 
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
@@ -873,18 +880,17 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # time embeddings
         # with amp.autocast(dtype=torch.float32):
         with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
-            if self.model_version == "2.1":
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
-                e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+            if self.model_version == "2.1" or self.simple_modulation:
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float()).to(self.e_dtype)
+                e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(self.e_dtype)
             else:  # For Wan2.2
                 if t.dim() == 1:
                     # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
                     t = t.unsqueeze(1).expand(-1, seq_len)
                 bt = t.size(0)
                 t = t.flatten()
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float())
-                e0 = self.time_projection(e).unflatten(2, (6, self.dim))
-        assert e.dtype == torch.float32 and e0.dtype == torch.float32
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float()).to(self.e_dtype)
+                e0 = self.time_projection(e).unflatten(2, (6, self.dim)).to(self.e_dtype)
 
         # context
         context_lens = None

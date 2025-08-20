@@ -655,7 +655,8 @@ def load_dit_model(
         "num_frames": 81 if not hasattr(args, "video_length") else args.video_length,
         "quant_dtype": None if not hasattr(args, "upcast_quantization") else torch.float32 if args.upcast_quantization else None,
         "upcast_linear": False if not hasattr(args, "upcast_linear") else args.upcast_linear,
-        "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention
+        "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention,
+        "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation
     }
     model = load_wan_model(
         config,

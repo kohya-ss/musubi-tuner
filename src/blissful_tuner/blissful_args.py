@@ -105,7 +105,8 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
-        parser.add_argument("--lower_precision_attention", action="store_true", help="Lower precision of certain parts of attention calculation to save some VRAM at small cost to quality.")
+        parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
+        parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")
         parser.add_argument("--i2i_path", type=str, default=None, help="path to an image for image2image inference. Use with T2V model and T2I task.")
         parser.add_argument("--v2_extra_noise", type=float, default=None, help="Extra latent noise for v2v. Low values are best e.g. 0.015. Can help add fine details, especially when upscaling(output res > input res)")
         parser.add_argument("--i2_extra_noise", type=float, default=None, help="Extra latent noise for i2v. Low values are best e.g. 0.025. Can help add fine details, especially when upscaling(output res > input res)")

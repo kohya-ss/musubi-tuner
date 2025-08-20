@@ -473,9 +473,13 @@ class WanNetworkTrainer(NetworkTrainer):
     ):
         dit_weight_dtype = None if args.mixed_precision_transformer else dit_weight_dtype
         blissful_kwargs = {
-            "rope_func": args.rope_func if hasattr(args, "rope_func") else "default",
-            "riflex_index": args.riflex_index if hasattr(args, "riflex_index") else 0,
-            "num_frames": args.video_length if hasattr(args, "video_length") else 81,
+            "rope_func": "default" if not hasattr(args, "rope_func") else args.rope_func,
+            "riflex_index": 0 if not hasattr(args, "riflex_index") else args.riflex_index,
+            "num_frames": 81 if not hasattr(args, "video_length") else args.video_length,
+            "quant_dtype": None if not hasattr(args, "upcast_quantization") else torch.float32 if args.upcast_quantization else None,
+            "upcast_linear": False if not hasattr(args, "upcast_linear") else args.upcast_linear,
+            "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention,
+            "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation
         }
         model = load_wan_model(
             self.config, accelerator.device, dit_path, attn_mode, split_attn,
@@ -494,6 +498,7 @@ class WanNetworkTrainer(NetworkTrainer):
                 "cpu" if args.offload_inactive_dit else loading_device,
                 dit_weight_dtype,
                 args.fp8_scaled,
+                **blissful_kwargs
             )
             if self.blocks_to_swap > 0:
                 # This moves the weights to the appropriate device
@@ -679,6 +684,10 @@ class WanNetworkTrainer(NetworkTrainer):
         seq_len = lat_f * lat_h * lat_w // (self.config.patch_size[0] * self.config.patch_size[1] * self.config.patch_size[2])
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
+        sd = model.state_dict()
+        for key, value in sd.items():
+            print(f"{key} {value.dtype}")
+        exit()
         with accelerator.autocast():
             model_pred = model(noisy_model_input, t=timesteps, context=context, clip_fea=clip_fea, seq_len=seq_len, y=image_latents)
         model_pred = torch.stack(model_pred, dim=0)  # list to tensor
@@ -721,6 +730,8 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     )
     parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
     parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
+    parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
+    parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")
 
     return parser
 
