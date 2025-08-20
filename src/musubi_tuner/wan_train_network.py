@@ -684,10 +684,6 @@ class WanNetworkTrainer(NetworkTrainer):
         seq_len = lat_f * lat_h * lat_w // (self.config.patch_size[0] * self.config.patch_size[1] * self.config.patch_size[2])
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
-        sd = model.state_dict()
-        for key, value in sd.items():
-            print(f"{key} {value.dtype}")
-        exit()
         with accelerator.autocast():
             model_pred = model(noisy_model_input, t=timesteps, context=context, clip_fea=clip_fea, seq_len=seq_len, y=image_latents)
         model_pred = torch.stack(model_pred, dim=0)  # list to tensor
