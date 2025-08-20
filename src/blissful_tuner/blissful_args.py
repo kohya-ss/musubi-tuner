@@ -204,9 +204,9 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
             args.prompt_2 = process_wildcards(args.prompt_2, args.prompt_wildcards) if args.prompt2 is not None else None
     if DIFFUSION_MODEL == "wan":
         if args.perp_neg is not None and args.slg_mode == "original":
-            error_out("--perp_neg cannot be used with --slg_mode 'original'")
+            error_out(argparse.ArgumentTypeError, "--perp_neg cannot be used with --slg_mode 'original'")
         if args.riflex_index != 0 and args.rope_func.lower() != "comfy":
-            error_out("RIFLEx can only be used with rope_func =='comfy'!")
+            error_out(argparse.ArgumentTypeError, "RIFLEx can only be used with rope_func =='comfy'!")
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
         if args.upcast_linear and not args.fp8_scaled:
             error_out(argparse.ArgumentTypeError, "--upcast_linear is only for --fp8_scaled")
