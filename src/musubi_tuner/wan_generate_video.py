@@ -1508,12 +1508,6 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         scheduler = FlowMatchLCMScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
         scheduler.set_timesteps(args.infer_steps, device=device)
         timesteps = scheduler.timesteps
-    elif args.sample_solver == "euler_a":
-        logger.warning("!!!!!!!!!!!!!!!!!!!Euler A is not fully working yet!!!!!!!!!!!!!!!!!!!")
-        from blissful_tuner.scheduling import FlowMatchEulerAncestralDiscreteScheduler
-        scheduler = FlowMatchEulerAncestralDiscreteScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
-        scheduler.set_timesteps(args.infer_steps, device=device)
-        timesteps = scheduler.timesteps
     elif "dpm++" in args.sample_solver:
         scheduler = FlowDPMSolverMultistepScheduler(
             num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False, algorithm_type="sde-dpmsolver++" if "sde" in args.sample_solver else "dpmsolver++"
@@ -1704,7 +1698,6 @@ def run_sampling(
         # latent is on CPU if use_cpu_offload is True
         timestep = torch.stack([t]).to(device)
         latent_model_input = [latent.to(device)]
-
         with accelerator.autocast(), torch.no_grad():
             noise_pred_cond = model(latent_model_input, t=timestep, km=km, **arg_c)[0].to(latent_storage_device)  # Cond is always the same
             apply_cfg = apply_cfg_array[i]  # Will we do any CFG or just proceed with cond?

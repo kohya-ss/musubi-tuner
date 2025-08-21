@@ -6,6 +6,7 @@ Created on Tue Aug 19 18:11:14 2025
 
 @author: blyss
 """
+import inspect
 import json
 from collections import defaultdict
 from typing import Dict, Optional
@@ -122,7 +123,7 @@ def dump_cuda_memory_snapshot(path: str) -> None:
 
 
 def vram_probe(
-    tag: str,
+    tag: Optional[str] = None,
     model: Optional[nn.Module] = None,
     tracked: Optional[Dict[str, torch.Tensor]] = None,
     dump_snapshot_path: Optional[str] = None,
@@ -135,6 +136,8 @@ def vram_probe(
       tracked: dict name->tensor for activations you care about (x, e, q, k, v, latents, etc.).
       dump_snapshot_path: If set (CUDA only), writes a JSON memory snapshot to this path.
     """
+    if tag is None:
+        tag = inspect.stack()[1][3]
     print(f"\n==== VRAM PROBE: {tag} ====")
 
     # Device overview

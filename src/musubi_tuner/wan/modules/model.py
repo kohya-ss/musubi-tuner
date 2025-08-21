@@ -416,16 +416,8 @@ class WanAttentionBlock(nn.Module):
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
 
-    def _forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
-        r"""
-        Args:
-            x(Tensor): Shape [B, L, C]
-            e(Tensor): Shape [B, 6, C] for 2.1, [B, L, 6, C] for 2.2
-            seq_lens(Tensor): Shape [B], length of each sequence in batch
-            grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
-            freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
-        """
-        x_orig_dtype = x.dtype
+    @torch.compiler.disable()
+    def get_modulation(self, e):
         split_dim = e.ndim - 2  # dim to split is 1 for 2.1 style modulation, 2 for 2.2 style modulation
         m = self.modulation.to(self.attention_dtype, copy=False)   # [1, 6, C]
         if e.ndim == 4:
@@ -443,6 +435,20 @@ class WanAttentionBlock(nn.Module):
         s3 = e3 + m3
         s4 = e4 + m4
         s5 = e5 + m5
+        return s0, s1, s2, s3, s4, s5
+
+    def _forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L, C]
+            e(Tensor): Shape [B, 6, C] for 2.1, [B, L, 6, C] for 2.2
+            seq_lens(Tensor): Shape [B], length of each sequence in batch
+            grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
+            freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
+        """
+        x_orig_dtype = x.dtype
+        s0, s1, s2, s3, s4, s5 = self.get_modulation(e)
+        del e
 
         # Self-attention
         q_in = self.norm1(x).to(self.attention_dtype, copy=False)
@@ -492,13 +498,13 @@ class Head(nn.Module):
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
-            e(Tensor): Shape [B, C] for 2.1, [B, L, 6, C] for 2.2
+            e(Tensor): Shape [B, C] for 2.1, [B, L, C] for 2.2
         """
         if self.model_version == "2.1" or self.simple_modulation:
-            e = (self.modulation.to(self.attention_dtype) + e.unsqueeze(1)).chunk(2, dim=1)
+            e = (self.modulation.to(self.attention_dtype, copy=False) + e.unsqueeze(1)).chunk(2, dim=1)
             x = self.head(self.norm(x) * (1 + e[1]) + e[0])
         else:  # For Wan2.2
-            e = (self.modulation.unsqueeze(0).to(self.attention_dtype) + e.unsqueeze(2)).chunk(2, dim=2)
+            e = (self.modulation.unsqueeze(0).to(self.attention_dtype, copy=False) + e.unsqueeze(2)).chunk(2, dim=2)
             x = self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2))
 
         return x

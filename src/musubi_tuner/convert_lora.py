@@ -6,8 +6,6 @@ from safetensors import safe_open
 from musubi_tuner.utils import model_utils
 
 from blissful_tuner.blissful_logger import BlissfulLogger
-
-
 logger = BlissfulLogger(__name__, "green")
 
 
@@ -70,8 +68,6 @@ def convert_from_diffusers(prefix, weights_sd):
     if not has_alpha:
         for lora_name, dim in lora_dims.items():
             new_weights_sd[f"{lora_name}.alpha"] = torch.tensor(dim)
-    else:
-        print("has alpha!")
 
     return new_weights_sd
 
