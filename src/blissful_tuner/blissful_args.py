@@ -86,6 +86,7 @@ def blissful_prefunc(args: argparse.Namespace):
         args.fp8_scaled = True
         if DIFFUSION_MODEL == "wan":
             args.rope_func = "comfy"
+            args.simple_modulation = True
         elif DIFFUSION_MODEL in ["hunyuan", "framepack"]:
             args.fp16_accumulation = False  # Disable this for hunyuan and framepack b/c we enable fp8_fast which offsets it anyway and torch 2.7.0 has issues with compiling hunyuan sometimes
             args.fp8_fast = True
