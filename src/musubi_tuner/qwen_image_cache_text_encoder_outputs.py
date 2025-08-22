@@ -1,10 +1,6 @@
 import argparse
-import os
-from typing import Optional, Union
-
-import numpy as np
+from typing import Optional
 import torch
-from tqdm import tqdm
 import accelerate
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
 
@@ -14,13 +10,11 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_QWEN_IMAGE, ItemInfo, save_text_encoder_output_cache_qwen_image
 
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
-import logging
 
 from musubi_tuner.qwen_image import qwen_image_utils
-from musubi_tuner.utils.model_utils import str_to_dtype
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def encode_and_save_batch(

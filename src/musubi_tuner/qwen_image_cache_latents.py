@@ -1,22 +1,14 @@
-import argparse
-import logging
-import math
-import os
-from typing import List, Optional
-
-import numpy as np
+from typing import List
 import torch
-import torch.nn.functional as F
-
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ItemInfo, ARCHITECTURE_QWEN_IMAGE, save_latent_cache_qwen_image
 from musubi_tuner.qwen_image import qwen_image_utils
-from musubi_tuner.qwen_image import qwen_image_model, qwen_image_autoencoder_kl
+from musubi_tuner.qwen_image import qwen_image_autoencoder_kl
 import musubi_tuner.cache_latents as cache_latents
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def preprocess_contents_qwen_image(batch: List[ItemInfo]) -> tuple[torch.Tensor]:

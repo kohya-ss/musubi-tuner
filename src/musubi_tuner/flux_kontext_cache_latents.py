@@ -2,7 +2,6 @@ from typing import List
 
 import numpy as np
 import torch
-from rich.traceback import install as install_rich_tracebacks
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import (
@@ -85,7 +84,6 @@ def encode_and_save_batch(ae: flux_models.AutoEncoder, batch: List[ItemInfo]):
 
 
 def main():
-    install_rich_tracebacks()
     parser = cache_latents.setup_parser_common()
     parser = cache_latents.hv_setup_parser(parser)  # VAE
     # parser = flux_kontext_setup_parser(parser)

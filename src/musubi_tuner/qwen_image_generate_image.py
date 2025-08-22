@@ -1,12 +1,8 @@
 import argparse
-from datetime import datetime
 import gc
-import json
 import random
 import os
-import re
 import time
-import math
 import copy
 from typing import Tuple, Optional, List, Any, Dict
 
@@ -15,29 +11,19 @@ import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from tqdm import tqdm
-from PIL import Image
-
+from rich_argparse import RichHelpFormatter
+from rich.traceback import install as install_rich_tracebacks
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
-from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
-
-
-try:
-    from lycoris.kohya import create_network_from_weights
-except:
-    pass
-
 from musubi_tuner.networks import lora_qwen_image
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 class GenerationSettings:
@@ -48,7 +34,8 @@ class GenerationSettings:
 
 def parse_args() -> argparse.Namespace:
     """parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Qwen-Image inference script")
+    install_rich_tracebacks()
+    parser = argparse.ArgumentParser(description="Qwen-Image inference script", formatter_class=RichHelpFormatter)
 
     # WAN arguments
     # parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
@@ -121,7 +108,7 @@ def parse_args() -> argparse.Namespace:
         "--attn_mode",
         type=str,
         default="torch",
-        choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  #  "flash2", "flash3",
+        choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  # "flash2", "flash3",
         help="attention mode",
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
@@ -373,7 +360,7 @@ def prepare_image_inputs(
         )
 
         # VAE encoding
-        logger.info(f"Encoding control image to latent space with VAE")
+        logger.info("Encoding control image to latent space with VAE")
         vae_original_device = vae.device
         vae.to(device)
 
@@ -923,7 +910,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         vae_for_batch.to(device)  # Move VAE to device for control image encoding
 
         for i, prompt_args_item in enumerate(all_prompt_args_list):
-            logger.info(f"Preprocessing control image for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+            logger.info(f"Preprocessing control image for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             assert prompt_args_item.control_image_path is not None, "Qwen-Image-Edit requires control_image_path"
             control_data = prepare_image_inputs(args, device, vae_for_batch)
             all_precomputed_image_data.append(control_data)
@@ -932,7 +919,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         clean_memory_on_device(device)  # Clean up VAE memory
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
-        logger.info(f"Text preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        logger.info(f"Text preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
 
         # prepare_text_inputs will move text_encoders to device temporarily
         text_data = prepare_text_inputs(prompt_args_item, all_precomputed_image_data[i][1], device, temp_shared_models_txt)
@@ -972,7 +959,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             current_text_data = all_precomputed_text_data[i]
             height, width = check_inputs(prompt_args_item)  # Get height/width for each prompt
 
-            logger.info(f"Generating latent for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+            logger.info(f"Generating latent for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             try:
                 # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
                 # It will use the DiT model from shared_models_for_generate.
@@ -1010,11 +997,11 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
         for i, latent in enumerate(all_latents):
             if latent is None:  # Skip failed generations
-                logger.warning(f"Skipping decoding for prompt {i+1} due to previous error.")
+                logger.warning(f"Skipping decoding for prompt {i + 1} due to previous error.")
                 continue
 
             current_args = all_prompt_args_list[i]
-            logger.info(f"Decoding output {i+1}/{len(all_latents)} for prompt: {current_args.prompt}")
+            logger.info(f"Decoding output {i + 1}/{len(all_latents)} for prompt: {current_args.prompt}")
 
             # if args.output_type is "latent_images", we already saved latent above.
             # so we skip saving latent here.

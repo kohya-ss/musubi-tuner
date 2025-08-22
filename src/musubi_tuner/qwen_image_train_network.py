@@ -1,10 +1,7 @@
 import argparse
 import gc
 from typing import Optional
-from PIL import Image
 
-
-from einops import rearrange
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -19,12 +16,8 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-import logging
-
-from musubi_tuner.utils import image_utils
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 class QwenImageNetworkTrainer(NetworkTrainer):
@@ -65,7 +58,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         vl_processor = qwen_image_utils.load_vl_processor() if is_edit else None
 
         # Encode with VLM
-        logger.info(f"Encoding with VLM")
+        logger.info("Encoding with VLM")
 
         sample_prompts_te_outputs = {}  # prompt -> embed or (prompt, control_image_path) -> embed
         with torch.amp.autocast(device_type=device.type, dtype=vl_dtype), torch.no_grad():
@@ -74,7 +67,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                     # Load control image
                     assert (
                         "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0
-                    ), f"control_image_path not found in sample prompt"
+                    ), "control_image_path not found in sample prompt"
                     control_image_path = prompt_dict["control_image_path"][0]  # only use the first control image
                     control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(control_image_path, True)
 
@@ -170,7 +163,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         if is_edit:
             # 4.1 Prepare control latents
-            logger.info(f"Preparing control latents from control image")
+            logger.info("Preparing control latents from control image")
             control_image_tensor = sample_parameter.get("control_image_tensor")
             vae.to(device)
             vae.eval()
@@ -265,7 +258,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             pixels = vae.decode_to_pixels(latents.to(device))  # decode to pixels, 0-1
         del latents
 
-        logger.info(f"Decoding complete")
+        logger.info("Decoding complete")
         pixels = pixels.to(torch.float32).cpu()
 
         vae.to("cpu")

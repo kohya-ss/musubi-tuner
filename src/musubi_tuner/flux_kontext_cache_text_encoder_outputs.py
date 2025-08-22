@@ -1,7 +1,6 @@
 import argparse
 import torch
 from transformers import CLIPTextModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer
-from rich.traceback import install as install_rich_tracebacks
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 
@@ -58,7 +57,6 @@ def encode_and_save_batch(
 
 
 def main():
-    install_rich_tracebacks()
     parser = cache_text_encoder_outputs.setup_parser_common()
     parser = flux_kontext_setup_parser(parser)
 

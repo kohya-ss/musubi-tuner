@@ -131,7 +131,6 @@ def post_process_cache_files(
 
 
 def main():
-    install_rich_tracebacks()
     parser = setup_parser_common()
     parser = hv_setup_parser(parser)
 
@@ -207,6 +206,7 @@ def main():
 
 
 def setup_parser_common():
+    install_rich_tracebacks()
     parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
 
     parser.add_argument("--dataset_config", type=str, required=True, help="path to dataset config .toml file")
