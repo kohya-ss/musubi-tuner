@@ -1,8 +1,8 @@
 import argparse
 import os
-import glob
+from rich_argparse import RichHelpFormatter
 from typing import Optional, Union
-
+from rich.traceback import install as install_rich_tracebacks
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -19,7 +19,6 @@ from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCau
 from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 def show_image(image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]]) -> int:
@@ -144,7 +143,7 @@ def show_datasets(
     fps: int = 24,
 ):
     if debug_mode != "video":
-        print(f"d: next dataset, q: quit")
+        print("d: next dataset, q: quit")
 
     num_workers = max(1, os.cpu_count() - 1)
     for i, dataset in enumerate(datasets):
@@ -297,6 +296,7 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
 
 
 def main():
+    install_rich_tracebacks()
     parser = setup_parser_common()
     parser = hv_setup_parser(parser)
 
@@ -344,7 +344,7 @@ def main():
 
 
 def setup_parser_common() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
 
     parser.add_argument("--dataset_config", type=str, required=True, help="path to dataset config .toml file")
     parser.add_argument("--vae", type=str, required=False, default=None, help="path to vae checkpoint")

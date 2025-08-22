@@ -1,17 +1,11 @@
-import argparse
-import logging
-import math
-import os
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-
+from rich.traceback import install as install_rich_tracebacks
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import (
-    BaseDataset,
     ItemInfo,
     ARCHITECTURE_FLUX_KONTEXT,
     save_latent_cache_flux_kontext,
@@ -19,10 +13,9 @@ from musubi_tuner.dataset.image_video_dataset import (
 from musubi_tuner.flux import flux_utils
 from musubi_tuner.flux import flux_models
 import musubi_tuner.cache_latents as cache_latents
-from musubi_tuner.cache_latents import preprocess_contents
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def preprocess_contents_flux_kontext(batch: List[ItemInfo]) -> tuple[torch.Tensor, List[List[np.ndarray]]]:
@@ -92,6 +85,7 @@ def encode_and_save_batch(ae: flux_models.AutoEncoder, batch: List[ItemInfo]):
 
 
 def main():
+    install_rich_tracebacks()
     parser = cache_latents.setup_parser_common()
     parser = cache_latents.hv_setup_parser(parser)  # VAE
     # parser = flux_kontext_setup_parser(parser)

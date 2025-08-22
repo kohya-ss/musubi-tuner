@@ -1,13 +1,7 @@
 import argparse
-import os
-from typing import Optional, Union
-
-import numpy as np
 import torch
-from tqdm import tqdm
-from transformers import CLIPConfig, CLIPTextModel, T5Config, T5EncoderModel, CLIPTokenizer, T5Tokenizer
-import accelerate
-
+from transformers import CLIPTextModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer
+from rich.traceback import install as install_rich_tracebacks
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 
@@ -20,12 +14,8 @@ from musubi_tuner.dataset.image_video_dataset import (
 from musubi_tuner.flux import flux_models
 from musubi_tuner.flux import flux_utils
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
-import logging
-
-from musubi_tuner.utils.model_utils import str_to_dtype
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def encode_and_save_batch(
@@ -55,7 +45,7 @@ def encode_and_save_batch(
         t5_vec = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
             "last_hidden_state"
         ]
-        assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"
+        assert torch.isnan(t5_vec).any() is False, "T5 vector contains NaN values"
         t5_vec = t5_vec.cpu()
 
     with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
@@ -68,6 +58,7 @@ def encode_and_save_batch(
 
 
 def main():
+    install_rich_tracebacks()
     parser = cache_text_encoder_outputs.setup_parser_common()
     parser = flux_kontext_setup_parser(parser)
 
@@ -94,7 +85,7 @@ def main():
     tokenizer2, text_encoder2 = flux_utils.load_clip_l(args.text_encoder2, dtype=torch.bfloat16, device=device, disable_mmap=True)
 
     # Encode with T5 and CLIP text encoders
-    logger.info(f"Encoding with T5 and CLIP text encoders")
+    logger.info("Encoding with T5 and CLIP text encoders")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
         encode_and_save_batch(tokenizer1, text_encoder1, tokenizer2, text_encoder2, batch, device)

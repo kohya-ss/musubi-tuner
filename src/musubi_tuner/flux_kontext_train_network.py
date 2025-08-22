@@ -1,18 +1,14 @@
 import argparse
 from typing import Optional
-from PIL import Image
 
 
 from einops import rearrange
-import numpy as np
 import torch
-import torchvision.transforms.functional as TF
 from tqdm import tqdm
-from accelerate import Accelerator, init_empty_weights
-
+from accelerate import Accelerator
+from rich_argparse import RichHelpFormatter
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_KONTEXT, ARCHITECTURE_FLUX_KONTEXT_FULL
 from musubi_tuner.flux import flux_models, flux_utils
-from musubi_tuner.hv_generate_video import resize_image_to_bucket
 from musubi_tuner.hv_train_network import (
     NetworkTrainer,
     load_prompts,
@@ -20,14 +16,9 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-from musubi_tuner.wan_generate_video import parse_one_frame_inference_args
 
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-from musubi_tuner.utils import model_utils
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 class FluxKontextNetworkTrainer(NetworkTrainer):

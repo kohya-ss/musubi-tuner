@@ -2,10 +2,10 @@ import argparse
 import os
 from typing import Optional, Union
 
-import numpy as np
 import torch
 from tqdm import tqdm
-
+from rich_argparse import RichHelpFormatter
+from rich.traceback import install as install_rich_tracebacks
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 import accelerate
@@ -22,9 +22,7 @@ from musubi_tuner.hunyuan_model.text_encoder import TextEncoder
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 from musubi_tuner.utils.model_utils import str_to_dtype
-
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 def encode_prompt(text_encoder: TextEncoder, prompt: Union[str, list[str]]):
@@ -133,6 +131,7 @@ def post_process_cache_files(
 
 
 def main():
+    install_rich_tracebacks()
     parser = setup_parser_common()
     parser = hv_setup_parser(parser)
 
@@ -208,7 +207,7 @@ def main():
 
 
 def setup_parser_common():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=RichHelpFormatter)
 
     parser.add_argument("--dataset_config", type=str, required=True, help="path to dataset config .toml file")
     parser.add_argument("--device", type=str, default=None, help="device to use, default is cuda if available")
