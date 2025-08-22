@@ -179,7 +179,6 @@ class ItemInfo:
         self.fp_1f_clean_indices: Optional[list[int]] = None  # indices of clean latents for 1f
         self.fp_1f_target_index: Optional[int] = None  # target index for 1f clean latents
         self.fp_1f_no_post: Optional[bool] = None  # whether to add zero values as clean latent post
-        self.flux_kontext_no_resize_control: Optional[bool] = None  # whether to resize control images to the bucket resolution
 
     def __str__(self) -> str:
         return (
@@ -290,21 +289,26 @@ def save_latent_cache_flux_kontext(
     dtype_str = dtype_to_str(latent.dtype)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
 
-    sd[f"varlen_control_{dtype_str}"] = control_latent.detach().cpu().contiguous()
+    _, H, W = control_latent.shape
+    F = 1
+    sd[f"latents_control_{F}x{H}x{W}_{dtype_str}"] = control_latent.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_latent_cache_qwen_image(
-    item_info: ItemInfo,
-    latent: torch.Tensor
-):
+def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[torch.Tensor]):
     """Qwen-Image architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+    assert (
+        control_latent is None or control_latent.dim() == 4
+    ), "control_latent should be 4D tensor (frame, channel, height, width) or None"
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+    if control_latent is not None:
+        _, F, H, W = control_latent.shape
+        sd[f"latents_control_{F}x{H}x{W}_{dtype_str}"] = control_latent.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
@@ -437,6 +441,14 @@ class BucketSelector:
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
     RESOLUTION_STEPS_QWEN_IMAGE = 16
 
+    ARCHITECTURE_STEPS_MAP = {
+        ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
+        ARCHITECTURE_WAN: RESOLUTION_STEPS_WAN,
+        ARCHITECTURE_FRAMEPACK: RESOLUTION_STEPS_FRAMEPACK,
+        ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
+        ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
+    }
+
     def __init__(
         self, resolution: Tuple[int, int], enable_bucket: bool = True, no_upscale: bool = False, architecture: str = "no_default"
     ):
@@ -444,18 +456,10 @@ class BucketSelector:
         self.bucket_area = resolution[0] * resolution[1]
         self.architecture = architecture
 
-        if self.architecture == ARCHITECTURE_HUNYUAN_VIDEO:
-            self.reso_steps = BucketSelector.RESOLUTION_STEPS_HUNYUAN
-        elif self.architecture == ARCHITECTURE_WAN:
-            self.reso_steps = BucketSelector.RESOLUTION_STEPS_WAN
-        elif self.architecture == ARCHITECTURE_FRAMEPACK:
-            self.reso_steps = BucketSelector.RESOLUTION_STEPS_FRAMEPACK
-        elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
-            self.reso_steps = BucketSelector.RESOLUTION_STEPS_FLUX_KONTEXT
-        elif self.architecture == ARCHITECTURE_QWEN_IMAGE:
-            self.reso_steps = BucketSelector.RESOLUTION_STEPS_QWEN_IMAGE
+        if architecture in BucketSelector.ARCHITECTURE_STEPS_MAP:
+            self.reso_steps = BucketSelector.ARCHITECTURE_STEPS_MAP[architecture]
         else:
-            raise ValueError(f"Invalid architecture: {self.architecture}")
+            raise ValueError(f"Invalid architecture: {architecture}")
 
         if not enable_bucket:
             # only define one bucket
@@ -493,6 +497,49 @@ class BucketSelector:
         ar_errors = self.aspect_ratios - aspect_ratio
         bucket_id = np.abs(ar_errors).argmin()
         return self.bucket_resolutions[bucket_id]
+
+    @classmethod
+    def calculate_bucket_resolution(
+        cls,
+        image_size: tuple[int, int],
+        resolution: tuple[int, int],
+        reso_steps: Optional[int] = None,
+        architecture: Optional[str] = None,
+    ) -> tuple[int, int]:
+        """
+        Get the bucket resolution for the given image size, resolution and resolution steps.
+        """
+        if reso_steps is None and architecture is None:
+            raise ValueError("resolution steps or architecture must be provided")
+        if reso_steps is None and architecture is not None:
+            if architecture in BucketSelector.ARCHITECTURE_STEPS_MAP:
+                reso_steps = BucketSelector.ARCHITECTURE_STEPS_MAP[architecture]
+            else:
+                raise ValueError(f"Invalid architecture: {architecture}")
+
+        max_area = resolution[0] * resolution[1]
+        width, height = image_size
+        aspect_ratio = width / height
+        bucket_width = int(math.sqrt(max_area * aspect_ratio))
+        bucket_height = int(math.sqrt(max_area / aspect_ratio))
+        bucket_width = divisible_by(bucket_width, reso_steps)
+        bucket_height = divisible_by(bucket_height, reso_steps)
+
+        # find appropriate resolutions
+        best_resolution = None
+        best_aspect_ratio_diff = float("inf")
+        for i in range(-2, 3):
+            w = bucket_width + i * reso_steps
+            h = divisible_by(max_area // w, reso_steps)
+            current_aspect_ratio_diff = abs((w / h) - aspect_ratio)
+            if current_aspect_ratio_diff < best_aspect_ratio_diff:
+                best_aspect_ratio_diff = current_aspect_ratio_diff
+                best_resolution = (w, h)
+
+        if best_resolution is not None:
+            return best_resolution
+
+        return bucket_width, bucket_height
 
 
 def load_video(
@@ -1440,6 +1487,8 @@ class ImageDataset(BaseDataset):
         fp_1f_target_index: Optional[int] = None,
         fp_1f_no_post: Optional[bool] = False,
         flux_kontext_no_resize_control: Optional[bool] = False,
+        qwen_image_edit_no_resize_control: Optional[bool] = False,
+        qwen_image_edit_control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
     ):
@@ -1462,6 +1511,8 @@ class ImageDataset(BaseDataset):
         self.fp_1f_target_index = fp_1f_target_index
         self.fp_1f_no_post = fp_1f_no_post
         self.flux_kontext_no_resize_control = flux_kontext_no_resize_control
+        self.qwen_image_edit_no_resize_control = qwen_image_edit_no_resize_control
+        self.qwen_image_edit_control_resolution = qwen_image_edit_control_resolution
 
         control_count_per_image = 1
         if fp_1f_clean_indices is not None:
@@ -1522,11 +1573,14 @@ class ImageDataset(BaseDataset):
 
                     item_info = ItemInfo(item_key, caption, original_size, bucket_reso, content=image)
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
+
+                    # for VLM, which require image in addition to text, like Qwen-Image-Edit
+                    item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
+
                     item_info.fp_latent_window_size = self.fp_latent_window_size
                     item_info.fp_1f_clean_indices = self.fp_1f_clean_indices
                     item_info.fp_1f_target_index = self.fp_1f_target_index
                     item_info.fp_1f_no_post = self.fp_1f_no_post
-                    item_info.flux_kontext_no_resize_control = self.flux_kontext_no_resize_control
 
                     if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
                         # we need to split the bucket with latent window size and optional 1f clean indices, zero post
@@ -1538,6 +1592,14 @@ class ImageDataset(BaseDataset):
 
                     if controls is not None:
                         item_info.control_content = controls
+                        if (
+                            self.flux_kontext_no_resize_control
+                            or self.qwen_image_edit_no_resize_control
+                            or self.qwen_image_edit_control_resolution is not None
+                        ):
+                            # Add control size to bucket_reso to make different control resolutions to different batch
+                            bucket_reso = list(bucket_reso) + list(controls[0].shape[0:2])
+                            bucket_reso = tuple(bucket_reso)
 
                     if bucket_reso not in batches:
                         batches[bucket_reso] = []
@@ -1570,12 +1632,25 @@ class ImageDataset(BaseDataset):
 
                 resized_controls = None
                 if controls is not None:
-                    if self.flux_kontext_no_resize_control:
-                        resized_controls = controls
-                    else:
-                        resized_controls = []
+                    resized_controls = []
+                    if self.flux_kontext_no_resize_control or self.qwen_image_edit_no_resize_control:
                         for control in controls:
-                            resized_control = resize_image_to_bucket(control, bucket_reso)  # returns np.ndarray
+                            # divisible by bucket reso steps
+                            width, height = control.size
+                            width = width - (width % buckset_selector.reso_steps)
+                            height = height - (height % buckset_selector.reso_steps)
+                            resized_control = resize_image_to_bucket(control, (width, height))  # returns np.ndarray
+                            resized_controls.append(resized_control)
+                    elif self.qwen_image_edit_control_resolution is not None:
+                        for control in controls:
+                            control_bucket_reso = BucketSelector.calculate_bucket_resolution(
+                                control.size, self.qwen_image_edit_control_resolution, architecture=self.architecture
+                            )
+                            resized_control = resize_image_to_bucket(control, control_bucket_reso)
+                            resized_controls.append(resized_control)
+                    else:
+                        for control in controls:
+                            resized_control = resize_image_to_bucket(control, bucket_reso)
                             resized_controls.append(resized_control)
 
                 return image_size, image_key, image, caption, resized_controls
@@ -1608,7 +1683,8 @@ class ImageDataset(BaseDataset):
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
         # assign cache files to item info
-        bucketed_item_info: dict[tuple[int, int], list[ItemInfo]] = {}  # (width, height) -> [ItemInfo]
+        # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
+        bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
 
@@ -1631,6 +1707,16 @@ class ImageDataset(BaseDataset):
                     bucket_reso.append(len(self.fp_1f_clean_indices))
                     bucket_reso.append(self.fp_1f_no_post)
                 bucket_reso = tuple(bucket_reso)
+            if (
+                self.flux_kontext_no_resize_control
+                or self.qwen_image_edit_no_resize_control
+                or self.qwen_image_edit_control_resolution is not None
+            ):
+                # we also need to split the bucket with control resolutions
+                control_key = safetensors_utils.find_key(cache_file, starts_with="latents_control_")  # latents_control_FxHxW_dtype
+                if control_key is not None:
+                    control_shape = control_key.rsplit("_", 3)[-2]  # FxHxW
+                    bucket_reso = tuple(list(bucket_reso) + [control_shape])  # (int, int, str)
 
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file

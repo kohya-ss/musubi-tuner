@@ -21,26 +21,41 @@ logging.basicConfig(level=logging.INFO)
 
 def preprocess_contents_qwen_image(batch: List[ItemInfo]) -> tuple[torch.Tensor]:
     # item.content: target image (H, W, C)
+    # item.control_content: list of images (H, W, C), optional, the length of the list is 1 for Qwen-Image-Edit
 
     # Stack batch into target tensor (B,H,W,C) in RGB order and control images list of tensors (H, W, C)
+    # Currently control images must have same size as target images
     contents = []
+    controls = []
     for item in batch:
         contents.append(torch.from_numpy(item.content))  # target image
+
+        if item.control_content is not None and len(item.control_content) > 0:
+            controls.append(torch.from_numpy(item.control_content[0][..., :3]))  # ensure RGB, remove alpha if present
 
     contents = torch.stack(contents, dim=0)  # B, H, W, C
     contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 
-    return contents
+    if len(controls) > 0:
+        controls = torch.stack(controls, dim=0)
+        controls = controls.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
+        controls = controls / 127.5 - 1.0  # normalize to [-1, 1]
+    else:
+        controls = None
+
+    return contents, controls
 
 
 def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage, batch: List[ItemInfo]):
     # item.content: target image (H, W, C)
-    contents = preprocess_contents_qwen_image(batch)  # (B, C, H, W)
+    contents, controls = preprocess_contents_qwen_image(batch)  # (B, C, H, W)
     contents = contents.unsqueeze(2)  # (B, C, 1, H, W), Qwen-Image VAE needs F axis
+    controls = controls.unsqueeze(2) if controls is not None else None  # (B, C, 1, H, W)
 
     with torch.no_grad():
         latents = vae.encode_pixels_to_latents(contents.to(vae.device, dtype=vae.dtype))
+        control_latents = vae.encode_pixels_to_latents(controls.to(vae.device, dtype=vae.dtype)) if controls is not None else None
 
     # # debugging: decode and visualize the latents
     # with torch.no_grad():
@@ -58,10 +73,13 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
     # save cache for each item in the batch
     for b, item in enumerate(batch):
         target_latent = latents[b]  # 1, C, H, W. Target latents for this image (ground truth)
+        control_latent = control_latents[b] if control_latents is not None else None
 
-        print(f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}")
+        print(
+            f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}, control latents shape: {control_latent.shape if control_latent is not None else None}"
+        )
 
-        save_latent_cache_qwen_image(item_info=item, latent=target_latent)
+        save_latent_cache_qwen_image(item_info=item, latent=target_latent, control_latent=control_latent)
 
 
 def main():

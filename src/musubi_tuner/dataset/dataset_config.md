@@ -473,7 +473,7 @@ flux_kontext_no_resize_control = false # optional, default is false. Disable res
 
 The technical details of `flux_kontext_no_resize_control`:
 
-When this option is specified, the control image is trimmed to a multiple of 16 pixels and converted to latent and passed to the model. Each element in the batch may have a different resolution, but in that case, the attention is calculated by decomposing each element in the batch during the attention calculation (no attention mask is used). This allows the model to work correctly even if the control images have different resolutions.
+When this option is specified, the control image is trimmed to a multiple of 16 pixels and converted to latent and passed to the model. Each element in the batch must have the same resolution, which is adjusted by Aspect Ratio Bucketing (buckets are divided by the resolution of the target image and also the resolution of the control image).
 
 However, since the attention calculation is split, the speed may be reduced.
 
@@ -490,13 +490,63 @@ FLUX.1 Kontextのデータセット設定は、制御画像を持つ画像デー
 
 `flux_kontext_no_resize_control` の技術的詳細：
 
-このオプションを指定すると、制御画像は16ピクセル単位にトリミングされ、latentに変換されてモデルに渡されます。バッチの各要素が異なる解像度を持つ可能性がありますが、そのときはattentionの計算時に、バッチの各要素が分解されて計算されます（attention maskは使用しません）。これにより、制御画像の解像度が異なる場合でも、モデルは正しく動作します。
-
-ただしattention計算が分割されるため、速度は低下する可能性があります。
+このオプションを指定すると、制御画像は16ピクセル単位にトリミングされ、latentに変換されてモデルに渡されます。バッチのすべての要素が同じ解像度を持つように調整されます（Aspect Ratio Bucketingにおいて、対象画像の解像度と、さらに制御画像の解像度でバケツが分けられます）。
 
 またFLUX.1 Kontextが前提とする[制御画像の解像度](https://github.com/black-forest-labs/flux/blob/1371b2bc70ac80e1078446308dd5b9a2ebc68c87/src/flux/util.py#L584)は一定のため、あらかじめ制御画像の解像度をこれらに合わせておいた方が良いかもしれません。
 
 </details>
+
+### Qwen-Image-Edit
+
+The Qwen-Image-Edit dataset configuration uses an image dataset with control images. Only one control image can be used.
+
+If you set `qwen_image_edit_no_resize_control`, it disables resizing of the control image. By default, the control image is resized to the same resolution as the image.
+
+Also, you can specify the resolution of the control image separately from the training image resolution by using `qwen_image_edit_control_resolution`. If you want to resize the control images the same as the official code, specify [1024,1024].
+
+`qwen_image_edit_no_resize_control` cannot be specified together with `qwen_image_edit_control_resolution`.
+
+```toml
+[[datasets]]
+qwen_image_edit_no_resize_control = false # optional, default is false. Disable resizing of control image
+qwen_image_edit_control_resolution = [1024, 1024] # optional, default is None. Specify the resolution of the control image.
+```
+
+`fp_1f_*` settings are not used in Qwen-Image-Edit.
+
+The technical details of `qwen_image_edit_no_resize_control` is similar to FLUX 1 Kontext.
+
+The technical details of `qwen_image_edit_control_resolution`:
+
+When this option is specified, the control image is resized to a resolution to have the total number of pixels equal to the specified resolution while maintaining the aspect ratio. The official implementation uses 1M pixels, so [1024, 1024] is a common choice.
+
+<details>
+<summary>日本語</summary>
+
+Qwen-Image-Editのデータセット設定は、制御画像を持つ画像データセットを使用します。ただし、制御画像は1枚しか使用できません。
+
+`qwen_image_edit_no_resize_control`を設定すると、制御画像のリサイズを無効にします。デフォルトでは、制御画像は画像と同じ解像度にリサイズされます。
+
+また、`qwen_image_edit_control_resolution`を使用することで、制御画像の解像度を学習画像の解像度と異なる値に指定できます。公式のコードと同じように制御画像をリサイズしたい場合は、[1024, 1024]を指定してください。
+
+`qwen_image_edit_no_resize_control`と `qwen_image_edit_control_resolution`は同時に指定できません。
+
+```toml
+[[datasets]]
+qwen_image_edit_no_resize_control = false # オプション、デフォルトはfalse。制御画像のリサイズを無効にします
+qwen_image_edit_control_resolution = [512, 512] # オプション、デフォルトはNone。制御画像の解像度を指定します
+```
+
+`fp_1f_*`の設定はQwen-Image-Editでは使用しません。
+
+`qwen_image_edit_no_resize_control` の技術的詳細はFLUX 1 Kontextと同様です。
+
+`qwen_image_edit_control_resolution` の技術的詳細：
+
+このオプションを指定すると、制御画像は、アスペクト比を維持したまま、指定された解像度と同じピクセル数のサイズにリサイズされます。公式の実装では1Mピクセルが使用されるため、[1024, 1024]を指定すると良いでしょう。
+
+</details>
+
 
 ## Specifications
 

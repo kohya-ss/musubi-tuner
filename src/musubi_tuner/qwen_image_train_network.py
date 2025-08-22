@@ -7,7 +7,6 @@ from PIL import Image
 from einops import rearrange
 import numpy as np
 import torch
-import torchvision.transforms.functional as TF
 from tqdm import tqdm
 from accelerate import Accelerator
 
@@ -21,6 +20,8 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
 )
 import logging
+
+from musubi_tuner.utils import image_utils
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -60,24 +61,46 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # Load Qwen2.5-VL
         vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
         tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(args.text_encoder, vl_dtype, device, disable_mmap=True)
+        is_edit = args.edit
+        vl_processor = qwen_image_utils.load_vl_processor() if is_edit else None
 
-        # Encode with T5 and CLIP text encoders
-        logger.info(f"Encoding with T5 and CLIP text encoders")
+        # Encode with VLM
+        logger.info(f"Encoding with VLM")
 
-        sample_prompts_te_outputs = {}  # (prompt) -> (t5, clip)
+        sample_prompts_te_outputs = {}  # prompt -> embed or (prompt, control_image_path) -> embed
         with torch.amp.autocast(device_type=device.type, dtype=vl_dtype), torch.no_grad():
             for prompt_dict in prompts:
+                if is_edit:
+                    # Load control image
+                    assert (
+                        "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0
+                    ), f"control_image_path not found in sample prompt"
+                    control_image_path = prompt_dict["control_image_path"][0]  # only use the first control image
+                    control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(control_image_path, True)
+
+                    prompt_dict["control_image_tensor"] = control_image_tensor
+                else:
+                    control_image_path, control_image_tensor, control_image_np = None, None, None
+
                 if "negative_prompt" not in prompt_dict:
                     prompt_dict["negative_prompt"] = " "
+
                 for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", " ")]:
-                    if p is None or p in sample_prompts_te_outputs:
+                    embed_key = p if not is_edit else (p, control_image_path)
+                    if p is None or embed_key in sample_prompts_te_outputs:
                         continue
-                    # encode prompt
-                    logger.info(f"cache Text Encoder outputs for prompt: {p}")
-                    embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
-                    txt_len = mask.sum().item()  # length of the text in the batch
+
+                    # encode prompt with image if available
+                    logger.info(f"cache Text Encoder outputs for prompt: {p} with image: {control_image_path}")
+                    if not is_edit:
+                        embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
+                    else:
+                        embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
+                            vl_processor, text_encoder, p, control_image_np
+                        )
+                    txt_len = mask.to(dtype=torch.bool).sum().item()  # length of the text in the batch
                     embed = embed[:, :txt_len]
-                    sample_prompts_te_outputs[p] = embed
+                    sample_prompts_te_outputs[embed_key] = embed
 
         del tokenizer, text_encoder
         gc.collect()
@@ -87,12 +110,15 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         sample_parameters = []
         for prompt_dict in prompts:
             prompt_dict_copy = prompt_dict.copy()
+            control_image_path = None if not is_edit else prompt_dict_copy["control_image_path"][0]
 
             p = prompt_dict.get("prompt", "")
-            prompt_dict_copy["vl_embed"] = sample_prompts_te_outputs[p]
+            embed_key = p if not is_edit else (p, control_image_path)
+            prompt_dict_copy["vl_embed"] = sample_prompts_te_outputs[embed_key]
 
             p = prompt_dict.get("negative_prompt", "")
-            prompt_dict_copy["negative_vl_embed"] = sample_prompts_te_outputs[p]
+            embed_key = p if not is_edit else (p, control_image_path)
+            prompt_dict_copy["negative_vl_embed"] = sample_prompts_te_outputs[embed_key]
 
             sample_parameters.append(prompt_dict_copy)
 
@@ -123,6 +149,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         """architecture dependent inference"""
         model: qwen_image_model.QwenImageTransformer2DModel = transformer
         vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage = vae
+        is_edit = args.edit
+
         device = accelerator.device
 
         if cfg_scale is None:
@@ -136,10 +164,29 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         # 4. Prepare latent variables
         num_channels_latents = model.in_channels // 4
-        latents = qwen_image_utils.prepare_latents(
-            1, num_channels_latents, height, width, torch.bfloat16, device, generator
-        )  # packed
+        # latents is packed
+        latents = qwen_image_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, generator)
         img_shapes = [(1, height // qwen_image_utils.VAE_SCALE_FACTOR // 2, width // qwen_image_utils.VAE_SCALE_FACTOR // 2)]
+
+        if is_edit:
+            # 4.1 Prepare control latents
+            logger.info(f"Preparing control latents from control image")
+            control_image_tensor = sample_parameter.get("control_image_tensor")
+            vae.to(device)
+            vae.eval()
+
+            with torch.no_grad():
+                control_latent = vae.encode_pixels_to_latents(control_image_tensor.to(device, vae.dtype))
+            control_latent = control_latent.to(torch.bfloat16).to("cpu")
+
+            vae.to("cpu")
+            clean_memory_on_device(device)
+
+            img_shapes = [[img_shapes[0], (1, control_latent.shape[-2] // 2, control_latent.shape[-1] // 2)]]
+            control_latent = qwen_image_utils.pack_latents(control_latent)
+            control_latent = control_latent.to(device=device, dtype=torch.bfloat16)
+        else:
+            control_latent = None
 
         # 5. Prepare timesteps
         sigmas = np.linspace(1.0, 1 / sample_steps, sample_steps)
@@ -163,28 +210,37 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         with tqdm(total=sample_steps, desc="Denoising steps") as pbar:
             for i, t in enumerate(timesteps):
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
+
+                latent_model_input = latents
+                if is_edit:
+                    latent_model_input = torch.cat([latents, control_latent], dim=1)
+
                 with torch.no_grad():
                     noise_pred = model(
-                        hidden_states=latents,
+                        hidden_states=latent_model_input,
                         timestep=timestep / 1000,
                         guidance=guidance,
                         encoder_hidden_states_mask=None,
                         encoder_hidden_states=vl_embed,
                         img_shapes=img_shapes,
                         txt_seq_lens=txt_seq_lens,
-                    )[0]
+                    )
+                    if is_edit:
+                        noise_pred = noise_pred[:, :image_seq_len]
 
                 if do_cfg:
                     with torch.no_grad():
                         neg_noise_pred = model(
-                            hidden_states=latents,
+                            hidden_states=latent_model_input,
                             timestep=timestep / 1000,
                             guidance=guidance,
                             encoder_hidden_states_mask=None,
                             encoder_hidden_states=negative_vl_embed,
                             img_shapes=img_shapes,
                             txt_seq_lens=negative_txt_seq_lens,
-                        )[0]
+                        )
+                    if is_edit:
+                        neg_noise_pred = neg_noise_pred[:, :image_seq_len]
                     comb_pred = neg_noise_pred + cfg_scale * (noise_pred - neg_noise_pred)
 
                     cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
@@ -257,6 +313,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
     ):
         model: qwen_image_model.QwenImageTransformer2DModel = transformer
+        is_edit = args.edit
 
         bsize = latents.shape[0]
         latents = batch["latents"]  # B, C, 1, H, W
@@ -265,7 +322,18 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         lat_h = latents.shape[3]
         lat_w = latents.shape[4]
         # print(noisy_model_input.shape, bsize, latents.shape[1], lat_h, lat_w)
-        noisy_model_input = qwen_image_utils.pack_latents(noisy_model_input, bsize, latents.shape[1], lat_h, lat_w)
+        noisy_model_input = qwen_image_utils.pack_latents(noisy_model_input)
+        img_seq_len = noisy_model_input.shape[1]
+
+        # control
+        if is_edit:
+            latents_control = batch["latents_control"]  # B, C, 1, H, W
+            latents_control_shape = latents_control.shape
+            latents_control = qwen_image_utils.pack_latents(latents_control)
+
+            noisy_model_input = torch.cat([noisy_model_input, latents_control], dim=1)  # B, C*2, 1, H, W
+        else:
+            latents_control, latents_control_shape = None, None
 
         # context
         vl_embed = batch["vl_embed"]  # list of (L, D)
@@ -296,6 +364,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             vl_mask = vl_mask.to(device=accelerator.device)  # bool
 
         img_shapes = [(1, lat_h // 2, lat_w // 2)]
+        if is_edit:
+            img_shapes = [[img_shapes[0], (1, latents_control_shape[-2] // 2, latents_control_shape[-1] // 2)]]
 
         guidance = None
         timesteps = timesteps / 1000.0
@@ -309,6 +379,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 img_shapes=img_shapes,
                 txt_seq_lens=txt_seq_lens,
             )
+            if is_edit:
+                model_pred = model_pred[:, :img_seq_len]
 
         # unpack latents
         model_pred = qwen_image_utils.unpack_latents(
@@ -333,6 +405,7 @@ def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--edit", action="store_true", help="training for Qwen-Image-Edit")
     return parser
 
 

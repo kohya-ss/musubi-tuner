@@ -10,7 +10,12 @@ from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 import accelerate
 
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, BaseDataset, ItemInfo, save_text_encoder_output_cache
+from musubi_tuner.dataset.image_video_dataset import (
+    ARCHITECTURE_HUNYUAN_VIDEO,
+    BaseDataset,
+    ItemInfo,
+    save_text_encoder_output_cache,
+)
 from musubi_tuner.hunyuan_model import text_encoder as text_encoder_module
 from musubi_tuner.hunyuan_model.text_encoder import TextEncoder
 
@@ -74,14 +79,27 @@ def process_text_encoder_batches(
     all_cache_files_for_dataset: list[set],
     all_cache_paths_for_dataset: list[set],
     encode: callable,
+    requires_content: Optional[bool] = False,
 ):
+    """
+    Architecture independent processing of text encoder batches.
+    """
+
     num_workers = num_workers if num_workers is not None else max(1, os.cpu_count() - 1)
     for i, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_cache_files = all_cache_files_for_dataset[i]
         all_cache_paths = all_cache_paths_for_dataset[i]
-        for batch in tqdm(dataset.retrieve_text_encoder_output_cache_batches(num_workers)):
+
+        if not requires_content:
+            batches = dataset.retrieve_text_encoder_output_cache_batches(num_workers)  # return captions only
+        else:
+            batches = dataset.retrieve_latent_cache_batches(num_workers)  # return captions and images/videos
+
+        for batch in tqdm(batches):
             # update cache files (it's ok if we update it multiple times)
+            if requires_content:
+                batch = batch[1]  # batch is (key, items), so use items
             all_cache_paths.update([os.path.normpath(item.text_encoder_output_cache_path) for item in batch])
 
             # skip existing cache files

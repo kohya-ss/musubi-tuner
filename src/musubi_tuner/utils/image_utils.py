@@ -17,7 +17,7 @@ def preprocess_image(image: Image, w: int, h: int) -> Tuple[torch.Tensor, np.nda
     Returns:
         Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
             - image_tensor: The preprocessed image tensor (NCHW format). -1.0 to 1.0.
-            - image_np: The original image as a numpy array (HWC format). -1.0 to 1.0.
+            - image_np: The original image as a numpy array (HWC format). 0 to 255.
             - alpha: The alpha channel if present, otherwise None.
     """
     if image.mode == "RGBA":

@@ -307,7 +307,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
 
         bsize = latents.shape[0]
         latents = batch["latents"]  # B, C, H, W
-        control_latents = batch["control"]  # list of control latent, each is C, H, W
+        control_latents = batch["latents_control"]  # B, C, H, W
 
         # pack latents
         packed_latent_height = latents.shape[2] // 2
@@ -316,30 +316,13 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
 
         img_ids = flux_utils.prepare_img_ids(bsize, packed_latent_height, packed_latent_width)
 
-        # calculate max control latent length
-        control_latent_lengths = [cl.shape[1] * cl.shape[2] // 4 for cl in control_latents]
-        max_control_length = max(control_latent_lengths)
+        # pack control latents
+        packed_control_latent_height = control_latents.shape[2] // 2
+        packed_control_latent_width = control_latents.shape[3] // 2
+        control_latents = rearrange(control_latents, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+        control_latent_lengths = [control_latents.shape[1]] * bsize
 
-        # pack and pad control latents
-        dim = control_latents[0].shape[0] * 2 * 2
-        dtype = control_latents[0].dtype
-        device = control_latents[0].device
-        padded_control_latents = torch.zeros(bsize, max_control_length, dim, dtype=dtype, device=device)
-        padded_control_ids = torch.zeros(bsize, max_control_length, 3)
-
-        for i, control_latent in enumerate(control_latents):
-            ctrl_packed_height = control_latent.shape[1] // 2
-            ctrl_packed_width = control_latent.shape[2] // 2
-            control_latent = rearrange(control_latent, "c (h ph) (w pw) -> (h w) (c ph pw)", ph=2, pw=2)
-            control_latent_ids = flux_utils.prepare_img_ids(1, ctrl_packed_height, ctrl_packed_width, is_ctrl=True)[0]
-            # print(f"control_latent shape: {control_latent.shape}, control_latent_ids shape: {control_latent_ids.shape}")
-
-            padded_control_latents[i, : control_latent.shape[0], :] = control_latent
-            padded_control_ids[i, : control_latent_ids.shape[0], :] = control_latent_ids
-
-        control_latents = padded_control_latents
-        control_ids = padded_control_ids
-        del padded_control_latents, padded_control_ids
+        control_ids = flux_utils.prepare_img_ids(bsize, packed_control_latent_height, packed_control_latent_width, is_ctrl=True)
 
         # context
         t5_vec = batch["t5_vec"]  # B, T, D

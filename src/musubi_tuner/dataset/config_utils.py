@@ -49,6 +49,8 @@ class ImageDatasetParams(BaseDatasetParams):
     fp_1f_target_index: Optional[int] = None
     fp_1f_no_post: Optional[bool] = False
     flux_kontext_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
+    qwen_image_edit_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
+    qwen_image_edit_control_resolution: Optional[Tuple[int, int]] = None  # if set, control images are resized to this resolution
 
 
 @dataclass
@@ -119,6 +121,8 @@ class ConfigSanitizer:
         "fp_1f_target_index": int,
         "fp_1f_no_post": bool,
         "flux_kontext_no_resize_control": bool,
+        "qwen_image_edit_no_resize_control": bool,
+        "qwen_image_edit_control_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -308,6 +312,8 @@ def generate_dataset_group_by_blueprint(
         fp_1f_target_index: {dataset.fp_1f_target_index}
         fp_1f_no_post: {dataset.fp_1f_no_post}
         flux_kontext_no_resize_control: {dataset.flux_kontext_no_resize_control}
+        qwen_image_edit_no_resize_control: {dataset.qwen_image_edit_no_resize_control}
+        qwen_image_edit_control_resolution: {dataset.qwen_image_edit_control_resolution}
     \n"""
                 ),
                 "    ",
