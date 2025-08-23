@@ -24,14 +24,8 @@ from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
-
-try:
-    from lycoris.kohya import create_network_from_weights
-except:
-    pass
-
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, save_videos_grid, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 from musubi_tuner.frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
 from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
@@ -232,7 +226,7 @@ def parse_args() -> argparse.Namespace:
         "--attn_mode",
         type=str,
         default="torch",
-        choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  #  "flash2", "flash3",
+        choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  # "flash2", "flash3",
         help="attention mode",
     )
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
@@ -564,7 +558,7 @@ def decode_latent(
     device: torch.device,
     one_frame_inference_mode: bool = False,
 ) -> torch.Tensor:
-    logger.info(f"Decoding video...")
+    logger.info("Decoding video...")
     if latent.ndim == 4:
         latent = latent.unsqueeze(0)  # add batch dimension
 
@@ -601,7 +595,7 @@ def decode_latent(
             clean_memory_on_device(device)
     else:
         # bulk decode
-        logger.info(f"Bulk decoding or one frame inference")
+        logger.info("Bulk decoding or one frame inference")
         if not one_frame_inference_mode:
             history_pixels = hunyuan.vae_decode(latent, vae).cpu()  # normal
         else:
@@ -697,7 +691,7 @@ def prepare_image_inputs(
     clean_memory_on_device(device)
 
     # VAE encoding
-    logger.info(f"Encoding image to latent space with VAE")
+    logger.info("Encoding image to latent space with VAE")
     vae_original_device = vae.device
     vae.to(device)
 
@@ -767,7 +761,7 @@ def prepare_text_inputs(
     text_encoder1_original_device = text_encoder1.device if text_encoder1 else None
     text_encoder2_original_device = text_encoder2.device if text_encoder2 else None
 
-    logger.info(f"Encoding prompt with Text Encoders")
+    logger.info("Encoding prompt with Text Encoders")
     llama_vecs = {}
     llama_attention_masks = {}
     clip_l_poolers = {}
@@ -1135,11 +1129,11 @@ def postprocess_magcache(args: argparse.Namespace, model: HunyuanVideoTransforme
 
     # print mag ratios
     norm_ratio, norm_std, cos_dis = model.get_calibration_data()
-    logger.info(f"MagCache calibration data:")
+    logger.info("MagCache calibration data:")
     logger.info(f"  - norm_ratio: {norm_ratio}")
     logger.info(f"  - norm_std: {norm_std}")
     logger.info(f"  - cos_dis: {cos_dis}")
-    logger.info(f"Copy and paste following values to --magcache_mag_ratios argument to use them:")
+    logger.info("Copy and paste following values to --magcache_mag_ratios argument to use them:")
     print(",".join([f"{ratio:.5f}" for ratio in [1] + norm_ratio]))
 
 
@@ -1280,7 +1274,7 @@ def generate(
                     print(
                         f"User defined latent paddings length {len(user_latent_paddings)} does not match total sections {total_latent_sections}."
                     )
-                    print(f"Use default paddings instead for unspecified sections.")
+                    print("Use default paddings instead for unspecified sections.")
                     latent_paddings[: len(user_latent_paddings)] = user_latent_paddings
                 elif len(user_latent_paddings) > total_latent_sections:
                     print(
@@ -1518,13 +1512,13 @@ def generate_with_one_frame_inference(
         return mask_image
 
     if control_latents is None or len(control_latents) == 0:
-        logger.info(f"No control images provided for one frame inference. Use zero latents for control images.")
+        logger.info("No control images provided for one frame inference. Use zero latents for control images.")
         control_latents = [torch.zeros(1, 16, 1, height // 8, width // 8, dtype=torch.float32)]
 
     if "no_post" not in one_frame_inference:
         # add zero latents as clean latents post
         control_latents.append(torch.zeros((1, 16, 1, height // 8, width // 8), dtype=torch.float32))
-        logger.info(f"Add zero latents as clean latents post for one frame inference.")
+        logger.info("Add zero latents as clean latents post for one frame inference.")
 
     # kisekaeichi and 1f-mc: both are using control images, but indices are different
     clean_latents = torch.cat(control_latents, dim=2)  # (1, 16, num_control_images, H//8, W//8)
@@ -1566,20 +1560,20 @@ def generate_with_one_frame_inference(
     if "no_2x" in one_frame_inference:
         clean_latents_2x = None
         clean_latent_2x_indices = None
-        logger.info(f"No clean_latents_2x")
+        logger.info("No clean_latents_2x")
     else:
         clean_latents_2x = torch.zeros((1, 16, 2, height // 8, width // 8), dtype=torch.float32)
         index = 1 + latent_window_size + 1
-        clean_latent_2x_indices = torch.arange(index, index + 2).unsqueeze(0)  #  2
+        clean_latent_2x_indices = torch.arange(index, index + 2).unsqueeze(0)  # 2
 
     if "no_4x" in one_frame_inference:
         clean_latents_4x = None
         clean_latent_4x_indices = None
-        logger.info(f"No clean_latents_4x")
+        logger.info("No clean_latents_4x")
     else:
         clean_latents_4x = torch.zeros((1, 16, 16, height // 8, width // 8), dtype=torch.float32)
         index = 1 + latent_window_size + 1 + 2
-        clean_latent_4x_indices = torch.arange(index, index + 16).unsqueeze(0)  #  16
+        clean_latent_4x_indices = torch.arange(index, index + 16).unsqueeze(0)  # 16
 
     logger.info(
         f"One frame inference. clean_latent: {clean_latents.shape} latent_indices: {latent_indices}, clean_latent_indices: {clean_latent_indices}, num_frames: {sample_num_frames}"
@@ -1672,7 +1666,6 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
             "video_seconds": f"{video_seconds}",
             "infer_steps": f"{args.infer_steps}",
             "guidance_scale": f"{args.guidance_scale}",
-            "latent_window_size": f"{args.latent_window_size}",
             "embedded_cfg_scale": f"{args.embedded_cfg_scale}",
             "guidance_rescale": f"{args.guidance_rescale}",
             "sample_solver": f"{args.sample_solver}",
@@ -1879,7 +1872,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     temp_shared_models_img = {"feature_extractor": feature_extractor_batch, "image_encoder": image_encoder_batch}
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
-        logger.info(f"Image preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        logger.info(f"Image preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
         # prepare_image_inputs will move vae/image_encoder to device temporarily
         image_data = prepare_image_inputs(prompt_args_item, device, vae_for_batch, temp_shared_models_img)
         all_precomputed_image_data.append(image_data)
@@ -1911,7 +1904,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     }
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
-        logger.info(f"Text preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        logger.info(f"Text preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
         # prepare_text_inputs will move text_encoders to device temporarily
         text_data = prepare_text_inputs(prompt_args_item, device, temp_shared_models_txt)
         all_precomputed_text_data.append(text_data)
@@ -1943,7 +1936,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             current_image_data = all_precomputed_image_data[i]
             current_text_data = all_precomputed_text_data[i]
 
-            logger.info(f"Generating latent for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+            logger.info(f"Generating latent for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             try:
                 # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
                 # It will use the DiT model from shared_models_for_generate.
@@ -1985,11 +1978,11 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
         for i, latent in enumerate(all_latents):
             if latent is None:  # Skip failed generations
-                logger.warning(f"Skipping decoding for prompt {i+1} due to previous error.")
+                logger.warning(f"Skipping decoding for prompt {i + 1} due to previous error.")
                 continue
 
             current_args = all_prompt_args_list[i]
-            logger.info(f"Decoding output {i+1}/{len(all_latents)} for prompt: {current_args.prompt}")
+            logger.info(f"Decoding output {i + 1}/{len(all_latents)} for prompt: {current_args.prompt}")
 
             # if args.output_type is "both" or "latent_images", we already saved latent above.
             # so we skip saving latent here.

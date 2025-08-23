@@ -171,7 +171,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
         latent_f = (frame_count - 1) // 4 + 1
         total_latent_sections = math.floor((latent_f - 1) / latent_window_size)
         if total_latent_sections < 1 and not one_frame_mode:
-            logger.warning(f"Not enough frames for FramePack: {latent_f}, minimum: {latent_window_size*4+1}")
+            logger.warning(f"Not enough frames for FramePack: {latent_f}, minimum: {latent_window_size * 4 + 1}")
             return None
 
         latent_f = total_latent_sections * latent_window_size + 1
@@ -195,7 +195,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
             return hunyuan.vae_encode(image, vae).to("cpu"), alpha
 
         # VAE encoding
-        logger.info(f"Encoding image to latent space")
+        logger.info("Encoding image to latent space")
         vae.to(device)
 
         start_latent, _ = (
@@ -352,13 +352,13 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 return mask_image
 
             if control_latents is None or len(control_latents) == 0:
-                logger.info(f"No control images provided for one frame inference. Use zero latents for control images.")
+                logger.info("No control images provided for one frame inference. Use zero latents for control images.")
                 control_latents = [torch.zeros(1, 16, 1, height // 8, width // 8, dtype=torch.float32)]
 
             if "no_post" not in one_frame_inference:
                 # add zero latents as clean latents post
                 control_latents.append(torch.zeros((1, 16, 1, height // 8, width // 8), dtype=torch.float32))
-                logger.info(f"Add zero latents as clean latents post for one frame inference.")
+                logger.info("Add zero latents as clean latents post for one frame inference.")
 
             # kisekaeichi and 1f-mc: both are using control images, but indices are different
             clean_latents = torch.cat(control_latents, dim=2)  # (1, 16, num_control_images, H//8, W//8)
@@ -371,7 +371,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 control_alpha = control_alphas[i]
                 if control_alpha is not None:
                     latent_mask = get_latent_mask(control_alpha)
-                    logger.info(f"Apply mask for clean latents 1x for {i+1}: shape: {latent_mask.shape}")
+                    logger.info(f"Apply mask for clean latents 1x for {i + 1}: shape: {latent_mask.shape}")
                     clean_latents[:, :, i : i + 1, :, :] = clean_latents[:, :, i : i + 1, :, :] * latent_mask
 
             for one_frame_param in one_frame_inference:
@@ -391,20 +391,20 @@ class FramePackNetworkTrainer(NetworkTrainer):
             if "no_2x" in one_frame_inference:
                 clean_latents_2x = None
                 clean_latent_2x_indices = None
-                logger.info(f"No clean_latents_2x")
+                logger.info("No clean_latents_2x")
             else:
                 clean_latents_2x = torch.zeros((1, 16, 2, height // 8, width // 8), dtype=torch.float32)
                 index = 1 + latent_window_size + 1
-                clean_latent_2x_indices = torch.arange(index, index + 2).unsqueeze(0)  #  2
+                clean_latent_2x_indices = torch.arange(index, index + 2).unsqueeze(0)  # 2
 
             if "no_4x" in one_frame_inference:
                 clean_latents_4x = None
                 clean_latent_4x_indices = None
-                logger.info(f"No clean_latents_4x")
+                logger.info("No clean_latents_4x")
             else:
                 clean_latents_4x = torch.zeros((1, 16, 16, height // 8, width // 8), dtype=torch.float32)
                 index = 1 + latent_window_size + 1 + 2
-                clean_latent_4x_indices = torch.arange(index, index + 16).unsqueeze(0)  #  16
+                clean_latent_4x_indices = torch.arange(index, index + 16).unsqueeze(0)  # 16
 
             logger.info(
                 f"One frame inference. clean_latent: {clean_latents.shape} latent_indices: {latent_indices}, clean_latent_indices: {clean_latent_indices}, num_frames: {sample_num_frames}"

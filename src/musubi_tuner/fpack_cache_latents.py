@@ -1,16 +1,12 @@
 import argparse
-import logging
 import math
 import os
-from typing import List, Optional
-
+from typing import List
 import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import SiglipImageProcessor, SiglipVisionModel
-from PIL import Image
-
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import BaseDataset, ItemInfo, save_latent_cache_framepack, ARCHITECTURE_FRAMEPACK
@@ -21,8 +17,8 @@ from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 import musubi_tuner.cache_latents as cache_latents
 from musubi_tuner.cache_latents import preprocess_contents
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 def encode_and_save_batch(
@@ -66,7 +62,7 @@ def encode_and_save_batch(
     if total_latent_sections < 1:
         min_frames_needed = latent_window_size * 4 + 1
         raise ValueError(
-            f"Not enough frames for FramePack: {batch[0].frame_count} frames ({latent_f} latent frames), minimum required: {min_frames_needed} frames ({latent_window_size+1} latent frames)"
+            f"Not enough frames for FramePack: {batch[0].frame_count} frames ({latent_f} latent frames), minimum required: {min_frames_needed} frames ({latent_window_size + 1} latent frames)"
         )
 
     # actual latent frame count (aligned to section boundaries)
@@ -294,9 +290,9 @@ def encode_and_save_batch_one_frame(
 
         if not item.fp_1f_no_post:
             clean_latent_indices = clean_latent_indices + [1 + item.fp_latent_window_size]
-        clean_latent_indices = torch.Tensor(clean_latent_indices).long()  #  N
+        clean_latent_indices = torch.Tensor(clean_latent_indices).long()  # N
 
-        latent_index = torch.Tensor([item.fp_1f_target_index]).long()  #  1
+        latent_index = torch.Tensor([item.fp_1f_target_index]).long()  # 1
 
         # zero values is not needed to cache even if one_frame_no_2x or 4x is False
         clean_latents_2x = None
@@ -306,13 +302,13 @@ def encode_and_save_batch_one_frame(
             clean_latent_2x_indices = None
         else:
             index = 1 + item.fp_latent_window_size + 1
-            clean_latent_2x_indices = torch.arange(index, index + 2)  #  2
+            clean_latent_2x_indices = torch.arange(index, index + 2)  # 2
 
         if one_frame_no_4x:
             clean_latent_4x_indices = None
         else:
             index = 1 + item.fp_latent_window_size + 1 + 2
-            clean_latent_4x_indices = torch.arange(index, index + 16)  #  16
+            clean_latent_4x_indices = torch.arange(index, index + 16)  # 16
 
         # clean latents preparation (emulating inference)
         clean_latents = latents[b, :, :-1]  # C, F, H, W

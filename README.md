@@ -7,12 +7,12 @@ Blissful extension of Musubi Tuner by Blyss Sarania
 Here you will find an extended version of Musubi Tuner with advanced and experimental features focused on creating a full suite of tools for working with generative video models. Preview videos as they generate, increase inference speed, make longer videos and gain more control over your creations and enhance them with VFI, upscaling and more! If you wanna get even more out of Musubi then you've come to the right place! Note for best performance and compatibility, Python 3.12 with PyTorch 2.7.0 or later is recommended! While development is done in Python 3.12, efforts are made to maintain compatibility back to 3.10 as well.
 
 Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do not post about issues with this version on the main Musubi Github repo but rather use this repo's issues section!
-
-Extensions for all models:
+Extensions for ALL models/modes:
+- Beautiful rich logging, rich argparse and rich tracebacks
+Extensions for Wan/Hunyuan/Framepack:
 - Latent preview during generation with either latent2RGB or TAEHV (`--preview_latent_every N` where N is a number of steps(or sections for framepack). By default uses latent2rgb, TAE can be enabled with `--preview_vae /path/to/model` models: https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv)
 - Optimized generation settings for fast, high quality gens (`--optimized`, enables various optimizations and settings based on the model. Requires SageAttention, Triton, PyTorch 2.7.0 or higher)
 - Save generation metadata in videos/images (automatic with `--container mkv` and when saving PNG, disable with `--no-metadata`, not available with `--container mp4` You can conveniently view/copy such metadata with `src/blissful_tuner/metaview.py some_video.mkv`)
-- Beautiful rich logging, rich argparse and rich tracebacks
 - Extended saving options (`--codec codec --container container`, can save Apple ProRes(`--codec prores`, super high bitrate perceptually lossless) into `--container mkv`, or either of `h264`, `h265` into `mp4` or `mkv`)
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
 - Use strings as your seed because why not! Also easier to remember!

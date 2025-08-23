@@ -9,12 +9,12 @@ Blyss Sarania による Musubi Tuner の Blissful な拡張機能
 ここでは、生成動画モデルを扱うためのツールスイートの作成に重点を置いた、高度で実験的な機能を備えたMusubi Tunerの拡張バージョンをご覧いただけます。動画生成時にプレビューしたり、推論速度を向上させたり、動画を長くしたり、作成した動画をより細かく制御したり、VFIやアップスケーリングなどで動画を強化したりできます。Musubiをさらに活用したい方は、ぜひこの機会にお試しください。最適なパフォーマンスと互換性を得るには、Python 3.12とPyTorch 2.7.0以降を推奨します。「requirements.txt」に追加の要件が追加されているため、通常のMusubiから移行する場合は、再度`pip install -r requirements.txt`を実行する必要があります。開発はPython 3.12で行われていますが、3.10との互換性も維持するよう努めています。
 
 Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコードを移植したHunyuanVideoWrapperとWanVideoWrapperを開発してくださったkijaiさん、そしてオープンソース生成AIコミュニティの開発者の皆様に心より感謝申し上げます。多くの変更は実験的なものであるため、修正前のMusubiと同じように動作しない部分もあることをご了承ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題は、MusubiのメインGithubリポジトリではなく、このリポジトリのIssuesセクションに投稿してください。
-
+すべてのモデル/モード向けの拡張機能:
+- 美しくリッチなログ出力、豊富なargparse、そして豊富なトレースバック
 すべてのモデル向けの拡張機能：
 - latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv ）
 - 高速で高品質な生成のための最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）
 - 動画/画像に生成メタデータを保存します (`--container mkv` で自動的に保存され、PNG を保存する場合は `--no-metadata` で無効になり、`--container mp4` では使用できません。`blissful_tuner/metaview.py some_video.mkv` を使用すると、このようなメタデータを簡単に表示/コピーできます)
-- 美しくリッチなログ出力、豊富な引数解析、そして豊富なトレースバック
 - 拡張された保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートの知覚的ロスレス) を `--container mkv` に保存、または `h264`、`h265` のいずれかを `mp4` または `mkv` に保存可能)
 - FP16 積算 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも機能します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、fp8_fast/mmscaled とほぼ同等の速度になります。精度の低下は抑えられています！fp8スケールモードにも対応しています！
 - シードとして文字列を使用するのは良いでしょう！覚えやすいのも魅力です！
