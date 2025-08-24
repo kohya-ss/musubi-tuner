@@ -17,7 +17,6 @@ Extensions for Wan/Hunyuan/Framepack:
 - FP16 accumulation (`--fp16_accumulation`, works best with Wan FP16 models(but works with Hunyaun bf16 too!) and requires PyTorch 2.7.0 or higher but significantly accelerates inference speeds, especially with `--compile` it's almost as fast as fp8_fast/mmscaled without the loss of precision! And it works with fp8 scaled mode too!)
 - Use strings as your seed because why not! Also easier to remember!
 - Use wildcards in your prompts for more variation! (`--prompt_wildcards /path/to/wildcard/directory`, for instance `__color__` in your prompt would look for color.txt in that directory. The wildcard file format is one potential replacement string per line, with an optional relative weight attached like red:2.0 or "some longer string:0.5"  - wildcards can also contain wildcards themselves, the recursion limit is 50 steps!)
-- Upcast quantization/linear transformations for accuracy (`--upcast_quantization` available for all models for both inference and training and slightly improves accuracy of fp8_scaled quantization for a small VRAM cost. `--upcast_linear` available for all models during inference(training soon) when using fp8_scaled, this will upcast linear transformations to fp32 for multiplication headroom. Not really any penalty and very slight boost to quality. Not applicable on layers using scaled_mm (fp8_fast) when that's enabled)
 
 Wan/Hunyuan extensions:
 - Load diffusion-pipe style LoRAs for inference without converting first
