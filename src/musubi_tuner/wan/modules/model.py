@@ -810,7 +810,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
     @torch.compiler.disable()
-    def minifunc(self, F, H, W, x):
+    def get_imgids(self, F, H, W, x):
         f_len = ((F + (self.patch_size[0] // 2)) // self.patch_size[0])
         h_len = ((H + (self.patch_size[1] // 2)) // self.patch_size[1])
         w_len = ((W + (self.patch_size[2] // 2)) // self.patch_size[2])
@@ -821,7 +821,6 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         return img_ids
 
     def get_patch_embedding(self, x, f_indices, seq_len):
-
         _, F, H, W = x[0].shape
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]  # x[0].shape = [1, 5120, F, H, W]
         grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])  # list of [F, H, W]
@@ -843,7 +842,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
 
         if self.rope_func == "comfy":
-            img_ids = self.minifunc(F, H, W, x)
+            img_ids = self.get_imgids(F, H, W, x)
             img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=1)
             freqs_list = self.rope_embedder(img_ids).movedim(1, 2)
         return x, seq_lens, grid_sizes, freqs_list
