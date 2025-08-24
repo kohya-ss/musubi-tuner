@@ -125,6 +125,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- August 24, 2025
+    - Reduced peak memory usage during training and inference for Wan2.1/2.2. PR [#493](https://github.com/kohya-ss/musubi-tuner/pull/493) This may reduce memory usage by about 10% for non-weight tensors, depending on the video frame size and number of frames.
+
 - August 22, 2025:
     - Qwen-Image-Edit support has been added. See PR [#473](https://github.com/kohya-ss/musubi-tuner/pull/473) and the [Qwen-Image documentation](./docs/qwen_image.md) for details. This change may affect existing features due to its extensive nature. If you encounter any issues, please report them in the [Issues](https://github.com/kohya-ss/musubi-tuner/issues).
     - **Breaking Change**: The cache format for FLUX.1 Kontext has been changed with this update. Please recreate the latent cache.
