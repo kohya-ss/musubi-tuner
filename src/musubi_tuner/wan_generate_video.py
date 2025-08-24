@@ -228,7 +228,7 @@ def parse_args() -> argparse.Namespace:
         "--compile_args",
         nargs=4,
         metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-        default=["inductor", "default", "False", "False"],
+        default=["inductor", "default", None, "False"],
         help="Torch.compile settings",
     )
 
@@ -655,7 +655,8 @@ def load_dit_model(
         "num_frames": 81 if not hasattr(args, "video_length") else args.video_length,
         "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention,
         "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation,
-        "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile
+        "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile,
+        "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args
     }
     model = load_wan_model(
         config,
@@ -720,7 +721,7 @@ def load_dit_model(
     if args.compile:
         compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
         logger.info(
-            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic if compile_dynamic is not None else 'Auto'}; Fullgraph: {compile_fullgraph}]"
         )
         torch._dynamo.config.cache_size_limit = 64
         for i in range(len(model.blocks)):
@@ -728,7 +729,7 @@ def load_dit_model(
                 model.blocks[i],
                 backend=compile_backend,
                 mode=compile_mode,
-                dynamic=compile_dynamic.lower() in "true",
+                dynamic=None if compile_dynamic is None else compile_dynamic.lower() in "true",
                 fullgraph=compile_fullgraph.lower() in "true",
             )
 
@@ -886,7 +887,7 @@ def optimize_model(
     if args.compile:
         compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
         logger.info(
-            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic if compile_dynamic is not None else 'Auto'}; Fullgraph: {compile_fullgraph}]"
         )
         torch._dynamo.config.cache_size_limit = 32
         for i in range(len(model.blocks)):
@@ -894,7 +895,7 @@ def optimize_model(
                 model.blocks[i],
                 backend=compile_backend,
                 mode=compile_mode,
-                dynamic=compile_dynamic.lower() in "true",
+                dynamic=None if compile_dynamic is None else compile_dynamic.lower() in "true",
                 fullgraph=compile_fullgraph.lower() in "true",
             )
 

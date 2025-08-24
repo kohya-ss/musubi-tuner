@@ -452,7 +452,7 @@ class WanAttentionBlock(nn.Module):
         q_in = self.norm1(x).to(self.attention_dtype, copy=False)
         fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()
         y = self.self_attn(fi1, seq_lens, grid_sizes, freqs)
-        x = x + (y * s2).to(x.dtype, copy=False)
+        x = x + (y * s2).to(x_orig_dtype, copy=False)
         del y
 
         # Cross-attn
@@ -461,8 +461,8 @@ class WanAttentionBlock(nn.Module):
 
         # FFN
         ff_in = self.norm2(x).to(self.attention_dtype, copy=False)
-        y = self.ffn((ff_in * (1 + s4) + s3).contiguous())
-        x = x + (y * s5).to(x.dtype, copy=False)
+        y = self.ffn((ff_in * (1 + s4) + s3).contiguous().to(x_orig_dtype, copy=False))
+        x = x + (y * s5).to(x_orig_dtype, copy=False)
         del y
         return x.to(x_orig_dtype, copy=False)
 
@@ -645,6 +645,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.riflex_index = kwargs.get("riflex_index", 0)
         self.num_frames = kwargs.get("num_frames", 81)
         self.optimized_compile = kwargs.get("optimized_compile", False)
+        self.compile_args = kwargs.get("compile_args", ["inductor", "default", None, "false"])
         # embeddings
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
         self.text_embedding = nn.Sequential(nn.Linear(text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim))
@@ -862,6 +863,24 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 e0 = self.time_projection(e).unflatten(2, (6, self.dim)).to(self.e_dtype)
         return e, e0
 
+    def blissful_optimize(self):
+        self.optimized_compile = False  # Otherwise it would be called every step
+        torch._dynamo.config.cache_size_limit = 64
+        backend, mode, dynamic, fullgraph = self.compile_args
+        dynamic = None if dynamic is None else True if dynamic.lower() == "true" else False
+        fullgraph = True if fullgraph.lower() == "true" else False
+        logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
+        logger.info(f"Compile parameters: Backend: {backend}; Mode: {mode}; Dynamic: {dynamic if dynamic is not None else 'Auto'}; Fullgraph: {fullgraph}")
+        self.rope_embedder = torch.compile(self.rope_embedder, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph) if self.rope_func == "comfy" else None
+        self.get_patch_embedding = torch.compile(self.get_patch_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+        self.get_time_embedding = torch.compile(self.get_time_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+        self.text_embedding = torch.compile(self.text_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+        self.head = torch.compile(self.head, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+        for block in self.blocks:
+            block._forward = torch.compile(block._forward, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+            if self.rope_func == "comfy":
+                block.self_attn.comfyrope = torch.compile(block.self_attn.comfyrope, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+
     def forward(self, x, t, context, seq_len, km=None, clip_fea=None, y=None, skip_block_indices=None, f_indices=None):
         r"""
         Forward pass through the diffusion model
@@ -892,18 +911,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         """
         if km is not None and km.early_exit_requested:
             return x  # If we don't return something useful other code will fail before we can break cleanly so just return x as is.
+
         if self.optimized_compile:
-            logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
-            self.optimized_compile = False
-            self.rope_embedder = torch.compile(self.rope_embedder) if self.rope_func == "comfy" else None
-            self.get_patch_embedding = torch.compile(self.get_patch_embedding)
-            self.get_time_embedding = torch.compile(self.get_time_embedding)
-            self.text_embedding = torch.compile(self.text_embedding)
-            self.head = torch.compile(self.head)
-            for block in self.blocks:
-                block._forward = torch.compile(block._forward)
-                if self.rope_func == "comfy":
-                    block.self_attn.comfyrope = torch.compile(block.self_attn.comfyrope)
+            self.blissful_optimize()
 
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:

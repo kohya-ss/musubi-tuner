@@ -478,7 +478,8 @@ class WanNetworkTrainer(NetworkTrainer):
             "num_frames": 81 if not hasattr(args, "video_length") else args.video_length,
             "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention,
             "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation,
-            "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile
+            "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile,
+            "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args
         }
         model = load_wan_model(
             self.config, accelerator.device, dit_path, attn_mode, split_attn,
@@ -728,6 +729,13 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
     parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")
     parser.add_argument("--optimized_compile", action="store_true", help="Enable optimized torch.compile of just the most crucial blocks. Exclusive of --dynamo_backend and works best with --rope_func comfy")
+    parser.add_argument(
+        "--compile_args",
+        nargs=4,
+        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
+        default=["inductor", "default", None, "False"],
+        help="Torch.compile settings for --optimized_compile. NOT for --dynamo_backend!",
+    )
     return parser
 
 
