@@ -720,7 +720,7 @@ def main():
                 convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
         else:
             sd = transformer.state_dict()
-            sd = transformer.fp8_optimization(sd, device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
+            sd = transformer.fp8_optimization(sd, device, use_scaled_mm=args.fp8_fast)
             transformer.load_state_dict(sd, strict=True, assign=True)
         if args.te_multiplier:
             llm_multiplier, clip_multiplier = args.te_multiplier
@@ -887,7 +887,7 @@ def main():
                         latents_input = torch.cat([latents, image_latents], dim=1)
                     batch_size = latents_input.shape[0]
                     for prompt_type, prompt_dict in conditioning_dict.items():
-                        if (prompt_type == "negative" and not do_cfg_for_step) or prompt_dict["prompt"] is None:
+                        if (prompt_type == "negative" and not do_cfg_for_step) or prompt_dict["prompt"] is None or km.early_exit_requested:
                             continue
                         prompt_dict["transformer_out"] = transformer(
                             latents_input,
@@ -902,28 +902,29 @@ def main():
                         )["x"]
 
                 # perform classifier free guidance
-                if do_cfg_for_step:
-                    if args.cfgzerostar_scaling:
-                        noise_pred = apply_zerostar_scaling(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], args.guidance_scale)
-                    elif args.perp_neg is not None:
-                        noise_pred = perpendicular_negative_cfg(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], conditioning_dict["nocond"]["transformer_out"], args.perp_neg, args.guidance_scale)
+                if not km.early_exit_requested:
+                    if do_cfg_for_step:
+                        if args.cfgzerostar_scaling:
+                            noise_pred = apply_zerostar_scaling(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], args.guidance_scale)
+                        elif args.perp_neg is not None:
+                            noise_pred = perpendicular_negative_cfg(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], conditioning_dict["nocond"]["transformer_out"], args.perp_neg, args.guidance_scale)
+                        else:
+                            noise_pred = conditioning_dict["negative"]["transformer_out"] + args.guidance_scale * (conditioning_dict["positive"]["transformer_out"] - conditioning_dict["negative"]["transformer_out"])
                     else:
-                        noise_pred = conditioning_dict["negative"]["transformer_out"] + args.guidance_scale * (conditioning_dict["positive"]["transformer_out"] - conditioning_dict["negative"]["transformer_out"])
-                else:
-                    noise_pred = conditioning_dict["positive"]["transformer_out"]
-                if i <= args.cfgzerostar_init_steps - 1:  # CFGZero* zero init
-                    noise_pred *= args.cfgzerostar_multiplier
+                        noise_pred = conditioning_dict["positive"]["transformer_out"]
+                    if i <= args.cfgzerostar_init_steps - 1:  # CFGZero* zero init
+                        noise_pred *= args.cfgzerostar_multiplier
 
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
-                # update progress bar
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
-                    if progress_bar is not None:
-                        progress_bar.update()
+                    # update progress bar
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
+                        if progress_bar is not None:
+                            progress_bar.update()
 
-                if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
-                    previewer.preview(latents)
+                    if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
+                        previewer.preview(latents)
 
         latents = latents.detach().cpu() if latents is not None else None
         transformer = None

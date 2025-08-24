@@ -625,14 +625,12 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         self,
         state_dict: dict[str, torch.Tensor],
         device: torch.device,
-        use_scaled_mm: bool = False,
-        upcast_linear: bool = False,
-        quant_dtype: Optional[torch.dtype] = None
+        use_scaled_mm: bool = False
     ) -> dict[str, torch.Tensor]:
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
         logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if use_scaled_mm else ''}...")
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep, quant_dtype=quant_dtype)
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, upcast_linear=upcast_linear, quant_dtype=quant_dtype)
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
         return state_dict
 
     def enable_gradient_checkpointing(self):
@@ -986,9 +984,7 @@ def load_transformer(
         dtype: torch.dtype,
         in_channels: int = 16,
         fp8_scaled: bool = False,
-        fp8_fast: bool = False,
-        upcast_linear: bool = False,
-        quant_dtype: Optional[torch.dtype] = None) -> HYVideoDiffusionTransformer:
+        fp8_fast: bool = False) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
     factor_kwargs = {"device": load_device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
@@ -1022,7 +1018,7 @@ def load_transformer(
 
     if fp8_scaled:
         sd = transformer.state_dict()
-        sd = transformer.fp8_optimization(sd, main_device, use_scaled_mm=fp8_fast, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
+        sd = transformer.fp8_optimization(sd, main_device, use_scaled_mm=fp8_fast)
         # make sure all the model weights are on the loading_device
         for key in sd.keys():
             sd[key] = sd[key].to(load_device)

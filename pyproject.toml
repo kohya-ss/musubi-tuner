@@ -1,6 +1,6 @@
 [project]
 name = "blissful-tuner"
-version = "0.9.66"
+version = "0.10.66"
 description = "Musubi Tuner by kohya_ss extended to Blissful Tuner by Sarania"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"

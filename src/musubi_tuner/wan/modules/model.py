@@ -23,8 +23,6 @@ from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_sta
 from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
-# blissful adds kwargs to pass through RoPE/RIFLe
-# blissful end
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -48,7 +46,7 @@ def rope_params(max_seq_len, dim, theta=10000):
     return freqs
 
 
-# @amp.autocast(enabled=False)
+@torch.compiler.disable()
 def rope_apply(x, grid_sizes, freqs):
     device_type = x.device.type
     with torch.amp.autocast(device_type=device_type, enabled=False):
@@ -104,9 +102,8 @@ def calculate_freqs_i(fhw, c, freqs, f_indices=None):
     return freqs_i
 
 
-# inplace version of rope_apply
+@torch.compiler.disable()
 def rope_apply_inplace_cached(x, grid_sizes, freqs_list):
-    # with torch.amp.autocast(device_type=device_type, enabled=False):
     rope_dtype = torch.float64  # float32 does not reduce memory usage significantly
 
     n, _ = x.size(2), x.size(3) // 2
@@ -203,6 +200,8 @@ class WanSelfAttention(nn.Module):
         self.attn_mode = attn_mode
         self.split_attn = split_attn
         self.rope_func = "default" if kwargs is None else kwargs.get("rope_func", "default")
+        if self.rope_func == "comfy":
+            self.comfyrope = apply_rope_comfy
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -243,7 +242,7 @@ class WanSelfAttention(nn.Module):
         v = v.view(b, s, n, d)
 
         if self.rope_func == "comfy":
-            q, k = apply_rope_comfy(q, k, freqs)
+            q, k = self.comfyrope(q, k, freqs)
         else:
             rope_apply_inplace_cached(q, grid_sizes, freqs)
             rope_apply_inplace_cached(k, grid_sizes, freqs)
@@ -388,7 +387,6 @@ class WanAttentionBlock(nn.Module):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.model_version = model_version  # New!
-        self.rope_func = kwargs.get("rope_func", "default")
         lower_precision_attention = kwargs.get("lower_precision_attention", False)
         self.attention_dtype = torch.float16 if lower_precision_attention else torch.float32
 
@@ -646,7 +644,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.rope_func = kwargs.get("rope_func", "default")
         self.riflex_index = kwargs.get("riflex_index", 0)
         self.num_frames = kwargs.get("num_frames", 81)
-
+        self.optimized_compile = kwargs.get("optimized_compile", False)
         # embeddings
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
         self.text_embedding = nn.Sequential(nn.Linear(text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim))
@@ -729,9 +727,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         state_dict: dict[str, torch.Tensor],
         device: torch.device,
         move_to_device: bool,
-        use_scaled_mm: bool = False,
-        quant_dtype: Optional[torch.dtype] = None,
-        upcast_linear: bool = False
+        use_scaled_mm: bool = False
     ) -> int:
         """
         Optimize the model state_dict with fp8.
@@ -750,7 +746,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         )
 
         # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True, quant_dtype=quant_dtype, upcast_linear=upcast_linear)
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True)
 
         return state_dict
 
@@ -813,6 +809,60 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             return
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
+    @torch.compiler.disable()
+    def minifunc(self, F, H, W, x):
+        f_len = ((F + (self.patch_size[0] // 2)) // self.patch_size[0])
+        h_len = ((H + (self.patch_size[1] // 2)) // self.patch_size[1])
+        w_len = ((W + (self.patch_size[2] // 2)) // self.patch_size[2])
+        img_ids = torch.zeros((f_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
+        img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, f_len - 1, steps=f_len, device=x.device, dtype=x.dtype).reshape(-1, 1, 1)
+        img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
+        img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
+        return img_ids
+
+    def get_patch_embedding(self, x, f_indices, seq_len):
+
+        _, F, H, W = x[0].shape
+        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]  # x[0].shape = [1, 5120, F, H, W]
+        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])  # list of [F, H, W]
+
+        freqs_list = []
+        if self.rope_func == "default":
+            for i, fhw in enumerate(grid_sizes):
+                fhw = tuple(fhw.tolist())
+                if f_indices is not None:
+                    fhw = tuple(list(fhw) + f_indices[i])  # add f_indices to fhw for cache key
+                if fhw not in self.freqs_fhw:
+                    c = self.dim // self.num_heads // 2
+                    self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs, None if f_indices is None else f_indices[i])
+                freqs_list.append(self.freqs_fhw[fhw])
+
+        x = [u.flatten(2).transpose(1, 2) for u in x]
+        seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
+        assert seq_lens.max() <= seq_len, f"Sequence length exceeds maximum allowed length {seq_len}. Got {seq_lens.max()}"
+        x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
+
+        if self.rope_func == "comfy":
+            img_ids = self.minifunc(F, H, W, x)
+            img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=1)
+            freqs_list = self.rope_embedder(img_ids).movedim(1, 2)
+        return x, seq_lens, grid_sizes, freqs_list
+
+    def get_time_embedding(self, t, seq_len, device):
+        with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
+            if self.model_version == "2.1" or self.simple_modulation:
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float()).to(self.e_dtype)
+                e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(self.e_dtype)
+            else:  # For Wan2.2
+                if t.dim() == 1:
+                    # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
+                    t = t.unsqueeze(1).expand(-1, seq_len)
+                bt = t.size(0)
+                t = t.flatten()
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float()).to(self.e_dtype)
+                e0 = self.time_projection(e).unflatten(2, (6, self.dim)).to(self.e_dtype)
+        return e, e0
+
     def forward(self, x, t, context, seq_len, km=None, clip_fea=None, y=None, skip_block_indices=None, f_indices=None):
         r"""
         Forward pass through the diffusion model
@@ -843,11 +893,19 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         """
         if km is not None and km.early_exit_requested:
             return x  # If we don't return something useful other code will fail before we can break cleanly so just return x as is.
-        # remove assertions to work with Fun-Control T2V
-        # if self.model_type == "i2v":
-        #     assert clip_fea is not None and y is not None
-        # params
-        _, F, H, W = x[0].shape
+        if self.optimized_compile:
+            logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
+            self.optimized_compile = False
+            self.rope_embedder = torch.compile(self.rope_embedder) if self.rope_func == "comfy" else None
+            self.get_patch_embedding = torch.compile(self.get_patch_embedding)
+            self.get_time_embedding = torch.compile(self.get_time_embedding)
+            self.text_embedding = torch.compile(self.text_embedding)
+            self.head = torch.compile(self.head)
+            for block in self.blocks:
+                block._forward = torch.compile(block._forward)
+                if self.rope_func == "comfy":
+                    block.self_attn.comfyrope = torch.compile(block.self_attn.comfyrope)
+
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
@@ -856,51 +914,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
             y = None
 
-        # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]  # x[0].shape = [1, 5120, F, H, W]
-        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])  # list of [F, H, W]
-
-        freqs_list = []
-        if self.rope_func == "default":
-            for i, fhw in enumerate(grid_sizes):
-                fhw = tuple(fhw.tolist())
-                if f_indices is not None:
-                    fhw = tuple(list(fhw) + f_indices[i])  # add f_indices to fhw for cache key
-                if fhw not in self.freqs_fhw:
-                    c = self.dim // self.num_heads // 2
-                    self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs, None if f_indices is None else f_indices[i])
-                freqs_list.append(self.freqs_fhw[fhw])
-
-        x = [u.flatten(2).transpose(1, 2) for u in x]
-        seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
-        assert seq_lens.max() <= seq_len, f"Sequence length exceeds maximum allowed length {seq_len}. Got {seq_lens.max()}"
-        x = torch.cat([torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1) for u in x])
-
-        if self.rope_func == "comfy":
-            f_len = ((F + (self.patch_size[0] // 2)) // self.patch_size[0])
-            h_len = ((H + (self.patch_size[1] // 2)) // self.patch_size[1])
-            w_len = ((W + (self.patch_size[2] // 2)) // self.patch_size[2])
-            img_ids = torch.zeros((f_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
-            img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, f_len - 1, steps=f_len, device=x.device, dtype=x.dtype).reshape(-1, 1, 1)
-            img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
-            img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
-            img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=1)
-            freqs_list = self.rope_embedder(img_ids).movedim(1, 2)
-
-        # time embeddings
-        # with amp.autocast(dtype=torch.float32):
-        with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
-            if self.model_version == "2.1" or self.simple_modulation:
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float()).to(self.e_dtype)
-                e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(self.e_dtype)
-            else:  # For Wan2.2
-                if t.dim() == 1:
-                    # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
-                    t = t.unsqueeze(1).expand(-1, seq_len)
-                bt = t.size(0)
-                t = t.flatten()
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float()).to(self.e_dtype)
-                e0 = self.time_projection(e).unflatten(2, (6, self.dim)).to(self.e_dtype)
+        x, seq_lens, grid_sizes, freqs_list = self.get_patch_embedding(x, f_indices, seq_len)
+        e, e0 = self.get_time_embedding(t, seq_len, device)
 
         # context
         context_lens = None
@@ -1076,8 +1091,7 @@ def load_wan_model(
         calc_device=device,
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
-        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
-        quant_dtype=kwargs.get("quant_dtype", None)
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix
@@ -1086,7 +1100,7 @@ def load_wan_model(
             sd[key[22:]] = sd.pop(key)
 
     if fp8_scaled:
-        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True, quant_dtype=kwargs.get("quant_dtype", None), upcast_linear=kwargs.get("upcast_linear", False))
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True)
 
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device

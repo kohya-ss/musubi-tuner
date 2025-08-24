@@ -653,10 +653,9 @@ def load_dit_model(
         "rope_func": "default" if not hasattr(args, "rope_func") else args.rope_func,
         "riflex_index": 0 if not hasattr(args, "riflex_index") else args.riflex_index,
         "num_frames": 81 if not hasattr(args, "video_length") else args.video_length,
-        "quant_dtype": None if not hasattr(args, "upcast_quantization") else torch.float32 if args.upcast_quantization else None,
-        "upcast_linear": False if not hasattr(args, "upcast_linear") else args.upcast_linear,
         "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention,
-        "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation
+        "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation,
+        "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile
     }
     model = load_wan_model(
         config,
@@ -694,7 +693,7 @@ def load_dit_model(
 
             # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
             move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
+            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
 
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
@@ -863,7 +862,7 @@ def optimize_model(
     if args.fp8_scaled:
         # load state dict as-is and optimize to fp8
         state_dict = model.state_dict()
-        state_dict = model.fp8_optimization(state_dict, device, use_scaled_mm=args.fp8_fast, upcast_linear=args.upcast_linear, quant_dtype=torch.float32 if args.upcast_quantization else None)
+        state_dict = model.fp8_optimization(state_dict, device, use_scaled_mm=args.fp8_fast)
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded FP8 optimized weights: {info}")
 

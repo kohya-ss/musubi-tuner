@@ -106,6 +106,7 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
+        parser.add_argument("--optimized_compile", action="store_true", help="Enable optimized torch.compile of just the most crucial blocks. Exclusive of --compile. Works best with --rope_func comfy")
         parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
         parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")
         parser.add_argument("--i2i_path", type=str, default=None, help="path to an image for image2image inference. Use with T2V model and T2I task.")
@@ -169,14 +170,6 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         "--container", choices=["mkv", "mp4"], default="mp4",
         help="Container format to use for output, choose from 'mkv' or 'mp4'. Default is 'mp4' and note that 'prores' can only go in 'mkv'! Ignored for images."
     )
-    parser.add_argument(
-        "--upcast_linear", action="store_true", help="If supplied, upcast linear transformations to fp32."
-        "Only for fp8_scaled and not active during mm_scaled. Can potentially increase accuracy at little cost to speed."
-    )
-    parser.add_argument(
-        "--upcast_quantization", action="store_true", help="If supplied, upcast quantization steps to fp32 for better accuracy."
-        "Will improve quantization accuracy a bit at a small VRAM cost. Only for fp8_scaled"
-    )
     parser.add_argument("--fp16_accumulation", action="store_true", help="Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
     parser.add_argument(
         "--optimized", action="store_true",
@@ -204,11 +197,10 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if hasattr(args, "prompt_2"):
             args.prompt_2 = process_wildcards(args.prompt_2, args.prompt_wildcards) if args.prompt2 is not None else None
     if DIFFUSION_MODEL == "wan":
+        if args.compile and args.optimized_compile:
+            error_out(argparse.ArgumentTypeError, "Only one of --compile and --optimized compile may be used.")
         if args.perp_neg is not None and args.slg_mode == "original":
             error_out(argparse.ArgumentTypeError, "--perp_neg cannot be used with --slg_mode 'original'")
         if args.riflex_index != 0 and args.rope_func.lower() != "comfy":
             error_out(argparse.ArgumentTypeError, "RIFLEx can only be used with rope_func =='comfy'!")
-    if DIFFUSION_MODEL in ["wan", "hunyuan"]:
-        if args.upcast_linear and not args.fp8_scaled:
-            error_out(argparse.ArgumentTypeError, "--upcast_linear is only for --fp8_scaled")
     return args
