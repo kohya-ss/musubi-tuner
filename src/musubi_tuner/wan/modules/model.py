@@ -450,7 +450,7 @@ class WanAttentionBlock(nn.Module):
 
         # Self-attention
         q_in = self.norm1(x).to(self.attention_dtype, copy=False)
-        fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()  # Output will be self.attention_dtype because q_in, s1 are
+        fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()  # Output will be self.attention_dtype because q_in, s0, s1 are
         y = self.self_attn(fi1, seq_lens, grid_sizes, freqs)  # Maybe could change dtype depending on the last three
         x = x + (y.to(self.attention_dtype, copy=False) * s2).to(x_orig_dtype, copy=False)  # (Potentially) upcast calc, then match x
         del y
