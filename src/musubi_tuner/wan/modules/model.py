@@ -444,27 +444,27 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        x_orig_dtype = x.dtype
-        s0, s1, s2, s3, s4, s5 = self.get_modulation(e)
+        x_orig_dtype = x.dtype  # Don't change x dtyp
+        s0, s1, s2, s3, s4, s5 = self.get_modulation(e)  # All will be self.attention_dtype
         del e
 
         # Self-attention
         q_in = self.norm1(x).to(self.attention_dtype, copy=False)
-        fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()
-        y = self.self_attn(fi1, seq_lens, grid_sizes, freqs)
-        x = x + (y * s2).to(x_orig_dtype, copy=False)
+        fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()  # Output will be self.attention_dtype because q_in, s1 are
+        y = self.self_attn(fi1, seq_lens, grid_sizes, freqs)  # Maybe could change dtype depending on the last three
+        x = x + (y.to(self.attention_dtype, copy=False) * s2).to(x_orig_dtype, copy=False)  # (Potentially) upcast calc, then match x
         del y
 
         # Cross-attn
-        x = x + self.cross_attn(self.norm3(x).to(self.attention_dtype, copy=False), context, context_lens)
+        x = x + self.cross_attn(self.norm3(x).to(self.attention_dtype, copy=False), context, context_lens).to(x_orig_dtype, copy=False)
         del context
 
         # FFN
         ff_in = self.norm2(x).to(self.attention_dtype, copy=False)
-        y = self.ffn((ff_in * (1 + s4) + s3).contiguous().to(x_orig_dtype, copy=False))
-        x = x + (y * s5).to(x_orig_dtype, copy=False)
+        y = self.ffn((ff_in * (1 + s4) + s3).contiguous())  # Should output self.attention_dtype because ff_in, s3, s4 will be as well.
+        x = x + (y.to(self.attention_dtype, copy=False) * s5).to(x_orig_dtype, copy=False)  # (Potentially) upcast calc, then match x, upcast probably redundant
         del y
-        return x.to(x_orig_dtype, copy=False)
+        return x
 
     def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
         if self.training and self.gradient_checkpointing:
