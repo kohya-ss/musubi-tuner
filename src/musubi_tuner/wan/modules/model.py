@@ -867,8 +867,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.optimized_compile = False  # Otherwise it would be called every step
         torch._dynamo.config.cache_size_limit = 64
         backend, mode, dynamic, fullgraph = self.compile_args
-        dynamic = None if dynamic is None else True if dynamic.lower() == "true" else False
-        fullgraph = True if fullgraph.lower() == "true" else False
+        dynamic = None if dynamic is None else dynamic.lower() in "true"
+        fullgraph = fullgraph.lower() in "true"
         logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
         logger.info(f"Compile parameters: Backend: {backend}; Mode: {mode}; Dynamic: {dynamic if dynamic is not None else 'Auto'}; Fullgraph: {fullgraph}")
         self.rope_embedder = torch.compile(self.rope_embedder, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph) if self.rope_func == "comfy" else None

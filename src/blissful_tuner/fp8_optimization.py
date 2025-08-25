@@ -324,7 +324,6 @@ def apply_fp8_monkey_patch(
         patched_module_paths.add(module_path)
 
     patched_count = 0
-    q_dtype = None
     # Apply monkey patch to each layer with FP8 weights
     for name, module in model.named_modules():
         # Check if this module has a corresponding scale_weight
@@ -348,7 +347,6 @@ def apply_fp8_monkey_patch(
             module.forward = new_forward.__get__(module, type(module))
 
             patched_count += 1
-    logger.info(f"Quantization done in {q_dtype}")
     logger.info(f"Number of monkey-patched Linear layers: {patched_count}")
     return model
 
