@@ -10,7 +10,7 @@ Blyss Sarania による Musubi Tuner の Blissful な拡張機能
 
 Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコードを移植したHunyuanVideoWrapperとWanVideoWrapperを開発してくださったkijaiさん、そしてオープンソース生成AIコミュニティの開発者の皆様に心より感謝申し上げます。多くの変更は実験的なものであるため、修正前のMusubiと同じように動作しない部分もあることをご了承ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題は、MusubiのメインGithubリポジトリではなく、このリポジトリのIssuesセクションに投稿してください。
 すべてのモデル/モード向けの拡張機能:
-- 美しくリッチなログ出力、豊富なargparse、そして豊富なトレースバック
+- 美しく豊富なログ、豊富な引数解析、豊富なトレースバック
 すべてのモデル向けの拡張機能：
 - latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv ）
 - 高速で高品質な生成のための最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）
@@ -34,6 +34,7 @@ Hunyuan 専用の拡張機能:
 - https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyanに基づいてテキストエンコーダーを再スケール（`--te_multiplier llm clip`、例えば`--te_multiplier 0.9 1.2`のように、LLMをわずかに重み付け下げ、CLIPをわずかに重み付け上げます）
 
 WAN 専用拡張機能（ワンショットモードとインタラクティブモードの両方をサポート）：
+- 正規化アテンションガイダンス (NAG) (https://arxiv.org/pdf/2505.21179) (クロスアテンションレイヤー内でネガティブガイダンスを提供します。通常の CFG だけでなく、蒸留モデルでも機能します。`--nag_scale 3.0` で有効にして、ネガティブプロンプトを提供してください!)
 - 高品質かつ低ステップの蒸留サンプリング (https://huggingface.co/lightx2v/Wan2.1-T2V-14B-StepDistill-CfgDistill のような蒸留 Wan モデル/LoRA で `--sample_solver lcm` または `--sample_solver dpm++sde` を使用します。また、便利な LoRA も作成しました: https://huggingface.co/Blyss/BlissfulModels/tree/main/wan_lcm )
 - V2V 推論 (`--video_path /path/to/input/video --denoise_strength amount`、amount は 0.0 - 1.0 の浮動小数点数で、ソース ビデオに追加されるノイズの強さを制御します。`--noise_mode traditional` の場合、他の実装と同様に、タイム ステップ スケジュールの最後の (amount * 100) パーセントが実行されます。`--noise_mode direct` の場合、タイム ステップ スケジュール内でその値に最も近い場所から開始して、追加されるノイズの量を可能な限り直接制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。`--video_length` が入力より長い場合、最初のフレームまたは最後のフレームが繰り返され、長さが埋められます。 `--v2v_pad_mode` に依存します。T2V または I2V の `--task` モードとモデルを使用できます（個人的には i2v モードの方が品質が良いと思います）。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去と同じ値にする必要があります。例えば、T2V の場合はデフォルトで 50、I2V の場合は 40 です。これは、完全なスケジュールから変更する必要があるためです。実際のステップ数は `--noise_mode` に依存します。
 - I2I推論 (`--i2i_path /path/to/image` - T2IモードでT2Vモデルと共に使用し、`--denoise_strength`で強度を指定します。潜在ノイズの増強のための`--i2_extra_noise`もサポートします)
