@@ -106,9 +106,9 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
-        parser.add_argument("--nag_scale", type=float, default=None, help="Enable Normalized Attention Guidance (NAG) and set scale")
-        parser.add_argument("--nag_tau", type=float, default=3.5)
-        parser.add_argument("--nag_alpha", type=float, default=0.5)
+        parser.add_argument("--nag_scale", type=float, default=None, help="Enable Normalized Attention Guidance (NAG) and set scale. The scale for attention feature extrapolation. Higher values result in stronger negative guidance.")
+        parser.add_argument("--nag_tau", type=float, default=3.5, help="The normalisation threshold. Higher values result in stronger negative guidance.")
+        parser.add_argument("--nag_alpha", type=float, default=0.5, help="0 to 1, Blending factor between original and extrapolated attention. Higher values result in stronger negative guidance.")
         parser.add_argument("--optimized_compile", action="store_true", help="Enable optimized torch.compile of just the most crucial blocks. Exclusive of --compile. Works best with --rope_func comfy")
         parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
         parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")
@@ -200,6 +200,8 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if hasattr(args, "prompt_2"):
             args.prompt_2 = process_wildcards(args.prompt_2, args.prompt_wildcards) if args.prompt2 is not None else None
     if DIFFUSION_MODEL == "wan":
+        if args.nag_scale and args.nag_alpha > 1:
+            logger.warning(f"NAG alpha requested is {args.nag_alpha} which is greater than 1. Results will be unpredictablee!")
         if args.compile and args.optimized_compile:
             error_out(argparse.ArgumentTypeError, "Only one of --compile and --optimized compile may be used.")
         if args.perp_neg is not None and args.slg_mode == "original":
