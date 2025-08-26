@@ -106,6 +106,9 @@ def blissful_prefunc(args: argparse.Namespace):
 def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install_rich_tracebacks()
     if DIFFUSION_MODEL == "wan":
+        parser.add_argument("--nag_scale", type=float, default=None, help="Enable Normalized Attention Guidance (NAG) and set scale")
+        parser.add_argument("--nag_tau", type=float, default=3.5)
+        parser.add_argument("--nag_alpha", type=float, default=0.5)
         parser.add_argument("--optimized_compile", action="store_true", help="Enable optimized torch.compile of just the most crucial blocks. Exclusive of --compile. Works best with --rope_func comfy")
         parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
         parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")
@@ -148,7 +151,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         parser.add_argument("--cfgzerostar_multiplier", type=float, default=0, help="Multiplier used for cfgzerostar_init. Default is 0 which zeroes the step. 1 would be like not using zero init.")
         parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps. 2 is good for Wan T2V, 1 for I2V")
         parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps. If --preview_vae is not specified it will use latent2rgb")
-        parser.add_argument("--cfg_schedule", type=str, help=CFG_SCHEDULE_HELP)
+        parser.add_argument("--cfg_schedule", type=str, default=None, help=CFG_SCHEDULE_HELP)
         parser.add_argument(
             "--perp_neg", type=float, default=None,
             help="Enable and set scale for perpendicular negative guidance. Start with like 1.5 - 2.0. This is a stronger, more precise form of CFG."

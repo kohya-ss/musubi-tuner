@@ -656,7 +656,10 @@ def load_dit_model(
         "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention,
         "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation,
         "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile,
-        "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args
+        "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args,
+        "nag_scale": None if not hasattr(args, "nag_scale") else args.nag_scale,
+        "nag_tau": None if not hasattr(args, "nag_tau") else args.nag_tau,
+        "nag_alpha": None if not hasattr(args, "nag_alpha") else args.nag_alpha
     }
     model = load_wan_model(
         config,
@@ -1650,6 +1653,10 @@ def run_sampling(
     logger.info(
         f"Starting sampling (high noise: {prev_high_noise}). Models: {len(models)}, timestep boundary: {args.timestep_boundary}, flow shift: {args.flow_shift}, guidance scale: {guidance_scale}"
     )
+    nag_context = None
+    if args.nag_scale is not None:
+        logger.info(f"NAG is enabled with scale of {args.nag_scale}, tau of {args.nag_tau} and alpha of {args.nag_alpha}")
+        nag_context = arg_null["context"]
 
     for i, t in enumerate(tqdm(timesteps)):
         is_high_noise = (t / 1000.0) >= args.timestep_boundary if args.timestep_boundary is not None else False
@@ -1698,8 +1705,9 @@ def run_sampling(
         # latent is on CPU if use_cpu_offload is True
         timestep = torch.stack([t]).to(device)
         latent_model_input = [latent.to(device)]
+
         with accelerator.autocast(), torch.no_grad():
-            noise_pred_cond = model(latent_model_input, t=timestep, km=km, **arg_c)[0].to(latent_storage_device)  # Cond is always the same
+            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c, km=km, nag_context=nag_context)[0].to(latent_storage_device)  # Cond is always the same
             apply_cfg = apply_cfg_array[i]  # Will we do any CFG or just proceed with cond?
             if apply_cfg:  # We will do CFG this step
                 if args.cfg_schedule is not None:  # Is it scheduled CFG? If so and it's off we won't come here but if it's on...
@@ -1710,10 +1718,10 @@ def run_sampling(
                 skip_block_indices = None  # e.g. normal uncond
                 if apply_slg and not do_slg_pass:  # args.slg_mode != "original" so args.slg_mode == "uncond"
                     skip_block_indices = args.slg_layers  # uncond with layer skips
-                noise_pred_uncond = model(latent_model_input, t=timestep, km=km, skip_block_indices=skip_block_indices, **arg_null)[0].to(latent_storage_device)  # uncond
+                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null, skip_block_indices=skip_block_indices, km=km)[0].to(latent_storage_device)  # uncond
 
                 if args.perp_neg is not None:  # Are we using perpendicular negative? It needs a third model pass (nocond).
-                    noise_pred_nocond = model(latent_model_input, t=timestep, km=km, **arg_nocond)[0].to(latent_storage_device)  # Then calculate nocond
+                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond, km=km)[0].to(latent_storage_device)  # Then calculate nocond
                     noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)  # And update the noise_pred
                 elif args.cfgzerostar_scaling:  # No perp_neg, so CFGZero* scaling instead? (mutually exclusive)
                     noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)  # does CFG with scaling inside, returns noise_pred after CFG formula
@@ -1721,7 +1729,7 @@ def run_sampling(
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 if do_slg_pass:  # Do SLG original? This mode uses 3 model passes, cond, uncond, and uncond with layer skip and it's calc comes after normal CFG
-                    skip_layer_out = model(latent_model_input, t=timestep, km=km, skip_block_indices=args.slg_layers, **arg_null)[0].to(latent_storage_device)
+                    skip_layer_out = model(latent_model_input, t=timestep, **arg_null, km=km, skip_block_indices=args.slg_layers)[0].to(latent_storage_device)
                     noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
 
             else:  # No CFG shenanigans at all

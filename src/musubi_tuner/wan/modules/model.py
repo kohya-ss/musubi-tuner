@@ -259,13 +259,11 @@ class WanSelfAttention(nn.Module):
 
 
 class WanCrossAttention(WanSelfAttention):
-
-    def forward(self, x, context, context_lens):
+    def forward(self, x, context):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
             context(Tensor): Shape [B, L2, C]
-            context_lens(Tensor): Shape [B]
         """
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
@@ -287,7 +285,7 @@ class WanCrossAttention(WanSelfAttention):
         # compute attention
         qkv = [q, k, v]
         del q, k, v
-        x = flash_attention(qkv, k_lens=context_lens, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        x = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
 
         # output
         x = x.flatten(2)
@@ -305,12 +303,11 @@ class WanI2VCrossAttention(WanSelfAttention):
         # self.alpha = nn.Parameter(torch.zeros((1, )))
         self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, context, context_lens):
+    def forward(self, x, context):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
             context(Tensor): Shape [B, L2, C]
-            context_lens(Tensor): Shape [B]
         """
         context_img = context[:, :257]
         context = context[:, 257:]
@@ -329,7 +326,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         # compute attention
         qkv = [q, k, v]
         del k, v
-        x = flash_attention(qkv, k_lens=context_lens, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        x = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
 
         # compute query, key, value
         k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
@@ -354,15 +351,162 @@ class WanI2VCrossAttention(WanSelfAttention):
         return x
 
 
-# For v2.1
-WAN_CROSSATTENTION_CLASSES = {
-    "t2v_cross_attn": WanCrossAttention,
-    "i2v_cross_attn": WanI2VCrossAttention,
-}
+# Blissful NAG Stuff, can't move elsewhere without copying pretty much the whole model ========================================
+def nag(z_positive, z_negative, nag_scale, nag_tau, nag_alpha):
+    z_tilde = z_positive * nag_scale - z_negative * (nag_scale - 1)  # Revised implementation
+    # z_tilde = z_positive + self.nag_scale * (z_positive - z_negative)  # Paper implementation
+    norm_positive = torch.norm(z_positive, p=1, dim=-1, keepdim=True).expand(*z_positive.shape)
+    norm_tilde = torch.norm(z_tilde, p=1, dim=-1, keepdim=True).expand(*z_tilde.shape)
+
+    ratio = norm_tilde / norm_positive
+    z_hat = z_tilde * torch.minimum(ratio, ratio.new_ones(1) * nag_tau) / ratio
+    z_guidance = z_hat * nag_alpha + z_positive * (1 - nag_alpha)
+    return z_guidance
+
+
+class NAGCrossAttention(WanCrossAttention):
+    def __init__(
+            self,
+            *args,
+            nag_scale: float = 1.0,
+            nag_tau: float = 3.5,
+            nag_alpha: float = 0.5,
+            **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.nag_scale = nag_scale
+        self.nag_tau = nag_tau
+        self.nag_alpha = nag_alpha
+
+    def nag_forward(self, x, context, nag_context):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L1, C]
+            context(Tensor): Shape [B, L2, C]
+        """
+        b, n, d = x.size(0), self.num_heads, self.head_dim
+        q = self.q(x)
+        del x
+
+        k = self.k(context)
+        v = self.v(context)
+        neg_k = self.k(nag_context)
+        neg_v = self.v(nag_context)
+
+        del context, nag_context
+        q = self.norm_q(q)
+        k = self.norm_k(k)
+        neg_k = self.norm_k(neg_k)
+
+        q = q.view(b, -1, n, d)
+        k = k.view(b, -1, n, d)
+        neg_k = neg_k.view(b, -1, n, d)
+        v = v.view(b, -1, n, d)
+        neg_v = neg_v.view(b, -1, n, d)
+
+        # compute attention
+        qkv = [q, k, v]
+        del k, v
+        neg_qkv = [q, neg_k, neg_v]
+        del q, neg_k, neg_v
+        z_positive = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        z_negative = flash_attention(neg_qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        z_guidance = nag(z_positive, z_negative, self.nag_scale, self.nag_tau, self.nag_alpha)
+        # output
+        x = z_guidance.flatten(2)
+        x = self.o(x)
+        return x
+
+    def forward(self, x, context, nag_context=None):
+        if nag_context is None:
+            return super().forward(x, context)
+        return self.nag_forward(x, context, nag_context)
+
+
+class NAGI2VCrossAttention(WanI2VCrossAttention):
+    def __init__(
+        self,
+        *args,
+        nag_scale: float = 1,
+        nag_tau: float = 3.5,
+        nag_alpha: float = 0.5,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.nag_scale = nag_scale
+        self.nag_tau = nag_tau
+        self.nag_alpha = nag_alpha
+
+    def nag_forward(self, x, context, nag_context):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L1, C]
+            context(Tensor): Shape [B, L2, C]
+        """
+        context_img = context[:, :257]
+        context = context[:, 257:]
+        b, n, d = x.size(0), self.num_heads, self.head_dim
+
+        # compute query
+        q = self.q(x)
+        del x
+        q = self.norm_q(q)
+        q = q.view(b, -1, n, d)
+
+        # compute key, value for pos and neg
+        k = self.k(context)
+        neg_k = self.k(nag_context)
+        k = self.norm_k(k).view(b, -1, n, d)
+        neg_k = self.norm_k(neg_k).view(b, -1, n, d)
+        v = self.v(context).view(b, -1, n, d)
+        neg_v = self.v(nag_context).view(b, -1, n, d)
+        del context, nag_context
+
+        # compute positive attention
+        qkv = [q, k, v]
+        del k, v
+        z_positive = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+
+        # compute negative attention
+        neg_qkv = [q, neg_k, neg_v]
+        del neg_k, neg_v
+        z_negative = flash_attention(neg_qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+
+        # Do NAG
+        x = nag(z_positive, z_negative, self.nag_scale, self.nag_tau, self.nag_alpha)
+        del z_positive, z_negative
+
+        # compute k_img, v_img
+        k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
+        v_img = self.v_img(context_img).view(b, -1, n, d)
+        del context_img
+
+        # compute image attention
+        qkv = [q, k_img, v_img]
+        del q, k_img, v_img
+        img_x = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+
+        # output
+        x = x.flatten(2)
+        img_x = img_x.flatten(2)
+        if self.training:
+            x = x + img_x  # avoid inplace
+        else:
+            x += img_x
+        del img_x
+
+        x = self.o(x)
+        return x
+
+    def forward(self, x, context, nag_context=None):
+        if nag_context is None:
+            return super().forward(x, context)
+        return self.nag_forward(x, context, nag_context)
+
+# End NAG stuff =============================
 
 
 class WanAttentionBlock(nn.Module):
-
     def __init__(
         self,
         cross_attn_type,
@@ -389,17 +533,25 @@ class WanAttentionBlock(nn.Module):
         self.model_version = model_version  # New!
         lower_precision_attention = kwargs.get("lower_precision_attention", False)
         self.attention_dtype = torch.float16 if lower_precision_attention else torch.float32
-
-        # layers
-        if model_version == "2.1":
-            cross_attn_class = WAN_CROSSATTENTION_CLASSES[cross_attn_type]
-        elif model_version == "2.2":
-            cross_attn_class = WanCrossAttention  # For Wan2.2, we use the same cross-attention class
+        nag_scale = kwargs.get("nag_scale", None)
+        # Todo: Fix I2V too
+        if nag_scale is not None:
+            nag_tau = kwargs.get("nag_tau", 3.5)
+            nag_alpha = kwargs.get("nah_alpha", 0.5)
+            if model_version == "2.2" or cross_attn_type == "t2v_cross_attn":
+                self.cross_attn = NAGCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn, nag_scale=nag_scale, nag_tau=nag_tau, nag_alpha=nag_alpha)
+            else:  # Wan 2.1 I2V cross attention
+                self.cross_attn = NAGI2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn, nag_scale=nag_scale, nag_tau=nag_tau, nag_alpha=nag_alpha)
+        else:
+            if model_version == "2.2" or cross_attn_type == "t2v_cross_attn":
+                self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
+            else:  # Wan 2.1 I2V cross attention
+                self.cross_attn = WanI2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
 
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, attn_mode, split_attn, **kwargs)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = cross_attn_class(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
+        # self.cross_attn = cross_attn_class(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim))
 
@@ -435,7 +587,7 @@ class WanAttentionBlock(nn.Module):
         s5 = e5 + m5
         return s0, s1, s2, s3, s4, s5
 
-    def _forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+    def _forward(self, x, e, seq_lens, grid_sizes, freqs, context, nag_context=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
@@ -456,8 +608,10 @@ class WanAttentionBlock(nn.Module):
         del y
 
         # Cross-attn
-        x = x + self.cross_attn(self.norm3(x).to(self.attention_dtype, copy=False), context, context_lens).to(x_orig_dtype, copy=False)
-        del context
+        # nag_context = None could be no NAG at all, or only for this invocation so wrap it out here incase we call the native cross_attn class
+        cross_attn_kwargs = {"context": context} if nag_context is None else {"context": context, "nag_context": nag_context}
+        x = x + self.cross_attn(self.norm3(x).to(self.attention_dtype, copy=False), **cross_attn_kwargs).to(x_orig_dtype, copy=False)
+        del context, nag_context
 
         # FFN
         ff_in = self.norm2(x).to(self.attention_dtype, copy=False)
@@ -466,10 +620,10 @@ class WanAttentionBlock(nn.Module):
         del y
         return x
 
-    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, nag_context=None):
         if self.training and self.gradient_checkpointing:
-            return checkpoint(self._forward, x, e, seq_lens, grid_sizes, freqs, context, context_lens, use_reentrant=False)
-        return self._forward(x, e, seq_lens, grid_sizes, freqs, context, context_lens)
+            return checkpoint(self._forward, x, e, seq_lens, grid_sizes, freqs, context, use_reentrant=False)
+        return self._forward(x, e, seq_lens, grid_sizes, freqs, context, nag_context)
 
 
 class Head(nn.Module):
@@ -881,7 +1035,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             if self.rope_func == "comfy":
                 block.self_attn.comfyrope = torch.compile(block.self_attn.comfyrope, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
 
-    def forward(self, x, t, context, seq_len, km=None, clip_fea=None, y=None, skip_block_indices=None, f_indices=None):
+    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None, km=None, nag_context=None):
         r"""
         Forward pass through the diffusion model
 
@@ -914,7 +1068,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         if self.optimized_compile:
             self.blissful_optimize()
-
+        apply_nag = nag_context is not None
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
@@ -927,10 +1081,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         e, e0 = self.get_time_embedding(t, seq_len, device)
 
         # context
-        context_lens = None
         if type(context) is list:
             context = torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context])
         context = self.text_embedding(context)
+        if apply_nag:
+            if type(nag_context) is list:
+                nag_context = torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in nag_context])
+            nag_context = self.text_embedding(nag_context)
 
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
@@ -939,7 +1096,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             context_clip = None
 
         # arguments
-        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=freqs_list, context=context, context_lens=context_lens)
+        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=freqs_list, context=context, nag_context=nag_context)
 
         if self.blocks_to_swap:
             clean_memory_on_device(device)
