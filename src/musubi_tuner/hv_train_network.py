@@ -1607,6 +1607,122 @@ class NetworkTrainer:
 
     # endregion model specific
 
+    # region caption analysis utilities
+    
+    def _extract_captions_from_dataset(self, datasource) -> List[str]:
+        """Extract captions from dataset datasource
+        
+        Args:
+            datasource: Dataset datasource object
+            
+        Returns:
+            List of caption strings
+        """
+        captions = []
+        
+        try:
+            # Check if it's a JSONL datasource with caption data
+            if hasattr(datasource, 'data') and hasattr(datasource, 'is_indexable') and datasource.is_indexable():
+                # For JSONL datasources, iterate through data
+                for item in datasource.data:
+                    if isinstance(item, dict) and 'caption' in item:
+                        caption = item['caption']
+                        if caption and isinstance(caption, str):
+                            captions.append(caption.strip())
+            
+            # For other datasource types, try to get captions through get_caption method
+            elif hasattr(datasource, 'get_caption') and hasattr(datasource, '__len__'):
+                try:
+                    for i in range(min(len(datasource), 1000)):  # Limit to first 1000 for performance
+                        try:
+                            _, caption = datasource.get_caption(i)
+                            if caption and isinstance(caption, str):
+                                captions.append(caption.strip())
+                        except (IndexError, TypeError, AttributeError):
+                            continue
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            logger.warning(f"Could not extract captions from datasource: {e}")
+        
+        return captions
+    
+    def _analyze_training_captions(self, captions: List[str], min_frequency: int = 2, min_word_length: int = 3) -> Dict[str, str]:
+        """Analyze training captions for trigger words and patterns
+        
+        Args:
+            captions: List of caption strings
+            min_frequency: Minimum frequency for trigger detection
+            min_word_length: Minimum word length for single words
+            
+        Returns:
+            Dict of metadata fields with analysis results
+        """
+        if not captions:
+            return {}
+        
+        # Prepare text: lowercase, split into words
+        all_words = []
+        all_phrases_2 = []
+        all_phrases_3 = []
+        
+        for caption in captions:
+            # Clean and tokenize
+            words = re.findall(r'\b\w+\b', caption.lower())
+            all_words.extend(words)
+            
+            # Extract 2-word phrases
+            for i in range(len(words) - 1):
+                phrase = f"{words[i]} {words[i+1]}"
+                all_phrases_2.append(phrase)
+            
+            # Extract 3-word phrases  
+            for i in range(len(words) - 2):
+                phrase = f"{words[i]} {words[i+1]} {words[i+2]}"
+                all_phrases_3.append(phrase)
+        
+        # Count frequencies using Counter
+        from collections import Counter
+        
+        word_counts = Counter(word for word in all_words if len(word) >= min_word_length)
+        phrase2_counts = Counter(all_phrases_2)
+        phrase3_counts = Counter(all_phrases_3)
+        
+        # Filter by minimum frequency and get top results
+        trigger_words = {word: count for word, count in word_counts.items() if count >= min_frequency}
+        trigger_phrases_2 = {phrase: count for phrase, count in phrase2_counts.items() if count >= min_frequency}
+        trigger_phrases_3 = {phrase: count for phrase, count in phrase3_counts.items() if count >= min_frequency}
+        
+        # Build result metadata
+        result = {
+            "ss_caption_total": str(len(captions)),
+            "ss_caption_unique": str(len(set(captions))),
+            "ss_total_words": str(len(all_words)),
+        }
+        
+        if trigger_words:
+            # Sort by frequency, get top 15 for training metadata
+            top_words = dict(sorted(trigger_words.items(), key=lambda x: x[1], reverse=True)[:15])
+            result["ss_trigger_words"] = json.dumps(top_words)
+        
+        if trigger_phrases_2:
+            top_phrases_2 = dict(sorted(trigger_phrases_2.items(), key=lambda x: x[1], reverse=True)[:15])
+            result["ss_trigger_phrases_2word"] = json.dumps(top_phrases_2)
+        
+        if trigger_phrases_3:
+            top_phrases_3 = dict(sorted(trigger_phrases_3.items(), key=lambda x: x[1], reverse=True)[:15])
+            result["ss_trigger_phrases_3word"] = json.dumps(top_phrases_3)
+        
+        # Add most common words as a summary
+        if word_counts:
+            most_common = dict(word_counts.most_common(10))
+            result["ss_most_common_words"] = json.dumps(most_common)
+        
+        return result
+
+    # endregion caption analysis utilities
+
     def train(self, args):
         # check required arguments
         if args.dataset_config is None:
@@ -1973,12 +2089,28 @@ class NetworkTrainer:
         }
 
         datasets_metadata = []
+        all_captions = []  # Collect all captions for trigger word analysis
+        
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
         for dataset in train_dataset_group.datasets:
             dataset_metadata = dataset.get_metadata()
+            
+            # Extract captions from JSONL datasets for trigger word analysis
+            if hasattr(dataset, 'datasource'):
+                dataset_captions = self._extract_captions_from_dataset(dataset.datasource)
+                all_captions.extend(dataset_captions)
+                if dataset_captions:
+                    dataset_metadata["caption_count"] = len(dataset_captions)
+                    dataset_metadata["sample_captions"] = dataset_captions[:3]  # Save first 3 as examples
+            
             datasets_metadata.append(dataset_metadata)
 
         metadata["ss_datasets"] = json.dumps(datasets_metadata)
+        
+        # Analyze captions for trigger words and patterns
+        if all_captions:
+            caption_analysis = self._analyze_training_captions(all_captions)
+            metadata.update(caption_analysis)
 
         # add extra args
         if args.network_args:
