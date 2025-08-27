@@ -4,7 +4,7 @@ This file provides guidance to developers when working with code in this reposit
 
 ## Project Overview
 
-Musubi Tuner is a Python-based training framework for LoRA (Low-Rank Adaptation) models with multiple video generation architectures including HunyuanVideo, Wan2.1, FramePack, and FLUX.1 Kontext. The project focuses on memory-efficient training and inference for video generation models.
+Musubi Tuner is a Python-based training framework for LoRA (Low-Rank Adaptation) models with multiple video generation architectures including HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext and Qwen-Image. The project focuses on memory-efficient training and inference for video generation models.
 
 ## Installation and Environment
 
@@ -41,6 +41,9 @@ python src/musubi_tuner/fpack_train_network.py [similar args]
 
 # FLUX.1 Kontext training
 python src/musubi_tuner/flux_kontext_train_network.py [similar args]
+
+# Qwen-Image training
+python src/musubi_tuner/qwen_image_train_network.py [similar args]
 ```
 
 ### Inference Commands
@@ -53,6 +56,12 @@ python src/musubi_tuner/wan_generate_video.py [similar args]
 
 # FramePack inference
 python src/musubi_tuner/fpack_generate_video.py [similar args]
+
+# FLUX.1 Kontext inference
+python src/musubi_tuner/flux_kontext_generate_image.py --control_image_path path/to/control_image.png [similar args]
+
+# Qwen-Image inference
+python src/musubi_tuner/qwen_image_generate_image.py [similar args to FLUX.1 Kontext]
 ```
 
 ### Utility Commands
@@ -80,9 +89,10 @@ No formal test suite is present in this repository. The project relies on manual
 
 ### Architecture-Specific Modules
 - `hunyuan_model/`: HunyuanVideo model implementation and utilities
-- `wan/`: Wan2.1 model configurations and modules
+- `wan/`: Wan2.1/2.2 model configurations and modules
 - `frame_pack/`: FramePack model implementation and utilities
 - `flux/`: FLUX model utilities
+- `qwen_image/`: Qwen-Image model utilities
 
 ### Key Components
 - **Dataset Configuration**: Uses TOML files for complex dataset setups supporting images, videos, control images, and metadata JSONL files

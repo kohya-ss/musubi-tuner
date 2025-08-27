@@ -268,8 +268,8 @@ class QwenEmbedRope(nn.Module):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
-        pos_index = torch.arange(1024)
-        neg_index = torch.arange(1024).flip(0) * -1 - 1
+        pos_index = torch.arange(4096)
+        neg_index = torch.arange(4096).flip(0) * -1 - 1
         self.pos_freqs = torch.cat(
             [
                 self.rope_params(pos_index, self.axes_dim[0], self.theta),
@@ -288,7 +288,7 @@ class QwenEmbedRope(nn.Module):
         )
         self.rope_cache = {}
 
-        # 是否使用 scale rope
+        # DO NOT USE REGISTER BUFFER HERE, IT WILL CAUSE COMPLEX NUMBERS TO LOSE THEIR IMAGINARY PART
         self.scale_rope = scale_rope
 
     def rope_params(self, index, dim, theta=10000):
@@ -310,39 +310,52 @@ class QwenEmbedRope(nn.Module):
             self.pos_freqs = self.pos_freqs.to(device)
             self.neg_freqs = self.neg_freqs.to(device)
 
-        if isinstance(video_fhw, list):
+        if isinstance(video_fhw, list):  # if list of lists
             video_fhw = video_fhw[0]
-        frame, height, width = video_fhw
-        rope_key = f"{frame}_{height}_{width}"
+        if not isinstance(video_fhw, list):  # if video_fhw is tuple
+            video_fhw = [video_fhw]
 
-        if rope_key not in self.rope_cache:
-            seq_lens = frame * height * width
-            freqs_pos = self.pos_freqs.split([x // 2 for x in self.axes_dim], dim=1)
-            freqs_neg = self.neg_freqs.split([x // 2 for x in self.axes_dim], dim=1)
-            freqs_frame = freqs_pos[0][:frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
+        vid_freqs = []
+        max_vid_index = 0
+        for idx, fhw in enumerate(video_fhw):
+            frame, height, width = fhw
+            rope_key = f"{idx}_{height}_{width}"
+
+            if rope_key not in self.rope_cache:
+                self.rope_cache[rope_key] = self._compute_video_freqs(frame, height, width, idx)
+            video_freq = self.rope_cache[rope_key]
+            video_freq = video_freq.to(device)
+            vid_freqs.append(video_freq)
+
             if self.scale_rope:
-                freqs_height = torch.cat([freqs_neg[1][-(height - height // 2) :], freqs_pos[1][: height // 2]], dim=0)
-                freqs_height = freqs_height.view(1, height, 1, -1).expand(frame, height, width, -1)
-                freqs_width = torch.cat([freqs_neg[2][-(width - width // 2) :], freqs_pos[2][: width // 2]], dim=0)
-                freqs_width = freqs_width.view(1, 1, width, -1).expand(frame, height, width, -1)
-
+                max_vid_index = max(height // 2, width // 2, max_vid_index)
             else:
-                freqs_height = freqs_pos[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
-                freqs_width = freqs_pos[2][:width].view(1, 1, width, -1).expand(frame, height, width, -1)
-
-            freqs = torch.cat([freqs_frame, freqs_height, freqs_width], dim=-1).reshape(seq_lens, -1)
-            self.rope_cache[rope_key] = freqs.clone().contiguous()
-        vid_freqs = self.rope_cache[rope_key]
-
-        if self.scale_rope:
-            max_vid_index = max(height // 2, width // 2)
-        else:
-            max_vid_index = max(height, width)
+                max_vid_index = max(height, width, max_vid_index)
 
         max_len = max(txt_seq_lens)
         txt_freqs = self.pos_freqs[max_vid_index : max_vid_index + max_len, ...]
+        vid_freqs = torch.cat(vid_freqs, dim=0)
 
         return vid_freqs, txt_freqs
+
+    # @functools.lru_cache(maxsize=None)
+    def _compute_video_freqs(self, frame, height, width, idx=0):
+        seq_lens = frame * height * width
+        freqs_pos = self.pos_freqs.split([x // 2 for x in self.axes_dim], dim=1)
+        freqs_neg = self.neg_freqs.split([x // 2 for x in self.axes_dim], dim=1)
+
+        freqs_frame = freqs_pos[0][idx : idx + frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
+        if self.scale_rope:
+            freqs_height = torch.cat([freqs_neg[1][-(height - height // 2) :], freqs_pos[1][: height // 2]], dim=0)
+            freqs_height = freqs_height.view(1, height, 1, -1).expand(frame, height, width, -1)
+            freqs_width = torch.cat([freqs_neg[2][-(width - width // 2) :], freqs_pos[2][: width // 2]], dim=0)
+            freqs_width = freqs_width.view(1, 1, width, -1).expand(frame, height, width, -1)
+        else:
+            freqs_height = freqs_pos[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
+            freqs_width = freqs_pos[2][:width].view(1, 1, width, -1).expand(frame, height, width, -1)
+
+        freqs = torch.cat([freqs_frame, freqs_height, freqs_width], dim=-1).reshape(seq_lens, -1)
+        return freqs.clone().contiguous()
 
 
 class RMSNorm(nn.Module):
@@ -665,17 +678,17 @@ class Attention(nn.Module):
         if encoder_hidden_states is None:
             raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
 
-        seq_txt = encoder_hidden_states.shape[1]
-
         # Compute QKV for image stream (sample projections)
         img_query = self.to_q(hidden_states)
         img_key = self.to_k(hidden_states)
         img_value = self.to_v(hidden_states)
+        del hidden_states
 
         # Compute QKV for text stream (context projections)
         txt_query = self.add_q_proj(encoder_hidden_states)
         txt_key = self.add_k_proj(encoder_hidden_states)
         txt_value = self.add_v_proj(encoder_hidden_states)
+        del encoder_hidden_states
 
         # Reshape for multi-head attention
         img_query = img_query.unflatten(-1, (self.heads, -1))
@@ -699,28 +712,34 @@ class Attention(nn.Module):
             img_key = apply_rotary_emb_qwen(img_key, img_freqs, use_real=False)
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+        seq_img = img_query.shape[1]
 
         # Concatenate for joint attention
         # Order: [image, txt]
         joint_query = torch.cat([img_query, txt_query], dim=1)
+        del img_query, txt_query
         joint_key = torch.cat([img_key, txt_key], dim=1)
+        del img_key, txt_key
         joint_value = torch.cat([img_value, txt_value], dim=1)
+        del img_value, txt_value
 
         # Compute joint attention
         # joint_query: [B, S, H, D], joint_key: [B, S, H, D], joint_value: [B, S, H, D]
-        seq_img = img_query.shape[1]
         total_len = seq_img + txt_seq_lens
         qkv = [joint_query, joint_key, joint_value]
+        org_dtype = joint_query.dtype
+        del joint_query, joint_key, joint_value
         joint_hidden_states = hunyuan_attention(
             qkv, mode=self.attn_mode, attn_mask=attention_mask, total_len=total_len if self.split_attn else None
         )
         # joint_hidden_states: [B, S, H*D]
 
-        joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
+        joint_hidden_states = joint_hidden_states.to(org_dtype)
 
         # Split attention outputs back
         img_attn_output = joint_hidden_states[:, :seq_img, :]  # Image part
         txt_attn_output = joint_hidden_states[:, seq_img:, :]  # Text part
+        del joint_hidden_states
 
         # Original implementation
         # ----
@@ -835,15 +854,19 @@ class QwenImageTransformerBlock(nn.Module):
 
         # Split modulation parameters for norm1 and norm2
         img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
+        del img_mod_params
         txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
+        del txt_mod_params
 
         # Process image stream - norm1 + modulation
         img_normed = self.img_norm1(hidden_states)
         img_modulated, img_gate1 = self._modulate(img_normed, img_mod1)
+        del img_normed, img_mod1
 
         # Process text stream - norm1 + modulation
         txt_normed = self.txt_norm1(encoder_hidden_states)
         txt_modulated, txt_gate1 = self._modulate(txt_normed, txt_mod1)
+        del txt_normed, txt_mod1
 
         # Use QwenAttnProcessor2_0 for joint attention computation
         # This directly implements the DoubleStreamLayerMegatron logic:
@@ -860,25 +883,35 @@ class QwenImageTransformerBlock(nn.Module):
             txt_seq_lens=txt_seq_lens,
             **joint_attention_kwargs,
         )
+        del img_modulated, txt_modulated
 
         # QwenAttnProcessor2_0 returns (img_output, txt_output) when encoder_hidden_states is provided
         img_attn_output, txt_attn_output = attn_output
+        del attn_output
 
         # Apply attention gates and add residual (like in Megatron)
         hidden_states = hidden_states + img_gate1 * img_attn_output
+        del img_gate1, img_attn_output
         encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
+        del txt_gate1, txt_attn_output
 
         # Process image stream - norm2 + MLP
         img_normed2 = self.img_norm2(hidden_states)
         img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2)
+        del img_normed2, img_mod2
         img_mlp_output = self.img_mlp(img_modulated2)
+        del img_modulated2
         hidden_states = hidden_states + img_gate2 * img_mlp_output
+        del img_gate2, img_mlp_output
 
         # Process text stream - norm2 + MLP
         txt_normed2 = self.txt_norm2(encoder_hidden_states)
         txt_modulated2, txt_gate2 = self._modulate(txt_normed2, txt_mod2)
+        del txt_normed2, txt_mod2
         txt_mlp_output = self.txt_mlp(txt_modulated2)
+        del txt_modulated2
         encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
+        del txt_gate2, txt_mlp_output
 
         # Clip to prevent overflow for fp16
         if encoder_hidden_states.dtype == torch.float16:

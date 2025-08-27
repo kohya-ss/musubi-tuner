@@ -66,6 +66,8 @@ ARCH_HUNYUAN_VIDEO = "hunyuan-video"
 ARCH_WAN = "wan2.1"
 
 ARCH_FRAMEPACK = "framepack"
+ARCH_FLUX_KONTEXT = "Flux.1-dev"
+ARCH_QWEN_IMAGE = "Qwen-Image"
 
 ADAPTER_LORA = "lora"
 
@@ -141,10 +143,10 @@ def build_metadata(
         arch = ARCH_FRAMEPACK
         impl = IMPL_FRAMEPACK
     elif architecture == ARCHITECTURE_FLUX_KONTEXT:
-        arch = ARCHITECTURE_FLUX_KONTEXT
+        arch = ARCH_FLUX_KONTEXT
         impl = IMPL_FLUX_KONTEXT
     elif architecture == ARCHITECTURE_QWEN_IMAGE:
-        arch = ARCHITECTURE_QWEN_IMAGE
+        arch = ARCH_QWEN_IMAGE
         impl = IMPL_QWEN_IMAGE
     else:
         raise ValueError(f"Unknown architecture: {architecture}")

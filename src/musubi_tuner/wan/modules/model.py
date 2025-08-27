@@ -405,6 +405,7 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
+        org_dtype = x.dtype
         assert e.dtype == torch.float32
         if self.model_version == "2.1":
             e = self.modulation.to(torch.float32) + e
@@ -412,15 +413,15 @@ class WanAttentionBlock(nn.Module):
             assert e[0].dtype == torch.float32
 
             # self-attention
-            y = self.self_attn(self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes, freqs)
-            x = x + y.to(torch.float32) * e[2]
+            y = self.self_attn((self.norm1(x).float() * (1 + e[1]) + e[0]).to(org_dtype), seq_lens, grid_sizes, freqs)
+            x = (x + y.to(torch.float32) * e[2]).to(org_dtype)
             del y
 
             # cross-attention & ffn
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
             del context
-            y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
-            x = x + y.to(torch.float32) * e[5]
+            y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(org_dtype))
+            x = (x + y.to(torch.float32) * e[5]).to(org_dtype)
             del y
         else:  # For Wan2.2
             e = self.modulation.to(torch.float32) + e
@@ -428,16 +429,17 @@ class WanAttentionBlock(nn.Module):
             assert e[0].dtype == torch.float32
 
             # self-attention
-            y = self.self_attn(self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2), seq_lens, grid_sizes, freqs)
-            x = x + y.to(torch.float32) * e[2].squeeze(2)
+            y = self.self_attn(
+                (self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2)).to(org_dtype), seq_lens, grid_sizes, freqs
+            )
+            x = (x + y.to(torch.float32) * e[2].squeeze(2)).to(org_dtype)
             del y
 
             # cross-attention & ffn
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
             del context
-            y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
-            x = x + y.to(torch.float32) * e[5].squeeze(2)
-
+            y = self.ffn((self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2)).to(org_dtype))
+            x = (x + y.to(torch.float32) * e[5].squeeze(2)).to(org_dtype)
             del y
 
         return x

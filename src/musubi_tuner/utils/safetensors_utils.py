@@ -219,3 +219,17 @@ def load_split_weights(
     else:
         state_dict = load_safetensors(file_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
     return state_dict
+
+
+def find_key(safetensors_file: str, starts_with: Optional[str] = None, ends_with: Optional[str] = None) -> Optional[str]:
+    """
+    Find a key in a safetensors file that starts with `starts_with` and ends with `ends_with`.
+    If `starts_with` is None, it will match any key.
+    If `ends_with` is None, it will match any key.
+    Returns the first matching key or None if no key matches.
+    """
+    with MemoryEfficientSafeOpen(safetensors_file) as f:
+        for key in f.keys():
+            if (starts_with is None or key.startswith(starts_with)) and (ends_with is None or key.endswith(ends_with)):
+                return key
+    return None

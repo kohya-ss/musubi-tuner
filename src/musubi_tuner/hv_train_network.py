@@ -170,7 +170,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
+        mixed_precision=args.mixed_precision if args.mixed_precision else None,
         log_with=log_with,
         project_dir=logging_dir,
         dynamo_plugin=dynamo_plugin,
@@ -1767,7 +1767,10 @@ class NetworkTrainer:
         )
 
         if train_dataset_group.num_train_items == 0:
-            raise ValueError("No training items found in the dataset / データセットに学習データがありません")
+            raise ValueError(
+                "No training items found in the dataset. Please ensure that the latent/Text Encoder cache has been created beforehand."
+                " / データセットに学習データがありません。latent/Text Encoderキャッシュを事前に作成したか確認してください"
+            )
 
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
@@ -1777,6 +1780,9 @@ class NetworkTrainer:
         # prepare accelerator
         logger.info("preparing accelerator")
         accelerator = prepare_accelerator(args)
+        if args.mixed_precision is None:
+            args.mixed_precision = accelerator.mixed_precision
+            logger.info(f"mixed precision set to {args.mixed_precision} / mixed precisionを{args.mixed_precision}に設定")
         is_main_process = accelerator.is_main_process
 
         # prepare dtype
@@ -2489,7 +2495,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default="no",
+        default=None,
         choices=["no", "fp16", "bf16"],
         help="use mixed precision / 混合精度を使う場合、その精度",
     )

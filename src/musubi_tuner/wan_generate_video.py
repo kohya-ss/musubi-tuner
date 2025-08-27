@@ -1419,8 +1419,10 @@ def run_sampling(
         if model is None:
             # lazy loading
             dit_path = args.dit_high_noise if is_high_noise else args.dit
+            lora_weight = args.lora_weight_high_noise if is_high_noise else args.lora_weight
+            lora_multiplier = args.lora_multiplier_high_noise if is_high_noise else args.lora_multiplier
             model = load_dit_model(
-                args, dit_path, args.lora_weight, args.lora_multiplier, gen_settings.cfg, device, gen_settings.dit_weight_dtype
+                args, dit_path, lora_weight, lora_multiplier, gen_settings.cfg, device, gen_settings.dit_weight_dtype
             )
 
         prev_high_noise = is_high_noise
