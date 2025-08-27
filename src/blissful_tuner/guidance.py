@@ -12,8 +12,8 @@ import torch
 
 
 def nag(z_positive, z_negative, nag_scale, nag_tau, nag_alpha):
-    z_tilde = z_positive * nag_scale - z_negative * (nag_scale - 1)  # Revised implementation
-    # z_tilde = z_positive + self.nag_scale * (z_positive - z_negative)  # Paper implementation
+    # z_tilde = z_positive + self.nag_scale * (z_positive - z_negative)  # Paper implementation, uses default tau of 2.5 and alpha of 0.25
+    z_tilde = z_positive * nag_scale - z_negative * (nag_scale - 1)  # Revised implementation, better scaling, default tau of 3.5 and alpha of 0.5
     norm_positive = torch.norm(z_positive, p=1, dim=-1, keepdim=True).expand(*z_positive.shape)
     norm_tilde = torch.norm(z_tilde, p=1, dim=-1, keepdim=True).expand(*z_tilde.shape)
 
