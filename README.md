@@ -9,6 +9,7 @@ Here you will find an extended version of Musubi Tuner with advanced and experim
 Super epic thanks to kohya-ss for his tireless work on Musubi Tuner, kijai for HunyuanVideoWrapper and WanVideoWrapper from which significant code is ported, and all other devs in the open source generative AI community! Please note that due to the experimental nature of many changes, some things might not work as well as the unmodified Musubi! If you find any issues please let me know and I'll do my best to fix them. Please do not post about issues with this version on the main Musubi Github repo but rather use this repo's issues section!
 Extensions for ALL models/modes:
 - Beautiful rich logging, rich argparse and rich tracebacks
+
 Extensions for Wan/Hunyuan/Framepack:
 - Latent preview during generation with either latent2RGB or TAEHV (`--preview_latent_every N` where N is a number of steps(or sections for framepack). By default uses latent2rgb, TAE can be enabled with `--preview_vae /path/to/model` models: https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv)
 - Optimized generation settings for fast, high quality gens (`--optimized`, enables various optimizations and settings based on the model. Requires SageAttention, Triton, PyTorch 2.7.0 or higher)
