@@ -44,7 +44,7 @@ from musubi_tuner.dataset.image_video_dataset import load_video
 
 # blissful start
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.cfg import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
+from blissful_tuner.guidance import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
 from blissful_tuner.utils import string_to_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards

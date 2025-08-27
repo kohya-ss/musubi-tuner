@@ -21,6 +21,7 @@ __all__ = ["WanModel"]
 from einops import repeat
 from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
+from blissful_tuner.guidance import nag
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
@@ -199,7 +200,7 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
         self.attn_mode = attn_mode
         self.split_attn = split_attn
-        self.rope_func = "default" if kwargs is None else kwargs.get("rope_func", "default")
+        self.rope_func = "default" if kwargs is None else kwargs.get("rope_func", "default")  # Subclasses may not have kwargs and don't need rope func anyway
         if self.rope_func == "comfy":
             self.comfyrope = apply_rope_comfy
 
@@ -352,16 +353,6 @@ class WanI2VCrossAttention(WanSelfAttention):
 
 
 # Blissful NAG Stuff, can't move elsewhere without copying pretty much the whole model ========================================
-def nag(z_positive, z_negative, nag_scale, nag_tau, nag_alpha):
-    z_tilde = z_positive * nag_scale - z_negative * (nag_scale - 1)  # Revised implementation
-    # z_tilde = z_positive + self.nag_scale * (z_positive - z_negative)  # Paper implementation
-    norm_positive = torch.norm(z_positive, p=1, dim=-1, keepdim=True).expand(*z_positive.shape)
-    norm_tilde = torch.norm(z_tilde, p=1, dim=-1, keepdim=True).expand(*z_tilde.shape)
-
-    ratio = norm_tilde / norm_positive
-    z_hat = z_tilde * torch.minimum(ratio, ratio.new_ones(1) * nag_tau) / ratio
-    z_guidance = z_hat * nag_alpha + z_positive * (1 - nag_alpha)
-    return z_guidance
 
 
 class NAGCrossAttention(WanCrossAttention):
@@ -410,10 +401,12 @@ class NAGCrossAttention(WanCrossAttention):
         neg_qkv = [q, neg_k, neg_v]
         del q, neg_k, neg_v
         z_positive = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        z_positive = z_positive.flatten(2)
         z_negative = flash_attention(neg_qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
-        z_guidance = nag(z_positive, z_negative, self.nag_scale, self.nag_tau, self.nag_alpha)
+        z_negative = z_negative.flatten(2)
+        x = nag(z_positive, z_negative, self.nag_scale, self.nag_tau, self.nag_alpha)
+
         # output
-        x = z_guidance.flatten(2)
         x = self.o(x)
         return x
 
@@ -466,11 +459,13 @@ class NAGI2VCrossAttention(WanI2VCrossAttention):
         qkv = [q, k, v]
         del k, v
         z_positive = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        z_positive = z_positive.flatten(2)
 
         # compute negative attention
         neg_qkv = [q, neg_k, neg_v]
         del neg_k, neg_v
         z_negative = flash_attention(neg_qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        z_negative = z_negative.flatten(2)
 
         # Do NAG
         x = nag(z_positive, z_negative, self.nag_scale, self.nag_tau, self.nag_alpha)
@@ -487,7 +482,6 @@ class NAGI2VCrossAttention(WanI2VCrossAttention):
         img_x = flash_attention(qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
 
         # output
-        x = x.flatten(2)
         img_x = img_x.flatten(2)
         if self.training:
             x = x + img_x  # avoid inplace
@@ -540,7 +534,7 @@ class WanAttentionBlock(nn.Module):
             nag_alpha = kwargs.get("nah_alpha", 0.5)
             if model_version == "2.2" or cross_attn_type == "t2v_cross_attn":
                 self.cross_attn = NAGCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn, nag_scale=nag_scale, nag_tau=nag_tau, nag_alpha=nag_alpha)
-            else:  # Wan 2.1 I2V cross attention
+            else:  # Wan 2.1 I2V cross attention w/ NAG
                 self.cross_attn = NAGI2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, attn_mode, split_attn, nag_scale=nag_scale, nag_tau=nag_tau, nag_alpha=nag_alpha)
         else:
             if model_version == "2.2" or cross_attn_type == "t2v_cross_attn":

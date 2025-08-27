@@ -2,13 +2,25 @@
 # -*- coding: utf-8 -*-
 """
 Created on Wed Apr 16 17:23:28 2025
-CFGZero* implementation for Blissful Tuner extension based on https://github.com/WeichenFan/CFG-Zero-star/blob/main/models/wan/wan_pipeline.py
+Various advanced guidance methods for Blissful Tuner
 License: Apache 2.0
 @author: blyss
 """
 import argparse
 from typing import List
 import torch
+
+
+def nag(z_positive, z_negative, nag_scale, nag_tau, nag_alpha):
+    z_tilde = z_positive * nag_scale - z_negative * (nag_scale - 1)  # Revised implementation
+    # z_tilde = z_positive + self.nag_scale * (z_positive - z_negative)  # Paper implementation
+    norm_positive = torch.norm(z_positive, p=1, dim=-1, keepdim=True).expand(*z_positive.shape)
+    norm_tilde = torch.norm(z_tilde, p=1, dim=-1, keepdim=True).expand(*z_tilde.shape)
+
+    ratio = norm_tilde / norm_positive
+    z_hat = z_tilde * torch.minimum(ratio, ratio.new_ones(1) * nag_tau) / ratio
+    z_guidance = z_hat * nag_alpha + z_positive * (1 - nag_alpha)
+    return z_guidance
 
 
 def perpendicular_negative_cfg(cond: torch.Tensor, uncond: torch.Tensor, nocond: torch.Tensor, negative_scale: float, guidance_scale: float) -> torch.Tensor:
