@@ -958,7 +958,6 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             return
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
-    @torch.compiler.disable()
     def get_imgids(self, F, H, W, x):
         f_len = ((F + (self.patch_size[0] // 2)) // self.patch_size[0])
         h_len = ((H + (self.patch_size[1] // 2)) // self.patch_size[1])
@@ -1012,6 +1011,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         return e, e0
 
     def blissful_optimize(self):
+        if self.training:
+            torch.compiler.disable(self.get_imgids, recursive=False)
         self.optimized_compile = False  # Otherwise it would be called every step
         torch._dynamo.config.cache_size_limit = 64
         backend, mode, dynamic, fullgraph = self.compile_args
