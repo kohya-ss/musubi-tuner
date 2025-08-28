@@ -540,7 +540,7 @@ class NetworkTrainer:
     def is_schedulefree_optimizer(self, optimizer: torch.optim.Optimizer, args: argparse.Namespace) -> bool:
         return args.optimizer_type.lower().endswith("schedulefree".lower())  # or args.optimizer_schedulefree_wrapper
 
-    def get_dummy_scheduler(optimizer: torch.optim.Optimizer) -> Any:
+    def get_dummy_scheduler(self, optimizer: torch.optim.Optimizer) -> Any:
         # dummy scheduler for schedulefree optimizer. supports only empty step(), get_last_lr() and optimizers.
         # this scheduler is used for logging only.
         # this isn't be wrapped by accelerator because of this class is not a subclass of torch.optim.lr_scheduler._LRScheduler
@@ -2113,6 +2113,8 @@ class NetworkTrainer:
         logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
 
         clean_memory_on_device(accelerator.device)
+
+        optimizer_train_fn()  # Set training mode
 
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")

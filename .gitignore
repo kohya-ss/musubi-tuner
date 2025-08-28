@@ -8,20 +8,10 @@ main.lib
 main.obj
 CLAUDE.md
 GEMINI.md
+AGENTS.md
 .claude/
 .gemini/
 
-# START blissful-tuner (may be)
+# START blissful-tuner
 .pylintrc
-*venv
-*logs
-*.safetensors
-*.mp4
-*.mkv
-*.mov
-*.png
-*.sh
-yamls
-settings.json
-previewflag
 # END blissful-tuner

@@ -47,26 +47,30 @@ def convert_from_diffusers(prefix, weights_sd):
     # note: Diffusers has no alpha, so alpha is set to rank
     new_weights_sd = {}
     lora_dims = {}
-    has_alpha = False
     for key, weight in weights_sd.items():
-        if "alpha" in key:
-            has_alpha = True
         diffusers_prefix, key_body = key.split(".", 1)
         if diffusers_prefix != "diffusion_model" and diffusers_prefix != "transformer":
             logger.warning(f"unexpected key: {key} in diffusers format")
             continue
-        if "lora_A" in key or "lora_B" in key:
-            new_key = f"{prefix}{key_body}".replace(".", "_").replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
-        else:  # Some other format?
-            new_key = f"{prefix}{key_body}".replace(".", "_").replace("_weight", ".weight").replace("_alpha", ".alpha").replace("_lora_down", ".lora_down").replace("_lora_up", ".lora_up")
+
+        new_key = f"{prefix}{key_body}".replace(".", "_")
+        new_key = new_key.replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
+
+        # support unknown format: do not replace dots but uses lora_up/lora_down/alpha
+        new_key = new_key.replace("_lora_down_", ".lora_down.").replace("_lora_up_", ".lora_up.")
+        if new_key.endswith("_alpha"):
+            new_key = new_key.replace("_alpha", ".alpha")
+
         new_weights_sd[new_key] = weight
 
         lora_name = new_key.split(".")[0]  # before first dot
         if lora_name not in lora_dims and "lora_down" in new_key:
             lora_dims[lora_name] = weight.shape[0]
 
-    if not has_alpha:
-        for lora_name, dim in lora_dims.items():
+    # add alpha with rank
+    for lora_name, dim in lora_dims.items():
+        alpha_key = f"{lora_name}.alpha"
+        if alpha_key not in new_weights_sd:
             new_weights_sd[f"{lora_name}.alpha"] = torch.tensor(dim)
 
     return new_weights_sd

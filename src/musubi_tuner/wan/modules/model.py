@@ -528,7 +528,7 @@ class WanAttentionBlock(nn.Module):
         lower_precision_attention = kwargs.get("lower_precision_attention", False)
         self.attention_dtype = torch.float16 if lower_precision_attention else torch.float32
         nag_scale = kwargs.get("nag_scale", None)
-        # Todo: Fix I2V too
+
         if nag_scale is not None:
             nag_tau = kwargs.get("nag_tau", 3.5)
             nag_alpha = kwargs.get("nah_alpha", 0.5)

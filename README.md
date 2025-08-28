@@ -48,6 +48,7 @@ Framepack only extensions:
 - FP8 fast/mm_scaled (`--fp8_fast`, increased speed on 40xx cards with a mild hit to quality, Wan and Hunyuan have this already in native Musubi!)
 
 Non model specific extras:
+(Please make sure to install the project into your venv with `--group postprocess` (e.g.`pip install -e . --group postprocess --group dev` to fully install all requirements) if you want to use the below scripts!)
 - GIMM-VFI framerate interpolation (`src/blissful_tuner/GIMMVFI.py`, please see it's `--help` for usage. Models: https://huggingface.co/Blyss/BlissfulModels/tree/main/VFI )
 - Upscaling with SwinIR or ESRGAN type models (`src/blissful_tuner/upscaler.py`, please see it's `--help` for usage. Models: https://huggingface.co/Blyss/BlissfulModels/tree/main/upscaling )
 - Face blurring script based on Yolo - helpful for training non face altering LoRA! ( `blissful_tuner/yolo_blur.py`, please see it's `--help` for usage. Recommended model: https://huggingface.co/Blyss/BlissfulModels/tree/main/yolo )
@@ -125,7 +126,15 @@ If you find this project helpful, please consider supporting its development via
 
 ### Recent Updates
 
-- GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- August 28, 2025
+    - If you are using an RTX 50 series GPU, please try PyTorch 2.8.0.
+    - Library dependencies have been updated, and version specifications have been removed from `bitsandbytes`. Please install the appropriate version according to your environment.
+        - If you are using an RTX 50 series GPU, installing the latest version with `pip install -U bitsandbytes` will resolve the error.
+        - `sentencepiece` has been updated to 0.2.1.
+    - [Schedule Free Optimizer](https://github.com/facebookresearch/schedule_free) is supported. Thanks to am7coffee for [PR #505](https://github.com/kohya-ss/musubi-tuner/pull/505). 
+        - See [Schedule Free Optimizer documentation](./docs/advanced_config.md#schedule-free-optimizer--スケジュールフリーオプティマイザ) for details.
 
 - August 24, 2025
     - Reduced peak memory usage during training and inference for Wan2.1/2.2. PR [#493](https://github.com/kohya-ss/musubi-tuner/pull/493) This may reduce memory usage by about 10% for non-weight tensors, depending on the video frame size and number of frames.

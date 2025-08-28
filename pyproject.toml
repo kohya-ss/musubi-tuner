@@ -7,7 +7,7 @@ requires-python = ">=3.10, <3.13"
 dependencies = [
     "accelerate==1.6.0",
     "av==14.0.1",
-    "bitsandbytes==0.45.5",
+    "bitsandbytes",
     "diffusers==0.32.1",
     "einops==0.7.0",
     "huggingface-hub==0.34.3",
@@ -23,7 +23,8 @@ dependencies = [
     "ftfy==6.3.1",
     "easydict==1.13",
     # FLUX.1 Kontext
-    "sentencepiece==0.2.0",
+    "sentencepiece==0.2.1",
+    # Blissful specific
     "ffmpeg-python>=0.1.18",
     "PySide6>=6.7.0",
     "omegaconf>=2.2.2",

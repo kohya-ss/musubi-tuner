@@ -16,6 +16,7 @@
 - [Style-Friendly SNR Sampler](#style-friendly-snr-sampler)
 - [Specify time step range for training](#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)
 - [Timestep Bucketing for Uniform Sampling](#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing)
+- [Schedule Free Optimizer](#schedule-free-optimizer--スケジュールフリーオプティマイザ)
 
 ## How to specify `network_args` / `network_args`の指定方法
 
@@ -964,5 +965,26 @@ accelerate launch ... \
 - `wan_train_network.py` でhigh/lowノイズモデルを同時に学習する場合（`--dit_high_noise` オプション）、および、`--preserve_distribution_shape` を指定した場合、タイムステップの扱いが異なるため、この機能は期待通りに動作しない可能性があります。
 
     具体的には、あらかじめ設定されたタイムステップのバケットから選択されるのではなく、都度、バケツの決定→範囲内でのランダムなタイムステップの生成が行われます。このため、均一なサンプリングの効果が得られない可能性がありますが、完全なランダム（`[0, 1]` の範囲での生成）に比べると、多少の改善が見込まれます。
+
+</details>
+
+## Schedule Free Optimizer / スケジュールフリーオプティマイザ
+
+[Schedule Free Optimizer](https://github.com/facebookresearch/schedule_free) is an optimizer that does not require a learning rate schedule.
+
+The library is optional, so you can install it with `pip install schedulefree`.
+
+Specify the optimizer with the `--optimizer_type` argument, using the format `package_name.ClassName`, for example: `--optimizer_type schedulefree.AdamWScheduleFree`.
+
+You can specify multiple arguments for the optimizer using the `--optimizer_args` argument in the form `arg_name=value` (e.g., `--optimizer_args "weight_decay=0.01" "betas=(0.9,0.95)"`).
+
+<details>
+<summary>日本語</summary>
+
+[Schedule Free Optimizer](https://github.com/facebookresearch/schedule_free)は、学習率スケジュールを必要としないオプティマイザです。
+
+ライブラリはオプションのため、`pip install schedulefree` でインストールしてください。
+
+`--optimizer_type`引数に、` --optimizer_type schedulefree.AdamWScheduleFree`のように、`パッケージ名.クラス名`の形式で指定します。オプティマイザへの引数は、`--optimizer_args`に`引数名=値`の形で複数指定できます（例：`--optimizer_args "weight_decay=0.01" "betas=(0.9,0.95)"`）。
 
 </details>
