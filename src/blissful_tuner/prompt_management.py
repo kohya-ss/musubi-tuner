@@ -31,7 +31,7 @@ def load_t5(args, config, device):
         weight_path=args.t5,
         fp8=args.fp8_t5,
     )
-    text_encoder = text_encoder.model.to(device)
+    text_encoder.model.to(device)
     if hasattr(args, "prompt_weighting") and args.prompt_weighting:
         text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
     return text_encoder

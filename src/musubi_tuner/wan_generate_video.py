@@ -1165,7 +1165,7 @@ def prepare_i2v_inputs(
 
     # calculate latent dimensions: keep aspect ratio
     i_height, i_width = img_tensor.shape[1:]
-    logger.info(f"Input image res: '{i_width}x{i_height}' will be rescaled to requested video res '{v_width}x{v_height}' (width x height @ frames)")
+    logger.info(f"Input image res: '{i_width}x{i_height}' will be rescaled to requested video res '{v_width}x{v_height}' (width x height)")
     aspect_ratio = v_height / v_width
     lat_h = int(round(np.sqrt(max_area * aspect_ratio) // config.vae_stride[1] // config.patch_size[1] * config.patch_size[1]))
     lat_w = int(round(np.sqrt(max_area / aspect_ratio) // config.vae_stride[2] // config.patch_size[2] * config.patch_size[2]))
@@ -1202,7 +1202,7 @@ def prepare_i2v_inputs(
                 context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
-        text_encoder = text_encoder.model.to("cpu")  # Offload instead because blissful might use it
+        text_encoder.model.to("cpu")  # Offload instead because blissful might use it
         clean_memory_on_device
 
         # load CLIP model
