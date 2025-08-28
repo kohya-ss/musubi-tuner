@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
-
+from contextlib import nullcontext
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.networks import lora_wan
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
@@ -47,8 +47,8 @@ from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.guidance import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
 from blissful_tuner.utils import string_to_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
-from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards
-from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
+from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards, prepare_wan_special_inputs
+from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_i2i_noise, prepare_metadata, BlissfulKeyboardManager
 logger = BlissfulLogger(__name__, "green")
 # blissful end
@@ -955,7 +955,7 @@ def prepare_t2v_inputs(
     else:
         # ComfyUI compatible noise
         seed_g = torch.manual_seed(seed)
-
+    text_encoder = None  # Sentinel to tell blissful function to load it herself
     if encoded_context is None:
         # load text encoder
         text_encoder = load_text_encoder(args, config, device)
@@ -965,28 +965,19 @@ def prepare_t2v_inputs(
 
         # encode prompt
         with torch.no_grad():
-            if args.fp8_t5:
-                with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
-                    context = text_encoder([args.prompt], device)
-                    context_null = text_encoder([n_prompt], device)
-            else:
+            with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext():
+                logger.info("Encoding positive and negative prompt")
                 context = text_encoder([args.prompt], device)
                 context_null = text_encoder([n_prompt], device)
-            if args.perp_neg is not None:
-                if args.fp8_t5:
-                    with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
-                        context_nocond = text_encoder("", device)
-                else:
-                    context_nocond = text_encoder("", device)
-
-        # free text encoder and clean memory
-        del text_encoder
-        clean_memory_on_device(device)
     else:
         # Use pre-encoded context
         context = encoded_context["context"]
         context_null = encoded_context["context_null"]
-
+    # prepare model input arguments
+    perp_neg_context, nag_context = prepare_wan_special_inputs(args, device, config, text_encoder)
+    if text_encoder is not None:
+        del text_encoder
+        clean_memory_on_device(device)
     # Fun-Control: encode control video to latent space
     if config.is_fun_control:
         # TODO use same resizing as for image
@@ -1005,17 +996,15 @@ def prepare_t2v_inputs(
     noise = torch.randn(target_shape, dtype=torch.float32, generator=seed_g, device=device if not args.cpu_noise else "cpu")
     noise = noise.to(device)
 
-    # prepare model input arguments
     arg_c = {"context": context, "seq_len": seq_len}
     arg_null = {"context": context_null, "seq_len": seq_len}
-    arg_nocond = {"context": context_nocond, "seq_len": seq_len} if args.perp_neg is not None else None
+    arg_true_uncond = {"context": perp_neg_context, "seq_len": seq_len}
     if y is not None:
         arg_c["y"] = [y]
         arg_null["y"] = [y]
-        if args.perp_neg is not None:
-            arg_nocond["y"] = [y]
+        arg_true_uncond["y"] = [y]
 
-    return noise, (arg_c, arg_null), context, context_null, arg_nocond
+    return noise, (arg_c, arg_null, (arg_true_uncond, nag_context)), context, context_null
 
 
 def parse_one_frame_inference_args(one_frame_inference_arg: str) -> Tuple[int, List[int], List[int], int]:
@@ -1185,7 +1174,6 @@ def prepare_i2v_inputs(
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
     max_seq_len = (lat_f + (1 if has_end_image else 0)) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
     logger.info(f"Latent dimensions: '{lat_w}x{lat_h}@{lat_f}' <- '{width}x{height}@{frames}' (width x height @ frames)")
-    # max_seq_len = (lat_f + additional_frames) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
 
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
@@ -1198,25 +1186,24 @@ def prepare_i2v_inputs(
 
     # configure negative prompt
     n_prompt = args.negative_prompt if args.negative_prompt else config.sample_neg_prompt
-
+    text_encoder = None  # Sentinel to tell blissful function to load it herself
     if encoded_context is None:
         # load text encoder
         text_encoder = load_text_encoder(args, config, device)
         text_encoder.model.to(device)
+        if args.prompt_weighting:
+            text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
 
         # encode prompt
         with torch.no_grad():
-            if args.fp8_t5:
-                with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
-                    context = text_encoder([args.prompt], device)
-                    context_null = text_encoder([n_prompt], device)
-            else:
+            with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext():
+                logger.info("Encoding positive and negative prompt")
                 context = text_encoder([args.prompt], device)
                 context_null = text_encoder([n_prompt], device)
 
         # free text encoder and clean memory
-        del text_encoder
-        clean_memory_on_device(device)
+        text_encoder = text_encoder.model.to("cpu")  # Offload instead because blissful might use it
+        clean_memory_on_device
 
         # load CLIP model
         clip_context = None
@@ -1244,6 +1231,10 @@ def prepare_i2v_inputs(
         context_null = encoded_context["context_null"]
         clip_context = encoded_context["clip_context"]
 
+    perp_neg_context, nag_context = prepare_wan_special_inputs(args, device, config, text_encoder)
+    if text_encoder is not None:
+        del text_encoder
+        clean_memory_on_device(device)
     # check if one frame inference is enabled
     if args.one_frame_inference is not None:
         if has_end_image and not config.flf2v:
@@ -1315,7 +1306,15 @@ def prepare_i2v_inputs(
             else:
                 y[:, 1:] = 0  # remove image latent except first frame
             y = torch.concat([control_latent, y], dim=0)  # add control video latent
-
+    if args.i2_extra_noise not in (None, 0.0):
+        logger.info(f"Adding {100 * args.i2_extra_noise:.1f}% extra noise to I2V conditioning latents")
+        extra_noise = torch.randn(
+            y.shape,
+            generator=seed_g,
+            device=y.device if not args.cpu_noise else "cpu",
+            dtype=y.dtype
+        ) * args.i2_extra_noise
+        y = y + extra_noise.to(y.device)
     # generate noise
     noise = torch.randn(
         16,
@@ -1327,124 +1326,6 @@ def prepare_i2v_inputs(
         device=device if not args.cpu_noise else "cpu",
     )
     noise = noise.to(device)
-
-    # configure negative prompt
-    n_prompt = args.negative_prompt if args.negative_prompt else config.sample_neg_prompt
-
-    if encoded_context is None:
-        # load text encoder
-        text_encoder = load_text_encoder(args, config, device)
-        text_encoder.model.to(device)
-        if args.prompt_weighting:
-            text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
-
-        # encode prompt
-        with torch.no_grad():
-            if args.fp8_t5:
-                with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype):
-                    context = text_encoder([args.prompt], device)
-                    context_null = text_encoder([n_prompt], device)
-            else:
-                context = text_encoder([args.prompt], device)
-                context_null = text_encoder([n_prompt], device)
-
-        # free text encoder and clean memory
-        del text_encoder
-        clean_memory_on_device(device)
-
-        # load CLIP model
-        clip = load_clip_model(args, config, device)
-        clip.model.to(device)
-        # encode image to CLIP context
-        logger.info("Encoding image to CLIP context")
-        with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
-            clip_context = clip.visual([img_tensor[:, None, :, :]])
-        logger.info("Encoding complete")
-        clip_context = None
-        if not config.v2_2:
-            clip = load_clip_model(args, config, device)
-            clip.model.to(device)
-
-            # encode image to CLIP context
-            logger.info("Encoding image to CLIP context")
-            with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
-                clip_context = clip.visual([img_tensor[:, None, :, :]])
-                # I2V end image is not officially supported, so no additional CLIP context
-                if end_img is not None and config.flf2v:
-                    end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
-                    end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
-                    clip_context = torch.concat([clip_context, end_clip_context], dim=0)
-            logger.info("Encoding complete")
-
-        # free CLIP model and clean memory
-        del clip
-        clean_memory_on_device(device)
-    else:
-        # Use pre-encoded context
-        context = encoded_context["context"]
-        context_null = encoded_context["context_null"]
-        clip_context = encoded_context["clip_context"]
-
-    # encode image to latent space with VAE
-    logger.info("Encoding image to latent space")
-    vae.to_device(device)
-
-    # resize image
-    interpolation = cv2.INTER_AREA if height < img_cv2.shape[0] else cv2.INTER_CUBIC
-    img_resized = cv2.resize(img_cv2, (width, height), interpolation=interpolation)
-    img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
-    img_resized = img_resized.unsqueeze(1)  # CFHW
-
-    if has_end_image:
-        interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
-        end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
-        end_img_resized = TF.to_tensor(end_img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
-        end_img_resized = end_img_resized.unsqueeze(1)  # CFHW
-
-    # create mask for the first frame
-    msk = torch.zeros(4, lat_f + (1 if has_end_image else 0), lat_h, lat_w, device=device)
-    msk[:, 0] = 1
-    if has_end_image:
-        msk[:, -1] = 1
-
-    # encode image to latent space
-    with accelerator.autocast(), torch.no_grad():
-        # padding to match the required number of frames
-        padding_frames = frames - 1  # the first frame is image
-        img_resized = torch.concat([img_resized, torch.zeros(3, padding_frames, height, width, device=device)], dim=1)
-        y = vae.encode([img_resized])[0]
-
-        if has_end_image:
-            y_end = vae.encode([end_img_resized])[0]
-            y = torch.concat([y, y_end], dim=1)  # add end frame
-
-    y = torch.concat([msk, y])
-    logger.info("Encoding complete")
-
-    if args.i2_extra_noise not in (None, 0.0):
-        logger.info(f"Adding {100 * args.i2_extra_noise:.1f}% extra noise to I2V conditioning latents")
-        extra_noise = torch.randn(
-            y.shape,
-            generator=seed_g,
-            device=y.device if not args.cpu_noise else "cpu",
-            dtype=y.dtype
-        ) * args.i2_extra_noise
-        y = y + extra_noise.to(y.device)
-
-    # Fun-Control: encode control video to latent space
-    if config.is_fun_control:
-        # TODO use same resizing as for image
-        logger.info("Encoding control video to latent space")
-        # C, F, H, W
-        control_video = load_control_video(args.control_path, frames + (1 if has_end_image else 0), height, width).to(device)
-        with accelerator.autocast(), torch.no_grad():
-            control_latent = vae.encode([control_video])[0]
-        y = y[msk.shape[0]:]  # remove mask because Fun-Control does not need it
-        if has_end_image:
-            y[:, 1:-1] = 0  # remove image latent except first and last frame. according to WanVideoWrapper, this doesn't work
-        else:
-            y[:, 1:] = 0  # remove image latent except first frame
-        y = torch.concat([control_latent, y], dim=0)  # add control video latent
 
     # prepare model input arguments
     arg_c = {
@@ -1463,10 +1344,18 @@ def prepare_i2v_inputs(
         "f_indices": [f_indices] if f_indices is not None else None,
     }
 
+    arg_true_uncond = {
+        "context": perp_neg_context,
+        "clip_fea": clip_context,
+        "seq_len": max_seq_len,
+        "y": [y],
+        "f_indices": [f_indices] if f_indices is not None else None,
+    }
+
     vae.to_device("cpu")  # move VAE to CPU to save memory
     clean_memory_on_device(device)
 
-    return noise, (arg_c, arg_null), one_frame_inference_index
+    return noise, (arg_c, arg_null, (arg_true_uncond, nag_context)), one_frame_inference_index
 
 
 def load_control_video(control_path: str, frames: int, height: int, width: int) -> torch.Tensor:
@@ -1553,8 +1442,7 @@ def run_sampling(
     seed_g: torch.Generator,
     accelerator: Accelerator,
     is_i2v: bool = False,
-    use_cpu_offload: bool = True,
-    arg_nocond: dict = None
+    use_cpu_offload: bool = True
 ) -> torch.Tensor:
     """run sampling
     Args:
@@ -1572,7 +1460,8 @@ def run_sampling(
     Returns:
         torch.Tensor: generated latent
     """
-    arg_c, arg_null = inputs
+    arg_c, arg_null, special_inputs = inputs
+    arg_true_uncond, nag_context = special_inputs
     latent = noise
     latent_storage_device = device if not use_cpu_offload else "cpu"
     latent = latent.to(latent_storage_device)
@@ -1653,10 +1542,11 @@ def run_sampling(
     logger.info(
         f"Starting sampling (high noise: {prev_high_noise}). Models: {len(models)}, timestep boundary: {args.timestep_boundary}, flow shift: {args.flow_shift}, guidance scale: {guidance_scale}"
     )
-    nag_context = None
-    if args.nag_scale is not None:
+    if args.nag_scale:
         logger.info(f"NAG is enabled with scale of {args.nag_scale}, tau of {args.nag_tau} and alpha of {args.nag_alpha}")
-        nag_context = arg_null["context"]
+        if nag_context is None:
+            logger.info("Using normal negative prompt as NAG negative prompt as a seperate wasn't provided.")
+            nag_context = arg_null["context"]
 
     for i, t in enumerate(tqdm(timesteps)):
         is_high_noise = (t / 1000.0) >= args.timestep_boundary if args.timestep_boundary is not None else False
@@ -1721,7 +1611,7 @@ def run_sampling(
                 noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null, skip_block_indices=skip_block_indices, km=km)[0].to(latent_storage_device)  # uncond
 
                 if args.perp_neg is not None:  # Are we using perpendicular negative? It needs a third model pass (nocond).
-                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_nocond, km=km)[0].to(latent_storage_device)  # Then calculate nocond
+                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_true_uncond, km=km)[0].to(latent_storage_device)  # Then calculate nocond
                     noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)  # And update the noise_pred
                 elif args.cfgzerostar_scaling:  # No perp_neg, so CFGZero* scaling instead? (mutually exclusive)
                     noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)  # does CFG with scaling inside, returns noise_pred after CFG formula
@@ -1788,7 +1678,6 @@ def generate(
     # setup scheduler
     scheduler, timesteps = setup_scheduler(args, cfg, device)
     # Check if we have shared models
-    arg_nocond = None  # Perp neg is only available for T2V currently
     one_frame_inference_index = None
     if shared_models is not None:
         # Use shared models and encoded data
@@ -1802,7 +1691,7 @@ def generate(
             noise, inputs, one_frame_inference_index = prepare_i2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
         else:
             # T2V
-            noise, inputs, context, context_null, arg_nocond = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
+            noise, inputs, context, context_null = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
 
     else:
         # prepare inputs without shared models
@@ -1817,7 +1706,7 @@ def generate(
             if cfg.is_fun_control or args.video_path is not None or args.i2i_path is not None:
                 # Fun-Control: need VAE for encoding control video
                 vae = load_vae(args, cfg, device, vae_dtype)
-            noise, inputs, context, context_null, arg_nocond = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
+            noise, inputs, context, context_null = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
 
         if args.video_path is not None:
             noise, timesteps = prepare_v2v_noise(noise, args, cfg, timesteps, device, vae)
@@ -1834,7 +1723,7 @@ def generate(
     seed_g.manual_seed(seed)
 
     # run sampling
-    latent = run_sampling(models, noise, scheduler, timesteps, args, gen_settings, inputs, device, seed_g, accelerator, is_i2v, arg_nocond=arg_nocond)
+    latent = run_sampling(models, noise, scheduler, timesteps, args, gen_settings, inputs, device, seed_g, accelerator, is_i2v)
     if one_frame_inference_index is not None:
         latent = latent[:, one_frame_inference_index : one_frame_inference_index + 1, :]
         latent = latent.contiguous()  # safetensors requires contiguous tensors :(

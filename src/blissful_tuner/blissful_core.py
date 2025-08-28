@@ -109,6 +109,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         parser.add_argument("--nag_scale", type=float, default=None, help="Enable Normalized Attention Guidance (NAG) and set scale. The scale for attention feature extrapolation. Higher values result in stronger negative guidance.")
         parser.add_argument("--nag_tau", type=float, default=3.5, help="The normalisation threshold. Higher values result in stronger negative guidance.")
         parser.add_argument("--nag_alpha", type=float, default=0.5, help="0 to 1, Blending factor between original and extrapolated attention. Higher values result in stronger negative guidance.")
+        parser.add_argument("--nag_prompt", type=str, default=None, help="Allows to specify a separate negative prompt for NAG to avoid overbroad guidance. If not specified and NAG is enabled it will use the regular negative prompt.")
         parser.add_argument("--optimized_compile", action="store_true", help="Enable optimized torch.compile of just the most crucial blocks. Exclusive of --compile. Works best with --rope_func comfy")
         parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
         parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")

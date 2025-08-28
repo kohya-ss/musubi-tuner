@@ -20,7 +20,7 @@ from tqdm import tqdm
 from rich_argparse import RichHelpFormatter
 from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import str_to_dtype
-from blissful_tuner.blissful_args import get_current_version
+from blissful_tuner.blissful_core import get_current_version
 from blissful_tuner.blissful_logger import BlissfulLogger
 install_rich_tracebacks()
 logger = BlissfulLogger(__name__, "#8e00ed")

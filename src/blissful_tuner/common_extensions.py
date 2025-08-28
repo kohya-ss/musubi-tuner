@@ -7,7 +7,6 @@ Created on Thu May  1 13:01:35 2025
 """
 import os
 import argparse
-import threading
 from datetime import datetime
 from typing import Tuple, Optional, Any
 from pynput import keyboard
@@ -20,7 +19,7 @@ import torchvision.transforms.functional as TF
 from easydict import EasyDict
 from musubi_tuner.wan.modules.vae import WanVAE
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from blissful_tuner.blissful_args import get_current_model_type, get_current_version
+from blissful_tuner.blissful_core import get_current_model_type, get_current_version
 from blissful_tuner.video_processing_common import BlissfulVideoProcessor
 from blissful_tuner.blissful_logger import BlissfulLogger
 
@@ -63,44 +62,6 @@ class BlissfulKeyboardManager:
         self.early_exit_requested = True
         logger.info("Early exit requested! Will exit after this step completes!")
         self.listener.stop()
-
-
-class BlissfulThreadManager():
-    def __init__(self, max_live_threads):
-        self.managed_threads = []
-        self.thread_count = 0
-        self.max_threads = max_live_threads
-
-    def spawn_thread(self, thread_target, thread_args):
-        if self.thread_count >= self.max_threads:
-            i = 0
-            to_del = []
-            while self.thread_count >= self.max_threads:
-                thread_dict = self.managed_threads[i]
-                logger.info(f"Joining thread #{thread_dict['id']} with target '{thread_dict['target']}'...")
-                thread_dict["handle"].join()
-                to_del.append(i)  # Don't delete while iterating against
-                self.thread_count -= 1
-                i += 1
-            for delable in to_del:
-                del self.managed_threads[delable]
-        logger.info(f"Spawn thread #{self.thread_count} with target'{thread_target}'")
-        thread_handle = threading.Thread(target=thread_target, args=thread_args)
-        thread_dict = {
-            "handle": thread_handle,
-            "id": self.thread_count,
-            "target": thread_target,
-            "args": thread_args
-        }
-        self.managed_threads.append(thread_dict)
-        thread_handle.start()
-        self.thread_count += 1
-        return thread_handle
-
-    def cleanup_threads(self):
-        for thread_dict in self.managed_threads:
-            logger.info(f"Joining thread #{thread_dict['id']} with target '{thread_dict['target']}'...")
-            thread_dict["handle"].join(timeout=3)
 
 
 def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:

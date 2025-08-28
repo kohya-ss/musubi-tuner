@@ -28,7 +28,7 @@ from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 from musubi_tuner.frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
-from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
+from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan, process_wildcards
 from blissful_tuner.latent_preview import LatentPreviewer

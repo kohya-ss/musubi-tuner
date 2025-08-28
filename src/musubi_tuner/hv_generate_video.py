@@ -36,12 +36,11 @@ from blissful_tuner.fp8_optimization import convert_fp8_linear
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata, BlissfulKeyboardManager
 from blissful_tuner.blissful_logger import BlissfulLogger
-from blissful_tuner.blissful_args import add_blissful_args, parse_blissful_args
+from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
 from blissful_tuner.guidance import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
 logger = BlissfulLogger(__name__, "green")
-
 
 def clean_memory_on_device(device):
     if device.type == "cuda":

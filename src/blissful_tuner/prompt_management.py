@@ -8,12 +8,33 @@ License: Apache 2.0
 """
 import os
 import random
+import argparse
+from contextlib import nullcontext
 from transformers import T5Model
 import torch
 import re
 from typing import Tuple, List, Union
+from musubi_tuner.wan.modules.t5 import T5EncoderModel
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
+
+
+def load_t5(args, config, device):
+    checkpoint_path = None if args.ckpt_dir is None else os.path.join(args.ckpt_dir, config.t5_checkpoint)
+    tokenizer_path = None if args.ckpt_dir is None else os.path.join(args.ckpt_dir, config.t5_tokenizer)
+    text_encoder = T5EncoderModel(
+        text_len=config.text_len,
+        dtype=config.t5_dtype,
+        device=device,
+        checkpoint_path=checkpoint_path,
+        tokenizer_path=tokenizer_path,
+        weight_path=args.t5,
+        fp8=args.fp8_t5,
+    )
+    text_encoder = text_encoder.model.to(device)
+    if hasattr(args, "prompt_weighting") and args.prompt_weighting:
+        text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
+    return text_encoder
 
 
 def rescale_text_encoders_hunyuan(llm_scale: float, clip_scale: float, transformer: torch.nn.Module) -> torch.nn.Module:
@@ -265,3 +286,22 @@ class MiniT5Wrapper():
                     parts.append(seg)
                     weights.append(1.0)
         return parts, weights
+
+
+def prepare_wan_special_inputs(args: argparse.Namespace, device: torch.device, config, t5) -> Union[dict, dict]:
+    """Prepare special model inputs for Wan models in any mode"""
+    perp_neg_context = nag_context = None
+    if args.perp_neg or args.nag_prompt:
+        if t5 is None:
+            t5 = load_t5(args, config, device)
+        t5.model.to(device)
+        if args.perp_neg:
+            logger.info("Encoding unconditional context for perpendicular negative")
+            with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext():
+                perp_neg_context = t5("", device)  # Encode a blank prompt for true unconditional guidance
+        if args.nag_prompt:
+            logger.info("Encoding a separate negative prompt for NAG")
+            with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext():
+                nag_context = t5(args.nag_prompt, device)
+
+    return perp_neg_context, nag_context
