@@ -405,6 +405,7 @@ class NAGCrossAttention(WanCrossAttention):
         z_negative = flash_attention(neg_qkv, k_lens=None, attn_mode=self.attn_mode, split_attn=self.split_attn)
         z_negative = z_negative.flatten(2)
         x = nag(z_positive, z_negative, self.nag_scale, self.nag_tau, self.nag_alpha)
+        del z_positive, z_negative
 
         # output
         x = self.o(x)
@@ -996,7 +997,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         return x, seq_lens, grid_sizes, freqs_list
 
     def get_time_embedding(self, t, seq_len, device):
-        with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
+        with torch.amp.autocast(device_type=device.type, dtype=self.e_dtype):
             if self.model_version == "2.1" or self.simple_modulation:
                 e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float()).to(self.e_dtype)
                 e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(self.e_dtype)
