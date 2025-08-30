@@ -807,7 +807,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.lower_precision_attention = kwargs.get("lower_precision_attention", False)
         self.e_dtype = torch.float32
         if self.lower_precision_attention:
-            logger.info("Attention pre-calcs/e tensor in torch.float16 to save VRAM (lower_precision_attention)")
+            logger.info("Attention/Time embedding/modulation in torch.float16 to save VRAM (--lower_precision_attention)")
             self.e_dtype = torch.float16
         self.simple_modulation = kwargs.get("simple_modulation", False)
         if self.model_version == "2.2" and self.simple_modulation:
@@ -997,9 +997,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         return x, seq_lens, grid_sizes, freqs_list
 
     def get_time_embedding(self, t, seq_len, device):
-        with torch.amp.autocast(device_type=device.type, dtype=self.e_dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=self.e_dtype):  # Original forces float32 but it seems we can get away with float16
             if self.model_version == "2.1" or self.simple_modulation:
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float()).to(self.e_dtype)
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).to(self.e_dtype)).to(self.e_dtype)
                 e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(self.e_dtype)
             else:  # For Wan2.2
                 if t.dim() == 1:
@@ -1007,13 +1007,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                     t = t.unsqueeze(1).expand(-1, seq_len)
                 bt = t.size(0)
                 t = t.flatten()
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float()).to(self.e_dtype)
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).to(self.e_dtype)).to(self.e_dtype)
                 e0 = self.time_projection(e).unflatten(2, (6, self.dim)).to(self.e_dtype)
         return e, e0
 
     def blissful_optimize(self):
-        if self.training:
-            torch.compiler.disable(self.get_imgids, recursive=False)
+        if self.training:  # This function changes shape if input res/length changes and will trigger lots of recompiles during training
+            torch.compiler.disable(self.get_imgids, recursive=False)  # So disable it then, but it's fine to compile for inference
         self.optimized_compile = False  # Otherwise it would be called every step
         torch._dynamo.config.cache_size_limit = 64
         backend, mode, dynamic, fullgraph = self.compile_args
@@ -1021,6 +1021,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         fullgraph = fullgraph.lower() in "true"
         logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
         logger.info(f"Compile parameters: Backend: {backend}; Mode: {mode}; Dynamic: {dynamic if dynamic is not None else 'Auto'}; Fullgraph: {fullgraph}")
+        # The default RoPE uses complex numbers and doesn't compile well as such, so only compile the alternate one which avoids them.
         self.rope_embedder = torch.compile(self.rope_embedder, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph) if self.rope_func == "comfy" else None
         self.get_patch_embedding = torch.compile(self.get_patch_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
         self.get_time_embedding = torch.compile(self.get_time_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
