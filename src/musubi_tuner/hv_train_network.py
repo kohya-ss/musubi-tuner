@@ -1946,7 +1946,7 @@ class NetworkTrainer:
 
         # TODO refactor metadata creation and move to util
         metadata = {
-            "ss_" "ss_session_id": session_id,  # random integer indicating which group of epochs the model came from
+            "ss_session_id": session_id,  # random integer indicating which group of epochs the model came from
             "ss_training_started_at": training_started_at,  # unix timestamp
             "ss_output_name": args.output_name,
             "ss_learning_rate": args.learning_rate,
