@@ -1,0 +1,53 @@
+# WAN 2.2 T2V Character LoRA - Batch Inference Prompts
+# Format: prompt --parameter value --parameter value
+# Use CHARACTER_VANRAJ_V1 token in your prompts for character consistency
+
+# Basic character scenes
+A video of CHARACTER_VANRAJ_V1 walking confidently through a bustling marketplace --seed 42 --w 512 --h 512
+CHARACTER_VANRAJ_V1 sitting peacefully by a riverbank during golden hour --seed 123 --w 640 --h 480
+A close-up video of CHARACTER_VANRAJ_V1 smiling warmly at the camera --seed 456 --w 512 --h 512
+
+# Action and movement scenes
+CHARACTER_VANRAJ_V1 practicing sword fighting in an ancient courtyard --seed 789 --w 768 --h 512 --g 7.5
+A dynamic video of CHARACTER_VANRAJ_V1 running through a dense forest --seed 321 --w 512 --h 768 --f 49
+CHARACTER_VANRAJ_V1 climbing a rocky mountain path with determination --seed 654 --w 640 --h 480
+
+# Emotional and portrait scenes
+CHARACTER_VANRAJ_V1 reading a letter with various emotions crossing his face --seed 987 --w 512 --h 512 --g 8.0
+A thoughtful video of CHARACTER_VANRAJ_V1 gazing at the stars from a balcony --seed 111 --w 512 --h 512
+CHARACTER_VANRAJ_V1 laughing heartily while sharing a meal with friends --seed 222 --w 640 --h 480
+
+# Royal and ceremonial scenes
+CHARACTER_VANRAJ_V1 in royal attire addressing a crowd from a palace balcony --seed 333 --w 832 --h 480 --s 40
+A majestic video of CHARACTER_VANRAJ_V1 wearing a crown during a coronation ceremony --seed 444 --w 768 --h 512
+CHARACTER_VANRAJ_V1 in traditional robes performing a sacred ritual --seed 555 --w 512 --h 512
+
+# Fantasy and magical scenes
+CHARACTER_VANRAJ_V1 wielding magical powers in an enchanted forest --seed 666 --w 512 --h 768 --g 7.0
+A mystical video of CHARACTER_VANRAJ_V1 floating in meditation surrounded by glowing orbs --seed 777 --w 512 --h 512
+CHARACTER_VANRAJ_V1 casting a spell with magical energy swirling around him --seed 888 --w 640 --h 480
+
+# Seasonal and environmental scenes
+CHARACTER_VANRAJ_V1 walking through falling autumn leaves in a park --seed 999 --w 512 --h 512
+A winter scene of CHARACTER_VANRAJ_V1 by a warm fireplace during snowfall --seed 1001 --w 640 --h 480
+CHARACTER_VANRAJ_V1 enjoying a spring garden full of blooming flowers --seed 1002 --w 512 --h 768
+
+# Professional and work scenes
+CHARACTER_VANRAJ_V1 working diligently at a wooden desk by candlelight --seed 1003 --w 768 --h 512
+A video of CHARACTER_VANRAJ_V1 teaching students in an ancient library --seed 1004 --w 640 --h 480
+CHARACTER_VANRAJ_V1 crafting pottery on a spinning wheel --seed 1005 --w 512 --h 512
+
+# Adventure and exploration
+CHARACTER_VANRAJ_V1 exploring ancient ruins with a torch in hand --seed 1006 --w 512 --h 768 --g 7.5
+A thrilling video of CHARACTER_VANRAJ_V1 crossing a rope bridge over a chasm --seed 1007 --w 768 --h 512
+CHARACTER_VANRAJ_V1 discovering a hidden treasure chest in a cave --seed 1008 --w 640 --h 480
+
+# Cultural and traditional scenes
+CHARACTER_VANRAJ_V1 performing a classical dance in traditional costume --seed 1009 --w 512 --h 768
+A festival video of CHARACTER_VANRAJ_V1 celebrating with colorful decorations --seed 1010 --w 640 --h 480
+CHARACTER_VANRAJ_V1 participating in a traditional wedding ceremony --seed 1011 --w 768 --h 512
+
+# Modern and contemporary scenes
+CHARACTER_VANRAJ_V1 in modern clothing walking through a bustling city --seed 1012 --w 512 --h 768
+A contemporary video of CHARACTER_VANRAJ_V1 working on a laptop in a cafe --seed 1013 --w 640 --h 480
+CHARACTER_VANRAJ_V1 driving a car through scenic countryside --seed 1014 --w 768 --h 512
