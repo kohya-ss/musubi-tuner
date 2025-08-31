@@ -1648,76 +1648,88 @@ class NetworkTrainer:
         
         return captions
     
-    def _analyze_training_captions(self, captions: List[str], min_frequency: int = 2, min_word_length: int = 3) -> Dict[str, str]:
-        """Analyze training captions for trigger words and patterns
+    def _analyze_training_captions(self, folder_captions: Dict[str, List[str]], min_frequency: int = 2, min_word_length: int = 3) -> Dict[str, str]:
+        """Analyze training captions for trigger words and patterns per folder
         
         Args:
-            captions: List of caption strings
+            folder_captions: Dict mapping folder names to lists of caption strings
             min_frequency: Minimum frequency for trigger detection
             min_word_length: Minimum word length for single words
             
         Returns:
             Dict of metadata fields with analysis results
         """
-        if not captions:
+        if not folder_captions:
             return {}
         
-        # Prepare text: lowercase, split into words
-        all_words = []
-        all_phrases_2 = []
-        all_phrases_3 = []
+        # Collect all captions for overall statistics
+        all_captions = []
+        for captions in folder_captions.values():
+            all_captions.extend(captions)
         
-        for caption in captions:
-            # Clean and tokenize
-            words = re.findall(r'\b\w+\b', caption.lower())
-            all_words.extend(words)
+        if not all_captions:
+            return {}
+        
+        # Analyze each folder separately
+        folder_tag_frequencies = {}
+        
+        for folder_name, captions in folder_captions.items():
+            if not captions:
+                continue
+                
+            # Prepare text: lowercase, split into sentences and words
+            all_words = []
+            all_phrases = []
             
-            # Extract 2-word phrases
-            for i in range(len(words) - 1):
-                phrase = f"{words[i]} {words[i+1]}"
-                all_phrases_2.append(phrase)
+            for caption in captions:
+                # Split by dots to get sentences
+                sentences = re.split(r'\.', caption.lower())
+                
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+                    
+                    # Clean and tokenize words in the sentence
+                    words = re.findall(r'\b\w+\b', sentence)
+                    if not words:
+                        continue
+                    
+                    # Add individual words
+                    all_words.extend(words)
+                    
+                    # Add the entire sentence as a phrase (up to dot)
+                    all_phrases.append(sentence)
             
-            # Extract 3-word phrases  
-            for i in range(len(words) - 2):
-                phrase = f"{words[i]} {words[i+1]} {words[i+2]}"
-                all_phrases_3.append(phrase)
-        
-        # Count frequencies using Counter
-        from collections import Counter
-        
-        word_counts = Counter(word for word in all_words if len(word) >= min_word_length)
-        phrase2_counts = Counter(all_phrases_2)
-        phrase3_counts = Counter(all_phrases_3)
-        
-        # Filter by minimum frequency and get top results
-        trigger_words = {word: count for word, count in word_counts.items() if count >= min_frequency}
-        trigger_phrases_2 = {phrase: count for phrase, count in phrase2_counts.items() if count >= min_frequency}
-        trigger_phrases_3 = {phrase: count for phrase, count in phrase3_counts.items() if count >= min_frequency}
+            # Count frequencies using Counter
+            from collections import Counter
+            
+            word_counts = Counter(word for word in all_words if len(word) >= min_word_length)
+            phrase_counts = Counter(all_phrases)
+            
+            # Filter by minimum frequency
+            trigger_words = {word: count for word, count in word_counts.items() if count >= min_frequency}
+            trigger_phrases = {phrase: count for phrase, count in phrase_counts.items() if count >= min_frequency}
+            
+            # Combine words and phrases into tag frequency for this folder
+            folder_tag_frequency = {}
+            folder_tag_frequency.update(trigger_words)
+            folder_tag_frequency.update(trigger_phrases)
+            
+            if folder_tag_frequency:
+                # Sort by frequency, get top 30 for this folder
+                top_tags = dict(sorted(folder_tag_frequency.items(), key=lambda x: x[1], reverse=True)[:30])
+                folder_tag_frequencies[folder_name] = top_tags
         
         # Build result metadata
         result = {
-            "ss_caption_total": str(len(captions)),
-            "ss_caption_unique": str(len(set(captions))),
-            "ss_total_words": str(len(all_words)),
+            "ss_caption_total": str(len(all_captions)),
+            "ss_caption_unique": str(len(set(all_captions))),
         }
         
-        if trigger_words:
-            # Sort by frequency, get top 15 for training metadata
-            top_words = dict(sorted(trigger_words.items(), key=lambda x: x[1], reverse=True)[:15])
-            result["ss_trigger_words"] = json.dumps(top_words)
-        
-        if trigger_phrases_2:
-            top_phrases_2 = dict(sorted(trigger_phrases_2.items(), key=lambda x: x[1], reverse=True)[:15])
-            result["ss_trigger_phrases_2word"] = json.dumps(top_phrases_2)
-        
-        if trigger_phrases_3:
-            top_phrases_3 = dict(sorted(trigger_phrases_3.items(), key=lambda x: x[1], reverse=True)[:15])
-            result["ss_trigger_phrases_3word"] = json.dumps(top_phrases_3)
-        
-        # Add most common words as a summary
-        if word_counts:
-            most_common = dict(word_counts.most_common(10))
-            result["ss_most_common_words"] = json.dumps(most_common)
+        # Store per-folder tag frequencies
+        if folder_tag_frequencies:
+            result["ss_tag_frequency"] = json.dumps(folder_tag_frequencies)
         
         return result
 
@@ -2096,6 +2108,7 @@ class NetworkTrainer:
 
         datasets_metadata = []
         all_captions = []  # Collect all captions for trigger word analysis
+        folder_captions = {}  # Collect captions per folder
         
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
         for dataset in train_dataset_group.datasets:
@@ -2105,17 +2118,36 @@ class NetworkTrainer:
             if hasattr(dataset, 'datasource'):
                 dataset_captions = self._extract_captions_from_dataset(dataset.datasource)
                 all_captions.extend(dataset_captions)
+                
+                # Get folder name from dataset metadata
+                folder_name = None
+                if "image_directory" in dataset_metadata:
+                    folder_name = dataset_metadata["image_directory"]
+                elif "video_directory" in dataset_metadata:
+                    folder_name = dataset_metadata["video_directory"]
+                elif "image_jsonl_file" in dataset_metadata:
+                    folder_name = dataset_metadata["image_jsonl_file"]
+                elif "video_jsonl_file" in dataset_metadata:
+                    folder_name = dataset_metadata["video_jsonl_file"]
+                else:
+                    folder_name = f"dataset_{len(datasets_metadata)}"
+                
                 if dataset_captions:
                     dataset_metadata["caption_count"] = len(dataset_captions)
                     dataset_metadata["sample_captions"] = dataset_captions[:3]  # Save first 3 as examples
+                    
+                    # Store captions per folder
+                    if folder_name not in folder_captions:
+                        folder_captions[folder_name] = []
+                    folder_captions[folder_name].extend(dataset_captions)
             
             datasets_metadata.append(dataset_metadata)
 
         metadata["ss_datasets"] = json.dumps(datasets_metadata)
         
-        # Analyze captions for trigger words and patterns
-        if all_captions:
-            caption_analysis = self._analyze_training_captions(all_captions)
+        # Analyze captions for trigger words and patterns (per folder)
+        if folder_captions:
+            caption_analysis = self._analyze_training_captions(folder_captions)
             metadata.update(caption_analysis)
 
         # add extra args
