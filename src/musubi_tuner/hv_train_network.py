@@ -2133,8 +2133,6 @@ class NetworkTrainer:
                     folder_name = f"dataset_{len(datasets_metadata)}"
                 
                 if dataset_captions:
-                    dataset_metadata["caption_count"] = len(dataset_captions)
-                    dataset_metadata["sample_captions"] = dataset_captions[:3]  # Save first 3 as examples
                     
                     # Store captions per folder
                     if folder_name not in folder_captions:
