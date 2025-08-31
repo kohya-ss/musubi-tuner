@@ -1648,7 +1648,7 @@ class NetworkTrainer:
         
         return captions
     
-    def _analyze_training_captions(self, folder_captions: Dict[str, List[str]], min_frequency: int = 2, min_word_length: int = 3) -> Dict[str, str]:
+    def _analyze_training_captions(self, folder_captions: Dict[str, List[str]], min_frequency: int = 1, min_word_length: int = 3) -> Dict[str, str]:
         """Analyze training captions for trigger words and patterns per folder
         
         Args:
@@ -1717,8 +1717,8 @@ class NetworkTrainer:
             folder_tag_frequency.update(trigger_phrases)
             
             if folder_tag_frequency:
-                # Sort by frequency, get top 30 for this folder
-                top_tags = dict(sorted(folder_tag_frequency.items(), key=lambda x: x[1], reverse=True)[:30])
+                # Sort by frequency, get top 200 for this folder
+                top_tags = dict(sorted(folder_tag_frequency.items(), key=lambda x: x[1], reverse=True)[:200])
                 folder_tag_frequencies[folder_name] = top_tags
         
         # Build result metadata
