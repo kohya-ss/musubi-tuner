@@ -55,7 +55,14 @@ def convert_from_diffusers(prefix, weights_sd):
             logger.warning(f"unexpected key: {key} in diffusers format")
             continue
 
-        new_key = f"{prefix}{key_body}".replace(".", "_").replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
+        new_key = f"{prefix}{key_body}".replace(".", "_")
+        new_key = new_key.replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
+
+        # support unknown format: do not replace dots but uses lora_up/lora_up/alpha
+        new_key = new_key.replace("_lora_down_", ".lora_down.").replace("_lora_up_", ".lora_up.")
+        if new_key.endswith("_alpha"):
+            new_key = new_key.replace("_alpha", ".alpha")
+
         new_weights_sd[new_key] = weight
 
         lora_name = new_key.split(".")[0]  # before first dot
@@ -64,7 +71,9 @@ def convert_from_diffusers(prefix, weights_sd):
 
     # add alpha with rank
     for lora_name, dim in lora_dims.items():
-        new_weights_sd[f"{lora_name}.alpha"] = torch.tensor(dim)
+        alpha_key = f"{lora_name}.alpha"
+        if alpha_key not in new_weights_sd:
+            new_weights_sd[f"{lora_name}.alpha"] = torch.tensor(dim)
 
     return new_weights_sd
 

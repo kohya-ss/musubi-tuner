@@ -1,13 +1,13 @@
 [project]
 name = "musubi-tuner"
-version = "0.1.0"
+version = "0.2.10"
 description = "Musubi Tuner by kohya_ss"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
 dependencies = [
     "accelerate==1.6.0",
     "av==14.0.1",
-    "bitsandbytes==0.45.5",
+    "bitsandbytes",
     "diffusers==0.32.1",
     "einops==0.7.0",
     "huggingface-hub==0.34.3",
@@ -23,7 +23,7 @@ dependencies = [
     "ftfy==6.3.1",
     "easydict==1.13",
     # FLUX.1 Kontext
-    "sentencepiece==0.2.0",
+    "sentencepiece==0.2.1",
 ]
 
 [project.optional-dependencies]

@@ -59,7 +59,15 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 ### 最近の更新
 
-- GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2025/08/28
+    - RTX 50シリーズのGPUをお使いの場合、PyTorch 2.8.0をお試しください。
+    - ライブラリの依存関係を更新し、`bitsandbytes`からバージョン指定を外しました。環境に応じた適切なバージョンをインストールしてください。
+        - RTX 50シリーズのGPUを使用している場合は、`pip install -U bitsandbytes`で最新バージョンをインストールするとエラーが解消されます。
+        - `sentencepiece`を0.2.1に更新しました。
+    - [Schedule Free Optimizer](https://github.com/facebookresearch/schedule_free)をサポートしました。PR [#505](https://github.com/kohya-ss/musubi-tuner/pull/505) am7coffee氏に感謝します。
+        - [Schedule Free Optimizerのドキュメント](./docs/advanced_config.md#schedule-free-optimizer--スケジュールフリーオプティマイザ)を参照してください。
 
 - 2025/08/24
     - Wan2.1/2.2の学習、推論時のピークメモリ使用量を削減しました。PR [#493](https://github.com/kohya-ss/musubi-tuner/pull/493) 動画のフレームサイズ、フレーム数にもよりますが重み以外のメモリ使用量が10%程度削減される可能性があります。

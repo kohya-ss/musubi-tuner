@@ -68,7 +68,15 @@ If you find this project helpful, please consider supporting its development via
 
 ### Recent Updates
 
-- GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- August 28, 2025
+    - If you are using an RTX 50 series GPU, please try PyTorch 2.8.0.
+    - Library dependencies have been updated, and version specifications have been removed from `bitsandbytes`. Please install the appropriate version according to your environment.
+        - If you are using an RTX 50 series GPU, installing the latest version with `pip install -U bitsandbytes` will resolve the error.
+        - `sentencepiece` has been updated to 0.2.1.
+    - [Schedule Free Optimizer](https://github.com/facebookresearch/schedule_free) is supported. Thanks to am7coffee for [PR #505](https://github.com/kohya-ss/musubi-tuner/pull/505). 
+        - See [Schedule Free Optimizer documentation](./docs/advanced_config.md#schedule-free-optimizer--スケジュールフリーオプティマイザ) for details.
 
 - August 24, 2025
     - Reduced peak memory usage during training and inference for Wan2.1/2.2. PR [#493](https://github.com/kohya-ss/musubi-tuner/pull/493) This may reduce memory usage by about 10% for non-weight tensors, depending on the video frame size and number of frames.
