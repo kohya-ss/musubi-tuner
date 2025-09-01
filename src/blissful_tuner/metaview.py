@@ -11,17 +11,12 @@ Requires:
 License: Apache 2.0
 """
 import sys
+import math
 import subprocess
 import argparse
 import os
 from PySide6.QtWidgets import (
-    QApplication,
-    QWidget,
-    QLabel,
-    QLineEdit,
-    QTextEdit,
-    QPushButton,
-    QGridLayout
+    QApplication, QWidget, QLabel, QLineEdit, QTextEdit, QPushButton, QGridLayout, QSizePolicy
 )
 from PySide6.QtCore import Qt
 from PIL import Image  # for reading PNG metadata
@@ -76,9 +71,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Display bt_ metadata tags from an MKV or PNG in a GUI"
     )
+    parser.add_argument("input_file", help="Input MKV or PNG file")
     parser.add_argument(
-        "input_file",
-        help="Input MKV or PNG file"
+        "--columns",
+        type=int,
+        default=0,
+        help="Number of metadata columns (0 = auto based on --max-rows)."
+    )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=12,
+        help="When --columns=0, wrap to a new column after this many rows."
     )
     args = parser.parse_args()
 
@@ -89,58 +93,64 @@ def main():
 
     app = QApplication(sys.argv)
     window = QWidget()
-    window.setWindowTitle("BT Metadata Viewer")
+    window.setWindowTitle("Blissful Metadata Viewer")
     layout = QGridLayout()
+    layout.setHorizontalSpacing(12)
+    layout.setVerticalSpacing(6)
 
     desired_order = [
-        "bt_model_type",
-        "bt_task",
-        "bt_prompt",
-        "bt_negative_prompt",
-        "bt_seeds",
-        "bt_infer_steps",
-        "bt_embedded_cfg_scale",
-        "bt_guidance_scale",
-        "bt_cfg_schedule",
-        "bt_fps"
+        "bt_model_type", "bt_task", "bt_prompt", "bt_negative_prompt", "bt_nag_prompt",
+        "bt_seeds", "bt_infer_steps", "bt_embedded_cfg_scale", "bt_guidance_scale",
+        "bt_cfg_schedule", "bt_fps"
     ]
 
-    # Order the keys: first in desired_order (if present), then any others sorted alphabetically
-    # We do a case-insensitive match to see if the stored key lowercased is in desired_order
-    ordered_keys = []
+    # Order keys: desired first (if present), then alphabetical extras
     lower_to_original = {k.lower(): k for k in metadata.keys()}
-    for want in desired_order:
-        if want in lower_to_original:
-            ordered_keys.append(lower_to_original[want])
-
-    # Any metadata keys that weren't in desired_order, sorted by lowercase name
+    ordered_keys = [lower_to_original[k] for k in desired_order if k in lower_to_original]
     extras = sorted(
-        [orig_key for orig_key in metadata.keys() if orig_key.lower() not in desired_order],
+        [k for k in metadata.keys() if k.lower() not in desired_order],
         key=lambda k: k.lower()
     )
     ordered_keys += extras
 
-    clipboard = app.clipboard()
-    row = 0
+    # Decide columns/rows
+    n_items = len(ordered_keys)
+    if args.columns and args.columns > 0:
+        columns = args.columns
+        rows_per_col = math.ceil(n_items / columns)
+    else:
+        rows_per_col = max(1, args.max_rows)
+        columns = math.ceil(n_items / rows_per_col)
 
-    # Create UI rows for each tag
-    for key in ordered_keys:
-        display_label = key.upper() + ":"  # e.g. "bt_prompt" → "BT_PROMPT:"
+    # Each "field" occupies 3 grid columns: label, editor, copy
+    triplet_width = 3
+
+    clipboard = app.clipboard()
+
+    for i, key in enumerate(ordered_keys):
+        r = i % rows_per_col
+        c_block = i // rows_per_col
+        base_c = c_block * triplet_width
+
+        display_label = key.upper() + ":"
         label = QLabel(display_label)
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        layout.addWidget(label, row, 0)
+        layout.addWidget(label, r, base_c + 0)
 
-        # Use QTextEdit for long fields like prompt; otherwise QLineEdit
-        if key.lower() in ["bt_prompt", "bt_negative_prompt"]:
+        if key.lower() in ["bt_prompt", "bt_negative_prompt", "bt_nag_prompt"]:
             editor = QTextEdit()
             editor.setPlainText(metadata[key])
             fh = editor.fontMetrics().lineSpacing()
-            editor.setFixedHeight(fh * 4 + 10)
+            editor.setFixedHeight(fh * 2 + 10)
+            # make wide fields not try to expand forever
+            editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            editor.setLineWrapMode(QTextEdit.WidgetWidth)
         else:
             editor = QLineEdit(metadata[key])
+            editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         editor.setReadOnly(True)
-        layout.addWidget(editor, row, 1)
+        layout.addWidget(editor, r, base_c + 1)
 
         copy_btn = QPushButton("Copy")
         copy_btn.clicked.connect(
@@ -148,15 +158,24 @@ def main():
                 w.toPlainText() if isinstance(w, QTextEdit) else w.text()
             )
         )
-        layout.addWidget(copy_btn, row, 2)
-        row += 1
+        layout.addWidget(copy_btn, r, base_c + 2)
 
-    # Add the Okay! button at bottom-right
+    # Place the Okay! button at the bottom-right of the last column
     ok_button = QPushButton("Okay!")
     ok_button.clicked.connect(window.close)
-    layout.addWidget(ok_button, row, 2)
+
+    # figure out the last logical row/column you used
+    last_row = layout.rowCount()
+    last_col = layout.columnCount() - 1
+
+    layout.setRowStretch(last_row, 1)
+
+    # now place the button in that bottom-right cell
+    layout.addWidget(ok_button, last_row, last_col, alignment=Qt.AlignRight | Qt.AlignBottom)
 
     window.setLayout(layout)
+    # Give it a reasonable default size so multi-column layouts breathe
+    window.resize(1280, 720)
     window.show()
     sys.exit(app.exec())
 

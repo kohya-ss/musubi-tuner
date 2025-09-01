@@ -67,8 +67,10 @@ class BlissfulKeyboardManager:
 def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:
     seed = args.seed if seed_override is None else seed_override
     attr_list = ["prompt", "infer_steps", "guidance_scale", "flow_shift",
-                 "hidden_state_skip_layer", "apply_final_norm", "sample_solver",
-                 "fps", "task", "embedded_cfg_scale", "negative_prompt", "cfg_schedule"]
+                 "hidden_state_skip_layer", "apply_final_norm", "sample_solver", "scheduler",
+                 "fps", "task", "embedded_cfg_scale", "negative_prompt", "prompt_2", "cfg_schedule",
+                 "nag_scale", "nag_tau", "nag_alpha", "nag_prompt", "perp_neg", "cfgzerostar_scaling",
+                 "cfgzerostar_init_steps", "te_multiplier", "riflex_index"]
     metadata = {
         "bt_model_type": f"{get_current_model_type()}",
         "bt_seeds": f"{seed}",
@@ -76,16 +78,33 @@ def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = No
         "bt_tunerver": f"{get_current_version()}"
     }
 
+    if hasattr(args, "task"):  # Use task arg present for Wan to suss out model version
+        if args.task.lower() in ["t2v-a14b", "i2v-a14b"]:
+            metadata["bt_model_type"] = "Wan 2.2"
+        else:
+            metadata["bt_model_type"] = "Wan 2.1"
+
     for attr in attr_list:
-        if hasattr(args, attr):
+        if hasattr(args, attr):  # Many are model specific
             value = getattr(args, attr)
-            value = str(value) if value is not None else "N/A"
-            metadata[f"bt_{attr}"] = value
+            attr = "scheduler" if attr == "sample_solver" else attr  # Normalize naming convention for metadata
+            if (attr == "riflex_index" and value == 0) or (attr == "cfgzerostar_init_steps" and value == -1) or (attr == "cfgzerostar_scaling" and value is False):
+                continue  # Don't put them in at their "off" values
+            if (attr == "nag_tau" or attr == "nag_alpha") and args.nag_scale is None:  # We can assume nag_scale exists if either of these two pass the previous hasattr
+                continue  # These default to nonzero floats but are only applicable if nag_scale is not None
+            value = str(value) if value is not None else None  # Might be dict, list, etc so make sure to string it
+            if value is not None:  # No point in passing through Nonetypes
+                metadata[f"bt_{attr}"] = value
 
     if args.lora_weight:
-        for i, lora_weight in enumerate(args.lora_weight):
-            lora_weight = os.path.basename(lora_weight)
+        for i, lora_weight in enumerate(args.lora_weight):  # Type list even if only 1
+            lora_weight = os.path.basename(lora_weight)  # Weed out the path for privacy etc and just use the LoRA's name
             metadata[f"bt_lora_{i}"] = f"{lora_weight}: {args.lora_multiplier[i]}"
+
+    if hasattr(args, "lora_weight_high_noise") and args.lora_weight_high_noise:  # Same same... but different.
+        for i, lora_weight_high_noise in enumerate(args.lora_weight_high_noise):
+            lora_weight_high_noise = os.path.basename(lora_weight_high_noise)
+            metadata[f"bt_lora_high_{i}"] = f"{lora_weight_high_noise}: {args.lora_multiplier_high_noise[i]}"
     return metadata
 
 
