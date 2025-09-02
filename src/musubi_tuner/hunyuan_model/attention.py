@@ -1,8 +1,6 @@
-import importlib.metadata
 import math
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
@@ -23,7 +21,6 @@ except ImportError:
 
 try:
     from sageattention import sageattn_varlen, sageattn
-
     logger.info("Sage Attention is installed!")
 except ImportError:
     logger.info("Sage Attention is not installed!")

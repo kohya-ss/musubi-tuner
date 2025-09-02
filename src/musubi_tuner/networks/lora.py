@@ -9,14 +9,12 @@ import os
 import re
 from typing import Dict, List, Optional, Type, Union
 from transformers import CLIPTextModel
-import numpy as np
 import torch
 import torch.nn as nn
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 HUNYUAN_TARGET_REPLACE_MODULES = ["MMDoubleStreamBlock", "MMSingleStreamBlock"]
 
@@ -455,7 +453,7 @@ class LoRANetwork(torch.nn.Module):
         # self.loraplus_text_encoder_lr_ratio = None
 
         if modules_dim is not None:
-            logger.info(f"create LoRA network from weights")
+            logger.info("create LoRA network from weights")
         else:
             logger.info(f"create LoRA network. base dim (rank): {lora_dim}, alpha: {alpha}")
             logger.info(
@@ -531,7 +529,7 @@ class LoRANetwork(torch.nn.Module):
                                 continue
 
                             # filter by name (not used in the current implementation)
-                            if filter is not None and not filter in lora_name:
+                            if filter is not None and filter not in lora_name:
                                 continue
 
                             dim = None
@@ -690,7 +688,7 @@ class LoRANetwork(torch.nn.Module):
         for future in futures:
             future.result()
 
-        #logger.info(f"weights are merged")
+        # logger.info(f"weights are merged")
 
     def set_loraplus_lr_ratio(self, loraplus_lr_ratio):  # , loraplus_unet_lr_ratio, loraplus_text_encoder_lr_ratio):
         self.loraplus_lr_ratio = loraplus_lr_ratio

@@ -2,9 +2,7 @@
 import argparse
 import json
 import math
-import os
 from pathlib import Path
-from typing import List, Union
 
 import torch
 from PIL import Image
@@ -245,7 +243,7 @@ def process_images(args):
             with open(text_file_path, "w", encoding="utf-8") as f:
                 f.write(caption)
 
-        logger.info(f"Caption generation completed. Text files saved alongside each image.")
+        logger.info("Caption generation completed. Text files saved alongside each image.")
 
 
 def main():

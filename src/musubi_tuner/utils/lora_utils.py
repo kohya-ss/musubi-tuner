@@ -34,7 +34,7 @@ def filter_lora_state_dict(
         remaining_keys.sort()
         logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
         if len(weights_sd) == 0:
-            logger.warning(f"No keys left after filtering.")
+            logger.warning("No keys left after filtering.")
 
     return weights_sd
 

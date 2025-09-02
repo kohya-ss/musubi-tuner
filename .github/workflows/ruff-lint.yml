@@ -1,0 +1,41 @@
+name: Ruff Lint
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    paths:
+      - "src/musubi_tuner/**/*.py"
+      - "src/musubi_tuner/**/*.pth"
+      - ".python-version"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install the project
+        run: uv sync --dev
+
+      - name: "Run Ruff check"
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: >
+            check --fix
+
+      # - name: Minimize uv cache
+      #   run: uv cache prune --ci

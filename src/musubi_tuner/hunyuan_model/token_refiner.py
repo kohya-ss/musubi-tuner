@@ -10,7 +10,7 @@ from musubi_tuner.hunyuan_model.attention import attention
 from musubi_tuner.hunyuan_model.norm_layers import get_norm_layer
 from musubi_tuner.hunyuan_model.embed_layers import TimestepEmbedder, TextProjection
 from musubi_tuner.hunyuan_model.mlp_layers import MLP
-from musubi_tuner.hunyuan_model.modulate_layers import modulate, apply_gate
+from musubi_tuner.hunyuan_model.modulate_layers import apply_gate
 
 
 class IndividualTokenRefinerBlock(nn.Module):

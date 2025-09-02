@@ -11,6 +11,7 @@ from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_WAN, ItemInfo,
 from musubi_tuner.wan.configs import wan_t2v_14B
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 from musubi_tuner.wan.modules.t5 import T5EncoderModel
+
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
@@ -71,6 +72,7 @@ def main():
     logger.info("Encoding with T5")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
+        nonlocal text_encoder, device, accelerator
         encode_and_save_batch(text_encoder, batch, device, accelerator)
 
     cache_text_encoder_outputs.process_text_encoder_batches(

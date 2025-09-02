@@ -9,7 +9,6 @@ import numpy as np
 import datetime
 import torchvision
 
-import safetensors.torch as sf
 from PIL import Image
 
 

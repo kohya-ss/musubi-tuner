@@ -39,8 +39,8 @@ def load_vae(
         logger (_type_, optional): logger. Defaults to None.
         device (_type_, optional): device to load vae. Defaults to None.
     """
-    if vae_path is None:
-        vae_path = VAE_PATH[vae_type]
+    assert vae_path is not None, "VAE path must be specified"
+    assert Path(vae_path).exists(), f"VAE path does not exist: {vae_path}"
 
     logger.info(f"Loading 3D VAE model ({vae_type}) from: {vae_path}")
 

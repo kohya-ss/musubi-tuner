@@ -1188,38 +1188,9 @@ FP8_OPTIMIZATION_EXCLUDE_KEYS = [
 ]
 
 
-def load_qwen_image_model(
-    device: Union[str, torch.device],
-    dit_path: str,
-    attn_mode: str,
-    split_attn: bool,
-    loading_device: Union[str, torch.device],
-    dit_weight_dtype: Optional[torch.dtype],
-    fp8_scaled: bool = False,
-    lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
-    lora_multipliers: Optional[List[float]] = None,
+def create_model(
+    attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
 ) -> QwenImageTransformer2DModel:
-    """
-    Load a WAN model from the specified checkpoint.
-
-    Args:
-        device (Union[str, torch.device]): Device for optimization or merging
-        dit_path (str): Path to the DiT model checkpoint.
-        attn_mode (str): Attention mode to use, e.g., "torch", "flash", etc.
-        split_attn (bool): Whether to use split attention.
-        loading_device (Union[str, torch.device]): Device to load the model weights on.
-        dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
-            If None, it will be loaded as is (same as the state_dict) or scaled for fp8. if not None, model weights will be casted to this dtype.
-        fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
-        lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
-        lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
-    """
-    # dit_weight_dtype is None for fp8_scaled
-    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
-
-    device = torch.device(device)
-    loading_device = torch.device(loading_device)
-
     with init_empty_weights():
         logger.info(f"Creating QwenImageTransformer2DModel")
         """
@@ -1242,11 +1213,13 @@ def load_qwen_image_model(
             "pooled_projection_dim": 768
         }
         """
+        if num_layers is None:
+            num_layers = 60
         model = QwenImageTransformer2DModel(
             patch_size=2,
             in_channels=64,
             out_channels=16,
-            num_layers=60,
+            num_layers=num_layers,
             attention_head_dim=128,
             num_attention_heads=24,
             joint_attention_dim=3584,
@@ -1255,8 +1228,46 @@ def load_qwen_image_model(
             attn_mode=attn_mode,
             split_attn=split_attn,
         )
-        if dit_weight_dtype is not None:
-            model.to(dit_weight_dtype)
+        if dtype is not None:
+            model.to(dtype)
+    return model
+
+
+def load_qwen_image_model(
+    device: Union[str, torch.device],
+    dit_path: str,
+    attn_mode: str,
+    split_attn: bool,
+    loading_device: Union[str, torch.device],
+    dit_weight_dtype: Optional[torch.dtype],
+    fp8_scaled: bool = False,
+    lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[List[float]] = None,
+    num_layers: Optional[int] = 60,
+) -> QwenImageTransformer2DModel:
+    """
+    Load a WAN model from the specified checkpoint.
+
+    Args:
+        device (Union[str, torch.device]): Device for optimization or merging
+        dit_path (str): Path to the DiT model checkpoint.
+        attn_mode (str): Attention mode to use, e.g., "torch", "flash", etc.
+        split_attn (bool): Whether to use split attention.
+        loading_device (Union[str, torch.device]): Device to load the model weights on.
+        dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
+            If None, it will be loaded as is (same as the state_dict) or scaled for fp8. if not None, model weights will be casted to this dtype.
+        fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
+        lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
+        lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+        num_layers (int): Number of layers in the DiT model.
+    """
+    # dit_weight_dtype is None for fp8_scaled
+    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+
+    device = torch.device(device)
+    loading_device = torch.device(loading_device)
+
+    model = create_model(attn_mode, split_attn, dit_weight_dtype, num_layers=num_layers)
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")

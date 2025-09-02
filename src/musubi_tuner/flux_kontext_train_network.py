@@ -1,12 +1,9 @@
 import argparse
 from typing import Optional
-
-
 from einops import rearrange
 import torch
 from tqdm import tqdm
 from accelerate import Accelerator
-from rich_argparse import RichHelpFormatter
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_KONTEXT, ARCHITECTURE_FLUX_KONTEXT_FULL
 from musubi_tuner.flux import flux_models, flux_utils
 from musubi_tuner.hv_train_network import (
@@ -65,7 +62,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         )
 
         # Encode with T5 and CLIP text encoders
-        logger.info(f"Encoding with T5 and CLIP text encoders")
+        logger.info("Encoding with T5 and CLIP text encoders")
 
         sample_prompts_te_outputs = {}  # (prompt) -> (t5, clip)
         with torch.amp.autocast(device_type=device.type, dtype=t5_dtype), torch.no_grad():
@@ -94,7 +91,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
                     t5_vec = text_encoder1(
                         input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False
                     )["last_hidden_state"]
-                    assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"
+                    assert torch.isnan(t5_vec).any() is False, "T5 vector contains NaN values"
                     t5_vec = t5_vec.cpu()
 
                 with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
@@ -240,7 +237,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
             pixels = vae.decode(latent)  # decode to pixels
         del latent
 
-        logger.info(f"Decoding complete")
+        logger.info("Decoding complete")
         pixels = pixels.to(torch.float32).cpu()
         pixels = (pixels / 2 + 0.5).clamp(0, 1)  # -1 to 1 -> 0 to 1
 

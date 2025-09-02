@@ -5,7 +5,6 @@ import shutil
 from typing import Callable
 
 import accelerate
-import torch
 
 from musubi_tuner.utils import huggingface_utils
 

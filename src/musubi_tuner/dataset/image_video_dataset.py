@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import glob
+from importlib.util import find_spec
 import json
 import math
 import os
@@ -10,7 +11,6 @@ from typing import Any, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 from safetensors.torch import save_file, load_file
-from safetensors import safe_open
 from PIL import Image
 import cv2
 import av
@@ -26,28 +26,17 @@ logger = BlissfulLogger(__name__, "green")
 
 IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP"]
 
-try:
-    import pillow_avif
-
+if find_spec("pillow_avif") is not None:
+    import pillow_avif  # noqa: F401 # type: ignore
     IMAGE_EXTENSIONS.extend([".avif", ".AVIF"])
-except:
-    pass
 
-# JPEG-XL on Linux
-try:
-    from jxlpy import JXLImagePlugin
-
+if find_spec("jxlpy") is not None:  # JPEG-XL on Linux
+    from jxlpy import JXLImagePlugin  # noqa: F401 # type: ignore
     IMAGE_EXTENSIONS.extend([".jxl", ".JXL"])
-except:
-    pass
 
-# JPEG-XL on Windows
-try:
-    import pillow_jxl
-
+if find_spec("pillow_jxl") is not None:  # JPEG-XL on Windows
+    import pillow_jxl  # noqa: F401 # type: ignore
     IMAGE_EXTENSIONS.extend([".jxl", ".JXL"])
-except:
-    pass
 
 VIDEO_EXTENSIONS = [
     ".mp4",
@@ -370,7 +359,7 @@ def save_text_encoder_output_cache_framepack(
     sd = {}
     dtype_str = dtype_to_str(llama_vec.dtype)
     sd[f"llama_vec_{dtype_str}"] = llama_vec.detach().cpu()
-    sd[f"llama_attention_mask"] = llama_attention_mask.detach().cpu()
+    sd["llama_attention_mask"] = llama_attention_mask.detach().cpu()
     dtype_str = dtype_to_str(clip_l_pooler.dtype)
     sd[f"clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
 

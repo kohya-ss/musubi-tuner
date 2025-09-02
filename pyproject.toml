@@ -1,7 +1,7 @@
 [project]
 name = "blissful-tuner"
 version = "0.10.66"
-description = "Musubi Tuner by kohya_ss extended to Blissful Tuner by Sarania"
+description = "Musubi Tuner by kohya_ss extended to Blissful Tuner by Blyss Sarania"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
 dependencies = [
@@ -61,6 +61,7 @@ dev = [
   "ascii-magic==2.3.0",
   "matplotlib==3.10.0",
   "tensorboard",
+  "ruff>=0.12.10",
 ]
 
 postprocess = [
@@ -98,3 +99,60 @@ explicit = true
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[tool.ruff]
+target-version = "py39"
+lint.ignore = [
+  "E402",  # module-import-not-at-top-of-file
+  "E712",  # true-false-comparison
+  "E721",  # type-comparison
+  "E722",  # bare-except
+  "E731",  # lambda-assignment
+  "E741",  # ambiguous-variable-name
+  "F601",  # multi-value-repeated-key-literal
+  "F841",  # unused-variable
+]
+
+extend-exclude = [  # Exclude external repos that blissful-tuner includes
+  "src/blissful_tuner/codeformer",
+  "src/blissful_tuner/esrgan",
+  "src/blissful_tuner/gfpgan",
+  "src/blissful_tuner/gimmvfi",
+  "src/blissful_tuner/swinir",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore all rules for files with copyright headers from external sources
+# https://docs.astral.sh/ruff/settings/#lint_per-file-ignores
+# # Ignore `E402` (import violations) in all `__init__.py` files, and in `path/to/file.py`.
+# "__init__.py" = ["E402"]
+# "path/to/file.py" = ["E402"]
+# # Ignore `D` rules everywhere except for the `src/` directory.
+# "!src/**.py" = ["D"]
+"src/musubi_tuner/flux/flux_models.py" = ["ALL"]
+"src/musubi_tuner/frame_pack/hunyuan.py" = ["ALL"]
+"src/musubi_tuner/frame_pack/hunyuan_video_packed.py" = ["ALL"]
+"src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py" = ["ALL"]
+"src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py" = ["ALL"]
+"src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py" = ["ALL"]
+"src/musubi_tuner/modules/scheduling_flow_match_discrete.py" = ["ALL"]
+"src/musubi_tuner/modules/unet_causal_3d_blocks.py" = ["ALL"]
+"src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py" = ["ALL"]
+"src/musubi_tuner/qwen_image/qwen_image_model.py" = ["ALL"]
+"src/musubi_tuner/wan/configs/__init__.py" = ["ALL"]
+"src/musubi_tuner/wan/configs/shared_config.py" = ["ALL"]
+"src/musubi_tuner/wan/configs/wan_i2v_14B.py" = ["ALL"]
+"src/musubi_tuner/wan/configs/wan_i2v_A14B.py" = ["ALL"]
+"src/musubi_tuner/wan/configs/wan_t2v_14B.py" = ["ALL"]
+"src/musubi_tuner/wan/configs/wan_t2v_1_3B.py" = ["ALL"]
+"src/musubi_tuner/wan/configs/wan_t2v_A14B.py" = ["ALL"]
+"src/musubi_tuner/wan/modules/attention.py" = ["ALL"]
+"src/musubi_tuner/wan/modules/clip.py" = ["ALL"]
+"src/musubi_tuner/wan/modules/model.py" = ["ALL"]
+"src/musubi_tuner/wan/modules/t5.py" = ["ALL"]
+"src/musubi_tuner/wan/modules/tokenizers.py" = ["ALL"]
+"src/musubi_tuner/wan/modules/vae.py" = ["ALL"]
+"src/musubi_tuner/wan/modules/xlm_roberta.py" = ["ALL"]
+"src/musubi_tuner/wan/utils/fm_solvers.py" = ["ALL"]
+"src/musubi_tuner/wan/utils/fm_solvers_unipc.py" = ["ALL"]
+"src/musubi_tuner/wan/utils/utils.py" = ["ALL"]

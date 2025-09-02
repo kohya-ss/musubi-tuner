@@ -103,7 +103,7 @@ def process_text_encoder_batches(
             # skip existing cache files
             if skip_existing:
                 filtered_batch = [
-                    item for item in batch if not os.path.normpath(item.text_encoder_output_cache_path) in all_cache_files
+                    item for item in batch if os.path.normpath(item.text_encoder_output_cache_path) not in all_cache_files
                 ]
                 # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
                 if len(filtered_batch) == 0:
@@ -166,6 +166,7 @@ def main():
     logger.info("Encoding with Text Encoder 1")
 
     def encode_for_text_encoder_1(batch: list[ItemInfo]):
+        nonlocal text_encoder_1
         encode_and_save_batch(text_encoder_1, batch, is_llm=True, accelerator=accelerator)
 
     process_text_encoder_batches(
@@ -188,6 +189,7 @@ def main():
     logger.info("Encoding with Text Encoder 2")
 
     def encode_for_text_encoder_2(batch: list[ItemInfo]):
+        nonlocal text_encoder_2
         encode_and_save_batch(text_encoder_2, batch, is_llm=False, accelerator=None)
 
     process_text_encoder_batches(

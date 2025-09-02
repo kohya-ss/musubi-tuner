@@ -530,7 +530,7 @@ def load_vae(vae_path: str, device: Union[str, torch.device] = "cpu", disable_mm
   "z_dim": 16
 }
 """
-    logger.info(f"Initializing VAE")
+    logger.info("Initializing VAE")
     config = json.loads(VAE_CONFIG_JSON)
     vae = AutoencoderKLQwenImage(
         base_dim=config["base_dim"],

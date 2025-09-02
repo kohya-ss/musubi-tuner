@@ -115,11 +115,21 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 このプロジェクトがお役に立ったなら、ご支援いただけると嬉しく思います。 [GitHub Sponsors](https://github.com/sponsors/kohya-ss/)で受け付けています。
 
-
 ### 最近の更新
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/09/02 (update)
+    - Qwen-Imageのfine tuningに対応しました。[PR #492](https://github.com/kohya-ss/musubi-tuner/pull/492)
+        - LoRA学習ではなくモデル全体を学習します。詳細は[Qwen-Imageのドキュメントのfinetuningの節](./docs/qwen_image.md#finetuning)を参照してください。
+
+- 2025/09/02
+    - ruffによるコード解析を導入しました。[PR #483](https://github.com/kohya-ss/musubi-tuner/pull/483) および[PR #488](https://github.com/kohya-ss/musubi-tuner/pull/488) arledesma 氏に感謝します。
+        - ruffはPythonのコード解析、整形ツールです。
+    - コードの貢献をいただく際は、`ruff check`を実行してコードスタイルを確認していただけると助かります。`ruff --fix`で自動修正も可能です。
+        - なおコードの整形はblackで行うか、ruffのblack互換フォーマットを使い、`line-length`を`132`に設定してください。
+        - ガイドライン等をのちほど整備する予定です。
+    
 - 2025/08/28
     - RTX 50シリーズのGPUをお使いの場合、PyTorch 2.8.0をお試しください。
     - ライブラリの依存関係を更新し、`bitsandbytes`からバージョン指定を外しました。環境に応じた適切なバージョンをインストールしてください。

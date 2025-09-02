@@ -8,14 +8,12 @@ import math
 import os
 import pathlib
 import re
-import sys
 import random
 import time
 import json
 from multiprocessing import Value
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 import accelerate
-import numpy as np
 from packaging.version import Version
 
 import huggingface_hub
@@ -25,7 +23,7 @@ import torch
 from tqdm import tqdm
 from accelerate.utils import set_seed
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 import transformers
 from diffusers.optimization import (
     SchedulerType as DiffusersSchedulerType,
@@ -39,7 +37,6 @@ import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
 from musubi_tuner.hunyuan_model.vae import load_vae
 import musubi_tuner.hunyuan_model.vae as vae_module
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
-import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
 
@@ -394,31 +391,31 @@ class FineTuningTrainer:
                 optimizer_kwargs["relative_step"] = True  # default
             if not optimizer_kwargs["relative_step"] and optimizer_kwargs.get("warmup_init", False):
                 logger.info(
-                    f"set relative_step to True because warmup_init is True / warmup_initがTrueのためrelative_stepをTrueにします"
+                    "set relative_step to True because warmup_init is True / warmup_initがTrueのためrelative_stepをTrueにします"
                 )
                 optimizer_kwargs["relative_step"] = True
             logger.info(f"use Adafactor optimizer | {optimizer_kwargs}")
 
             if optimizer_kwargs["relative_step"]:
-                logger.info(f"relative_step is true / relative_stepがtrueです")
+                logger.info("relative_step is true / relative_stepがtrueです")
                 if lr != 0.0:
-                    logger.warning(f"learning rate is used as initial_lr / 指定したlearning rateはinitial_lrとして使用されます")
+                    logger.warning("learning rate is used as initial_lr / 指定したlearning rateはinitial_lrとして使用されます")
                 args.learning_rate = None
 
                 if args.lr_scheduler != "adafactor":
-                    logger.info(f"use adafactor_scheduler / スケジューラにadafactor_schedulerを使用します")
+                    logger.info("use adafactor_scheduler / スケジューラにadafactor_schedulerを使用します")
                 args.lr_scheduler = f"adafactor:{lr}"  # ちょっと微妙だけど
 
                 lr = None
             else:
                 if args.max_grad_norm != 0.0:
                     logger.warning(
-                        f"because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0 / max_grad_normが設定されているためclip_grad_normが有効になります。0に設定して無効にしたほうがいいかもしれません"
+                        "because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0 / max_grad_normが設定されているためclip_grad_normが有効になります。0に設定して無効にしたほうがいいかもしれません"
                     )
                 if args.lr_scheduler != "constant_with_warmup":
-                    logger.warning(f"constant_with_warmup will be good / スケジューラはconstant_with_warmupが良いかもしれません")
+                    logger.warning("constant_with_warmup will be good / スケジューラはconstant_with_warmupが良いかもしれません")
                 if optimizer_kwargs.get("clip_threshold", 1.0) != 1.0:
-                    logger.warning(f"clip_threshold=1.0 will be good / clip_thresholdは1.0が良いかもしれません")
+                    logger.warning("clip_threshold=1.0 will be good / clip_thresholdは1.0が良いかもしれません")
 
             optimizer_class = transformers.optimization.Adafactor
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
@@ -527,7 +524,7 @@ class FineTuningTrainer:
         if name.startswith("adafactor"):
             assert (
                 type(optimizer) == transformers.optimization.Adafactor
-            ), f"adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
+            ), "adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
             initial_lr = float(name.split(":")[1])
             # logger.info(f"adafactor scheduler init lr {initial_lr}")
             return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
@@ -802,7 +799,7 @@ class FineTuningTrainer:
             attn_mode = "xformers"
         else:
             raise ValueError(
-                f"either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
+                "either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
             )
         transformer = load_transformer(
             args.dit, attn_mode, args.split_attn, loading_device, None, in_channels=args.dit_in_channels

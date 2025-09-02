@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 # from toolz import curry
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import toml
 import voluptuous

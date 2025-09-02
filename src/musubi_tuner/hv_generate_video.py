@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime
 import gc
+from importlib.util import find_spec
 import random
 import os
 import time
@@ -23,10 +24,6 @@ from musubi_tuner.hunyuan_model.vae import load_vae
 from musubi_tuner.hunyuan_model.models import load_transformer
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.networks import lora
-try:
-    from lycoris.kohya import create_network_from_weights
-except ImportError:
-    pass
 from rich_argparse import RichHelpFormatter
 from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.utils.model_utils import str_to_dtype
@@ -41,6 +38,10 @@ from blissful_tuner.guidance import apply_zerostar_scaling, perpendicular_negati
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
 logger = BlissfulLogger(__name__, "green")
+lycoris_available = find_spec("lycoris") is not None
+if lycoris_available:
+    from lycoris.kohya import create_network_from_weights
+
 
 def clean_memory_on_device(device):
     if device.type == "cuda":
@@ -480,7 +481,7 @@ def parse_args():
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
+    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
     parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     parser.add_argument(
@@ -498,6 +499,9 @@ def parse_args():
     ), "latent_path is only supported for images or video output"
 
     # update dit_weight based on model_base if not exists
+
+    if args.lycoris and not lycoris_available:
+        raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
 
