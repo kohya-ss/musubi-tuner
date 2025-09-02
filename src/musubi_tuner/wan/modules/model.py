@@ -30,7 +30,7 @@ def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.type(torch.float32)
 
     # calculation
     sinusoid = torch.outer(position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
@@ -997,40 +997,40 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         return x, seq_lens, grid_sizes, freqs_list
 
     def get_time_embedding(self, t, seq_len, device):
-        with torch.amp.autocast(device_type=device.type, dtype=self.e_dtype):  # Original forces float32 but it seems we can get away with float16
-            if self.model_version == "2.1" or self.simple_modulation:
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).to(self.e_dtype)).to(self.e_dtype)
-                e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(self.e_dtype)
-            else:  # For Wan2.2
-                if t.dim() == 1:
-                    # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
-                    t = t.unsqueeze(1).expand(-1, seq_len)
-                bt = t.size(0)
-                t = t.flatten()
-                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).to(self.e_dtype)).to(self.e_dtype)
-                e0 = self.time_projection(e).unflatten(2, (6, self.dim)).to(self.e_dtype)
+        if self.model_version == "2.1" or self.simple_modulation:
+            e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t.flatten())).to(self.e_dtype)
+            e0 = self.time_projection(e).unflatten(1, (6, self.dim)).to(self.e_dtype, copy=False)
+        else:  # For Wan2.2
+            if t.dim() == 1:
+                # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
+                t = t.unsqueeze(1).expand(-1, seq_len)
+            bt = t.size(0)
+            t = t.flatten()
+            e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len))).to(self.e_dtype)
+            e0 = self.time_projection(e).unflatten(2, (6, self.dim)).to(self.e_dtype)
         return e, e0
 
     def blissful_optimize(self):
+        self.optimized_compile = False  # Otherwise it would be called every step
         if self.training:  # This function changes shape if input res/length changes and will trigger lots of recompiles during training
             torch.compiler.disable(self.get_imgids, recursive=False)  # So disable it then, but it's fine to compile for inference
-        self.optimized_compile = False  # Otherwise it would be called every step
         torch._dynamo.config.cache_size_limit = 64
         backend, mode, dynamic, fullgraph = self.compile_args
         dynamic = None if dynamic is None else dynamic.lower() in "true"
         fullgraph = fullgraph.lower() in "true"
+        self.compile_args = {"backend": backend, "mode": mode, "dynamic": dynamic, fullgraph: "fullgraph"}  # Now they've been processed to be compatible to be passed directly to torch.compile
         logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
         logger.info(f"Compile parameters: Backend: {backend}; Mode: {mode}; Dynamic: {dynamic if dynamic is not None else 'Auto'}; Fullgraph: {fullgraph}")
         # The default RoPE uses complex numbers and doesn't compile well as such, so only compile the alternate one which avoids them.
-        self.rope_embedder = torch.compile(self.rope_embedder, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph) if self.rope_func == "comfy" else None
-        self.get_patch_embedding = torch.compile(self.get_patch_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
-        self.get_time_embedding = torch.compile(self.get_time_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
-        self.text_embedding = torch.compile(self.text_embedding, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
-        self.head = torch.compile(self.head, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+        self.rope_embedder = torch.compile(self.rope_embedder, **self.compile_args) if self.rope_func == "comfy" else None
+        self.get_patch_embedding = torch.compile(self.get_patch_embedding, **self.compile_args)
+        self.get_time_embedding = torch.compile(self.get_time_embedding, **self.compile_args)
+        self.text_embedding = torch.compile(self.text_embedding, **self.compile_args)
+        self.head = torch.compile(self.head, **self.compile_args)
         for block in self.blocks:
-            block._forward = torch.compile(block._forward, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+            block._forward = torch.compile(block._forward, **self.compile_args)
             if self.rope_func == "comfy":
-                block.self_attn.comfyrope = torch.compile(block.self_attn.comfyrope, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+                block.self_attn.comfyrope = torch.compile(block.self_attn.comfyrope, **self.compile_args)
 
     def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None, km=None, nag_context=None):
         r"""
