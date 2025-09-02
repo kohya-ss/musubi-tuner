@@ -66,7 +66,7 @@ def get_current_version():
 
 def blissful_prefunc(args: argparse.Namespace):
     """Simple function to print about version, environment, and things"""
-    cuda_list = [f"Python: {sys.version.split(" ")[0]}"]
+    cuda_list = [f"Python: {sys.version.split(' ')[0]}"]
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

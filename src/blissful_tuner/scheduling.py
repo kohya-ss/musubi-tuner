@@ -31,7 +31,7 @@ import torch
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils import BaseOutput, is_scipy_available, logging
 from diffusers.utils.torch_utils import randn_tensor
-from diffusers.schedulers.scheduling_utils import SchedulerMixin, KarrasDiffusionSchedulers
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
 
 
 if is_scipy_available():
