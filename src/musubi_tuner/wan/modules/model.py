@@ -1018,7 +1018,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         backend, mode, dynamic, fullgraph = self.compile_args
         dynamic = None if dynamic is None else dynamic.lower() in "true"
         fullgraph = fullgraph.lower() in "true"
-        self.compile_args = {"backend": backend, "mode": mode, "dynamic": dynamic, fullgraph: "fullgraph"}  # Now they've been processed to be compatible to be passed directly to torch.compile
+        self.compile_args = {"backend": backend, "mode": mode, "dynamic": dynamic, "fullgraph": fullgraph}  # Now they've been processed to be compatible to be passed directly to torch.compile
         logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
         logger.info(f"Compile parameters: Backend: {backend}; Mode: {mode}; Dynamic: {dynamic if dynamic is not None else 'Auto'}; Fullgraph: {fullgraph}")
         # The default RoPE uses complex numbers and doesn't compile well as such, so only compile the alternate one which avoids them.
