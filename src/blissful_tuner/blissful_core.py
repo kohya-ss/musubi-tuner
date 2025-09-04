@@ -48,6 +48,8 @@ elif "wan_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "wan"
 elif "fpack_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "framepack"
+elif "flux_" in ROOT_SCRIPT:
+    DIFFUSION_MODEL = "flux"
 
 MODE = None
 if "generate" in ROOT_SCRIPT:
@@ -78,6 +80,7 @@ def blissful_prefunc(args: argparse.Namespace):
     logger.info(f"PyTorch: {torch.__version__}, Memory allocation: '{allocator}'")
     for string in cuda_list:
         logger.info(string)
+
     if args.optimized and MODE == "generate":
         logger.info("Optimized arguments enabled!")
         args.fp16_accumulation = True
@@ -89,6 +92,10 @@ def blissful_prefunc(args: argparse.Namespace):
             args.simple_modulation = True
         elif DIFFUSION_MODEL in ["hunyuan", "framepack"]:
             args.fp16_accumulation = False  # Disable this for hunyuan and framepack b/c we enable fp8_fast which offsets it anyway and torch 2.7.0 has issues with compiling hunyuan sometimes
+            args.fp8_fast = True
+        elif DIFFUSION_MODEL == "flux":
+            args.compile = False
+            args.fp16_accumulation = False
             args.fp8_fast = True
     if args.fp16_accumulation and MODE == "generate":
         logger.info("Enabling FP16 accumulation")
@@ -185,10 +192,10 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
 
 
 def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
-    if DIFFUSION_MODEL != "framepack":
+    blissful_prefunc(args)
+    if DIFFUSION_MODEL in ["wan", "hunyuan"]:
         if args.cfgzerostar_scaling and args.perp_neg is not None:
             error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
-    blissful_prefunc(args)
     args.seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     try:
         args.seed = int(args.seed)
@@ -210,3 +217,26 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if args.riflex_index != 0 and args.rope_func.lower() != "comfy":
             error_out(argparse.ArgumentTypeError, "RIFLEx can only be used with rope_func =='comfy'!")
     return args
+
+# =====================================================Region Flux============================================================================
+
+
+def add_blissful_flux_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:  # Todo: individualize the others to avoid the clusterf*** above
+    parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
+    parser.add_argument("--cfgzerostar_multiplier", type=float, default=0, help="Multiplier used for cfgzerostar_init. Default is 0 which zeroes the step. 1 would be like not using zero init.")
+    parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps. 2 is good for Wan T2V, 1 for I2V")
+    parser.add_argument("--cfg_schedule", type=str, default=None, help=CFG_SCHEDULE_HELP)
+    parser.add_argument("--fp16_accumulation", action="store_true", help="Enable FP16 accumulation in GEMMS for speed. Requires Pytorch 2.7+")
+    parser.add_argument("--guidance_scale", type=float, default=1.0, help="If > 1.0, enables and sets guidance scale for CFG(Classifier Free Guidance)")
+    parser.add_argument("--negative_prompt", type=str, default=None, help="Specify a negative prompt for CFG(Classifier Free Guidance)")
+    parser.add_argument(
+        "--optimized", action="store_true",
+        help="Overrides the default values of several command line args to provide an optimized but quality experience. "
+        "Enables fp16_accumulation, fp8_scaled, sageattn and torch.compile. For Wan additionally enables 'rope_func comfy'. "
+        "For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed in addition to PyTorch 2.7.0 or higher!"
+    )
+    parser.add_argument(
+        "--prompt_wildcards", type=str, default=None,
+        help="Path to a directory of wildcard.txt files to enable wildcards in prompts and negative prompts. For instance __color__ will look for wildcards in color.txt in that directory. "
+        "Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.")
+    return parser

@@ -20,6 +20,8 @@ from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
+from blissful_tuner.guidance import parse_scheduled_cfg, apply_zerostar_scaling
+from blissful_tuner.blissful_core import add_blissful_flux_args, parse_blissful_args
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
@@ -41,7 +43,6 @@ def parse_args() -> argparse.Namespace:
     # parser.add_argument(
     #     "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla"], help="The solver used to sample."
     # )
-
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
     parser.add_argument("--vae", type=str, default=None, help="AE directory or path")
     parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 (T5) directory or path")
@@ -66,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_resize_control", action="store_true", help="do not resize control image")
     parser.add_argument("--infer_steps", type=int, default=25, help="number of inference steps, default is 25")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument("--seed", type=str, default=None, help="Seed for evaluation.")
     # parser.add_argument(
     #     "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
     # )
@@ -91,7 +92,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
-    # parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled")
+    parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled")
 
     parser.add_argument("--fp8_t5", action="store_true", help="use fp8 for Text Encoder 1 (T5)")
     parser.add_argument(
@@ -115,20 +116,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
-    # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
-    # parser.add_argument(
-    #     "--compile_args",
-    #     nargs=4,
-    #     metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-    #     default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
-    #     help="Torch.compile settings",
-    # )
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
+    parser.add_argument(
+        "--compile_args",
+        nargs=4,
+        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
+        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        help="Torch.compile settings",
+    )
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
-
+    parser = add_blissful_flux_args(parser)
     args = parser.parse_args()
+    args = parse_blissful_args(args)
 
     # Validate arguments
     if args.from_file and args.interactive:
@@ -281,7 +283,7 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
 
         # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
         move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=False)  # args.fp8_fast)
+        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
 
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded FP8 optimized weights: {info}")
@@ -303,20 +305,29 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
         if target_device is not None and target_dtype is not None:
             model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # if args.compile:
-    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-    #     logger.info(
-    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-    #     )
-    #     torch._dynamo.config.cache_size_limit = 32
-    #     for i in range(len(model.blocks)):
-    #         model.blocks[i] = torch.compile(
-    #             model.blocks[i],
-    #             backend=compile_backend,
-    #             mode=compile_mode,
-    #             dynamic=compile_dynamic.lower() in "true",
-    #             fullgraph=compile_fullgraph.lower() in "true",
-    #         )
+    if args.compile:
+        compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
+        logger.info(
+            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+        )
+        torch._dynamo.config.cache_size_limit = 32
+        for i in range(len(model.single_blocks)):
+            model.single_blocks[i] = torch.compile(
+                model.single_blocks[i],
+                backend=compile_backend,
+                mode=compile_mode,
+                dynamic=None if compile_dynamic is None else compile_dynamic.lower() in "true",
+                fullgraph=compile_fullgraph.lower() in "true",
+            )
+
+        for i in range(len(model.double_blocks)):
+            model.double_blocks[i] = torch.compile(
+                model.double_blocks[i],
+                backend=compile_backend,
+                mode=compile_mode,
+                dynamic=None if compile_dynamic is None else compile_dynamic.lower() in "true",
+                fullgraph=compile_fullgraph.lower() in "true",
+            )
 
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
@@ -453,7 +464,7 @@ def prepare_text_inputs(
             t5_vec = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
                 "last_hidden_state"
             ]
-            assert torch.isnan(t5_vec).any() is False, "T5 vector contains NaN values"
+            assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"
             t5_vec = t5_vec.cpu()
 
         with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
@@ -461,6 +472,38 @@ def prepare_text_inputs(
             clip_l_pooler = clip_l_pooler.cpu()
 
         conds_cache[prompt] = (t5_vec, clip_l_pooler)
+
+    neg_t5_vec = neg_clip_l_pooler = None
+    neg_prompt = args.negative_prompt if args.negative_prompt is not None else ""  # No negative with CFG = true uncond
+    if args.guidance_scale > 1.0 or args.cfg_schedule is not None:
+        if neg_prompt in conds_cache:
+            neg_t5_vec, neg_clip_l_pooler = conds_cache[neg_prompt]
+        else:
+            move_models_to_device_if_needed()
+
+            neg_t5_tokens = tokenizer1(
+                neg_prompt,
+                max_length=flux_models.T5XXL_MAX_LENGTH,
+                padding="max_length",
+                return_length=False,
+                return_overflowing_tokens=False,
+                truncation=True,
+                return_tensors="pt",
+            )["input_ids"]
+            neg_l_tokens = tokenizer2(prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
+
+            with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+                neg_t5_vec = text_encoder1(input_ids=neg_t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
+                    "last_hidden_state"
+                ]
+                assert torch.isnan(neg_t5_vec).any() == False, "T5 vector contains NaN values"
+                neg_t5_vec = neg_t5_vec.cpu()
+
+            with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
+                neg_clip_l_pooler = text_encoder2(neg_l_tokens.to(text_encoder2.device))["pooler_output"]
+                neg_clip_l_pooler = neg_clip_l_pooler.cpu()
+
+            conds_cache[neg_prompt] = (neg_t5_vec, neg_clip_l_pooler)
 
     if not (shared_models and "text_encoder1" in shared_models):  # if loaded locally
         del tokenizer1, text_encoder1, tokenizer2, text_encoder2
@@ -473,8 +516,9 @@ def prepare_text_inputs(
     clean_memory_on_device(device)
 
     arg_c = {"t5_vec": t5_vec, "clip_l_pooler": clip_l_pooler, "prompt": prompt}
+    arg_null = {"t5_vec": neg_t5_vec, "clip_l_pooler": neg_clip_l_pooler, "prompt": neg_prompt}
 
-    return arg_c
+    return (arg_c, arg_null)
 
 
 def prepare_i2v_inputs(
@@ -524,7 +568,7 @@ def generate(
     """
     device, _ = (gen_settings.device, gen_settings.dit_weight_dtype)
     vae_instance_for_return = None
-
+    do_cfg = args.guidance_scale > 1.0 or args.cfg_schedule is not None
     # prepare seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     args.seed = seed  # set seed to args for saving
@@ -535,7 +579,7 @@ def generate(
         width = precomputed_image_data["width"]
         control_latent = precomputed_image_data["control_latent"]
 
-        context = precomputed_text_data
+        context_inputs = precomputed_text_data
 
         # VAE is not loaded here if data is precomputed; decoding VAE is handled by caller (e.g., process_batch_prompts)
         # vae_instance_for_return remains None
@@ -550,8 +594,8 @@ def generate(
             # the dtype of VAE weights is float32, but we can load it as bfloat16 for better performance in future
             vae_instance_for_return = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
 
-        height, width, context, control_latent = prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)
-
+        height, width, context_inputs, control_latent = prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)
+    context, neg_context = context_inputs  # Unpack tuple that haws negative context potentially now
     if shared_models is None or "model" not in shared_models:
         # load DiT model
         model = load_dit_model(args, device)
@@ -608,9 +652,14 @@ def generate(
 
     t5_vec = context["t5_vec"].to(device, dtype=torch.bfloat16)
     clip_l_pooler = context["clip_l_pooler"].to(device, dtype=torch.bfloat16)
-
     txt_ids = torch.zeros(t5_vec.shape[0], t5_vec.shape[1], 3, device=t5_vec.device)
-
+    if do_cfg:
+        logger.info("Will use CFG")
+        neg_t5_vec = neg_context["t5_vec"].to(device, dtype=torch.bfloat16)
+        neg_clip_l_pooler = neg_context["clip_l_pooler"].to(device, dtype=torch.bfloat16)
+        neg_txt_ids = torch.zeros(neg_t5_vec.shape[0], neg_t5_vec.shape[1], 3, device=neg_t5_vec.device)
+    if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
+        logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
     # make first noise with packed shape
     # original: b,16,2*h//16,2*w//16, packed: b,h//16*w//16,16*2*2
     packed_latent_height, packed_latent_width = height // 16, width // 16
@@ -637,39 +686,72 @@ def generate(
         control_latent = control_latent.to(device, dtype=torch.bfloat16)
     else:
         control_latent_ids = None
-
     # denoise
     timesteps = flux_utils.get_schedule(
         num_steps=args.infer_steps, image_seq_len=packed_latent_height * packed_latent_width, shift_value=args.flow_shift
     )
+    num_timesteps = len(timesteps)
+    if args.cfg_schedule is not None:
+        scale_per_step = parse_scheduled_cfg(args.cfg_schedule, num_timesteps, args.guidance_scale)
+        apply_cfg_array = [(i + 1) in scale_per_step and scale_per_step[i + 1] != 1.0 for i in range(num_timesteps)]
+        included_steps = sorted(scale_per_step.keys())
+        step_str = ", ".join(f"{step}: {scale_per_step[step]}" for step in included_steps if scale_per_step[step] != 1.0)
+        logger.info(f"CFG Schedule: {step_str}")
+        logger.info(f"Total CFG steps: {len(included_steps)}")
+    else:
+        apply_cfg_array = [args.guidance_scale > 1.0] * num_timesteps
 
     guidance = args.embedded_cfg_scale
     x = noise
 
     # logger.info(f"guidance: {guidance}, timesteps: {timesteps}")
-    guidance_vec = torch.full((x.shape[0],), guidance, device=x.device, dtype=x.dtype)
+    steps = zip(timesteps[:-1], timesteps[1:], apply_cfg_array)
 
-    for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
+    for i, (t_curr, t_prev, do_cfg_step) in tqdm(
+        enumerate(steps),
+        total=num_timesteps - 1
+    ):
         t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=x.device)
 
         img_input = x
         img_input_ids = img_ids
         if control_latent is not None:
-            # if control_latent is provided, concatenate it to the input
             img_input = torch.cat((img_input, control_latent), dim=1)
             img_input_ids = torch.cat((img_input_ids, control_latent_ids), dim=1)
+
+        if do_cfg_step:
+            img_input = torch.cat([img_input, img_input], dim=0)
+            img_input_ids = torch.cat([img_input_ids, img_input_ids], dim=0)
+            in_t5_vec = torch.cat([neg_t5_vec, t5_vec], dim=0)
+            in_clip_pooler = torch.cat([neg_clip_l_pooler, clip_l_pooler], dim=0)
+            in_txt_ids = torch.cat([neg_txt_ids, txt_ids], dim=0)
+            in_guidance = torch.full((x.shape[0] * 2,), guidance, device=x.device, dtype=x.dtype)
+        else:
+            in_t5_vec, in_clip_pooler, in_txt_ids = t5_vec, clip_l_pooler, txt_ids
+            in_guidance = torch.full((x.shape[0],), guidance, device=x.device, dtype=x.dtype)
 
         with torch.no_grad():
             pred = model(
                 img=img_input,
                 img_ids=img_input_ids,
-                txt=t5_vec,
-                txt_ids=txt_ids,
-                y=clip_l_pooler,
+                txt=in_t5_vec,
+                txt_ids=in_txt_ids,
+                y=in_clip_pooler,
                 timesteps=t_vec,
-                guidance=guidance_vec,
+                guidance=in_guidance,
             )
+
         pred = pred[:, : x.shape[1]]
+
+        if do_cfg_step:
+            pred_uncond, pred = torch.chunk(pred, 2, dim=0)
+            if args.cfgzerostar_scaling:
+                pred = apply_zerostar_scaling(pred, pred_uncond, args.guidance_scale)
+            else:
+                pred = pred_uncond + args.guidance_scale * (pred - pred_uncond)
+
+        if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
+            pred *= args.cfgzerostar_multiplier
 
         x = x + (t_prev - t_curr) * pred
 
@@ -1101,7 +1183,7 @@ def main():
     # Set device
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
-    logger.info(f"Using device: {device}")
+    #logger.info(f"Using device: {device}")
     args.device = device
 
     if latents_mode:

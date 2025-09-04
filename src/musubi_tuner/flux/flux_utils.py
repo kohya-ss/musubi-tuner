@@ -12,12 +12,8 @@ from musubi_tuner.flux import flux_models
 from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.safetensors_utils import load_safetensors
 from musubi_tuner.utils.train_utils import get_lin_function
-
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 CLIP_L_TOKENIZER_ID = "openai/clip-vit-large-patch14"
 T5_XXL_TOKENIZER_ID = "google/t5-v1_1-xxl"

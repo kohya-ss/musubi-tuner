@@ -3,26 +3,18 @@
 
 
 import math
-import os
-import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Optional
 
 import torch
 from einops import rearrange
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader, synchronize_device, clean_memory_on_device
+from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
-
-
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 # USE_REENTRANT = True
 
@@ -447,7 +439,7 @@ def attention(
             # split attention with different control lengths, trim to each control length
             max_control_length = max(control_lengths)
             total_len = torch.tensor([q.shape[-2] - max_control_length + cl for cl in control_lengths], dtype=torch.long)
-        # print(f"Max control length: {max_control_length}, control lengths: {control_lengths}, total_len: {total_len}")
+        # logger.info(f"Max control length: {max_control_length}, control lengths: {control_lengths}, total_len: {total_len}")
     else:
         # inference time or same length for all controls
         total_len = None
@@ -896,13 +888,23 @@ class Flux(nn.Module):
             move_to_device (bool):
                 Whether to move the weight to the device after optimization.
         """
-        TARGET_KEYS = ["single_blocks", "double_blocks"]
+        TARGET_KEYS = ["blocks"]
         EXCLUDE_KEYS = [
             "norm",
-            "mod",
+            "time_in",
+            "vector_in",
+            "text_in",
+            "guidance_in",
+            "img_in",
+            "final_layer",
+            #"modulation",  # Saves lots of mem to fp8 these and doesn't seem to hurt quality
+            #"img_mod",
+            #"img_mlp",
+            #"txt_mod",
+            #"txt_mlp"
         ]
 
-        from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+        from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
         # inplace optimization
         state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
@@ -923,7 +925,7 @@ class Flux(nn.Module):
         for block in self.double_blocks + self.single_blocks:
             block.enable_gradient_checkpointing()
 
-        print(f"FLUX: Gradient checkpointing enabled.")
+        logger.info(f"FLUX: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -936,7 +938,7 @@ class Flux(nn.Module):
         for block in self.double_blocks + self.single_blocks:
             block.disable_gradient_checkpointing()
 
-        print("FLUX: Gradient checkpointing disabled.")
+        logger.info("FLUX: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool):
         self.blocks_to_swap = num_blocks
@@ -954,7 +956,7 @@ class Flux(nn.Module):
         self.offloader_single = ModelOffloader(
             "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
         )
-        print(
+        logger.info(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
         )
 
@@ -963,14 +965,14 @@ class Flux(nn.Module):
             self.offloader_double.set_forward_only(True)
             self.offloader_single.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            print(f"FLUX: Block swap set to forward only.")
+            logger.info(f"FLUX: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader_double.set_forward_only(False)
             self.offloader_single.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            print(f"FLUX: Block swap set to forward and backward.")
+            logger.info(f"FLUX: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage

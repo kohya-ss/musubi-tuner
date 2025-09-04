@@ -4,14 +4,9 @@ import ast
 from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
-
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
 import musubi_tuner.networks.lora as lora
-
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 FLUX_KONTEXT_TARGET_REPLACE_MODULES = ["DoubleStreamBlock", "SingleStreamBlock"]
 

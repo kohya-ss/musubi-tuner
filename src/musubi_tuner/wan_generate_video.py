@@ -1206,7 +1206,7 @@ def prepare_i2v_inputs(
 
         # free text encoder and clean memory
         text_encoder.model.to("cpu")  # Offload instead because blissful might use it
-        clean_memory_on_device
+        clean_memory_on_device(device)
 
         # load CLIP model
         clip_context = None

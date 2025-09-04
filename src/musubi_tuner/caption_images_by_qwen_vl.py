@@ -11,12 +11,8 @@ from transformers import AutoProcessor
 
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.qwen_image.qwen_image_utils import load_qwen2_5_vl
-
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 IMAGE_FACTOR = 28  # The image size must be divisible by this factor
 DEFAULT_MAX_SIZE = 1280

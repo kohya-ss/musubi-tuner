@@ -135,7 +135,8 @@ def optimize_state_dict_with_fp8(
     target_layer_keys=None,
     exclude_layer_keys=None,
     exp_bits=4,
-    mantissa_bits=3
+    mantissa_bits=3,
+    move_to_device=False
 ):
     """
     Optimize Linear layer weights in a model's state dict to FP8 format
@@ -203,8 +204,7 @@ def optimize_state_dict_with_fp8(
         # Calculate the mean relative error (in percent)
         average_quantization_error_this_tensor = (torch.mean(torch.abs(value - reconstructed)) / (torch.mean(torch.abs(value)) + 1e-8)) * 100  # Adding a small epsilon to avoid division by zero issues if necessary.
         per_tensor_quantization_error.append(average_quantization_error_this_tensor)
-
-        quantized_weight = quantized_weight.to(original_device)  # Offload it for now
+        quantized_weight = quantized_weight.to(original_device)  # Offloading it now always saves memory versus not
         scale_tensor = torch.tensor([scale], dtype=original_dtype, device=quantized_weight.device)
 
         state_dict[fp8_key] = quantized_weight

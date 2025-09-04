@@ -153,7 +153,7 @@ def process_wildcards(
             for key in set(matches):
                 replacement = wildcard_replace(key, wildcard_location)
                 prompt = re.sub(f"__{re.escape(key)}__", replacement, prompt)
-                replacements.append(f"{key} -> {replacement}")
+                replacements.append(f"'{key}' -> '{replacement}'")
             depth += 1
 
         if depth >= max_depth:
