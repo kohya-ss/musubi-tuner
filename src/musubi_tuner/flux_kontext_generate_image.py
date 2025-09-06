@@ -1,5 +1,6 @@
 import argparse
 from importlib.util import find_spec
+from contextlib import nullcontext
 import random
 import os
 import time
@@ -20,6 +21,7 @@ from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
+from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.guidance import parse_scheduled_cfg, apply_zerostar_scaling
 from blissful_tuner.blissful_core import add_blissful_flux_args, parse_blissful_args
 from blissful_tuner.blissful_logger import BlissfulLogger
@@ -121,7 +123,7 @@ def parse_args() -> argparse.Namespace:
         "--compile_args",
         nargs=4,
         metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        default=["inductor", "default", "False", "False"],
         help="Torch.compile settings",
     )
 
@@ -296,7 +298,7 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
         target_device = None
 
         if args.fp8:
-            target_dtype = torch.float8e4m3fn
+            target_dtype = torch.float8_e4m3fn
 
         if args.blocks_to_swap == 0:
             logger.info(f"Move model to device: {device}")
@@ -403,7 +405,7 @@ def prepare_text_inputs(
         # text_encoder1 and text_encoder2 are on device (batched inference) or CPU (interactive inference)
     else:  # Load if not in shared_models
         # T5XXL is float16 by default, but it causes NaN values in some cases, so we use bfloat16 (or fp8 if specified)
-        t5_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.bfloat16
+        t5_dtype = torch.float8_e4m3fn if args.fp8_t5 else torch.bfloat16
         tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t5_dtype, device=device, disable_mmap=True)
         tokenizer2, text_encoder2 = flux_utils.load_clip_l(
             args.text_encoder2, dtype=torch.bfloat16, device=device, disable_mmap=True
@@ -464,7 +466,7 @@ def prepare_text_inputs(
             t5_vec = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
                 "last_hidden_state"
             ]
-            assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"
+            assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"  # NoQA tensor is not bool
             t5_vec = t5_vec.cpu()
 
         with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
@@ -490,13 +492,13 @@ def prepare_text_inputs(
                 truncation=True,
                 return_tensors="pt",
             )["input_ids"]
-            neg_l_tokens = tokenizer2(prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
+            neg_l_tokens = tokenizer2(neg_prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
 
             with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
                 neg_t5_vec = text_encoder1(input_ids=neg_t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
                     "last_hidden_state"
                 ]
-                assert torch.isnan(neg_t5_vec).any() == False, "T5 vector contains NaN values"
+                assert torch.isnan(neg_t5_vec).any() == False, "T5 vector contains NaN values"  # NoQA
                 neg_t5_vec = neg_t5_vec.cpu()
 
             with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
@@ -649,14 +651,14 @@ def generate(
     #     return mask_image
 
     logger.info(f"Prompt: {context['prompt']}")
-
-    t5_vec = context["t5_vec"].to(device, dtype=torch.bfloat16)
-    clip_l_pooler = context["clip_l_pooler"].to(device, dtype=torch.bfloat16)
+    working_dtype = torch.bfloat16
+    t5_vec = context["t5_vec"].to(device, dtype=working_dtype)
+    clip_l_pooler = context["clip_l_pooler"].to(device, dtype=working_dtype)
     txt_ids = torch.zeros(t5_vec.shape[0], t5_vec.shape[1], 3, device=t5_vec.device)
     if do_cfg:
         logger.info("Will use CFG")
-        neg_t5_vec = neg_context["t5_vec"].to(device, dtype=torch.bfloat16)
-        neg_clip_l_pooler = neg_context["clip_l_pooler"].to(device, dtype=torch.bfloat16)
+        neg_t5_vec = neg_context["t5_vec"].to(device, dtype=working_dtype)
+        neg_clip_l_pooler = neg_context["clip_l_pooler"].to(device, dtype=working_dtype)
         neg_txt_ids = torch.zeros(neg_t5_vec.shape[0], neg_t5_vec.shape[1], 3, device=neg_t5_vec.device)
     if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
         logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
@@ -671,7 +673,7 @@ def generate(
         dtype=noise_dtype,
         generator=seed_g,
         device="cpu",
-    ).to(device, dtype=torch.bfloat16)
+    ).to(device, dtype=working_dtype)
 
     img_ids = flux_utils.prepare_img_ids(1, packed_latent_height, packed_latent_width).to(device)
 
@@ -683,13 +685,19 @@ def generate(
         control_latent = rearrange(control_latent, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
         control_latent_ids = flux_utils.prepare_img_ids(1, ctrl_packed_height, ctrl_packed_width, is_ctrl=True).to(device)
 
-        control_latent = control_latent.to(device, dtype=torch.bfloat16)
+        control_latent = control_latent.to(device, dtype=working_dtype)
     else:
         control_latent_ids = None
     # denoise
     timesteps = flux_utils.get_schedule(
         num_steps=args.infer_steps, image_seq_len=packed_latent_height * packed_latent_width, shift_value=args.flow_shift
     )
+    if args.preview_latent_every:
+        previewer = LatentPreviewer(  # Make noise proper latent space image
+            args, rearrange(noise, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2),
+            None, device, torch.bfloat16, model_type="flux"
+        )
+        previewer.sigmas = timesteps
     num_timesteps = len(timesteps)
     if args.cfg_schedule is not None:
         scale_per_step = parse_scheduled_cfg(args.cfg_schedule, num_timesteps, args.guidance_scale)
@@ -705,56 +713,64 @@ def generate(
     x = noise
 
     # logger.info(f"guidance: {guidance}, timesteps: {timesteps}")
-    steps = zip(timesteps[:-1], timesteps[1:], apply_cfg_array)
-
-    for i, (t_curr, t_prev, do_cfg_step) in tqdm(
-        enumerate(steps),
-        total=num_timesteps - 1
-    ):
+    need_cast = model.dtype != torch.bfloat16
+    dtype_context = nullcontext()
+    if need_cast:
+        dtype_context = torch.autocast(device_type=device.type, dtype=torch.bfloat16)  # BRAINFLOAT
+        logger.info(f"Autocast enabled for {model.dtype} model")
+    i = 0
+    guidance_vec = torch.full((x.shape[0],), guidance, device=x.device, dtype=x.dtype)
+    for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
         t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=x.device)
-
+        do_cfg_step = apply_cfg_array[i]
         img_input = x
         img_input_ids = img_ids
         if control_latent is not None:
             img_input = torch.cat((img_input, control_latent), dim=1)
             img_input_ids = torch.cat((img_input_ids, control_latent_ids), dim=1)
 
-        if do_cfg_step:
-            img_input = torch.cat([img_input, img_input], dim=0)
-            img_input_ids = torch.cat([img_input_ids, img_input_ids], dim=0)
-            in_t5_vec = torch.cat([neg_t5_vec, t5_vec], dim=0)
-            in_clip_pooler = torch.cat([neg_clip_l_pooler, clip_l_pooler], dim=0)
-            in_txt_ids = torch.cat([neg_txt_ids, txt_ids], dim=0)
-            in_guidance = torch.full((x.shape[0] * 2,), guidance, device=x.device, dtype=x.dtype)
-        else:
-            in_t5_vec, in_clip_pooler, in_txt_ids = t5_vec, clip_l_pooler, txt_ids
-            in_guidance = torch.full((x.shape[0],), guidance, device=x.device, dtype=x.dtype)
-
-        with torch.no_grad():
+        with torch.no_grad(), dtype_context:
             pred = model(
                 img=img_input,
                 img_ids=img_input_ids,
-                txt=in_t5_vec,
-                txt_ids=in_txt_ids,
-                y=in_clip_pooler,
+                txt=t5_vec,
+                txt_ids=txt_ids,
+                y=clip_l_pooler,
                 timesteps=t_vec,
-                guidance=in_guidance,
+                guidance=guidance_vec,
             )
 
         pred = pred[:, : x.shape[1]]
 
         if do_cfg_step:
-            pred_uncond, pred = torch.chunk(pred, 2, dim=0)
+            cur_guidance = scale_per_step[i + 1] if args.cfg_schedule else args.guidance_scale
+            with torch.no_grad(), dtype_context:
+                pred_uncond = model(
+                    img=img_input,
+                    img_ids=img_input_ids,
+                    txt=neg_t5_vec,
+                    txt_ids=neg_txt_ids,
+                    y=neg_clip_l_pooler,
+                    timesteps=t_vec,
+                    guidance=guidance_vec,
+                )
+
+            pred_uncond = pred_uncond[:, : x.shape[1]]
+
             if args.cfgzerostar_scaling:
-                pred = apply_zerostar_scaling(pred, pred_uncond, args.guidance_scale)
+                pred = apply_zerostar_scaling(pred, pred_uncond, cur_guidance)
             else:
-                pred = pred_uncond + args.guidance_scale * (pred - pred_uncond)
+                pred = pred_uncond + cur_guidance * (pred - pred_uncond)
 
         if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
             pred *= args.cfgzerostar_multiplier
 
         x = x + (t_prev - t_curr) * pred
 
+        if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
+            preview_x = rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
+            previewer.preview(preview_x, i)
+        i += 1
     # unpack
     x = x.float()
     x = rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
@@ -1183,7 +1199,6 @@ def main():
     # Set device
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
-    #logger.info(f"Using device: {device}")
     args.device = device
 
     if latents_mode:

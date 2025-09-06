@@ -63,7 +63,7 @@ def load_torch_file(ckpt, weights_only=True, device=None, return_metadata=False)
             # only load supported extensions
             if not os.path.isfile(path):
                 continue
-            if not path.lower().endswith((".safetensors", ".sft", ".pt", ".pth")):
+            if not path.lower().endswith((".safetensors", ".sft", ".pt", ".pth", ".bin")):
                 continue
             # load each shard (we ignore metadata for shards)
             shard_sd = load_torch_file(path, weights_only, device, return_metadata=False)

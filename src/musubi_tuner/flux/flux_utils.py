@@ -137,17 +137,19 @@ def load_flow_model(
     loading_device = torch.device(loading_device) if loading_device is not None else device
     flux_kontext_loading_device = loading_device if not fp8_scaled else torch.device("cpu")
 
-    # build model
-    with init_empty_weights():
-        params = flux_models.configs_flux_dev_context.params
-
-        model = flux_models.Flux(params, attn_mode, split_attn)
-        if dtype is not None:
-            model = model.to(dtype)
-
     # load_sft doesn't support torch.device
     logger.info(f"Loading state dict from {ckpt_path} to {flux_kontext_loading_device}")
     sd = load_safetensors(ckpt_path, device=flux_kontext_loading_device, disable_mmap=disable_mmap, dtype=dtype)
+    if "guidance_in.in_layer.weight" in sd:
+        params = flux_models.configs_flux_dev_context.params
+    else:
+        logger.info("Initializing without guidance embed (Dedistilled etc)")
+        params = flux_models.configs_flux_dev_dedistilled_context.params
+    # build model
+    with init_empty_weights():
+        model = flux_models.Flux(params, attn_mode, split_attn)
+        if dtype is not None:
+            model = model.to(dtype)
 
     # if the key has annoying prefix, remove it
     for key in list(sd.keys()):
@@ -293,7 +295,11 @@ def load_clip_l(
     else:
         logger.info(f"Loading state dict from {ckpt_path}")
         sd = load_safetensors(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
-    info = clip.load_state_dict(sd, strict=True, assign=True)
+    new_sd = {}
+    for key, value in sd.items():
+        if "logit_scale" != key and "text_projection.weight" != key:
+            new_sd[key] = value
+    info = clip.load_state_dict(new_sd, strict=True, assign=True)
     logger.info(f"Loaded CLIP-L: {info}")
     clip.to(device)
 

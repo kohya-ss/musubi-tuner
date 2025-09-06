@@ -15,6 +15,7 @@ from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import string_to_seed, error_out
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import process_wildcards
+from blissful_tuner.utils import power_seed
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 BLISSFUL_VERSION = "0.10.66"
@@ -196,12 +197,7 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
         if args.cfgzerostar_scaling and args.perp_neg is not None:
             error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
-    args.seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
-    try:
-        args.seed = int(args.seed)
-    except ValueError:
-        args.seed = string_to_seed(args.seed, bits=32)
-
+    args.seed = power_seed(args.seed)  # Save it back because it might have been a STR before
     if args.prompt_wildcards is not None:
         args.prompt = process_wildcards(args.prompt, args.prompt_wildcards) if args.prompt is not None else None
         args.negative_prompt = process_wildcards(args.negative_prompt, args.prompt_wildcards) if args.negative_prompt is not None else None
@@ -222,6 +218,8 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def add_blissful_flux_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:  # Todo: individualize the others to avoid the clusterf*** above
+    parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
+    parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps. If --preview_vae is not specified it will use latent2rgb")
     parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
     parser.add_argument("--cfgzerostar_multiplier", type=float, default=0, help="Multiplier used for cfgzerostar_init. Default is 0 which zeroes the step. 1 would be like not using zero init.")
     parser.add_argument("--cfgzerostar_init_steps", type=int, default=-1, help="Enables CFGZero* zeroing out the first N steps. 2 is good for Wan T2V, 1 for I2V")

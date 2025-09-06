@@ -14,6 +14,7 @@ import torch
 import av
 from PIL import Image
 from .taehv import TAEHV
+from .taesd import TAESD
 from .utils import load_torch_file
 from blissful_tuner.blissful_logger import BlissfulLogger
 
@@ -31,53 +32,55 @@ class LatentPreviewer():
         dtype: torch.dtype,
         model_type: str = "hunyuan"
     ) -> None:
-        self.mode = "latent2rgb" if args.preview_vae is None else "taehv"
+        self.mode = "latent2rgb" if args.preview_vae is None else "taehv" if model_type != "flux" else "taesd"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")
         self.subtract_noise = False
         self.args = args
-        self.noise_remaining = 1.00
         self.model_type = model_type
         self.device = device
         self.dtype = dtype if dtype != torch.float8_e4m3fn else torch.float16
-        if model_type != "framepack" and original_latents is not None and scheduler is not None:
-            self.original_latents = original_latents.to(self.device)
-            self.sigmas = scheduler.sigmas
-            self.scheduler = scheduler
-            self.subtract_noise = True
+        self.scheduler = None
+        self.sigmas = None
+        self.warning_done = False
 
-        if self.model_type not in ["hunyuan", "wan", "framepack"]:
+        if self.model_type not in ["hunyuan", "wan", "framepack", "flux"]:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
-        if self.mode == "taehv":
-            logger.info(f"Loading TAEHV: {args.preview_vae}...")
+        if model_type != "framepack" and original_latents is not None:  # Framepack will send in na clean latent, others will be noisy
+            self.original_latents = original_latents.to(self.device)
+            self.subtract_noise = True
+            if scheduler is not None:
+                self.sigmas = scheduler.sigmas
+                self.scheduler = scheduler
+
+        if "tae" in self.mode:
             if os.path.exists(args.preview_vae):
                 tae_sd = load_torch_file(args.preview_vae, safe_load=True, device=args.device)
             else:
                 raise FileNotFoundError(f"{args.preview_vae} was not found!")
-            self.taehv = TAEHV(tae_sd).to("cpu", self.dtype)  # Offload for VRAM and match datatype
-            self.decoder = self.decode_taehv
-            self.scale_factor = None
-            self.fps = args.fps
+            logger.info(f"Loading TAE: {args.preview_vae}...")
+            tae_class = TAEHV if self.mode == "taehv" else TAESD
+            self.decoder = self.decode_taehv if self.mode == "taehv" else self.decode_taesd
+            self.tae = tae_class(tae_sd).to("cpu", self.dtype)  # Offload for VRAM and match datatype
         elif self.mode == "latent2rgb":
             self.decoder = self.decode_latent2rgb
-            self.scale_factor = 8
-            self.fps = int(args.fps / 4)
 
     @torch.inference_mode()
-    def preview(self, noisy_latents: torch.Tensor) -> None:
+    def preview(self, noisy_latents: torch.Tensor, step: int = None) -> None:
         self.clean_cache()
         if self.model_type == "wan":
             noisy_latents = noisy_latents.unsqueeze(0)  # F, C, H, W -> B, F, C, H, W
         elif self.model_type in ["hunyuan", "framepack"]:
             pass  # already B, F, C, H, W
-        denoisy_latents = self.subtract_original_and_normalize(noisy_latents) if self.subtract_noise else noisy_latents
+        denoisy_latents = self.subtract_original_and_normalize(noisy_latents, step) if self.subtract_noise else noisy_latents
         decoded = self.decoder(denoisy_latents)  # returned as F, C, H, W
 
         # Upscale if we used latent2rgb so output is same size as expected
-        if self.scale_factor is not None:
+        scale_factor = 8 if self.mode == "latent2rgb" else None
+        if scale_factor is not None:
             upscaled = torch.nn.functional.interpolate(
                 decoded,
-                scale_factor=self.scale_factor,
+                scale_factor=scale_factor,
                 mode="bicubic",
                 align_corners=False
             )
@@ -93,14 +96,20 @@ class LatentPreviewer():
             torch.cuda.empty_cache()
 
     @torch.inference_mode()
-    def subtract_original_and_normalize(self, noisy_latents: torch.Tensor):
+    def subtract_original_and_normalize(self, noisy_latents: torch.Tensor, step: int = None):
         device = noisy_latents.device
-        noise_remaining = self.sigmas[self.scheduler.step_index]  # get step directly from scheduler
-        # Subtract the portion of original latents
-        if hasattr(self.scheduler, "last_noise") and self.scheduler.last_noise is not None:
-            noise = self.scheduler.last_noise  # Some schedulers e.g. LCM change the noise/use additional noise.
+        noise = self.original_latents
+        if self.scheduler is not None and self.sigmas is not None:
+            noise_remaining = self.sigmas[self.scheduler.step_index]  # get step directly from scheduler
+            if hasattr(self.scheduler, "last_noise") and self.scheduler.last_noise is not None:
+                noise = self.scheduler.last_noise  # Some schedulers e.g. LCM change the noise/use additional noise.
+        elif step is not None and self.sigmas is not None:
+            noise_remaining = self.sigmas[step]
         else:
-            noise = self.original_latents
+            if not self.warning_done:
+                self.warning_done = True
+            logger.warning("No sigmas provided to previewer so preview may be incorrect/bad!")
+        # Subtract the portion of original latents
         denoisy_latents = noisy_latents - (noise.to(device) * noise_remaining)
         normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-9)
         return normalized_denoisy_latents
@@ -120,8 +129,13 @@ class LatentPreviewer():
             return
 
         # Otherwise, write out as a video.
+        if hasattr(self.args, "fps"):
+            out_fps = self.args.fps // 4 if self.mode == "latent2rgb" else self.args.fps
+        else:
+            out_fps = 24 // 4 if self.mode == "latent2rgb" else 24
+            logger.warning(f"Requested to write out a video but no fps in args! Probably shouldn't see this but we'll set it to {out_fps} and keep going")
         container = av.open(target, mode="w")
-        stream = container.add_stream("libx264", rate=self.fps)
+        stream = container.add_stream("libx264", rate=out_fps)
         stream.pix_fmt = "yuv420p"
         stream.width = width
         stream.height = height
@@ -146,12 +160,20 @@ class LatentPreviewer():
         """
         Decodes latents with the TAEHV model, returns shape (F, C, H, W).
         """
-        self.taehv.to(self.device)  # Onload
+        self.tae.to(self.device)  # Onload
         latents_permuted = latents.permute(0, 2, 1, 3, 4)  # Reordered to B, F, C, H, W for TAE
         latents_permuted = latents_permuted.to(device=self.device, dtype=self.dtype)
-        decoded = self.taehv.decode_video(latents_permuted, parallel=False, show_progress_bar=False)
-        self.taehv.to("cpu")  # Offload
+        decoded = self.tae.decode_video(latents_permuted, parallel=False, show_progress_bar=False)
+        self.tae.to("cpu")  # Offload
         return decoded.squeeze(0)  # squeeze off batch dimension as next step doesn't want it
+
+    @torch.inference_mode()
+    def decode_taesd(self, latents: torch.Tensor):
+        self.tae.to(self.device)  # Onload
+        latents = latents.to(device=self.device, dtype=self.dtype)
+        decoded = self.tae.decoder(latents).clamp(0, 1)
+        self.tae.to("cpu")  # Offload
+        return decoded
 
     @torch.inference_mode()
     def decode_latent2rgb(self, latents: torch.Tensor):
@@ -201,8 +223,28 @@ class LatentPreviewer():
                 ],
                 "bias": [-0.1835, -0.0868, -0.3360],
             },
+            "flux": {
+                "rgb_factors": [
+                    [-0.0346,  0.0244,  0.0681],
+                    [ 0.0034,  0.0210,  0.0687],
+                    [ 0.0275, -0.0668, -0.0433],
+                    [-0.0174,  0.0160,  0.0617],
+                    [ 0.0859,  0.0721,  0.0329],
+                    [ 0.0004,  0.0383,  0.0115],
+                    [ 0.0405,  0.0861,  0.0915],
+                    [-0.0236, -0.0185, -0.0259],
+                    [-0.0245,  0.0250,  0.1180],
+                    [ 0.1008,  0.0755, -0.0421],
+                    [-0.0515,  0.0201,  0.0011],
+                    [ 0.0428, -0.0012, -0.0036],
+                    [ 0.0817,  0.0765,  0.0749],
+                    [-0.1264, -0.0522, -0.1103],
+                    [-0.0280, -0.0881, -0.0499],
+                    [-0.1262, -0.0982, -0.0778]
+                ],
+                "bias": [-0.0329, -0.0718, -0.0851]
+            }
         }
-
         latent_rgb_factors = model_params[self.model_type]["rgb_factors"] if self.model_type != "framepack" else model_params["hunyuan"]
         latent_rgb_factors_bias = model_params[self.model_type]["bias"]
 
@@ -220,7 +262,9 @@ class LatentPreviewer():
 
         # For each frame, apply the linear transform
         latent_images = []
-        for t in range(latents.shape[2]):
+        if self.model_type == "flux":
+            latents = latents[:, :, None, :, :]  # Will be B, C, H, W so make a fake frame dim to make life easy
+        for t in range(latents.shape[2]):  # B, C, F, H, W
             extracted = latents[:, :, t, :, :][0].permute(1, 2, 0)  # shape = (H, W, C) after .permute(1,2,0)
             rgb = torch.nn.functional.linear(extracted, latent_rgb_factors, bias=latent_rgb_factors_bias)  # shape = (H, W, 3) after linear
             latent_images.append(rgb)

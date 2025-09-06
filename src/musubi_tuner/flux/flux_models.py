@@ -400,6 +400,36 @@ configs_flux_dev_context = ModelSpec(
     ),
 )
 
+configs_flux_dev_dedistilled_context = ModelSpec(
+    params=FluxParams(
+        in_channels=64,
+        # out_channels=64,
+        vec_in_dim=768,
+        context_in_dim=4096,
+        hidden_size=3072,
+        mlp_ratio=4.0,
+        num_heads=24,
+        depth=19,
+        depth_single_blocks=38,
+        axes_dim=[16, 56, 56],
+        theta=10_000,
+        qkv_bias=True,
+        guidance_embed=False,
+    ),
+    ae_params=AutoEncoderParams(
+        resolution=256,
+        in_channels=3,
+        ch=128,
+        out_ch=3,
+        ch_mult=[1, 2, 4, 4],
+        num_res_blocks=2,
+        z_channels=16,
+        scale_factor=0.3611,
+        shift_factor=0.1159,
+    ),
+)
+
+
 T5XXL_MAX_LENGTH = 512
 
 # endregion
@@ -897,7 +927,7 @@ class Flux(nn.Module):
             "guidance_in",
             "img_in",
             "final_layer",
-            #"modulation",  # Saves lots of mem to fp8 these and doesn't seem to hurt quality
+            "modulation",  # Saves lots of mem to fp8 these and doesn't seem to hurt quality
             #"img_mod",
             #"img_mlp",
             #"txt_mod",

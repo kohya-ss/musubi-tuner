@@ -110,7 +110,7 @@ def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dty
     return device, dtype
 
 
-def string_to_seed(s: str, bits: int = 63) -> int:
+def string_to_seed(s: str, bits: int = 63, silent: bool = False) -> int:
     """
     Turn any string into a reproducible integer in [0, 2**bits) with a hash and some other logic.
 
@@ -140,7 +140,8 @@ def string_to_seed(s: str, bits: int = 63) -> int:
     if algo == float("inf"):  # In case we somehow still do
         algo = len(s) + (314159 * ord(s[len(s) // 2])) - ord(s[len(s) // 4])
     seed = (abs(crypto - int(algo))) & mask
-    logger.info(f"Seed '{seed}' was generated from string '{s}'")
+    if not silent:
+        logger.info(f"Seed '{seed}' was generated from string '{s}'")
     return seed
 
 
@@ -154,14 +155,17 @@ def power_seed(seed: Union[int, str] = None) -> int:
     else:
         try:
             seed = int(seed)
+            msg = f"Seed '{seed}' was set globally!"
         except ValueError:
-            seed = string_to_seed(seed, bits=32)
+            s = seed
+            seed = string_to_seed(seed, bits=32, silent=True)
+            msg = f"Seed '{seed}' was generated from string '{s}' and set globally!"
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    logger.info(f"Seed '{seed}' was set globally!")
+    logger.info(msg)
     return seed
 
 
