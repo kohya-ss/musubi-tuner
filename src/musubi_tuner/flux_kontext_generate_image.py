@@ -770,6 +770,7 @@ def generate(
         if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
             preview_x = rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
             previewer.preview(preview_x, i)
+            del preview_x
         i += 1
     # unpack
     x = x.float()
