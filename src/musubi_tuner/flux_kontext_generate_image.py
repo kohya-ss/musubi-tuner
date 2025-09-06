@@ -698,16 +698,13 @@ def generate(
             None, device, torch.bfloat16, model_type="flux"
         )
         previewer.sigmas = timesteps
-    num_timesteps = len(timesteps)
+
     if args.cfg_schedule is not None:
-        scale_per_step = parse_scheduled_cfg(args.cfg_schedule, num_timesteps, args.guidance_scale)
-        apply_cfg_array = [(i + 1) in scale_per_step and scale_per_step[i + 1] != 1.0 for i in range(num_timesteps)]
+        scale_per_step = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
         included_steps = sorted(scale_per_step.keys())
         step_str = ", ".join(f"{step}: {scale_per_step[step]}" for step in included_steps if scale_per_step[step] != 1.0)
         logger.info(f"CFG Schedule: {step_str}")
         logger.info(f"Total CFG steps: {len(included_steps)}")
-    else:
-        apply_cfg_array = [args.guidance_scale > 1.0] * num_timesteps
 
     guidance = args.embedded_cfg_scale
     x = noise
@@ -722,7 +719,7 @@ def generate(
     guidance_vec = torch.full((x.shape[0],), guidance, device=x.device, dtype=x.dtype)
     for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
         t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=x.device)
-        do_cfg_step = apply_cfg_array[i]
+        do_cfg_step = (i + 1) in scale_per_step if args.cfg_schedule else True if args.guidance_scale > 1.0 else False
         img_input = x
         img_input_ids = img_ids
         if control_latent is not None:
