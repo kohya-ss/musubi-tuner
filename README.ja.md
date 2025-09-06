@@ -71,25 +71,24 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
     - [スポンサー募集のお知らせ](#スポンサー募集のお知らせ)
     - [最近の更新](#最近の更新)
     - [リリースについて](#リリースについて)
+    - [AIコーディングエージェントを使用する開発者の方へ](#AIコーディングエージェントを使用する開発者の方へ)
 - [概要](#概要)
     - [ハードウェア要件](#ハードウェア要件)
     - [特徴](#特徴)
 - [インストール](#インストール)
+    - [pipによるインストール](#pipによるインストール)
+    - [uvによるインストール](#uvによるインストール)
+    - [Linux/MacOS](#linuxmacos)
+    - [Windows](#windows)
 - [モデルのダウンロード](#モデルのダウンロード)
-    - [HunyuanVideoの公式モデルを使う](#HunyuanVideoの公式モデルを使う)
-    - [Text EncoderにComfyUI提供のモデルを使う](#Text-EncoderにComfyUI提供のモデルを使う)
 - [使い方](#使い方)
     - [データセット設定](#データセット設定)
-    - [latentの事前キャッシュ](#latentの事前キャッシュ)
-    - [Text Encoder出力の事前キャッシュ](#Text-Encoder出力の事前キャッシュ)
+    - [事前キャッシュと学習](#事前キャッシュと学習)
     - [Accelerateの設定](#Accelerateの設定)
-    - [学習](#学習)
-    - [LoRAの重みのマージ](#LoRAの重みのマージ)
-    - [推論](#推論)
-    - [SkyReels V1での推論](#SkyReels-V1での推論)
-    - [LoRAの形式の変換](#LoRAの形式の変換)
+    - [学習と推論](#学習と推論)
 - [その他](#その他)
     - [SageAttentionのインストール方法](#SageAttentionのインストール方法)
+    - [PyTorchのバージョンについて](#PyTorchのバージョンについて)
 - [免責事項](#免責事項)
 - [コントリビューションについて](#コントリビューションについて)
 - [ライセンス](#ライセンス)
@@ -97,9 +96,14 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 
 ## はじめに
 
-このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 KontextのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1/2.2、FramePack、FLUX.1 Kontextのリポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、Qwen-ImageのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、Qwen-Imageのリポジトリとは関係ありません。
 
-Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
+アーキテクチャ固有のドキュメントについては、以下を参照してください：
+- [HunyuanVideo](./docs/hunyuan_video.md)
+- [Wan2.1/2.2](./docs/wan.md)
+- [FramePack](./docs/framepack.md)
+- [FLUX.1 Kontext](./docs/flux_kontext.md)
+- [Qwen-Image](./docs/qwen_image.md)
 
 *リポジトリは開発中です。*
 
@@ -118,6 +122,11 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 ### 最近の更新
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2025/09/06
+    - 新しいLRスケジューラRexを追加しました。[PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513) xzuyn氏に感謝します。
+        - powerを1未満に設定した Polynomial Scheduler に似ていますが、Rexは学習率の減少がより緩やかです。
+        - 詳細は[高度な設定のドキュメント](./docs/advanced_config.md#rex)を参照してください。
 
 - 2025/09/02 (update)
     - Qwen-Imageのfine tuningに対応しました。[PR #492](https://github.com/kohya-ss/musubi-tuner/pull/492)
@@ -251,37 +260,13 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ## モデルのダウンロード
 
-以下のいずれかの方法で、モデルをダウンロードしてください。
+モデルのダウンロード手順はアーキテクチャによって異なります。各アーキテクチャの詳細については、以下のドキュメントを参照してください：
 
-### HunyuanVideoの公式モデルを使う 
-
-[公式のREADME](https://github.com/Tencent/HunyuanVideo/blob/main/ckpts/README.md)を参考にダウンロードし、任意のディレクトリに以下のように配置します。
-
-```
-  ckpts
-    ├──hunyuan-video-t2v-720p
-    │  ├──transformers
-    │  ├──vae
-    ├──text_encoder
-    ├──text_encoder_2
-    ├──...
-```
-
-### Text EncoderにComfyUI提供のモデルを使う
-
-こちらの方法の方がより簡単です。DiTとVAEのモデルはHumyuanVideoのものを使用します。
-
-https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/transformers から、[mp_rank_00_model_states.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt) をダウンロードし、任意のディレクトリに配置します。
-
-（同じページにfp8のモデルもありますが、未検証です。）
-
-`--fp8_base`を指定して学習する場合は、`mp_rank_00_model_states.pt`の代わりに、[こちら](https://huggingface.co/kohya-ss/HunyuanVideo-fp8_e4m3fn-unofficial)の`mp_rank_00_model_states_fp8.safetensors`を使用可能です。（このファイルは非公式のもので、重みを単純にfloat8_e4m3fnに変換したものです。）
-
-また、https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/vae から、[pytorch_model.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/vae/pytorch_model.pt) をダウンロードし、任意のディレクトリに配置します。
-
-Text EncoderにはComfyUI提供のモデルを使用させていただきます。[ComyUIのページ](https://comfyanonymous.github.io/ComfyUI_examples/hunyuan_video/)を参考に、https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/tree/main/split_files/text_encoders から、llava_llama3_fp16.safetensors （Text Encoder 1、LLM）と、clip_l.safetensors （Text Encoder 2、CLIP）をダウンロードし、任意のディレクトリに配置します。
-
-（同じページにfp8のLLMモデルもありますが、動作未検証です。）
+- [HunyuanVideoのモデルダウンロード](./docs/hunyuan_video.md#download-the-model--モデルのダウンロード)
+- [Wan2.1/2.2のモデルダウンロード](./docs/wan.md#download-the-model--モデルのダウンロード)
+- [FramePackのモデルダウンロード](./docs/framepack.md#download-the-model--モデルのダウンロード)
+- [FLUX.1 Kontextのモデルダウンロード](./docs/flux_kontext.md#download-the-model--モデルのダウンロード)
+- [Qwen-Imageのモデルダウンロード](./docs/qwen_image.md#download-the-model--モデルのダウンロード)
 
 ## 使い方
 
@@ -289,43 +274,15 @@ Text EncoderにはComfyUI提供のモデルを使用させていただきます�
 
 [こちら](./src/musubi_tuner/dataset/dataset_config.md)を参照してください。
 
-### latentの事前キャッシュ
+### 事前キャッシュと学習
 
-latentの事前キャッシュは必須です。以下のコマンドを使用して、事前キャッシュを作成してください。（pipによるインストールの場合）
+各アーキテクチャは固有の事前キャッシュと学習手順が必要です。詳細については、以下のドキュメントを参照してください：
 
-```bash
-python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
-```
-
-uvでインストールした場合は、`uv run --extra cu124 python src/musubi_tuner/cache_latents.py ...`のように、`uv run --extra cu124`を先頭につけてください。CUDA 12.8に対応している場合は、`uv run --extra cu128`も利用可能です。以下のコマンドも同様です。
-
-その他のオプションは`python src/musubi_tuner/cache_latents.py --help`で確認できます。
-
-VRAMが足りない場合は、`--vae_spatial_tile_sample_min_size`を128程度に減らし、`--batch_size`を小さくしてください。
-
-`--debug_mode image` を指定するとデータセットの画像とキャプションが新規ウィンドウに表示されます。`--debug_mode console`でコンソールに表示されます（`ascii-magic`が必要）。
-
-`--debug_mode video`で、キャッシュディレクトリに画像または動画が保存されます（確認後、削除してください）。動画のビットレートは確認用に低くしてあります。実際には元動画の画像が学習に使用されます。
-
-`--debug_mode`指定時は、実際のキャッシュ処理は行われません。
-
-デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
-
-### Text Encoder出力の事前キャッシュ
-
-Text Encoder出力の事前キャッシュは必須です。以下のコマンドを使用して、事前キャッシュを作成してください。
-
-```bash
-python src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
-```
-
-その他のオプションは`python src/musubi_tuner/cache_text_encoder_outputs.py --help`で確認できます。
-
-`--batch_size`はVRAMに合わせて調整してください。
-
-VRAMが足りない場合（16GB程度未満の場合）は、`--fp8_llm`を指定して、fp8でLLMを実行してください。
-
-デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
+- [HunyuanVideoの使用方法](./docs/hunyuan_video.md)
+- [Wan2.1/2.2の使用方法](./docs/wan.md)
+- [FramePackの使用方法](./docs/framepack.md)
+- [FLUX.1 Kontextの使用方法](./docs/flux_kontext.md)
+- [Qwen-Imageの使用方法](./docs/qwen_image.md)
 
 ### Accelerateの設定
 
@@ -345,149 +302,20 @@ VRAMが足りない場合（16GB程度未満の場合）は、`--fp8_llm`を指�
 ※場合によって ``ValueError: fp16 mixed precision requires a GPU`` というエラーが出ることがあるようです。この場合、6番目の質問（
 ``What GPU(s) (by id) should be used for training on this machine as a comma-separated list? [all]:``）に「0」と答えてください。（id `0`、つまり1台目のGPUが使われます。）
 
-### 学習
+### 学習と推論
 
-以下のコマンドを使用して、学習を開始します（実際には一行で入力してください）。
+学習と推論の手順はアーキテクチャによって大きく異なります。詳細な手順については、対応するドキュメントを参照してください：
 
-```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
-    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
-    --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
-    --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
-    --max_data_loader_n_workers 2 --persistent_data_loader_workers 
-    --network_module networks.lora --network_dim 32 
-    --timestep_sampling shift --discrete_flow_shift 7.0 
-    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42
-    --output_dir path/to/output_dir --output_name name-of-lora
-```
+- [HunyuanVideoの学習と推論](./docs/hunyuan_video.md)
+- [Wan2.1/2.2の学習と推論](./docs/wan.md)
+- [FramePackの学習と推論](./docs/framepack.md)
+- [FLUX.1 Kontextの学習と推論](./docs/flux_kontext.md)
+- [Qwen-Imageの学習と推論](./docs/qwen_image.md)
 
-__更新__：サンプルの学習率を1e-3から2e-4に、`--timestep_sampling`を`sigmoid`から`shift`に、`--discrete_flow_shift`を1.0から7.0に変更しました。より高速な学習が期待されます。ディテールが甘くなる場合は、discrete flow shiftを3.0程度に下げてみてください。
-
-ただ、適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、以前として不明な点が数多くあります。情報提供をお待ちしています。
-
-その他のオプションは`python src/musubi_tuner/hv_train_network.py --help`で確認できます（ただし多くのオプションは動作未確認です）。
-
-`--fp8_base`を指定すると、DiTがfp8で学習されます。未指定時はmixed precisionのデータ型が使用されます。fp8は大きく消費メモリを削減できますが、品質は低下する可能性があります。`--fp8_base`を指定しない場合はVRAM 24GB以上を推奨します。また必要に応じて`--blocks_to_swap`を使用してください。
-
-VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大36が指定できます。
-
-（block swapのアイデアは2kpr氏の実装に基づくものです。2kpr氏にあらためて感謝します。）
-
-`--sdpa`でPyTorchのscaled dot product attentionを使用します。`--flash_attn`で[FlashAttention]:(https://github.com/Dao-AILab/flash-attention)を使用します。`--xformers`でxformersの利用も可能ですが、xformersを使う場合は`--split_attn`を指定してください。`--sage_attn`でSageAttentionを使用しますが、SageAttentionは現時点では学習に未対応のため、エラーが発生します。
-
-`--split_attn`を指定すると、attentionを分割して処理します。速度が多少低下しますが、VRAM使用量はわずかに減ります。
-
-学習されるLoRAの形式は、`sd-scripts`と同じです。
-
-`--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](./docs/advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)を参照してください。
-
-`--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。（`flux_shift`と`qwen_shift`を使用する場合は画像の解像度が1024x1024の場合の分布になります。）
-
-学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
-
-PyTorch Dynamoによる最適化を行う場合は、[こちら](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
-
-`--gradient_checkpointing`を指定すると、gradient checkpointingが有効になります。VRAM使用量は減りますが、学習速度は低下します。
-
-`--optimizer_type`には`adamw8bit`、`adamw8bit_apex_fused`、`adamw8bit_apex_fused_legacy`、`adamw8bit_apex_fused_legacy_no_scale`のいずれかを指定してください。
-
-学習中のサンプル画像生成については、[こちらのドキュメント](./docs/sampling_during_training.md)を参照してください。その他の高度な設定については[こちらのドキュメント](./docs/advanced_config.md)を参照してください。
-
-### LoRAの重みのマージ
-
-注：Wan 2.1には対応していません。
-
-```bash
-python src/musubi_tuner/merge_lora.py \
-    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
-    --lora_weight path/to/lora.safetensors \
-    --save_merged_model path/to/merged_model.safetensors \
-    --device cpu \
-    --lora_multiplier 1.0
-```
-
-`--device`には計算を行うデバイス（`cpu`または`cuda`等）を指定してください。`cuda`を指定すると計算が高速化されます。
-
-`--lora_weight`にはマージするLoRAの重みを、`--lora_multiplier`にはLoRAの重みの係数を、それぞれ指定してください。複数個が指定可能で、両者の数は一致させてください。
-
-### 推論
-
-以下のコマンドを使用して動画を生成します。
-
-```bash
-python src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
-    --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
-    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
-    --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
-    --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 
-    --text_encoder1 path/to/ckpts/text_encoder 
-    --text_encoder2 path/to/ckpts/text_encoder_2 
-    --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
-```
-
-その他のオプションは`python src/musubi_tuner/hv_generate_video.py --help`で確認できます。
-
-`--fp8`を指定すると、DiTがfp8で推論されます。fp8は大きく消費メモリを削減できますが、品質は低下する可能性があります。
-
-RTX 40x0シリーズのGPUを使用している場合は、`--fp8_fast`オプションを指定することで、高速推論が可能です。このオプションを指定する場合は、`--fp8`も指定してください。
-
-VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大38が指定できます。
-
-`--attn_mode`には`flash`、`torch`、`sageattn`、`xformers`または`sdpa`（`torch`指定時と同じ）のいずれかを指定してください。それぞれFlashAttention、scaled dot product attention、SageAttention、xformersに対応します。デフォルトは`torch`です。SageAttentionはVRAMの削減に有効です。
-
-`--split_attn`を指定すると、attentionを分割して処理します。SageAttention利用時で10%程度の高速化が見込まれます。
-
-`--output_type`には`both`、`latent`、`video`、`images`のいずれかを指定してください。`both`はlatentと動画の両方を出力します。VAEでOut of Memoryエラーが発生する場合に備えて、`both`を指定することをお勧めします。`--latent_path`に保存されたlatentを指定し、`--output_type video` （または`images`）としてスクリプトを実行すると、VAEのdecodeのみを行えます。
-
-`--seed`は省略可能です。指定しない場合はランダムなシードが使用されます。
-
-`--video_length`は「4の倍数+1」を指定してください。
-
-`--flow_shift`にタイムステップのシフト値（discrete flow shift）を指定可能です。省略時のデフォルト値は7.0で、これは推論ステップ数が50の時の推奨値です。HunyuanVideoの論文では、ステップ数50の場合は7.0、ステップ数20未満（10など）で17.0が推奨されています。
-
-`--video_path`に読み込む動画を指定すると、video2videoの推論が可能です。動画ファイルを指定するか、複数の画像ファイルが入ったディレクトリを指定してください（画像ファイルはファイル名でソートされ、各フレームとして用いられます）。`--video_length`よりも短い動画を指定するとエラーになります。`--strength`で強度を指定できます。0~1.0で指定でき、大きいほど元の動画からの変化が大きくなります。
-
-なおvideo2video推論の処理は実験的なものです。
-
-`--compile`オプションでPyTorchのコンパイル機能を有効にします（実験的機能）。tritonのインストールが必要です。また、WindowsではVisual C++ build toolsが必要で、かつPyTorch>=2.6.0でのみ動作します。`--compile_args`でコンパイル時の引数を渡すことができます。
-
-`--compile`は初回実行時にかなりの時間がかかりますが、2回目以降は高速化されます。
-
-`--save_merged_model`オプションで、LoRAマージ後のDiTモデルを保存できます。`--save_merged_model path/to/merged_model.safetensors`のように指定してください。なおこのオプションを指定すると推論は行われません。
-
-### SkyReels V1での推論
-
-SkyReels V1のT2VとI2Vモデルがサポートされています（推論のみ）。
-
-モデルは[こちら](https://huggingface.co/Kijai/SkyReels-V1-Hunyuan_comfy)からダウンロードできます。モデルを提供してくださったKijai氏に感謝します。`skyreels_hunyuan_i2v_bf16.safetensors`がI2Vモデル、`skyreels_hunyuan_t2v_bf16.safetensors`がT2Vモデルです。`bf16`以外の形式は未検証です（`fp8_e4m3fn`は動作するかもしれません）。
-
-T2V推論を行う場合、以下のオプションを推論コマンドに追加してください：
-
-```bash
---guidance_scale 6.0 --embedded_cfg_scale 1.0 --negative_prompt "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion" --split_uncond
-```
-
-SkyReels V1はclassifier free guidance（ネガティブプロンプト）を必要とするようです。`--guidance_scale`はネガティブプロンプトのガイダンススケールです。公式リポジトリの推奨値は6.0です。デフォルトは1.0で、この場合はclassifier free guidanceは使用されません（ネガティブプロンプトは無視されます）。
-
-`--embedded_cfg_scale`は埋め込みガイダンスのスケールです。公式リポジトリの推奨値は1.0です（埋め込みガイダンスなしを意味すると思われます）。
-
-`--negative_prompt`はいわゆるネガティブプロンプトです。上記のサンプルは公式リポジトリのものです。`--guidance_scale`を指定し、`--negative_prompt`を指定しなかった場合は、空文字列が使用されます。
-
-`--split_uncond`を指定すると、モデル呼び出しをuncondとcond（ネガティブプロンプトとプロンプト）に分割します。VRAM使用量が減りますが、推論速度は低下する可能性があります。`--split_attn`が指定されている場合、`--split_uncond`は自動的に有効になります。
-
-### LoRAの形式の変換
-
-他の推論環境（DiffusersやComfyUI）で使用可能な形式（Diffusion-pipe または Diffusers と思われる）への変換は以下のコマンドで行えます。
-
-```bash
-python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
-```
-
-`--input`と`--output`はそれぞれ入力と出力のファイルパスを指定してください。
-
-`--target`には`other`を指定してください。`default`を指定すると、他の形式から当リポジトリの形式に変換できます。
-
-Wan2.1およびQwen-Imageも対応済みです。Diffusersで推論する場合、`--diffusers_prefix transformers` が追加で必要かもしれません。
+高度な設定オプションや追加機能については、以下を参照してください：
+- [高度な設定](./docs/advanced_config.md)
+- [学習中のサンプル生成](./docs/sampling_during_training.md)
+- [ツールとユーティリティ](./docs/tools.md)
 
 ## その他
 
@@ -523,7 +351,7 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 
 ## 免責事項
 
-このリポジトリは非公式であり、公式のHunyuanVideoリポジトリとは関係ありません。また、このリポジトリは開発中で、実験的なものです。テストおよびフィードバックを歓迎しますが、以下の点にご注意ください：
+このリポジトリは非公式であり、サポートされているアーキテクチャの公式リポジトリとは関係ありません。また、このリポジトリは開発中で、実験的なものです。テストおよびフィードバックを歓迎しますが、以下の点にご注意ください：
 
 - 実際の稼働環境での動作を意図したものではありません
 - 機能やAPIは予告なく変更されることがあります

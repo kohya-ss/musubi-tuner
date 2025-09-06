@@ -6,12 +6,17 @@ This document describes the usage of the [FLUX.1 Kontext](https://github.com/bla
 
 This feature is experimental.
 
+Latent pre-caching, training, and inference options can be found in the `--help` output. Many options are shared with HunyuanVideo, so refer to the [HunyuanVideo documentation](./hunyuan_video.md) as needed.
+
 <details>
 <summary>日本語</summary>
 
 このドキュメントは、Musubi Tunerフレームワーク内での[FLUX.1 Kontext](https://github.com/black-forest-labs/flux) \[dev\] アーキテクチャの使用法について説明しています。FLUX.1 Kontextは、参照画像をコンテキストとして入力できる画像生成モデルです。
 
 この機能は実験的なものです。
+
+事前キャッシング、学習、推論のオプションは`--help`で確認してください。HunyuanVideoと共通のオプションが多くありますので、必要に応じて[HunyuanVideoのドキュメント](./hunyuan_video.md)も参照してください。
+
 </details>
 
 ## Download the model / モデルのダウンロード

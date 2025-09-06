@@ -106,9 +106,11 @@ Wan2.2モデルは高ノイズ用と低ノイズ用の2つのDiTモデルで構�
 
 ## Pre-caching / 事前キャッシュ
 
+Pre-caching is almost the same as in HunyuanVideo, but some options may differ. See [HunyuanVideo documentation](./hunyuan_video.md#pre-caching--事前キャッシング) and `--help` for details. 
+
 ### Latent Pre-caching
 
-Latent pre-caching is almost the same as in HunyuanVideo. Create the cache using the following command:
+Create the cache using the following command:
 
 ```bash
 python src/musubi_tuner/wan_cache_latents.py --dataset_config path/to/toml --vae path/to/wan_vae.safetensors
@@ -123,7 +125,9 @@ The control video settings are required for training the Fun-Control model. Plea
 <details>
 <summary>日本語</summary>
 
-latentの事前キャッシングはHunyuanVideoとほぼ同じです。上のコマンド例を使用してキャッシュを作成してください。
+事前キャッシングはHunyuanVideoとほぼ同じです。オプションが異なる場合がありますので、詳細は[HunyuanVideoのドキュメント](./hunyuan_video.md#pre-caching--事前キャッシング)および`--help`を参照してください。
+
+latentの事前キャッシングは上のコマンド例を使用してキャッシュを作成してください。
 
 **I2Vモデルを学習する場合は、`--i2v` オプションを上のコマンドに追加してください。**Wan2.1の場合は、`--clip path/to/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth` を追加してCLIPモデルを指定してください。指定しないと学習時にエラーが発生します。Wan2.2ではCLIPモデルは不要です。
 
@@ -191,9 +195,7 @@ For Wan2.2 models, `--discrete_flow_shift` may need to be adjusted based on I2V 
 
 Don't forget to specify `--network_module networks.lora_wan`.
 
-Other options are mostly the same as `hv_train_network.py`.
-
-~~Use `convert_lora.py` for converting the LoRA weights after training, as in HunyuanVideo.~~
+Other options are mostly the same as `hv_train_network.py`. See [HunyuanVideo documentation](./hunyuan_video.md#training--学習) and `--help` for details.
 
 The trained LoRA weights are seemed to be compatible with ComfyUI (may depend on the nodes used).
 
@@ -229,9 +231,7 @@ Wan2.2の場合、I2VとT2Vで`--discrete_flow_shift`を調整する必要があ
 
 `--network_module` に `networks.lora_wan` を指定することを忘れないでください。
 
-その他のオプションは、ほぼ`hv_train_network.py`と同様です。
-
-~~学習後のLoRAの重みの変換は、HunyuanVideoと同様に`convert_lora.py`を使用してください。~~
+その他のオプションは、ほぼ`hv_train_network.py`と同様です。[HunyuanVideoのドキュメント](./hunyuan_video.md#training--学習)および`--help`を参照してください。
 
 学習後のLoRAの重みはそのままComfyUIで使用できるようです（用いるノードにもよります）。
 

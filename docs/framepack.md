@@ -16,6 +16,8 @@ This feature is experimental.
 
 For one-frame inference and training, see [here](./framepack_1f.md).
 
+Latent pre-caching, training, and inference options can be found in the `--help` output. Many options are shared with HunyuanVideo, so refer to the [HunyuanVideo documentation](./hunyuan_video.md) as needed.
+
 <details>
 <summary>日本語</summary>
 
@@ -32,6 +34,9 @@ HunyuanVideoとの主な違いは次のとおりです。
 この機能は実験的なものです。
 
 1フレーム推論、学習については[こちら](./framepack_1f.md)を参照してください。
+
+事前キャッシング、学習、推論のオプションは`--help`で確認してください。HunyuanVideoと共通のオプションが多くありますので、必要に応じて[HunyuanVideoのドキュメント](./hunyuan_video.md)も参照してください。
+
 </details>
 
 ## Download the model / モデルのダウンロード

@@ -39,6 +39,7 @@ from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_e
 import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
 from musubi_tuner.hunyuan_model.vae import load_vae, VAE_VER
 import musubi_tuner.hunyuan_model.vae as vae_module
+from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -611,6 +612,18 @@ class NetworkTrainer:
             initial_lr = float(name.split(":")[1])
             # logger.info(f"adafactor scheduler init lr {initial_lr}")
             return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
+
+        if name.lower() == "rex":
+            return RexLR(
+                optimizer,
+                max_lr=args.learning_rate,
+                min_lr=(  # Will start and end with min_lr, use non-zero min_lr by default
+                    args.learning_rate * min_lr_ratio if min_lr_ratio is not None else args.learning_rate * 0.01
+                ),
+                num_steps=num_training_steps,
+                num_warmup_steps=num_warmup_steps,
+                **lr_scheduler_kwargs,
+            )
 
         if name == DiffusersSchedulerType.PIECEWISE_CONSTANT.value:
             name = DiffusersSchedulerType(name)
@@ -2488,7 +2501,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--lr_scheduler",
         type=str,
         default="constant",
-        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor",
+        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor, rex",
     )
     parser.add_argument(
         "--lr_warmup_steps",
@@ -2527,8 +2540,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--lr_scheduler_min_lr_ratio",
         type=float,
         default=None,
-        help="The minimum learning rate as a ratio of the initial learning rate for cosine with min lr scheduler and warmup decay scheduler"
-        + " / 初期学習率の比率としての最小学習率を指定する、cosine with min lr と warmup decay スケジューラ で有効",
+        help="The minimum learning rate as a ratio of the initial learning rate for cosine with min lr scheduler, warmup decay scheduler and rex scheduler"
+        + " / 初期学習率の比率としての最小学習率を指定する、cosine with min lr スケジューラ、warmup decay スケジューラ、rex スケジューラ で有効",
     )
     parser.add_argument("--lr_scheduler_type", type=str, default="", help="custom scheduler module / 使用するスケジューラ")
     parser.add_argument(
