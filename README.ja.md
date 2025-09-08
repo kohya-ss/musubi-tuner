@@ -9,55 +9,50 @@ Blyss Sarania による Musubi Tuner の Blissful な拡張機能
 ここでは、生成動画モデルを扱うためのツールスイートの作成に重点を置いた、高度で実験的な機能を備えたMusubi Tunerの拡張バージョンをご覧いただけます。動画生成時にプレビューしたり、推論速度を向上させたり、動画を長くしたり、作成した動画をより細かく制御したり、VFIやアップスケーリングなどで動画を強化したりできます。Musubiをさらに活用したい方は、ぜひこの機会にお試しください。最適なパフォーマンスと互換性を得るには、Python 3.12とPyTorch 2.7.0以降を推奨します。「requirements.txt」に追加の要件が追加されているため、通常のMusubiから移行する場合は、再度`pip install -r requirements.txt`を実行する必要があります。開発はPython 3.12で行われていますが、3.10との互換性も維持するよう努めています。
 
 Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコードを移植したHunyuanVideoWrapperとWanVideoWrapperを開発してくださったkijaiさん、そしてオープンソース生成AIコミュニティの開発者の皆様に心より感謝申し上げます。多くの変更は実験的なものであるため、修正前のMusubiと同じように動作しない部分もあることをご了承ください。何か問題が見つかった場合はお知らせください。できる限り修正いたします。このバージョンに関する問題は、MusubiのメインGithubリポジトリではなく、このリポジトリのIssuesセクションに投稿してください。
-すべてのモデル/モード向けの拡張機能:
-- 美しく豊富なログ、豊富な引数解析、豊富なトレースバック
 
-すべてのモデル向けの拡張機能：
-- latent2RGBまたはTAEHVによる生成中に潜在プレビュー（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数）。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv ）
-- 高速で高品質な生成のための最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）
-- 動画/画像に生成メタデータを保存します (`--container mkv` で自動的に保存され、PNG を保存する場合は `--no-metadata` で無効になり、`--container mp4` では使用できません。`blissful_tuner/metaview.py some_video.mkv` を使用すると、このようなメタデータを簡単に表示/コピーできます)
-- 拡張された保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートの知覚的ロスレス) を `--container mkv` に保存、または `h264`、`h265` のいずれかを `mp4` または `mkv` に保存可能)
-- FP16 積算 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも機能します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、fp8_fast/mmscaled とほぼ同等の速度になります。精度の低下は抑えられています！fp8スケールモードにも対応しています！
-- シードとして文字列を使用するのは良いでしょう！覚えやすいのも魅力です！
-- プロンプトでワイルドカードを使用すると、バリエーションが増えます！（`--prompt_wildcards /path/to/wildcard/directory` のように指定します。例えば、プロンプトで `__color__` と指定すると、そのディレクトリ内の color.txt が検索されます。ワイルドカードファイルの形式は、1行につき1つの置換文字列で、red:2.0 や "some long string:0.5" のように相対的な重みを任意で付加できます。ワイルドカード自体にワイルドカードを含めることも可能で、再帰回数の制限は50回です！）
+プロジェクトの拡大に​​合わせてこのセクションをメンテナンスしやすくするため、各機能は一度だけリストアップし、プロジェクト内のどのモデルが現在その機能をサポートしているかを示す凡例も表示します。ほとんどの機能は推論に関するもので、トレーニングに利用可能な機能がある場合は特に明記します。また、記載しきれないほど多くの小さな最適化や機能追加も実施しました。最新のアップデートについては、[こちら](https://github.com/kohya-ss/musubi-tuner/discussions/232) で開発ログのようなものを公開しています。
 
-Wan/Hunyuan 拡張機能：
-- 拡散パイプ形式の LoRA を、事前に変換することなく推論用に読み込みます。
-- RifleX など。より長い動画は https://github.com/thu-ml/RIFLEx をご覧ください（`--riflex_index N` で、N は RifleX の周波数です。Wan の場合は 6 が適しており、通常 81 フレームではなく約 115 フレームまで再生できます。Wan の場合は `--rope_func comfy` が必要です。Hunyuan の場合は 4 が適しており、少なくとも 2 倍の長さにできます！）
-- CFGZero* 例: https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` で、N は開始時に 0 になるまでのステップ数です。T2V の場合は 2、I2V の場合は 1 が適切ですが、私の経験では T2V の方が適しています。Hunyuan のサポートは非​​常に実験的であり、CFG が有効になっている場合にのみ利用可能です。)
-- 高度な CFG スケジューリング: (`--cfg_schedule`、使用方法については `--help` を参照してください。必要に応じて、個々のステップにガイダンスのスケールダウンを指定することもできます!)
-- 垂直負ガイダンス (`--perp_neg neg_strength`、neg_strength は負プロンプトの文字列を制御する浮動小数点数です。詳細は `--help` を参照してください!)
+現在のモデルの凡例：Hunyuan Video: (HY)、Wan 2.1/2.2: (WV)、Framepack: (FP)、Flux (FX)、Qwen Image (QI)、トレーニングに利用可能: (T)
 
-Hunyuan 専用の拡張機能:
-- その他の LLM オプション(`--hidden_​​state_skip_layer N --apply_final_norm --reproduce`、説明は`--help`を参照してください！)
-- Wanと同じアルゴリズムを使用したFP8スケールのサポート（`--fp8_scaled`、推論と学習の両方に強く推奨。より優れたfp8なので、これだけ知っておく必要があります！）
-- CLIP用の別のプロンプト（`--prompt_2 "second prompt goes here"`、CLIPはよりシンプルなテキストに使用されるため、異なるプロンプトを提供します）
-- https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyanに基づいてテキストエンコーダーを再スケール（`--te_multiplier llm clip`、例えば`--te_multiplier 0.9 1.2`のように、LLMをわずかに重み付け下げ、CLIPをわずかに重み付け上げます）
+素晴らしい機能：
+- 美しく豊富なログ機能、豊富なargparse、豊富なトレースバック (HY) (WV) (FP) (FX) (QI) (T)
+- プロンプトにワイルドカードを使用することで、バリエーションを増やすことができます！ (`--prompt_wildcards /path/to/wildcard/directory` のように指定します。例えば、プロンプトで `__color__` と指定すると、そのディレクトリ内の color.txt が検索されます。ワイルドカードファイルの形式は、1行につき1つの置換文字列で、red:2.0 や "some long string:0.5" のように相対的な重みをオプションで付加できます。ワイルドカード自体にワイルドカードを含めることも可能で、再帰回数の制限は50回です。) (HY) (WV) (FP) (FX) (QI)
+- シードとして文字列を使用するのは良いでしょう。覚えやすいのも魅力です。 (HY) (WV) (FP) (FX) (QI)
+- 推論用の外部LoRAを、事前に変換することなく読み込みます (HY) (WV) (FP) (FX) (QI)
+- 決定論を保証する強力な世代ごとのグローバルシード (HY) (WV) (FP) (FX) (QI)
+- 生成中にlatent2RGBまたはTAEHV（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数））を使用した潜在プレビュー。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv）(HY) (WV) (FP) (FX)
+- 高速で高品質な生成のために最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）(HY) (WV) (FP) (FX)
+- FP16 積分 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも動作します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、精度を損なうことなく fp8_fast/mmscaled とほぼ同等の速度を実現できます。また、fp8 スケールモードでも動作します!) (HY) (WV) (FP) (FX)
+- 拡張保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートで知覚的にロスレス) を `--container mkv` に保存、または `h264`、`h265` のいずれかを `mp4` または `mkv` に保存可能) (HY) (WV) (FP)
+- 生成メタデータを動画/画像に保存 (自動`--container mkv` を使用し、PNG 保存時は `--no-metadata` で無効にしてください。`--container mp4` では無効です。こうしたメタデータは `src/blissful_tuner/metaview.py some_video.mkv` で簡単に表示/コピーできます。ビューアには mediainfo_cli が必要です) (HY) (WV) (FP)
+- CFGZero* 例: https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` で、N は開始時に 0 になるまでのステップ数です。T2V の場合は 2、I2V の場合は 1 が適切ですが、私の経験では T2V の方が適しています。Hunyuan のサポートは非​​常に実験的であり、CFG が有効になっている場合にのみ利用可能です。) (HY) (WV) (FX)
+- 高度な CFG スケジューリング: (`--cfg_schedule`、使用方法については `--help` を参照してください。必要に応じて、個々のステップにガイダンススケールダウンを指定することもできます!) (HY) (WV) (FX)
+- RifleX 例:より長い動画の場合は https://github.com/thu-ml/RIFLEx をご覧ください (`--riflex_index N`、N は RifleX の周波数です。Wan の場合は 6 が適しており、通常 81 フレームではなく約 115 フレームまで再生できます。Wan の場合は `--rope_func comfy` が必要です。Hunyuan の場合は 4 が適しており、少なくとも 2 倍の長さにできます!) (HY) (WV)
+- 垂直ネガティブガイダンス (`--perp_neg neg_strength`、neg_strength はネガティブプロンプトの文字列を制御する浮動小数点数です。詳しくは `--help` を参照してください!) (HY) (WV)
+- 正規化アテンションガイダンス (NAG) (https://arxiv.org/pdf/2505.21179) (クロスアテンション層内でネガティブガイダンスを提供します。通常の CFG だけでなく、蒸留モデルでも動作します。有効にするには`--nag_scale 3.0` を指定して否定プロンプトを表示してください！ (WV)
+- 高品質かつ低ステップの蒸留サンプリング（https://huggingface.co/lightx2v/Wan2.1-T2V-14B-StepDistill-CfgDistill のような蒸留Wanモデル/LoRAで`--sample_solver lcm`または`--sample_solver dpm++sde`を使用します。さらに、便利なLoRAも作成しました: https://huggingface.co/Blyss/BlissfulModels/tree/main/wan_lcm ）(WV)
+- V2V推論（`--video_path /path/to/input/video --denoise_strength amount`。amountは0.0～1.0の浮動小数点数で、ソースビデオに追加するノイズの強度を制御します。`--noise_mode Traditional`の場合、他の実装と同様に、タイムステップスケジュールの最後の（amount * 100）パーセントを実行します。`--noise_mode direct`の場合、タイムステップスケジュール内でその値に最も近いところから開始し、そこから処理を進めることで、追加されるノイズの量を可能な限り正確に制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。`--video_length` が入力より長い場合、`--v2v_pad_mode` に応じて最初のフレームまたは最後のフレームが繰り返され、長さがパディングされます。T2V または I2V の `--task` モードとモデルを使用できます (i2v モードの方が品質が高いと思います)。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去の場合と同じ量である必要があります (例: デフォルト)。 T2Vの場合は50、I2Vの場合は40です。これは、フルスケジュールから変更する必要があるためです。実際の手順は`--noise_mode`に依存します。(WV)
+- I2I推論 (`--i2i_path /path/to/image` - T2IモードでT2Vモデルを使用する場合、`--denoise_strength`で強度を指定します。潜在ノイズの増強には`--i2_extra_noise`もサポートされています。) (WV)
+- プロンプトの重み付け (`--prompt_weighting`を使用し、プロンプトで「(large:1.4)の赤いボールで遊ぶ猫」のように記述することで、「large」の効果を強調できます。[this]や(this)はサポートされておらず、(this:1.0)のみがサポートされています。(WV)
+- 複素数を使用しないComfyUIから移植されたROPE。推論または`--compile`と併用すると、VRAMを大幅に節約できます。学習には `--optimized_compile` を使用してください！(`--rope_func comfy`) (WV) (T)
+- I2V/V2V/I2I 用のオプションの潜在ノイズ (`--v2_extra_noise 0.02 --i2_extra_noise 0.02`、0.04 未満の値を推奨。これにより、細かいディテールやテクスチャが向上しますが、値が大きすぎるとアーティファクトや影の動きが発生します。私は V2V の場合は 0.01～0.02、I2V の場合は 0.02～0.04 程度を使用しています) (WV)
+- 混合精度トランスフォーマーをロードします (推論または学習には `--mixed_precision_transformer` を使用します。このようなトランスフォーマーの作成方法と、その理由については https://github.com/kohya-ss/musubi-tuner/discussions/232#discussioncomment-13284677 を参照してください) (WV) (T)
+- LLMオプションの追加 (`--hidden_​​state_skip_layer N --apply_final_norm`、説明は`--help`を参照してください!) (HY)
+- Wanと同じアルゴリズムを使用したFP8スケールのサポート (`--fp8_scaled`、推論と学習の両方に強く推奨。FP8が優れているだけなので、これだけ知っておく必要があります!) (HY) (T)
+- CLIP用のプロンプトの分離 (`--prompt_2 "second prompt goes here"`、CLIPはよりシンプルなテキストに使用されるため、CLIPとは異なるプロンプトを提供します) (HY)
+- https://github.com/zer0int/ComfyUI-HunyuanVideo-Nyan に基づいてテキストエンコーダーを再スケール (`--te_multiplier llm clip`、例えば`--te_multiplier 0.9 1.2`のように、LLMの重みをわずかに下げ、CLIPの重みを上げる)（HY）
 
-WAN 専用拡張機能（ワンショットモードとインタラクティブモードの両方をサポート）：
-- 正規化アテンションガイダンス (NAG) (https://arxiv.org/pdf/2505.21179) (クロスアテンションレイヤー内でネガティブガイダンスを提供します。通常の CFG だけでなく、蒸留モデルでも機能します。`--nag_scale 3.0` で有効にして、ネガティブプロンプトを提供してください!)
-- 高品質かつ低ステップの蒸留サンプリング (https://huggingface.co/lightx2v/Wan2.1-T2V-14B-StepDistill-CfgDistill のような蒸留 Wan モデル/LoRA で `--sample_solver lcm` または `--sample_solver dpm++sde` を使用します。また、便利な LoRA も作成しました: https://huggingface.co/Blyss/BlissfulModels/tree/main/wan_lcm )
-- V2V 推論 (`--video_path /path/to/input/video --denoise_strength amount`、amount は 0.0 - 1.0 の浮動小数点数で、ソース ビデオに追加されるノイズの強さを制御します。`--noise_mode traditional` の場合、他の実装と同様に、タイム ステップ スケジュールの最後の (amount * 100) パーセントが実行されます。`--noise_mode direct` の場合、タイム ステップ スケジュール内でその値に最も近い場所から開始して、追加されるノイズの量を可能な限り直接制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。`--video_length` が入力より長い場合、最初のフレームまたは最後のフレームが繰り返され、長さが埋められます。 `--v2v_pad_mode` に依存します。T2V または I2V の `--task` モードとモデルを使用できます（個人的には i2v モードの方が品質が良いと思います）。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去と同じ値にする必要があります。例えば、T2V の場合はデフォルトで 50、I2V の場合は 40 です。これは、完全なスケジュールから変更する必要があるためです。実際のステップ数は `--noise_mode` に依存します。
-- I2I推論 (`--i2i_path /path/to/image` - T2IモードでT2Vモデルと共に使用し、`--denoise_strength`で強度を指定します。潜在ノイズの増強のための`--i2_extra_noise`もサポートします)
-- プロンプトの重み付け（`--prompt_weighting` を指定し、プロンプトで「(large:1.4) の赤いボールで遊ぶ猫」のように記述することで、「large」の効果を強調できます。[this] または (this) に注意してください。はサポートされておらず、(this:1.0) のみサポートされています。また、重み付けのダウンウェイトには奇妙な効果があります。
-- 複素数を使用しない ComfyUI から移植された ROPE。`--compile` と併用すると VRAM を大幅に節約できます！(`--rope_func comfy`)
-- I2V/V2V 用のオプションの潜在ノイズ (`--v2v_extra_noise 0.02 --i2v_extra_noise 0.02`、0.04 未満の値を推奨。これにより V2V/I2V のディテールとテクスチャが向上しますが、値が大きすぎるとアーティファクトや影の動きが発生します。V2V では 0.01～0.02、I2V では 0.02～0.04 程度を使用しています)
-- 混合精度トランスフォーマーをロードします (推論またはトレーニングの場合は `--mixed_precision_transformer` を使用します。このようなトランスフォーマーの作成方法とその理由については、https://github.com/kohya-ss/musubi-tuner/discussions/232#discussioncomment-13284677 を参照してください)。
-
-フレームパックのみの拡張機能:
-- Torch.compile (`--compile`、Wan と Hunyuan が既に使用している構文と同じ)
-- FP8 fast/mm_scaled (`--fp8_fast` は、40xx カードで若干の品質低下を伴いますが、速度が向上します。Wan と Hunyuan は既にネイティブ Musubi でこの機能を搭載しています！)
-
-機種に依存しない追加機能:
-(以下のスクリプトを使用する場合は、`--group postprocess` (例: すべての要件を完全にインストールするには、`pip install -e . --group postprocess --group dev`) を使用してプロジェクトを venv にインストールしてください。)
-- GIMM-VFI フレームレート補間 (`blissful_tuner/GIMMVFI.py`。使用方法については `--help` を参照してください。対応モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/VFI )
-- SwinIR または ESRGAN タイプのモデルによるアップスケーリング (`blissful_tuner/upscaler.py`。使用方法については `--help` を参照してください。対応モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/upscaling )
-- Yoloベースの顔ぼかしスクリプト - 顔の改変を伴わないLoRAのトレーニングに役立ちます！(`blissful_tuner/yolo_blur.py`、使用方法については`--help`をご覧ください。推奨モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/yolo )
-- CodeFormer/GFPGANによる顔の修復 (`blissful_tuner/facefix.py`、いつものように`--help` を見てください! モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/face_restoration )
+モデルに依存しない追加機能：
+（以下のスクリプトを使用する場合は、`--group postprocess` オプションを使用してプロジェクトを venv にインストールしてください（例：`pip install -e . --group postprocess --group dev` ですべての要件を完全にインストールしてください！）
+- GIMM-VFI フレームレート補間（`src/blissful_tuner/GIMMVFI.py`、使用方法については `--help` を参照してください。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/VFI）
+- SwinIR または ESRGAN タイプのモデルによるアップスケーリング（`src/blissful_tuner/upscaler.py`、使用方法については `--help` を参照してください。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/upscaling）
+- スクリプトベースの顔ぼかしYolo で - 顔の修正を行わない LoRA のトレーニングに役立ちます！（`blissful_tuner/yolo_blur.py`、使用方法については `--help` を参照してください。推奨モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/yolo ）
+- CodeFormer/GFPGAN による顔の修復（`src/blissful_tuner/facefix.py`、いつものように `--help` を参照してください！モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/face_restoration ）
 
 また、私の関連プロジェクト（ https://github.com/Sarania/Envious ）は、LinuxのターミナルからNvidia GPUを管理するのに便利です。nvidia-ml-pyが必要ですが、リアルタイムモニタリング、オーバークロック/アンダークロック、電力制限調整、ファン制御、プロファイルなどをサポートしています。GPU VRAM用の小さなプロセスモニターも付いています！nvidia-smiがダメな場合のnvidia-smiのようなものです😂
 
 私のコード全体と Musubi Tuner のコードは Apache 2.0 ライセンスです。含まれている他のプロジェクトはライセンスが異なる場合があります。その場合は、それぞれのディレクトリにライセンス条項を記載した LICENSE ファイルがあります。以下は、現在でも有効なオリジナルの Musubi Readme です。
+(機械翻訳の終了)
 
 # Musubi Tuner
 
