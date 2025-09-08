@@ -45,7 +45,6 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 BASE_MODEL_VERSION_HUNYUAN_VIDEO = "hunyuan_video"

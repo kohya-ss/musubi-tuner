@@ -8,6 +8,7 @@ from tqdm import tqdm
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 from blissful_tuner.fp8_optimization import load_safetensors_with_fp8_optimization
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 
 
@@ -48,7 +49,7 @@ def load_safetensors_with_lora_and_fp8(
     move_to_device: bool = False,
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
-    exclude_keys: Optional[List[str]] = None
+    exclude_keys: Optional[List[str]] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -183,7 +184,7 @@ def load_safetensors_with_lora_and_fp8(
         dit_weight_dtype,
         target_keys,
         exclude_keys,
-        weight_hook=weight_hook
+        weight_hook=weight_hook,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -204,7 +205,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
-    weight_hook: callable = None
+    weight_hook: callable = None,
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.

@@ -15,7 +15,6 @@ from musubi_tuner.modules.unet_causal_3d_blocks import CausalConv3d, UNetMidBloc
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 SCALING_FACTOR = 0.476986

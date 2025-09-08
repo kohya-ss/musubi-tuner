@@ -7,12 +7,14 @@ Created on Sat Apr 12 14:09:37 2025
 
 @author: blyss
 """
+
 import random
 import hashlib
 import torch
 import safetensors
 import numpy as np
 from typing import Union, Dict, Tuple, Optional, Type
+
 try:
     from blissful_logger import BlissfulLogger
 except ImportError:
@@ -21,14 +23,8 @@ except ImportError:
 
 # Adapted from ComfyUI
 def load_torch_file(
-    ckpt: str,
-    safe_load: bool = True,
-    device: Optional[Union[str, torch.device]] = None,
-    return_metadata: bool = False
-) -> Union[
-    Dict[str, torch.Tensor],
-    Tuple[Dict[str, torch.Tensor], Optional[Dict[str, str]]]
-]:
+    ckpt: str, safe_load: bool = True, device: Optional[Union[str, torch.device]] = None, return_metadata: bool = False
+) -> Union[Dict[str, torch.Tensor], Tuple[Dict[str, torch.Tensor], Optional[Dict[str, str]]]]:
     if device is None:
         device = torch.device("cpu")
     metadata = None
@@ -44,12 +40,19 @@ def load_torch_file(
             if len(e.args) > 0:
                 message = e.args[0]
                 if "HeaderTooLarge" in message:
-                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt or invalid. Make sure this is actually a safetensors file and not a ckpt or pt or other filetype.".format(message, ckpt))
+                    raise ValueError(
+                        "{}\n\nFile path: {}\n\nThe safetensors file is corrupt or invalid. Make sure this is actually a safetensors file and not a ckpt or pt or other filetype.".format(
+                            message, ckpt
+                        )
+                    )
                 if "MetadataIncompleteBuffer" in message:
-                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
+                    raise ValueError(
+                        "{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(
+                            message, ckpt
+                        )
+                    )
             raise e
     else:
-
         pl_sd = torch.load(ckpt, map_location=device, weights_only=safe_load)
 
         if "state_dict" in pl_sd:
@@ -67,6 +70,7 @@ def load_torch_file(
 
 # Below here, Blyss wrote it!
 
+
 def str_to_dtype(dtype_str: str):
     dtype_mapping = {
         "fp16": torch.float16,
@@ -77,7 +81,7 @@ def str_to_dtype(dtype_str: str):
         "float32": torch.float32,
         "float": torch.float32,
         "fp8": torch.float8_e4m3fn,
-        "float8": torch.float8_e4m3fn
+        "float8": torch.float8_e4m3fn,
     }
     if dtype_str in dtype_mapping:
         return dtype_mapping[dtype_str]
@@ -85,7 +89,9 @@ def str_to_dtype(dtype_str: str):
         error_out(ValueError, f"Unknown dtype string '{dtype_str}'")
 
 
-def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dtype: Optional[Union[torch.dtype, str]] = None) -> Tuple[torch.device, torch.dtype]:
+def setup_compute_context(
+    device: Optional[Union[torch.device, str]] = None, dtype: Optional[Union[torch.dtype, str]] = None
+) -> Tuple[torch.device, torch.dtype]:
     logger = BlissfulLogger(__name__, "#8e00ed")
 
     if device is None:
@@ -102,7 +108,7 @@ def setup_compute_context(device: Optional[Union[torch.device, str]] = None, dty
     elif isinstance(dtype, str):
         dtype = str_to_dtype(dtype)
 
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision("high")
     if dtype == torch.float16 or dtype == torch.bfloat16:
         if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
@@ -136,7 +142,7 @@ def string_to_seed(s: str, bits: int = 63, silent: bool = False) -> int:
         else:
             char_val_str = str(char_val)
             for digit in char_val_str:
-                algo *= int(digit) if digit != "0" else .31415  # Prevents us from ascending to infinity
+                algo *= int(digit) if digit != "0" else 0.31415  # Prevents us from ascending to infinity
     if algo == float("inf"):  # In case we somehow still do
         algo = len(s) + (314159 * ord(s[len(s) // 2])) - ord(s[len(s) // 4])
     seed = (abs(crypto - int(algo))) & mask

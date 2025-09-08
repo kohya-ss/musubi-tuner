@@ -5,6 +5,7 @@ Created on Thu May  1 13:01:35 2025
 
 @author: blyss
 """
+
 import os
 import argparse
 from datetime import datetime
@@ -29,15 +30,9 @@ logger = BlissfulLogger(__name__, "#8e00ed")
 class BlissfulKeyboardManager:
     def __init__(self):
         self.early_exit_requested = False
-        self.hotkey = keyboard.HotKey(
-            keyboard.HotKey.parse("<ctrl>+q"),
-            self.request_exit
-        )
+        self.hotkey = keyboard.HotKey(keyboard.HotKey.parse("<ctrl>+q"), self.request_exit)
 
-        self.listener = keyboard.Listener(
-            on_press=self._on_press,
-            on_release=self._on_release
-        )
+        self.listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         self.listener.start()
         logger.info("Keyboard manager initialized! Press CTRL+Q for early exit!")
 
@@ -66,16 +61,36 @@ class BlissfulKeyboardManager:
 
 def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = None) -> dict:
     seed = args.seed if seed_override is None else seed_override
-    attr_list = ["prompt", "infer_steps", "guidance_scale", "flow_shift",
-                 "hidden_state_skip_layer", "apply_final_norm", "sample_solver", "scheduler",
-                 "fps", "task", "embedded_cfg_scale", "negative_prompt", "prompt_2", "cfg_schedule",
-                 "nag_scale", "nag_tau", "nag_alpha", "nag_prompt", "perp_neg", "cfgzerostar_scaling",
-                 "cfgzerostar_init_steps", "te_multiplier", "riflex_index"]
+    attr_list = [
+        "prompt",
+        "infer_steps",
+        "guidance_scale",
+        "flow_shift",
+        "hidden_state_skip_layer",
+        "apply_final_norm",
+        "sample_solver",
+        "scheduler",
+        "fps",
+        "task",
+        "embedded_cfg_scale",
+        "negative_prompt",
+        "prompt_2",
+        "cfg_schedule",
+        "nag_scale",
+        "nag_tau",
+        "nag_alpha",
+        "nag_prompt",
+        "perp_neg",
+        "cfgzerostar_scaling",
+        "cfgzerostar_init_steps",
+        "te_multiplier",
+        "riflex_index",
+    ]
     metadata = {
         "bt_model_type": f"{get_current_model_type()}",
         "bt_seeds": f"{seed}",
         "bt_creation_timestamp": f"{datetime.now()}",
-        "bt_tunerver": f"{get_current_version()}"
+        "bt_tunerver": f"{get_current_version()}",
     }
 
     if hasattr(args, "task"):  # Use task arg present for Wan to suss out model version
@@ -88,9 +103,15 @@ def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = No
         if hasattr(args, attr):  # Many are model specific
             value = getattr(args, attr)
             attr = "scheduler" if attr == "sample_solver" else attr  # Normalize naming convention for metadata
-            if (attr == "riflex_index" and value == 0) or (attr == "cfgzerostar_init_steps" and value == -1) or (attr == "cfgzerostar_scaling" and value is False):
+            if (
+                (attr == "riflex_index" and value == 0)
+                or (attr == "cfgzerostar_init_steps" and value == -1)
+                or (attr == "cfgzerostar_scaling" and value is False)
+            ):
                 continue  # Don't put them in at their "off" values
-            if (attr == "nag_tau" or attr == "nag_alpha") and args.nag_scale is None:  # We can assume nag_scale exists if either of these two pass the previous hasattr
+            if (
+                attr == "nag_tau" or attr == "nag_alpha"
+            ) and args.nag_scale is None:  # We can assume nag_scale exists if either of these two pass the previous hasattr
                 continue  # These default to nonzero floats but are only applicable if nag_scale is not None
             value = str(value) if value is not None else None  # Might be dict, list, etc so make sure to string it
             if value is not None:  # No point in passing through Nonetypes
@@ -114,7 +135,7 @@ def save_videos_grid_advanced(
     args: argparse.Namespace,
     rescale: bool = False,
     n_rows: int = 1,
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = None,
 ):
     "Function for saving Musubi Tuner outputs with more codec and container types"
 
@@ -123,10 +144,7 @@ def save_videos_grid_advanced(
 
     VideoProcessor = BlissfulVideoProcessor()
     VideoProcessor.prepare_files_and_path(
-        input_file_path=None,
-        output_file_path=output_video,
-        codec=args.codec,
-        container=args.container
+        input_file_path=None, output_file_path=output_video, codec=args.codec, container=args.container
     )
 
     outputs = []
@@ -141,12 +159,7 @@ def save_videos_grid_advanced(
 
 
 def prepare_i2i_noise(
-    base_noise: torch.Tensor,
-    args: argparse.Namespace,
-    config: EasyDict,
-    timesteps: torch.Tensor,
-    device: torch.device,
-    vae: WanVAE
+    base_noise: torch.Tensor, args: argparse.Namespace, config: EasyDict, timesteps: torch.Tensor, device: torch.device, vae: WanVAE
 ) -> torch.Tensor:
     """
     Prepare (noise, timesteps) for Wan Video-to-Video.
@@ -161,12 +174,16 @@ def prepare_i2i_noise(
     if args.noise_mode.lower() == "traditional":
         steps = int(args.infer_steps * args.denoise_strength)
         timesteps = timesteps[-(steps):]
-        logger.info(f"Modifying timestep schedule to run {args.denoise_strength * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%")
+        logger.info(
+            f"Modifying timestep schedule to run {args.denoise_strength * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%"
+        )
     elif args.noise_mode.lower() == "direct":
         normalized_ts = timesteps.float() / 1000
         start_idx = torch.argmin(torch.abs(normalized_ts - args.denoise_strength))
         timesteps = timesteps[start_idx:]
-        logger.info(f"Modifying timestep schedule to add as close to {args.denoise_strength * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%")
+        logger.info(
+            f"Modifying timestep schedule to add as close to {args.denoise_strength * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%"
+        )
     args.infer_steps = len(timesteps)
 
     output_height, output_width = args.video_size
@@ -174,20 +191,10 @@ def prepare_i2i_noise(
     aspect_ratio = output_height / output_width
 
     latent_height = int(
-        round(
-            np.sqrt(output_video_area * aspect_ratio)
-            / config.vae_stride[1]
-            / config.patch_size[1]
-            * config.patch_size[1]
-        )
+        round(np.sqrt(output_video_area * aspect_ratio) / config.vae_stride[1] / config.patch_size[1] * config.patch_size[1])
     )
     latent_width = int(
-        round(
-            np.sqrt(output_video_area / aspect_ratio)
-            / config.vae_stride[2]
-            / config.patch_size[2]
-            * config.patch_size[2]
-        )
+        round(np.sqrt(output_video_area / aspect_ratio) / config.vae_stride[2] / config.patch_size[2] * config.patch_size[2])
     )
     computed_height = latent_height * config.vae_stride[1]
     computed_width = latent_width * config.vae_stride[2]
@@ -196,17 +203,17 @@ def prepare_i2i_noise(
     img = Image.open(args.i2i_path).convert("RGB")
 
     # 4) Build a [1, C, T, H_px, W_px] video tensor
-    t = TF.to_tensor(img)                                   # [C, H, W], 0–1
+    t = TF.to_tensor(img)  # [C, H, W], 0–1
     t = TF.resize(t, [computed_height, computed_width], interpolation=TF.InterpolationMode.BICUBIC)
-    t = t.sub_(0.5).div_(0.5).to(device)                     # normalize to [-1,1]
+    t = t.sub_(0.5).div_(0.5).to(device)  # normalize to [-1,1]
     t = t.unsqueeze(1)
 
     # 5) Encode the entire video in one go to latent space
     vae.to_device(device)
     logger.info("Encoding input image to latent space for i2i")
     with torch.autocast(device_type=str(device), dtype=vae.dtype), torch.no_grad():
-        latent_list = vae.encode([t])           # returns list of length B=1
-    input_samples = latent_list[0]                # [C, T, H_lat, W_lat]
+        latent_list = vae.encode([t])  # returns list of length B=1
+    input_samples = latent_list[0]  # [C, T, H_lat, W_lat]
     vae.to_device("cpu")
 
     # 8) Blend noise & input according to updated timestep schedule
@@ -241,12 +248,16 @@ def prepare_v2v_noise(
     if args.noise_mode.lower() == "traditional":
         steps = int(args.infer_steps * args.denoise_strength)
         timesteps = timesteps[-(steps):]
-        logger.info(f"Modifying timestep schedule to run {args.denoise_strength * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%")
+        logger.info(
+            f"Modifying timestep schedule to run {args.denoise_strength * 100}% of the process. Noise added: {timesteps.float()[0] / 10:.2f}%"
+        )
     elif args.noise_mode.lower() == "direct":
         normalized_ts = timesteps.float() / 1000
         start_idx = torch.argmin(torch.abs(normalized_ts - args.denoise_strength))
         timesteps = timesteps[start_idx:]
-        logger.info(f"Modifying timestep schedule to add as close to {args.denoise_strength * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%")
+        logger.info(
+            f"Modifying timestep schedule to add as close to {args.denoise_strength * 100}% noise as possible. Noise added: {timesteps.float()[0] / 10:.2f}%"
+        )
     args.infer_steps = len(timesteps)
 
     output_height, output_width = args.video_size
@@ -254,20 +265,10 @@ def prepare_v2v_noise(
     aspect_ratio = output_height / output_width
 
     latent_height = int(
-        round(
-            np.sqrt(output_video_area * aspect_ratio)
-            / config.vae_stride[1]
-            / config.patch_size[1]
-            * config.patch_size[1]
-        )
+        round(np.sqrt(output_video_area * aspect_ratio) / config.vae_stride[1] / config.patch_size[1] * config.patch_size[1])
     )
     latent_width = int(
-        round(
-            np.sqrt(output_video_area / aspect_ratio)
-            / config.vae_stride[2]
-            / config.patch_size[2]
-            * config.patch_size[2]
-        )
+        round(np.sqrt(output_video_area / aspect_ratio) / config.vae_stride[2] / config.patch_size[2] * config.patch_size[2])
     )
     computed_height = latent_height * config.vae_stride[1]
     computed_width = latent_width * config.vae_stride[2]
@@ -280,19 +281,19 @@ def prepare_v2v_noise(
     # 4) Build a [1, C, T, H_px, W_px] video tensor
     frame_tensors = []
     for arr in raw_frames:
-        t = TF.to_tensor(arr)                                   # [C, H, W], 0–1
+        t = TF.to_tensor(arr)  # [C, H, W], 0–1
         t = TF.resize(t, [computed_height, computed_width], interpolation=TF.InterpolationMode.BICUBIC)
-        t = t.sub_(0.5).div_(0.5).to(device)                     # normalize to [-1,1]
+        t = t.sub_(0.5).div_(0.5).to(device)  # normalize to [-1,1]
         frame_tensors.append(t)
-    video = torch.stack(frame_tensors, dim=0)                   # [F, C, H, W]
-    video = video.permute(1, 0, 2, 3).unsqueeze(0)              # [1, C, F, H, W]
+    video = torch.stack(frame_tensors, dim=0)  # [F, C, H, W]
+    video = video.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, F, H, W]
 
     # 5) Encode the entire video in one go to latent space
     vae.to_device(device)
     logger.info("Encoding input video to latent space")
     with torch.autocast(device_type=str(device), dtype=vae.dtype), torch.no_grad():
-        latent_list = vae.encode(video)           # returns list of length B=1
-    input_samples = latent_list[0]                # [C, T, H_lat, W_lat]
+        latent_list = vae.encode(video)  # returns list of length B=1
+    input_samples = latent_list[0]  # [C, T, H_lat, W_lat]
     vae.to_device("cpu")
 
     # 7) Ensure input_samples has exactly T = noise.shape[1] frames

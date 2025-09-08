@@ -5,6 +5,7 @@ Tiny AutoEncoder for Stable Diffusion
 From: https://github.com/madebyollin/taesd
 MIT License
 """
+
 import torch
 import torch.nn as nn
 
@@ -31,21 +32,46 @@ class Block(nn.Module):
 
 def Encoder(latent_channels=4):
     return nn.Sequential(
-        conv(3, 64), Block(64, 64),
-        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
-        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
-        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+        conv(3, 64),
+        Block(64, 64),
+        conv(64, 64, stride=2, bias=False),
+        Block(64, 64),
+        Block(64, 64),
+        Block(64, 64),
+        conv(64, 64, stride=2, bias=False),
+        Block(64, 64),
+        Block(64, 64),
+        Block(64, 64),
+        conv(64, 64, stride=2, bias=False),
+        Block(64, 64),
+        Block(64, 64),
+        Block(64, 64),
         conv(64, latent_channels),
     )
 
 
 def Decoder(latent_channels=4):
     return nn.Sequential(
-        Clamp(), conv(latent_channels, 64), nn.ReLU(),
-        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
-        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
-        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
-        Block(64, 64), conv(64, 3),
+        Clamp(),
+        conv(latent_channels, 64),
+        nn.ReLU(),
+        Block(64, 64),
+        Block(64, 64),
+        Block(64, 64),
+        nn.Upsample(scale_factor=2),
+        conv(64, 64, bias=False),
+        Block(64, 64),
+        Block(64, 64),
+        Block(64, 64),
+        nn.Upsample(scale_factor=2),
+        conv(64, 64, bias=False),
+        Block(64, 64),
+        Block(64, 64),
+        Block(64, 64),
+        nn.Upsample(scale_factor=2),
+        conv(64, 64, bias=False),
+        Block(64, 64),
+        conv(64, 3),
     )
 
 
@@ -100,6 +126,7 @@ def main():
     from PIL import Image
     import sys
     import torchvision.transforms.functional as TF
+
     dev = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print("Using device", dev)
     taesd = TAESD().to(dev)

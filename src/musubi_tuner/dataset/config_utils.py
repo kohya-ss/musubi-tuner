@@ -21,7 +21,6 @@ from musubi_tuner.dataset.image_video_dataset import DatasetGroup, ImageDataset,
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 @dataclass

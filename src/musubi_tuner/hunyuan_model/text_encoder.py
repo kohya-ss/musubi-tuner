@@ -21,7 +21,6 @@ from accelerate import init_empty_weights
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 CLIP_L_HUGGINGFACE_MODEL_ID = "openai/clip-vit-large-patch14"
@@ -248,7 +247,7 @@ def load_text_encoder(
     text_encoder_path: str,
     text_encoder_dtype: Optional[Union[str, torch.dtype]] = None,
 ):
-    #logger.info(f"Loading text encoder model ({text_encoder_type}) from: {text_encoder_path}")
+    # logger.info(f"Loading text encoder model ({text_encoder_type}) from: {text_encoder_path}")
 
     # reduce peak memory usage by specifying the dtype of the model
     dtype = text_encoder_dtype
@@ -275,7 +274,7 @@ def load_text_encoder(
 
 
 def load_tokenizer(tokenizer_type, tokenizer_path=None, padding_side="right"):
-    #logger.info(f"Loading tokenizer ({tokenizer_type}) from: {tokenizer_path}")
+    # logger.info(f"Loading tokenizer ({tokenizer_type}) from: {tokenizer_path}")
 
     if tokenizer_type == "clipL":
         tokenizer = load_clip_l_tokenizer(tokenizer_path)

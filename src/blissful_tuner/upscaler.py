@@ -17,14 +17,13 @@ from spandrel import ImageModelDescriptor, ModelLoader
 from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
 from blissful_tuner.utils import setup_compute_context, load_torch_file, BlissfulLogger, power_seed
 from blissful_tuner.swinir.network_swinir import SwinIR
+
 logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 
 
 def upscale_frames_swin(
-    model: torch.nn.Module,
-    frames: List[np.ndarray],
-    VideoProcessor: BlissfulVideoProcessor
+    model: torch.nn.Module, frames: List[np.ndarray], VideoProcessor: BlissfulVideoProcessor
 ) -> List[np.ndarray]:
     """
     Upscale a list of RGB frames using a compiled SwinIR model.
@@ -87,11 +86,11 @@ def load_swin_model(
         embed_dim=240,
         num_heads=[8] * 9,
         mlp_ratio=2,
-        upsampler='nearest+conv',
-        resi_connection='3conv',
+        upsampler="nearest+conv",
+        resi_connection="3conv",
     )
     ckpt = load_torch_file(model_path)
-    key = 'params_ema' if 'params_ema' in ckpt else None
+    key = "params_ema" if "params_ema" in ckpt else None
     model.load_state_dict(ckpt[key] if key else ckpt, strict=True)
     model.to(device, dtype).eval()
     return model
@@ -123,15 +122,12 @@ def main() -> None:
     """
     Parse CLI args, load input, model, and run upscaling pipeline.
     """
-    parser = setup_parser_video_common(description="Video upscaling using SwinIR or ESRGAN models", model_help="Path to model safetensors/pt file e.g. SwinIR.safetensors, 4x_NMKD-Siax_200k.safetensors")
-    parser.add_argument(
-        "--scale", type=float, default=2,
-        help="Final scale multiplier for output resolution"
+    parser = setup_parser_video_common(
+        description="Video upscaling using SwinIR or ESRGAN models",
+        model_help="Path to model safetensors/pt file e.g. SwinIR.safetensors, 4x_NMKD-Siax_200k.safetensors",
     )
-    parser.add_argument(
-        "--mode", choices=["swinir", "esrgan"], default="swinir",
-        help="Model architecture to use"
-    )
+    parser.add_argument("--scale", type=float, default=2, help="Final scale multiplier for output resolution")
+    parser.add_argument("--mode", choices=["swinir", "esrgan"], default="swinir", help="Model architecture to use")
     args = parser.parse_args()
     args.mode = args.mode.lower()
     # Map string → torch.dtype

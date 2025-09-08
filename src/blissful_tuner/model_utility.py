@@ -7,6 +7,7 @@ License: Apache 2.0
 Created on Wed Apr 23 10:19:19 2025
 @author: blyss
 """
+
 import os
 import argparse
 import torch
@@ -15,33 +16,38 @@ from safetensors.torch import save_file
 from rich_argparse import RichHelpFormatter
 from rich.traceback import install as install_rich_tracebacks
 from tqdm import tqdm
+
 install_rich_tracebacks()
 
 parser = argparse.ArgumentParser(
     description="Utility for inspecting model structure and converting between dtypes. Supports loading single safetensors or sharded, saving is single safetensors",
-    formatter_class=RichHelpFormatter
+    formatter_class=RichHelpFormatter,
+)
+parser.add_argument("--input", required=True, help="Checkpoint file or directory of shards to convert/inspect")
+parser.add_argument(
+    "--convert",
+    type=str,
+    default=None,
+    help="/path/to/output.safetensors, If provided, the model will be loaded, processed and written to this file",
 )
 parser.add_argument(
-    "--input",
-    required=True,
-    help="Checkpoint file or directory of shards to convert/inspect"
+    "--inspect",
+    action="store_true",
+    help="If provided, will print out the keys in the model's state dict along with their dtype and shape",
 )
-parser.add_argument(
-    "--convert", type=str, default=None,
-    help="/path/to/output.safetensors, If provided, the model will be loaded, processed and written to this file"
-)
-parser.add_argument("--inspect", action="store_true", help="If provided, will print out the keys in the model's state dict along with their dtype and shape")
 parser.add_argument("--target_keys", nargs="*", type=str, default=None, help="Keys to target for dtype conversion")
 parser.add_argument("--exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude for dtype conversion")
 parser.add_argument(
-    "--weights_only", action="store_false",
-    help="Whether to load the model using 'weights_only' which can be safer. Default is true, don't change unless needed"
+    "--weights_only",
+    action="store_false",
+    help="Whether to load the model using 'weights_only' which can be safer. Default is true, don't change unless needed",
 )
 parser.add_argument(
-    "--dtype", type=str,
+    "--dtype",
+    type=str,
     help="Datatype to convert tensors to when using --convert. "
     "If --target_keys or --exclude_keys is specified, only target keys that aren't excluded will have their dtype converted. "
-    "This can be useful for creating mixed precision models!"
+    "This can be useful for creating mixed precision models!",
 )
 args = parser.parse_args()
 
@@ -115,11 +121,7 @@ for key in tqdm(keys_to_process, desc="Processing tensors"):
     if args.inspect and is_target:
         print(f"{key}: {value.shape} ({value.dtype})")
 
-    dtype_to_use = (
-        dtype_mapping.get(args.dtype.lower(), value.dtype)
-        if args.dtype
-        else value.dtype
-    )
+    dtype_to_use = dtype_mapping.get(args.dtype.lower(), value.dtype) if args.dtype else value.dtype
     final_dtype = dtype_to_use if is_target else value.dtype
     if args.convert:
         print(f"{key} {final_dtype}")
@@ -132,9 +134,6 @@ for key in tqdm(keys_to_process, desc="Processing tensors"):
 
 print(f"Dtypes in model: {dtypes_in_model}")
 if args.convert:
-    output_file = (
-        args.convert.replace(".pth", ".safetensors")
-        .replace(".pt", ".safetensors")
-    )
+    output_file = args.convert.replace(".pth", ".safetensors").replace(".pt", ".safetensors")
     print(f"Saving converted tensors to '{output_file}'...")
     save_file(converted_state_dict, output_file)

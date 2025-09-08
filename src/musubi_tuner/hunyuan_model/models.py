@@ -19,6 +19,7 @@ from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 
 
@@ -636,14 +637,13 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         return next(self.parameters()).dtype
 
     def fp8_optimization(
-        self,
-        state_dict: dict[str, torch.Tensor],
-        device: torch.device,
-        use_scaled_mm: bool = False
+        self, state_dict: dict[str, torch.Tensor], device: torch.device, use_scaled_mm: bool = False
     ) -> dict[str, torch.Tensor]:
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
         logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if use_scaled_mm else ''}...")
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep)
+        state_dict = optimize_state_dict_with_fp8(
+            state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep
+        )
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
         return state_dict
 
@@ -781,7 +781,9 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         vec = vec + self.vector_in(text_states_2)
 
         # guidance modulation
-        if self.guidance_embed and guidance is not None:  # If guidance is None, this is an embedded-free CFG step so skip embedded guidance
+        if (
+            self.guidance_embed and guidance is not None
+        ):  # If guidance is None, this is an embedded-free CFG step so skip embedded guidance
             # our timestep_embedding is merged into guidance_in(TimestepEmbedder)
             vec = vec + self.guidance_in(guidance)
 
@@ -1006,15 +1008,16 @@ def load_state_dict(model, model_path):
 
 
 def load_transformer(
-        dit_path: str,
-        attn_mode: str,
-        split_attn: bool,
-        load_device: torch.device,
-        main_device: torch.device,
-        dtype: torch.dtype,
-        in_channels: int = 16,
-        fp8_scaled: bool = False,
-        fp8_fast: bool = False) -> HYVideoDiffusionTransformer:
+    dit_path: str,
+    attn_mode: str,
+    split_attn: bool,
+    load_device: torch.device,
+    main_device: torch.device,
+    dtype: torch.dtype,
+    in_channels: int = 16,
+    fp8_scaled: bool = False,
+    fp8_fast: bool = False,
+) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
     factor_kwargs = {"device": load_device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16

@@ -5,6 +5,7 @@ Created on Tue Mar 11 19:08:55 2025
 
 @author: blyss
 """
+
 import os
 import json
 
@@ -13,6 +14,7 @@ class SingletonMeta(type):
     """
     The SingletonMeta class is useful for creating objects that persist as a single instance across the whole program. Basically a global class.
     """
+
     _instances = {}
 
     def __call__(cls, *Parameters, **kwParameters):

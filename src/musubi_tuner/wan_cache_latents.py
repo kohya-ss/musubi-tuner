@@ -16,7 +16,7 @@ from musubi_tuner.wan.modules.clip import CLIPModel
 import musubi_tuner.cache_latents as cache_latents
 
 logger = BlissfulLogger(__name__, "green")
- 
+
 
 black_image_latents = {}  # global variable for black image latent, used in encode_and_save_batch_one_frame. key: tuple for shape
 

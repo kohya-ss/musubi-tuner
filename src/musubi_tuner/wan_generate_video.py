@@ -46,7 +46,14 @@ from blissful_tuner.utils import string_to_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards, prepare_wan_special_inputs
 from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
-from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_v2v_noise, prepare_i2i_noise, prepare_metadata, BlissfulKeyboardManager
+from blissful_tuner.common_extensions import (
+    save_videos_grid_advanced,
+    prepare_v2v_noise,
+    prepare_i2i_noise,
+    prepare_metadata,
+    BlissfulKeyboardManager,
+)
+
 # blissful end
 lycoris_available = find_spec("lycoris") is not None
 if lycoris_available:
@@ -73,7 +80,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
     parser.add_argument("--task", type=str, default="t2v-14B", choices=list(WAN_CONFIGS.keys()), help="The task to run.")
     parser.add_argument(
-        "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla", "lcm", "dpm++sde", "euler_a"], help="The solver used to sample."
+        "--sample_solver",
+        type=str,
+        default="unipc",
+        choices=["unipc", "dpm++", "vanilla", "lcm", "dpm++sde", "euler_a"],
+        help="The solver used to sample.",
     )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path")
@@ -446,7 +457,9 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int, int]:
     size = f"{width}*{height}"
 
     if size not in SUPPORTED_SIZES[args.task]:
-        logger.info(f"Size {size} is not (officially) supported for task {args.task}.\n Officially supported sizes are {SUPPORTED_SIZES[args.task]}.")
+        logger.info(
+            f"Size {size} is not (officially) supported for task {args.task}.\n Officially supported sizes are {SUPPORTED_SIZES[args.task]}."
+        )
 
     video_length = args.video_length
 
@@ -663,7 +676,7 @@ def load_dit_model(
         "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args,
         "nag_scale": None if not hasattr(args, "nag_scale") else args.nag_scale,
         "nag_tau": None if not hasattr(args, "nag_tau") else args.nag_tau,
-        "nag_alpha": None if not hasattr(args, "nag_alpha") else args.nag_alpha
+        "nag_alpha": None if not hasattr(args, "nag_alpha") else args.nag_alpha,
     }
     model = load_wan_model(
         config,
@@ -677,7 +690,7 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
         use_scaled_mm=args.fp8_fast,
-        **blissful_kwargs
+        **blissful_kwargs,
     )
 
     # merge LoRA weights
@@ -1168,7 +1181,9 @@ def prepare_i2v_inputs(
 
     # calculate latent dimensions: keep aspect ratio
     i_height, i_width = img_tensor.shape[1:]
-    logger.info(f"Input image res: '{i_width}x{i_height}' will be rescaled to requested video res '{v_width}x{v_height}' (width x height)")
+    logger.info(
+        f"Input image res: '{i_width}x{i_height}' will be rescaled to requested video res '{v_width}x{v_height}' (width x height)"
+    )
     aspect_ratio = v_height / v_width
     lat_h = int(round(np.sqrt(max_area * aspect_ratio) // config.vae_stride[1] // config.patch_size[1] * config.patch_size[1]))
     lat_w = int(round(np.sqrt(max_area / aspect_ratio) // config.vae_stride[2] // config.patch_size[2] * config.patch_size[2]))
@@ -1311,12 +1326,10 @@ def prepare_i2v_inputs(
             y = torch.concat([control_latent, y], dim=0)  # add control video latent
     if args.i2_extra_noise not in (None, 0.0):
         logger.info(f"Adding {100 * args.i2_extra_noise:.1f}% extra noise to I2V conditioning latents")
-        extra_noise = torch.randn(
-            y.shape,
-            generator=seed_g,
-            device=y.device if not args.cpu_noise else "cpu",
-            dtype=y.dtype
-        ) * args.i2_extra_noise
+        extra_noise = (
+            torch.randn(y.shape, generator=seed_g, device=y.device if not args.cpu_noise else "cpu", dtype=y.dtype)
+            * args.i2_extra_noise
+        )
         y = y + extra_noise.to(y.device)
     # generate noise
     noise = torch.randn(
@@ -1400,12 +1413,16 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         timesteps = scheduler.timesteps
     elif args.sample_solver == "lcm":
         from blissful_tuner.scheduling import FlowMatchLCMScheduler
+
         scheduler = FlowMatchLCMScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
         scheduler.set_timesteps(args.infer_steps, device=device)
         timesteps = scheduler.timesteps
     elif "dpm++" in args.sample_solver:
         scheduler = FlowDPMSolverMultistepScheduler(
-            num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False, algorithm_type="sde-dpmsolver++" if "sde" in args.sample_solver else "dpmsolver++"
+            num_train_timesteps=config.num_train_timesteps,
+            shift=1,
+            use_dynamic_shifting=False,
+            algorithm_type="sde-dpmsolver++" if "sde" in args.sample_solver else "dpmsolver++",
         )
         sampling_sigmas = get_sampling_sigmas(args.infer_steps, args.flow_shift)
         timesteps, _ = retrieve_timesteps(scheduler, device=device, sigmas=sampling_sigmas)
@@ -1445,7 +1462,7 @@ def run_sampling(
     seed_g: torch.Generator,
     accelerator: Accelerator,
     is_i2v: bool = False,
-    use_cpu_offload: bool = True
+    use_cpu_offload: bool = True,
 ) -> torch.Tensor:
     """run sampling
     Args:
@@ -1529,7 +1546,9 @@ def run_sampling(
         apply_cfg_array = [args.guidance_scale > 1.0] * num_timesteps
 
     if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
-        logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
+        logger.info(
+            f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}"
+        )
     # SLG original implementation is based on https://github.com/Stability-AI/sd3.5/blob/main/sd3_impls.py
     slg_start_step = int(args.slg_start * num_timesteps)
     slg_end_step = int(args.slg_end * num_timesteps)
@@ -1600,7 +1619,9 @@ def run_sampling(
         latent_model_input = [latent.to(device)]
 
         with accelerator.autocast(), torch.no_grad():
-            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c, km=km, nag_context=nag_context)[0].to(latent_storage_device)  # Cond is always the same
+            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c, km=km, nag_context=nag_context)[0].to(
+                latent_storage_device
+            )  # Cond is always the same
             apply_cfg = apply_cfg_array[i]  # Will we do any CFG or just proceed with cond?
             if apply_cfg:  # We will do CFG this step
                 if args.cfg_schedule is not None:  # Is it scheduled CFG? If so and it's off we won't come here but if it's on...
@@ -1611,19 +1632,31 @@ def run_sampling(
                 skip_block_indices = None  # e.g. normal uncond
                 if apply_slg and not do_slg_pass:  # args.slg_mode != "original" so args.slg_mode == "uncond"
                     skip_block_indices = args.slg_layers  # uncond with layer skips
-                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null, skip_block_indices=skip_block_indices, km=km)[0].to(latent_storage_device)  # uncond
+                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null, skip_block_indices=skip_block_indices, km=km)[
+                    0
+                ].to(latent_storage_device)  # uncond
 
                 if args.perp_neg is not None:  # Are we using perpendicular negative? It needs a third model pass (nocond).
-                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_true_uncond, km=km)[0].to(latent_storage_device)  # Then calculate nocond
-                    noise_pred = perpendicular_negative_cfg(noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale)  # And update the noise_pred
+                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_true_uncond, km=km)[0].to(
+                        latent_storage_device
+                    )  # Then calculate nocond
+                    noise_pred = perpendicular_negative_cfg(
+                        noise_pred_cond, noise_pred_uncond, noise_pred_nocond, args.perp_neg, args.guidance_scale
+                    )  # And update the noise_pred
                 elif args.cfgzerostar_scaling:  # No perp_neg, so CFGZero* scaling instead? (mutually exclusive)
-                    noise_pred = apply_zerostar_scaling(noise_pred_cond, noise_pred_uncond, args.guidance_scale)  # does CFG with scaling inside, returns noise_pred after CFG formula
+                    noise_pred = apply_zerostar_scaling(
+                        noise_pred_cond, noise_pred_uncond, args.guidance_scale
+                    )  # does CFG with scaling inside, returns noise_pred after CFG formula
                 else:  # Normal CFG
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 if do_slg_pass:  # Do SLG original? This mode uses 3 model passes, cond, uncond, and uncond with layer skip and it's calc comes after normal CFG
-                    skip_layer_out = model(latent_model_input, t=timestep, **arg_null, km=km, skip_block_indices=args.slg_layers)[0].to(latent_storage_device)
-                    noise_pred = noise_pred + args.slg_scale * (noise_pred_cond - skip_layer_out)  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
+                    skip_layer_out = model(latent_model_input, t=timestep, **arg_null, km=km, skip_block_indices=args.slg_layers)[
+                        0
+                    ].to(latent_storage_device)
+                    noise_pred = noise_pred + args.slg_scale * (
+                        noise_pred_cond - skip_layer_out
+                    )  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
 
             else:  # No CFG shenanigans at all
                 noise_pred = noise_pred_cond
@@ -1820,7 +1853,9 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     return latent_path
 
 
-def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name: Optional[str] = None, metadata: Optional[dict] = None) -> str:
+def save_video(
+    video: torch.Tensor, args: argparse.Namespace, original_base_name: Optional[str] = None, metadata: Optional[dict] = None
+) -> str:
     """Save video to file
 
     Args:
@@ -1878,7 +1913,7 @@ def save_output(
     height: int,
     width: int,
     original_base_names: Optional[List[str]] = None,
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = None,
 ) -> None:
     """save output
 

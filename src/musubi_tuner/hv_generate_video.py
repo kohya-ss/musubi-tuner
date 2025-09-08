@@ -37,6 +37,7 @@ from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
 from blissful_tuner.guidance import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
 from blissful_tuner.advanced_rope import get_rotary_pos_embed_riflex
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
+
 logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
 if lycoris_available:
@@ -178,11 +179,7 @@ def encode_prompt(
 
     # tile the mask if provided
     if attention_mask is not None:
-        attention_mask = (
-            attention_mask.to(device)
-            .repeat(1, num_videos_per_prompt)
-            .view(-1, attention_mask.shape[-1])
-        )
+        attention_mask = attention_mask.to(device).repeat(1, num_videos_per_prompt).view(-1, attention_mask.shape[-1])
 
     # ensure correct dtype/device
     prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
@@ -190,16 +187,10 @@ def encode_prompt(
     # handle 2D vs 3D embeddings
     if prompt_embeds.ndim == 2:
         bs, dim = prompt_embeds.shape
-        prompt_embeds = (
-            prompt_embeds.repeat(1, num_videos_per_prompt)
-            .view(bs * num_videos_per_prompt, dim)
-        )
+        prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt).view(bs * num_videos_per_prompt, dim)
     else:
         bs, seq_len, dim = prompt_embeds.shape
-        prompt_embeds = (
-            prompt_embeds.repeat(1, num_videos_per_prompt, 1)
-            .view(bs * num_videos_per_prompt, seq_len, dim)
-        )
+        prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1).view(bs * num_videos_per_prompt, seq_len, dim)
 
     return prompt_embeds, attention_mask
 
@@ -584,11 +575,13 @@ def main():
         if negative_prompt is None:
             logger.info("Negative prompt is not provided, using empty prompt")
             negative_prompt = ""
-        conditioning_dict = {"positive": {"prompt": prompt}, "negative": {"prompt": negative_prompt}, "nocond": {"prompt": None if args.perp_neg is None else ""}}
+        conditioning_dict = {
+            "positive": {"prompt": prompt},
+            "negative": {"prompt": negative_prompt},
+            "nocond": {"prompt": None if args.perp_neg is None else ""},
+        }
 
-        conditioning_dict = encode_input_prompt(
-            conditioning_dict, args, device, args.fp8_llm, accelerator
-        )
+        conditioning_dict = encode_input_prompt(conditioning_dict, args, device, args.fp8_llm, accelerator)
 
         # encode latents for video2video inference
         video_latents = None
@@ -771,7 +764,12 @@ def main():
         # load scheduler
         if "dpm" in args.scheduler:
             from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler
-            scheduler = FlowDPMSolverMultistepScheduler(shift=args.flow_shift, use_dynamic_shifting=False, algorithm_type="sde-dpmsolver++" if "sde" in args.scheduler else "dpmsolver++")
+
+            scheduler = FlowDPMSolverMultistepScheduler(
+                shift=args.flow_shift,
+                use_dynamic_shifting=False,
+                algorithm_type="sde-dpmsolver++" if "sde" in args.scheduler else "dpmsolver++",
+            )
         else:
             scheduler = FlowMatchDiscreteScheduler(shift=args.flow_shift, reverse=True, solver="euler")
 
@@ -828,7 +826,11 @@ def main():
             logger.info(f"Loading latent '{args.from_latent}'")
             sd = load_file(args.from_latent, device=str(device))
             from_latent = sd["latent"]
-            video_latents = torchvision.transforms.functional.resize(from_latent, (latents.shape[3], latents.shape[4]), interpolation=torchvision.transforms.functional.InterpolationMode.BICUBIC)
+            video_latents = torchvision.transforms.functional.resize(
+                from_latent,
+                (latents.shape[3], latents.shape[4]),
+                interpolation=torchvision.transforms.functional.InterpolationMode.BICUBIC,
+            )
             video_latents = video_latents.unsqueeze(0)
             logger.info(f"Latent2Video: noise shape {latents.shape}, video_latents shape {video_latents.shape}")
         if args.video_path is not None or args.from_latent is not None:
@@ -845,7 +847,9 @@ def main():
 
             logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
         if args.preview_latent_every:
-            previewer = LatentPreviewer(args, original_latents=latents, scheduler=scheduler, device=device, dtype=dit_dtype, model_type="hunyuan")
+            previewer = LatentPreviewer(
+                args, original_latents=latents, scheduler=scheduler, device=device, dtype=dit_dtype, model_type="hunyuan"
+            )
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
         # Denoising loop
         embedded_guidance_scale = args.embedded_cfg_scale
@@ -873,9 +877,11 @@ def main():
         if args.split_attn and do_classifier_free_guidance and not args.split_uncond:
             logger.warning("split_attn is enabled, split_uncond will be enabled as well.")
             args.split_uncond = True
-        do_cfg_for_step = do_classifier_free_guidance         # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
+        do_cfg_for_step = do_classifier_free_guidance  # if args.cfg_schedule is None this will remain as assigned here so we don't need to bother it.
         if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
-            logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
+            logger.info(
+                f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}"
+            )
 
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -892,7 +898,11 @@ def main():
                         latents_input = torch.cat([latents, image_latents], dim=1)
                     batch_size = latents_input.shape[0]
                     for prompt_type, prompt_dict in conditioning_dict.items():
-                        if (prompt_type == "negative" and not do_cfg_for_step) or prompt_dict["prompt"] is None or km.early_exit_requested:
+                        if (
+                            (prompt_type == "negative" and not do_cfg_for_step)
+                            or prompt_dict["prompt"] is None
+                            or km.early_exit_requested
+                        ):
                             continue
                         prompt_dict["transformer_out"] = transformer(
                             latents_input,
@@ -910,11 +920,23 @@ def main():
                 if not km.early_exit_requested:
                     if do_cfg_for_step:
                         if args.cfgzerostar_scaling:
-                            noise_pred = apply_zerostar_scaling(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], args.guidance_scale)
+                            noise_pred = apply_zerostar_scaling(
+                                conditioning_dict["positive"]["transformer_out"],
+                                conditioning_dict["negative"]["transformer_out"],
+                                args.guidance_scale,
+                            )
                         elif args.perp_neg is not None:
-                            noise_pred = perpendicular_negative_cfg(conditioning_dict["positive"]["transformer_out"], conditioning_dict["negative"]["transformer_out"], conditioning_dict["nocond"]["transformer_out"], args.perp_neg, args.guidance_scale)
+                            noise_pred = perpendicular_negative_cfg(
+                                conditioning_dict["positive"]["transformer_out"],
+                                conditioning_dict["negative"]["transformer_out"],
+                                conditioning_dict["nocond"]["transformer_out"],
+                                args.perp_neg,
+                                args.guidance_scale,
+                            )
                         else:
-                            noise_pred = conditioning_dict["negative"]["transformer_out"] + args.guidance_scale * (conditioning_dict["positive"]["transformer_out"] - conditioning_dict["negative"]["transformer_out"])
+                            noise_pred = conditioning_dict["negative"]["transformer_out"] + args.guidance_scale * (
+                                conditioning_dict["positive"]["transformer_out"] - conditioning_dict["negative"]["transformer_out"]
+                            )
                     else:
                         noise_pred = conditioning_dict["positive"]["transformer_out"]
                     if i <= args.cfgzerostar_init_steps - 1:  # CFGZero* zero init
@@ -956,17 +978,27 @@ def main():
             # save video
             videos = decode_latents(args, latents, device)
             for i, sample in enumerate(videos):
-                original_name = "" if original_base_names is None or len(original_base_names[i]) == 0 else f"_{original_base_names[i]}"
+                original_name = (
+                    "" if original_base_names is None or len(original_base_names[i]) == 0 else f"_{original_base_names[i]}"
+                )
                 sample = sample.unsqueeze(0)
                 video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-                metadata = meta_keep[i] if meta_keep is not None else prepare_metadata(args, seed_override=seeds[i]) if not args.no_metadata else None
+                metadata = (
+                    meta_keep[i]
+                    if meta_keep is not None
+                    else prepare_metadata(args, seed_override=seeds[i])
+                    if not args.no_metadata
+                    else None
+                )
                 save_videos_grid_advanced(sample, video_path, args, metadata=metadata)
                 logger.info(f"Sample save to: {video_path}")
         elif output_type == "images":
             # save images
             videos = decode_latents(args, latents, device)
             for i, sample in enumerate(videos):
-                original_name = "" if original_base_names is None or len(original_base_names[i]) == 0 else f"_{original_base_names[i]}"
+                original_name = (
+                    "" if original_base_names is None or len(original_base_names[i]) == 0 else f"_{original_base_names[i]}"
+                )
                 sample = sample.unsqueeze(0)
                 image_name = f"{time_flag}_{i}_{seeds[i]}{original_name}"
                 save_images_grid(sample, save_path, image_name)

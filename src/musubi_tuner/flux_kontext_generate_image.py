@@ -25,6 +25,7 @@ from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.guidance import parse_scheduled_cfg, apply_zerostar_scaling
 from blissful_tuner.blissful_core import add_blissful_flux_args, parse_blissful_args
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
 
@@ -410,9 +411,7 @@ def prepare_text_inputs(
         # T5XXL is float16 by default, but it causes NaN values in some cases, so we use bfloat16 (or fp8 if specified)
         t_dtype = torch.float8_e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
         tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t_dtype, device=t_device, disable_mmap=True)
-        tokenizer2, text_encoder2 = flux_utils.load_clip_l(
-            args.text_encoder2, dtype=t_dtype, device=t_device, disable_mmap=True
-        )
+        tokenizer2, text_encoder2 = flux_utils.load_clip_l(args.text_encoder2, dtype=t_dtype, device=t_device, disable_mmap=True)
 
     # Store original devices to move back later if they were shared. This does nothing if shared_models is None
     text_encoder1_original_device = text_encoder1.device if text_encoder1 else None
@@ -465,14 +464,20 @@ def prepare_text_inputs(
         )["input_ids"]
         l_tokens = tokenizer2(prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
 
-        with torch.autocast(device_type=t_device.type, dtype=text_encoder1.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
+        with (
+            torch.autocast(device_type=t_device.type, dtype=text_encoder1.dtype) if not args.fp32_cpu_te else nullcontext(),
+            torch.no_grad(),
+        ):
             t5_vec = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
                 "last_hidden_state"
             ]
             assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"  # NoQA tensor is not bool
             t5_vec = t5_vec.cpu()
 
-        with torch.autocast(device_type=t_device.type, dtype=text_encoder2.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
+        with (
+            torch.autocast(device_type=t_device.type, dtype=text_encoder2.dtype) if not args.fp32_cpu_te else nullcontext(),
+            torch.no_grad(),
+        ):
             clip_l_pooler = text_encoder2(l_tokens.to(text_encoder2.device))["pooler_output"]
             clip_l_pooler = clip_l_pooler.cpu()
 
@@ -495,16 +500,24 @@ def prepare_text_inputs(
                 truncation=True,
                 return_tensors="pt",
             )["input_ids"]
-            neg_l_tokens = tokenizer2(neg_prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
+            neg_l_tokens = tokenizer2(neg_prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")[
+                "input_ids"
+            ]
 
-            with torch.autocast(device_type=t_device.type, dtype=text_encoder1.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
-                neg_t5_vec = text_encoder1(input_ids=neg_t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
-                    "last_hidden_state"
-                ]
+            with (
+                torch.autocast(device_type=t_device.type, dtype=text_encoder1.dtype) if not args.fp32_cpu_te else nullcontext(),
+                torch.no_grad(),
+            ):
+                neg_t5_vec = text_encoder1(
+                    input_ids=neg_t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False
+                )["last_hidden_state"]
                 assert torch.isnan(neg_t5_vec).any() == False, "T5 vector contains NaN values"  # NoQA
                 neg_t5_vec = neg_t5_vec.cpu()
 
-            with torch.autocast(device_type=t_device.type, dtype=text_encoder2.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
+            with (
+                torch.autocast(device_type=t_device.type, dtype=text_encoder2.dtype) if not args.fp32_cpu_te else nullcontext(),
+                torch.no_grad(),
+            ):
                 neg_clip_l_pooler = text_encoder2(neg_l_tokens.to(text_encoder2.device))["pooler_output"]
                 neg_clip_l_pooler = neg_clip_l_pooler.cpu()
 
@@ -665,7 +678,9 @@ def generate(
         neg_clip_l_pooler = neg_context["clip_l_pooler"].to(device, dtype=working_dtype)
         neg_txt_ids = torch.zeros(neg_t5_vec.shape[0], neg_t5_vec.shape[1], 3, device=neg_t5_vec.device)
     if args.cfgzerostar_scaling or args.cfgzerostar_init_steps != -1:
-        logger.info(f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}")
+        logger.info(
+            f"Using CFGZero* - Scaling: {args.cfgzerostar_scaling}; Zero init steps: {'None' if args.cfgzerostar_init_steps == -1 else args.cfgzerostar_init_steps}"
+        )
     # make first noise with packed shape
     # original: b,16,2*h//16,2*w//16, packed: b,h//16*w//16,16*2*2
     packed_latent_height, packed_latent_width = height // 16, width // 16
@@ -696,8 +711,14 @@ def generate(
 
     if args.scheduler == "dpm++":
         logger.info("Using FlowDPMSolverMultistepScheduler")
-        mu = flux_utils.get_lin_function(y1=0.5, y2=1.15)(packed_latent_height * packed_latent_width) if args.flow_shift is None else None
-        scheduler = FlowDPMSolverMultistepScheduler(use_dynamic_shifting=True if args.flow_shift is None else False, algorithm_type="dpmsolver++")
+        mu = (
+            flux_utils.get_lin_function(y1=0.5, y2=1.15)(packed_latent_height * packed_latent_width)
+            if args.flow_shift is None
+            else None
+        )
+        scheduler = FlowDPMSolverMultistepScheduler(
+            use_dynamic_shifting=True if args.flow_shift is None else False, algorithm_type="dpmsolver++"
+        )
         scheduler.set_timesteps(args.infer_steps, device=device, shift=args.flow_shift, mu=mu)
         timesteps = scheduler.timesteps
         sigmas = scheduler.sigmas
@@ -710,8 +731,12 @@ def generate(
         timesteps = sigmas
     if args.preview_latent_every:
         previewer = LatentPreviewer(  # Make noise proper latent space image
-            args, rearrange(noise, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2),
-            scheduler, device, working_dtype, model_type="flux"
+            args,
+            rearrange(noise, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2),
+            scheduler,
+            device,
+            working_dtype,
+            model_type="flux",
         )
         if args.scheduler == "euler":
             previewer.sigmas = timesteps  # hack to support ancient scheduling
@@ -783,7 +808,9 @@ def generate(
             x = x + (t_prev - t_curr) * pred
 
         if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
-            preview_x = rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
+            preview_x = rearrange(
+                x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2
+            )
             previewer.preview(preview_x, i)
             del preview_x
     # unpack

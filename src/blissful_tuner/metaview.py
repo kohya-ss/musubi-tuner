@@ -10,14 +10,13 @@ Requires:
 
 License: Apache 2.0
 """
+
 import sys
 import math
 import subprocess
 import argparse
 import os
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QLabel, QLineEdit, QTextEdit, QPushButton, QGridLayout, QSizePolicy
-)
+from PySide6.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QTextEdit, QPushButton, QGridLayout, QSizePolicy
 from PySide6.QtCore import Qt
 from PIL import Image  # for reading PNG metadata
 
@@ -68,22 +67,10 @@ def parse_bt_tags(filename: str) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Display bt_ metadata tags from an MKV or PNG in a GUI"
-    )
+    parser = argparse.ArgumentParser(description="Display bt_ metadata tags from an MKV or PNG in a GUI")
     parser.add_argument("input_file", help="Input MKV or PNG file")
-    parser.add_argument(
-        "--columns",
-        type=int,
-        default=0,
-        help="Number of metadata columns (0 = auto based on --max-rows)."
-    )
-    parser.add_argument(
-        "--max-rows",
-        type=int,
-        default=12,
-        help="When --columns=0, wrap to a new column after this many rows."
-    )
+    parser.add_argument("--columns", type=int, default=0, help="Number of metadata columns (0 = auto based on --max-rows).")
+    parser.add_argument("--max-rows", type=int, default=12, help="When --columns=0, wrap to a new column after this many rows.")
     args = parser.parse_args()
 
     metadata = parse_bt_tags(args.input_file)
@@ -99,18 +86,23 @@ def main():
     layout.setVerticalSpacing(6)
 
     desired_order = [
-        "bt_model_type", "bt_task", "bt_prompt", "bt_negative_prompt", "bt_nag_prompt",
-        "bt_seeds", "bt_infer_steps", "bt_embedded_cfg_scale", "bt_guidance_scale",
-        "bt_cfg_schedule", "bt_fps"
+        "bt_model_type",
+        "bt_task",
+        "bt_prompt",
+        "bt_negative_prompt",
+        "bt_nag_prompt",
+        "bt_seeds",
+        "bt_infer_steps",
+        "bt_embedded_cfg_scale",
+        "bt_guidance_scale",
+        "bt_cfg_schedule",
+        "bt_fps",
     ]
 
     # Order keys: desired first (if present), then alphabetical extras
     lower_to_original = {k.lower(): k for k in metadata.keys()}
     ordered_keys = [lower_to_original[k] for k in desired_order if k in lower_to_original]
-    extras = sorted(
-        [k for k in metadata.keys() if k.lower() not in desired_order],
-        key=lambda k: k.lower()
-    )
+    extras = sorted([k for k in metadata.keys() if k.lower() not in desired_order], key=lambda k: k.lower())
     ordered_keys += extras
 
     # Decide columns/rows
@@ -154,9 +146,7 @@ def main():
 
         copy_btn = QPushButton("Copy")
         copy_btn.clicked.connect(
-            lambda _checked, w=editor: clipboard.setText(
-                w.toPlainText() if isinstance(w, QTextEdit) else w.text()
-            )
+            lambda _checked, w=editor: clipboard.setText(w.toPlainText() if isinstance(w, QTextEdit) else w.text())
         )
         layout.addWidget(copy_btn, r, base_c + 2)
 

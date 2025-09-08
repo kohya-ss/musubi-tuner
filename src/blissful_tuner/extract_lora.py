@@ -22,6 +22,7 @@ from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.utils import str_to_dtype
 from blissful_tuner.blissful_core import get_current_version
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 install_rich_tracebacks()
 logger = BlissfulLogger(__name__, "#8e00ed")
 
@@ -47,9 +48,8 @@ def svd(
     mem_eff_safe_open=False,
     prefix="lora_unet",
     target_keys=["blocks"],
-    exclude_keys=["bias", "norm", "modulation"]
+    exclude_keys=["bias", "norm", "modulation"],
 ):
-
     calc_dtype = torch.float
     save_dtype = str_to_dtype(save_precision) if save_precision is not None else None
     store_device = "cpu"
@@ -69,10 +69,10 @@ def svd(
 
         with safe_open(model_tuned, framework="pt") as f_tuned:
             for key in tqdm(keys, desc="Extracting LoRA"):
-                key2 = key if key in f_tuned.keys() else 'model.diffusion_model.' + key
+                key2 = key if key in f_tuned.keys() else "model.diffusion_model." + key
 
                 if key2 not in f_tuned.keys():
-                    logger.warning(f'{key} not found')
+                    logger.warning(f"{key} not found")
                     continue
 
                 # get tensors and calculate difference
@@ -130,7 +130,7 @@ def svd(
         "ss_network_args": json.dumps(net_kwargs),
         "bt_tunerver": get_current_version(),
         "bt_target_keys": ", ".join(target_keys),
-        "bt_exclude_keys": ", ".join(exclude_keys)
+        "bt_exclude_keys": ", ".join(exclude_keys),
     }
 
     save_to_file(save_to, lora_sd, metadata, save_dtype)
@@ -139,22 +139,37 @@ def svd(
 
 
 def setup_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generic script for extracting LoRA from the difference between two diffusion models of the same arch", formatter_class=RichHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description="Generic script for extracting LoRA from the difference between two diffusion models of the same arch",
+        formatter_class=RichHelpFormatter,
+    )
     parser.add_argument(
-        "--save_precision", type=str, default=None, choices=[None, "float", "fp32", "float16", "fp16", "bfloat16", "bf16"],
+        "--save_precision",
+        type=str,
+        default=None,
+        choices=[None, "float", "fp32", "float16", "fp16", "bfloat16", "bf16"],
         help="Precision to save the LoRA. Default is float32 / 保存時に精度を変更して保存する、省略時はfloat",
     )
     parser.add_argument(
-        "--model_org", type=str, default=None, required=True,
+        "--model_org",
+        type=str,
+        default=None,
+        required=True,
         help="Original model: safetensors file / 元モデル、safetensors",
     )
     parser.add_argument(
-        "--model_tuned", type=str, default=None, required=True,
+        "--model_tuned",
+        type=str,
+        default=None,
+        required=True,
         help="Tuned model, LoRA is difference of `original to tuned`: safetensors file / 派生モデル（生成されるLoRAは元→派生の差分になります）、ckptまたはsafetensors",
     )
 
     parser.add_argument(
-        "--save_to", type=str, default=None, required=True,
+        "--save_to",
+        type=str,
+        default=None,
+        required=True,
         help="destination file name: safetensors file / 保存先のファイル名、safetensors",
     )
     parser.add_argument(
@@ -164,13 +179,24 @@ def setup_parser() -> argparse.ArgumentParser:
         "--device", type=str, default=None, help="device to use, cuda for GPU / 計算を行うデバイス、cuda でGPUを使う"
     )
     parser.add_argument(
-        "--clamp_quantile", type=float, default=0.99,
+        "--clamp_quantile",
+        type=float,
+        default=0.99,
         help="Quantile clamping value, float, (0-1). Default = 0.99 / 値をクランプするための分位点、float、(0-1)。デフォルトは0.99",
     )
-    parser.add_argument("--target_keys", nargs="*", type=str, default=["blocks"], help="Keys to target for LoRA, default is any key containing 'blocks'")
     parser.add_argument(
-        "--exclude_keys", nargs="*", type=str, default=["norm", "bias", "modulation"],
-        help="Keys to exclude for LoRA, default is any key containing 'norm', 'bias', or 'modulation'"
+        "--target_keys",
+        nargs="*",
+        type=str,
+        default=["blocks"],
+        help="Keys to target for LoRA, default is any key containing 'blocks'",
+    )
+    parser.add_argument(
+        "--exclude_keys",
+        nargs="*",
+        type=str,
+        default=["norm", "bias", "modulation"],
+        help="Keys to exclude for LoRA, default is any key containing 'norm', 'bias', or 'modulation'",
     )
     parser.add_argument("--prefix", type=str, default="lora_unet", help="Prefix for LoRA modules, default is 'lora_unet'")
     return parser

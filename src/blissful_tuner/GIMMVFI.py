@@ -42,6 +42,7 @@ from blissful_tuner.gimmvfi.generalizable_INR.flowformer.configs.submission impo
 from blissful_tuner.gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
 from blissful_tuner.utils import load_torch_file, setup_compute_context, power_seed
 from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+
 warnings.filterwarnings("ignore")
 install_rich_tracebacks()
 
@@ -104,7 +105,9 @@ def load_model(model_path: str, device: torch.device, dtype: torch.dtype, mode: 
     return model
 
 
-def interpolate(model: torch.nn.Module, frames: List[torch.Tensor], ds_factor: float, N: int, VideoProcessor: BlissfulVideoProcessor):
+def interpolate(
+    model: torch.nn.Module, frames: List[torch.Tensor], ds_factor: float, N: int, VideoProcessor: BlissfulVideoProcessor
+):
     """
     Interpolates frames using the provided model.
 
@@ -154,10 +157,7 @@ def interpolate(model: torch.nn.Module, frames: List[torch.Tensor], ds_factor: f
                 )
                 for i in range(1, N)
             ]
-            timesteps = [
-                i / N * torch.ones(batch_size, device=xs.device, dtype=dtype)
-                for i in range(1, N)
-            ]
+            timesteps = [i / N * torch.ones(batch_size, device=xs.device, dtype=dtype) for i in range(1, N)]
             if dtype != torch.float32:
                 with torch.autocast(device_type=str(device), dtype=dtype):
                     all_outputs = model(xs, coord_inputs, t=timesteps, ds_factor=ds_factor)
@@ -178,12 +178,22 @@ def interpolate(model: torch.nn.Module, frames: List[torch.Tensor], ds_factor: f
 
 
 def main():
-    parser = setup_parser_video_common(description="Frame rate interpolation using GIMM-VFI", model_help="Path to folder containing models/configs for GIMM-VFI")
+    parser = setup_parser_video_common(
+        description="Frame rate interpolation using GIMM-VFI", model_help="Path to folder containing models/configs for GIMM-VFI"
+    )
     parser.add_argument("--ds_factor", type=float, default=1.0, help="Downsampling factor")
-    parser.add_argument("--mode", type=str, default="gimmvfi_f", help="Model mode: 'gimmvfi_r' or 'gimmvfi_f' for RAFT or FlowFormer version respectively")
     parser.add_argument(
-        "--factor", type=int, default=2, help="Factor to increase the number of frames by. \
-        A factor of 2 will double the fps, taking e.g. a 16fps video to 32fps. Can go up to 8 but higher values have more artifacts"
+        "--mode",
+        type=str,
+        default="gimmvfi_f",
+        help="Model mode: 'gimmvfi_r' or 'gimmvfi_f' for RAFT or FlowFormer version respectively",
+    )
+    parser.add_argument(
+        "--factor",
+        type=int,
+        default=2,
+        help="Factor to increase the number of frames by. \
+        A factor of 2 will double the fps, taking e.g. a 16fps video to 32fps. Can go up to 8 but higher values have more artifacts",
     )
     args = parser.parse_args()
     device, dtype = setup_compute_context(None, args.dtype)

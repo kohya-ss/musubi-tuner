@@ -33,6 +33,7 @@ from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 # blissful start
 from blissful_tuner.utils import error_out
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 # blissful end
 
@@ -476,15 +477,23 @@ class WanNetworkTrainer(NetworkTrainer):
             "rope_func": "default" if not hasattr(args, "rope_func") else args.rope_func,
             "riflex_index": 0 if not hasattr(args, "riflex_index") else args.riflex_index,
             "num_frames": 81 if not hasattr(args, "video_length") else args.video_length,
-            "lower_precision_attention": False if not hasattr(args, "lower_precision_attention") else args.lower_precision_attention,
+            "lower_precision_attention": False
+            if not hasattr(args, "lower_precision_attention")
+            else args.lower_precision_attention,
             "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation,
             "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile,
-            "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args
+            "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args,
         }
         model = load_wan_model(
-            self.config, accelerator.device, dit_path, attn_mode, split_attn,
-            loading_device, dit_weight_dtype, args.fp8_scaled,
-            **blissful_kwargs
+            self.config,
+            accelerator.device,
+            dit_path,
+            attn_mode,
+            split_attn,
+            loading_device,
+            dit_weight_dtype,
+            args.fp8_scaled,
+            **blissful_kwargs,
         )
         if self.high_low_training:
             # load high noise model
@@ -498,7 +507,7 @@ class WanNetworkTrainer(NetworkTrainer):
                 "cpu" if args.offload_inactive_dit else loading_device,
                 dit_weight_dtype,
                 args.fp8_scaled,
-                **blissful_kwargs
+                **blissful_kwargs,
             )
             if self.blocks_to_swap > 0:
                 # This moves the weights to the appropriate device
@@ -724,11 +733,32 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         action="store_true",
         help="Offload inactive DiT model to CPU. Cannot be used with block swap / アクティブではないDiTモデルをCPUにオフロードします。ブロックスワップと併用できません",
     )
-    parser.add_argument("--rope_func", type=str, default="default", help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile")
-    parser.add_argument("--mixed_precision_transformer", action="store_true", help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else")
-    parser.add_argument("--simple_modulation", action="store_true", help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus")
-    parser.add_argument("--lower_precision_attention", action="store_true", help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.")
-    parser.add_argument("--optimized_compile", action="store_true", help="Enable optimized torch.compile of just the most crucial blocks. Exclusive of --dynamo_backend and works best with --rope_func comfy")
+    parser.add_argument(
+        "--rope_func",
+        type=str,
+        default="default",
+        help="Function to use for ROPE. Choose from 'default' or 'comfy' the latter of which uses ComfyUI implementation and is compilable with torch.compile",
+    )
+    parser.add_argument(
+        "--mixed_precision_transformer",
+        action="store_true",
+        help="Allow loading mixed precision transformer such as a combination of float16 weights / float32 everything else",
+    )
+    parser.add_argument(
+        "--simple_modulation",
+        action="store_true",
+        help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus",
+    )
+    parser.add_argument(
+        "--lower_precision_attention",
+        action="store_true",
+        help="Do parts of attention calculation in and maintain e tensor in float16 to save some VRAM at small cost to quality.",
+    )
+    parser.add_argument(
+        "--optimized_compile",
+        action="store_true",
+        help="Enable optimized torch.compile of just the most crucial blocks. Exclusive of --dynamo_backend and works best with --rope_func comfy",
+    )
     parser.add_argument(
         "--compile_args",
         nargs=4,

@@ -7,15 +7,18 @@ Created on Mon May  5 14:21:21 2025
 
 @author: blyss
 """
+
 import os
 import argparse
 from rich_argparse import RichHelpFormatter
 from video_processing_common import BlissfulVideoProcessor
-parser = argparse.ArgumentParser(description="Extract N frames from a video and save to png in specified directory", formatter_class=RichHelpFormatter)
+
+parser = argparse.ArgumentParser(
+    description="Extract N frames from a video and save to png in specified directory", formatter_class=RichHelpFormatter
+)
 parser.add_argument("--input", required=True, help="Input video to process")
 parser.add_argument(
-    "--output", type=str, default=None,
-    help="Output path for directory that will contain PNGs. Default is same path as input"
+    "--output", type=str, default=None, help="Output path for directory that will contain PNGs. Default is same path as input"
 )
 parser.add_argument("--num_frames", type=int, default=None, help="Number of frames to extract, default is all of them")
 args = parser.parse_args()

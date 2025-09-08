@@ -1547,9 +1547,15 @@ class NetworkTrainer:
         dit_weight_dtype: Optional[torch.dtype],
     ):
         transformer = load_transformer(
-            dit_path, attn_mode, split_attn,
-            loading_device, accelerator.device, dit_weight_dtype,
-            args.dit_in_channels, fp8_scaled=args.fp8_scaled)
+            dit_path,
+            attn_mode,
+            split_attn,
+            loading_device,
+            accelerator.device,
+            dit_weight_dtype,
+            args.dit_in_channels,
+            fp8_scaled=args.fp8_scaled,
+        )
 
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")
@@ -2894,7 +2900,11 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
-    parser.add_argument("--fp16_accumulation", action="store_true", help="(Not recommended for training) Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher")
+    parser.add_argument(
+        "--fp16_accumulation",
+        action="store_true",
+        help="(Not recommended for training) Enable full FP16 Accmumulation in FP16 GEMMs, requires Pytorch 2.7.0 or higher",
+    )
     return parser
 
 
@@ -2948,7 +2958,9 @@ def hv_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         " / VAEの空間タイリングを有効にする、デフォルトはFalse。vae_spatial_tile_sample_min_sizeが設定されている場合、自動的に有効になります。",
     )
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
-    parser.add_argument("--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256")
+    parser.add_argument(
+        "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
+    )
     parser.add_argument("--fp8_scaled", action="store_true", help="Scaled FP8 quantization for better accuracy/quality")
     return parser
 

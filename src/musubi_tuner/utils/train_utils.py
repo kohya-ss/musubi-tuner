@@ -9,7 +9,6 @@ import accelerate
 from musubi_tuner.utils import huggingface_utils
 
 logger = BlissfulLogger(__name__, "green")
- 
 
 
 # checkpointファイル名

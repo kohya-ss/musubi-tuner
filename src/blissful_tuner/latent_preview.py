@@ -7,6 +7,7 @@ Created on Mon Mar 10 16:47:29 2025
 
 @author: blyss
 """
+
 import argparse
 import os
 from typing import List
@@ -21,7 +22,7 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 
-class LatentPreviewer():
+class LatentPreviewer:
     @torch.inference_mode()
     def __init__(
         self,
@@ -30,7 +31,7 @@ class LatentPreviewer():
         scheduler: any,
         device: torch.device,
         dtype: torch.dtype,
-        model_type: str = "hunyuan"
+        model_type: str = "hunyuan",
     ) -> None:
         self.mode = "latent2rgb" if args.preview_vae is None else "taehv" if model_type != "flux" else "taesd"
         logger.info(f"Initializing latent previewer with mode {self.mode}...")
@@ -46,7 +47,9 @@ class LatentPreviewer():
         if self.model_type not in ["hunyuan", "wan", "framepack", "flux"]:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
-        if model_type != "framepack" and original_latents is not None:  # Framepack will send in na clean latent, others will be noisy
+        if (
+            model_type != "framepack" and original_latents is not None
+        ):  # Framepack will send in na clean latent, others will be noisy
             self.original_latents = original_latents.to(self.device)
             self.subtract_noise = True
             if scheduler is not None:
@@ -78,12 +81,7 @@ class LatentPreviewer():
         # Upscale if we used latent2rgb so output is same size as expected
         scale_factor = 8 if self.mode == "latent2rgb" else None
         if scale_factor is not None:
-            upscaled = torch.nn.functional.interpolate(
-                decoded,
-                scale_factor=scale_factor,
-                mode="bicubic",
-                align_corners=False
-            )
+            upscaled = torch.nn.functional.interpolate(decoded, scale_factor=scale_factor, mode="bicubic", align_corners=False)
         else:
             upscaled = decoded
 
@@ -133,7 +131,9 @@ class LatentPreviewer():
             out_fps = self.args.fps // 4 if self.mode == "latent2rgb" else self.args.fps
         else:
             out_fps = 24 // 4 if self.mode == "latent2rgb" else 24
-            logger.warning(f"Requested to write out a video but no fps in args! Probably shouldn't see this but we'll set it to {out_fps} and keep going")
+            logger.warning(
+                f"Requested to write out a video but no fps in args! Probably shouldn't see this but we'll set it to {out_fps} and keep going"
+            )
         container = av.open(target, mode="w")
         stream = container.add_stream("libx264", rate=out_fps)
         stream.pix_fmt = "yuv420p"
@@ -183,82 +183,76 @@ class LatentPreviewer():
         model_params = {
             "hunyuan": {
                 "rgb_factors": [
-                    [-0.0395, -0.0331,  0.0445],
-                    [ 0.0696,  0.0795,  0.0518],
-                    [ 0.0135, -0.0945, -0.0282],
-                    [ 0.0108, -0.0250, -0.0765],
-                    [-0.0209,  0.0032,  0.0224],
+                    [-0.0395, -0.0331, 0.0445],
+                    [0.0696, 0.0795, 0.0518],
+                    [0.0135, -0.0945, -0.0282],
+                    [0.0108, -0.0250, -0.0765],
+                    [-0.0209, 0.0032, 0.0224],
                     [-0.0804, -0.0254, -0.0639],
-                    [-0.0991,  0.0271, -0.0669],
+                    [-0.0991, 0.0271, -0.0669],
                     [-0.0646, -0.0422, -0.0400],
                     [-0.0696, -0.0595, -0.0894],
                     [-0.0799, -0.0208, -0.0375],
-                    [ 0.1166,  0.1627,  0.0962],
-                    [ 0.1165,  0.0432,  0.0407],
+                    [0.1166, 0.1627, 0.0962],
+                    [0.1165, 0.0432, 0.0407],
                     [-0.2315, -0.1920, -0.1355],
-                    [-0.0270,  0.0401, -0.0821],
+                    [-0.0270, 0.0401, -0.0821],
                     [-0.0616, -0.0997, -0.0727],
-                    [ 0.0249, -0.0469, -0.1703]
+                    [0.0249, -0.0469, -0.1703],
                 ],
                 "bias": [0.0259, -0.0192, -0.0761],
             },
             "wan": {
                 "rgb_factors": [
-                    [-0.1299, -0.1692,  0.2932],
-                    [ 0.0671,  0.0406,  0.0442],
-                    [ 0.3568,  0.2548,  0.1747],
-                    [ 0.0372,  0.2344,  0.1420],
-                    [ 0.0313,  0.0189, -0.0328],
-                    [ 0.0296, -0.0956, -0.0665],
+                    [-0.1299, -0.1692, 0.2932],
+                    [0.0671, 0.0406, 0.0442],
+                    [0.3568, 0.2548, 0.1747],
+                    [0.0372, 0.2344, 0.1420],
+                    [0.0313, 0.0189, -0.0328],
+                    [0.0296, -0.0956, -0.0665],
                     [-0.3477, -0.4059, -0.2925],
-                    [ 0.0166,  0.1902,  0.1975],
-                    [-0.0412,  0.0267, -0.1364],
-                    [-0.1293,  0.0740,  0.1636],
-                    [ 0.0680,  0.3019,  0.1128],
-                    [ 0.0032,  0.0581,  0.0639],
-                    [-0.1251,  0.0927,  0.1699],
-                    [ 0.0060, -0.0633,  0.0005],
-                    [ 0.3477,  0.2275,  0.2950],
-                    [ 0.1984,  0.0913,  0.1861]
+                    [0.0166, 0.1902, 0.1975],
+                    [-0.0412, 0.0267, -0.1364],
+                    [-0.1293, 0.0740, 0.1636],
+                    [0.0680, 0.3019, 0.1128],
+                    [0.0032, 0.0581, 0.0639],
+                    [-0.1251, 0.0927, 0.1699],
+                    [0.0060, -0.0633, 0.0005],
+                    [0.3477, 0.2275, 0.2950],
+                    [0.1984, 0.0913, 0.1861],
                 ],
                 "bias": [-0.1835, -0.0868, -0.3360],
             },
             "flux": {
                 "rgb_factors": [
-                    [-0.0346,  0.0244,  0.0681],
-                    [ 0.0034,  0.0210,  0.0687],
-                    [ 0.0275, -0.0668, -0.0433],
-                    [-0.0174,  0.0160,  0.0617],
-                    [ 0.0859,  0.0721,  0.0329],
-                    [ 0.0004,  0.0383,  0.0115],
-                    [ 0.0405,  0.0861,  0.0915],
+                    [-0.0346, 0.0244, 0.0681],
+                    [0.0034, 0.0210, 0.0687],
+                    [0.0275, -0.0668, -0.0433],
+                    [-0.0174, 0.0160, 0.0617],
+                    [0.0859, 0.0721, 0.0329],
+                    [0.0004, 0.0383, 0.0115],
+                    [0.0405, 0.0861, 0.0915],
                     [-0.0236, -0.0185, -0.0259],
-                    [-0.0245,  0.0250,  0.1180],
-                    [ 0.1008,  0.0755, -0.0421],
-                    [-0.0515,  0.0201,  0.0011],
-                    [ 0.0428, -0.0012, -0.0036],
-                    [ 0.0817,  0.0765,  0.0749],
+                    [-0.0245, 0.0250, 0.1180],
+                    [0.1008, 0.0755, -0.0421],
+                    [-0.0515, 0.0201, 0.0011],
+                    [0.0428, -0.0012, -0.0036],
+                    [0.0817, 0.0765, 0.0749],
                     [-0.1264, -0.0522, -0.1103],
                     [-0.0280, -0.0881, -0.0499],
-                    [-0.1262, -0.0982, -0.0778]
+                    [-0.1262, -0.0982, -0.0778],
                 ],
-                "bias": [-0.0329, -0.0718, -0.0851]
-            }
+                "bias": [-0.0329, -0.0718, -0.0851],
+            },
         }
-        latent_rgb_factors = model_params[self.model_type]["rgb_factors"] if self.model_type != "framepack" else model_params["hunyuan"]
+        latent_rgb_factors = (
+            model_params[self.model_type]["rgb_factors"] if self.model_type != "framepack" else model_params["hunyuan"]
+        )
         latent_rgb_factors_bias = model_params[self.model_type]["bias"]
 
         # Prepare linear transform
-        latent_rgb_factors = torch.tensor(
-            latent_rgb_factors,
-            device=latents.device,
-            dtype=latents.dtype
-        ).transpose(0, 1)
-        latent_rgb_factors_bias = torch.tensor(
-            latent_rgb_factors_bias,
-            device=latents.device,
-            dtype=latents.dtype
-        )
+        latent_rgb_factors = torch.tensor(latent_rgb_factors, device=latents.device, dtype=latents.dtype).transpose(0, 1)
+        latent_rgb_factors_bias = torch.tensor(latent_rgb_factors_bias, device=latents.device, dtype=latents.dtype)
 
         # For each frame, apply the linear transform
         latent_images = []
@@ -266,7 +260,9 @@ class LatentPreviewer():
             latents = latents[:, :, None, :, :]  # Will be B, C, H, W so make a fake frame dim to make life easy
         for t in range(latents.shape[2]):  # B, C, F, H, W
             extracted = latents[:, :, t, :, :][0].permute(1, 2, 0)  # shape = (H, W, C) after .permute(1,2,0)
-            rgb = torch.nn.functional.linear(extracted, latent_rgb_factors, bias=latent_rgb_factors_bias)  # shape = (H, W, 3) after linear
+            rgb = torch.nn.functional.linear(
+                extracted, latent_rgb_factors, bias=latent_rgb_factors_bias
+            )  # shape = (H, W, 3) after linear
             latent_images.append(rgb)
 
         # Stack frames into (F, H, W, 3)

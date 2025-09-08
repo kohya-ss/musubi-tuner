@@ -62,12 +62,13 @@ def get_meshgrid_nd(start, *args, dim=2):
 #################################################################################
 # https://github.com/meta-llama/llama/blob/be327c427cc5e89cc1d3ab3d3fec4484df771245/llama/model.py#L80
 
-    
+
 def apply_rotary(x, cos, sin):
-        x_reshaped = x.view(*x.shape[:-1], -1, 2)
-        x1, x2 = x_reshaped.unbind(-1)
-        x_rotated = torch.stack([-x2, x1], dim=-1).flatten(3)
-        return (x * cos) + (x_rotated * sin)
+    x_reshaped = x.view(*x.shape[:-1], -1, 2)
+    x1, x2 = x_reshaped.unbind(-1)
+    x_rotated = torch.stack([-x2, x1], dim=-1).flatten(3)
+    return (x * cos) + (x_rotated * sin)
+
 
 def apply_rotary_emb(
     xq: torch.Tensor,
@@ -92,7 +93,7 @@ def apply_rotary_emb(
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
 
     """
-   
+
     shape = [d if i == 1 or i == xq.ndim - 1 else 1 for i, d in enumerate(xq.shape)]
     cos, sin = freqs_cis[0].view(*shape), freqs_cis[1].view(*shape)
 
@@ -136,25 +137,19 @@ def get_nd_rotary_pos_embed(
         pos_embed (torch.Tensor): [HW, D/2]
     """
 
-    grid = get_meshgrid_nd(
-        start, *args, dim=len(rope_dim_list)
-    )  # [3, W, H, D] / [2, W, H]
+    grid = get_meshgrid_nd(start, *args, dim=len(rope_dim_list))  # [3, W, H, D] / [2, W, H]
 
     if isinstance(theta_rescale_factor, int) or isinstance(theta_rescale_factor, float):
         theta_rescale_factor = [theta_rescale_factor] * len(rope_dim_list)
     elif isinstance(theta_rescale_factor, list) and len(theta_rescale_factor) == 1:
         theta_rescale_factor = [theta_rescale_factor[0]] * len(rope_dim_list)
-    assert len(theta_rescale_factor) == len(
-        rope_dim_list
-    ), "len(theta_rescale_factor) should equal to len(rope_dim_list)"
+    assert len(theta_rescale_factor) == len(rope_dim_list), "len(theta_rescale_factor) should equal to len(rope_dim_list)"
 
     if isinstance(interpolation_factor, int) or isinstance(interpolation_factor, float):
         interpolation_factor = [interpolation_factor] * len(rope_dim_list)
     elif isinstance(interpolation_factor, list) and len(interpolation_factor) == 1:
         interpolation_factor = [interpolation_factor[0]] * len(rope_dim_list)
-    assert len(interpolation_factor) == len(
-        rope_dim_list
-    ), "len(interpolation_factor) should equal to len(rope_dim_list)"
+    assert len(interpolation_factor) == len(rope_dim_list), "len(interpolation_factor) should equal to len(rope_dim_list)"
 
     # use 1/ndim of dimensions to encode grid_axis
     embs = []
@@ -178,7 +173,7 @@ def get_nd_rotary_pos_embed(
                 use_real=use_real,
                 theta_rescale_factor=theta_rescale_factor[i],
                 interpolation_factor=interpolation_factor[i],
-            )  
+            )
         embs.append(emb)
 
     if use_real:
@@ -228,9 +223,7 @@ def get_1d_rotary_pos_embed(
     if theta_rescale_factor != 1.0:
         theta *= theta_rescale_factor ** (dim / (dim - 2))
 
-    freqs = 1.0 / (
-        theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-    )  # [D/2]
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))  # [D/2]
     # assert interpolation_factor == 1.0, f"interpolation_factor: {interpolation_factor}"
 
     freqs = torch.outer(pos * interpolation_factor, freqs)  # [S, D/2]
@@ -239,10 +232,9 @@ def get_1d_rotary_pos_embed(
         freqs_sin = freqs.sin().repeat_interleave(2, dim=1)  # [S, D]
         return freqs_cos, freqs_sin
     else:
-        freqs_cis = torch.polar(
-            torch.ones_like(freqs), freqs
-        )  # complex64     # [S, D/2]
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64     # [S, D/2]
         return freqs_cis
+
 
 def get_1d_rotary_pos_embed_riflex(
     dim: int,
@@ -253,7 +245,7 @@ def get_1d_rotary_pos_embed_riflex(
     interpolation_factor: float = 1.0,
     L_test: int = 66,
     k: int = 0,
-    N_k: int=50
+    N_k: int = 50,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Precompute the frequency tensor for complex exponential (cis) with given dimensions.
@@ -283,15 +275,12 @@ def get_1d_rotary_pos_embed_riflex(
     if theta_rescale_factor != 1.0:
         theta *= theta_rescale_factor ** (dim / (dim - 2))
 
-    freqs = 1.0 / (
-        theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-    )  # [D/2]
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))  # [D/2]
     # assert interpolation_factor == 1.0, f"interpolation_factor: {interpolation_factor}"
 
-    #RIFLEx https://github.com/thu-ml/RIFLEx
+    # RIFLEx https://github.com/thu-ml/RIFLEx
     if k > 0 and L_test > N_k:
-        freqs[k-1] = 0.9 * 2 * torch.pi / L_test
-
+        freqs[k - 1] = 0.9 * 2 * torch.pi / L_test
 
     freqs = torch.outer(pos * interpolation_factor, freqs)  # [S, D/2]
     if use_real:
@@ -299,7 +288,5 @@ def get_1d_rotary_pos_embed_riflex(
         freqs_sin = freqs.sin().repeat_interleave(2, dim=1)  # [S, D]
         return freqs_cos, freqs_sin
     else:
-        freqs_cis = torch.polar(
-            torch.ones_like(freqs), freqs
-        )  # complex64     # [S, D/2]
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64     # [S, D/2]
         return freqs_cis

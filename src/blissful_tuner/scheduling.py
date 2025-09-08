@@ -329,9 +329,7 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
 
         if sigmas is None:
             if timesteps is None:
-                timesteps = np.linspace(
-                    self._sigma_to_t(self.sigma_max), self._sigma_to_t(self.sigma_min), num_inference_steps
-                )
+                timesteps = np.linspace(self._sigma_to_t(self.sigma_max), self._sigma_to_t(self.sigma_min), num_inference_steps)
             sigmas = timesteps / self.config.num_train_timesteps
         else:
             sigmas = np.array(sigmas).astype(np.float32)
@@ -430,11 +428,7 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
                 returned, otherwise a tuple is returned where the first element is the sample tensor.
         """
 
-        if (
-            isinstance(timestep, int)
-            or isinstance(timestep, torch.IntTensor)
-            or isinstance(timestep, torch.LongTensor)
-        ):
+        if isinstance(timestep, int) or isinstance(timestep, torch.IntTensor) or isinstance(timestep, torch.LongTensor):
             raise ValueError(
                 (
                     "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
@@ -444,9 +438,7 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
             )
 
         if self._scale_factors and self._upscale_mode and len(self.timesteps) != len(self._scale_factors) + 1:
-            raise ValueError(
-                "`_scale_factors` should have the same length as `timesteps` - 1, if `_scale_factors` are set."
-            )
+            raise ValueError("`_scale_factors` should have the same length as `timesteps` - 1, if `_scale_factors` are set.")
 
         if self._init_size is None or self.step_index is None:
             self._init_size = model_output.size()[2:]
@@ -551,10 +543,7 @@ class FlowMatchLCMScheduler(SchedulerMixin, ConfigMixin):
         sigmas = np.array(
             [
                 sigma_min + (ppf * (sigma_max - sigma_min))
-                for ppf in [
-                    scipy.stats.beta.ppf(timestep, alpha, beta)
-                    for timestep in 1 - np.linspace(0, 1, num_inference_steps)
-                ]
+                for ppf in [scipy.stats.beta.ppf(timestep, alpha, beta) for timestep in 1 - np.linspace(0, 1, num_inference_steps)]
             ]
         )
         return sigmas
@@ -581,6 +570,7 @@ class FlowMatchEulerDiscreteSchedulerOutput(BaseOutput):
     """
 
     prev_sample: torch.FloatTensor
+
 
 @dataclass
 class EulerAncestralDiscreteSchedulerOutput(BaseOutput):
@@ -791,9 +781,7 @@ class FlowMatchEulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
             raise ValueError(" you have a pass a value for `mu` when `use_dynamic_shifting` is set to be `True`")
 
         if sigmas is None:
-            timesteps = np.linspace(
-                self._sigma_to_t(self.sigma_max), self._sigma_to_t(self.sigma_min), num_inference_steps
-            )
+            timesteps = np.linspace(self._sigma_to_t(self.sigma_max), self._sigma_to_t(self.sigma_min), num_inference_steps)
 
             sigmas = timesteps / self.config.num_train_timesteps
         else:
@@ -962,9 +950,7 @@ class FlowMatchEulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 pred_original_sample,
             )
 
-        return EulerAncestralDiscreteSchedulerOutput(
-            prev_sample=prev_sample, pred_original_sample=pred_original_sample
-        )
+        return EulerAncestralDiscreteSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
     # Copied from diffusers.schedulers.scheduling_euler_discrete.EulerDiscreteScheduler._convert_to_karras
     def _convert_to_karras(self, in_sigmas: torch.Tensor, num_inference_steps) -> torch.Tensor:
@@ -1038,10 +1024,7 @@ class FlowMatchEulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         sigmas = np.array(
             [
                 sigma_min + (ppf * (sigma_max - sigma_min))
-                for ppf in [
-                    scipy.stats.beta.ppf(timestep, alpha, beta)
-                    for timestep in 1 - np.linspace(0, 1, num_inference_steps)
-                ]
+                for ppf in [scipy.stats.beta.ppf(timestep, alpha, beta) for timestep in 1 - np.linspace(0, 1, num_inference_steps)]
             ]
         )
         return sigmas

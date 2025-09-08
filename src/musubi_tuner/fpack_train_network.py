@@ -27,6 +27,7 @@ from musubi_tuner.hv_train_network import (
 )
 
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 
 

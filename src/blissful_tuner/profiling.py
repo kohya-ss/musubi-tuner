@@ -6,6 +6,7 @@ Created on Tue Aug 19 18:11:14 2025
 
 @author: blyss
 """
+
 import inspect
 import json
 from collections import defaultdict
@@ -16,10 +17,10 @@ import torch.nn as nn
 
 
 def _fmt_bytes(n: int) -> str:
-    units = ["B","KiB","MiB","GiB","TiB"]
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
     i = 0
     f = float(n)
-    while f >= 1024 and i < len(units)-1:
+    while f >= 1024 and i < len(units) - 1:
         f /= 1024
         i += 1
     return f"{f:.2f} {units[i]}"
@@ -45,12 +46,14 @@ def summarize_tensors(tensors: Dict[str, torch.Tensor]) -> str:
         by_dtype[str(t.dtype)] += nbytes
         by_device[str(t.device)] += nbytes
         lines.append(f"  • {name:<20} {list(t.shape)} {t.dtype} {t.device} = {_fmt_bytes(nbytes)}")
-    lines.sort(key=lambda s: int(s.split()[-2].replace('.', '').replace('KiB','').replace('MiB','').replace('GiB','')), reverse=True)
+    lines.sort(
+        key=lambda s: int(s.split()[-2].replace(".", "").replace("KiB", "").replace("MiB", "").replace("GiB", "")), reverse=True
+    )
     head = [f"Tracked tensors total: {_fmt_bytes(total)}"]
     if by_dtype:
-        head.append("By dtype: " + ", ".join(f"{k}: {_fmt_bytes(v)}" for k,v in by_dtype.items()))
+        head.append("By dtype: " + ", ".join(f"{k}: {_fmt_bytes(v)}" for k, v in by_dtype.items()))
     if by_device:
-        head.append("By device: " + ", ".join(f"{k}: {_fmt_bytes(v)}" for k,v in by_device.items()))
+        head.append("By device: " + ", ".join(f"{k}: {_fmt_bytes(v)}" for k, v in by_device.items()))
     return "\n".join(head + lines)
 
 
@@ -69,9 +72,7 @@ def summarize_parameters(model: nn.Module, topk: int = 15) -> str:
     entries.sort(reverse=True, key=lambda x: x[0])
     lines = [f"Parameters total: {_fmt_bytes(total)}"]
     if by_key:
-        lines.append("By device/dtype: " + ", ".join(
-            f"{dev}/{dt}: {_fmt_bytes(sz)}" for (dev,dt), sz in by_key.items()
-        ))
+        lines.append("By device/dtype: " + ", ".join(f"{dev}/{dt}: {_fmt_bytes(sz)}" for (dev, dt), sz in by_key.items()))
     lines.append(f"Top {min(topk, len(entries))} largest parameters:")
     for nbytes, name, shape, dtype, device in entries[:topk]:
         lines.append(f"  • {name:<40} {shape} {dtype} {device} = {_fmt_bytes(nbytes)}")
@@ -81,12 +82,12 @@ def summarize_parameters(model: nn.Module, topk: int = 15) -> str:
 def _cuda_stats_block() -> str:
     # Works only on CUDA
     allocated = torch.cuda.memory_allocated()
-    reserved  = torch.cuda.memory_reserved()
+    reserved = torch.cuda.memory_reserved()
     max_alloc = torch.cuda.max_memory_allocated()
-    max_rsrv  = torch.cuda.max_memory_reserved()
+    max_rsrv = torch.cuda.max_memory_reserved()
     lines = [
         f"CUDA memory: allocated={_fmt_bytes(allocated)} reserved={_fmt_bytes(reserved)}",
-        f"CUDA peaks : max_allocated={_fmt_bytes(max_alloc)} max_reserved={_fmt_bytes(max_rsrv)}"
+        f"CUDA peaks : max_allocated={_fmt_bytes(max_alloc)} max_reserved={_fmt_bytes(max_rsrv)}",
     ]
     # Deeper stats where available
     try:
@@ -104,7 +105,7 @@ def _mps_stats_block() -> str:
     lines = ["MPS memory:"]
     try:
         current = torch.mps.current_allocated_memory()
-        driver  = torch.mps.driver_allocated_memory()
+        driver = torch.mps.driver_allocated_memory()
         lines.append(f"  current_allocated={_fmt_bytes(current)} driver_allocated={_fmt_bytes(driver)}")
     except Exception:
         lines.append("  (MPS stats unavailable in this PyTorch build)")

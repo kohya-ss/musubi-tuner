@@ -36,6 +36,7 @@ from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan, proc
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.utils import string_to_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
 
@@ -210,7 +211,11 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
-    parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled mode and can degrade quality slightly but offers noticeable speedup")
+    parser.add_argument(
+        "--fp8_fast",
+        action="store_true",
+        help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled mode and can degrade quality slightly but offers noticeable speedup",
+    )
     parser.add_argument(
         "--rope_scaling_factor", type=float, default=0.5, help="RoPE scaling factor for high resolution (H/W), default is 0.5"
     )

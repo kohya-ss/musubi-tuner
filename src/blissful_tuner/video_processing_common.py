@@ -7,6 +7,7 @@ License: Apache-2.0
 Created on Thu Apr 24 11:29:37 2025
 Author: Blyss
 """
+
 import argparse
 import glob
 import os
@@ -21,6 +22,7 @@ from PIL.PngImagePlugin import PngInfo
 import cv2
 import numpy as np
 import torch
+
 try:
     from blissful_tuner.blissful_logger import BlissfulLogger
 except ImportError:  # This is needed so we can import either within blissful_tuner directory or base musubi directory
@@ -38,18 +40,24 @@ def setup_parser_video_common(description: Optional[str] = None, model_help: Opt
     parser.add_argument("--input", required=True, help="Input video/image to process")
     parser.add_argument("--dtype", type=str, default="fp32", help="Datatype to use")
     parser.add_argument(
-        "--output", type=str, default=None,
-        help="Output file path, default is same path as input. Extension may be changed to match chosen settings!"
+        "--output",
+        type=str,
+        default=None,
+        help="Output file path, default is same path as input. Extension may be changed to match chosen settings!",
     )
     parser.add_argument("--seed", type=str, default=None, help="Seed for reproducibility")
     parser.add_argument("--keep_pngs", action="store_true", help="Also keep individual frames as PNGs")
     parser.add_argument(
-        "--codec", choices=["h264", "h265", "prores"], default="h264",
-        help="Codec to use when saving videos, choose from 'prores', 'h264', or 'h265'. Default is 'h264' and this setting is ignored for images."
+        "--codec",
+        choices=["h264", "h265", "prores"],
+        default="h264",
+        help="Codec to use when saving videos, choose from 'prores', 'h264', or 'h265'. Default is 'h264' and this setting is ignored for images.",
     )
     parser.add_argument(
-        "--container", choices=["mkv", "mp4"], default="mp4",
-        help="Container format to use for output, choose from 'mkv' or 'mp4'. Default is 'mp4' and note that 'prores' can only go in 'mkv'! Ignored for images."
+        "--container",
+        choices=["mkv", "mp4"],
+        default="mp4",
+        help="Container format to use for output, choose from 'mkv' or 'mp4'. Default is 'mp4' and note that 'prores' can only go in 'mkv'! Ignored for images.",
     )
     parser.add_argument("--yes", "-y", action="store_true", help="Overwrite existing without prompting")
     return parser
@@ -64,7 +72,7 @@ class BlissfulVideoProcessor:
         self,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
-        will_write_video: bool = True  # Foo
+        will_write_video: bool = True,  # Foo
     ) -> None:
         """
         Initialize with a target device and dtype for tensor operations.
@@ -91,7 +99,7 @@ class BlissfulVideoProcessor:
         modifier: str = "",
         codec: str = "prores",
         container: str = "mkv",
-        overwrite_all: bool = False
+        overwrite_all: bool = False,
     ) -> Tuple[str, str]:
         """
         Determine and confirm input/output paths, generating a default output
@@ -107,6 +115,7 @@ class BlissfulVideoProcessor:
         Returns:
             A tuple of (input_file_path, output_file_path).
         """
+
         def _is_image_file(path: Path) -> bool:
             try:
                 with Image.open(path) as img:
@@ -150,23 +159,23 @@ class BlissfulVideoProcessor:
             o_name, o_ext = os.path.splitext(o_basename)
             o_output_dir = os.path.dirname(output_file_path)
             if o_ext != self.new_ext:
-                #logger.warning(f"Extension '{o_ext[-3:]}' not valid for output! Updating to '{self.new_ext[-3:]}'...")
+                # logger.warning(f"Extension '{o_ext[-3:]}' not valid for output! Updating to '{self.new_ext[-3:]}'...")
                 output_file_path = os.path.join(o_output_dir, f"{o_name}{self.new_ext}")
 
             if os.path.exists(output_file_path) and not overwrite_all:
                 choice = input(f"{output_file_path} exists. F for 'fix' by appending _! Overwrite?[y/N/f]: ").strip().lower()
-                if choice == 'f':
+                if choice == "f":
                     base = o_name
                     while os.path.exists(output_file_path):
-                        base += '_'
+                        base += "_"
                         output_file_path = os.path.join(o_output_dir, f"{base}{self.new_ext}")
-                elif choice != 'y':
+                elif choice != "y":
                     logger.info("Aborted.")
                     exit()
 
             self.output_file_path = output_file_path
             self.output_directory = output_dir
-            self.frame_dir = os.path.join(self.output_directory, 'frames')
+            self.frame_dir = os.path.join(self.output_directory, "frames")
             if os.path.exists(self.frame_dir):
                 while os.path.exists(self.frame_dir):
                     self.frame_dir += "_"
@@ -180,10 +189,7 @@ class BlissfulVideoProcessor:
 
         return self.input_file_path, self.output_file_path
 
-    def np_image_to_tensor(
-        self,
-        image: Union[np.ndarray, List[np.ndarray]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def np_image_to_tensor(self, image: Union[np.ndarray, List[np.ndarray]]) -> Union[torch.Tensor, List[torch.Tensor]]:
         """
         Convert a single H×W×3 numpy image or list of images (RGB uint8 or float32)
         into torch tensors of shape 1×3×H×W in [0,1], on the configured device and dtype.
@@ -194,6 +200,7 @@ class BlissfulVideoProcessor:
         Returns:
             A torch.Tensor or list of torch.Tensors.
         """
+
         def _convert(img: np.ndarray) -> torch.Tensor:
             arr = img.astype(np.float32) / 255.0
             tensor = torch.from_numpy(arr.transpose(2, 0, 1))
@@ -204,9 +211,7 @@ class BlissfulVideoProcessor:
         return [_convert(img) for img in image]
 
     def tensor_to_np_image(
-        self,
-        tensor: Union[torch.Tensor, List[torch.Tensor]],
-        rescale: bool = False
+        self, tensor: Union[torch.Tensor, List[torch.Tensor]], rescale: bool = False
     ) -> Union[np.ndarray, List[np.ndarray]]:
         """
         Convert a 1×3×H×W or 3×H×W torch tensor (RGB float in [0,1] or [-1,1])
@@ -218,6 +223,7 @@ class BlissfulVideoProcessor:
         Returns:
             A numpy BGR image or list of images.
         """
+
         def _convert(t: torch.Tensor) -> np.ndarray:
             # 1) Bring to CPU, float, clamp
             t = t.detach().cpu().float()
@@ -227,14 +233,14 @@ class BlissfulVideoProcessor:
             t = t.clamp(0.0, 1.0)
 
             # 3) Normalize shape to [1,3,H,W]
-            if t.ndim == 3:            # [3,H,W]
-                t = t.unsqueeze(0)     # -> [1,3,H,W]
+            if t.ndim == 3:  # [3,H,W]
+                t = t.unsqueeze(0)  # -> [1,3,H,W]
             elif t.ndim != 4 or t.shape[1] != 3:
                 raise ValueError(f"Unexpected tensor shape: {tuple(t.shape)}")
 
             # 4) Squeeze batch, permute to H×W×C, scale to 0–255
-            t = t.squeeze(0)                         # [3,H,W]
-            img = (t.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)        # [H,W,3]
+            t = t.squeeze(0)  # [3,H,W]
+            img = (t.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)  # [H,W,3]
 
             # 5) Flip RGB→BGR for OpenCV
             return img[..., ::-1]
@@ -243,10 +249,7 @@ class BlissfulVideoProcessor:
             return _convert(tensor)
         return [_convert(t) for t in tensor]
 
-    def load_frames(
-        self,
-        make_rgb: bool = False
-    ) -> Tuple[List[np.ndarray], float, int, int]:
+    def load_frames(self, make_rgb: bool = False) -> Tuple[List[np.ndarray], float, int, int]:
         """
         Load all frames from the input video/image as uint8 BGR or RGB numpy arrays.
 
@@ -276,10 +279,7 @@ class BlissfulVideoProcessor:
         cap.release()
         return frames, fps, width, height
 
-    def write_np_or_tensor_to_png(
-        self,
-        img: Union[np.ndarray, torch.Tensor]
-    ) -> None:
+    def write_np_or_tensor_to_png(self, img: Union[np.ndarray, torch.Tensor]) -> None:
         """
         Write a single frame (numpy BGR or tensor) to the frames directory as PNG.
 
@@ -300,7 +300,7 @@ class BlissfulVideoProcessor:
         fps: float = 1.0,
         keep_frames: bool = False,
         rescale: Optional[Tuple[int, int]] = None,
-        metadata: Optional[Dict[str, str]] = None
+        metadata: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Dump a list of BGR frames as PNGs
@@ -322,18 +322,20 @@ class BlissfulVideoProcessor:
         fps: float = 1.0,
         keep_frames: bool = False,
         rescale: Optional[Tuple[int, int]] = None,
-        metadata: Optional[Dict[str, str]] = None
+        metadata: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Encode the PNG sequence in the frames directory to a video via ffmpeg,
         or—if there's only one frame—just write out an (optionally-rescaled) PNG.
         """
+
         def _sanitize_metadata_value(v: str) -> str:
             # 1) turn any newlines into literal "\n"
             v = v.replace("\n", "\\n").replace("\r", "\\r")
             # 2) strip out any non-printable control characters
             v = re.sub(r"[^\x20-\x7E]", "", v)
             return v
+
         # 1) get all the PNGs
         pattern = os.path.join(self.frame_dir, "*.png")
         png_paths = sorted(glob.glob(pattern))
@@ -354,8 +356,11 @@ class BlissfulVideoProcessor:
             # 3) multi‐frame → video
             codec_args = self._get_ffmpeg_codec_args()
             cmd = [
-                "ffmpeg", "-framerate", str(fps),
-                "-i", os.path.join(self.frame_dir, "%06d.png"),
+                "ffmpeg",
+                "-framerate",
+                str(fps),
+                "-i",
+                os.path.join(self.frame_dir, "%06d.png"),
             ] + codec_args
 
             if rescale is not None:
@@ -381,27 +386,41 @@ class BlissfulVideoProcessor:
         if self.codec == "prores":
             # prores_ks profile 3 + broadcast-safe colors
             return [
-                "-c:v", "prores_ks",
-                "-profile:v", "3",
-                "-pix_fmt", "yuv422p10le",
-                "-colorspace", "1",
-                "-color_primaries", "1",
-                "-color_trc", "1",
+                "-c:v",
+                "prores_ks",
+                "-profile:v",
+                "3",
+                "-pix_fmt",
+                "yuv422p10le",
+                "-colorspace",
+                "1",
+                "-color_primaries",
+                "1",
+                "-color_trc",
+                "1",
             ]
         if self.codec == "h264":
             # libx264
             return [
-                "-c:v", "libx264",
-                "-preset", "slow",
-                "-crf", "12",
-                "-pix_fmt", "yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "slow",
+                "-crf",
+                "12",
+                "-pix_fmt",
+                "yuv420p",
             ]
         if self.codec == "h265":
             # libx265
             return [
-                "-c:v", "libx265",
-                "-preset", "slow",
-                "-crf", "12",
-                "-pix_fmt", "yuv420p",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "slow",
+                "-crf",
+                "12",
+                "-pix_fmt",
+                "yuv420p",
             ]
         raise ValueError(f"Unsupported codec: {self.codec}")

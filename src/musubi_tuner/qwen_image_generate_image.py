@@ -26,6 +26,7 @@ from musubi_tuner.wan_generate_video import merge_lora_weights
 
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.blissful_core import add_blissful_qwen_args, parse_blissful_args
+
 logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
 

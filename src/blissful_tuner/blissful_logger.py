@@ -5,11 +5,12 @@ Created on Thu May 22 13:24:47 2025
 
 @author: blyss
 """
+
 import logging
 from rich.logging import RichHandler
 
 
-class BlissfulLogger():
+class BlissfulLogger:
     def __init__(self, logging_source: str, log_color: str, do_announce: bool = False):
         self.logging_source = logging_source
         self.log_color = log_color
@@ -22,13 +23,7 @@ class BlissfulLogger():
         if self.logger.hasHandlers():
             self.logger.handlers.clear()
         # now add one RichHandler
-        self.handler = RichHandler(
-            show_time=False,
-            show_level=True,
-            show_path=True,
-            rich_tracebacks=True,
-            markup=True
-        )
+        self.handler = RichHandler(show_time=False, show_level=True, show_path=True, rich_tracebacks=True, markup=True)
         fmt = f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
         self.handler.setFormatter(logging.Formatter(fmt))
         self.logger.addHandler(self.handler)
@@ -39,9 +34,7 @@ class BlissfulLogger():
 
     def set_color(self, new_color):
         self.log_color = new_color
-        formatter = logging.Formatter(
-            f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]"
-        )
+        formatter = logging.Formatter(f"[{self.log_color} bold]%(name)s[/] | %(message)s [dim](%(funcName)s)[/]")
         self.handler.setFormatter(formatter)
 
     def set_name(self, new_name):

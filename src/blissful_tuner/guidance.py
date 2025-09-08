@@ -6,6 +6,7 @@ Various advanced guidance methods for Blissful Tuner
 License: Apache 2.0
 @author: blyss
 """
+
 import argparse
 from typing import List
 import torch
@@ -13,7 +14,9 @@ import torch
 
 def nag(z_positive, z_negative, nag_scale, nag_tau, nag_alpha):
     # z_tilde = z_positive + self.nag_scale * (z_positive - z_negative)  # Paper implementation, uses default tau of 2.5 and alpha of 0.25
-    z_tilde = z_positive * nag_scale - z_negative * (nag_scale - 1)  # Revised implementation, better scaling, default tau of 3.5 and alpha of 0.5
+    z_tilde = z_positive * nag_scale - z_negative * (
+        nag_scale - 1
+    )  # Revised implementation, better scaling, default tau of 3.5 and alpha of 0.5
     norm_positive = torch.norm(z_positive, p=1, dim=-1, keepdim=True).expand(*z_positive.shape)
     norm_tilde = torch.norm(z_tilde, p=1, dim=-1, keepdim=True).expand(*z_tilde.shape)
 
@@ -23,11 +26,13 @@ def nag(z_positive, z_negative, nag_scale, nag_tau, nag_alpha):
     return z_guidance
 
 
-def perpendicular_negative_cfg(cond: torch.Tensor, uncond: torch.Tensor, nocond: torch.Tensor, negative_scale: float, guidance_scale: float) -> torch.Tensor:
+def perpendicular_negative_cfg(
+    cond: torch.Tensor, uncond: torch.Tensor, nocond: torch.Tensor, negative_scale: float, guidance_scale: float
+) -> torch.Tensor:
     """Perpendicular negative CFG"""
     pos_cond = cond - nocond
     neg_cond = uncond - nocond
-    perp_neg_cond = neg_cond - ((torch.mul(neg_cond, pos_cond).sum()) / (torch.norm(pos_cond)**2)) * pos_cond
+    perp_neg_cond = neg_cond - ((torch.mul(neg_cond, pos_cond).sum()) / (torch.norm(pos_cond) ** 2)) * pos_cond
     perp_neg_cond *= negative_scale
     noise_pred = nocond + guidance_scale * (pos_cond - perp_neg_cond)
     return noise_pred
@@ -49,7 +54,7 @@ def apply_zerostar_scaling(cond: torch.Tensor, uncond: torch.Tensor, guidance_sc
 def optimized_scale(positive_flat: torch.Tensor, negative_flat: torch.Tensor) -> torch.Tensor:
     """Computes optimized scaling factors for CFG"""
     dot_product = torch.sum(positive_flat * negative_flat, dim=1, keepdim=True)
-    squared_norm = torch.sum(negative_flat ** 2, dim=1, keepdim=True) + 1e-8
+    squared_norm = torch.sum(negative_flat**2, dim=1, keepdim=True) + 1e-8
 
     # st_star = v_cond^T * v_uncond / ||v_uncond||^2
     st_star = dot_product / squared_norm

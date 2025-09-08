@@ -15,6 +15,7 @@ from musubi_tuner.flux import flux_models
 from musubi_tuner.flux import flux_utils
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 
 
