@@ -940,7 +940,7 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     """
     shared_models = {}
     # Load text encoders to CPU
-    t_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
+    t_dtype = torch.float8_e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
     tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t_dtype, device="cpu", disable_mmap=True)
     tokenizer2, text_encoder2 = flux_utils.load_clip_l(args.text_encoder2, dtype=t_dtype, device="cpu", disable_mmap=True)
 
@@ -992,7 +992,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     logger.info("Loading Text Encoders for batch text preprocessing...")
 
     # Text Encoders loaded to CPU by load_text_encoder1/2
-    t_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
+    t_dtype = torch.float8_e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
     tokenizer1_batch, text_encoder1_batch = flux_utils.load_t5xxl(
         args.text_encoder1, dtype=t_dtype, device=device, disable_mmap=True
     )
