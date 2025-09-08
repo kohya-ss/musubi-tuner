@@ -15,12 +15,13 @@ import safetensors
 from safetensors.torch import save_file
 from rich_argparse import RichHelpFormatter
 from rich.traceback import install as install_rich_tracebacks
-from tqdm import tqdm
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 install_rich_tracebacks()
 
 parser = argparse.ArgumentParser(
-    description="Utility for inspecting model structure and converting between dtypes. Supports loading single safetensors or sharded, saving is single safetensors",
+    description="Utility for inspecting model structure and converting between dtypes and key naming. Supports loading single safetensors or sharded, saving is single safetensors",
     formatter_class=RichHelpFormatter,
 )
 parser.add_argument("--input", required=True, help="Checkpoint file or directory of shards to convert/inspect")
@@ -33,10 +34,12 @@ parser.add_argument(
 parser.add_argument(
     "--inspect",
     action="store_true",
-    help="If provided, will print out the keys in the model's state dict along with their dtype and shape",
+    help="If provided, will print out the keys in the model's state dict along with their dtype and shape. Also runs the same processes as --convert so can be used as a dry run.",
 )
 parser.add_argument("--target_keys", nargs="*", type=str, default=None, help="Keys to target for dtype conversion")
 parser.add_argument("--exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude for dtype conversion")
+parser.add_argument("--fully_exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude from copying at all")
+parser.add_argument("--strip_prefix", type=str, default=None, help="If specified and matched, prefix will be stripped for keys in state dict")
 parser.add_argument(
     "--weights_only",
     action="store_false",
@@ -92,7 +95,7 @@ def load_torch_file(ckpt, weights_only=True, device=None, return_metadata=False)
     return (sd, metadata) if return_metadata else sd
 
 
-print("Loading checkpoint...")
+logger.info("Loading checkpoint...")
 checkpoint = load_torch_file(args.input, args.weights_only)
 
 dtype_mapping = {
@@ -107,33 +110,39 @@ dtype_mapping = {
 if args.convert is not None and os.path.exists(args.convert):
     confirm = input(f"{args.convert} exists. Overwrite? [y/N]: ").strip().lower()
     if confirm != "y":
-        print("Aborting.")
+        logger.info("Aborting.")
         exit()
 
 converted_state_dict = {}
 keys_to_process = checkpoint.keys()
 dtypes_in_model = {}
-for key in tqdm(keys_to_process, desc="Processing tensors"):
+for key in keys_to_process:
+    is_fully_excluded = args.fully_exclude_keys is not None and any(pattern in key for pattern in args.fully_exclude_keys)
+    if is_fully_excluded:
+        continue  # Skip this key
     is_target = args.target_keys is None or any(pattern in key for pattern in args.target_keys)
     is_excluded = args.exclude_keys is not None and any(pattern in key for pattern in args.exclude_keys)
     is_target = is_target and not is_excluded
     value = checkpoint[key]
-    if args.inspect and is_target:
-        print(f"{key}: {value.shape} ({value.dtype})")
-
+    if is_target:
+        if args.strip_prefix is not None and key.startswith(args.strip_prefix):
+            logger.info(f"'{key}' had it's prefix stripped per rules!")
+            key = key.replace(args.strip_prefix, "")
     dtype_to_use = dtype_mapping.get(args.dtype.lower(), value.dtype) if args.dtype else value.dtype
     final_dtype = dtype_to_use if is_target else value.dtype
     if args.convert:
-        print(f"{key} {final_dtype}")
         converted_state_dict[key] = value.to(final_dtype)
     if final_dtype not in dtypes_in_model:
         dtypes_in_model[final_dtype] = 1
     else:
         dtypes_in_model[final_dtype] += 1
+    if args.convert or (args.inspect and is_target):
+        logger.info(f"'{key}': shape={value.shape} dtype='{final_dtype}'")
+        logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
 
-print(f"Dtypes in model: {dtypes_in_model}")
+logger.info(f"Tensor and dtypes in model: {dtypes_in_model}")
 if args.convert:
     output_file = args.convert.replace(".pth", ".safetensors").replace(".pt", ".safetensors")
-    print(f"Saving converted tensors to '{output_file}'...")
+    logger.info(f"Saving converted tensors to '{output_file}'...")
     save_file(converted_state_dict, output_file)
