@@ -95,6 +95,7 @@ def load_vae(
 
     if vae_path.endswith(".safetensors"):
         from safetensors.torch import load_file
+
         ckpt = load_file(vae_path)
     else:
         ckpt = torch.load(vae_path, map_location=vae.device, weights_only=True)

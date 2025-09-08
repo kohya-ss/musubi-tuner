@@ -348,9 +348,9 @@ class TextEncoder(nn.Module):
 
         self.use_template = self.prompt_template is not None
         if self.use_template:
-            assert (
-                isinstance(self.prompt_template, dict) and "template" in self.prompt_template
-            ), f"`prompt_template` must be a dictionary with a key 'template', got {self.prompt_template}"
+            assert isinstance(self.prompt_template, dict) and "template" in self.prompt_template, (
+                f"`prompt_template` must be a dictionary with a key 'template', got {self.prompt_template}"
+            )
             assert "{}" in str(self.prompt_template["template"]), (
                 "`prompt_template['template']` must contain a placeholder `{}` for the input text, "
                 f"got {self.prompt_template['template']}"
@@ -359,9 +359,9 @@ class TextEncoder(nn.Module):
         self.use_video_template = self.prompt_template_video is not None
         if self.use_video_template:
             if self.prompt_template_video is not None:
-                assert (
-                    isinstance(self.prompt_template_video, dict) and "template" in self.prompt_template_video
-                ), f"`prompt_template_video` must be a dictionary with a key 'template', got {self.prompt_template_video}"
+                assert isinstance(self.prompt_template_video, dict) and "template" in self.prompt_template_video, (
+                    f"`prompt_template_video` must be a dictionary with a key 'template', got {self.prompt_template_video}"
+                )
             assert "{}" in str(self.prompt_template_video["template"]), (
                 "`prompt_template_video['template']` must contain a placeholder `{}` for the input text, "
                 f"got {self.prompt_template_video['template']}"

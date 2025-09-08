@@ -30,9 +30,9 @@ def encode_and_save_batch(
     if is_edit:
         images = []
         for item in batch:
-            assert (
-                item.control_content is not None and len(item.control_content) > 0
-            ), f"Item {item.item_key} must have control content for Qwen-Image-Edit"
+            assert item.control_content is not None and len(item.control_content) > 0, (
+                f"Item {item.item_key} must have control content for Qwen-Image-Edit"
+            )
             control_content = item.control_content[0]  # np.ndarray, 0-255
             control_content = control_content[..., :3]  # ensure RGB, remove alpha if present
             images.append(control_content)  # vl_processor accepts PIL.Image and np.ndarray

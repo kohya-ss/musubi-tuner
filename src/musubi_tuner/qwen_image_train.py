@@ -216,7 +216,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         if args.gradient_checkpointing:
-            transformer.enable_gradient_checkpointing()
+            transformer.enable_gradient_checkpointing(args.gradient_checkpointing_cpu_offload)
 
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
@@ -281,9 +281,9 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         #     network_dtype = weight_dtype
         #     network.to(network_dtype)
         if args.full_bf16:
-            assert (
-                args.mixed_precision == "bf16"
-            ), "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
+            assert args.mixed_precision == "bf16", (
+                "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
+            )
             accelerator.print("enable full bf16 training.")
 
         if blocks_to_swap > 0:
@@ -359,6 +359,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             "ss_num_batches_per_epoch": len(train_dataloader),
             "ss_num_epochs": num_train_epochs,
             "ss_gradient_checkpointing": args.gradient_checkpointing,
+            "ss_gradient_checkpointing_cpu_offload": args.gradient_checkpointing_cpu_offload,
             "ss_gradient_accumulation_steps": args.gradient_accumulation_steps,
             "ss_max_train_steps": args.max_train_steps,
             "ss_lr_warmup_steps": args.lr_warmup_steps,
@@ -518,7 +519,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         optimizer_train_fn()
 
         for epoch in range(epoch_to_start, num_train_epochs):
-            accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
+            accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
 
             metadata["ss_epoch"] = str(epoch + 1)

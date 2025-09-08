@@ -203,7 +203,7 @@ def encode_and_save_batch_one_frame(vae: WanVAE, clip: Optional[CLIPModel], batc
 
         logger.info(f"Saving cache for item: {item.item_key} at {item.latent_cache_path}")
         logger.info(f"  control_latent_indices: {control_latent_indices}, fp_1f_target_index: {item.fp_1f_target_index}")
-        logger.info(f"  y shape: {y.shape}, mask: {y[0, :,0,0]}, l shape: {l.shape}, clip_context shape: {cctx.shape}")
+        logger.info(f"  y shape: {y.shape}, mask: {y[0, :, 0, 0]}, l shape: {l.shape}, clip_context shape: {cctx.shape}")
         logger.info(f"  f_indices: {f_indices}")
 
         save_latent_cache_wan(item, l, cctx, y, None, f_indices=f_indices)

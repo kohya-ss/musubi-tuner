@@ -6,6 +6,7 @@ import torch.nn as nn
 
 class ModulateDiT(nn.Module):
     """Modulation layer for DiT."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -17,9 +18,7 @@ class ModulateDiT(nn.Module):
         factory_kwargs = {"dtype": dtype, "device": device}
         super().__init__()
         self.act = act_layer()
-        self.linear = nn.Linear(
-            hidden_size, factor * hidden_size, bias=True, **factory_kwargs
-        )
+        self.linear = nn.Linear(hidden_size, factor * hidden_size, bias=True, **factory_kwargs)
         # Zero-initialize the modulation
         nn.init.zeros_(self.linear.weight)
         nn.init.zeros_(self.linear.bias)

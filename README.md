@@ -127,6 +127,14 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 8, 2025
+    - Code analysis with ruff has been introduced, and [contribution guidelines](./CONTRIBUTING.md) have been added.
+        - Thanks to arledesma for [Issue #524](https://github.com/kohya-ss/musubi-tuner/issues/524) and [PR #538](https://github.com/kohya-ss/musubi-tuner/pull/538).
+    - Activation CPU offloading has been added. See [PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537).
+        - This can be used in combination with block swap.
+        - This can reduce VRAM usage, especially when training long videos or large batch sizes. Combining it with block swap may enable training that was previously not possible.
+        - See the PR and [HunyuanVideo documentation](./docs/hunyuan_video.md#memory-optimization) for details.
+
 - September 6, 2025
     - A new LR scheduler, Rex, has been added. Thanks to xzuyn for [PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513).
         - Similar to the Polynomial Scheduler with power set to less than 1, Rex has a more gradual decrease in learning rate.
@@ -157,15 +165,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
 - August 22, 2025:
     - Qwen-Image-Edit support has been added. See PR [#473](https://github.com/kohya-ss/musubi-tuner/pull/473) and the [Qwen-Image documentation](./docs/qwen_image.md) for details. This change may affect existing features due to its extensive nature. If you encounter any issues, please report them in the [Issues](https://github.com/kohya-ss/musubi-tuner/issues).
     - **Breaking Change**: The cache format for FLUX.1 Kontext has been changed with this update. Please recreate the latent cache.
-
-- August 18, 2025:
-    - The option `--network_module networks.lora_qwen_image` was missing from the documentation for training with `qwen_image_train_network.py`. The [documentation](./docs/qwen_image.md#training--学習) has been fixed to include this information.
-
-- August 16, 2025:
-    - Added a tool for captioning images using Qwen-Image VLM. PR [#460](https://github.com/kohya-ss/musubi-tuner/pull/460) See [here](./docs/tools.md#image-captioning-with-qwen25-vl-srcmusubi_tunercaption_images_by_qwen_vlpy) for more details.
-
-- August 15, 2025:
-    - The Timestep Bucketing feature has been added, which allows for a more uniform distribution of timesteps and stabilizes training. See PR [#418](https://github.com/kohya-ss/musubi-tuner/pull/418) and the [Timestep Bucketing documentation](./docs/advanced_config.md#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing) for details.
 
 ### Releases
 
@@ -375,15 +374,7 @@ If you encounter any issues or bugs, please create an Issue in this repository w
 
 ## Contributing
 
-We welcome contributions! However, please note:
-
-- Due to limited maintainer resources, PR reviews and merges may take some time
-- Before starting work on major changes, please open an Issue for discussion
-- For PRs:
-    - Keep changes focused and reasonably sized
-    - Include clear descriptions
-    - Follow the existing code style
-    - Ensure documentation is updated
+We welcome contributions! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 
 ## License
 

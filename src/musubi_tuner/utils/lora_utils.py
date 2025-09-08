@@ -77,7 +77,7 @@ def load_safetensors_with_lora_and_fp8(
             count = int(match.group(3))
             state_dict = {}
             for i in range(count):
-                filename = f"{prefix}{i+1:05d}-of-{count:05d}.safetensors"
+                filename = f"{prefix}{i + 1:05d}-of-{count:05d}.safetensors"
                 filepath = os.path.join(os.path.dirname(model_file), filename)
                 if os.path.exists(filepath):
                     extended_model_files.append(filepath)

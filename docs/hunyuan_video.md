@@ -221,22 +221,33 @@ The training settings are still experimental. Appropriate learning rates, traini
 
 For additional options, use `python src/musubi_tuner/hv_train_network.py --help` (note that many options are unverified).
 
+### Memory Optimization
+
+`--gradient_checkpointing` enables gradient checkpointing to reduce VRAM usage. Gradient checkpointing is a memory-saving technique that trades off computation time for memory usage by recomputing certain intermediate results during the backward pass instead of storing them all in memory. This is particularly useful for training large models such as HunyuanVideo, where VRAM can be a limiting factor. However, it may slow down training. If you have sufficient VRAM, you can disable it.
+
 Specifying `--fp8_base` runs DiT in fp8 mode. Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality. If `--fp8_base` is not specified, 24GB or more VRAM is recommended. Use `--blocks_to_swap` as needed.
 
 If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 36.
 
 (The idea of block swap is based on the implementation by 2kpr. Thanks again to 2kpr.)
 
+`--gradient_checkpointing_cpu_offload` can be used to offload activations to CPU when using gradient checkpointing. This can further reduce VRAM usage, but may slow down training. This option is especially useful when the latent resolution (or video length) is high and VRAM is limited. This option must be used together with `--gradient_checkpointing`. See [PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537) for more details.
+
+### Attention
+
 Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for [FlashAttention](https://github.com/Dao-AILab/flash-attention). Use `--xformers` for xformers, but specify `--split_attn` when using xformers. `--sage_attn` for SageAttention, but SageAttention is not yet supported for training, so it raises a ValueError.
 
 `--split_attn` processes attention in chunks. Speed may be slightly reduced, but VRAM usage is slightly reduced.
 
-The format of LoRA trained is the same as `sd-scripts`.
-
+### Timestep Sampling
 You can also specify the range of timesteps 
 with `--min_timestep` and `--max_timestep`. See [advanced configuration](../advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定) for details.
 
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training. (When using `flux_shift` and `qwen_shift`, the distribution will be for images with a resolution of 1024x1024.)
+
+### Other Options
+
+The format of LoRA trained is the same as `sd-scripts`.
 
 You can record logs during training. Refer to [Save and view logs in TensorBoard format](../advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
 
@@ -261,11 +272,15 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --output_dir path/to/output_dir --output_name name-of-lora
 ```
 
-__更新__：サンプルの学習率を1e-3から2e-4に、`--timestep_sampling`を`sigmoid`から`shift`に、`--discrete_flow_shift`を1.0から7.0に変更しました。より高速な学習が期待されます。ディテールが甘くなる場合は、discrete flow shiftを3.0程度に下げてみてください。
+ディテールが甘くなる場合は、discrete flow shiftを3.0程度に下げてみてください。
 
 ただ、適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、以前として不明な点が数多くあります。情報提供をお待ちしています。
 
 その他のオプションは`python src/musubi_tuner/hv_train_network.py --help`で確認できます（ただし多くのオプションは動作未確認です）。
+
+**メモリ最適化**
+
+`--gradient_checkpointing`でgradient checkpointingを有効にします。VRAM使用量を削減できます。gradient checkpointingは、バックワードパス中に一部の中間結果をすべてメモリに保存するのではなく、再計算することで、計算時間とメモリ使用量をトレードオフするメモリ節約技術です。HunyuanVideoのような大規模モデルの学習ではVRAMが制約となることが多いため、特に有用です。ただし学習が遅くなる可能性があります。十分なVRAMがある場合は無効にしても構いません。
 
 `--fp8_base`を指定すると、DiTがfp8で学習されます。未指定時はmixed precisionのデータ型が使用されます。fp8は大きく消費メモリを削減できますが、品質は低下する可能性があります。`--fp8_base`を指定しない場合はVRAM 24GB以上を推奨します。また必要に応じて`--blocks_to_swap`を使用してください。
 
@@ -273,15 +288,21 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 （block swapのアイデアは2kpr氏の実装に基づくものです。2kpr氏にあらためて感謝します。）
 
+**Attention**
+
 `--sdpa`でPyTorchのscaled dot product attentionを使用します。`--flash_attn`で[FlashAttention]:(https://github.com/Dao-AILab/flash-attention)を使用します。`--xformers`でxformersの利用も可能ですが、xformersを使う場合は`--split_attn`を指定してください。`--sage_attn`でSageAttentionを使用しますが、SageAttentionは現時点では学習に未対応のため、エラーが発生します。
 
 `--split_attn`を指定すると、attentionを分割して処理します。速度が多少低下しますが、VRAM使用量はわずかに減ります。
 
-学習されるLoRAの形式は、`sd-scripts`と同じです。
+**タイムステップサンプリング**
 
 `--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](../advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)を参照してください。
 
 `--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。（`flux_shift`と`qwen_shift`を使用する場合は画像の解像度が1024x1024の場合の分布になります。）
+
+**その他のオプション**
+
+学習されるLoRAの形式は、`sd-scripts`と同じです。
 
 学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](../advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
 

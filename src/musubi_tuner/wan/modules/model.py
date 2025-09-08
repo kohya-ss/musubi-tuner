@@ -8,8 +8,8 @@ from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
 
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
-
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 
 from musubi_tuner.wan.modules.attention import flash_attention
@@ -554,12 +554,15 @@ class WanAttentionBlock(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     @torch.compiler.disable()
     def get_modulation(self, e):
@@ -617,7 +620,10 @@ class WanAttentionBlock(nn.Module):
 
     def forward(self, x, e, seq_lens, grid_sizes, freqs, context, nag_context=None):
         if self.training and self.gradient_checkpointing:
-            return checkpoint(self._forward, x, e, seq_lens, grid_sizes, freqs, context, use_reentrant=False)
+            forward_fn = self._forward
+            if self.activation_cpu_offloading:
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.modulation.device)
+            return checkpoint(forward_fn, x, e, seq_lens, grid_sizes, freqs, context, use_reentrant=False)
         return self._forward(x, e, seq_lens, grid_sizes, freqs, context, nag_context)
 
 
@@ -859,6 +865,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         self.init_weights()
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
         # offloading
         self.blocks_to_swap = None
@@ -900,16 +907,18 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         return state_dict
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading=False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
         for block in self.blocks:
-            block.enable_gradient_checkpointing()
+            block.enable_gradient_checkpointing(activation_cpu_offloading)
 
-        logger.info("WanModel: Gradient checkpointing enabled.")
+        logger.info(f"WanModel: Gradient checkpointing enabled. Activation CPU offloading: {activation_cpu_offloading}")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
         for block in self.blocks:
             block.disable_gradient_checkpointing()
@@ -1098,7 +1107,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         if self.blocks_to_swap:
             clean_memory_on_device(device)
 
-        # logger.info(f"x: {x.shape}, e: {e0.shape}, context: {context.shape}, seq_lens: {seq_lens}")
+        input_device = x.device
+
         for block_idx, block in enumerate(self.blocks):
             is_block_skipped = skip_block_indices is not None and block_idx in skip_block_indices
 
@@ -1110,6 +1120,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, block_idx)
+
+        if x.device != input_device:
+            x = x.to(input_device)
 
         # head
         x = self.head(x, e)

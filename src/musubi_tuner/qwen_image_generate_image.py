@@ -126,7 +126,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
+    parser.add_argument(
+        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+    )
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
@@ -288,6 +290,8 @@ def load_dit_model(
     loading_weight_dtype = dit_weight_dtype
     if args.fp8_scaled and not args.lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
+    elif args.lycoris:
+        loading_weight_dtype = torch.bfloat16  # lycoris requires bfloat16 or float16, because it merges weights
 
     model = qwen_image_model.load_qwen_image_model(
         device,
@@ -305,7 +309,17 @@ def load_dit_model(
     # merge LoRA weights
     if args.lycoris:
         if args.lora_weight is not None and len(args.lora_weight) > 0:
-            merge_lora_weights(lora_qwen_image, model, args, device)
+            merge_lora_weights(
+                lora_qwen_image,
+                model,
+                args.lora_weight,
+                args.lora_multiplier,
+                args.include_patterns,
+                args.exclude_patterns,
+                device,
+                lycoris=True,
+                save_merged_model=args.save_merged_model,
+            )
 
         if args.fp8_scaled:
             # load state dict as-is and optimize to fp8
@@ -313,7 +327,19 @@ def load_dit_model(
 
             # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
             move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+            # state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+
+            from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+
+            # inplace optimization
+            state_dict = optimize_state_dict_with_fp8(
+                state_dict,
+                device,
+                qwen_image_model.FP8_OPTIMIZATION_TARGET_KEYS,
+                qwen_image_model.FP8_OPTIMIZATION_EXCLUDE_KEYS,
+                move_to_device=move_to_device,
+            )
+            apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)  # args.scaled_mm)
 
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")

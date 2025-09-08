@@ -254,7 +254,6 @@ def load_qwen2_5_vl(
                         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
                         **kwargs,
                     ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
-
                         residual = hidden_states
 
                         hidden_states = module.input_layernorm(hidden_states)

@@ -18,10 +18,10 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=1.0):
 
 def fm_wrapper(transformer, t_scale=1000.0):
     def k_model(x, sigma, **extra_args):
-        dtype = extra_args['dtype']
-        cfg_scale = extra_args['cfg_scale']
-        cfg_rescale = extra_args['cfg_rescale']
-        concat_latent = extra_args['concat_latent']
+        dtype = extra_args["dtype"]
+        cfg_scale = extra_args["cfg_scale"]
+        cfg_rescale = extra_args["cfg_rescale"]
+        concat_latent = extra_args["concat_latent"]
 
         original_dtype = x.dtype
         sigma = sigma.float()
@@ -34,12 +34,16 @@ def fm_wrapper(transformer, t_scale=1000.0):
         else:
             hidden_states = torch.cat([x, concat_latent.to(x)], dim=1)
 
-        pred_positive = transformer(hidden_states=hidden_states, timestep=timestep, return_dict=False, **extra_args['positive'])[0].float()
+        pred_positive = transformer(hidden_states=hidden_states, timestep=timestep, return_dict=False, **extra_args["positive"])[
+            0
+        ].float()
 
         if cfg_scale == 1.0:
             pred_negative = torch.zeros_like(pred_positive)
         else:
-            pred_negative = transformer(hidden_states=hidden_states, timestep=timestep, return_dict=False, **extra_args['negative'])[0].float()
+            pred_negative = transformer(
+                hidden_states=hidden_states, timestep=timestep, return_dict=False, **extra_args["negative"]
+            )[0].float()
 
         pred_cfg = pred_negative + cfg_scale * (pred_positive - pred_negative)
         pred = rescale_noise_cfg(pred_cfg, pred_positive, guidance_rescale=cfg_rescale)

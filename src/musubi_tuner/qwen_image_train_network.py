@@ -65,9 +65,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             for prompt_dict in prompts:
                 if is_edit:
                     # Load control image
-                    assert (
-                        "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0
-                    ), "control_image_path not found in sample prompt"
+                    assert "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0, (
+                        "control_image_path not found in sample prompt"
+                    )
                     control_image_path = prompt_dict["control_image_path"][0]  # only use the first control image
                     control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(control_image_path, True)
 

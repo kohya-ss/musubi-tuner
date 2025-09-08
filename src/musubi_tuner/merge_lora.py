@@ -15,9 +15,13 @@ def parse_args():
     parser.add_argument("--dit", type=str, required=True, help="DiT checkpoint path or directory")
     parser.add_argument("--dit_in_channels", type=int, default=16, help="input channels for DiT, default is 16, skyreels I2V is 32")
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
-    parser.add_argument("--lora_multiplier", type=float, nargs="*", default=[1.0], help="LoRA multiplier (can specify multiple values)")
+    parser.add_argument(
+        "--lora_multiplier", type=float, nargs="*", default=[1.0], help="LoRA multiplier (can specify multiple values)"
+    )
     parser.add_argument("--save_merged_model", type=str, required=True, help="Path to save the merged model")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for merging")
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for merging"
+    )
 
     return parser.parse_args()
 
@@ -44,9 +48,7 @@ def main():
 
             logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
             weights_sd = load_file(lora_weight)
-            network = lora.create_arch_network_from_weights(
-                lora_multiplier, weights_sd, unet=transformer, for_inference=True
-            )
+            network = lora.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=transformer, for_inference=True)
             logger.info("Merging LoRA weights to DiT model")
             network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
 

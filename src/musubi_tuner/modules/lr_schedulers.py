@@ -21,11 +21,9 @@ class RexLR(torch.optim.lr_scheduler.LRScheduler):
 
     def __init__(self, optimizer, max_lr, min_lr=0.0, num_steps=0, num_warmup_steps=0, rex_alpha=0.1, rex_beta=0.9, last_epoch=-1):
         if min_lr > max_lr:
-            raise ValueError(
-                f'Value of "min_lr" should be less than value of "max_lr". ' f"Got min_lr={min_lr} and max_lr={max_lr}"
-            )
+            raise ValueError(f'Value of "min_lr" should be less than value of "max_lr". Got min_lr={min_lr} and max_lr={max_lr}')
         if num_warmup_steps > num_steps:
-            raise ValueError(f"num_warmup_steps ({num_warmup_steps}) must be less than " f"or equal to num_steps ({num_steps})")
+            raise ValueError(f"num_warmup_steps ({num_warmup_steps}) must be less than or equal to num_steps ({num_steps})")
 
         self.min_lr = min_lr
         self.max_lr = max_lr

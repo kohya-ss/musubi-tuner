@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from musubi_tuner.hunyuan_model.helpers import to_2tuple
 
+
 class PatchEmbed(nn.Module):
     """2D Image to Patch Embedding
 

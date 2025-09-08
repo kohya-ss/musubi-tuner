@@ -30,6 +30,7 @@ from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.qwen_image.qwen_image_modules import get_activation
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper, to_cpu, to_device
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
@@ -997,6 +998,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
         # offloading
         self.blocks_to_swap = None
@@ -1010,12 +1012,14 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
     def device(self):
         return next(self.parameters()).device
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
-        logger.info("QwenModel: Gradient checkpointing enabled.")
+        self.activation_cpu_offloading = activation_cpu_offloading
+        logger.info(f"QwenModel: Gradient checkpointing enabled. Activation CPU offloading: {activation_cpu_offloading}")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         logger.info("QwenModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
@@ -1038,13 +1042,13 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         if self.blocks_to_swap:
             self.offloader.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            logger.info(f"QwenModel: Block swap set to forward only.")
+            logger.info("QwenModel: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            logger.info(f"QwenModel: Block swap set to forward and backward.")
+            logger.info("QwenModel: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -1063,6 +1067,8 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         self.offloader.prepare_block_devices_before_forward(self.transformer_blocks)
 
     def _gradient_checkpointing_func(self, block, *args):
+        if self.activation_cpu_offloading:
+            block = create_cpu_offloading_wrapper(block, self.img_in.weight.device)
         return torch.utils.checkpoint.checkpoint(block, *args, use_reentrant=False)
 
     def forward(
@@ -1137,6 +1143,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         # block expects tensor instead of list
         txt_seq_lens = torch.tensor(txt_seq_lens, device=hidden_states.device) if txt_seq_lens is not None else None
 
+        input_device = hidden_states.device
         for index_block, block in enumerate(self.transformer_blocks):
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(index_block)
@@ -1166,6 +1173,9 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.transformer_blocks, index_block)
 
+        if input_device != hidden_states.device:
+            hidden_states = hidden_states.to(input_device)
+
         # Use only the image part (hidden_states) from the dual-stream blocks
         hidden_states = self.norm_out(hidden_states, temb)
         output = self.proj_out(hidden_states)
@@ -1189,7 +1199,7 @@ def create_model(
     attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
 ) -> QwenImageTransformer2DModel:
     with init_empty_weights():
-        logger.info(f"Creating QwenImageTransformer2DModel")
+        logger.info("Creating QwenImageTransformer2DModel")
         """
         {
             "_class_name": "QwenImageTransformer2DModel",

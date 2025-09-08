@@ -1,6 +1,6 @@
 import hashlib
 from io import BytesIO
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import safetensors.torch
 import torch
@@ -149,3 +149,64 @@ def str_to_dtype(s: Optional[str], default_dtype: Optional[torch.dtype] = None) 
         return torch.float8_e4m3fn  # default fp8
     else:
         raise ValueError(f"Unsupported dtype: {s}")
+
+
+def to_device(x: Any, device: torch.device) -> Any:
+    if isinstance(x, torch.Tensor):
+        return x.to(device)
+    elif isinstance(x, list):
+        return [to_device(elem, device) for elem in x]
+    elif isinstance(x, tuple):
+        return tuple(to_device(elem, device) for elem in x)
+    elif isinstance(x, dict):
+        return {k: to_device(v, device) for k, v in x.items()}
+    else:
+        return x
+
+
+def to_cpu(x: Any) -> Any:
+    """
+    Recursively moves torch.Tensor objects (and containers thereof) to CPU.
+
+    Args:
+        x: A torch.Tensor, or a (possibly nested) list, tuple, or dict containing tensors.
+
+    Returns:
+        The same structure as x, with all torch.Tensor objects moved to CPU.
+        Non-tensor objects are returned unchanged.
+    """
+    if isinstance(x, torch.Tensor):
+        return x.cpu()
+    elif isinstance(x, list):
+        return [to_cpu(elem) for elem in x]
+    elif isinstance(x, tuple):
+        return tuple(to_cpu(elem) for elem in x)
+    elif isinstance(x, dict):
+        return {k: to_cpu(v) for k, v in x.items()}
+    else:
+        return x
+
+
+def create_cpu_offloading_wrapper(func: Callable, device: torch.device) -> Callable:
+    """
+    Create a wrapper function that offloads inputs to CPU before calling the original function
+    and moves outputs back to the specified device.
+
+    Args:
+        func: The original function to wrap.
+        device: The device to move outputs back to.
+
+    Returns:
+        A wrapped function that offloads inputs to CPU and moves outputs back to the specified device.
+    """
+
+    def wrapper(orig_func: Callable) -> Callable:
+        def custom_forward(*inputs):
+            nonlocal device, orig_func
+            cuda_inputs = to_device(inputs, device)
+            outputs = orig_func(*cuda_inputs)
+            return to_cpu(outputs)
+
+        return custom_forward
+
+    return wrapper(func)

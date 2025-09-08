@@ -16,6 +16,7 @@ import numpy as np
 
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import load_split_weights
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from accelerate import init_empty_weights
@@ -791,7 +792,9 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
             x = torch.cat(x, dim=0)
             return x
 
-        assert attn_mode is None or attn_mode == "torch", f"Unsupported attention mode: {attn_mode}. Supported modes: 'sageattn', 'flash', 'xformers', 'torch'."
+        assert (
+            attn_mode is None or attn_mode == "torch"
+        ), f"Unsupported attention mode: {attn_mode}. Supported modes: 'sageattn', 'flash', 'xformers', 'torch'."
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
@@ -1588,6 +1591,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
 
         self.inner_dim = inner_dim
         self.use_gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         self.enable_teacache = False
 
         # if has_image_proj:
@@ -1620,12 +1624,16 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading=False):
         self.use_gradient_checkpointing = True
-        logger.info("Gradient checkpointing enabled for HunyuanVideoTransformer3DModelPacked.")  # Logging
+        self.activation_cpu_offloading = activation_cpu_offloading
+        logger.info(
+            f"Gradient checkpointing enabled for HunyuanVideoTransformer3DModelPacked. Activation CPU offloading: {activation_cpu_offloading}"
+        )  # Logging
 
     def disable_gradient_checkpointing(self):
         self.use_gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         logger.info("Gradient checkpointing disabled for HunyuanVideoTransformer3DModelPacked.")  # Logging
 
     def initialize_teacache(self, enable_teacache=True, num_steps=25, rel_l1_thresh=0.15):
@@ -1644,6 +1652,8 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
 
     def gradient_checkpointing_method(self, block, *args):
         if self.use_gradient_checkpointing:
+            if self.activation_cpu_offloading:
+                block = create_cpu_offloading_wrapper(block, self.proj_out.weight.device)
             result = torch.utils.checkpoint.checkpoint(block, *args, use_reentrant=False)
         else:
             result = block(*args)
@@ -1832,6 +1842,8 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         post_patch_width = width // p
         original_context_length = post_patch_num_frames * post_patch_height * post_patch_width
 
+        input_device = hidden_states.device
+
         hidden_states, rope_freqs = self.process_input_hidden_states(
             hidden_states,
             latent_indices,
@@ -1969,6 +1981,9 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
                 self.proj_out.to(dtype=torch.float32)
 
         hidden_states = self.gradient_checkpointing_method(self.proj_out, hidden_states)
+
+        if hidden_states.device != input_device:
+            hidden_states = hidden_states.to(input_device)
 
         hidden_states = einops.rearrange(
             hidden_states,

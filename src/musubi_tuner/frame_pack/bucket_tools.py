@@ -19,12 +19,11 @@ bucket_options = {
 
 
 def find_nearest_bucket(h, w, resolution=640):
-    min_metric = float('inf')
+    min_metric = float("inf")
     best_bucket = None
-    for (bucket_h, bucket_w) in bucket_options[resolution]:
+    for bucket_h, bucket_w in bucket_options[resolution]:
         metric = abs(h * bucket_w - w * bucket_h)
         if metric <= min_metric:
             min_metric = metric
             best_bucket = (bucket_h, bucket_w)
     return best_bucket
-

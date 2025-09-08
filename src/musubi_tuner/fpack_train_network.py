@@ -18,7 +18,14 @@ from musubi_tuner.frame_pack.hunyuan_video_packed import HunyuanVideoTransformer
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask
 from musubi_tuner.dataset.image_video_dataset import resize_image_to_bucket
-from musubi_tuner.hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
+from musubi_tuner.hv_train_network import (
+    NetworkTrainer,
+    load_prompts,
+    clean_memory_on_device,
+    setup_parser_common,
+    read_config_from_file,
+)
+
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
@@ -590,9 +597,11 @@ def main():
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
-    assert (
-        args.vae_dtype is None or args.vae_dtype == "float16"
-    ), "VAE dtype must be float16 / VAEのdtypeはfloat16でなければなりません"
+
+    assert args.vae_dtype is None or args.vae_dtype == "float16", (
+        "VAE dtype must be float16 / VAEのdtypeはfloat16でなければなりません"
+    )
+
     args.vae_dtype = "float16"  # fixed
     args.dit_dtype = "bfloat16"  # fixed
     args.sample_solver = "unipc"  # for sample generation, fixed to unipc

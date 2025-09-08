@@ -101,7 +101,10 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.ruff]
+line-length = 132
+indent-width = 4
 target-version = "py39"
+
 lint.ignore = [
   "E402",  # module-import-not-at-top-of-file
   "E712",  # true-false-comparison
@@ -113,13 +116,55 @@ lint.ignore = [
   "F841",  # unused-variable
 ]
 
-extend-exclude = [  # Exclude external repos that blissful-tuner includes
-  "src/blissful_tuner/codeformer",
+
+# Whether to enforce exclude and extend-exclude patterns, even for paths that are passed to Ruff explicitly
+# This is used to ensure that certain files are always excluded via IDE formatters or external tool calls (CI, AI, etc.)
+force-exclude = true
+
+# Single-path or Relative patterns
+# Extends the default exclude patterns documented at https://docs.astral.sh/ruff/settings/#exclude
+extend-exclude = [
+  "src/musubi_tuner/flux/flux_models.py",
+  "src/musubi_tuner/frame_pack/hunyuan.py",
+  "src/musubi_tuner/frame_pack/hunyuan_video_packed.py",
+  "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py",
+  "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py",
+  "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py",
+  "src/musubi_tuner/modules/scheduling_flow_match_discrete.py",
+  "src/musubi_tuner/modules/unet_causal_3d_blocks.py",
+  "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py",
+  "src/musubi_tuner/qwen_image/qwen_image_model.py",
+  "src/musubi_tuner/wan/configs/__init__.py",
+  "src/musubi_tuner/wan/configs/shared_config.py",
+  "src/musubi_tuner/wan/configs/wan_i2v_14B.py",
+  "src/musubi_tuner/wan/configs/wan_i2v_A14B.py",
+  "src/musubi_tuner/wan/configs/wan_t2v_14B.py",
+  "src/musubi_tuner/wan/configs/wan_t2v_1_3B.py",
+  "src/musubi_tuner/wan/configs/wan_t2v_A14B.py",
+  "src/musubi_tuner/wan/modules/attention.py",
+  "src/musubi_tuner/wan/modules/clip.py",
+  "src/musubi_tuner/wan/modules/model.py",
+  "src/musubi_tuner/wan/modules/t5.py",
+  "src/musubi_tuner/wan/modules/tokenizers.py",
+  "src/musubi_tuner/wan/modules/vae.py",
+  "src/musubi_tuner/wan/modules/xlm_roberta.py",
+  "src/musubi_tuner/wan/utils/fm_solvers.py",
+  "src/musubi_tuner/wan/utils/fm_solvers_unipc.py",
+  "src/musubi_tuner/wan/utils/utils.py",
+  "src/blissful_tuner/codeformer",  # Blissful
   "src/blissful_tuner/esrgan",
   "src/blissful_tuner/gfpgan",
   "src/blissful_tuner/gimmvfi",
   "src/blissful_tuner/swinir",
 ]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = false
+docstring-code-line-length = "dynamic"
 
 [tool.ruff.lint.per-file-ignores]
 # Ignore all rules for files with copyright headers from external sources

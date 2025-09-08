@@ -222,7 +222,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
+    parser.add_argument(
+        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+    )
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     parser.add_argument(
         "--compile_args",
@@ -1044,7 +1046,6 @@ def prepare_one_frame_inference(
     height: int,
     width: int,
 ) -> Tuple[int, torch.Tensor, List[int]]:
-
     target_index, _, f_indices, one_frame_inference_index = parse_one_frame_inference_args(args.one_frame_inference)
 
     # prepare image
@@ -2345,9 +2346,9 @@ def main():
     # Parse arguments
     args = parse_args()
 
-    assert not (
-        args.offload_inactive_dit and args.lazy_loading
-    ), "--offload_inactive_dit and --lazy_loading cannot be used together"
+    assert not (args.offload_inactive_dit and args.lazy_loading), (
+        "--offload_inactive_dit and --lazy_loading cannot be used together"
+    )
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0

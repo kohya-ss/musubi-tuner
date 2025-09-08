@@ -37,5 +37,12 @@ jobs:
           args: >
             check --fix
 
+      - name: "Run Ruff format check"
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: >
+            format --check
+          # will exit with a non-zero code if there are formatting changes
+
       # - name: Minimize uv cache
       #   run: uv cache prune --ci

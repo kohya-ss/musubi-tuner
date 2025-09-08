@@ -41,7 +41,7 @@ class RMSNorm(nn.Module):
 
         """
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-    
+
     def forward(self, x):
         """
         Forward pass through the RMSNorm layer.

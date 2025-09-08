@@ -34,19 +34,11 @@ class MLP(nn.Module):
         drop_probs = to_2tuple(drop)
         linear_layer = partial(nn.Conv2d, kernel_size=1) if use_conv else nn.Linear
 
-        self.fc1 = linear_layer(
-            in_channels, hidden_channels, bias=bias[0], **factory_kwargs
-        )
+        self.fc1 = linear_layer(in_channels, hidden_channels, bias=bias[0], **factory_kwargs)
         self.act = act_layer()
         self.drop1 = nn.Dropout(drop_probs[0])
-        self.norm = (
-            norm_layer(hidden_channels, **factory_kwargs)
-            if norm_layer is not None
-            else nn.Identity()
-        )
-        self.fc2 = linear_layer(
-            hidden_channels, out_features, bias=bias[1], **factory_kwargs
-        )
+        self.norm = norm_layer(hidden_channels, **factory_kwargs) if norm_layer is not None else nn.Identity()
+        self.fc2 = linear_layer(hidden_channels, out_features, bias=bias[1], **factory_kwargs)
         self.drop2 = nn.Dropout(drop_probs[1])
 
     def forward(self, x):
@@ -59,9 +51,10 @@ class MLP(nn.Module):
         return x
 
 
-# 
+#
 class MLPEmbedder(nn.Module):
     """copied from https://github.com/black-forest-labs/flux/blob/main/src/flux/modules/layers.py"""
+
     def __init__(self, in_dim: int, hidden_dim: int, device=None, dtype=None):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -76,23 +69,14 @@ class MLPEmbedder(nn.Module):
 class FinalLayer(nn.Module):
     """The final layer of DiT."""
 
-    def __init__(
-        self, hidden_size, patch_size, out_channels, act_layer, device=None, dtype=None
-    ):
+    def __init__(self, hidden_size, patch_size, out_channels, act_layer, device=None, dtype=None):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
         # Just use LayerNorm for the final layer
-        self.norm_final = nn.LayerNorm(
-            hidden_size, elementwise_affine=False, eps=1e-6, **factory_kwargs
-        )
+        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6, **factory_kwargs)
         if isinstance(patch_size, int):
-            self.linear = nn.Linear(
-                hidden_size,
-                patch_size * patch_size * out_channels,
-                bias=True,
-                **factory_kwargs
-            )
+            self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True, **factory_kwargs)
         else:
             self.linear = nn.Linear(
                 hidden_size,

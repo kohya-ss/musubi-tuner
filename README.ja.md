@@ -123,6 +123,14 @@ WAN 専用拡張機能（ワンショットモードとインタラクティブ�
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/09/08
+    - ruffによるコード解析を導入しました。またコントリビューションのガイドライン（[英語版](./CONTRIBUTING.md)と[日本語版](./CONTRIBUTING.ja.md)）を追加しました。
+        - [Issue #524](https://github.com/kohya-ss/musubi-tuner/issues/524) および [PR 538](https://github.com/kohya-ss/musubi-tuner/pull/538)　arledesma氏に深く感謝します。
+    - ActivationのCPU offloadingを追加しました。[PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537)
+        - block swapと組み合わせて使用することも可能です。
+        - 特に長い動画や大きなバッチサイズで学習する際に、VRAMの使用量を削減できます。block swapと組み合わせることでこれらの学習が可能になる場合があります。
+        - 詳細はPRおよび[HunyuanVideoのドキュメント](./docs/hunyuan_video.md#memory-optimization)を参照してください。
+
 - 2025/09/06
     - 新しいLRスケジューラRexを追加しました。[PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513) xzuyn氏に感謝します。
         - powerを1未満に設定した Polynomial Scheduler に似ていますが、Rexは学習率の減少がより緩やかです。
@@ -153,15 +161,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
 - 2025/08/22
     - Qwen-Image-Editに対応しました。PR [#473](https://github.com/kohya-ss/musubi-tuner/pull/473) 詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md)を参照してください。変更が多岐に渡るため既存機能へ影響がある可能性があります。不具合が発生した場合は、[Issues](https://github.com/kohya-ss/musubi-tuner/issues)でご報告ください。
     - **破壊的変更**: この変更に伴いFLUX.1 Kontextのキャッシュフォーマットが変更されました。Latentキャッシュを再作成してください。
-
-- 2025/08/18
-    - `qwen_image_train_network.py`の訓練時の`--network_module networks.lora_qwen_image`の指定について、ドキュメントへの記載が漏れていました。[ドキュメント](./docs/qwen_image.md#training--学習)を修正しました。
-
-- 2025/08/16
-    - Qwen-ImageのVLMを利用したキャプション生成ツールを追加しました。PR [#460](https://github.com/kohya-ss/musubi-tuner/pull/460) 詳細は[ドキュメント](./docs/tools.md#image-captioning-with-qwen25-vl-srcmusubi_tunercaption_images_by_qwen_vlpy)を参照してください。
-
-- 2025/08/15
-    - Timestep Bucketing機能が追加されました。これにより、タイムステップの分布がより均一になり、学習が安定します。PR [#418](https://github.com/kohya-ss/musubi-tuner/pull/418) 詳細は[Timestep Bucketingのドキュメント](./docs/advanced_config.md#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing)を参照してください。
 
 ### リリースについて
 
@@ -367,15 +366,7 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 
 ## コントリビューションについて
 
-コントリビューションを歓迎します。ただし、以下にご注意ください：
-
-- メンテナーのリソースが限られているため、PRのレビューやマージには時間がかかる場合があります
-- 大きな変更に取り組む前には、議論のためのIssueを作成してください
-- PRに関して：
-    - 変更は焦点を絞り、適度なサイズにしてください
-    - 明確な説明をお願いします
-    - 既存のコードスタイルに従ってください
-    - ドキュメントが更新されていることを確認してください
+コントリビューションを歓迎します。 [CONTRIBUTING.md](./CONTRIBUTING.md)および[CONTRIBUTING.ja.md](./CONTRIBUTING.ja.md)をご覧ください。
 
 ## ライセンス
 

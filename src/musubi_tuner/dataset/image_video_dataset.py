@@ -28,14 +28,17 @@ IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".
 
 if find_spec("pillow_avif") is not None:
     import pillow_avif  # noqa: F401 # type: ignore
+
     IMAGE_EXTENSIONS.extend([".avif", ".AVIF"])
 
 if find_spec("jxlpy") is not None:  # JPEG-XL on Linux
     from jxlpy import JXLImagePlugin  # noqa: F401 # type: ignore
+
     IMAGE_EXTENSIONS.extend([".jxl", ".JXL"])
 
 if find_spec("pillow_jxl") is not None:  # JPEG-XL on Windows
     import pillow_jxl  # noqa: F401 # type: ignore
+
     IMAGE_EXTENSIONS.extend([".jxl", ".JXL"])
 
 VIDEO_EXTENSIONS = [
@@ -288,9 +291,9 @@ def save_latent_cache_flux_kontext(
 def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[torch.Tensor]):
     """Qwen-Image architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
-    assert (
-        control_latent is None or control_latent.dim() == 4
-    ), "control_latent should be 4D tensor (frame, channel, height, width) or None"
+    assert control_latent is None or control_latent.dim() == 4, (
+        "control_latent should be 4D tensor (frame, channel, height, width) or None"
+    )
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
@@ -326,9 +329,9 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
 
 def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mask: Optional[torch.Tensor], is_llm: bool):
     """HunyuanVideo architecture"""
-    assert (
-        embed.dim() == 1 or embed.dim() == 2
-    ), f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
+    assert embed.dim() == 1 or embed.dim() == 2, (
+        f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
+    )
     assert mask is None or mask.dim() == 1, f"mask should be 1D tensor (feature), got {mask.shape}"
 
     sd = {}
@@ -656,7 +659,6 @@ def load_video(
 
 
 class BucketBatchManager:
-
     def __init__(
         self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
     ):
@@ -1609,7 +1611,6 @@ class ImageDataset(BaseDataset):
             return None, None
 
         for fetch_op in self.datasource:
-
             # fetch and resize image in a separate thread
             def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image]]:
                 image_key, image, caption, controls = op()

@@ -210,7 +210,7 @@ def load_split_weights(
         count = int(match.group(3))
         state_dict = {}
         for i in range(count):
-            filename = f"{prefix}{i+1:05d}-of-{count:05d}.safetensors"
+            filename = f"{prefix}{i + 1:05d}-of-{count:05d}.safetensors"
             filepath = os.path.join(os.path.dirname(file_path), filename)
             if os.path.exists(filepath):
                 state_dict.update(load_safetensors(filepath, device=device, disable_mmap=disable_mmap, dtype=dtype))

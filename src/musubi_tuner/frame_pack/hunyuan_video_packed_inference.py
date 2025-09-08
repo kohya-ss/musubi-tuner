@@ -156,7 +156,6 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
         return_dict=True,
         calibration=False,
     ):
-
         if attention_kwargs is None:
             attention_kwargs = {}
 

@@ -119,7 +119,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--mixed_precision bf16` is recommended for FLUX.1 Kontext training.
 - `--timestep_sampling flux_shift` is recommended for FLUX.1 Kontext.
 - Memory saving options like `--fp8` (for DiT) and `--fp8_t5` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
-- `--gradient_checkpointing` is available for memory savings.
+-  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 <details>
 <summary>日本語</summary>

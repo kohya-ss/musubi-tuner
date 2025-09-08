@@ -15,6 +15,7 @@ from musubi_tuner.hunyuan_model.modulate_layers import ModulateDiT, modulate, ap
 from musubi_tuner.hunyuan_model.token_refiner import SingleTokenRefiner
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader, synchronize_device, clean_memory_on_device
 from musubi_tuner.hunyuan_model.posemb_layers import get_nd_rotary_pos_embed
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.blissful_logger import BlissfulLogger
@@ -107,6 +108,7 @@ class MMDoubleStreamBlock(nn.Module):
         self.hybrid_seq_parallel_attn = None
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     def enable_deterministic(self):
         self.deterministic = True
@@ -114,11 +116,13 @@ class MMDoubleStreamBlock(nn.Module):
     def disable_deterministic(self):
         self.deterministic = False
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     def _forward(
         self,
@@ -156,9 +160,9 @@ class MMDoubleStreamBlock(nn.Module):
             img_q_shape = img_q.shape
             img_k_shape = img_k.shape
             img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-            assert (
-                img_q.shape == img_q_shape and img_k.shape == img_k_shape
-            ), f"img_kk: {img_q.shape}, img_q: {img_q_shape}, img_kk: {img_k.shape}, img_k: {img_k_shape}"
+            assert img_q.shape == img_q_shape and img_k.shape == img_k_shape, (
+                f"img_kk: {img_q.shape}, img_q: {img_q_shape}, img_kk: {img_k.shape}, img_k: {img_k_shape}"
+            )
             # img_q, img_k = img_qq, img_kk
 
         # Prepare txt for attention.
@@ -183,9 +187,9 @@ class MMDoubleStreamBlock(nn.Module):
         v = torch.cat((img_v, txt_v), dim=1)
         img_v = txt_v = None
 
-        assert (
-            cu_seqlens_q.shape[0] == 2 * img.shape[0] + 1
-        ), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, img.shape[0]:{img.shape[0]}"
+        assert cu_seqlens_q.shape[0] == 2 * img.shape[0] + 1, (
+            f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, img.shape[0]:{img.shape[0]}"
+        )
 
         # attention computation start
         if not self.hybrid_seq_parallel_attn:
@@ -251,7 +255,10 @@ class MMDoubleStreamBlock(nn.Module):
     # ) -> Tuple[torch.Tensor, torch.Tensor]:
     def forward(self, *args, **kwargs):
         if self.training and self.gradient_checkpointing:
-            return checkpoint(self._forward, *args, use_reentrant=False, **kwargs)
+            forward_fn = self._forward
+            if self.activation_cpu_offloading:
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.img_attn_qkv.weight.device)
+            return checkpoint(forward_fn, *args, use_reentrant=False, **kwargs)
         else:
             return self._forward(*args, **kwargs)
 
@@ -307,6 +314,7 @@ class MMSingleStreamBlock(nn.Module):
         self.hybrid_seq_parallel_attn = None
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     def enable_deterministic(self):
         self.deterministic = True
@@ -314,11 +322,13 @@ class MMSingleStreamBlock(nn.Module):
     def disable_deterministic(self):
         self.deterministic = False
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     def _forward(
         self,
@@ -355,9 +365,9 @@ class MMSingleStreamBlock(nn.Module):
             img_q_shape = img_q.shape
             img_k_shape = img_k.shape
             img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-            assert (
-                img_q.shape == img_q_shape and img_k_shape == img_k.shape
-            ), f"img_kk: {img_q.shape}, img_q: {img_q.shape}, img_kk: {img_k.shape}, img_k: {img_k.shape}"
+            assert img_q.shape == img_q_shape and img_k_shape == img_k.shape, (
+                f"img_kk: {img_q.shape}, img_q: {img_q.shape}, img_kk: {img_k.shape}, img_k: {img_k.shape}"
+            )
             # img_q, img_k = img_qq, img_kk
             # del img_qq, img_kk
             q = torch.cat((img_q, txt_q), dim=1)
@@ -419,7 +429,10 @@ class MMSingleStreamBlock(nn.Module):
     # ) -> torch.Tensor:
     def forward(self, *args, **kwargs):
         if self.training and self.gradient_checkpointing:
-            return checkpoint(self._forward, *args, use_reentrant=False, **kwargs)
+            forward_fn = self._forward
+            if self.activation_cpu_offloading:
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.linear1.weight.device)
+            return checkpoint(forward_fn, *args, use_reentrant=False, **kwargs)
         else:
             return self._forward(*args, **kwargs)
 
@@ -608,6 +621,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         )
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         self.blocks_to_swap = None
         self.offloader_double = None
         self.offloader_single = None
@@ -633,18 +647,22 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
         return state_dict
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
         self.txt_in.enable_gradient_checkpointing()
 
         for block in self.double_blocks + self.single_blocks:
-            block.enable_gradient_checkpointing()
+            block.enable_gradient_checkpointing(activation_cpu_offloading)
 
-        logger.info("HYVideoDiffusionTransformer: Gradient checkpointing enabled.")
+        logger.info(
+            f"HYVideoDiffusionTransformer: Gradient checkpointing enabled. Activation CPU offloading: {activation_cpu_offloading}"
+        )
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
         self.txt_in.disable_gradient_checkpointing()
 
@@ -669,10 +687,20 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         )
 
         self.offloader_double = ModelOffloader(
-            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device  # , debug=True
+            "double",
+            self.double_blocks,
+            self.num_double_blocks,
+            double_blocks_to_swap,
+            supports_backward,
+            device,  # , debug=True
         )
         self.offloader_single = ModelOffloader(
-            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
+            "single",
+            self.single_blocks,
+            self.num_single_blocks,
+            single_blocks_to_swap,
+            supports_backward,
+            device,  # , debug=True
         )
         logger.info(
             f"HYVideoDiffusionTransformer: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
@@ -803,6 +831,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
         # --------------------- Pass through DiT blocks ------------------------
+        input_device = img.device
         for block_idx, block in enumerate(self.double_blocks):
             double_block_args = [
                 img,
@@ -856,6 +885,8 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
 
         img = x[:, :img_seq_len, ...]
         x = None
+        if img.device != input_device:
+            img = img.to(input_device)
 
         # ---------------------------- Final layer ------------------------------
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
@@ -968,8 +999,7 @@ def load_state_dict(model, model_path):
         state_dict = state_dict[load_key]
     else:
         raise KeyError(
-            f"Missing key: `{load_key}` in the checkpoint: {model_path}. The keys in the checkpoint "
-            f"are: {list(state_dict.keys())}."
+            f"Missing key: `{load_key}` in the checkpoint: {model_path}. The keys in the checkpoint are: {list(state_dict.keys())}."
         )
     model.load_state_dict(state_dict, strict=True, assign=True)
     return model
@@ -1034,14 +1064,12 @@ def get_rotary_pos_embed_by_shape(model, latents_size):
 
     if isinstance(model.patch_size, int):
         assert all(s % model.patch_size == 0 for s in latents_size), (
-            f"Latent size(last {ndim} dimensions) should be divisible by patch size({model.patch_size}), "
-            f"but got {latents_size}."
+            f"Latent size(last {ndim} dimensions) should be divisible by patch size({model.patch_size}), but got {latents_size}."
         )
         rope_sizes = [s // model.patch_size for s in latents_size]
     elif isinstance(model.patch_size, list):
         assert all(s % model.patch_size[idx] == 0 for idx, s in enumerate(latents_size)), (
-            f"Latent size(last {ndim} dimensions) should be divisible by patch size({model.patch_size}), "
-            f"but got {latents_size}."
+            f"Latent size(last {ndim} dimensions) should be divisible by patch size({model.patch_size}), but got {latents_size}."
         )
         rope_sizes = [s // model.patch_size[idx] for idx, s in enumerate(latents_size)]
 

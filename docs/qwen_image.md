@@ -139,7 +139,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--mixed_precision bf16` is recommended for Qwen-Image training.
 - Add `--edit` flag for Qwen-Image-Edit training with control images.
 - Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT), and `--fp8_vl` (for Text Encoder) are available. 
-- `--gradient_checkpointing` is available for memory savings.
+-  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 `--fp8_vl` is recommended for GPUs with less than 16GB of VRAM.
 

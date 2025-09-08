@@ -226,7 +226,7 @@ Key differences from HunyuanVideo training:
 -  Optional `--latent_window_size` argument (default 9, should match caching).
 -   Memory saving options like `--fp8` (for DiT) and `--fp8_llm` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
 -   `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size` options are available for the VAE to prevent out-of-memory during sampling (similar to caching).
--  `--gradient_checkpointing` is available for memory savings.
+-  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 - If you encounter an error when the batch size is greater than 1 (especially when specifying `--sdpa` or `--xformers`, it will always result in an error), please specify `--split_attn`.
 <!-- -   Use `convert_lora.py` for converting the LoRA weights after training, similar to HunyuanVideo. -->
 
