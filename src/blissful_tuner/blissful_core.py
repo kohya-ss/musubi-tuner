@@ -50,6 +50,8 @@ elif "fpack_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "framepack"
 elif "flux_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "flux"
+elif "qwen_" in ROOT_SCRIPT:
+    DIFFUSION_MODEL = "qwen"
 
 MODE = None
 if "generate" in ROOT_SCRIPT:
@@ -81,7 +83,7 @@ def blissful_prefunc(args: argparse.Namespace):
     for string in cuda_list:
         logger.info(string)
 
-    if args.optimized and MODE == "generate":
+    if hasattr(args, "optimized") and args.optimized and MODE == "generate":
         logger.info("Optimized arguments enabled!")
         args.fp16_accumulation = True
         args.attn_mode = "sageattn"
@@ -97,7 +99,7 @@ def blissful_prefunc(args: argparse.Namespace):
             args.compile = False
             args.fp16_accumulation = False
             args.fp8_fast = True
-    if args.fp16_accumulation and MODE == "generate":
+    if hasattr(args, "fp16_accumulation") and args.fp16_accumulation and MODE == "generate":
         logger.info("Enabling FP16 accumulation")
         if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
@@ -217,6 +219,10 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def add_blissful_flux_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:  # Todo: individualize the others to avoid the clusterf*** above
+    parser.add_argument("--offload_transformer_for_decode", action="store_true", help="Free VRAM for decode by offloading transformer")
+    parser.add_argument("--scheduler", type=str, choices=["dpm++", "euler"], default="euler", help="Scheduler/sampler to use for denoise")
+    parser.add_argument("--fp32_cpu_te", action="store_true", help="Load and run text encoders on CPU in FP32 for extra precision. Takes just a few seconds extra but you should start with fp32 model as well!")
+    parser.add_argument("--fp32_working_dtype", action="store_true", help="Input contexts, noise etc in torch.float32 and autocast to torch.float32 - slow but max quality. Best with --fp32_cpu_te")
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument("--preview_latent_every", type=int, default=None, help="Enable latent preview every N steps. If --preview_vae is not specified it will use latent2rgb")
     parser.add_argument("--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star")
@@ -231,6 +237,22 @@ def add_blissful_flux_args(parser: argparse.ArgumentParser) -> argparse.Argument
         help="Overrides the default values of several command line args to provide an optimized but quality experience. "
         "Enables fp16_accumulation, fp8_scaled, sageattn and torch.compile. For Wan additionally enables 'rope_func comfy'. "
         "For Hunyuan/Fpack additionally enables fp8_fast. Requires SageAttention and Triton to be installed in addition to PyTorch 2.7.0 or higher!"
+    )
+    parser.add_argument(
+        "--prompt_wildcards", type=str, default=None,
+        help="Path to a directory of wildcard.txt files to enable wildcards in prompts and negative prompts. For instance __color__ will look for wildcards in color.txt in that directory. "
+        "Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.")
+    return parser
+
+
+def add_blissful_qwen_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
+    parser.add_argument(
+        "--compile_args",
+        nargs=4,
+        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
+        default=["inductor", "default", None, "False"],
+        help="Torch.compile settings",
     )
     parser.add_argument(
         "--prompt_wildcards", type=str, default=None,

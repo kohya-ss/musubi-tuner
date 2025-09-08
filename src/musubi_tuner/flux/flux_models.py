@@ -928,9 +928,9 @@ class Flux(nn.Module):
             "img_in",
             "final_layer",
             "modulation",  # Saves lots of mem to fp8 these and doesn't seem to hurt quality
-            #"img_mod",
+            "img_mod",
             #"img_mlp",
-            #"txt_mod",
+            "txt_mod",
             #"txt_mlp"
         ]
 
@@ -1041,9 +1041,7 @@ class Flux(nn.Module):
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
-        if self.params.guidance_embed:
-            if guidance is None:
-                raise ValueError("Didn't get guidance strength for guidance distilled model.")
+        if self.params.guidance_embed and guidance is not None:
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)

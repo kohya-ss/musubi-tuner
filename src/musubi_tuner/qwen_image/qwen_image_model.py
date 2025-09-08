@@ -29,13 +29,9 @@ from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.qwen_image.qwen_image_modules import get_activation
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
-
-import logging
-
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 
 EXAMPLE_DOC_STRING = """
@@ -548,6 +544,7 @@ class FeedForward(nn.Module):
         return hidden_states
 
 
+@torch.compiler.disable(recursive=False)
 def apply_rotary_emb_qwen(
     x: torch.Tensor,
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
@@ -1015,11 +1012,11 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
-        print("QwenModel: Gradient checkpointing enabled.")
+        logger.info("QwenModel: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
-        print("QwenModel: Gradient checkpointing disabled.")
+        logger.info("QwenModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
         self.blocks_to_swap = blocks_to_swap
@@ -1033,7 +1030,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
             "qwen-image-block", self.transformer_blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device
         )
         # , debug=True
-        print(
+        logger.info(
             f"QwenModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. Supports backward: {supports_backward}"
         )
 
@@ -1041,13 +1038,13 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         if self.blocks_to_swap:
             self.offloader.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            print(f"QwenModel: Block swap set to forward only.")
+            logger.info(f"QwenModel: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            print(f"QwenModel: Block swap set to forward and backward.")
+            logger.info(f"QwenModel: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage

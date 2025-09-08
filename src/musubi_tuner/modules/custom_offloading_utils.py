@@ -198,7 +198,7 @@ class ModelOffloader(Offloader):
         self.forward_only = forward_only
 
     def __del__(self):
-        if self.supports_backward:
+        if hasattr(self, "supports_backward") and self.supports_backward:
             for handle in self.remove_handles:
                 handle.remove()
 

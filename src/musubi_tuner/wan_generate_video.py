@@ -639,12 +639,11 @@ def load_dit_model(
                 elif "lora_unet" in prefix:
                     conversion_needed = False
                     break
-
-        if conversion_needed:
-            logger.info("Converting LoRA from foreign key naming format")
-            lora_sd = convert_from_diffusers("lora_unet_", lora_sd)
-        lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
-        lora_weights_list.append(lora_sd)
+            if conversion_needed:
+                logger.info("Converting LoRA from foreign key naming format")
+                lora_sd = convert_from_diffusers("lora_unet_", lora_sd)
+            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            lora_weights_list.append(lora_sd)
     else:
         lora_weights_list = None
 

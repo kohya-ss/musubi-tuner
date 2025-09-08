@@ -16,7 +16,7 @@ from rich_argparse import RichHelpFormatter
 from musubi_tuner.flux import flux_utils
 from musubi_tuner.flux.flux_utils import load_flow_model
 from musubi_tuner.flux import flux_models
-
+from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler
 from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
@@ -376,7 +376,7 @@ def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flu
 
         with torch.no_grad():
             control_latent = ae.encode(control_image_tensor.to(device, dtype=ae.dtype))
-        control_latent = control_latent.to(torch.bfloat16).to("cpu")
+        control_latent = control_latent.to(torch.bfloat16 if not args.fp32_working_dtype else torch.float32).to("cpu")
 
         ae.to(ae_original_device)  # Move VAE back to its original device
         clean_memory_on_device(device)
@@ -397,6 +397,7 @@ def prepare_text_inputs(
 
     # load text encoder: conds_cache holds cached encodings for prompts without padding
     conds_cache = {}
+    t_device = device if not args.fp32_cpu_te else torch.device("cpu")
     if shared_models is not None:
         tokenizer1, text_encoder1 = shared_models.get("tokenizer1"), shared_models.get("text_encoder1")
         tokenizer2, text_encoder2 = shared_models.get("tokenizer2"), shared_models.get("text_encoder2")
@@ -405,10 +406,10 @@ def prepare_text_inputs(
         # text_encoder1 and text_encoder2 are on device (batched inference) or CPU (interactive inference)
     else:  # Load if not in shared_models
         # T5XXL is float16 by default, but it causes NaN values in some cases, so we use bfloat16 (or fp8 if specified)
-        t5_dtype = torch.float8_e4m3fn if args.fp8_t5 else torch.bfloat16
-        tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t5_dtype, device=device, disable_mmap=True)
+        t_dtype = torch.float8_e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
+        tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t_dtype, device=t_device, disable_mmap=True)
         tokenizer2, text_encoder2 = flux_utils.load_clip_l(
-            args.text_encoder2, dtype=torch.bfloat16, device=device, disable_mmap=True
+            args.text_encoder2, dtype=t_dtype, device=t_device, disable_mmap=True
         )
 
     # Store original devices to move back later if they were shared. This does nothing if shared_models is None
@@ -442,8 +443,8 @@ def prepare_text_inputs(
             model.to("cpu")
             clean_memory_on_device(device)  # clean memory on device before moving models
 
-        text_encoder1.to(device)
-        text_encoder2.to(device)
+        text_encoder1.to(t_device)
+        text_encoder2.to(t_device)
 
     prompt = args.prompt
     if prompt in conds_cache:
@@ -462,14 +463,14 @@ def prepare_text_inputs(
         )["input_ids"]
         l_tokens = tokenizer2(prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
 
-        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+        with torch.autocast(device_type=t_device.type, dtype=text_encoder1.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
             t5_vec = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
                 "last_hidden_state"
             ]
             assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"  # NoQA tensor is not bool
             t5_vec = t5_vec.cpu()
 
-        with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
+        with torch.autocast(device_type=t_device.type, dtype=text_encoder2.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
             clip_l_pooler = text_encoder2(l_tokens.to(text_encoder2.device))["pooler_output"]
             clip_l_pooler = clip_l_pooler.cpu()
 
@@ -494,14 +495,14 @@ def prepare_text_inputs(
             )["input_ids"]
             neg_l_tokens = tokenizer2(neg_prompt, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
 
-            with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+            with torch.autocast(device_type=t_device.type, dtype=text_encoder1.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
                 neg_t5_vec = text_encoder1(input_ids=neg_t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
                     "last_hidden_state"
                 ]
                 assert torch.isnan(neg_t5_vec).any() == False, "T5 vector contains NaN values"  # NoQA
                 neg_t5_vec = neg_t5_vec.cpu()
 
-            with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
+            with torch.autocast(device_type=t_device.type, dtype=text_encoder2.dtype) if not args.fp32_cpu_te else nullcontext(), torch.no_grad():
                 neg_clip_l_pooler = text_encoder2(neg_l_tokens.to(text_encoder2.device))["pooler_output"]
                 neg_clip_l_pooler = neg_clip_l_pooler.cpu()
 
@@ -651,7 +652,8 @@ def generate(
     #     return mask_image
 
     logger.info(f"Prompt: {context['prompt']}")
-    working_dtype = torch.bfloat16
+    working_dtype = torch.bfloat16 if not args.fp32_working_dtype else torch.float32
+    logger.info(f"Working dtype is {working_dtype}")
     t5_vec = context["t5_vec"].to(device, dtype=working_dtype)
     clip_l_pooler = context["clip_l_pooler"].to(device, dtype=working_dtype)
     txt_ids = torch.zeros(t5_vec.shape[0], t5_vec.shape[1], 3, device=t5_vec.device)
@@ -689,15 +691,28 @@ def generate(
     else:
         control_latent_ids = None
     # denoise
-    timesteps = flux_utils.get_schedule(
-        num_steps=args.infer_steps, image_seq_len=packed_latent_height * packed_latent_width, shift_value=args.flow_shift
-    )
+
+    if args.scheduler == "dpm++":
+        logger.info("Using FlowDPMSolverMultistepScheduler")
+        mu = flux_utils.get_lin_function(y1=0.5, y2=1.15)(packed_latent_height * packed_latent_width) if args.flow_shift is None else None
+        scheduler = FlowDPMSolverMultistepScheduler(use_dynamic_shifting=True if args.flow_shift is None else False, algorithm_type="dpmsolver++")
+        scheduler.set_timesteps(args.infer_steps, device=device, shift=args.flow_shift, mu=mu)
+        timesteps = scheduler.timesteps
+        sigmas = scheduler.sigmas
+    elif args.scheduler == "euler":
+        scheduler = None
+        logger.info("Using basic scheduler")
+        sigmas = flux_utils.get_schedule(
+            num_steps=args.infer_steps, image_seq_len=packed_latent_height * packed_latent_width, shift_value=args.flow_shift
+        )
+        timesteps = sigmas
     if args.preview_latent_every:
         previewer = LatentPreviewer(  # Make noise proper latent space image
             args, rearrange(noise, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2),
-            None, device, torch.bfloat16, model_type="flux"
+            scheduler, device, working_dtype, model_type="flux"
         )
-        previewer.sigmas = timesteps
+        if args.scheduler == "euler":
+            previewer.sigmas = timesteps  # hack to support ancient scheduling
 
     if args.cfg_schedule is not None:
         scale_per_step = parse_scheduled_cfg(args.cfg_schedule, args.infer_steps, args.guidance_scale)
@@ -708,16 +723,14 @@ def generate(
 
     guidance = args.embedded_cfg_scale
     x = noise
-
     # logger.info(f"guidance: {guidance}, timesteps: {timesteps}")
-    need_cast = model.dtype != torch.bfloat16
+    need_cast = model.dtype != working_dtype
     dtype_context = nullcontext()
     if need_cast:
-        dtype_context = torch.autocast(device_type=device.type, dtype=torch.bfloat16)  # BRAINFLOAT
-        logger.info(f"Autocast enabled for {model.dtype} model")
-    i = 0
+        dtype_context = torch.autocast(device_type=device.type, dtype=working_dtype)  # BRAINFLOAT
+        logger.info(f"Autocast enabled because model dtype of {model.dtype} != working dtype of {working_dtype}")
     guidance_vec = torch.full((x.shape[0],), guidance, device=x.device, dtype=x.dtype)
-    for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
+    for i, t_curr in enumerate(tqdm(sigmas[:-1])):
         t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=x.device)
         do_cfg_step = (i + 1) in scale_per_step if args.cfg_schedule else True if args.guidance_scale > 1.0 else False
         img_input = x
@@ -761,15 +774,24 @@ def generate(
 
         if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
             pred *= args.cfgzerostar_multiplier
-
-        x = x + (t_prev - t_curr) * pred
+        if args.scheduler == "dpm++":
+            x = scheduler.step(pred, float(timesteps[i]), x, return_dict=False)[0]
+        elif args.scheduler == "euler":
+            t_prev = sigmas[1:][i]
+            x = x + (t_prev - t_curr) * pred
 
         if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
             preview_x = rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
             previewer.preview(preview_x, i)
             del preview_x
-        i += 1
     # unpack
+    if args.offload_transformer_for_decode:
+        if args.blocks_to_swap > 0:
+            logger.info("Wait 5 seconds for block swap")
+            time.sleep(5)
+        logger.info("Offloading transformer for decode")
+        model = model.to("cpu")
+        clean_memory_on_device(device)
     x = x.float()
     x = rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
 
@@ -918,9 +940,9 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     """
     shared_models = {}
     # Load text encoders to CPU
-    t5_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.bfloat16
-    tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t5_dtype, device="cpu", disable_mmap=True)
-    tokenizer2, text_encoder2 = flux_utils.load_clip_l(args.text_encoder2, dtype=torch.bfloat16, device="cpu", disable_mmap=True)
+    t_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
+    tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t_dtype, device="cpu", disable_mmap=True)
+    tokenizer2, text_encoder2 = flux_utils.load_clip_l(args.text_encoder2, dtype=t_dtype, device="cpu", disable_mmap=True)
 
     shared_models["tokenizer1"] = tokenizer1
     shared_models["text_encoder1"] = text_encoder1
@@ -970,12 +992,12 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     logger.info("Loading Text Encoders for batch text preprocessing...")
 
     # Text Encoders loaded to CPU by load_text_encoder1/2
-    t5_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.bfloat16
+    t_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.float32 if args.fp32_cpu_te else torch.bfloat16
     tokenizer1_batch, text_encoder1_batch = flux_utils.load_t5xxl(
-        args.text_encoder1, dtype=t5_dtype, device=device, disable_mmap=True
+        args.text_encoder1, dtype=t_dtype, device=device, disable_mmap=True
     )
     tokenizer2_batch, text_encoder2_batch = flux_utils.load_clip_l(
-        args.text_encoder2, dtype=torch.bfloat16, device=device, disable_mmap=True
+        args.text_encoder2, dtype=t_dtype, device=device, disable_mmap=True
     )
 
     # Text Encoders to device for this phase

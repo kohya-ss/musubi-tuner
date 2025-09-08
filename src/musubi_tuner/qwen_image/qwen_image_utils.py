@@ -1,5 +1,4 @@
 import json
-import logging
 import math
 from typing import List, Optional, Tuple, Union
 
@@ -16,9 +15,8 @@ from musubi_tuner.flux.flux_utils import is_fp8
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.safetensors_utils import load_safetensors, load_split_weights
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from blissful_tuner.blissful_logger import BlissfulLogger
+logger = BlissfulLogger(__name__, "green")
 
 # region constants
 

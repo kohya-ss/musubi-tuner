@@ -14,6 +14,7 @@ from safetensors import safe_open
 from tqdm import tqdm
 from rich_argparse import RichHelpFormatter
 from rich.traceback import install as install_rich_tracebacks
+from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
@@ -24,6 +25,7 @@ from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, sync
 from musubi_tuner.wan_generate_video import merge_lora_weights
 
 from blissful_tuner.blissful_logger import BlissfulLogger
+from blissful_tuner.blissful_core import add_blissful_qwen_args, parse_blissful_args
 logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
 
@@ -129,8 +131,9 @@ def parse_args() -> argparse.Namespace:
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
-
+    parser = add_blissful_qwen_args(parser)
     args = parser.parse_args()
+    args = parse_blissful_args(args)
 
     # Validate arguments
     if args.from_file and args.interactive:
@@ -265,6 +268,18 @@ def load_dit_model(
         for lora_weight in args.lora_weight:
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
+            conversion_needed = False
+            for key, weight in lora_sd.items():
+                prefix, key_body = key.split(".", 1)
+                if prefix == "diffusion_model" or prefix == "transformer":
+                    conversion_needed = True
+                    break
+                elif "lora_unet" in prefix:
+                    conversion_needed = False
+                    break
+            if conversion_needed:
+                logger.info("Converting LoRA from foreign key naming format")
+                lora_sd = convert_from_diffusers("lora_unet_", lora_sd)
             lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
             lora_weights_list.append(lora_sd)
     else:
@@ -322,20 +337,20 @@ def load_dit_model(
 
         model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # if args.compile:
-    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-    #     logger.info(
-    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-    #     )
-    #     torch._dynamo.config.cache_size_limit = 32
-    #     for i in range(len(model.blocks)):
-    #         model.blocks[i] = torch.compile(
-    #             model.blocks[i],
-    #             backend=compile_backend,
-    #             mode=compile_mode,
-    #             dynamic=compile_dynamic.lower() in "true",
-    #             fullgraph=compile_fullgraph.lower() in "true",
-    #         )
+    if args.compile:
+        compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
+        logger.info(
+            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+        )
+        torch._dynamo.config.cache_size_limit = 32
+        for i in range(len(model.transformer_blocks)):
+            model.transformer_blocks[i] = torch.compile(
+                model.transformer_blocks[i],
+                backend=compile_backend,
+                mode=compile_mode,
+                dynamic=None if compile_dynamic is None else compile_dynamic.lower() in "true",
+                fullgraph=compile_fullgraph.lower() in "true",
+            )
 
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
