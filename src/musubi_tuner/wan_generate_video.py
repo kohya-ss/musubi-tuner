@@ -1283,7 +1283,10 @@ def prepare_i2v_inputs(
         msk[:, 0] = 1
         if has_end_image:
             # this process is confirmed by official code for FLF2V
-            msk[:, -1] = 1
+            if config.flf2v:
+                msk[-1, -1] = 1
+            else:
+                msk[:, -1] = 1
 
         # encode image to latent space
         with accelerator.autocast(), torch.no_grad():
