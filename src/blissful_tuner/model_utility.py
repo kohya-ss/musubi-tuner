@@ -22,7 +22,7 @@ logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 
 parser = argparse.ArgumentParser(
-    description="Utility for inspecting model structure and converting between dtypes and key naming. Supports loading single safetensors or sharded, saving is single safetensors",
+    description="Utility for inspecting model structure and converting between dtypes, filtering keys and stripping prefixes. Supports loading single safetensors or sharded, saving is single safetensors. Default mode is a simpel inspection printing the model's keys and size as it would be with the requested filtering and dtype conversion if any, or as is otherwise. --convert /path/to/output.safetensors can be specified to save that resulting output.",
     formatter_class=RichHelpFormatter,
 )
 parser.add_argument("--input", required=True, help="Checkpoint file or directory of shards to convert/inspect")
@@ -30,12 +30,7 @@ parser.add_argument(
     "--convert",
     type=str,
     default=None,
-    help="/path/to/output.safetensors, If provided, the model will be loaded, processed and written to this file",
-)
-parser.add_argument(
-    "--inspect",
-    action="store_true",
-    help="If provided, will print out the keys in the model's state dict along with their dtype and shape. Also runs the same processes as --convert so can be used as a dry run.",
+    help="--convert /path/to/output.safetensors, If provided, the model will be loaded, processed and written to this file.",
 )
 parser.add_argument(
     "--dtype_target_keys",
@@ -52,7 +47,11 @@ parser.add_argument(
     help="List of keys to exclude for dtype conversion(will still be processed otherwise)",
 )
 parser.add_argument(
-    "--full_exclude_keys", nargs="*", type=str, default=None, help="List of keys to exclude from any processing at all"
+    "--full_exclude_keys",
+    nargs="*",
+    type=str,
+    default=None,
+    help="List of keys to exclude from any processing at all. Default is None e.g. process all keys",
 )
 parser.add_argument(
     "--full_target_keys",
