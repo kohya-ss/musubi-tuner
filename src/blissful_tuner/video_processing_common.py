@@ -453,10 +453,14 @@ def list_media_files(directory: str, include_images: bool = True):
 
 
 def get_media_input_list(input_path: str, ignore_prompts: bool = False, include_images: bool = True) -> list[str]:
-    master_input = [input_path] if not os.path.isdir(input_path) else list_media_files(input_path, include_images=include_images)  # so we can iterate if single file
+    master_input = (
+        [input_path] if not os.path.isdir(input_path) else list_media_files(input_path, include_images=include_images)
+    )  # so we can iterate if single file
     logger.info(f"Files to process: {master_input}")
     if os.path.isdir(input_path):
-        logger.warning("A directory was specified as input so we will process ALL applicable media files in this directory. Is this acceptable?")
+        logger.warning(
+            "A directory was specified as input so we will process ALL applicable media files in this directory. Is this acceptable?"
+        )
         if ignore_prompts:
             logger.info("Continuing because of --yes")
         else:

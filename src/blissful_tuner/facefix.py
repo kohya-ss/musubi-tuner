@@ -48,7 +48,9 @@ def main():
     parser.add_argument(
         "--detection_model", type=str, default="retinaface_resnet50", help="Face detector. Default: retinaface_resnet50"
     )
-    parser.add_argument("--mode", choices=["gfpgan", "codeformer"], type=str, default="gfpgan", help="Mode - either gfpgan or codeformer")
+    parser.add_argument(
+        "--mode", choices=["gfpgan", "codeformer"], type=str, default="gfpgan", help="Mode - either gfpgan or codeformer"
+    )
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args = parser.parse_args()
     master_input = get_media_input_list(args.input, ignore_prompts=args.yes)
