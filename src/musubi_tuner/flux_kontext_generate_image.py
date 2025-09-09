@@ -19,10 +19,13 @@ from musubi_tuner.flux import flux_models
 from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler
 from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.guidance import parse_scheduled_cfg, apply_zerostar_scaling
+from blissful_tuner.prompt_management import process_wildcards
+from blissful_tuner.common_extensions import prepare_metadata, save_media_advanced
+from blissful_tuner.utils import power_seed
 from blissful_tuner.blissful_core import add_blissful_flux_args, parse_blissful_args
 from blissful_tuner.blissful_logger import BlissfulLogger
 
@@ -151,7 +154,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def parse_prompt_line(line: str) -> Dict[str, Any]:
+def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict[str, Any]:
     """Parse a prompt line into a dictionary of argument overrides
 
     Args:
@@ -163,6 +166,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
     # TODO common function with hv_train_network.line_to_prompt_dict
     parts = line.split(" --")
     prompt = parts[0].strip()
+    if prompt_wildcards is not None:
+        prompt = process_wildcards(prompt, prompt_wildcards)
 
     # Create dictionary of overrides
     overrides = {"prompt": prompt}
@@ -180,7 +185,7 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         elif option == "h":
             overrides["image_size_height"] = int(value)
         elif option == "d":
-            overrides["seed"] = int(value)
+            overrides["seed"] = power_seed(value)
         elif option == "s":
             overrides["infer_steps"] = int(value)
         # elif option == "g" or option == "l":
@@ -197,6 +202,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         #     overrides["negative_prompt"] = value
         elif option == "ci":  # control_image_path
             overrides["control_image_path"] = value
+        elif option == "cs":
+            overrides["cfg_schedule"] = value
 
     return overrides
 
@@ -846,21 +853,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     seed = args.seed
 
     latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
-
-    if args.no_metadata:
-        metadata = None
-    else:
-        metadata = {
-            "seeds": f"{seed}",
-            "prompt": f"{args.prompt}",
-            "height": f"{height}",
-            "width": f"{width}",
-            "infer_steps": f"{args.infer_steps}",
-            "embedded_cfg_scale": f"{args.embedded_cfg_scale}",
-        }
-        # if args.negative_prompt is not None:
-        #     metadata["negative_prompt"] = f"{args.negative_prompt}"
-
+    metadata = prepare_metadata(args)  # Will be set to None inside if args.no_metadata
     sd = {"latent": latent.contiguous()}
     save_file(sd, latent_path, metadata=metadata)
     logger.info(f"Latent saved to: {latent_path}")
@@ -868,7 +861,9 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     return latent_path
 
 
-def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_name: Optional[str] = None) -> str:
+def save_images(
+    sample: torch.Tensor, args: argparse.Namespace, original_base_name: Optional[str] = None, metadata: Optional[dict] = None
+) -> str:
     """Save images to directory
 
     Args:
@@ -882,13 +877,13 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
     time_flag = get_time_flag()
-
     seed = args.seed
-    original_name = "" if original_base_name is None else f"_{original_base_name}"
-    image_name = f"{time_flag}_{seed}{original_name}"
+    original_name = "" if original_base_name is None or len(original_base_name) == 0 else f"_{original_base_name}"
+    image_name = f"{time_flag}_{seed}{original_name}.png"
+    save_path = os.path.join(save_path, image_name)
     sample = sample.unsqueeze(0).unsqueeze(2)  # C,HW -> BCTHW, where B=1, C=3, T=1
-    save_images_grid(sample, save_path, image_name, rescale=True, create_subdir=False)
-    logger.info(f"Sample images saved to: {save_path}/{image_name}")
+    metadata = prepare_metadata(args) if metadata is None else metadata  # Prepare will return None if args.no_metadata
+    save_media_advanced(sample, save_path, args, rescale=True, metadata=metadata)
 
     return f"{save_path}/{image_name}"
 
@@ -899,6 +894,7 @@ def save_output(
     latent: torch.Tensor,
     device: torch.device,
     original_base_names: Optional[List[str]] = None,
+    metadata: Optional[dict] = None,
 ) -> None:
     """save output
 
@@ -927,8 +923,8 @@ def save_output(
 
     if args.output_type == "images" or args.output_type == "latent_images":
         # save images
-        original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
-        save_images(video, args, original_name)
+        original_name = "" if original_base_names is None or len(original_base_names[0]) == 0 else f"_{original_base_names[0]}"
+        save_images(video, args, original_name, metadata)
 
 
 def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Namespace) -> List[Dict]:
@@ -949,7 +945,7 @@ def preprocess_prompts_for_batch(prompt_lines: List[str], base_args: argparse.Na
             continue
 
         # Parse prompt line and create override dictionary
-        prompt_data = parse_prompt_line(line)
+        prompt_data = parse_prompt_line(line, base_args.prompt_wildcards)
         logger.info(f"Parsed prompt data: {prompt_data}")
         prompts_data.append(prompt_data)
 
@@ -1196,7 +1192,7 @@ def process_interactive(args: argparse.Namespace) -> None:
                     raise EOFError  # Exit on Ctrl+D or Ctrl+Z
 
                 # Parse prompt
-                prompt_data = parse_prompt_line(line)
+                prompt_data = parse_prompt_line(line, args.prompt_wildcards)
                 prompt_args = apply_overrides(args, prompt_data)
 
                 # Generate latent
@@ -1255,6 +1251,7 @@ def main():
         original_base_names = []
         latents_list = []
         seeds = []
+        metadata_list = []
 
         # assert len(args.latent_path) == 1, "Only one latent path is supported for now"
 
@@ -1271,12 +1268,13 @@ def main():
                 if metadata is None:
                     metadata = {}
                 logger.info(f"Loaded metadata: {metadata}")
+                metadata_list.append(metadata)
 
-                if "seeds" in metadata:
-                    seed = int(metadata["seeds"])
-                if "height" in metadata and "width" in metadata:
-                    height = int(metadata["height"])
-                    width = int(metadata["width"])
+                if "bt_seeds" in metadata:
+                    seed = int(metadata["bt_seeds"])
+                if "bt_height" in metadata and "bt_width" in metadata:
+                    height = int(metadata["bt_height"])
+                    width = int(metadata["bt_width"])
                     args.image_size = [height, width]
 
             seeds.append(seed)
@@ -1291,9 +1289,9 @@ def main():
 
         for i, latent in enumerate(latents_list):
             args.seed = seeds[i]
-
+            metadata = metadata_list[i]
             ae = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
-            save_output(args, ae, latent, device, original_base_names)
+            save_output(args, ae, latent, device, original_base_names, metadata=metadata)
 
     elif args.from_file:
         # Batch mode from file

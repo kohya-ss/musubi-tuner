@@ -30,7 +30,7 @@ from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.qwen_image.qwen_image_modules import get_activation
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
-from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper, to_cpu, to_device
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 

@@ -31,10 +31,10 @@ from musubi_tuner.wan_generate_video import merge_lora_weights
 from musubi_tuner.frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
 
 from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
-from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata
+from blissful_tuner.common_extensions import save_media_advanced, prepare_metadata
 from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan, process_wildcards
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.utils import string_to_seed
+from blissful_tuner.utils import power_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
@@ -335,10 +335,7 @@ def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict
         elif option == "f":
             overrides["video_seconds"] = float(value)
         elif option == "d":
-            try:
-                overrides["seed"] = int(value)
-            except ValueError:
-                overrides["seed"] = string_to_seed(value, bits=32)
+            overrides["seed"] = power_seed(value)
         elif option == "s":
             overrides["infer_steps"] = int(value)
         elif option == "g" or option == "l":
@@ -1664,31 +1661,11 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     time_flag = get_time_flag()
 
     seed = args.seed
-    video_seconds = args.video_seconds
 
     latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
 
-    if args.no_metadata:
-        metadata = None
-    else:
-        metadata = {
-            "seeds": f"{seed}",
-            "prompt": f"{args.prompt}",
-            "height": f"{height}",
-            "width": f"{width}",
-            "video_seconds": f"{video_seconds}",
-            "infer_steps": f"{args.infer_steps}",
-            "guidance_scale": f"{args.guidance_scale}",
-            "embedded_cfg_scale": f"{args.embedded_cfg_scale}",
-            "guidance_rescale": f"{args.guidance_rescale}",
-            "sample_solver": f"{args.sample_solver}",
-            "latent_window_size": f"{args.latent_window_size}",
-            "fps": f"{args.fps}",
-        }
-        if args.negative_prompt is not None:
-            metadata["negative_prompt"] = f"{args.negative_prompt}"
-
     sd = {"latent": latent.contiguous()}
+    metadata = prepare_metadata(args)
     save_file(sd, latent_path, metadata=metadata)
     logger.info(f"Latent saved to: {latent_path}")
 
@@ -1696,7 +1673,11 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
 
 
 def save_video(
-    video: torch.Tensor, args: argparse.Namespace, original_base_name: Optional[str] = None, latent_frames: Optional[int] = None
+    video: torch.Tensor,
+    args: argparse.Namespace,
+    original_base_name: Optional[str] = None,
+    latent_frames: Optional[int] = None,
+    metadata: Optional[dict] = None,
 ) -> str:
     """Save video to file
 
@@ -1718,8 +1699,8 @@ def save_video(
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}{latent_frames}.mp4"
 
     video = video.unsqueeze(0)
-    metadata = prepare_metadata(args)
-    save_videos_grid_advanced(video, video_path, args, rescale=True, metadata=metadata)
+    metadata = prepare_metadata(args) if metadata is None else metadata  # Returns None if args.no_metadata
+    save_media_advanced(video, video_path, args, rescale=True, metadata=metadata)
     logger.info(f"Video saved to: {video_path}")
 
     return video_path
@@ -1757,6 +1738,7 @@ def save_output(
     latent: torch.Tensor,
     device: torch.device,
     original_base_names: Optional[List[str]] = None,
+    metadata: Optional[dict] = None,
 ) -> None:
     """save output
 
@@ -1790,7 +1772,7 @@ def save_output(
     if args.output_type == "video" or args.output_type == "both":
         # save video
         original_name = "" if original_base_names is None or len(original_base_names[0]) == 0 else f"_{original_base_names[0]}"
-        save_video(video, args, original_name)
+        save_video(video, args, original_name, metadata=metadata)
 
     elif args.output_type == "images" or args.output_type == "latent_images":
         # save images
@@ -2118,7 +2100,7 @@ def main():
         original_base_names = []
         latents_list = []
         seeds = []
-
+        metadata_list = []
         # assert len(args.latent_path) == 1, "Only one latent path is supported for now"
 
         for latent_path in args.latent_path:
@@ -2133,13 +2115,13 @@ def main():
                     metadata = f.metadata()
                 if metadata is None:
                     metadata = {}
-                logger.info(f"Loaded metadata: {metadata}")
+                metadata_list.append(metadata)
 
-                if "seeds" in metadata:
-                    seed = int(metadata["seeds"])
-                if "height" in metadata and "width" in metadata:
-                    height = int(metadata["height"])
-                    width = int(metadata["width"])
+                if "bt_seeds" in metadata:
+                    seed = int(metadata["bt_seeds"])
+                if "bt_height" in metadata and "bt_width" in metadata:
+                    height = int(metadata["bt_height"])
+                    width = int(metadata["bt_width"])
                     args.video_size = [height, width]
                 if "video_seconds" in metadata:
                     args.video_seconds = float(metadata["video_seconds"])
@@ -2156,9 +2138,10 @@ def main():
 
         for i, latent in enumerate(latents_list):
             args.seed = seeds[i]
+            metadata = metadata_list[i]
 
             vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device)
-            save_output(args, vae, latent, device, original_base_names)
+            save_output(args, vae, latent, device, original_base_names, metadata=metadata)
 
     elif args.from_file:
         # Batch mode from file

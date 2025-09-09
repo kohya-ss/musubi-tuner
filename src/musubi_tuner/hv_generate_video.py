@@ -31,7 +31,7 @@ from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
 from blissful_tuner.latent_preview import LatentPreviewer
-from blissful_tuner.common_extensions import save_videos_grid_advanced, prepare_metadata, BlissfulKeyboardManager
+from blissful_tuner.common_extensions import save_media_advanced, prepare_metadata, BlissfulKeyboardManager
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
 from blissful_tuner.guidance import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
@@ -990,7 +990,7 @@ def main():
                     if not args.no_metadata
                     else None
                 )
-                save_videos_grid_advanced(sample, video_path, args, metadata=metadata)
+                save_media_advanced(sample, video_path, args, metadata=metadata)
                 logger.info(f"Sample save to: {video_path}")
         elif output_type == "images":
             # save images

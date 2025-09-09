@@ -42,12 +42,12 @@ from musubi_tuner.dataset.image_video_dataset import load_video
 # blissful start
 from blissful_tuner.latent_preview import LatentPreviewer
 from blissful_tuner.guidance import apply_zerostar_scaling, perpendicular_negative_cfg, parse_scheduled_cfg
-from blissful_tuner.utils import string_to_seed
+from blissful_tuner.utils import power_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards, prepare_wan_special_inputs
 from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
 from blissful_tuner.common_extensions import (
-    save_videos_grid_advanced,
+    save_media_advanced,
     prepare_v2v_noise,
     prepare_i2i_noise,
     prepare_metadata,
@@ -303,10 +303,7 @@ def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict
         elif option == "f":
             overrides["video_length"] = int(value)
         elif option == "d":
-            try:
-                overrides["seed"] = int(value)
-            except ValueError:
-                overrides["seed"] = string_to_seed(value, bits=32)
+            overrides["seed"] = power_seed(value)
         elif option == "s":
             overrides["infer_steps"] = int(value)
         elif option == "g" or option == "l":
@@ -1788,7 +1785,7 @@ def generate(
     return latent
 
 
-def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg) -> torch.Tensor:
+def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg, vae_in: Optional[WanVAE] = None) -> torch.Tensor:
     """decode latent
 
     Args:
@@ -1803,7 +1800,9 @@ def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg) -> torch.
 
     # load VAE model or use the one from the generation
     vae_dtype = str_to_dtype(args.vae_dtype) if args.vae_dtype is not None else torch.bfloat16
-    if hasattr(args, "_vae") and args._vae is not None:
+    if vae_in is not None:
+        vae = vae_in
+    elif hasattr(args, "_vae") and args._vae is not None:
         vae = args._vae
     else:
         vae = load_vae(args, cfg, device, vae_dtype)
@@ -1874,8 +1873,8 @@ def save_video(
     original_name = "" if original_base_name is None or len(original_base_name) == 0 else f"_{original_base_name}"
     video_path = f"{save_path}/{time_flag}_{seed}{original_name}.mp4"
     video = video.unsqueeze(0)
-    metadata = prepare_metadata(args) if metadata is None else metadata
-    save_videos_grid_advanced(video, video_path, args, rescale=True, metadata=metadata)
+    metadata = prepare_metadata(args) if metadata is None else metadata  # Prepare will return None if args.no_metadata
+    save_media_advanced(video, video_path, args, rescale=True, metadata=metadata)
 
     return video_path
 
@@ -1914,6 +1913,7 @@ def save_output(
     width: int,
     original_base_names: Optional[List[str]] = None,
     metadata: Optional[dict] = None,
+    vae: Optional[WanVAE] = None,
 ) -> None:
     """save output
 
@@ -1931,7 +1931,7 @@ def save_output(
 
     if args.output_type != "latent":
         # save video
-        sample = decode_latent(latent.unsqueeze(0), args, cfg)
+        sample = decode_latent(latent.unsqueeze(0), args, cfg, vae)
         original_name = "" if original_base_names is None or len(original_base_names[0]) == 0 else f"_{original_base_names[0]}"
         save_video(sample, args, original_name, metadata)
 
@@ -2122,13 +2122,9 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             logger.info(f"Decoding output {i + 1}/{len(all_latents)}")
 
             # Decode latent
-            video = decode_latent(latent.unsqueeze(0), prompt_args, cfg)
-
+            height, width, _ = check_inputs(prompt_args)
             # Save as video or images
-            if prompt_args.output_type == "video" or prompt_args.output_type == "both":
-                save_video(video, prompt_args)
-            elif prompt_args.output_type == "images":
-                save_images(video, prompt_args)
+            save_output(latent, prompt_args, cfg, height, width, vae=vae)
 
         # Free VAE
         del vae
@@ -2288,7 +2284,8 @@ def process_interactive(args: argparse.Namespace) -> None:
 
                 # Move model to CPU after generation
                 for model in models:
-                    model.to("cpu")
+                    if model is not None:
+                        model.to("cpu")
 
                 if latent is None:  # None is sentinel for early exit
                     raise KeyboardInterrupt
@@ -2308,12 +2305,8 @@ def process_interactive(args: argparse.Namespace) -> None:
                         vae = load_vae(args, cfg, device, vae_dtype)
 
                     vae.to_device(device)
-                    video = decode_latent(latent.unsqueeze(0), prompt_args, cfg)
 
-                    if prompt_args.output_type == "video" or prompt_args.output_type == "both":
-                        save_video(video, prompt_args)
-                    elif prompt_args.output_type == "images":
-                        save_images(video, prompt_args)
+                    save_output(latent, prompt_args, cfg, height, width, vae=vae)
 
                     # Move VAE to CPU after use
                     vae.to_device("cpu")

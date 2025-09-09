@@ -16,6 +16,7 @@ from safetensors.torch import save_file
 from rich_argparse import RichHelpFormatter
 from rich.traceback import install as install_rich_tracebacks
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "#8e00ed")
 
 install_rich_tracebacks()
@@ -39,7 +40,9 @@ parser.add_argument(
 parser.add_argument("--target_keys", nargs="*", type=str, default=None, help="Keys to target for dtype conversion")
 parser.add_argument("--exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude for dtype conversion")
 parser.add_argument("--fully_exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude from copying at all")
-parser.add_argument("--strip_prefix", type=str, default=None, help="If specified and matched, prefix will be stripped for keys in state dict")
+parser.add_argument(
+    "--strip_prefix", type=str, default=None, help="If specified and matched, prefix will be stripped for keys in state dict"
+)
 parser.add_argument(
     "--weights_only",
     action="store_false",

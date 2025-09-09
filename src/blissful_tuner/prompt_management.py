@@ -127,46 +127,46 @@ def wildcard_replace(wildcard: str, wildcard_location: str) -> str:
 def process_wildcards(prompts: Union[str, List[str]], wildcard_location: str, max_depth: int = 50) -> Union[str, List[str]]:
     """
     Recursively replace __keys__ in prompt(s) via wildcard_replace(key).
-
     Args:
         prompts:       A single prompt string or list of prompt strings.
         max_depth:     Maximum recursion depth before bailing out.
-
     Returns:
         The same type as `prompts`, with all __key__ markers replaced.
     """
-    # Normalize to list
     single = isinstance(prompts, str)
     prompt_list = [prompts] if single else list(prompts)
 
     pattern = re.compile(r"__([^_]+?)__")
 
-    def replace_in_one(prompt: str) -> str:
-        replacements = []
+    def replace_in_one(prompt: str) -> str:  # Helper function so we can make a listcomp
         depth = 0
         while depth < max_depth:
-            # find all wildcard markers in this prompt
-            matches = pattern.findall(prompt)
-            if not matches:
+            # Replace each match independently, allowing repeats by chance
+            replacements: List[str] = []
+
+            def _cb(m: re.Match) -> str:
+                key = m.group(1)
+                val = wildcard_replace(key, wildcard_location)  # <- one draw per occurrence
+                replacements.append(f"'{key}' -> '{val}'")
+                return val
+
+            new_prompt, nsubs = pattern.subn(_cb, prompt)
+            if nsubs == 0:
                 break
-            # for each unique key, get replacement and do a global sub
-            for key in set(matches):
-                replacement = wildcard_replace(key, wildcard_location)
-                prompt = re.sub(f"__{re.escape(key)}__", replacement, prompt)
-                replacements.append(f"'{key}' -> '{replacement}'")
+
+            if replacements:
+                reps = ", ".join(replacements)
+                logger.info(f"Wildcard replacements: {reps}")
+
+            prompt = new_prompt
             depth += 1
 
         if depth >= max_depth:
             raise RecursionError(f"Wildcard recursion exceeded {max_depth} levels in prompt: {prompt}")
-        if len(replacements) != 0:
-            replacement_string = ", ".join(replacements)
-            logger.info(f"Wildcard replacements: {replacement_string}")
+
         return prompt
 
-    # Process each prompt
     processed = [replace_in_one(p) for p in prompt_list]
-
-    # Return same type as input
     return processed[0] if single else processed
 
 
@@ -230,7 +230,7 @@ class MiniT5Wrapper:
         weight_vec = weight_vec.unsqueeze(0).unsqueeze(-1)  # shape [1, seq, 1]
 
         # ----- 4. encode & apply weights --------------------------------------------
-        # T5 expects (ids, mask) and spits out hidden-states of shape [B, L, D]
+        # This wrapped T5 expects (ids, mask) and spits out hidden-states of shape [B, L, D]
         context = self.model(ids, mask)  # same as baseline
         context = context * weight_vec  # scale token-wise
 
@@ -289,15 +289,22 @@ def prepare_wan_special_inputs(args: argparse.Namespace, device: torch.device, c
     perp_neg_context = nag_context = None
     if args.perp_neg or args.nag_prompt:
         if t5 is None:
+            print("Need load t5")
             t5 = load_t5(args, config, device)
         t5.model.to(device)
         if args.perp_neg:
             logger.info("Encoding unconditional context for perpendicular negative")
-            with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext():
+            with (
+                torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext(),
+                torch.no_grad(),
+            ):
                 perp_neg_context = t5("", device)  # Encode a blank prompt for true unconditional guidance
         if args.nag_prompt:
             logger.info("Encoding a separate negative prompt for NAG")
-            with torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext():
+            with (
+                torch.amp.autocast(device_type=device.type, dtype=config.t5_dtype) if args.fp8_t5 else nullcontext(),
+                torch.no_grad(),
+            ):
                 nag_context = t5(args.nag_prompt, device)
 
     return perp_neg_context, nag_context

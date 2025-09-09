@@ -129,8 +129,8 @@ def prepare_metadata(args: argparse.Namespace, seed_override: Optional[Any] = No
     return metadata
 
 
-def save_videos_grid_advanced(
-    videos: torch.Tensor,
+def save_media_advanced(
+    medias: torch.Tensor,
     output_video: str,
     args: argparse.Namespace,
     rescale: bool = False,
@@ -139,23 +139,31 @@ def save_videos_grid_advanced(
 ):
     "Function for saving Musubi Tuner outputs with more codec and container types"
 
-    # 1) rearrange so we iterate over time
-    videos = rearrange(videos, "b c t h w -> t b c h w")
+    # 1) rearrange so we iterate over time, everything that reaches this point should have shape B C T H W
+    medias = rearrange(medias, "b c t h w -> t b c h w")
 
     VideoProcessor = BlissfulVideoProcessor()
     VideoProcessor.prepare_files_and_path(
-        input_file_path=None, output_file_path=output_video, codec=args.codec, container=args.container
+        input_file_path=None,
+        output_file_path=output_video,
+        codec=args.codec if hasattr(args, "codec") else None,
+        container=args.container if hasattr(args, "container") else None,
     )
 
     outputs = []
-    for video in videos:
+    for media in medias:
         # 2) tile frames into one grid [C, H, W]
-        grid = torchvision.utils.make_grid(video, nrow=n_rows)
+        grid = torchvision.utils.make_grid(media, nrow=n_rows)
         # 3) convert to an OpenCV-ready numpy array
         np_img = VideoProcessor.tensor_to_np_image(grid, rescale=rescale)
         outputs.append(np_img)
 
-    VideoProcessor.write_np_images_to_output(outputs, args.fps, args.keep_pngs, metadata=metadata)
+    VideoProcessor.write_np_images_to_output(
+        outputs,
+        args.fps if hasattr(args, "fps") else 1.0,
+        args.keep_pngs if hasattr(args, "keep_pngs") else False,
+        metadata=metadata,
+    )
 
 
 def prepare_i2i_noise(

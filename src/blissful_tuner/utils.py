@@ -158,6 +158,7 @@ def power_seed(seed: Union[int, str] = None) -> int:
     logger = BlissfulLogger(__name__, "#8e00ed")
     if seed is None:
         seed = random.getrandbits(32)
+        msg = f"Seed '{seed}' generated pseudorandomly was set globally!"
     else:
         try:
             seed = int(seed)

@@ -23,7 +23,8 @@ from musubi_tuner.networks import lora_qwen_image
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
-
+from blissful_tuner.prompt_management import process_wildcards
+from blissful_tuner.utils import power_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.blissful_core import add_blissful_qwen_args, parse_blissful_args
 
@@ -152,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def parse_prompt_line(line: str) -> Dict[str, Any]:
+def parse_prompt_line(line: str, prompt_wildcards: Optional[str] = None) -> Dict[str, Any]:
     """Parse a prompt line into a dictionary of argument overrides
 
     Args:
@@ -164,7 +165,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
     # TODO common function with hv_train_network.line_to_prompt_dict
     parts = line.split(" --")
     prompt = parts[0].strip()
-
+    if prompt_wildcards is not None:
+        prompt = process_wildcards(prompt, prompt_wildcards)
     # Create dictionary of overrides
     overrides = {"prompt": prompt}
 
@@ -181,7 +183,7 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         elif option == "h":
             overrides["image_size_height"] = int(value)
         elif option == "d":
-            overrides["seed"] = int(value)
+            overrides["seed"] = power_seed(value)
         elif option == "s":
             overrides["infer_steps"] = int(value)
         elif option == "g" or option == "l":
