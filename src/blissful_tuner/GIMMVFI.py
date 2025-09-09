@@ -41,8 +41,10 @@ from blissful_tuner.gimmvfi.generalizable_INR.flowformer.core.FlowFormer.LatentC
 from blissful_tuner.gimmvfi.generalizable_INR.flowformer.configs.submission import get_cfg
 from blissful_tuner.gimmvfi.utils.utils import InputPadder, RaftArgs, easydict_to_dict
 from blissful_tuner.utils import load_torch_file, setup_compute_context, power_seed
-from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, get_media_input_list
+from blissful_tuner.blissful_logger import BlissfulLogger
 
+logger = BlissfulLogger(__name__, "#8e00ed")
 warnings.filterwarnings("ignore")
 install_rich_tracebacks()
 
@@ -197,21 +199,25 @@ def main():
     )
     args = parser.parse_args()
     device, dtype = setup_compute_context(None, args.dtype)
-    VideoProcessor = BlissfulVideoProcessor(device, dtype)
-    VideoProcessor.prepare_files_and_path(args.input, args.output, "VFI", args.codec, args.container, overwrite_all=args.yes)
+    master_input = get_media_input_list(args.input, ignore_prompts=args.yes, include_images=False)
     model = load_model(args.model, device, dtype, args.mode)
-    frames, fps, _, _ = VideoProcessor.load_frames(make_rgb=True)
-    frames = VideoProcessor.np_image_to_tensor(frames)
-    new_fps = fps * args.factor  # Adjust the frame rate according to the interpolation
+    for input_file in master_input:
+        logger.info(f"Processing VFI for {input_file}")
+        VideoProcessor = BlissfulVideoProcessor(device, dtype)
+        VideoProcessor.prepare_files_and_path(input_file, args.output, "VFI", args.codec, args.container, overwrite_all=args.yes)
+        frames, fps, _, _ = VideoProcessor.load_frames(make_rgb=True)
+        frames = VideoProcessor.np_image_to_tensor(frames)
+        new_fps = fps * args.factor  # Adjust the frame rate according to the interpolation
 
-    # Set seed for reproducibility.
-    power_seed(args.seed)
+        # Set seed for reproducibility.
+        power_seed(args.seed)
 
-    # Perform the frame interpolation.
-    interpolate(model, frames, args.ds_factor, args.factor, VideoProcessor)
+        # Perform the frame interpolation.
+        interpolate(model, frames, args.ds_factor, args.factor, VideoProcessor)
 
-    # Save the interpolated video.
-    VideoProcessor.write_buffered_frames_to_output(new_fps, args.keep_pngs)
+        # Save the interpolated video.
+        VideoProcessor.write_buffered_frames_to_output(new_fps, args.keep_pngs)
+        del VideoProcessor
 
 
 if __name__ == "__main__":

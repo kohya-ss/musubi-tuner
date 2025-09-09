@@ -37,8 +37,8 @@ def setup_parser_video_common(description: Optional[str] = None, model_help: Opt
     parser = argparse.ArgumentParser(description=description, formatter_class=RichHelpFormatter)
     model_help = "Path to the model" if model_help is None else model_help
     parser.add_argument("--model", required=True, help=model_help)
-    parser.add_argument("--input", required=True, help="Input video/image to process")
-    parser.add_argument("--dtype", type=str, default="fp32", help="Datatype to use")
+    parser.add_argument("--input", required=True, help="Input to process, may be a single file or a directory for batch operation")
+    parser.add_argument("--dtype", type=str, default="fp16", help="Datatype to use")
     parser.add_argument(
         "--output",
         type=str,
@@ -59,7 +59,7 @@ def setup_parser_video_common(description: Optional[str] = None, model_help: Opt
         default="mp4",
         help="Container format to use for output, choose from 'mkv' or 'mp4'. Default is 'mp4' and note that 'prores' can only go in 'mkv'! Ignored for images.",
     )
-    parser.add_argument("--yes", "-y", action="store_true", help="Overwrite existing without prompting")
+    parser.add_argument("--yes", "-y", action="store_true", help="Overwrite existing and accept warnings without prompting")
     return parser
 
 
@@ -148,9 +148,13 @@ class BlissfulVideoProcessor:
             if is_image:
                 self.new_ext = ".png"
                 self.codec = "png"
-        elif output_file_path is not None:
-            output_dir = os.path.dirname(output_file_path)
-        else:
+        if output_file_path is not None:
+            if os.path.isdir(output_file_path):
+                output_dir = output_file_path  # Save dirname
+                output_file_path = None  # Generate filenamess
+            else:
+                output_dir = os.path.dirname(output_file_path)
+        if input_file_path is None and output_file_path is None:
             raise ValueError("At least one of input_file_path or output_file_path must be provided!")
         if self.will_write_video:
             if not output_file_path:
@@ -424,3 +428,40 @@ class BlissfulVideoProcessor:
                 "yuv420p",
             ]
         raise ValueError(f"Unsupported codec: {self.codec}")
+
+
+def list_media_files(directory: str, include_images: bool = True):
+    """
+    Helper that will return a list of files in `directory` with extensions PNG, JPG, JPEG, MKV, or MP4.
+    """
+    # Normalize extensions (case-insensitive)
+    video_exts = {".mkv", ".mp4"}
+    image_exts = {".png", ".jpg", ".jpeg"}
+    valid_exts = video_exts | image_exts if include_images else video_exts
+
+    # Use pathlib for cleaner path handling
+    directory_path = Path(directory)
+
+    # Collect matching files
+    matching_files = [
+        str(file)  # convert Path to string if you want plain strings
+        for file in directory_path.iterdir()
+        if file.is_file() and file.suffix.lower() in valid_exts
+    ]
+
+    return matching_files
+
+
+def get_media_input_list(input_path: str, ignore_prompts: bool = False, include_images: bool = True) -> list[str]:
+    master_input = [input_path] if not os.path.isdir(input_path) else list_media_files(input_path, include_images=include_images)  # so we can iterate if single file
+    logger.info(f"Files to process: {master_input}")
+    if os.path.isdir(input_path):
+        logger.warning("A directory was specified as input so we will process ALL applicable media files in this directory. Is this acceptable?")
+        if ignore_prompts:
+            logger.info("Continuing because of --yes")
+        else:
+            choice = input("[y/N]: ").strip().lower()
+            if choice.lower() != "y" and choice.lower() != "yes":
+                logger.info("Exit at user request")
+                exit()
+    return master_input

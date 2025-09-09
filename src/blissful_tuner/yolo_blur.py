@@ -12,7 +12,7 @@ import cv2
 from tqdm import tqdm
 from rich.traceback import install as install_rich_tracebacks
 from ultralytics import YOLO
-from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common
+from blissful_tuner.video_processing_common import BlissfulVideoProcessor, setup_parser_video_common, get_media_input_list
 from blissful_tuner.utils import setup_compute_context
 from blissful_tuner.blissful_logger import BlissfulLogger
 
@@ -48,22 +48,26 @@ args = parser.parse_args()
 if args.strength % 2 == 0:
     args.strength += 1  # Kernel size must be odd
 device, dtype = setup_compute_context(None, args.dtype)
-vp = BlissfulVideoProcessor(device, dtype)
-vp.prepare_files_and_path(args.input, args.output, "blur", args.codec, args.container, overwrite_all=args.yes)
-frames, fps, width, height = vp.load_frames()
 model = YOLO(args.model).to(device, dtype)
-for frame in tqdm(frames):
-    results = model.predict(source=frame, conf=args.conf, verbose=False)
+master_input = get_media_input_list(args.input, args.yes)
+for input_file in master_input:
+    logger.info(f"Processing YOLO + blur for {input_file}")
+    vp = BlissfulVideoProcessor(device, dtype)
+    vp.prepare_files_and_path(input_file, args.output, "blur", args.codec, args.container, overwrite_all=args.yes)
+    frames, fps, width, height = vp.load_frames()
+    for frame in tqdm(frames):
+        results = model.predict(source=frame, conf=args.conf, verbose=False)
 
-    if len(results) > 0:
-        # We only have one frame in the list, so take the first result
-        dets = results[0].boxes
-        if dets is not None:
-            for box in dets:
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-                face_roi = frame[y1:y2, x1:x2]  # Blur it
-                blurred_roi = cv2.GaussianBlur(face_roi, (args.strength, args.strength), args.sigmax)
-                frame[y1:y2, x1:x2] = blurred_roi
-    vp.write_np_or_tensor_to_png(frame)
-vp.write_buffered_frames_to_output(fps=fps, keep_frames=args.keep_pngs)
+        if len(results) > 0:
+            # We only have one frame in the list, so take the first result
+            dets = results[0].boxes
+            if dets is not None:
+                for box in dets:
+                    x1, y1, x2, y2 = box.xyxy[0]
+                    x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+                    face_roi = frame[y1:y2, x1:x2]  # Blur it
+                    blurred_roi = cv2.GaussianBlur(face_roi, (args.strength, args.strength), args.sigmax)
+                    frame[y1:y2, x1:x2] = blurred_roi
+        vp.write_np_or_tensor_to_png(frame)
+    vp.write_buffered_frames_to_output(fps=fps, keep_frames=args.keep_pngs)
+    del vp
