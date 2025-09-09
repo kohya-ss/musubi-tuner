@@ -38,12 +38,14 @@ def setup_parser_video_common(description: Optional[str] = None, model_help: Opt
     model_help = "Path to the model" if model_help is None else model_help
     parser.add_argument("--model", required=True, help=model_help)
     parser.add_argument("--input", required=True, help="Input to process, may be a single file or a directory for batch operation")
-    parser.add_argument("--dtype", type=str, default="fp16", help="Datatype to use")
     parser.add_argument(
         "--output",
         type=str,
         default=None,
-        help="Output file path, default is same path as input. Extension may be changed to match chosen settings!",
+        help="Output path, if a filename we will write to that filename while making sure the extension is appropriate. If a directory we will write autonamed files out to that directory instead if the input directory",
+    )
+    parser.add_argument(
+        "--dtype", type=str, default="fp16", help="Datatype to use, default fp16 is likely fine and is a bit quicker"
     )
     parser.add_argument("--seed", type=str, default=None, help="Seed for reproducibility")
     parser.add_argument("--keep_pngs", action="store_true", help="Also keep individual frames as PNGs")
@@ -453,6 +455,9 @@ def list_media_files(directory: str, include_images: bool = True):
 
 
 def get_media_input_list(input_path: str, ignore_prompts: bool = False, include_images: bool = True) -> list[str]:
+    """
+    Produces an iterable list of media files for further processing, images being optional
+    """
     master_input = (
         [input_path] if not os.path.isdir(input_path) else list_media_files(input_path, include_images=include_images)
     )  # so we can iterate if single file

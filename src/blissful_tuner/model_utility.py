@@ -37,9 +37,30 @@ parser.add_argument(
     action="store_true",
     help="If provided, will print out the keys in the model's state dict along with their dtype and shape. Also runs the same processes as --convert so can be used as a dry run.",
 )
-parser.add_argument("--target_keys", nargs="*", type=str, default=None, help="Keys to target for dtype conversion")
-parser.add_argument("--exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude for dtype conversion")
-parser.add_argument("--fully_exclude_keys", nargs="*", type=str, default=None, help="Keys to exclude from copying at all")
+parser.add_argument(
+    "--dtype_target_keys",
+    nargs="*",
+    type=str,
+    default=None,
+    help="List of keys to target for dtype conversion(will still be processed otherwise",
+)
+parser.add_argument(
+    "--dtype_exclude_keys",
+    nargs="*",
+    type=str,
+    default=None,
+    help="List of keys to exclude for dtype conversion(will still be processed otherwise)",
+)
+parser.add_argument(
+    "--full_exclude_keys", nargs="*", type=str, default=None, help="List of keys to exclude from any processing at all"
+)
+parser.add_argument(
+    "--full_target_keys",
+    nargs="*",
+    type=str,
+    default=None,
+    help="If specified, only process keys that match this list. Default is all keys not otherwise excluded.",
+)
 parser.add_argument(
     "--strip_prefix", type=str, default=None, help="If specified and matched, prefix will be stripped for keys in state dict"
 )
@@ -52,7 +73,7 @@ parser.add_argument(
     "--dtype",
     type=str,
     help="Datatype to convert tensors to when using --convert. "
-    "If --target_keys or --exclude_keys is specified, only target keys that aren't excluded will have their dtype converted. "
+    "If --dtype_target_keys or --dtype_exclude_keys is specified, only target keys that aren't excluded will have their dtype converted. "
     "This can be useful for creating mixed precision models!",
 )
 args = parser.parse_args()
@@ -118,13 +139,19 @@ if args.convert is not None and os.path.exists(args.convert):
 
 converted_state_dict = {}
 keys_to_process = checkpoint.keys()
+if args.full_target_keys is not None:
+    keys_to_process = []
+    for key in checkpoint.keys():
+        if any(pattern in key for pattern in args.full_target_keys):
+            keys_to_process.append(key)
+
 dtypes_in_model = {}
 for key in keys_to_process:
-    is_fully_excluded = args.fully_exclude_keys is not None and any(pattern in key for pattern in args.fully_exclude_keys)
+    is_fully_excluded = args.full_exclude_keys is not None and any(pattern in key for pattern in args.full_exclude_keys)
     if is_fully_excluded:
         continue  # Skip this key
-    is_target = args.target_keys is None or any(pattern in key for pattern in args.target_keys)
-    is_excluded = args.exclude_keys is not None and any(pattern in key for pattern in args.exclude_keys)
+    is_target = args.dtype_target_keys is None or any(pattern in key for pattern in args.dtype_target_keys)
+    is_excluded = args.dtype_exclude_keys is not None and any(pattern in key for pattern in args.dtype_exclude_keys)
     is_target = is_target and not is_excluded
     value = checkpoint[key]
     if is_target:
@@ -139,9 +166,8 @@ for key in keys_to_process:
         dtypes_in_model[final_dtype] = 1
     else:
         dtypes_in_model[final_dtype] += 1
-    if args.convert or (args.inspect and is_target):
-        logger.info(f"'{key}': shape={value.shape} dtype='{final_dtype}'")
-        logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    logger.info(f"'{key}': shape={value.shape} dtype='{final_dtype}'")
+    logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
 
 logger.info(f"Tensor and dtypes in model: {dtypes_in_model}")
