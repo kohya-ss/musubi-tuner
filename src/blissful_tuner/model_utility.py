@@ -22,7 +22,10 @@ logger = BlissfulLogger(__name__, "#8e00ed")
 install_rich_tracebacks()
 
 parser = argparse.ArgumentParser(
-    description="Utility for inspecting model structure and converting between dtypes, filtering keys and stripping prefixes. Supports loading single safetensors or sharded, saving is single safetensors. Default mode is a simpel inspection printing the model's keys and size as it would be with the requested filtering and dtype conversion if any, or as is otherwise. --convert /path/to/output.safetensors can be specified to save that resulting output.",
+    description="Multipurpose Utility for inspecting model structure and converting between dtypes, filtering keys and stripping prefixes etc. "
+    "Supports loading single safetensors or sharded, saving is single safetensors. Default mode is a simple inspection printing the model's "
+    "keys and size as it would be with the requested filtering and dtype conversion if any, or as is otherwise. "
+    "--convert /path/to/output.safetensors can be specified to save that resulting output.",
     formatter_class=RichHelpFormatter,
 )
 parser.add_argument("--input", required=True, help="Checkpoint file or directory of shards to convert/inspect")
@@ -71,7 +74,7 @@ parser.add_argument(
 parser.add_argument(
     "--dtype",
     type=str,
-    help="Datatype to convert tensors to when using --convert. "
+    help="Datatype to convert tensors to. Applies to both inspection and conversion mode, subject to filters."
     "If --dtype_target_keys or --dtype_exclude_keys is specified, only target keys that aren't excluded will have their dtype converted. "
     "This can be useful for creating mixed precision models!",
 )
