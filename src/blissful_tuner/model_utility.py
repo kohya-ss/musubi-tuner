@@ -23,62 +23,68 @@ install_rich_tracebacks()
 
 parser = argparse.ArgumentParser(
     description="Multipurpose Utility for inspecting model structure and converting between dtypes, filtering keys and stripping prefixes etc. "
-    "Supports loading single safetensors or sharded, saving is single safetensors. Default mode is a simple inspection printing the model's "
-    "keys and size as it would be with the requested filtering and dtype conversion if any, or as is otherwise. "
-    "--convert /path/to/output.safetensors can be specified to save that resulting output.",
+    "Supports loading single safetensors or sharded as well as weights only single pt/pth files. Saving is single safetensors. Default mode is a "
+    "simple inspection printing the model's keys and tensor shape as it would be with the requested filtering and dtype conversion if any, or as is "
+    "otherwise. --output_path /path/to/output.safetensors can be specified to save that resulting output.",
     formatter_class=RichHelpFormatter,
 )
-parser.add_argument("--input", required=True, help="Checkpoint file or directory of shards to convert/inspect")
+parser.add_argument("--input", required=True, help="Model file or directory of model shards to convert/inspect")
 parser.add_argument(
-    "--convert",
-    type=str,
-    default=None,
-    help="--convert /path/to/output.safetensors, If provided, the model will be loaded, processed and written to this file.",
-)
-parser.add_argument(
-    "--dtype_target_keys",
+    "--full_target_keys",
     nargs="*",
     type=str,
     default=None,
-    help="List of keys to target for dtype conversion(will still be processed otherwise",
-)
-parser.add_argument(
-    "--dtype_exclude_keys",
-    nargs="*",
-    type=str,
-    default=None,
-    help="List of keys to exclude for dtype conversion(will still be processed otherwise)",
+    help="If specified, only process keys that match patterns in this list. Default is all keys not otherwise excluded.",
 )
 parser.add_argument(
     "--full_exclude_keys",
     nargs="*",
     type=str,
     default=None,
-    help="List of keys to exclude from any processing at all. Default is None e.g. process all keys",
-)
-parser.add_argument(
-    "--full_target_keys",
-    nargs="*",
-    type=str,
-    default=None,
-    help="If specified, only process keys that match this list. Default is all keys not otherwise excluded.",
-)
-parser.add_argument(
-    "--strip_prefix", type=str, default=None, help="If specified and matched, prefix will be stripped for keys in state dict"
-)
-parser.add_argument(
-    "--weights_only",
-    action="store_false",
-    help="Whether to load the model using 'weights_only' which can be safer. Default is true, don't change unless needed",
+    help="List of key patterns to exclude from any processing at all. Default is None e.g. process all keys",
 )
 parser.add_argument(
     "--dtype",
     type=str,
-    help="Datatype to convert tensors to. Applies to both inspection and conversion mode, subject to filters."
+    help="Datatype to convert tensors to. Applies to both inspection and conversion mode, subject to filters. "
     "If --dtype_target_keys or --dtype_exclude_keys is specified, only target keys that aren't excluded will have their dtype converted. "
     "This can be useful for creating mixed precision models!",
 )
+parser.add_argument(
+    "--dtype_target_keys",
+    nargs="*",
+    type=str,
+    default=None,
+    help="List of key patterns to target for dtype conversion. If not specified and a dtype is provided it will be applied to all tensors for display or conversion",
+)
+parser.add_argument(
+    "--dtype_exclude_keys",
+    nargs="*",
+    type=str,
+    default=None,
+    help="List of key patterns to exclude from dtype conversion(will still be processed otherwise)",
+)
+parser.add_argument(
+    "--strip_prefix",
+    type=str,
+    default=None,
+    nargs="*",
+    help="If specified and matched, list of prefixes which will be stripped from keys in state dict",
+)
+parser.add_argument(
+    "--output_path",
+    type=str,
+    default=None,
+    help="'--output_path /path/to/output.safetensors' - If provided, the model will be loaded, processed and written to this file.",
+)
+parser.add_argument(
+    "--disable_weights_only",
+    action="store_true",
+    help="If specified, disables loading the model using 'weights_only', potentially unsafe as could allow arbitrary code execution. "
+    "Don't use unless specifically needed, model likely won't save right anyway if it has code in the source",
+)
 args = parser.parse_args()
+use_weights_only = not args.disable_weights_only
 
 
 def load_torch_file(ckpt, weights_only=True, device=None, return_metadata=False):
@@ -122,7 +128,7 @@ def load_torch_file(ckpt, weights_only=True, device=None, return_metadata=False)
 
 
 logger.info("Loading checkpoint...")
-checkpoint = load_torch_file(args.input, args.weights_only)
+checkpoint = load_torch_file(args.input, use_weights_only)
 
 dtype_mapping = {
     "fp16": torch.float16,
@@ -133,8 +139,8 @@ dtype_mapping = {
     "float32": torch.float32,
 }
 
-if args.convert is not None and os.path.exists(args.convert):
-    confirm = input(f"{args.convert} exists. Overwrite? [y/N]: ").strip().lower()
+if args.output_path is not None and os.path.exists(args.output_path):
+    confirm = input(f"{args.output_path} exists. Overwrite? [y/N]: ").strip().lower()
     if confirm != "y":
         logger.info("Aborting.")
         exit()
@@ -152,28 +158,36 @@ for key in keys_to_process:
     is_fully_excluded = args.full_exclude_keys is not None and any(pattern in key for pattern in args.full_exclude_keys)
     if is_fully_excluded:
         continue  # Skip this key
-    is_target = args.dtype_target_keys is None or any(pattern in key for pattern in args.dtype_target_keys)
-    is_excluded = args.dtype_exclude_keys is not None and any(pattern in key for pattern in args.dtype_exclude_keys)
-    is_target = is_target and not is_excluded
+
+    is_dtype_target = args.dtype_target_keys is None or any(pattern in key for pattern in args.dtype_target_keys)
+    is_dtype_excluded = args.dtype_exclude_keys is not None and any(pattern in key for pattern in args.dtype_exclude_keys)
+    is_dtype_target = is_dtype_target and not is_dtype_excluded
+
     value = checkpoint[key]
-    if is_target:
-        if args.strip_prefix is not None and key.startswith(args.strip_prefix):
-            logger.info(f"'{key}' had it's prefix stripped per rules!")
-            key = key.replace(args.strip_prefix, "")
-    dtype_to_use = dtype_mapping.get(args.dtype.lower(), value.dtype) if args.dtype else value.dtype
-    final_dtype = dtype_to_use if is_target else value.dtype
-    if args.convert:
+    if args.strip_prefix is not None:
+        for pattern in args.strip_prefix:
+            if key.startswith(pattern):
+                logger.info(f"'{key}' had it's prefix stripped per rules!")
+                key = key.replace(pattern, "")
+
+    dtype_to_use = (
+        dtype_mapping.get(args.dtype.lower(), value.dtype) if args.dtype else value.dtype
+    )  # All cases default back to current value dtype
+    final_dtype = dtype_to_use if is_dtype_target else value.dtype
+
+    if args.output_path:  # Need to plop it in the converted sd
         converted_state_dict[key] = value.to(final_dtype)
-    if final_dtype not in dtypes_in_model:
+
+    if final_dtype not in dtypes_in_model:  # count dtypes separately for later display
         dtypes_in_model[final_dtype] = 1
     else:
         dtypes_in_model[final_dtype] += 1
+
     logger.info(f"'{key}': shape={value.shape} dtype='{final_dtype}'")
     logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
-
 logger.info(f"Tensor and dtypes in model: {dtypes_in_model}")
-if args.convert:
-    output_file = args.convert.replace(".pth", ".safetensors").replace(".pt", ".safetensors")
+if args.output_path:
+    output_file = args.output_path.replace(".pth", ".safetensors").replace(".pt", ".safetensors")
     logger.info(f"Saving converted tensors to '{output_file}'...")
     save_file(converted_state_dict, output_file)
