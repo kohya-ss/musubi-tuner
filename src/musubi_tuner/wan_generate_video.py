@@ -975,7 +975,7 @@ def prepare_t2v_inputs(
         text_encoder = load_text_encoder(args, config, device)
         text_encoder.model.to(device)
         if args.prompt_weighting:
-            text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
+            text_encoder = MiniT5Wrapper(device, config.t5_dtype, t5=text_encoder.model, tokenizer=text_encoder.tokenizer.tokenizer)
 
         # encode prompt
         with torch.no_grad():
@@ -1207,7 +1207,7 @@ def prepare_i2v_inputs(
         text_encoder = load_text_encoder(args, config, device)
         text_encoder.model.to(device)
         if args.prompt_weighting:
-            text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
+            text_encoder = MiniT5Wrapper(device, config.t5_dtype, t5=text_encoder.model, tokenizer=text_encoder.tokenizer.tokenizer)
 
         # encode prompt
         with torch.no_grad():
@@ -1991,7 +1991,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     text_encoder = load_text_encoder(args, cfg, device)
     text_encoder.model.to(device)
     if args.prompt_weighting:
-        text_encoder = MiniT5Wrapper(device, cfg.t5_dtype, text_encoder)
+        text_encoder = MiniT5Wrapper(device, cfg.t5_dtype, t5=text_encoder.model, tokenizer=text_encoder.tokenizer.tokenizer)
 
     encoded_contexts = {}
 
@@ -2197,7 +2197,9 @@ def process_interactive(args: argparse.Namespace) -> None:
                     logger.info("Loading text encoder")
                     text_encoder = load_text_encoder(args, cfg, device)
                     if args.prompt_weighting:
-                        text_encoder = MiniT5Wrapper(device, cfg.t5_dtype, text_encoder)
+                        text_encoder = MiniT5Wrapper(
+                            device, cfg.t5_dtype, t5=text_encoder.model, tokenizer=text_encoder.tokenizer.tokenizer
+                        )
 
                 text_encoder.model.to(device)
 

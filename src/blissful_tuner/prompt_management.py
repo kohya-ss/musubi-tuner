@@ -11,10 +11,10 @@ import os
 import random
 import argparse
 from contextlib import nullcontext
-from transformers import T5Model
+from transformers import T5Model, T5Tokenizer
 import torch
 import re
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, Optional
 from musubi_tuner.wan.modules.t5 import T5EncoderModel
 from blissful_tuner.blissful_logger import BlissfulLogger
 
@@ -170,20 +170,74 @@ def process_wildcards(prompts: Union[str, List[str]], wildcard_location: str, ma
     return processed[0] if single else processed
 
 
+def parse_prompt_weights(prompt: str) -> Tuple[List[str], List[float]]:
+    """
+    Split a diffusion prompt into (text, weight) pairs.
+
+    Supports:
+      • `(text:1.3)`   → explicit weight 1.3
+      • `(text)`       → implicit “emphasis” weight 1.1
+      • '(text:-2.0)'  → inversion weight
+      • bare text      → default weight 1.0
+    Everything is returned in the order it appears so `parts[i]` lines up with `weights[i]`.
+    """
+    # 1️ find every (…) group, where the :weight part is optional
+    token_re = re.compile(r"\(([^:()]+?)(?::([+-]?\d*\.?\d+))?\)")
+
+    parts: List[str] = []
+    weights: List[float] = []
+
+    idx = 0  # keeps track of how far we’ve scanned
+    for m in token_re.finditer(prompt):
+        # text that sits *before* this (…) block → default 1.0 weight
+        if m.start() > idx:
+            for seg in prompt[idx : m.start()].split(","):
+                seg = seg.strip()
+                if seg:
+                    parts.append(seg)
+                    weights.append(1.0)
+
+        inner, w = m.group(1).strip(), m.group(2)
+        parts.append(inner)
+        if w is None:  # “(something)” with no :weight
+            weights.append(1.1)
+        else:
+            weights.append(float(w))  # user-supplied weight
+
+        idx = m.end()
+
+    # tail text after the final (…) block
+    if idx < len(prompt):
+        for seg in prompt[idx:].split(","):
+            seg = seg.strip()
+            if seg:
+                parts.append(seg)
+                weights.append(1.0)
+    return parts, weights
+
+
 class MiniT5Wrapper:
     """A mini wrapper for the T5 to make managing prompt weighting in Musubi easier"""
 
-    def __init__(self, device: torch.device, dtype: torch.dtype, t5: T5Model):
+    def __init__(self, device: torch.device, dtype: torch.dtype, t5: T5Model, tokenizer: T5Tokenizer, mode="wan"):
+        self.mode = mode
         self.device = device
         self.dtype = dtype
-        self.t5 = t5
-        self.model = t5.model
-        self.tokenizer = (
-            t5.tokenizer.tokenizer
-        )  # Unwrap the tokenizer so we can access it's internal properties and methods directly
+        self.pad_to_max = False if mode == "wan" else True
+        self.model = t5
+        self.tokenizer = tokenizer
         self.times_called = 0
 
-    def __call__(self, prompt: Union[str, List[str]], device: torch.device, max_len: int | None = None) -> List[torch.Tensor]:
+    def to(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
+        """Pass through for wrapped model"""
+        if device and dtype:
+            self.model.to(device, dtype)
+        elif device:
+            self.model.to(device)
+        elif dtype:
+            self.model.to(dtype)
+
+    def __call__(self, prompt: Union[str, List[str]], device: torch.device, max_len: Optional[int] = None) -> Union[List[torch.Tensor], torch.tensor]:
         # ----- 0. normalise the input ------------------------------------------------
         if isinstance(prompt, list):
             if len(prompt) != 1:
@@ -191,11 +245,11 @@ class MiniT5Wrapper:
             prompt = prompt[0]
 
         if self.times_called == 0:  # only once for noisy logs
-            logger.info("Weighting prompts…")
+            logger.info("Weighting prompts for T5…")
         self.times_called += 1
 
         # ----- 1. split “(text:weight)” chunks ---------------------------------------
-        parts, weights = self.parse_prompt_weights(prompt)
+        parts, weights = parse_prompt_weights(prompt)
 
         # ----- 2. tokenise each chunk so we know its span --------------------------
         all_ids: list[int] = []
@@ -222,66 +276,35 @@ class MiniT5Wrapper:
         all_ids.append(eos_id)
         tok_weights.append(1.0)  # EOS should stay neutral
 
+        if self.pad_to_max:  # Padding comes after EOS, Flux seems to like it
+            cur_len = len(all_ids)
+            if cur_len < 512:
+                for _ in range(512 - cur_len):
+                    all_ids.append(self.tokenizer.pad_token_id)
+                    tok_weights.append(1.0)
+
         # ----- 3. build tensors ------------------------------------------------------
         ids = torch.tensor(all_ids, dtype=torch.long, device=device).unsqueeze(0)
-        mask = ids.ne(self.tokenizer.pad_token_id).int()  # 1 where real
+        mask = ids.ne(self.tokenizer.pad_token_id).int()  # 1 where real, not used for Flux
 
         weight_vec = torch.tensor(tok_weights, dtype=self.dtype, device=device)
         weight_vec = weight_vec.unsqueeze(0).unsqueeze(-1)  # shape [1, seq, 1]
 
         # ----- 4. encode & apply weights --------------------------------------------
-        # This wrapped T5 expects (ids, mask) and spits out hidden-states of shape [B, L, D]
-        context = self.model(ids, mask)  # same as baseline
+        if self.mode == "wan":
+            context = self.model(ids, mask)
+        elif self.mode == "flux":
+            context = self.model(ids, attention_mask=None, output_hidden_states=False)["last_hidden_state"]
+
+        # After model, context is 1, seq_len, 4096 for wan or 1, 512, 4096 for Flux
         context = context * weight_vec  # scale token-wise
+        # ----- 5. output ------------------------------------------------------------
+        if self.mode == "wan":
+            # trim to actual length & wrap the list Wan wants
+            seq_len = mask.sum(dim=1).long().item()  # number of *real* tokens
+            return [context[0, :seq_len]]
 
-        # ----- 5. trim to actual length & wrap the list Wan wants -------------------
-        seq_len = mask.sum(dim=1).long().item()  # number of *real* tokens
-        return [context[0, :seq_len]]
-
-    def parse_prompt_weights(self, prompt: str) -> Tuple[List[str], List[float]]:
-        """
-        Split a diffusion prompt into (text, weight) pairs.
-
-        Supports:
-          • `(text:1.3)`   → explicit weight 1.3
-          • `(text)`       → implicit “emphasis” weight 1.1
-          • '(text:-2.0)'  → inversion weight
-          • bare text      → default weight 1.0
-        Everything is returned in the order it appears so `parts[i]` lines up with `weights[i]`.
-        """
-        # 1️ find every (…) group, where the :weight part is optional
-        token_re = re.compile(r"\(([^:()]+?)(?::([+-]?\d*\.?\d+))?\)")
-
-        parts: List[str] = []
-        weights: List[float] = []
-
-        idx = 0  # keeps track of how far we’ve scanned
-        for m in token_re.finditer(prompt):
-            # text that sits *before* this (…) block → default 1.0 weight
-            if m.start() > idx:
-                for seg in prompt[idx : m.start()].split(","):
-                    seg = seg.strip()
-                    if seg:
-                        parts.append(seg)
-                        weights.append(1.0)
-
-            inner, w = m.group(1).strip(), m.group(2)
-            parts.append(inner)
-            if w is None:  # “(something)” with no :weight
-                weights.append(1.1)
-            else:
-                weights.append(float(w))  # user-supplied weight
-
-            idx = m.end()
-
-        # tail text after the final (…) block
-        if idx < len(prompt):
-            for seg in prompt[idx:].split(","):
-                seg = seg.strip()
-                if seg:
-                    parts.append(seg)
-                    weights.append(1.0)
-        return parts, weights
+        return context  # Just return as is for Flux
 
 
 def prepare_wan_special_inputs(args: argparse.Namespace, device: torch.device, config, t5) -> Union[dict, dict]:
@@ -289,7 +312,7 @@ def prepare_wan_special_inputs(args: argparse.Namespace, device: torch.device, c
     perp_neg_context = nag_context = None
     if args.perp_neg or args.nag_prompt:
         if t5 is None:
-            print("Need load t5")
+            logger.info("Loading T5 text encoder")
             t5 = load_t5(args, config, device)
         t5.model.to(device)
         if args.perp_neg:
