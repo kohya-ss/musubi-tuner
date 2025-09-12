@@ -237,7 +237,9 @@ class MiniT5Wrapper:
         elif dtype:
             self.model.to(dtype)
 
-    def __call__(self, prompt: Union[str, List[str]], device: torch.device, max_len: Optional[int] = None) -> Union[List[torch.Tensor], torch.tensor]:
+    def __call__(
+        self, prompt: Union[str, List[str]], device: torch.device, max_len: Optional[int] = None
+    ) -> Union[List[torch.Tensor], torch.tensor]:
         # ----- 0. normalise the input ------------------------------------------------
         if isinstance(prompt, list):
             if len(prompt) != 1:

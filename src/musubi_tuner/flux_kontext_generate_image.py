@@ -455,7 +455,9 @@ def prepare_text_inputs(
         text_encoder2.to(t_device)
 
     prompt = args.prompt
-    blissful_text_encoder = MiniT5Wrapper(device, t_dtype, t5=text_encoder1, tokenizer=tokenizer1, mode="flux")  # Wrap it for weighting
+    blissful_text_encoder = MiniT5Wrapper(
+        device, t_dtype, t5=text_encoder1, tokenizer=tokenizer1, mode="flux"
+    )  # Wrap it for weighting
     if prompt in conds_cache:
         t5_vec, clip_l_pooler = conds_cache[prompt]
     else:
