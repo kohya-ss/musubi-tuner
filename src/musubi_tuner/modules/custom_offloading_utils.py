@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 
 
-def clean_memory_on_device(device: torch.device):
+# Keep these functions here for portability, and private to avoid confusion with the ones in device_utils.py
+def _clean_memory_on_device(device: torch.device):
     r"""
     Clean memory on the specified device, will be called from training scripts.
     """
@@ -21,7 +22,7 @@ def clean_memory_on_device(device: torch.device):
         torch.mps.empty_cache()
 
 
-def synchronize_device(device: torch.device):
+def _synchronize_device(device: torch.device):
     if device.type == "cuda":
         torch.cuda.synchronize()
     elif device.type == "xpu":
@@ -89,14 +90,14 @@ def swap_weight_devices_no_cuda(device: torch.device, layer_to_cpu: nn.Module, l
     for module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view in weight_swap_jobs:
         module_to_cpu.weight.data = cuda_data_view.data.to("cpu", non_blocking=True)
 
-    synchronize_device()
+    _synchronize_device(device)
 
     # cpu to device
     for module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view in weight_swap_jobs:
         cuda_data_view.copy_(module_to_cuda.weight.data, non_blocking=True)
         module_to_cuda.weight.data = cuda_data_view
 
-    synchronize_device()
+    _synchronize_device(device)
 
 
 def weighs_to_device(layer: nn.Module, device: torch.device):
@@ -245,8 +246,8 @@ class ModelOffloader(Offloader):
             b.to(self.device)  # move block to device first. this makes sure that buffers (non weights) are on the device
             weighs_to_device(b, "cpu")  # make sure weights are on cpu
 
-        synchronize_device(self.device)
-        clean_memory_on_device(self.device)
+        _synchronize_device(self.device)
+        _clean_memory_on_device(self.device)
 
     def wait_for_block(self, block_idx: int):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:

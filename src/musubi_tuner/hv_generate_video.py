@@ -27,6 +27,7 @@ from musubi_tuner.networks import lora
 from rich_argparse import RichHelpFormatter
 from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.utils.model_utils import str_to_dtype
+from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
@@ -42,24 +43,6 @@ logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
 if lycoris_available:
     from lycoris.kohya import create_network_from_weights
-
-
-def clean_memory_on_device(device):
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    elif device.type == "cpu":
-        pass
-    elif device.type == "mps":  # not tested
-        torch.mps.empty_cache()
-
-
-def synchronize_device(device: torch.device):
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "xpu":
-        torch.xpu.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
 
 
 def get_time_flag():

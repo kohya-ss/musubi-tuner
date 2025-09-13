@@ -68,7 +68,7 @@ def load_model_and_processor(model_path: str, device: torch.device, max_size: in
 
     # Use load_qwen2_5_vl function from qwen_image_utils
     dtype = torch.float8_e4m3fn if fp8_vl else torch.bfloat16
-    _, model = load_qwen2_5_vl(model_path, dtype=dtype, device=device, disable_mmap=False)
+    _, model = load_qwen2_5_vl(model_path, dtype=dtype, device=device, disable_mmap=True)
 
     model.eval()
 

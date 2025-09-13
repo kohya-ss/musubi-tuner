@@ -13,15 +13,15 @@ from musubi_tuner.hunyuan_model.posemb_layers import apply_rotary_emb
 from musubi_tuner.hunyuan_model.mlp_layers import MLP, MLPEmbedder, FinalLayer
 from musubi_tuner.hunyuan_model.modulate_layers import ModulateDiT, modulate, apply_gate
 from musubi_tuner.hunyuan_model.token_refiner import SingleTokenRefiner
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader, synchronize_device, clean_memory_on_device
+from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.utils.device_utils import synchronize_device, clean_memory_on_device
 from musubi_tuner.hunyuan_model.posemb_layers import get_nd_rotary_pos_embed
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+from musubi_tuner.utils.safetensors_utils import load_safetensors
 from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
-
 
 class MMDoubleStreamBlock(nn.Module):
     """
@@ -1036,15 +1036,7 @@ def load_transformer(
 
     if os.path.splitext(dit_path)[-1] == ".safetensors":
         # loading safetensors: may be already fp8
-        with MemoryEfficientSafeOpen(dit_path) as f:
-            state_dict = {}
-            for k in f.keys():
-                tensor = f.get_tensor(k)
-                tensor = tensor.to(device=load_device, dtype=dtype)
-                # TODO support comfy model
-                # if k.startswith("model.model."):
-                #     k = convert_comfy_model_key(k)
-                state_dict[k] = tensor
+        state_dict = load_safetensors(dit_path, device=load_device, disable_mmap=True, dtype=dtype)
         transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
         transformer = load_state_dict(transformer, dit_path)

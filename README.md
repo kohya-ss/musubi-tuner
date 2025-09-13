@@ -120,6 +120,11 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 13, 2025
+    - A bug in masking during FLF2V inference in `wan_generate_video.py` has been fixed. Thanks to LittleNyima for [PR #548](https://github.com/kohya-ss/musubi-tuner/pull/548).
+    - The loading speed of `.safetensors` files has been improved. See [PR #556](https://github.com/kohya-ss/musubi-tuner/pull/556).
+        - Model loading can be up to 1.5 times faster.
+
 - September 8, 2025
     - Code analysis with ruff has been introduced, and [contribution guidelines](./CONTRIBUTING.md) have been added.
         - Thanks to arledesma for [Issue #524](https://github.com/kohya-ss/musubi-tuner/issues/524) and [PR #538](https://github.com/kohya-ss/musubi-tuner/pull/538).
@@ -143,21 +148,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
     - When contributing code, it would be helpful if you could run `ruff check` to verify the code style. Automatic fixes are also possible with `ruff --fix`.
         - Note that code formatting should be done with `black`, and the `line-length` should be set to `132`.
         - Guidelines will be developed later.
-
-- August 28, 2025
-    - If you are using an RTX 50 series GPU, please try PyTorch 2.8.0.
-    - Library dependencies have been updated, and version specifications have been removed from `bitsandbytes`. Please install the appropriate version according to your environment.
-        - If you are using an RTX 50 series GPU, installing the latest version with `pip install -U bitsandbytes` will resolve the error.
-        - `sentencepiece` has been updated to 0.2.1.
-    - [Schedule Free Optimizer](https://github.com/facebookresearch/schedule_free) is supported. Thanks to am7coffee for [PR #505](https://github.com/kohya-ss/musubi-tuner/pull/505). 
-        - See [Schedule Free Optimizer documentation](./docs/advanced_config.md#schedule-free-optimizer--スケジュールフリーオプティマイザ) for details.
-
-- August 24, 2025
-    - Reduced peak memory usage during training and inference for Wan2.1/2.2. PR [#493](https://github.com/kohya-ss/musubi-tuner/pull/493) This may reduce memory usage by about 10% for non-weight tensors, depending on the video frame size and number of frames.
-
-- August 22, 2025:
-    - Qwen-Image-Edit support has been added. See PR [#473](https://github.com/kohya-ss/musubi-tuner/pull/473) and the [Qwen-Image documentation](./docs/qwen_image.md) for details. This change may affect existing features due to its extensive nature. If you encounter any issues, please report them in the [Issues](https://github.com/kohya-ss/musubi-tuner/issues).
-    - **Breaking Change**: The cache format for FLUX.1 Kontext has been changed with this update. Please recreate the latent cache.
 
 ### Releases
 

@@ -34,6 +34,7 @@ import logging
 
 from musubi_tuner.qwen_image_train_network import QwenImageNetworkTrainer
 from musubi_tuner.utils import huggingface_utils, model_utils, sai_model_spec, train_utils
+from musubi_tuner.utils.device_utils import synchronize_device
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors, mem_eff_save_file
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         if block_index_map is None:
             state_dict = load_safetensors(dit_path, device=loading_device, disable_mmap=True, dtype=dit_weight_dtype)
         else:
+            loading_device = torch.device(loading_device) if loading_device is not None else None
             state_dict = {}
             with MemoryEfficientSafeOpen(dit_path) as f:
                 for key in f.keys():
@@ -98,7 +100,8 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                         new_block_index = block_index_map[block_index]
                         state_dict_key = key.replace(f"transformer_blocks.{block_index}.", f"transformer_blocks.{new_block_index}.")
 
-                    state_dict[state_dict_key] = f.get_tensor(key).to(loading_device, dtype=dit_weight_dtype)
+                    state_dict[state_dict_key] = f.get_tensor(key, device=loading_device, dtype=dit_weight_dtype)
+            synchronize_device(loading_device)
 
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded DiT model from {dit_path}, info={info}")

@@ -1,7 +1,12 @@
+from typing import Optional, Union
 import torch
 
 
-def clean_memory_on_device(device):
+def clean_memory_on_device(device: Optional[Union[str, torch.device]]):
+    if device is None:
+        return
+    if isinstance(device, str):
+        device = torch.device(device)
     if device.type == "cuda":
         torch.cuda.empty_cache()
     elif device.type == "cpu":
@@ -10,7 +15,11 @@ def clean_memory_on_device(device):
         torch.mps.empty_cache()
 
 
-def synchronize_device(device: torch.device):
+def synchronize_device(device: Optional[Union[str, torch.device]]):
+    if device is None:
+        return
+    if isinstance(device, str):
+        device = torch.device(device)
     if device.type == "cuda":
         torch.cuda.synchronize()
     elif device.type == "xpu":
