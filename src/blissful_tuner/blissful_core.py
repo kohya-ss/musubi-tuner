@@ -346,7 +346,10 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
     if hasattr(args, "preview_latent_every") and args.preview_latent_every:
         scheduler = args.scheduler if hasattr(args, "scheduler") else args.sample_solver if hasattr(args, "sample_solver") else None
         if scheduler and "sde" in scheduler.lower():
-            error_out(argparse.ArgumentTypeError, "Previewer is not compatible with DPM++SDE currently. Please either disable previews or change scheduler/solver.")
+            error_out(
+                argparse.ArgumentTypeError,
+                "Previewer is not compatible with DPM++SDE currently. Please either disable previews or change scheduler/solver.",
+            )
     return args
 
 
