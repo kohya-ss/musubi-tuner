@@ -10,7 +10,7 @@ Created on Mon Mar 10 16:47:29 2025
 
 import argparse
 import os
-from typing import List
+from typing import List, Optional
 import torch
 import av
 from PIL import Image
@@ -69,7 +69,7 @@ class LatentPreviewer:
             self.decoder = self.decode_latent2rgb
 
     @torch.inference_mode()
-    def preview(self, noisy_latents: torch.Tensor, step: int = None) -> None:
+    def preview(self, noisy_latents: torch.Tensor, step: Optional[int] = None) -> None:
         self.clean_cache()
         if self.model_type == "wan":
             noisy_latents = noisy_latents.unsqueeze(0)  # F, C, H, W -> B, F, C, H, W
@@ -94,7 +94,7 @@ class LatentPreviewer:
             torch.cuda.empty_cache()
 
     @torch.inference_mode()
-    def subtract_original_and_normalize(self, noisy_latents: torch.Tensor, step: int = None):
+    def subtract_original_and_normalize(self, noisy_latents: torch.Tensor, step: Optional[int] = None):
         device = noisy_latents.device
         noise = self.original_latents
         if self.scheduler is not None and self.sigmas is not None:

@@ -62,11 +62,11 @@ elif "train" in ROOT_SCRIPT:
     MODE = "train"
 
 
-def get_current_model_type():
+def get_current_model_type() -> str:
     return DIFFUSION_MODEL
 
 
-def get_current_version():
+def get_current_version() -> str:
     return BLISSFUL_VERSION
 
 

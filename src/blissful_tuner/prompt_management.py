@@ -10,6 +10,7 @@ License: Apache 2.0
 import os
 import random
 import argparse
+from easydict import EasyDict
 from contextlib import nullcontext
 from transformers import T5Model, T5Tokenizer
 import torch
@@ -19,24 +20,6 @@ from musubi_tuner.wan.modules.t5 import T5EncoderModel
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "#8e00ed")
-
-
-def load_t5(args, config, device):
-    checkpoint_path = None if args.ckpt_dir is None else os.path.join(args.ckpt_dir, config.t5_checkpoint)
-    tokenizer_path = None if args.ckpt_dir is None else os.path.join(args.ckpt_dir, config.t5_tokenizer)
-    text_encoder = T5EncoderModel(
-        text_len=config.text_len,
-        dtype=config.t5_dtype,
-        device=device,
-        checkpoint_path=checkpoint_path,
-        tokenizer_path=tokenizer_path,
-        weight_path=args.t5,
-        fp8=args.fp8_t5,
-    )
-    text_encoder.model.to(device)
-    if hasattr(args, "prompt_weighting") and args.prompt_weighting:
-        text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
-    return text_encoder
 
 
 def rescale_text_encoders_hunyuan(llm_scale: float, clip_scale: float, transformer: torch.nn.Module) -> torch.nn.Module:
@@ -219,7 +202,7 @@ def parse_prompt_weights(prompt: str) -> Tuple[List[str], List[float]]:
 class MiniT5Wrapper:
     """A mini wrapper for the T5 to make managing prompt weighting in Musubi easier"""
 
-    def __init__(self, device: torch.device, dtype: torch.dtype, t5: T5Model, tokenizer: T5Tokenizer, mode="wan"):
+    def __init__(self, device: torch.device, dtype: torch.dtype, t5: T5Model, tokenizer: T5Tokenizer, mode: str = "wan"):
         self.mode = mode
         self.device = device
         self.dtype = dtype
@@ -309,7 +292,27 @@ class MiniT5Wrapper:
         return context  # Just return as is for Flux
 
 
-def prepare_wan_special_inputs(args: argparse.Namespace, device: torch.device, config, t5) -> Union[dict, dict]:
+def load_t5(args: argparse.Namespace, config: EasyDict, device: torch.device) -> Union[T5EncoderModel, MiniT5Wrapper]:
+    checkpoint_path = None if args.ckpt_dir is None else os.path.join(args.ckpt_dir, config.t5_checkpoint)
+    tokenizer_path = None if args.ckpt_dir is None else os.path.join(args.ckpt_dir, config.t5_tokenizer)
+    text_encoder = T5EncoderModel(
+        text_len=config.text_len,
+        dtype=config.t5_dtype,
+        device=device,
+        checkpoint_path=checkpoint_path,
+        tokenizer_path=tokenizer_path,
+        weight_path=args.t5,
+        fp8=args.fp8_t5,
+    )
+    text_encoder.model.to(device)
+    if hasattr(args, "prompt_weighting") and args.prompt_weighting:
+        text_encoder = MiniT5Wrapper(device, config.t5_dtype, text_encoder)
+    return text_encoder
+
+
+def prepare_wan_special_inputs(
+    args: argparse.Namespace, device: torch.device, config: EasyDict, t5: T5EncoderModel
+) -> Tuple[dict, dict]:
     """Prepare special model inputs for Wan models in any mode"""
     perp_neg_context = nag_context = None
     if args.perp_neg or args.nag_prompt:
