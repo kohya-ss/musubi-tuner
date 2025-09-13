@@ -23,6 +23,7 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
 
+
 class MMDoubleStreamBlock(nn.Module):
     """
     A multimodal dit block with seperate modulation for

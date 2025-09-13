@@ -70,7 +70,7 @@ def preprocess_control_image(
         bucket_width = control_latent_width * 16
         bucket_height = control_latent_height * 16
         control_image = control_image.crop((0, 0, bucket_width, bucket_height))
-
+    logger.info((f"Control latent size for diffusion (W*H) {bucket_width}*{bucket_height}"))
     return image_utils.preprocess_image(control_image, bucket_width, bucket_height)
 
 

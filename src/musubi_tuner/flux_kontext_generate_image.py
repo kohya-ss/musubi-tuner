@@ -674,7 +674,6 @@ def generate(
     #     mask_image = mask_image.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # HW -> 111HW (BCFHW)
     #     mask_image = mask_image.to(torch.float32)
     #     return mask_image
-
     logger.info(f"Prompt: {context['prompt']}")
     working_dtype = torch.bfloat16 if not args.fp32_working_dtype else torch.float32
     logger.info(f"Working dtype is {working_dtype}")
@@ -718,15 +717,16 @@ def generate(
         control_latent_ids = None
     # denoise
 
-    if args.scheduler == "dpm++":
-        logger.info("Using FlowDPMSolverMultistepScheduler")
+    if "dpm++" in args.scheduler:
+        logger.info(f"Using FlowDPMSolverMultistepScheduler{', SDE variant' if 'sde' in args.scheduler else ''}")
         mu = (
             flux_utils.get_lin_function(y1=0.5, y2=1.15)(packed_latent_height * packed_latent_width)
             if args.flow_shift is None
             else None
         )
         scheduler = FlowDPMSolverMultistepScheduler(
-            use_dynamic_shifting=True if args.flow_shift is None else False, algorithm_type="dpmsolver++"
+            use_dynamic_shifting=True if args.flow_shift is None else False,
+            algorithm_type="dpmsolver++" if "sde" not in args.scheduler else "sde-dpmsolver++",
         )
         scheduler.set_timesteps(args.infer_steps, device=device, shift=args.flow_shift, mu=mu)
         timesteps = scheduler.timesteps
@@ -774,7 +774,6 @@ def generate(
         if control_latent is not None:
             img_input = torch.cat((img_input, control_latent), dim=1)
             img_input_ids = torch.cat((img_input_ids, control_latent_ids), dim=1)
-
         with torch.no_grad(), dtype_context:
             pred = model(
                 img=img_input,
@@ -810,7 +809,7 @@ def generate(
 
         if i + 1 <= args.cfgzerostar_init_steps:  # Do zero init? User provides init_steps as 1 based but i is 0 based
             pred *= args.cfgzerostar_multiplier
-        if args.scheduler == "dpm++":
+        if "dpm++" in args.scheduler:
             x = scheduler.step(pred, float(timesteps[i]), x, return_dict=False)[0]
         elif args.scheduler == "euler":
             t_prev = sigmas[1:][i]
