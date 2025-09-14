@@ -407,7 +407,9 @@ class RMSNorm(nn.Module):
                 hidden_states = hidden_states.to(self.weight.dtype)
             elif self.weight.dtype == torch.float8_e4m3fn:  # fp8 support
                 hidden_states = hidden_states * self.weight.to(hidden_states.dtype)
-                return hidden_states + (self.bias.to(hidden_states.dtype) if self.bias is not None else 0)
+                hidden_states = hidden_states + (self.bias.to(hidden_states.dtype) if self.bias is not None else 0)
+                hidden_states = hidden_states.to(input_dtype)
+                return hidden_states
 
             hidden_states = hidden_states * self.weight
             if self.bias is not None:

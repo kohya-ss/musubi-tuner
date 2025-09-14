@@ -17,7 +17,7 @@ logger = BlissfulLogger(__name__, "green")
 def calculate_fp8_maxval(exp_bits=4, mantissa_bits=3, sign_bits=1):
     """
     Calculate the maximum representable value in FP8 format.
-    Default is E4M3 format (4-bit exponent, 3-bit mantissa, 1-bit sign).
+    Default is E4M3 format (4-bit exponent, 3-bit mantissa, 1-bit sign). Only supports E4M3 and E5M2 with sign bit.
 
     Args:
         exp_bits (int): Number of exponent bits
@@ -28,19 +28,29 @@ def calculate_fp8_maxval(exp_bits=4, mantissa_bits=3, sign_bits=1):
         float: Maximum value representable in FP8 format
     """
     assert exp_bits + mantissa_bits + sign_bits == 8, "Total bits must be 8"
+    if exp_bits == 4 and mantissa_bits == 3 and sign_bits == 1:
+        return torch.finfo(torch.float8_e4m3fn).max
+    elif exp_bits == 5 and mantissa_bits == 2 and sign_bits == 1:
+        return torch.finfo(torch.float8_e5m2).max
+    else:
+        raise ValueError(f"Unsupported FP8 format: E{exp_bits}M{mantissa_bits} with sign_bits={sign_bits}")
 
-    # Calculate exponent bias
-    bias = 2 ** (exp_bits - 1) - 1
 
-    # Calculate maximum mantissa value
-    mantissa_max = 1.0
-    for i in range(mantissa_bits - 1):
-        mantissa_max += 2 ** -(i + 1)
+# The following is a manual calculation method (wrong implementation for E5M2), kept for reference.
+"""
+# Calculate exponent bias
+bias = 2 ** (exp_bits - 1) - 1
 
-    # Calculate maximum value
-    max_value = mantissa_max * (2 ** (2**exp_bits - 1 - bias))
+# Calculate maximum mantissa value
+mantissa_max = 1.0
+for i in range(mantissa_bits - 1):
+    mantissa_max += 2 ** -(i + 1)
 
-    return max_value
+# Calculate maximum value
+max_value = mantissa_max * (2 ** (2**exp_bits - 1 - bias))
+
+return max_value
+"""
 
 
 def quantize_tensor_to_fp8(tensor, scale, exp_bits=4, mantissa_bits=3, sign_bits=1, max_value=None, min_value=None):
@@ -230,16 +240,21 @@ def load_safetensors_with_fp8_optimization(
             keys = f.keys()
             for key in tqdm(keys, desc=f"Loading {os.path.basename(model_file)}", unit="key"):
                 value = f.get_tensor(key)
+
+                # Save original device
+                original_device = value.device  # usually cpu
+
                 if weight_hook is not None:
                     # Apply weight hook if provided
-                    value = weight_hook(key, value)
+                    value = weight_hook(key, value, keep_on_calc_device=(calc_device is not None))
 
                 if not is_target_key(key):
+                    target_device = calc_device if (calc_device is not None and move_to_device) else original_device
+                    value = value.to(target_device)
                     state_dict[key] = value
                     continue
 
-                # Save original device and dtype
-                original_device = value.device
+                # Save original dtype
                 original_dtype = value.dtype
 
                 # Move to calculation device
