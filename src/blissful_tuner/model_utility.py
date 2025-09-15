@@ -77,6 +77,7 @@ parser.add_argument(
     default=None,
     help="'--output_path /path/to/output.safetensors' - If provided, the model will be loaded, processed and written to this file.",
 )
+parser.add_argument("--convert", type=str, default=None, help=argparse.SUPPRESS)  # Maintained for backwards compatibility
 parser.add_argument(
     "--disable_weights_only",
     action="store_true",
@@ -84,6 +85,10 @@ parser.add_argument(
     "Don't use unless specifically needed, model likely won't save right anyway if it has code in the source",
 )
 args = parser.parse_args()
+if args.convert and not args.output_path:
+    logger.warning("Using '--convert /path/' is deprecated and will be removed in future versions. Please use '--output_path /path/'")
+    args.output_path = args.convert
+
 use_weights_only = not args.disable_weights_only
 
 
