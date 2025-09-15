@@ -294,6 +294,7 @@ def load_dit_model(
     elif args.lycoris:
         loading_weight_dtype = torch.bfloat16  # lycoris requires bfloat16 or float16, because it merges weights
 
+    start_time = time.perf_counter()
     model = qwen_image_model.load_qwen_image_model(
         device,
         args.dit,
@@ -393,6 +394,9 @@ def load_dit_model(
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
+
+    end_time = time.perf_counter()
+    logger.info(f"Model preparation time: {end_time - start_time:.2f} seconds")
 
     return model
 
@@ -694,6 +698,8 @@ def generate(
     guidance = None  # guidance_embeds is false for Qwen-Image
 
     # 6. Denoising loop
+    start_time = time.perf_counter()
+
     do_cfg = args.guidance_scale != 1.0
     scheduler.set_begin_index(0)
     with tqdm(total=num_inference_steps, desc="Denoising steps") as pbar:
@@ -744,6 +750,14 @@ def generate(
                 pbar.update()
 
     latents = qwen_image_utils.unpack_latents(latents, height, width)
+
+    end_time = time.perf_counter()
+    logger.info(f"Generation completed in {end_time - start_time:.2f} seconds.")
+
+    # show GPU memory usage after generation
+    # clean_memory_on_device(device)
+    mem_usage = torch.cuda.memory_allocated(device) / (1024**3) if device.type == "cuda" else 0
+    logger.info(f"Peak memory usage on {device}: {mem_usage:.2f} GB")
 
     return vae_instance_for_return, latents
 
