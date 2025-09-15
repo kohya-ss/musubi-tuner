@@ -249,7 +249,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
             move_to_device=move_to_device,
             weight_hook=weight_hook,
             per_channel=(quantization_mode == "channel"),
-            percentile=0.999 if quantization_mode == "channel" else None,
+            percentile=None,  # 0.9999 if quantization_mode == "channel" else None,
         )
     else:
         logger.info(
