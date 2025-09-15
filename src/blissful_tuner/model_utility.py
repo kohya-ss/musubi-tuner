@@ -86,7 +86,9 @@ parser.add_argument(
 )
 args = parser.parse_args()
 if args.convert and not args.output_path:
-    logger.warning("Using '--convert /path/' is deprecated and will be removed in future versions. Please use '--output_path /path/'")
+    logger.warning(
+        "Using '--convert /path/' is deprecated and will be removed in future versions. Please use '--output_path /path/'"
+    )
     args.output_path = args.convert
 
 use_weights_only = not args.disable_weights_only
