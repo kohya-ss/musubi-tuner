@@ -135,6 +135,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
 
+    # experiment arguments
+    parser.add_argument("--fp8_dtype", type=str, default=None, choices=["e4m3fn", "e5m2"], help="fp8 data type")
+    parser.add_argument(
+        "--exclude_modules",
+        type=str,
+        nargs="*",
+        default=None,
+        help="modules to exclude from fp8. Specify all modules to exclude if specified. Default is None (default excludes)",
+    )
+    parser.add_argument(
+        "--quantization_mode", type=str, default="tensor", choices=["tensor", "channel"], help="quantization mode for fp8"
+    )
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -292,6 +305,9 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         num_layers=args.num_layers,
+        fp8_quantize_dtype=args.fp8_dtype,
+        quantization_mode=args.quantization_mode,
+        fp8_exclude_keys=args.exclude_modules,
     )
 
     # merge LoRA weights
@@ -688,7 +704,7 @@ def generate(
             if is_edit:
                 latent_model_input = torch.cat([latents, control_latent], dim=1)
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True):
                 noise_pred = model(
                     hidden_states=latent_model_input,
                     timestep=timestep / 1000,
@@ -702,7 +718,7 @@ def generate(
                     noise_pred = noise_pred[:, : latents.shape[1], :]  # trim to latents shape
 
             if do_cfg:
-                with torch.no_grad():
+                with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True):
                     neg_noise_pred = model(
                         hidden_states=latent_model_input,
                         timestep=timestep / 1000,
@@ -1130,6 +1146,14 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
     elif args.fp8:
         dit_weight_dtype = torch.float8_e4m3fn
+    elif args.fp8_dtype is not None:
+        args.fp8 = True
+        if args.fp8_dtype == "e4m3fn":
+            dit_weight_dtype = torch.float8_e4m3fn
+        elif args.fp8_dtype == "e5m2":
+            dit_weight_dtype = torch.float8_e5m2
+        else:
+            raise ValueError(f"Unsupported fp8_dtype: {args.fp8_dtype}")
 
     logger.info(f"Using device: {device}, DiT weight weight precision: {dit_weight_dtype}")
 

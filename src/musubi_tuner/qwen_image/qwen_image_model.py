@@ -409,7 +409,7 @@ class RMSNorm(nn.Module):
             # convert into half-precision if necessary
             if self.weight.dtype in [torch.float16, torch.bfloat16]:
                 hidden_states = hidden_states.to(self.weight.dtype)
-            elif self.weight.dtype == torch.float8_e4m3fn:  # fp8 support
+            elif self.weight.dtype == torch.float8_e4m3fn or self.weight.dtype == torch.float8_e5m2:  # fp8 support
                 hidden_states = hidden_states * self.weight.to(hidden_states.dtype)
                 hidden_states = hidden_states + (self.bias.to(hidden_states.dtype) if self.bias is not None else 0)
                 hidden_states = hidden_states.to(input_dtype)
@@ -1256,6 +1256,9 @@ def load_qwen_image_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     num_layers: Optional[int] = 60,
+    fp8_quantize_dtype: Optional[torch.dtype] = None,
+    quantization_mode: Optional[str] = None,
+    fp8_exclude_keys: Optional[List[str]] = None,
 ) -> QwenImageTransformer2DModel:
     """
     Load a WAN model from the specified checkpoint.
@@ -1282,7 +1285,14 @@ def load_qwen_image_model(
     model = create_model(attn_mode, split_attn, dit_weight_dtype, num_layers=num_layers)
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
-    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}, dit_weight_dtype={dit_weight_dtype}")
+
+    if fp8_exclude_keys is None:
+        fp8_exclude_keys = FP8_OPTIMIZATION_EXCLUDE_KEYS
+    logger.info(f"FP8 optimization enabled: {fp8_scaled}")
+    logger.info(f"FP8 optimization target keys: {FP8_OPTIMIZATION_TARGET_KEYS}")
+    logger.info(f"FP8 optimization exclude keys: {fp8_exclude_keys}")
+    logger.info(f"FP8 quantize dtype: {fp8_quantize_dtype}, quantization_mode: {quantization_mode}")
 
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
@@ -1293,7 +1303,9 @@ def load_qwen_image_model(
         move_to_device=(loading_device == device),
         dit_weight_dtype=dit_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
-        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        exclude_keys=fp8_exclude_keys,
+        fp8_quantize_dtype=fp8_quantize_dtype,
+        quantization_mode=quantization_mode,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

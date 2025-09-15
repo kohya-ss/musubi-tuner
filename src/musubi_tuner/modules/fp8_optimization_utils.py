@@ -1,5 +1,5 @@
 import os
-from typing import List, Union
+from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -197,6 +197,8 @@ def load_safetensors_with_fp8_optimization(
     mantissa_bits=3,
     move_to_device=False,
     weight_hook=None,
+    per_channel: bool = False,
+    percentile: float = 0.999,
 ):
     """
     Load weight tensors from safetensors files and merge LoRA weights into the state dict with explicit FP8 optimization.
@@ -220,6 +222,7 @@ def load_safetensors_with_fp8_optimization(
         fp8_dtype = torch.float8_e5m2
     else:
         raise ValueError(f"Unsupported FP8 format: E{exp_bits}M{mantissa_bits}")
+    logger.info(f"FP8 optimization format: {fp8_dtype}, per_channel={per_channel}, percentile={percentile}")
 
     # Calculate FP8 max value
     max_value = calculate_fp8_maxval(exp_bits, mantissa_bits)
@@ -263,11 +266,32 @@ def load_safetensors_with_fp8_optimization(
                 if calc_device is not None:
                     value = value.to(calc_device)
 
-                # Calculate scale factor
-                scale = torch.max(torch.abs(value.flatten())) / max_value
-                # print(f"Optimizing {key} with scale: {scale}")
+                # # Calculate scale factor
+                # scale = torch.max(torch.abs(value.flatten())) / max_value
+                # # print(f"Optimizing {key} with scale: {scale}")
 
-                # Quantize weight to FP8
+                # Calculate scale factor (per-tensor or per-output-channel with percentile)
+                # value shape is expected to be [out_features, in_features] for Linear weights
+                if per_channel and value.ndim == 2:
+                    # row-wise percentile to avoid being dominated by outliers
+                    # result shape: [out_features, 1]
+                    abs_w = torch.abs(value)
+                    # torch.quantile supports keepdim per-dim from PyTorch 2.1+, works only for float/double dtype
+                    row_q = torch.quantile(abs_w.to(torch.float32), q=percentile, dim=1, keepdim=True)
+                    scale = row_q / max_value
+                else:
+                    # per-tensor (fallback)
+                    tensor_q = torch.quantile(torch.abs(value).view(-1).to(torch.float32), q=percentile)
+                    scale = tensor_q / max_value
+
+                # numerical safety
+                scale = torch.clamp(scale, min=1e-8)
+                scale = scale.to(value.dtype)  # float32 may be better for scale, but keep original dtype for now
+
+                # # Quantize weight to FP8
+                # quantized_weight, _ = quantize_tensor_to_fp8(value, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
+
+                # Quantize weight to FP8 (scale can be scalar or [out,1], broadcasting works)
                 quantized_weight, _ = quantize_tensor_to_fp8(value, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
 
                 # Add to state dict using original key for weight and new key for scale
@@ -280,10 +304,15 @@ def load_safetensors_with_fp8_optimization(
                 if not move_to_device:
                     quantized_weight = quantized_weight.to(original_device)
 
-                scale_tensor = torch.tensor([scale], dtype=original_dtype, device=quantized_weight.device)
+                # scale_tensor = torch.tensor([scale], dtype=original_dtype, device=quantized_weight.device)
+                # keep scale shape: scalar or [out,1]
+                scale_tensor = scale.to(dtype=original_dtype, device=quantized_weight.device)
 
                 state_dict[fp8_key] = quantized_weight
                 state_dict[scale_key] = scale_tensor
+                # print(
+                #     f"Optimized {key} with scale shape {scale_tensor.shape}, dtype {scale_tensor.dtype}, scale min {scale_tensor.min().item():.4e}, max {scale_tensor.max().item():.4e}"
+                # )
 
                 optimized_count += 1
 
@@ -375,10 +404,14 @@ def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False):
 
     # Enumerate patched layers
     patched_module_paths = set()
+    scale_shape_info = {}
     for scale_key in scale_keys:
         # Extract module path from scale key (remove .scale_weight)
         module_path = scale_key.rsplit(".scale_weight", 1)[0]
         patched_module_paths.add(module_path)
+
+        # Store scale shape information
+        scale_shape_info[module_path] = optimized_state_dict[scale_key].shape
 
     patched_count = 0
 
@@ -390,7 +423,9 @@ def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False):
         # Apply patch if it's a Linear layer with FP8 scale
         if isinstance(module, nn.Linear) and has_scale:
             # register the scale_weight as a buffer to load the state_dict
-            module.register_buffer("scale_weight", torch.tensor(1.0, dtype=module.weight.dtype))
+            # module.register_buffer("scale_weight", torch.tensor(1.0, dtype=module.weight.dtype))
+            scale_shape = scale_shape_info[name]
+            module.register_buffer("scale_weight", torch.ones(scale_shape, dtype=module.weight.dtype))
 
             # Create a new forward method with the patched version.
             def new_forward(self, x):

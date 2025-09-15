@@ -55,6 +55,8 @@ def load_safetensors_with_lora_and_fp8(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
+    fp8_quantize_dtype: Optional[torch.dtype] = None,
+    quantization_mode: str = "tensor",
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -190,6 +192,8 @@ def load_safetensors_with_lora_and_fp8(
         target_keys,
         exclude_keys,
         weight_hook=weight_hook,
+        fp8_quantize_dtype=fp8_quantize_dtype,
+        quantization_mode=quantization_mode,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -211,6 +215,8 @@ def load_safetensors_with_fp8_optimization_and_hook(
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
     weight_hook: callable = None,
+    fp8_quantize_dtype: Optional[torch.dtype] = None,
+    quantization_mode: str = "tensor",
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
@@ -219,9 +225,30 @@ def load_safetensors_with_fp8_optimization_and_hook(
         logger.info(
             f"Loading state dict with FP8 optimization. Dtype of weight: {dit_weight_dtype}, hook enabled: {weight_hook is not None}"
         )
+
+        # set exp and mantissa bits based on quantize dtype
+        exp_bits = 4
+        mantissa_bits = 3
+        if fp8_quantize_dtype == "e4m3fn":
+            # default
+            pass
+        elif fp8_quantize_dtype == "e5m2":
+            exp_bits = 5
+            mantissa_bits = 2
+        elif fp8_quantize_dtype is not None:
+            raise ValueError(f"Unsupported fp8_quantize_dtype: {fp8_quantize_dtype}")
+
         # dit_weight_dtype is not used because we use fp8 optimization
         state_dict = load_safetensors_with_fp8_optimization(
-            model_files, calc_device, target_keys, exclude_keys, move_to_device=move_to_device, weight_hook=weight_hook
+            model_files,
+            calc_device,
+            target_keys,
+            exclude_keys,
+            exp_bits=exp_bits,
+            mantissa_bits=mantissa_bits,
+            move_to_device=move_to_device,
+            weight_hook=weight_hook,
+            per_channel=(quantization_mode == "channel"),
         )
     else:
         logger.info(
