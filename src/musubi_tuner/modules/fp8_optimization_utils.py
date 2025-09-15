@@ -198,7 +198,7 @@ def load_safetensors_with_fp8_optimization(
     move_to_device=False,
     weight_hook=None,
     per_channel: bool = False,
-    percentile: float = 0.999,
+    percentile: Optional[float] = 0.999,
 ):
     """
     Load weight tensors from safetensors files and merge LoRA weights into the state dict with explicit FP8 optimization.
@@ -276,13 +276,34 @@ def load_safetensors_with_fp8_optimization(
                     # row-wise percentile to avoid being dominated by outliers
                     # result shape: [out_features, 1]
                     abs_w = torch.abs(value)
-                    # torch.quantile supports keepdim per-dim from PyTorch 2.1+, works only for float/double dtype
-                    row_q = torch.quantile(abs_w.to(torch.float32), q=percentile, dim=1, keepdim=True)
-                    scale = row_q / max_value
+
+                    if percentile is None:
+                        row_max = torch.max(abs_w, dim=1, keepdim=True).values  # shape: [out_features, 1]
+                        scale = row_max / max_value
+                    else:
+                        # torch.quantile supports keepdim per-dim from PyTorch 2.1+, works only for float/double dtype
+                        row_q = torch.quantile(abs_w.to(torch.float32), q=percentile, dim=1, keepdim=True)
+                        scale = row_q / max_value
+
                 else:
                     # per-tensor (fallback)
-                    tensor_q = torch.quantile(torch.abs(value).view(-1).to(torch.float32), q=percentile)
-                    scale = tensor_q / max_value
+                    if percentile is None:
+                        tensor_max = torch.max(torch.abs(value).view(-1))
+                        scale = tensor_max / max_value
+                    else:
+                        if value.numel() <= 8192 * 4096 // value.dtype.itemsize:  # limit to 16M elements with float16/bfloat16
+                            tensor_q = torch.quantile(torch.abs(value).view(-1).to(torch.float32), q=percentile)
+                        else:
+                            # above code raises error for bigger tensors, use chunked processing instead
+                            abs_w = torch.abs(value).view(-1).to(torch.float32)
+                            num_chunks = 1
+                            while abs_w.numel() / num_chunks > 8192 * 4096 // value.dtype.itemsize:
+                                num_chunks *= 2
+                            chunked_abs = torch.chunk(abs_w, num_chunks)
+                            chunked_q = [torch.quantile(chunk, q=percentile) for chunk in chunked_abs]
+                            tensor_q = torch.max(torch.stack(chunked_q, dim=0))
+
+                        scale = tensor_q / max_value
 
                 # numerical safety
                 scale = torch.clamp(scale, min=1e-8)

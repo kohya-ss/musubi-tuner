@@ -235,7 +235,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
         elif fp8_quantize_dtype == "e5m2":
             exp_bits = 5
             mantissa_bits = 2
-        elif fp8_quantize_dtype is not None:
+        elif fp8_quantize_dtype is not None:  # if None, use default
             raise ValueError(f"Unsupported fp8_quantize_dtype: {fp8_quantize_dtype}")
 
         # dit_weight_dtype is not used because we use fp8 optimization
@@ -249,6 +249,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
             move_to_device=move_to_device,
             weight_hook=weight_hook,
             per_channel=(quantization_mode == "channel"),
+            percentile=0.999 if quantization_mode == "channel" else None,
         )
     else:
         logger.info(
