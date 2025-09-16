@@ -16,6 +16,7 @@
 
 import inspect
 import numbers
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import math
 
@@ -32,6 +33,7 @@ from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 
 import logging
 
+from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper, to_cpu, to_device
 
@@ -1294,6 +1296,13 @@ def load_qwen_image_model(
     logger.info(f"FP8 optimization exclude keys: {fp8_exclude_keys}")
     logger.info(f"FP8 quantize dtype: {fp8_quantize_dtype}, quantization_mode: {quantization_mode}")
 
+    use_torchao = False  # set to True to use torchao fp8 quantization instead of musubi
+    if use_torchao:
+        assert fp8_quantize_dtype == "e4m3fn", f"torchao only supports float8_e4m3fn for now but got {fp8_quantize_dtype}"
+        assert fp8_scaled, "torchao only supports fp8_scaled for now"
+        fp8_scaled = False # skip fp8_scaled in load_safetensors_with_lora_and_fp8. load the weights as is
+        dit_weight_dtype = None # use the weights dtype in the checkpoint (bfloat16)
+
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
@@ -1324,5 +1333,14 @@ def load_qwen_image_model(
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded DiT model from {dit_path}, info={info}")
+
+    if use_torchao:
+        start_time = time.perf_counter()
+        logger.info(f"Applying torchao fp8 quantization")
+        from musubi_tuner.modules.torchao_fp8_utils import quantize_model_weights_fp8
+        model = quantize_model_weights_fp8(model, device, FP8_OPTIMIZATION_TARGET_KEYS, fp8_exclude_keys, torch.float8_e4m3fn)
+        clean_memory_on_device(device)
+        end_time = time.perf_counter()
+        logger.info(f"Applied torchao fp8 quantization in {end_time - start_time:.2f} seconds") # less than 1 second for QwenImage
 
     return model
