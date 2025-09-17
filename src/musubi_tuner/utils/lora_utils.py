@@ -57,6 +57,7 @@ def load_safetensors_with_lora_and_fp8(
     exclude_keys: Optional[List[str]] = None,
     fp8_quantize_dtype: Optional[torch.dtype] = None,
     quantization_mode: str = "tensor",
+    block_size: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -194,6 +195,7 @@ def load_safetensors_with_lora_and_fp8(
         weight_hook=weight_hook,
         fp8_quantize_dtype=fp8_quantize_dtype,
         quantization_mode=quantization_mode,
+        block_size=block_size,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -217,6 +219,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     weight_hook: callable = None,
     fp8_quantize_dtype: Optional[torch.dtype] = None,
     quantization_mode: str = "tensor",
+    block_size: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
@@ -248,8 +251,9 @@ def load_safetensors_with_fp8_optimization_and_hook(
             mantissa_bits=mantissa_bits,
             move_to_device=move_to_device,
             weight_hook=weight_hook,
-            per_channel=(quantization_mode == "channel"),
-            percentile=None,  # 0.9999 if quantization_mode == "channel" else None,
+            quantization_mode=quantization_mode,
+            block_size=block_size,
+            percentile=None,  # 0.9990 if quantization_mode == "block" else None,
         )
     else:
         logger.info(

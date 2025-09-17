@@ -1260,6 +1260,7 @@ def load_qwen_image_model(
     num_layers: Optional[int] = 60,
     fp8_quantize_dtype: Optional[torch.dtype] = None,
     quantization_mode: Optional[str] = None,
+    block_size: Optional[int] = None,
     fp8_exclude_keys: Optional[List[str]] = None,
 ) -> QwenImageTransformer2DModel:
     """
@@ -1294,7 +1295,7 @@ def load_qwen_image_model(
     logger.info(f"FP8 optimization enabled: {fp8_scaled}")
     logger.info(f"FP8 optimization target keys: {FP8_OPTIMIZATION_TARGET_KEYS}")
     logger.info(f"FP8 optimization exclude keys: {fp8_exclude_keys}")
-    logger.info(f"FP8 quantize dtype: {fp8_quantize_dtype}, quantization_mode: {quantization_mode}")
+    logger.info(f"FP8 quantize dtype: {fp8_quantize_dtype}, quantization_mode: {quantization_mode}, block_size: {block_size}")
 
     use_torchao = False  # set to True to use torchao fp8 quantization instead of musubi
     if use_torchao:
@@ -1315,6 +1316,7 @@ def load_qwen_image_model(
         exclude_keys=fp8_exclude_keys,
         fp8_quantize_dtype=fp8_quantize_dtype,
         quantization_mode=quantization_mode,
+        block_size = block_size
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

@@ -145,8 +145,9 @@ def parse_args() -> argparse.Namespace:
         help="modules to exclude from fp8. Specify all modules to exclude if specified. Default is None (default excludes)",
     )
     parser.add_argument(
-        "--quantization_mode", type=str, default="tensor", choices=["tensor", "channel"], help="quantization mode for fp8"
+        "--quantization_mode", type=str, default="tensor", choices=["tensor", "channel", "block"], help="quantization mode for fp8"
     )
+    parser.add_argument("--quantization_block_size", type=int, default=None, help="Block size for block-wise quantization")
 
     args = parser.parse_args()
 
@@ -308,6 +309,7 @@ def load_dit_model(
         num_layers=args.num_layers,
         fp8_quantize_dtype=args.fp8_dtype,
         quantization_mode=args.quantization_mode,
+        block_size=args.quantization_block_size,
         fp8_exclude_keys=args.exclude_modules,
     )
 
