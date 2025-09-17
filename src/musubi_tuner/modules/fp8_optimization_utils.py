@@ -289,6 +289,11 @@ def load_safetensors_with_fp8_optimization(
                     state_dict[key] = value
                     continue
 
+                # test: if `_mod` in key, do fine-grained quantization
+                original_shape = value.shape
+                if "_mod" in key:
+                    value = value.reshape(value.shape[0] * 32, -1)  # [18432, 3072] to [589824, 96]
+
                 # Save original dtype
                 original_dtype = value.dtype
 
@@ -343,14 +348,18 @@ def load_safetensors_with_fp8_optimization(
                 # quantized_weight, _ = quantize_tensor_to_fp8(value, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
 
                 # Quantize weight to FP8 (scale can be scalar or [out,1], broadcasting works)
-                quantized_weight, _ = quantize_tensor_to_fp8(value, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
+                quantized_weight = quantize_fp8(value, scale, fp8_dtype, max_value, min_value)
+
+                # test: if `_mod` in key, restore shape
+                if "_mod" in key:
+                    quantized_weight = quantized_weight.reshape(original_shape)  # restore to original shape [18432, 3072]
 
                 # Add to state dict using original key for weight and new key for scale
                 fp8_key = key  # Maintain original key
                 scale_key = key.replace(".weight", ".scale_weight")
                 assert fp8_key != scale_key, "FP8 key and scale key must be different"
 
-                quantized_weight = quantized_weight.to(fp8_dtype)
+                # quantized_weight = quantized_weight.to(fp8_dtype)
 
                 if not move_to_device:
                     quantized_weight = quantized_weight.to(original_device)
@@ -423,7 +432,13 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
     else:
         # Dequantize the weight
         original_dtype = self.scale_weight.dtype
-        dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
+        # dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
+        if self.weight.shape[0] == self.scale_weight.numel():  # default
+            dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
+        else:  # test: `_mod`
+            dequantized_weight = self.weight.to(original_dtype).view(self.scale_weight.numel(), -1)
+            dequantized_weight = dequantized_weight * self.scale_weight
+            dequantized_weight = dequantized_weight.view(self.weight.shape)
 
         # Perform linear transformation
         if self.bias is not None:
