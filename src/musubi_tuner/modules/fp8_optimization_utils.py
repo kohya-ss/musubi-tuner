@@ -58,6 +58,7 @@ return max_value
 def quantize_tensor_to_fp8(tensor, scale, exp_bits=4, mantissa_bits=3, sign_bits=1, max_value=None, min_value=None):
     """
     Quantize a tensor to FP8 format.
+    **Not used in the current implementation. Kept for reference.**
 
     Args:
         tensor (torch.Tensor): Tensor to quantize
@@ -100,6 +101,34 @@ def quantize_tensor_to_fp8(tensor, scale, exp_bits=4, mantissa_bits=3, sign_bits
     quantized = torch.round(clamped_tensor / quant_factor) * quant_factor
 
     return quantized, scale
+
+
+def quantize_fp8(tensor, scale, fp8_dtype, max_value, min_value):
+    """
+    Quantize a tensor to FP8 format using PyTorch's native FP8 dtype support.
+
+    Args:
+        tensor (torch.Tensor): Tensor to quantize
+        scale (float or torch.Tensor): Scale factor
+        fp8_dtype (torch.dtype): Target FP8 dtype (torch.float8_e4m3fn or torch.float8_e5m2)
+        max_value (float): Maximum representable value in FP8
+        min_value (float): Minimum representable value in FP8
+
+    Returns:
+        torch.Tensor: Quantized tensor in FP8 format
+    """
+    tensor = tensor.to(torch.float32)  # ensure tensor is in float32 for division
+
+    # Create scaled tensor
+    tensor = torch.div(tensor, scale).nan_to_num_(0.0)  # handle NaN values, equivalent to nonzero_mask in previous function
+
+    # Clamp tensor to range
+    tensor = tensor.clamp_(min=min_value, max=max_value)
+
+    # Convert to FP8 dtype
+    tensor = tensor.to(fp8_dtype)
+
+    return tensor
 
 
 def optimize_state_dict_with_fp8(
@@ -162,13 +191,14 @@ def optimize_state_dict_with_fp8(
         # print(f"Optimizing {key} with scale: {scale}")
 
         # Quantize weight to FP8
-        quantized_weight, _ = quantize_tensor_to_fp8(value, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
+        # quantized_weight, _ = quantize_tensor_to_fp8(value, scale, exp_bits, mantissa_bits, 1, max_value, min_value)
+        quantized_weight = quantize_fp8(value, scale, fp8_dtype, max_value, min_value)
 
         # Add to state dict using original key for weight and new key for scale
         fp8_key = key  # Maintain original key
         scale_key = key.replace(".weight", ".scale_weight")
 
-        quantized_weight = quantized_weight.to(fp8_dtype)
+        # quantized_weight = quantized_weight.to(fp8_dtype)
 
         if not move_to_device:
             quantized_weight = quantized_weight.to(original_device)
