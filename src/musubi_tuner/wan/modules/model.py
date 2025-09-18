@@ -1029,21 +1029,18 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             self.get_imgids = types.MethodType(disabled_fn, self)
         torch._dynamo.config.cache_size_limit = 64
         backend, mode, dynamic, fullgraph = self.compile_args
-        dynamic = None if dynamic is None else dynamic.lower() in "true"            # re-bind it to this instance so calls to self.get_imgids(...) still work
+        dynamic = None if dynamic is None else dynamic.lower() in "true"
         fullgraph = fullgraph.lower() in "true"
         self.compile_args = {"backend": backend, "mode": mode, "dynamic": dynamic, "fullgraph": fullgraph}  # Now they've been processed to be compatible to be passed directly to torch.compile
         logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
         logger.info(f"Compile parameters: Backend: {backend}; Mode: {mode}; Dynamic: {dynamic if dynamic is not None else 'Auto'}; Fullgraph: {fullgraph}")
         # The default RoPE uses complex numbers and doesn't compile well as such, so only compile the alternate one which avoids them.
-        self.rope_embedder = torch.compile(self.rope_embedder, **self.compile_args) if self.rope_func == "comfy" else None
-        self.get_patch_embedding = torch.compile(self.get_patch_embedding, **self.compile_args)
+        if self.rope_func == "comfy":
+            self.rope_embedder = torch.compile(self.rope_embedder, **self.compile_args)
         self.get_time_embedding = torch.compile(self.get_time_embedding, **self.compile_args)
-        self.text_embedding = torch.compile(self.text_embedding, **self.compile_args)
         self.head = torch.compile(self.head, **self.compile_args)
         for block in self.blocks:
-            block._forward = torch.compile(block._forward, **self.compile_args)
-            if self.rope_func == "comfy":
-                block.self_attn.comfyrope = torch.compile(block.self_attn.comfyrope, **self.compile_args)
+            block._forward = torch.compile(block._forward, **self.compile_args)  # Actual rope will be compiled as part of forward
 
     def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None, km=None, nag_context=None):
         r"""
