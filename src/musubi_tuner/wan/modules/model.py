@@ -1,7 +1,8 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
 from typing import Dict, List, Optional, Union
-
+import types
+import inspect
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
@@ -1021,11 +1022,14 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
     def blissful_optimize(self):
         self.optimized_compile = False  # Otherwise it would be called every step
-        if self.training:  # This function changes shape if input res/length changes and will trigger lots of recompiles during training
-            torch.compiler.disable(self.get_imgids, recursive=False)  # So disable it then, but it's fine to compile for inference
+        if self.training:  # This function changes shape if the input changes shape so it will trigger many recompiles for training, disable it there.
+            bound = self.get_imgids  # Weird dance to support dynamically disabling it this way versus using a permanent decorator
+            unbound = bound.__func__ if inspect.ismethod(bound) else bound
+            disabled_fn = torch.compiler.disable(unbound, recursive=False)
+            self.get_imgids = types.MethodType(disabled_fn, self)
         torch._dynamo.config.cache_size_limit = 64
         backend, mode, dynamic, fullgraph = self.compile_args
-        dynamic = None if dynamic is None else dynamic.lower() in "true"
+        dynamic = None if dynamic is None else dynamic.lower() in "true"            # re-bind it to this instance so calls to self.get_imgids(...) still work
         fullgraph = fullgraph.lower() in "true"
         self.compile_args = {"backend": backend, "mode": mode, "dynamic": dynamic, "fullgraph": fullgraph}  # Now they've been processed to be compatible to be passed directly to torch.compile
         logger.info(f"Optimized compile enabled for attention{', RoPE, ' if self.rope_func == 'comfy' else ' '}and embeddings")
