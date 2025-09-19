@@ -21,8 +21,8 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 - 推論用の外部LoRAを、事前に変換することなく読み込みます (HY) (WV) (FP) (FX) (QI)
 - 決定論を保証する強力な世代ごとのグローバルシード (HY) (WV) (FP) (FX) (QI)
 - 生成中にlatent2RGBまたはTAEHV（`--preview_latent_every N`、Nはステップ数（フレームパックの場合はセクション数））を使用した潜在プレビュー。デフォルトではlatent2rgbを使用しますが、TAEは`--preview_vae /path/to/model`で有効にできます。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/taehv）(HY) (WV) (FP) (FX)
-- 高速で高品質な生成のために最適化された生成設定（`--optimized`、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）(HY) (WV) (FP) (FX)
-- FP16 積分 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも動作します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile` を使用すると、精度を損なうことなく fp8_fast/mmscaled とほぼ同等の速度を実現できます。また、fp8 スケールモードでも動作します!) (HY) (WV) (FP) (FX)
+- 高速で高品質な生成のために最適化された生成設定（`--optimized`\*、モデルに基づいてさまざまな最適化と設定を有効にします。SageAttention、Triton、PyTorch 2.7.0以降が必要です）(HY) (WV) (FP) (FX)
+- FP16 積分 (`--fp16_accumulation`、Wan FP16 モデルで最も効果的に機能します (Hunyaun bf16 でも動作します!)。PyTorch 2.7.0 以上が必要ですが、推論速度が大幅に向上します。特に `--compile`\* を使用すると、精度を損なうことなく fp8_fast/mmscaled とほぼ同等の速度を実現できます。また、fp8 スケールモードでも動作します!) (HY) (WV) (FP) (FX)
 - 拡張保存オプション (`--codec codec --container container`、Apple ProRes (`--codec prores`、超高ビットレートで知覚的にロスレス) を `--container mkv` に保存、または `h264`、`h265` のいずれかを `mp4` または `mkv` に保存可能) (HY) (WV) (FP)
 - 生成メタデータを動画/画像に保存 (自動`--container mkv` を使用し、PNG 保存時は `--no-metadata` で無効にしてください。`--container mp4` では無効です。こうしたメタデータは `src/blissful_tuner/metaview.py some_video.mkv` で簡単に表示/コピーできます。ビューアには mediainfo_cli が必要です) (HY) (WV) (FP)
 - CFGZero* 例: https://github.com/WeichenFan/CFG-Zero-star (`--cfgzerostar_scaling --cfgzerostar_init_steps N` で、N は開始時に 0 になるまでのステップ数です。T2V の場合は 2、I2V の場合は 1 が適切ですが、私の経験では T2V の方が適しています。Hunyuan のサポートは非​​常に実験的であり、CFG が有効になっている場合にのみ利用可能です。) (HY) (WV) (FX)
@@ -34,7 +34,7 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 - V2V推論（`--video_path /path/to/input/video --denoise_strength amount`。amountは0.0～1.0の浮動小数点数で、ソースビデオに追加するノイズの強度を制御します。`--noise_mode Traditional`の場合、他の実装と同様に、タイムステップスケジュールの最後の（amount * 100）パーセントを実行します。`--noise_mode direct`の場合、タイムステップスケジュール内でその値に最も近いところから開始し、そこから処理を進めることで、追加されるノイズの量を可能な限り正確に制御します。スケーリング、パディング、切り捨てをサポートしているため、入力は出力と同じ解像度や長さである必要はありません。`--video_length` が入力より短い場合、入力は切り捨てられ、最初の `--video_length` フレームのみが含まれます。`--video_length` が入力より長い場合、`--v2v_pad_mode` に応じて最初のフレームまたは最後のフレームが繰り返され、長さがパディングされます。T2V または I2V の `--task` モードとモデルを使用できます (i2v モードの方が品質が高いと思います)。I2V モードでは、`--image_path` が指定されていない場合、代わりにビデオの最初のフレームがモデルの調整に使用されます。`--infer_steps` は、完全なノイズ除去の場合と同じ量である必要があります (例: デフォルト)。 T2Vの場合は50、I2Vの場合は40です。これは、フルスケジュールから変更する必要があるためです。実際の手順は`--noise_mode`に依存します。(WV)
 - I2I推論 (`--i2i_path /path/to/image` - T2IモードでT2Vモデルを使用する場合、`--denoise_strength`で強度を指定します。潜在ノイズの増強には`--i2_extra_noise`もサポートされています。) (WV)
 - プロンプトの重み付け (`--prompt_weighting`を使用し、プロンプトで「(large:1.4)の赤いボールで遊ぶ猫」のように記述することで、「large」の効果を強調できます。[this]や(this)はサポートされておらず、(this:1.0)のみがサポートされています。(WV) (FX)
-- 複素数を使用しないComfyUIから移植されたROPE。推論または`--compile`と併用すると、VRAMを大幅に節約できます。学習には `--optimized_compile` を使用してください！(`--rope_func comfy`) (WV) (T)
+- 複素数を使用しないComfyUIから移植されたROPE。推論または`--compile`\*と併用すると、VRAMを大幅に節約できます。学習には `--optimized_compile`\* を使用してください！(`--rope_func comfy`) (WV) (T)
 - I2V/V2V/I2I 用のオプションの潜在ノイズ (`--v2_extra_noise 0.02 --i2_extra_noise 0.02`、0.04 未満の値を推奨。これにより、細かいディテールやテクスチャが向上しますが、値が大きすぎるとアーティファクトや影の動きが発生します。私は V2V の場合は 0.01～0.02、I2V の場合は 0.02～0.04 程度を使用しています) (WV)
 - 混合精度トランスフォーマーをロードします (推論または学習には `--mixed_precision_transformer` を使用します。このようなトランスフォーマーの作成方法と、その理由については https://github.com/kohya-ss/musubi-tuner/discussions/232#discussioncomment-13284677 を参照してください) (WV) (T)
 - LLMオプションの追加 (`--hidden_​​state_skip_layer N --apply_final_norm`、説明は`--help`を参照してください!) (HY)
@@ -48,6 +48,8 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 - SwinIR または ESRGAN タイプのモデルによるアップスケーリング（`src/blissful_tuner/upscaler.py`、使用方法については `--help` を参照してください。モデル：https://huggingface.co/Blyss/BlissfulModels/tree/main/upscaling）
 - スクリプトベースの顔ぼかしYolo で - 顔の修正を行わない LoRA のトレーニングに役立ちます！（`blissful_tuner/yolo_blur.py`、使用方法については `--help` を参照してください。推奨モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/yolo ）
 - CodeFormer/GFPGAN による顔の修復（`src/blissful_tuner/facefix.py`、いつものように `--help` を参照してください！モデル: https://huggingface.co/Blyss/BlissfulModels/tree/main/face_restoration ）
+
+(\*) - torch.compile に関連する機能には追加の要件があり、ネイティブ Windows プラットフォームでは大きな制限があるため、代わりに WSL2 またはネイティブ Linux 環境をお勧めします。
 
 また、私の関連プロジェクト（ https://github.com/Sarania/Envious ）は、LinuxのターミナルからNvidia GPUを管理するのに便利です。nvidia-ml-pyが必要ですが、リアルタイムモニタリング、オーバークロック/アンダークロック、電力制限調整、ファン制御、プロファイルなどをサポートしています。GPU VRAM用の小さなプロセスモニターも付いています！nvidia-smiがダメな場合のnvidia-smiのようなものです😂
 
