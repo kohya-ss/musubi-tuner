@@ -73,6 +73,8 @@ class AttentionParams:
                 attention_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
                     seqlens_list, seqlens_list, device=attention_mask.device
                 )
+            elif attn_mode == "torch":
+                attention_mask = attention_mask[:, None, None, :].to(torch.bool)  # [B, 1, 1, img_len + L]
 
             return AttentionParams(attn_mode, split_attn, img_len, attention_mask, seqlens, cu_seqlens, max_seqlen)
 
