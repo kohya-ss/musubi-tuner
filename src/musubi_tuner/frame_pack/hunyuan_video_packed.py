@@ -14,41 +14,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+from musubi_tuner.modules.attention import AttentionParams, attention
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
-from musubi_tuner.utils.safetensors_utils import load_split_weights
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from accelerate import init_empty_weights
 
-try:
-    # raise NotImplementedError
-    from xformers.ops import memory_efficient_attention as xformers_attn_func
-
-    print("Xformers is installed!")
-except:
-    print("Xformers is not installed!")
-    xformers_attn_func = None
-
-try:
-    # raise NotImplementedError
-    from flash_attn import flash_attn_varlen_func, flash_attn_func
-
-    print("Flash Attn is installed!")
-except:
-    print("Flash Attn is not installed!")
-    flash_attn_varlen_func = None
-    flash_attn_func = None
-
-try:
-    # raise NotImplementedError
-    from sageattention import sageattn_varlen, sageattn
-
-    print("Sage Attn is installed!")
-except:
-    print("Sage Attn is not installed!")
-    sageattn_varlen = None
-    sageattn = None
 
 
 import logging
@@ -563,14 +535,14 @@ class Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        attn_params: AttentionParams = None,
         **cross_attention_kwargs,
     ) -> torch.Tensor:
         return self.processor(
             self,
             hidden_states,
             encoder_hidden_states=encoder_hidden_states,
-            attention_mask=attention_mask,
+            attn_params=attn_params,
             **cross_attention_kwargs,
         )
 
@@ -715,24 +687,6 @@ def center_down_sample_3d(x, kernel_size):
     return torch.nn.functional.avg_pool3d(x, kernel_size, stride=kernel_size)
 
 
-def get_cu_seqlens(text_mask, img_len):
-    batch_size = text_mask.shape[0]
-    text_len = text_mask.sum(dim=1)
-    max_len = text_mask.shape[1] + img_len
-
-    cu_seqlens = torch.zeros([2 * batch_size + 1], dtype=torch.int32, device=text_mask.device)  # ensure device match
-
-    for i in range(batch_size):
-        s = text_len[i] + img_len
-        s1 = i * max_len + s
-        s2 = (i + 1) * max_len
-        cu_seqlens[2 * i + 1] = s1
-        cu_seqlens[2 * i + 2] = s2
-
-    seq_len = text_len + img_len
-    return cu_seqlens, seq_len
-
-
 def apply_rotary_emb_transposed(x, freqs_cis):
     cos, sin = freqs_cis.unsqueeze(-2).chunk(2, dim=-1)
     del freqs_cis
@@ -742,93 +696,6 @@ def apply_rotary_emb_transposed(x, freqs_cis):
     return (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 
 
-def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len, attn_mode=None, split_attn=False):
-    # q,k,v: [batch_size, seqlen, heads, head_dim]
-    if cu_seqlens_q is None and cu_seqlens_kv is None and max_seqlen_q is None and max_seqlen_kv is None:
-        if attn_mode == "sageattn" or attn_mode is None and sageattn is not None:
-            x = sageattn(q, k, v, tensor_layout="NHD")
-            return x
-
-        if attn_mode == "flash" or attn_mode is None and flash_attn_func is not None:
-            x = flash_attn_func(q, k, v)
-            return x
-
-        if attn_mode == "xformers" or attn_mode is None and xformers_attn_func is not None:
-            x = xformers_attn_func(q, k, v)
-            return x
-
-        x = torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(
-            1, 2
-        )
-        return x
-    if split_attn:
-        if attn_mode == "sageattn" or attn_mode is None and sageattn is not None:
-            x = []
-            for i in range(q.size(0)):
-                seq_len_i = seq_len[i]
-                x_i = sageattn(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i], tensor_layout="NHD")
-                if seq_len_i < max_seqlen_q:
-                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
-                x.append(x_i)
-            x = torch.cat(x, dim=0)
-            return x
-
-        if attn_mode == "flash" or attn_mode is None and flash_attn_func is not None:
-            x = []
-            for i in range(q.size(0)):
-                seq_len_i = seq_len[i]
-                x_i = flash_attn_func(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i])
-                if seq_len_i < max_seqlen_q:
-                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
-                x.append(x_i)
-            x = torch.cat(x, dim=0)
-            return x
-
-        if attn_mode == "xformers" or attn_mode is None and xformers_attn_func is not None:
-            x = []
-            for i in range(q.size(0)):
-                seq_len_i = seq_len[i]
-                x_i = xformers_attn_func(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i])
-                if seq_len_i < max_seqlen_q:
-                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
-                x.append(x_i)
-            x = torch.cat(x, dim=0)
-            return x
-
-        assert (
-            attn_mode is None or attn_mode == "torch"
-        ), f"Unsupported attention mode: {attn_mode}. Supported modes: 'sageattn', 'flash', 'xformers', 'torch'."
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        x = []
-        for i in range(q.size(0)):
-            seq_len_i = seq_len[i]
-            x_i = torch.nn.functional.scaled_dot_product_attention(
-                q[i : i + 1, :, :seq_len_i], k[i : i + 1, :, :seq_len_i], v[i : i + 1, :, :seq_len_i]
-            )
-            if seq_len_i < max_seqlen_q:
-                x_i = torch.nn.functional.pad(x_i, (0, 0, 0, max_seqlen_q - seq_len_i, 0, 0), mode="constant", value=0.0)
-            x.append(x_i)
-        x = torch.cat(x, dim=0)
-        x = x.transpose(1, 2)
-        return x
-
-    batch_size = q.shape[0]
-    q = q.view(q.shape[0] * q.shape[1], *q.shape[2:])
-    k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])
-    v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])
-    if attn_mode == "sageattn" or attn_mode is None and sageattn_varlen is not None:
-        x = sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
-        del q, k, v  # free memory
-    elif attn_mode == "flash" or attn_mode is None and flash_attn_varlen_func is not None:
-        x = flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
-        del q, k, v  # free memory
-    else:
-        raise NotImplementedError("No Attn Installed or batch_size > 1 is not supported in this configuration. Try `--split_attn`.")
-    x = x.view(batch_size, max_seqlen_q, *x.shape[1:])
-    return x
-
 
 class HunyuanAttnProcessorFlashAttnDouble:
     def __call__(
@@ -836,13 +703,9 @@ class HunyuanAttnProcessorFlashAttnDouble:
         attn: Attention,
         hidden_states,
         encoder_hidden_states,
-        attention_mask,
-        image_rotary_emb,
-        attn_mode: Optional[str] = None,
-        split_attn: Optional[bool] = False,
+        attn_params: AttentionParams,
+        image_rotary_emb
     ):
-        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len = attention_mask
-
         # Project image latents
         query = attn.to_q(hidden_states)
         key = attn.to_k(hidden_states)
@@ -880,20 +743,10 @@ class HunyuanAttnProcessorFlashAttnDouble:
         value = torch.cat([value, encoder_value], dim=1)
         del encoder_query, encoder_key, encoder_value  # free memory
 
-        hidden_states_attn = attn_varlen_func(
-            query,
-            key,
-            value,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
-            seq_len,
-            attn_mode=attn_mode,
-            split_attn=split_attn,
-        )
+        qkv = [query, key, value]
         del query, key, value  # free memory
-        hidden_states_attn = hidden_states_attn.flatten(-2)
+        hidden_states_attn = attention(qkv, attn_params=attn_params) # (batch, seq_len, dim)
+        del qkv  # free memory
 
         hidden_states, encoder_hidden_states = hidden_states_attn[:, :-txt_length], hidden_states_attn[:, -txt_length:]
         del hidden_states_attn  # free memory
@@ -912,12 +765,9 @@ class HunyuanAttnProcessorFlashAttnSingle:
         attn: Attention,
         hidden_states,
         encoder_hidden_states,
-        attention_mask,
+        attn_params: AttentionParams,
         image_rotary_emb,
-        attn_mode: Optional[str] = None,
-        split_attn: Optional[bool] = False,
     ):
-        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len = attention_mask
         txt_length = encoder_hidden_states.shape[1]  # Store text length
 
         # Concatenate image and context inputs
@@ -941,20 +791,10 @@ class HunyuanAttnProcessorFlashAttnSingle:
         key = torch.cat([apply_rotary_emb_transposed(key[:, :-txt_length], image_rotary_emb), key[:, -txt_length:]], dim=1)
         del image_rotary_emb  # free memory
 
-        hidden_states = attn_varlen_func(
-            query,
-            key,
-            value,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
-            seq_len,
-            attn_mode=attn_mode,
-            split_attn=split_attn,
-        )
+        qkv = [query, key, value]
         del query, key, value  # free memory
-        hidden_states = hidden_states.flatten(-2)
+        hidden_states = attention(qkv, attn_params=attn_params)
+        del qkv  # free memory
 
         hidden_states, encoder_hidden_states = hidden_states[:, :-txt_length], hidden_states[:, -txt_length:]
 
@@ -1290,16 +1130,12 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
         num_attention_heads: int,
         attention_head_dim: int,
         mlp_ratio: float = 4.0,
-        qk_norm: str = "rms_norm",
-        attn_mode: Optional[str] = None,
-        split_attn: Optional[bool] = False,
+        qk_norm: str = "rms_norm"
     ) -> None:
         super().__init__()
 
         hidden_size = num_attention_heads * attention_head_dim
         mlp_dim = int(hidden_size * mlp_ratio)
-        self.attn_mode = attn_mode
-        self.split_attn = split_attn
 
         # Attention layer (pre_only=True means no output projection in Attention module itself)
         self.attn = Attention(
@@ -1325,7 +1161,7 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attn_params: AttentionParams,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         text_seq_length = encoder_hidden_states.shape[1]
@@ -1347,10 +1183,8 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
         attn_output, context_attn_output = self.attn(
             hidden_states=norm_hidden_states,
             encoder_hidden_states=norm_encoder_hidden_states,
-            attention_mask=attention_mask,
-            image_rotary_emb=image_rotary_emb,
-            attn_mode=self.attn_mode,
-            split_attn=self.split_attn,
+            attn_params=attn_params,
+            image_rotary_emb=image_rotary_emb
         )
         attn_output = torch.cat([attn_output, context_attn_output], dim=1)
         del norm_hidden_states, norm_encoder_hidden_states, context_attn_output  # free memory
@@ -1375,15 +1209,11 @@ class HunyuanVideoTransformerBlock(nn.Module):
         num_attention_heads: int,
         attention_head_dim: int,
         mlp_ratio: float,
-        qk_norm: str = "rms_norm",
-        attn_mode: Optional[str] = None,
-        split_attn: Optional[bool] = False,
+        qk_norm: str = "rms_norm"
     ) -> None:
         super().__init__()
 
         hidden_size = num_attention_heads * attention_head_dim
-        self.attn_mode = attn_mode
-        self.split_attn = split_attn
 
         self.norm1 = AdaLayerNormZero(hidden_size, norm_type="layer_norm")
         self.norm1_context = AdaLayerNormZero(hidden_size, norm_type="layer_norm")
@@ -1413,7 +1243,7 @@ class HunyuanVideoTransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attn_params: AttentionParams,
         freqs_cis: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # 1. Input normalization
@@ -1426,10 +1256,8 @@ class HunyuanVideoTransformerBlock(nn.Module):
         attn_output, context_attn_output = self.attn(
             hidden_states=norm_hidden_states,
             encoder_hidden_states=norm_encoder_hidden_states,
-            attention_mask=attention_mask,
+            attn_params=attn_params,
             image_rotary_emb=freqs_cis,
-            attn_mode=self.attn_mode,
-            split_attn=self.split_attn,
         )
         del norm_hidden_states, norm_encoder_hidden_states, freqs_cis  # free memory
 
@@ -1543,6 +1371,9 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         self.config_patch_size = patch_size
         self.config_patch_size_t = patch_size_t
 
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
+
         # 1. Latent and condition embedders
         self.x_embedder = HunyuanVideoPatchEmbed((patch_size_t, patch_size, patch_size), in_channels, inner_dim)
         self.context_embedder = HunyuanVideoTokenRefiner(
@@ -1557,17 +1388,13 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         self.rope = HunyuanVideoRotaryPosEmbed(rope_axes_dim, rope_theta)
 
         # 3. Dual stream transformer blocks
-        self.attn_mode = attn_mode
-        self.split_attn = split_attn
         self.transformer_blocks = nn.ModuleList(
             [
                 HunyuanVideoTransformerBlock(
                     num_attention_heads,
                     attention_head_dim,
                     mlp_ratio=mlp_ratio,
-                    qk_norm=qk_norm,
-                    attn_mode=attn_mode,
-                    split_attn=split_attn,
+                    qk_norm=qk_norm
                 )
                 for _ in range(num_layers)
             ]
@@ -1580,9 +1407,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
                     num_attention_heads,
                     attention_head_dim,
                     mlp_ratio=mlp_ratio,
-                    qk_norm=qk_norm,
-                    attn_mode=attn_mode,
-                    split_attn=split_attn,
+                    qk_norm=qk_norm
                 )
                 for _ in range(num_single_layers)
             ]
@@ -1892,19 +1717,12 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
                 # If they are not same, then their impls are wrong. Ours are always the correct one.
                 text_len = encoder_attention_mask.sum().item()
                 encoder_hidden_states = encoder_hidden_states[:, :text_len]
-                attention_mask = None, None, None, None, None
+                attn_params = AttentionParams.create_attention_params(self.attn_mode, False)
             else:
-                # If batch size = 1 and split_attn is True, it will be same as above
                 img_seq_len = hidden_states.shape[1]
-                txt_seq_len = encoder_hidden_states.shape[1]
+                attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, img_seq_len, encoder_attention_mask)
+            print(f"Attention params: {attn_params}")
 
-                cu_seqlens_q, seq_len = get_cu_seqlens(encoder_attention_mask, img_seq_len)
-                cu_seqlens_kv = cu_seqlens_q
-                max_seqlen_q = img_seq_len + txt_seq_len
-                max_seqlen_kv = max_seqlen_q
-
-                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len
-                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len  # free memory
         del encoder_attention_mask  # free memory
 
         if self.enable_teacache:
@@ -1938,12 +1756,12 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
 
                 for block_id, block in enumerate(self.transformer_blocks):
                     hidden_states, encoder_hidden_states = self.gradient_checkpointing_method(
-                        block, hidden_states, encoder_hidden_states, temb, attention_mask, rope_freqs
+                        block, hidden_states, encoder_hidden_states, temb, attn_params, rope_freqs
                     )
 
                 for block_id, block in enumerate(self.single_transformer_blocks):
                     hidden_states, encoder_hidden_states = self.gradient_checkpointing_method(
-                        block, hidden_states, encoder_hidden_states, temb, attention_mask, rope_freqs
+                        block, hidden_states, encoder_hidden_states, temb, attn_params, rope_freqs
                     )
 
                 self.previous_residual = hidden_states - ori_hidden_states
@@ -1954,7 +1772,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
                     self.offloader_double.wait_for_block(block_id)
 
                 hidden_states, encoder_hidden_states = self.gradient_checkpointing_method(
-                    block, hidden_states, encoder_hidden_states, temb, attention_mask, rope_freqs
+                    block, hidden_states, encoder_hidden_states, temb, attn_params, rope_freqs
                 )
 
                 if self.blocks_to_swap:
@@ -1965,13 +1783,13 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
                     self.offloader_single.wait_for_block(block_id)
 
                 hidden_states, encoder_hidden_states = self.gradient_checkpointing_method(
-                    block, hidden_states, encoder_hidden_states, temb, attention_mask, rope_freqs
+                    block, hidden_states, encoder_hidden_states, temb, attn_params, rope_freqs
                 )
 
                 if self.blocks_to_swap:
                     self.offloader_single.submit_move_blocks_forward(self.single_transformer_blocks, block_id)
 
-        del attention_mask, rope_freqs  # free memory
+        del attn_params, rope_freqs  # free memory
         del encoder_hidden_states  # free memory
 
         hidden_states = self.gradient_checkpointing_method(self.norm_out, hidden_states, temb)

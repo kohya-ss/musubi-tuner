@@ -9,9 +9,11 @@ import einops
 import numpy as np
 import torch
 from torch.nn import functional as F
-from musubi_tuner.frame_pack.hunyuan_video_packed import HunyuanVideoTransformer3DModelPacked, get_cu_seqlens
+from musubi_tuner.frame_pack.hunyuan_video_packed import HunyuanVideoTransformer3DModelPacked
 
 import logging
+
+from musubi_tuner.modules.attention import AttentionParams
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -213,23 +215,17 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
             del extra_encoder_hidden_states, extra_attention_mask  # free memory
 
         with torch.no_grad():
-            if batch_size == 1:
+            if batch_size == 1 and not self.split_attn:
                 # When batch size is 1, we do not need any masks or var-len funcs since cropping is mathematically same to what we want
                 # If they are not same, then their impls are wrong. Ours are always the correct one.
                 text_len = encoder_attention_mask.sum().item()
                 encoder_hidden_states = encoder_hidden_states[:, :text_len]
-                attention_mask = None, None, None, None, None
+                attn_params = AttentionParams.create_attention_params(self.attn_mode, False)
             else:
                 img_seq_len = hidden_states.shape[1]
-                txt_seq_len = encoder_hidden_states.shape[1]
-
-                cu_seqlens_q, seq_len = get_cu_seqlens(encoder_attention_mask, img_seq_len)
-                cu_seqlens_kv = cu_seqlens_q
-                max_seqlen_q = img_seq_len + txt_seq_len
-                max_seqlen_kv = max_seqlen_q
-
-                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len
-                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len  # free memory
+                attn_params = AttentionParams.create_attention_params_from_mask(
+                    self.attn_mode, self.split_attn, img_seq_len, encoder_attention_mask
+                )
         del encoder_attention_mask  # free memory
 
         if self.enable_teacache:
@@ -269,7 +265,7 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
                     self.offloader_double.wait_for_block(block_id)
 
                 hidden_states, encoder_hidden_states = self.gradient_checkpointing_method(
-                    block, hidden_states, encoder_hidden_states, temb, attention_mask, rope_freqs
+                    block, hidden_states, encoder_hidden_states, temb, attn_params, rope_freqs
                 )
 
                 if self.blocks_to_swap:
@@ -280,7 +276,7 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
                     self.offloader_single.wait_for_block(block_id)
 
                 hidden_states, encoder_hidden_states = self.gradient_checkpointing_method(
-                    block, hidden_states, encoder_hidden_states, temb, attention_mask, rope_freqs
+                    block, hidden_states, encoder_hidden_states, temb, attn_params, rope_freqs
                 )
 
                 if self.blocks_to_swap:
@@ -300,7 +296,7 @@ class HunyuanVideoTransformer3DModelPackedInference(HunyuanVideoTransformer3DMod
 
             del ori_hidden_states  # free memory
 
-        del attention_mask, rope_freqs  # free memory
+        del attn_params, rope_freqs  # free memory
         del encoder_hidden_states  # free memory
 
         hidden_states = self.gradient_checkpointing_method(self.norm_out, hidden_states, temb)

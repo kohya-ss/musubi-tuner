@@ -230,6 +230,7 @@ def parse_args() -> argparse.Namespace:
         choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  #  "flash2", "flash3",
         help="attention mode",
     )
+    parser.add_argument("--split_attn", action="store_true", help="split attention for long sequence")
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
@@ -287,6 +288,9 @@ def parse_args() -> argparse.Namespace:
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    if args.attn_mode == "sdpa":
+        args.attn_mode = "torch"
 
     return args
 
@@ -451,6 +455,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         args.attn_mode,
         loading_device,
         args.fp8_scaled and not args.lycoris,
+        args.split_attn,
         for_inference=True,
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
