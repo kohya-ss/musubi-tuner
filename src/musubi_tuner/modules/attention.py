@@ -141,6 +141,7 @@ def attention(
     if attn_params.split_attn:
         if attn_params.seqlens is None:
             # If no seqlens provided, assume all tokens are valid
+            attn_params = AttentionParams.create_attention_params(attn_params.attn_mode, True)  # do not in-place modify
             attn_params.seqlens = torch.tensor([q.shape[1]] * q.shape[0], device=q.device)
             attn_params.max_seqlen = q.shape[1]
         q = [transpose_fn(q[i : i + 1, : attn_params.seqlens[i]]) for i in range(len(q))]
