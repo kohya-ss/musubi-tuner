@@ -1721,7 +1721,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             else:
                 img_seq_len = hidden_states.shape[1]
                 attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, img_seq_len, encoder_attention_mask)
-            print(f"Attention params: {attn_params}")
+            # print(f"Attention params: {attn_params}")
 
         del encoder_attention_mask  # free memory
 

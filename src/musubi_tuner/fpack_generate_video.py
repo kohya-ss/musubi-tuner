@@ -274,6 +274,12 @@ def parse_args() -> argparse.Namespace:
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Batch size for processing prompts from file. Only available with one-frame inference.",
+    )
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
 
     args = parser.parse_args()
@@ -1476,6 +1482,245 @@ def generate(
     return vae_instance_for_return, real_history_latents
 
 
+# Copy and modify from generate() for one-frame inference mode in batch processing
+def generate_batch_with_one_frame_inference(
+    batch_args: List[argparse.Namespace],
+    gen_settings: GenerationSettings,
+    shared_models: Dict,
+    precomputed_image_data: List[Dict],
+    precomputed_text_data: List[Dict],
+) -> tuple[Optional[AutoencoderKLCausal3D], torch.Tensor]:  # VAE can be Optional
+    """main function for generation
+
+    Args:
+        batch_args: list of command line arguments
+        gen_settings: generation settings
+        shared_models: dictionary containing pre-loaded models (mainly for DiT)
+        precomputed_image_data: list of dictionaries with precomputed image data
+        precomputed_text_data: list of dictionaries with precomputed text data
+
+    Returns:
+        tuple: (AutoencoderKLCausal3D model (vae) or None, torch.Tensor generated latent)
+    """
+    device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
+    vae_instance_for_return = None
+
+    batch_size = len(batch_args)
+
+    # prepare seed
+    seeds = [args.seed if args.seed is not None else random.randint(0, 2**32 - 1) for args in batch_args]
+    for args, seed in zip(batch_args, seeds):
+        args.seed = seed  # set seed to args for saving
+
+    logger.info("Using precomputed image and text data.")
+    height = precomputed_image_data[0]["height"]
+    width = precomputed_image_data[0]["width"]
+    video_seconds = precomputed_image_data[0]["video_seconds"]
+
+    context_img, end_latent, control_latents, control_mask_images = None, None, None, None
+    context_img = [data["context_img"] for data in precomputed_image_data]
+
+    if "end_latent" in precomputed_image_data[0] and precomputed_image_data[0]["end_latent"] is not None:
+        end_latent = torch.stack([data["end_latent"] for data in precomputed_image_data])
+
+    if "control_latents" in precomputed_image_data[0] and precomputed_image_data[0]["control_latents"] is not None:
+        control_latents = [
+            torch.cat([data["control_latents"][i] for data in precomputed_image_data], dim=0)
+            for i in range(len(precomputed_image_data[0]["control_latents"]))
+        ]
+
+    if "control_mask_images" in precomputed_image_data[0] and precomputed_image_data[0]["control_mask_images"] is not None:
+        control_mask_images = [data["control_mask_images"] for data in precomputed_image_data]
+
+    context = [data["context"] for data in precomputed_text_data]
+    context_null = [data["context_null"] for data in precomputed_text_data]
+
+    # VAE is not loaded here if data is precomputed; decoding VAE is handled by caller (e.g., process_batch_prompts)
+    # vae_instance_for_return remains None
+
+    args = batch_args[0]  # for common args
+    if "model" not in shared_models:
+        model = load_dit_model(args, device)
+        if args.save_merged_model:
+            # If we only want to save the model, we can skip the rest
+            return model, None
+
+        if shared_models is not None:
+            shared_models["model"] = model
+    else:
+        # use shared model
+        model: HunyuanVideoTransformer3DModelPackedInference = shared_models["model"]
+        model.move_to_device_except_swap_blocks(device)  # Handles block swap correctly
+        model.prepare_block_swap_before_forward()
+
+    # sampling
+    latent_window_size = args.latent_window_size  # default is 9
+    # ex: (5s * 30fps) / (9 * 4) = 4.16 -> 4 sections, 60s -> 1800 / 36 = 50 sections
+    total_latent_sections = (video_seconds * 30) / (latent_window_size * 4)
+    total_latent_sections = int(max(round(total_latent_sections), 1))
+
+    # set random generator
+    seed_generators = []
+    for seed in seeds:
+        seed_g = torch.Generator(device="cpu")
+        seed_g.manual_seed(seed)
+        seed_generators.append(seed_g)
+
+    num_frames = latent_window_size * 4 - 3
+
+    logger.info(
+        f"Video size: {height}x{width}@{video_seconds} (HxW@seconds), fps: {args.fps}, num sections: {total_latent_sections}, "
+        f"infer_steps: {args.infer_steps}, frames per generation: {num_frames}"
+    )
+
+    # video generation ######
+    f1_mode = args.f1
+    one_frame_inference = set()
+    for mode in args.one_frame_inference.split(","):
+        one_frame_inference.add(mode.strip())
+
+    # one frame inference
+    sample_num_frames = 1
+    latent_indices = torch.zeros((batch_size, 1), dtype=torch.int64)  # 1x1 latent index for target image
+    latent_indices[:, 0] = latent_window_size  # last of latent_window
+
+    def get_latent_mask(mask_image: Image.Image) -> torch.Tensor:
+        if mask_image.mode != "L":
+            mask_image = mask_image.convert("L")
+        mask_image = mask_image.resize((width // 8, height // 8), Image.LANCZOS)
+        mask_image = np.array(mask_image)  # PIL to numpy, HWC
+        mask_image = torch.from_numpy(mask_image).float() / 255.0  # 0 to 1.0, HWC
+        mask_image = mask_image.squeeze(-1)  # HWC -> HW
+        mask_image = mask_image.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # HW -> 111HW (BCFHW)
+        mask_image = mask_image.to(torch.float32)
+        return mask_image
+
+    if control_latents is None or len(control_latents[0]) == 0:
+        logger.info("No control images provided for one frame inference. Use zero latents for control images.")
+        control_latents = [torch.zeros(batch_size, 16, 1, height // 8, width // 8, dtype=torch.float32)]
+
+    if "no_post" not in one_frame_inference:
+        # add zero latents as clean latents post
+        control_latents.append(torch.zeros((batch_size, 16, 1, height // 8, width // 8), dtype=torch.float32))
+        logger.info("Add zero latents as clean latents post for one frame inference.")
+
+    # kisekaeichi and 1f-mc: both are using control images, but indices are different
+    clean_latents = torch.cat(control_latents, dim=2)  # (batch_size, 16, num_control_images, H//8, W//8)
+    clean_latent_indices = torch.zeros((batch_size, len(control_latents)), dtype=torch.int64)
+    if "no_post" not in one_frame_inference:
+        clean_latent_indices[:, -1] = 1 + latent_window_size  # default index for clean latents post
+
+    if control_latents is not None:
+        for i in range(len(control_latents[0])):  # for each control image
+            mask_images = None
+            if args.control_image_mask_path is not None and i < len(args.control_image_mask_path):
+                mask_images = [get_latent_mask(Image.open(a.control_image_mask_path[i])) for a in batch_args]
+                logger.info(
+                    f"Apply mask for clean latents 1x for {i + 1}: {[a.control_image_mask_path[i] for a in batch_args]}, shape: {mask_images[0].shape}"
+                )
+            elif control_mask_images is not None and i < len(control_mask_images[0]) and control_mask_images[0][i] is not None:
+                mask_images = [get_latent_mask(cmi[i]) for cmi in control_mask_images]
+                logger.info(f"Apply mask for clean latents 1x for {i + 1} with alpha channel: {mask_images[0].shape}")
+            if mask_images is not None:
+                clean_latents[:, :, i : i + 1, :, :] = clean_latents[:, :, i : i + 1, :, :] * torch.cat(mask_images, dim=0)
+
+    for one_frame_param in one_frame_inference:
+        if one_frame_param.startswith("target_index="):
+            target_index = int(one_frame_param.split("=")[1])
+            latent_indices[:, 0] = target_index
+            logger.info(f"Set index for target: {target_index}")
+        elif one_frame_param.startswith("control_index="):
+            control_indices = one_frame_param.split("=")[1].split(";")
+            i = 0
+            while i < len(control_indices) and i < clean_latent_indices.shape[1]:
+                control_index = int(control_indices[i])
+                clean_latent_indices[:, i] = control_index
+                i += 1
+            logger.info(f"Set index for clean latent 1x: {control_indices}")
+
+    # "default" option does nothing, so we can skip it
+    if "default" in one_frame_inference:
+        pass
+
+    if "no_2x" in one_frame_inference:
+        clean_latents_2x = None
+        clean_latent_2x_indices = None
+        logger.info("No clean_latents_2x")
+    else:
+        clean_latents_2x = torch.zeros((batch_size, 16, 2, height // 8, width // 8), dtype=torch.float32)
+        index = 1 + latent_window_size + 1
+        clean_latent_2x_indices = torch.arange(index, index + 2).unsqueeze(0)  #  2
+
+    if "no_4x" in one_frame_inference:
+        clean_latents_4x = None
+        clean_latent_4x_indices = None
+        logger.info("No clean_latents_4x")
+    else:
+        clean_latents_4x = torch.zeros((batch_size, 16, 16, height // 8, width // 8), dtype=torch.float32)
+        index = 1 + latent_window_size + 1 + 2
+        clean_latent_4x_indices = torch.arange(index, index + 16).unsqueeze(0)  #  16
+
+    logger.info(
+        f"One frame inference. clean_latent: {clean_latents.shape} latent_indices: {latent_indices}, clean_latent_indices: {clean_latent_indices}, num_frames: {sample_num_frames}"
+    )
+
+    # prepare conditioning inputs
+    prompt_index = 0
+    image_index = 0
+
+    context_for_index = [ctx[prompt_index] for ctx in context]
+    logger.info(f"Prompt: {[ctx['prompt'] for ctx in context_for_index]}")
+
+    llama_vec = torch.cat([ctx["llama_vec"] for ctx in context_for_index], dim=0).to(device, dtype=torch.bfloat16)
+    llama_attention_mask = torch.cat([ctx["llama_attention_mask"] for ctx in context_for_index], dim=0).to(device)
+    clip_l_pooler = torch.cat([ctx["clip_l_pooler"] for ctx in context_for_index], dim=0).to(device, dtype=torch.bfloat16)
+
+    image_encoder_last_hidden_state = torch.cat(
+        [ctx[image_index]["image_encoder_last_hidden_state"] for ctx in context_img], dim=0
+    ).to(device, dtype=torch.bfloat16)
+
+    llama_vec_n = torch.cat([ctx["llama_vec"] for ctx in context_null], dim=0).to(device, dtype=torch.bfloat16)
+    llama_attention_mask_n = torch.cat([ctx["llama_attention_mask"] for ctx in context_null], dim=0).to(device)
+    clip_l_pooler_n = torch.cat([ctx["clip_l_pooler"] for ctx in context_null], dim=0).to(device, dtype=torch.bfloat16)
+
+    # preprocess_magcache(args, model)
+
+    generated_latents = sample_hunyuan(
+        transformer=model,
+        sampler=args.sample_solver,
+        width=width,
+        height=height,
+        frames=1,
+        real_guidance_scale=args.guidance_scale,
+        distilled_guidance_scale=args.embedded_cfg_scale,
+        guidance_rescale=args.guidance_rescale,
+        shift=args.flow_shift,
+        num_inference_steps=args.infer_steps,
+        generator=seed_g,
+        prompt_embeds=llama_vec,
+        prompt_embeds_mask=llama_attention_mask,
+        prompt_poolers=clip_l_pooler,
+        negative_prompt_embeds=llama_vec_n,
+        negative_prompt_embeds_mask=llama_attention_mask_n,
+        negative_prompt_poolers=clip_l_pooler_n,
+        device=device,
+        dtype=torch.bfloat16,
+        image_embeddings=image_encoder_last_hidden_state,
+        latent_indices=latent_indices,
+        clean_latents=clean_latents,
+        clean_latent_indices=clean_latent_indices,
+        clean_latents_2x=clean_latents_2x,
+        clean_latent_2x_indices=clean_latent_2x_indices,
+        clean_latents_4x=clean_latents_4x,
+        clean_latent_4x_indices=clean_latent_4x_indices,
+    )
+
+    # postprocess_magcache(args, model)
+
+    real_history_latents = generated_latents.to(clean_latents)
+    return None, real_history_latents
+
+
 def generate_with_one_frame_inference(
     args: argparse.Namespace,
     model: HunyuanVideoTransformer3DModelPackedInference,
@@ -1928,33 +2173,71 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     logger.info("Generating latents for all prompts...")
     with torch.no_grad():
-        for i, prompt_args_item in enumerate(all_prompt_args_list):
-            current_image_data = all_precomputed_image_data[i]
-            current_text_data = all_precomputed_text_data[i]
+        if args.one_frame_inference is None or args.batch_size == 1:
+            for i, prompt_args_item in enumerate(all_prompt_args_list):
+                current_image_data = all_precomputed_image_data[i]
+                current_text_data = all_precomputed_text_data[i]
 
-            logger.info(f"Generating latent for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
-            try:
-                # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
-                # It will use the DiT model from shared_models_for_generate.
-                # The VAE instance returned by generate will be None here.
-                _, latent = generate(
-                    prompt_args_item, gen_settings, shared_models_for_generate, current_image_data, current_text_data
-                )
+                logger.info(f"Generating latent for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+                try:
+                    # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
+                    # It will use the DiT model from shared_models_for_generate.
+                    # The VAE instance returned by generate will be None here.
+                    _, latent = generate(
+                        prompt_args_item, gen_settings, shared_models_for_generate, current_image_data, current_text_data
+                    )
 
-                if latent is None and prompt_args_item.save_merged_model:  # Should be caught earlier
+                    if latent is None and prompt_args_item.save_merged_model:  # Should be caught earlier
+                        continue
+
+                    # Save latent if needed (using data from precomputed_image_data for H/W)
+                    if prompt_args_item.output_type in ["latent", "both", "latent_images"]:
+                        height = current_image_data["height"]
+                        width = current_image_data["width"]
+                        save_latent(latent, prompt_args_item, height, width)
+
+                    all_latents.append(latent)
+                except Exception as e:
+                    logger.error(f"Error generating latent for prompt: {prompt_args_item.prompt}. Error: {e}", exc_info=True)
+                    all_latents.append(None)  # Add placeholder for failed generations
                     continue
 
-                # Save latent if needed (using data from precomputed_image_data for H/W)
-                if prompt_args_item.output_type in ["latent", "both", "latent_images"]:
-                    height = current_image_data["height"]
-                    width = current_image_data["width"]
-                    save_latent(latent, prompt_args_item, height, width)
+        else:
+            batch_size = args.batch_size
+            for i in range(0, len(all_prompt_args_list), batch_size):
+                si, ei = i, min(i + batch_size, len(all_prompt_args_list))
+                batch_prompt_args = all_prompt_args_list[si:ei]
 
-                all_latents.append(latent)
-            except Exception as e:
-                logger.error(f"Error generating latent for prompt: {prompt_args_item.prompt}. Error: {e}", exc_info=True)
-                all_latents.append(None)  # Add placeholder for failed generations
-                continue
+                # Corresponding precomputed data for the batch
+                current_image_data = all_precomputed_image_data[si:ei]
+                current_text_data = all_precomputed_text_data[si:ei]
+
+                logger.info(
+                    f"Generating latent for prompt {si + 1} to {ei}/{len(all_prompt_args_list)}: {[a.prompt for a in batch_prompt_args]}"
+                )
+                try:
+                    # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
+                    # It will use the DiT model from shared_models_for_generate.
+                    # The VAE instance returned by generate will be None here.
+                    _, latents = generate_batch_with_one_frame_inference(
+                        batch_prompt_args, gen_settings, shared_models_for_generate, current_image_data, current_text_data
+                    )
+
+                    if latents is None and batch_prompt_args[0].save_merged_model:  # Should be caught earlier
+                        continue
+
+                    # Save latent if needed (using data from precomputed_image_data for H/W)
+                    if batch_prompt_args[0].output_type in ["latent", "both", "latent_images"]:
+                        height = current_image_data[0]["height"]
+                        width = current_image_data[0]["width"]
+                        for latent_i, prompt_args_item in zip(latents, batch_prompt_args):
+                            save_latent(latent_i, prompt_args_item, height, width)
+
+                    all_latents.extend(latents)
+                except Exception as e:
+                    logger.error(f"Error generating latent for prompt: {prompt_args_item.prompt}. Error: {e}", exc_info=True)
+                    all_latents.append([None] * (ei - si))  # Append None for each failed prompt in the batch
+                    continue
 
     # Free DiT model
     logger.info("Releasing DiT model from memory...")
