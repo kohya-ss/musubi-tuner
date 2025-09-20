@@ -345,6 +345,7 @@ python src/musubi_tuner/qwen_image_generate_image.py \
   - `--resize_control_to_image_size`: Resize control image to match the specified image size.
   - `--resize_control_to_official_size`: Resize control image to official size (1M pixels keeping aspect ratio). Recommended for better results.
   - Above two options are mutually exclusive. If both are not specified, the control image will be used at its original resolution.
+  - `--append_original_name`: When saving edited images, appends the original base name of the control image to the output file name.
 - Memory saving options like `--fp8_scaled` (for DiT) are available.
 - `--text_encoder_cpu` enables CPU inference for the text encoder. Recommended for systems with limited GPU resources (less than 16GB VRAM).
 - LoRA loading options (`--lora_weight`, `--lora_multiplier`) are available.
