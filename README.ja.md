@@ -64,6 +64,10 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/09/20
+    - `qwen_image_generate_image.py` で`--from_file`での生成が動作しない不具合が修正されました。[PR #553](https://github.com/kohya-ss/musubi-tuner/pull/553) および [PR #557](https://github.com/kohya-ss/musubi-tuner/pull/557) nmfisher 氏に感謝します。
+        - また同スクリプトに`--append_original_name`オプションが追加されました。編集時に元の画像のベース名を出力ファイル名に追加します。
+
 - 2025/09/14
     - Qwen-ImageのLoRA学習で`--fp8_base`を指定し`--fp8_scaled`指定しない時にFlashAttentionまたはxformersで学習するとエラーになる不具合を修正しました。[PR #559](https://github.com/kohya-ss/musubi-tuner/pull/559)
         - なお、メモリが足りない場合以外は`--fp8_scaled`を指定することをお勧めします。

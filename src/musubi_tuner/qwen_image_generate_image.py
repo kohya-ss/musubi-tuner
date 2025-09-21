@@ -130,8 +130,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
     )
+    parser.add_argument(
+        "--append_original_name", action="store_true", help="append original base name when saving images when editing"
+    )
 
-    # New arguments for batch and interactive modes
+    # arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
 
@@ -750,7 +753,14 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
 
     seed = args.seed
 
-    latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
+    if args.append_original_name and args.edit and args.control_image_path is not None:
+        original_base_name = os.path.basename(args.control_image_path)
+        original_base_name = os.path.splitext(original_base_name)[0]
+        original_name = f"_{original_base_name}"
+    else:
+        original_name = ""
+
+    latent_path = f"{save_path}/{time_flag}_{seed}_latent{original_name}.safetensors"
 
     if args.no_metadata:
         metadata = None
@@ -838,7 +848,15 @@ def save_output(
 
     if args.output_type == "images" or args.output_type == "latent_images":
         # save images
-        original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
+        if original_base_names is None or len(original_base_names) == 0:
+            if args.append_original_name and args.edit and args.control_image_path is not None:
+                original_base_name = os.path.basename(args.control_image_path)
+                original_base_name = os.path.splitext(original_base_name)[0]
+                original_name = f"_{original_base_name}"
+            else:
+                original_name = ""
+        else:
+            original_name = f"_{original_base_names[0]}"
         save_images(video, args, original_name)
 
 
@@ -948,27 +966,23 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         for i, prompt_args_item in enumerate(all_prompt_args_list):
             logger.info(f"Preprocessing control image for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             assert prompt_args_item.control_image_path is not None, "Qwen-Image-Edit requires control_image_path"
-            control_data = prepare_image_inputs(args, device, vae_for_batch)
+            control_data = prepare_image_inputs(prompt_args_item, device, vae_for_batch)
             all_precomputed_image_data.append(control_data)
 
         vae_for_batch.to("cpu")  # Move VAE back to CPU after control image encoding
         clean_memory_on_device(device)  # Clean up VAE memory
+    else:
+        # For Qwen-Image, no control images. Use placeholders for (control_latent, control_image_np)
+        all_precomputed_image_data = [(None, None)] * len(all_prompt_args_list)  # No control images for Qwen-Image
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
         logger.info(f"Text preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
 
-        # prepare_text_inputs will move text_encoders to device temporarily
-        text_data = prepare_text_inputs(prompt_args_item, all_precomputed_image_data[i][1], device, temp_shared_models_txt)
-
-        if args.edit:
-            control_image_data = all_precomputed_image_data[i]
-            control_image_feature = control_image_data[1]
-        else:
-            control_image_data = None
-            control_image_feature = None
-        text_data = prepare_text_inputs(prompt_args_item, control_image_feature, device, temp_shared_models_txt)
-
-        text_data["control"] = control_image_data
+        # prepare_text_inputs will move text_encoders to device temporarily, and handles edit or not
+        context, context_null = prepare_text_inputs(
+            prompt_args_item, all_precomputed_image_data[i][1], device, temp_shared_models_txt
+        )
+        text_data = {"context": context, "context_null": context_null, "control": all_precomputed_image_data[i]}
         all_precomputed_text_data.append(text_data)
 
     # Models should be removed from device after prepare_text_inputs

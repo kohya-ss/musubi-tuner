@@ -69,6 +69,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 20, 2025
+    - A bug in `qwen_image_generate_image.py` where generation with `--from_file` did not work has been fixed. Thanks to nmfisher for [PR #553](https://github.com/kohya-ss/musubi-tuner/pull/553). Followed by [PR #557](https://github.com/kohya-ss/musubi-tuner/pull/557).
+        - Additionally, the `--append_original_name` option has been added to the same script. This appends the base name of the original image to the output file name during editing.
+
 - September 14, 2025
     - A bug was fixed that caused an error when training LoRA for Qwen-Image with `--fp8_base` specified and `--fp8_scaled` not specified using FlashAttention or xformers. See [PR #559](https://github.com/kohya-ss/musubi-tuner/pull/559).
         - However, it is recommended to specify `--fp8_scaled` unless you are running out of memory.
