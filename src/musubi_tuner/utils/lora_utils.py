@@ -112,7 +112,7 @@ def load_safetensors_with_lora_and_fp8(
         logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}")
 
         # make hook for LoRA merging
-        def weight_hook_func(model_weight_key, model_weight, keep_on_calc_device=False):
+        def weight_hook_func(model_weight_key, model_weight: torch.Tensor, keep_on_calc_device=False):
             nonlocal list_of_lora_weight_keys, lora_weights_list, lora_multipliers, calc_device
 
             if not model_weight_key.endswith(".weight"):
@@ -144,6 +144,13 @@ def load_safetensors_with_lora_and_fp8(
                 down_weight = down_weight.to(calc_device)
                 up_weight = up_weight.to(calc_device)
 
+                original_dtype = model_weight.dtype
+                if original_dtype.itemsize == 1:  # fp8
+                    # temporarily convert to float16 for calculation
+                    model_weight = model_weight.to(torch.float16)
+                    down_weight = down_weight.to(torch.float16)
+                    up_weight = up_weight.to(torch.float16)
+
                 # W <- W + U * D
                 if len(model_weight.size()) == 2:
                     # linear
@@ -164,6 +171,9 @@ def load_safetensors_with_lora_and_fp8(
                     conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
                     # logger.info(conved.size(), weight.size(), module.stride, module.padding)
                     model_weight = model_weight + multiplier * conved * scale
+
+                if original_dtype.itemsize == 1:  # fp8
+                    model_weight = model_weight.to(original_dtype)  # convert back to original dtype
 
                 # remove LoRA keys from set
                 lora_weight_keys.remove(down_key)

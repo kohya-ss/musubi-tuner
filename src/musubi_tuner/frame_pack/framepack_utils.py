@@ -25,7 +25,11 @@ logger = BlissfulLogger(__name__, "green")
 
 
 def load_vae(
-    vae_path: str, vae_chunk_size: Optional[int], vae_spatial_tile_sample_min_size: Optional[int], device: Union[str, torch.device]
+    vae_path: str,
+    vae_chunk_size: Optional[int],
+    vae_spatial_tile_sample_min_size: Optional[int],
+    vae_tiling: bool,
+    device: Union[str, torch.device],
 ):
     # single file and directory (contains 'vae') support
     if os.path.isdir(vae_path):
@@ -49,8 +53,7 @@ def load_vae(
         vae.tile_sample_min_size = vae_spatial_tile_sample_min_size
         vae.tile_latent_min_size = vae_spatial_tile_sample_min_size // 8
         logger.info(f"Enabled spatial tiling with min size {vae_spatial_tile_sample_min_size}")
-    # elif vae_tiling:
-    else:
+    elif vae_tiling:
         vae.enable_spatial_tiling(True)
 
     return vae

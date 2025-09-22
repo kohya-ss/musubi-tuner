@@ -114,7 +114,7 @@ python src/musubi_tuner/fpack_cache_latents.py \
     --dataset_config path/to/toml \
     --vae path/to/vae_model.safetensors \
     --image_encoder path/to/image_encoder_model.safetensors \
-    --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 
+    --vae_chunk_size 32 
 ```
 
 Key differences from HunyuanVideo caching:
@@ -123,7 +123,9 @@ Key differences from HunyuanVideo caching:
 -  The script generates multiple cache files per video, each corresponding to a different section, with the section index appended to the filename (e.g., `..._frame_pos-0000-count_...` becomes `..._frame_pos-0000-0000-count_...`, `..._frame_pos-0000-0001-count_...`, etc.).
 -   Image embeddings are calculated using the Image Encoder and stored in the cache files alongside the latents.
 
-For VRAM savings during VAE decoding, consider using `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size`. If VRAM is overflowing and using shared memory, it is recommended to set `--vae_chunk_size` to 16 or 8, and `--vae_spatial_tile_sample_min_size` to 64 or 32.
+For VRAM savings during VAE decoding, consider using `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size`. If VRAM is overflowing and using shared memory, it is recommended to set `--vae_chunk_size` to 16 or 8 to lower Conv3D chunk size. If VRAM is still an issue, consider specifying `--vae_spatial_tile_sample_min_size` to 64 or 32. This option enables tiling during VAE encoding and decoding. `--vae_tiling` option is also available to enable tiling with the default tile size of 32.
+
+Note that the quality may be slightly lower when using tiling. Chunking does not affect quality.
 
 Specifying `--f1` is required for FramePack-F1 training. For one-frame training, specify `--one_frame`. If you change the presence of these options, please overwrite the existing cache without specifying `--skip_existing`.
 
@@ -149,7 +151,9 @@ HunyuanVideoのキャッシングとの主な違いは次のとおりです。
 -  スクリプトは、各ビデオに対して複数のキャッシュファイルを生成します。各ファイルは異なるセクションに対応し、セクションインデックスがファイル名に追加されます（例：`..._frame_pos-0000-count_...`は`..._frame_pos-0000-0000-count_...`、`..._frame_pos-0000-0001-count_...`などになります）。
 -  画像埋め込みは画像エンコーダーを使用して計算され、latentとともにキャッシュファイルに保存されます。
 
-VAEのdecode時のVRAM節約のために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`を使用することを検討してください。VRAMがあふれて共有メモリを使用している場合には、`--vae_chunk_size`を16、8などに、`--vae_spatial_tile_sample_min_size`を64、32などに変更することをお勧めします。
+VAEのdecode時のVRAM節約のために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`を使用することを検討してください。VRAMがあふれて共有メモリを使用している場合には、`--vae_chunk_size`を16、8などに設定してConv3Dチャンクを有効にすることをお勧めします。VRAMがまだ不足する場合は、`--vae_spatial_tile_sample_min_size`を64、32などに指定してください。このオプションはVAEのエンコードとデコード時にタイリングを有効にします。`--vae_tiling`オプションも利用可能で、デフォルトのタイルサイズ32でタイル処理を有効にします。
+
+タイリングを有効にすると品質はわずかに低下する可能性があります。チャンク処理は品質に影響しません。
 
 FramePack-F1の学習を行う場合は`--f1`を指定してください。これらのオプションの有無を変更する場合には、`--skip_existing`を指定せずに既存のキャッシュを上書きしてください。
 
@@ -248,7 +252,7 @@ HunyuanVideoの学習との主な違いは次のとおりです。
 -  `--network_module networks.lora_framepack`を指定する必要があります。
 -  必要に応じて`--latent_window_size`引数（デフォルト9）を指定できます（キャッシング時と一致させる必要があります）。
 -  `--fp8`（DiT用）や`--fp8_llm`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
--  サンプル生成時にメモリ不足を防ぐため、VAE用の`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`オプションが利用可能です（キャッシング時と同様）。
+-  サンプル生成時にメモリ不足を防ぐため、VAE用の`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`、`--vae_tiling`オプションが利用可能です（キャッシング時と同様）。
 -  メモリ節約のために`--gradient_checkpointing`が利用可能です。
 - バッチサイズが1より大きい場合にエラーが出た時には（特に`--sdpa`や`--xformers`を指定すると必ずエラーになります。）、`--split_attn`を指定してください。
 
@@ -269,7 +273,7 @@ python src/musubi_tuner/fpack_generate_video.py \
     --prompt "A cat walks on the grass, realistic style." \
     --video_size 512 768 --video_seconds 5 --fps 30 --infer_steps 25 \
     --attn_mode sdpa --fp8_scaled \
-    --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 \
+    --vae_chunk_size 32 \
     --save_path path/to/save/dir --output_type both \
     --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
 ```
@@ -289,7 +293,7 @@ Key differences from HunyuanVideo inference:
 -   `--embedded_cfg_scale` (default 10.0) controls the distilled guidance scale.
 -   `--guidance_scale` (default 1.0) controls the standard classifier-free guidance scale. **Changing this from 1.0 is generally not recommended for the base FramePack model.**
 -   `--guidance_rescale` (default 0.0) is available but typically not needed.
--   `--bulk_decode` option can decode all frames at once, potentially faster but uses more VRAM during decoding. `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size` options are recommended to prevent out-of-memory errors.
+-   `--bulk_decode` option can decode all frames at once, potentially faster but uses more VRAM during decoding. `--vae_chunk_size` option is recommended to prevent out-of-memory errors.
 -   `--sample_solver` (default `unipc`) is available but only `unipc` is implemented.
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
 - `--latent_paddings` option overrides the default padding for each section. Specify it as a comma-separated list of integers, e.g., `--latent_paddings 0,0,0,0`. This option is ignored if `--f1` is specified.
@@ -297,7 +301,7 @@ Key differences from HunyuanVideo inference:
 - `--rope_scaling_timestep_threshold` option is the RoPE scaling timestep threshold, default is None (disabled). If set, RoPE scaling is applied only when the timestep exceeds the threshold. Start with around 800 and adjust as needed. This option is intended for one-frame inference and may not be suitable for other cases.
 - `--rope_scaling_factor` option is the RoPE scaling factor, default is 0.5, assuming a resolution of 2x. For 1.5x resolution, around 0.7 is recommended.
 
-Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable.
+Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable. `--vae_tiling` option is also available.
 
 `--output_type` supports `latent_images` in addition to the options available in HunyuanVideo/Wan2.1. This option saves the latent and image files in the specified directory. 
 
@@ -324,7 +328,7 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  `--embedded_cfg_scale`（デフォルト10.0）は、蒸留されたガイダンススケールを制御します。通常は変更しないでください。
 -  `--guidance_scale`（デフォルト1.0）は、標準の分類器フリーガイダンススケールを制御します。**FramePackモデルのベースモデルでは、通常1.0から変更しないことをお勧めします。**
 -  `--guidance_rescale`（デフォルト0.0）も利用可能ですが、通常は必要ありません。
--  `--bulk_decode`オプションは、すべてのフレームを一度にデコードできるオプションです。高速ですが、デコード中にVRAMを多く使用します。VRAM不足エラーを防ぐために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`オプションを指定することをお勧めします。
+-  `--bulk_decode`オプションは、すべてのフレームを一度にデコードできるオプションです。高速ですが、デコード中にVRAMを多く使用します。VRAM不足エラーを防ぐために、`--vae_chunk_size`オプションを指定することをお勧めします。
 -  `--sample_solver`（デフォルト`unipc`）は利用可能ですが、`unipc`のみが実装されています。
 -  `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
 - `--latent_paddings`オプションは、各セクションのデフォルトのパディングを上書きします。カンマ区切りの整数リストとして指定します。例：`--latent_paddings 0,0,0,0`。`--f1`を指定した場合は無視されます。
@@ -332,7 +336,9 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 - `--rope_scaling_timestep_threshold`オプションはRoPEスケーリングのタイムステップ閾値で、デフォルトはNone（無効）です。設定すると、タイムステップが閾値以上の場合にのみRoPEスケーリングが適用されます。800程度から初めて調整してください。1フレーム推論時での使用を想定しており、それ以外の場合は想定していません。
 - `--rope_scaling_factor`オプションはRoPEスケーリング係数で、デフォルトは0.5で、解像度が2倍の場合を想定しています。1.5倍なら0.7程度が良いでしょう。
 
-`--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。
+`--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。また`--vae_tiling`オプションも利用可能です。
+
+`--output_type`はHunyuanVideo/Wan2.1で利用可能なオプションに加えて、`latent_images`をサポートしています。このオプションは、指定されたディレクトリにlatentと画像ファイルを保存します。
 
 `--lora_weight`に指定できるLoRAの重みは、当リポジトリで学習したFramePackの重み以外に、当リポジトリのHunyuanVideoのLoRA、diffusion-pipeのHunyuanVideoのLoRAが指定可能です（自動判定）。
 

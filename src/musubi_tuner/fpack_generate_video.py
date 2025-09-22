@@ -237,6 +237,11 @@ def parse_args() -> argparse.Namespace:
         choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  # "flash2", "flash3",
         help="attention mode",
     )
+    parser.add_argument(
+        "--vae_tiling",
+        action="store_true",
+        help="enable spatial tiling for VAE, default is False. If vae_spatial_tile_sample_min_size is set, this is automatically enabled",
+    )
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
@@ -1194,7 +1199,9 @@ def generate(
         if shared_models and "vae" in shared_models:  # Should not happen with new load_shared_models
             vae_instance_for_return = shared_models["vae"]
         else:
-            vae_instance_for_return = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device)
+            vae_instance_for_return = load_vae(
+                args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, args.vae_tiling, device
+            )
 
         height, width, video_seconds, context, context_null, context_img, end_latent, control_latents, control_mask_images = (
             prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)  # Pass VAE
@@ -1849,7 +1856,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # 1. Precompute Image Data (VAE and Image Encoders)
     logger.info("Loading VAE and Image Encoders for batch image preprocessing...")
-    vae_for_batch = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, "cpu")
+    vae_for_batch = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, args.vae_tiling, "cpu")
     feature_extractor_batch, image_encoder_batch = load_image_encoders(args)  # Assume loads to CPU
 
     all_precomputed_image_data = []
@@ -2110,7 +2117,18 @@ def main():
             if os.path.splitext(latent_path)[1] != ".safetensors":
                 latents = torch.load(latent_path, map_location="cpu")
             else:
-                latents = load_file(latent_path)["latent"]
+                state_dict = load_file(latent_path)
+                if "latent" in state_dict:
+                    latents = state_dict["latent"]
+                else:
+                    for key in state_dict:
+                        if key.startswith("latent") and state_dict[key].ndim >= 4:
+                            latents = state_dict[key]
+                            logger.warning(f"'latent' not found in state_dict. Using '{key}' instead.")
+                            break
+                    else:
+                        raise KeyError(f"'latent' not found in state_dict keys: {list(state_dict.keys())}")
+
                 with safe_open(latent_path, framework="pt") as f:
                     metadata = f.metadata()
                 if metadata is None:
@@ -2140,7 +2158,7 @@ def main():
             args.seed = seeds[i]
             metadata = metadata_list[i]
 
-            vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device)
+            vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, args.vae_tiling, device)
             save_output(args, vae, latent, device, original_base_names, metadata=metadata)
 
     elif args.from_file:
