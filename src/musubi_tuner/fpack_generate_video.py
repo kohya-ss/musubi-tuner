@@ -1875,7 +1875,7 @@ def generate_with_one_frame_inference(
     return real_history_latents
 
 
-def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, width: int) -> str:
+def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, width: int, postfix: Optional[str] = None) -> str:
     """Save latent to file
 
     Args:
@@ -1894,7 +1894,9 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     seed = args.seed
     video_seconds = args.video_seconds
 
-    latent_path = f"{save_path}/{time_flag}_{seed}_latent.safetensors"
+    if postfix is None:
+        postfix = ""
+    latent_path = f"{save_path}/{time_flag}{postfix}_{seed}_latent.safetensors"
 
     if args.no_metadata:
         metadata = None
@@ -2230,8 +2232,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
                     if batch_prompt_args[0].output_type in ["latent", "both", "latent_images"]:
                         height = current_image_data[0]["height"]
                         width = current_image_data[0]["width"]
-                        for latent_i, prompt_args_item in zip(latents, batch_prompt_args):
-                            save_latent(latent_i, prompt_args_item, height, width)
+                        for j, (latent_i, prompt_args_item) in enumerate(zip(latents, batch_prompt_args)):
+                            save_latent(latent_i, prompt_args_item, height, width, postfix=f"_{j}")
 
                     all_latents.extend(latents)
                 except Exception as e:
@@ -2273,7 +2275,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             # save_output expects latent to be [BCTHW] or [CTHW]. generate returns [BCTHW] (batch size 1).
             # latent[0] is correct if generate returns it with batch dim.
             # The latent from generate is (1, C, T, H, W)
-            save_output(current_args, vae_for_batch, latent[0], device)  # Pass vae_for_batch
+            save_output(current_args, vae_for_batch, latent, device)  # Pass vae_for_batch
 
         vae_for_batch.to("cpu")  # Move VAE back to CPU
 
