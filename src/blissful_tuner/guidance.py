@@ -41,10 +41,10 @@ def perpendicular_negative_cfg(
 def apply_zerostar_scaling(cond: torch.Tensor, uncond: torch.Tensor, guidance_scale: float) -> torch.Tensor:
     """Function to apply CFGZero* scaling"""
     batch_size = cond.shape[0]
-    positive_flat = cond.view(batch_size, -1)
-    negative_flat = uncond.view(batch_size, -1)
+    positive_flat = cond.reshape(batch_size, -1)
+    negative_flat = uncond.reshape(batch_size, -1)
     alpha = optimized_scale(positive_flat, negative_flat)
-    alpha = alpha.view(batch_size, *([1] * (len(cond.shape) - 1)))
+    alpha = alpha.reshape(batch_size, *([1] * (len(cond.shape) - 1)))
     alpha = alpha.to(cond.dtype)
     # CFG formula modified with alpha
     noise_pred = uncond * alpha + guidance_scale * (cond - uncond * alpha)
