@@ -12,7 +12,7 @@ from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from musubi_tuner.wan.modules.attention import flash_attention
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 
@@ -20,7 +20,6 @@ __all__ = ["WanModel"]
 
 # blissful start
 from einops import repeat
-from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.advanced_rope import apply_rope_comfy, EmbedND_RifleX
 from blissful_tuner.guidance import nag
 from blissful_tuner.blissful_logger import BlissfulLogger
@@ -899,8 +898,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 Whether to move the weight to the device after optimization.
         """
         # inplace optimization
+        quantization_mode = "block" if not use_scaled_mm else "tensor"
+        logger.info(f"Using per '{quantization_mode}' quantization mode as scaled_mm/fp8_fast {'is' if use_scaled_mm else 'is not'} enabled")
         state_dict = optimize_state_dict_with_fp8(
-            state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device
+            state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device, quantization_mode=quantization_mode
         )
 
         # apply monkey patching
@@ -1259,7 +1260,8 @@ def load_wan_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
-
+    quantization_mode = "block" if not use_scaled_mm else "tensor"
+    logger.info(f"Using per '{quantization_mode}' quantization mode as scaled_mm/fp8_fast {'is' if use_scaled_mm else 'is not'} enabled")
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
@@ -1268,7 +1270,8 @@ def load_wan_model(
         calc_device=device,
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
-        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        quantization_mode=quantization_mode
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

@@ -18,7 +18,7 @@ from musubi_tuner.utils.device_utils import synchronize_device, clean_memory_on_
 from musubi_tuner.hunyuan_model.posemb_layers import get_nd_rotary_pos_embed
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import load_safetensors
-from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
@@ -642,8 +642,16 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
     ) -> dict[str, torch.Tensor]:
         params_to_keep = {"norm", "time_in", "vector_in", "guidance_in", "txt_in", "img_in", "modulation", "bias", "head"}
         logger.info(f"Scaling transformer to FP8{' and enabling fp8_fast/mm_scaled' if use_scaled_mm else ''}...")
+        quantization_mode = "block" if not use_scaled_mm else "tensor"
+        logger.info(
+            f"Using per '{quantization_mode}' quantization mode as scaled_mm/fp8_fast {'is' if use_scaled_mm else 'is not'} enabled"
+        )
         state_dict = optimize_state_dict_with_fp8(
-            state_dict, device, target_layer_keys=["single_blocks", "double_blocks"], exclude_layer_keys=params_to_keep
+            state_dict,
+            device,
+            target_layer_keys=["single_blocks", "double_blocks"],
+            exclude_layer_keys=params_to_keep,
+            quantization_mode=quantization_mode,
         )
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
         return state_dict

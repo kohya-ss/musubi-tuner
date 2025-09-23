@@ -169,63 +169,108 @@ wandbを使用する場合は、`--log_tracker_name`でプロジェクト名を�
 
 ## FP8 weight optimization for models / モデルの重みのFP8への最適化
 
-The `--fp8_scaled` option is available to quantize the weights of the model to FP8 (E4M3) format with appropriate scaling. This reduces the VRAM usage while maintaining precision. Important weights are kept in FP16/BF16/FP32 format.
+The `--fp8_scaled` option performs an offline optimization pass that rewrites selected Linear weights into FP8 (E4M3) with block-wise scaling. Compared with the legacy `--fp8` cast, it reduces VRAM usage while maintaining relatively high precision.
 
-The model weights must be in fp16 or bf16. Weights that have been pre-converted to float8_e4m3 cannot be used.
+From v0.2.12, block-wise scaling is supported instead of per-tensor scaling, allowing for higher precision quantization.
 
-Wan2.1 inference and training are supported.
+This flow dequantizes back the weights to the FP16/BF16/FP32 weights during the forward path, and computes in FP16/BF16/FP32. The shared routines live in `src/musubi_tuner/modules/fp8_optimization_utils.py` and are wired into the Wan2.x, FramePack, FLUX.1 Kontext, and Qwen-Image pipelines (except HunyuanVideo, which `--fp8_scaled` is not supported).
 
-Specify the `--fp8_scaled` option in addition to the `--fp8` option during inference.
-
-Specify the `--fp8_scaled` option in addition to the `--fp8_base` option during training.
-
-Acknowledgments: This feature is based on the [implementation](https://github.com/Tencent/HunyuanVideo/blob/7df4a45c7e424a3f6cd7d653a7ff1f60cddc1eb1/hyvideo/modules/fp8_optimization.py) of [HunyuanVideo](https://github.com/Tencent/HunyuanVideo). The selection of high-precision modules is based on the [implementation](https://github.com/tdrussell/diffusion-pipe/blob/407c04fdae1c9ab5e67b54d33bef62c3e0a8dbc7/models/wan.py) of [diffusion-pipe](https://github.com/tdrussell/diffusion-pipe). I would like to thank these repositories.
+Acknowledgments: This idea is based on the [implementation](https://github.com/Tencent/HunyuanVideo/blob/7df4a45c7e424a3f6cd7d653a7ff1f60cddc1eb1/hyvideo/modules/fp8_optimization.py) of [HunyuanVideo](https://github.com/Tencent/HunyuanVideo). The selection of high-precision modules is referenced from the [implementation](https://github.com/tdrussell/diffusion-pipe/blob/407c04fdae1c9ab5e67b54d33bef62c3e0a8dbc7/models/wan.py) of [diffusion-pipe](https://github.com/tdrussell/diffusion-pipe). I would like to thank these repositories.
 
 <details>
 <summary>日本語</summary>
-重みを単純にFP8へcastするのではなく、適切なスケーリングでFP8形式に量子化することで、精度を維持しつつVRAM使用量を削減します。また、重要な重みはFP16/BF16/FP32形式で保持します。
 
-モデルの重みは、fp16またはbf16が必要です。あらかじめfloat8_e4m3に変換された重みは使用できません。
+`--fp8_scaled` オプションは、対象の Linear 層の重みを、blockごとに適切な倍率でスケーリングした FP8 (E4M3) に書き換える前処理を実行します。従来の `--fp8` による単純なキャストと比べて、元の精度を比較的保ったまま VRAM を削減できます。
 
-Wan2.1の推論、学習のみ対応しています。
+v0.2.12から、テンソルごとのスケーリングではなく、ブロック単位のスケーリングに対応しました。これにより、より高い精度での量子化が可能になります。
 
-推論時は`--fp8`オプションに加えて `--fp8_scaled`オプションを指定してください。
+forward の計算は、逆量子化を行なった重みで FP16/BF16 で行われます。共通ルーチンは `src/musubi_tuner/modules/fp8_optimization_utils.py` にあり、Wan 2.x・FramePack・FLUX.1 Kontext・Qwen-Image の各パイプラインで利用されます（HunyuanVideo については `--fp8_scaled` オプションは無効です）。
 
-学習時は`--fp8_base`オプションに加えて `--fp8_scaled`オプションを指定してください。
-
-謝辞：この機能は、[HunyuanVideo](https://github.com/Tencent/HunyuanVideo)の[実装](https://github.com/Tencent/HunyuanVideo/blob/7df4a45c7e424a3f6cd7d653a7ff1f60cddc1eb1/hyvideo/modules/fp8_optimization.py)を参考にしました。また、高精度モジュールの選択においては[diffusion-pipe](https://github.com/tdrussell/diffusion-pipe)の[実装](https://github.com/tdrussell/diffusion-pipe/blob/407c04fdae1c9ab5e67b54d33bef62c3e0a8dbc7/models/wan.py)を参考にしました。これらのリポジトリに感謝します。
+このアイデアは、[HunyuanVideo](https://github.com/Tencent/HunyuanVideo) の [実装](https://github.com/Tencent/HunyuanVideo/blob/7df4a45c7e424a3f6cd7d653a7ff1f60cddc1eb1/hyvideo/modules/fp8_optimization.py) に基づいています。高精度モジュールの選定は、[diffusion-pipe](https://github.com/tdrussell/diffusion-pipe) の [実装](https://github.com/tdrussell/diffusion-pipe/blob/407c04fdae1c9ab5e67b54d33bef62c3e0a8dbc7/models/wan.py) を参考にしています。これらのリポジトリに感謝します。
 
 </details>
 
-### Key features and implementation details / 主な特徴と実装の詳細
+### Usage summary / 使い方のまとめ
 
-- Implements FP8 (E4M3) weight quantization for Linear layers
-- Reduces VRAM requirements by using 8-bit weights for storage (slightly increased compared to existing `--fp8` `--fp8_base` options)
-- Quantizes weights to FP8 format with appropriate scaling instead of simple cast to FP8
-- Maintains computational precision by dequantizing to original precision (FP16/BF16/FP32) during forward pass
-- Preserves important weights in FP16/BF16/FP32 format
-
-The implementation:
-
-1. Quantizes weights to FP8 format with appropriate scaling
-2. Replaces weights by FP8 quantized weights and stores scale factors in model state dict
-3. Applies monkey patching to Linear layers for transparent dequantization during computation
+- Inference: add `--fp8` and `--fp8_scaled` when running `wan_generate_video.py`, `fpack_generate_video.py`, `flux_kontext_generate_image.py`, or `qwen_image_generate_image.py`. HunyuanVideo continues to rely on `--fp8`/`--fp8_fast` without scaled weights.
+- Training: specify `--fp8_base --fp8_scaled` in `wan_train_network.py`, `fpack_train_network.py`,`flux_kontext_train_network.py` and `qwen_image_train_network.py`; the trainers enforce this pairing.
+- Input checkpoints must be FP16/BF16; pre-quantized FP8 weights cannot be re-optimized.
+- LoRA / LyCORIS weights are merged before quantization, so no additional steps are required.
 
 <details>
 <summary>日本語</summary>
 
-- Linear層のFP8（E4M3）重み量子化を実装
+- 推論では `wan_generate_video.py`、`fpack_generate_video.py`、`flux_kontext_generate_image.py`、`qwen_image_generate_image.py` を実行する際に `--fp8` と `--fp8_scaled` を併用してください。HunyuanVideo は引き続き`--fp8` / `--fp8_fast` を使用し、スケーリング付き重みは未対応です。
+- 学習では `wan_train_network.py`、`fpack_train_network.py`、`flux_kontext_train_network.py` で `--fp8_base --fp8_scaled` を指定します。
+- 読み込むチェックポイントは FP16/BF16 である必要があります。あらかじめ FP8 化された重みは再最適化できません。
+- LoRA / LyCORIS の重みは量子化の前に自動でマージされるため、追加作業は不要です。
+
+</details>
+
+### Implementation highlights / 実装のポイント
+
+
+When `--fp8_scaled` flag is enabled, the loader loads the base weights in FP16/BF16, merges optional LoRA or LyCORIS, and then emits FP8 weights plus matching block-wise `.scale_weight` buffers for the targeted layers. The patched forward either dequantizes back to the original dtype on demand for computation.
+
+The current scripts in this repository use FP8 E4M3 format and block-wise quantization, but the implementation supports:
+
+- Implements FP8 (E4M3 or E5M2) weight quantization for Linear layers
+- Supports multiple quantization modes: tensor-wise, channel-wise, and block-wise quantization described below
+- Block-wise quantization provides better precision by using granular scaling with configurable block size (default: 64)
+- Reduces VRAM requirements by using 8-bit weights for storage (slightly increased compared to existing `--fp8` `--fp8_base` options)
+- Quantizes weights to FP8 format with appropriate scaling instead of simple cast to FP8
+- Applies monkey patching to Linear layers for transparent dequantization during computation
+- Maintains computational precision by dequantizing to original precision (FP16/BF16) during forward pass
+- Preserves important weights for example norm, embedding, modulation in FP16/BF16 format (fewer exclusions than previous versions)
+
+For quantization and precision discussion, see also [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564).
+
+Note: Testing for quantization other than E4M3/block-wise is limited, so please be cautious if you plan to use the code in other projects.
+
+<details>
+<summary>日本語</summary>
+
+`--fp8_scaled` フラグを有効にすると、ローダーはまずベースとなる重みを FP16/BF16 のまま読み込み、必要に応じて LoRA や LyCORIS をマージした後、対象層の重みを FP8 の重みと、ブロックごとの `.scale_weight` バッファへ変換します。forward ではこのスケールを使って元の精度へ動的に逆量子化し計算を行います。
+
+このリポジトリの現在のスクリプトでは、量子化はFP8 E4M3形式、ブロック単位量子化が用いられていますが、実装としては以下をサポートしています：
+
+- Linear層のFP8（E4M3またはE5M2）重み量子化を実装
+- 複数の量子化モード対応：テンソル単位、チャネル単位、ブロック単位量子化
+- ブロック単位量子化は指定したブロックサイズ（デフォルト：64）での細粒度スケーリングによりより高い精度を提供
 - 8ビットの重みを使用することでVRAM使用量を削減（既存の`--fp8` `--fp8_base` オプションに比べて微増）
 - 単純なFP8へのcastではなく、適切な値でスケールして重みをFP8形式に量子化
-- forward時に元の精度（FP16/BF16/FP32）に逆量子化して計算精度を維持
-- 精度が重要な重みはFP16/BF16/FP32のまま保持
+- Linear層にmonkey patchingを適用し、計算時に透過的に逆量子化
+- forward時に元の精度（FP16/BF16）に逆量子化して計算精度を維持
+- 精度が重要な重み、たとえばnormやembedding、modulationは、FP16/BF16のまま保持（従来バージョンより除外対象を削減）
 
-実装:
+量子化と精度については[Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564)も参照してください。
 
-1. 精度を維持できる適切な倍率で重みをFP8形式に量子化
-2. 重みをFP8量子化重みに置き換え、倍率をモデルのstate dictに保存
-3. Linear層にmonkey patchingすることでモデルを変更せずに逆量子化
- </details>
+※E4M3/ブロック単位以外の量子化のテストは不十分ですので、コードを他のプロジェクトで利用する場合等には注意してください。
+
+</details>
+
+### Quantization modes / 量子化モード
+
+The current implementation supports three quantization modes:
+
+- **Block-wise quantization (default)**: Divides weight matrices into blocks of configurable size (default: 64) and calculates separate scale factors for each block. Provides the best precision but requires more memory for scale storage.
+- **Channel-wise quantization**: Calculates scale factors per output channel (row). Balances precision and memory usage.
+- **Tensor-wise quantization**: Uses a single scale factor for the entire weight tensor. Lowest memory usage but may have reduced precision for some weights.
+
+The implementation automatically falls back to simpler modes when block-wise quantization is not feasible (e.g., when weight dimensions are not divisible by block size).
+
+<details>
+<summary>日本語</summary>
+
+現在の実装では3つの量子化モードをサポートしています：
+
+- **ブロック単位量子化（デフォルト）**：重み行列を設定可能なサイズのブロック（デフォルト：64）に分割し、各ブロックに対して個別のスケール係数を計算します。最高の精度を提供しますが、スケール保存により追加メモリが必要です。
+- **チャネル単位量子化**：出力チャネル（行）ごとにスケール係数を計算します。精度とメモリ使用量のバランスを取ります。
+- **テンソル単位量子化**：重みテンソル全体に対して単一のスケール係数を使用します。最も少ないメモリ使用量ですが、一部の重みで精度が低下する場合があります。
+
+実装では、ブロック単位量子化が実行不可能な場合（重み次元がブロックサイズで割り切れない場合など）、自動的により単純なモードにフォールバックします。
+
+</details>
 
  ## PyTorch Dynamo optimization for model training / モデルの学習におけるPyTorch Dynamoの最適化
 

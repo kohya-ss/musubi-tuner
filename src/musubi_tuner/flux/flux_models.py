@@ -13,7 +13,7 @@ from torch.utils.checkpoint import checkpoint
 
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
-
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
@@ -942,17 +942,18 @@ class Flux(nn.Module):
             "guidance_in",
             "img_in",
             "final_layer",
-            "modulation",  # Saves lots of mem to fp8 these and doesn't seem to hurt quality
-            "img_mod",
+            #"modulation",  # Saves lots of mem to fp8 these and doesn't seem to hurt quality much since blockwise
+            #"img_mod",
             #"img_mlp",
-            "txt_mod",
+            #"txt_mod",
             #"txt_mlp"
         ]
 
-        from blissful_tuner.fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-
+        from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+        quantization_mode = "block" if not use_scaled_mm else "tensor"
+        logger.info(f"Using per '{quantization_mode}' quantization mode as scaled_mm/fp8_fast {'is' if use_scaled_mm else 'is not'} enabled")
         # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device, quantization_mode=quantization_mode)
 
         # apply monkey patching
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
