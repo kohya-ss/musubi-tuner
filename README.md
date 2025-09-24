@@ -122,6 +122,9 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 24, 2025
+    - Added `--force_v2_1_time_embedding` option to Wan2.2 LoRA training and inference scripts. See [PR #586](https://github.com/kohya-ss/musubi-tuner/pull/586) This option can reduce VRAM usage. See [Wan documentation](./docs/wan.md#training--学習) for details.
+    
 - September 23, 2025
     - The method of quantization when the `--fp8_scaled` option is specified has been changed from per-tensor to block-wise scaling. See [PR #575](https://github.com/kohya-ss/musubi-tuner/pull/575) [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564) for more details.
         - This improves the accuracy of FP8 quantization, leading to more stable training and improved inference accuracy for each model (except HunyuanVideo). Training and inference speed may decrease slightly.

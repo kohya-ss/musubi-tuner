@@ -195,6 +195,8 @@ When training Wan2.2 high and low models, you can use `--offload_inactive_dit` t
 
 For Wan2.2 models, `--discrete_flow_shift` may need to be adjusted based on I2V and T2V. According to the official implementation, the shift values in inference are 12.0 for T2V and 5.0 for I2V. The shift values during training do not necessarily have to match those during inference, but they may serve as a useful reference.
 
+`--force_v2_1_time_embedding` uses the same shape of time embedding as Wan2.1. This can reduce VRAM usage during inference and training (the larger the resolution and number of frames, the greater the reduction). Although this is different from the official implementation of Wan2.2, it seems that there is no effect on inference or training within the range that has been confirmed.
+
 Don't forget to specify `--network_module networks.lora_wan`.
 
 Other options are mostly the same as `hv_train_network.py`. See [HunyuanVideo documentation](./hunyuan_video.md#training--学習) and `--help` for details.
@@ -230,6 +232,8 @@ Wan2.2モデルの場合、高ノイズ用モデルまたは低ノイズ用モ�
 またWan2.2モデルで両方のモデルを学習するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができ、VRAMを節約できます（`--blocks_to_swap`未指定時のみ有効）。
 
 Wan2.2の場合、I2VとT2Vで`--discrete_flow_shift`を調整する必要があるかもしれません。公式実装によると、推論時のシフト値はT2Vで12.0、I2Vで5.0です。学習時のシフト値は推論時度必ずしも合わせる必要はありませんが、参考になるかもしれません。
+
+`--force_v2_1_time_embedding` を指定すると、Wan2.1と同じ形状の時間埋め込みを使用します。これにより推論中、学習中のVRAM使用量を削減できます（解像度やフレーム数が大きいほど削減量も大きくなります）。Wan2.2の公式実装とは異なりますが、確認した範囲では推論、学習共に影響はないようです。
 
 `--network_module` に `networks.lora_wan` を指定することを忘れないでください。
 
@@ -316,6 +320,8 @@ Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory con
 
 `--blocks_to_swap` is the number of blocks to swap during inference. The default value is None (no block swap). The maximum value is 39 for 14B model and 29 for 1.3B model.
 
+`--force_v2_1_time_embedding` uses the same shape of time embedding as Wan2.1 for Wan2.2. See the training section for details.
+
 `--vae_cache_cpu` enables VAE cache in main memory. This reduces VRAM usage slightly but processing is slower.
 
 `--compile` enables torch.compile. See [here](/README.md#inference) for details.
@@ -368,6 +374,8 @@ Wan2.2モデルの場合、`--dit`に低ノイズ用モデルを、`--dit_high_n
 `--guidance_scale` でclassifier free guianceのガイダンススケールを指定できます（デフォルト5.0）。Wan2.2の場合は、`--guidance_scale_high_noise` で高ノイズ用モデルのガイダンススケールを別に指定できます。
 
 `--blocks_to_swap` は推論時のblock swapの数です。デフォルト値はNone（block swapなし）です。最大値は14Bモデルの場合39、1.3Bモデルの場合29です。
+
+`--force_v2_1_time_embedding` はWan2.2の場合に有効で、Wan2.1と同じ形状の時間埋め込みを使用します。詳細は学習セクションを参照してください。
 
 `--vae_cache_cpu` を有効にすると、VAEのキャッシュをメインメモリに保持します。VRAM使用量が多少減りますが、処理は遅くなります。
 

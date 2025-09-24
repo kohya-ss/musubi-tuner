@@ -120,6 +120,9 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/09/24
+    - Wan2.2のLoRA学習および推論スクリプトに`--force_v2_1_time_embedding`オプションを追加しました。[PR #586](https://github.com/kohya-ss/musubi-tuner/pull/586) このオプションを指定することでVRAM使用量を削減できます。詳細は[Wanのドキュメント](./docs/wan.md#training--学習)を参照してください。
+    
 - 2025/09/23
     - `--fp8_scaled`オプションを指定した時の量子化方法を、per-tensorからblock-wise scalingに変更しました。[PR #575](https://github.com/kohya-ss/musubi-tuner/pull/575) [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564)も参照してください。
         - これによりFP8量子化の精度が向上し、各モデル（HunyuanVideoを除く）学習の安定、推論精度の向上が期待できます。学習、推論速度はわずかに低下します。
