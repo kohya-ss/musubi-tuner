@@ -64,6 +64,15 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/09/23
+    - `--fp8_scaled`オプションを指定した時の量子化方法を、per-tensorからblock-wise scalingに変更しました。[PR #575](https://github.com/kohya-ss/musubi-tuner/pull/575) [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564)も参照してください。
+        - これによりFP8量子化の精度が向上し、各モデル（HunyuanVideoを除く）学習の安定、推論精度の向上が期待できます。学習、推論速度はわずかに低下します。
+        - Qwen-ImageのLoRA学習では、量子化対象モジュールの見直しにより、学習に必要なVRAMが5GB程度削減されます。
+        - 詳細は[高度な設定のドキュメント](./docs/advanced_config.md#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化)を参照してください。
+
+- 2025/09/22
+    - FramePackのVAEについて強制的にtilingが有効になっていた不具合を修正しました。`--vae_tiling`オプションを指定するか、`--vae_spatial_tile_sample_min_size`を指定することでtilingが有効になります。[PR #583](https://github.com/kohya-ss/musubi-tuner/pull/583)
+
 - 2025/09/20
     - `qwen_image_generate_image.py` で`--from_file`での生成が動作しない不具合が修正されました。[PR #553](https://github.com/kohya-ss/musubi-tuner/pull/553) および [PR #557](https://github.com/kohya-ss/musubi-tuner/pull/557) nmfisher 氏に感謝します。
         - また同スクリプトに`--append_original_name`オプションが追加されました。編集時に元の画像のベース名を出力ファイル名に追加します。
@@ -89,17 +98,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - 新しいLRスケジューラRexを追加しました。[PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513) xzuyn氏に感謝します。
         - powerを1未満に設定した Polynomial Scheduler に似ていますが、Rexは学習率の減少がより緩やかです。
         - 詳細は[高度な設定のドキュメント](./docs/advanced_config.md#rex)を参照してください。
-
-- 2025/09/02 (update)
-    - Qwen-Imageのfine tuningに対応しました。[PR #492](https://github.com/kohya-ss/musubi-tuner/pull/492)
-        - LoRA学習ではなくモデル全体を学習します。詳細は[Qwen-Imageのドキュメントのfinetuningの節](./docs/qwen_image.md#finetuning)を参照してください。
-
-- 2025/09/02
-    - ruffによるコード解析を導入しました。[PR #483](https://github.com/kohya-ss/musubi-tuner/pull/483) および[PR #488](https://github.com/kohya-ss/musubi-tuner/pull/488) arledesma 氏に感謝します。
-        - ruffはPythonのコード解析、整形ツールです。
-    - コードの貢献をいただく際は、`ruff check`を実行してコードスタイルを確認していただけると助かります。`ruff --fix`で自動修正も可能です。
-        - なおコードの整形はblackで行うか、ruffのblack互換フォーマットを使い、`line-length`を`132`に設定してください。
-        - ガイドライン等をのちほど整備する予定です。
 
 ### リリースについて
 

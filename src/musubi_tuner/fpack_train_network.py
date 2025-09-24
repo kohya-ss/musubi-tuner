@@ -486,7 +486,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
     def load_vae(self, args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
         vae_path = args.vae
         logger.info(f"Loading VAE model from {vae_path}")
-        vae = load_framepack_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, "cpu")
+        vae = load_framepack_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, args.vae_tiling, "cpu")
         return vae
 
     def load_transformer(
@@ -585,6 +585,11 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for LLM / LLMにfp8を使う")
     parser.add_argument("--text_encoder1", type=str, help="Text Encoder 1 directory / テキストエンコーダ1のディレクトリ")
     parser.add_argument("--text_encoder2", type=str, help="Text Encoder 2 directory / テキストエンコーダ2のディレクトリ")
+    parser.add_argument(
+        "--vae_tiling",
+        action="store_true",
+        help="enable spatial tiling for VAE, default is False. If vae_spatial_tile_sample_min_size is set, this is automatically enabled",
+    )
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"

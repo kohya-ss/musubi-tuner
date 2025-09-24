@@ -69,6 +69,15 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 23, 2025
+    - The method of quantization when the `--fp8_scaled` option is specified has been changed from per-tensor to block-wise scaling. See [PR #575](https://github.com/kohya-ss/musubi-tuner/pull/575) [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564) for more details.
+        - This improves the accuracy of FP8 quantization, leading to more stable training and improved inference accuracy for each model (except HunyuanVideo). Training and inference speed may decrease slightly.
+        - For LoRA training of Qwen-Image, the required VRAM for training is reduced by about 5GB due to a review of the quantized modules.
+        - See [Advanced Configuration documentation](./docs/advanced_config.md#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化) for details.
+
+- September 22, 2025
+    - A bug in FramePack where VAE was forcibly set to tiling has been fixed. Tiling is now enabled by specifying the `--vae_tiling` option or by setting `--vae_spatial_tile_sample_min_size`. See [PR #583](https://github.com/kohya-ss/musubi-tuner/pull/583)
+
 - September 20, 2025
     - A bug in `qwen_image_generate_image.py` where generation with `--from_file` did not work has been fixed. Thanks to nmfisher for [PR #553](https://github.com/kohya-ss/musubi-tuner/pull/553). Followed by [PR #557](https://github.com/kohya-ss/musubi-tuner/pull/557).
         - Additionally, the `--append_original_name` option has been added to the same script. This appends the base name of the original image to the output file name during editing.
@@ -94,17 +103,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
     - A new LR scheduler, Rex, has been added. Thanks to xzuyn for [PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513).
         - Similar to the Polynomial Scheduler with power set to less than 1, Rex has a more gradual decrease in learning rate.
         - See [Advanced Configuration documentation](./docs/advanced_config.md#rex) for details.
-        
-- September 2, 2025 (update)
-    - Fine-tuning for Qwen-Image has been added. See [PR #492](https://github.com/kohya-ss/musubi-tuner/pull/492).
-        - This trains the entire model rather than just the LoRA layers. See the [finetuning section of the Qwen-Image documentation](./docs/qwen_image.md#finetuning) for details.
-
-- September 2, 2025
-    - Code analysis with ruff has been introduced. Thanks to arledesma for [PR #483](https://github.com/kohya-ss/musubi-tuner/pull/483) and [PR #488](https://github.com/kohya-ss/musubi-tuner/pull/488).
-        - ruff is a Python code analysis and formatting tool.
-    - When contributing code, it would be helpful if you could run `ruff check` to verify the code style. Automatic fixes are also possible with `ruff --fix`.
-        - Note that code formatting should be done with `black`, and the `line-length` should be set to `132`.
-        - Guidelines will be developed later.
 
 ### Releases
 

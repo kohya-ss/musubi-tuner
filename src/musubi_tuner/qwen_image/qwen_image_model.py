@@ -1193,9 +1193,11 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
 
 
 FP8_OPTIMIZATION_TARGET_KEYS = ["transformer_blocks"]
+# modulation layers are large and block-wise scaling may be effective, so we quantize them
+# norm layers and time_text_embed are small and may be sensitive to quantization, so we skip them
 FP8_OPTIMIZATION_EXCLUDE_KEYS = [
     "norm",
-    "_mod",
+    # "_mod",
     "time_text_embed",
 ]
 

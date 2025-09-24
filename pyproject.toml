@@ -1,6 +1,6 @@
 [project]
 name = "musubi-tuner"
-version = "0.2.11"
+version = "0.2.12"
 description = "Musubi Tuner by kohya_ss"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
