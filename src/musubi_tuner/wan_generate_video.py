@@ -2027,7 +2027,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     if is_i2v or cfg.is_fun_control:
         logger.info("Loading VAE for I2V/Fun-control processing")
         vae = load_vae(args, cfg, device, vae_dtype)
-        vae.to_device("cpu")
+        vae.to_device("cpu" if cfg.is_fun_control else device)  # Cpu for fun control, device for i2v
 
     if is_i2v:  # Only need CLIP for Wan 2.1 I2V
         if not cfg.v2_2:
