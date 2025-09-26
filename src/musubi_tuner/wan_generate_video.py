@@ -2023,13 +2023,15 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     clean_memory_on_device(device)
 
     # 3. Process I2V additional encodings if needed
-    vae = None
-    if is_i2v:
-        logger.info("Loading VAE and CLIP for I2V preprocessing")
+    vae = clip = None
+    if is_i2v or cfg.is_fun_control:
+        logger.info("Loading VAE for I2V/Fun-control processing")
         vae = load_vae(args, cfg, device, vae_dtype)
-        vae.to_device(device)
+        vae.to_device("cpu")
 
+    if is_i2v:  # Only need CLIP for Wan 2.1 I2V
         if not cfg.v2_2:
+            logger.info("Loading CLIP for Wan 2.1 I2V preprocessing")
             clip = load_clip_model(args, cfg, device)
             clip.model.to(device)
 
@@ -2038,7 +2040,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             if "image_path" not in prompt_data:
                 continue
 
-            if not cfg.v2_2:
+            if not cfg.v2_2:  # Process batch CLIP context for 2.1
                 prompt_args = apply_overrides(args, prompt_data)
                 if not os.path.exists(prompt_args.image_path):
                     logger.warning(f"Image path not found: {prompt_args.image_path}")
@@ -2054,23 +2056,18 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
                 if prompt_args.end_image_path is not None and os.path.exists(prompt_args.end_image_path):
                     end_img = Image.open(prompt_args.end_image_path).convert("RGB")
                     end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
-                    end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
+                    with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
+                        end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
                     clip_context = torch.concat([clip_context, end_clip_context], dim=0)
-            else:
+            else:  # No clip context for 2.2
                 clip_context = None
 
+            # Stow it for later usage
             encoded_contexts[prompt_data["prompt"]]["clip_context"] = clip_context
 
         # Free CLIP and clean memory
-        del clip
+        del clip  # Safe now because we preset to None
         clean_memory_on_device(device)
-
-        # Keep VAE in CPU memory for later use
-        vae.to_device("cpu")
-    elif cfg.is_fun_control:
-        # For Fun-Control, we need VAE but keep it on CPU
-        vae = load_vae(args, cfg, device, vae_dtype)
-        vae.to_device("cpu")
 
     # 4. Load DiT model, 5. Merge LoRA weights if needed, and 6. Optimize model
     logger.info("Loading DiT model(s)")
