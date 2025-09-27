@@ -4,6 +4,7 @@ from importlib.util import find_spec
 import random
 import os
 import re
+import sys
 import time
 import math
 import copy
@@ -650,34 +651,37 @@ def load_dit_model(
         model.set_time_embedding_v2_1(True)
 
     # merge LoRA weights
-    if args.lycoris:
-        if lora_weights is not None and len(lora_weights) > 0:
-            merge_lora_weights(
-                lora_wan,
-                model,
-                lora_weights,
-                lora_multipliers,
-                args.include_patterns,
-                args.exclude_patterns,
-                device,
-                lycoris=True,
-                save_merged_model=args.save_merged_model,
-            )
-
-        if args.fp8_scaled:
-            # load state dict as-is and optimize to fp8
-            state_dict = model.state_dict()
-
-            # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
-            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
-
-            info = model.load_state_dict(state_dict, strict=True, assign=True)
-            logger.info(f"Loaded FP8 optimized weights: {info}")
+    if args.lycoris and lora_weights is not None and len(lora_weights) > 0:
+        merge_lora_weights(
+            lora_wan,
+            model,
+            lora_weights,
+            lora_multipliers,
+            args.include_patterns,
+            args.exclude_patterns,
+            device,
+            lycoris=True,
+        )
 
     # if we only want to save the model, we can skip the rest
     if args.save_merged_model:
-        return None
+        model.eval().requires_grad_(False)
+        clean_memory_on_device(device)
+        logger.info(f"Saving merged model to {args.save_merged_model}")
+        mem_eff_save_file(model.state_dict(), args.save_merged_model)  # save_file needs a lot of memory
+        logger.info("Model merged and saved. Exiting...")
+        sys.exit(0)
+
+    if args.lycoris and args.fp8_scaled:
+        # load state dict as-is and optimize to fp8
+        state_dict = model.state_dict()
+
+        # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
+        move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+
+        info = model.load_state_dict(state_dict, strict=True, assign=True)
+        logger.info(f"Loaded FP8 optimized weights: {info}")
 
     if not args.fp8_scaled:
         # simple cast to dit_weight_dtype
@@ -733,7 +737,6 @@ def merge_lora_weights(
     exclude_patterns: Optional[List[str]],
     device: torch.device,
     lycoris: bool = False,
-    save_merged_model: Optional[str] = None,
     converter: Optional[callable] = None,
 ) -> None:
     """merge LoRA weights to the model
@@ -747,7 +750,6 @@ def merge_lora_weights(
         exclude_patterns: regex patterns to exclude LoRA modules
         device: torch.device
         lycoris: use LyCORIS
-        save_merged_model: path to save merged model, if specified, no inference will be performed
         converter: Optional[callable] = None
     """
     if lora_weights is None or len(lora_weights) == 0:
@@ -803,12 +805,6 @@ def merge_lora_weights(
 
         synchronize_device(device)
         logger.info("LoRA weights loaded")
-
-    # save model here before casting to dit_weight_dtype
-    if save_merged_model:
-        logger.info(f"Saving merged model to {save_merged_model}")
-        mem_eff_save_file(model.state_dict(), save_merged_model)  # save_file needs a lot of memory
-        logger.info("Merged model saved")
 
 
 def prepare_t2v_inputs(
@@ -1560,10 +1556,6 @@ def generate(
         # load DiT models
         models = load_dit_models(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
 
-        # if we only want to save the model, we can skip the rest
-        if args.save_merged_model:
-            return None
-
     # setup scheduler
     scheduler, timesteps = setup_scheduler(args, cfg, device)
 
@@ -1896,10 +1888,6 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     # 4. Load DiT model, 5. Merge LoRA weights if needed, and 6. Optimize model
     logger.info("Loading DiT model(s)")
     models = load_dit_models(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
-
-    if args.save_merged_model:
-        logger.info("Model merged and saved. Exiting.")
-        return
 
     # Create shared models dict for generate function
     shared_models = {"vae": vae, "models": models, "encoded_contexts": encoded_contexts}
@@ -2302,10 +2290,6 @@ def main():
         # Make sure the model is freed from GPU memory
         gc.collect()
         clean_memory_on_device(args.device)
-
-        # Save latent and video
-        if args.save_merged_model:
-            return
 
         # Add batch dimension
         latent = latent.unsqueeze(0)

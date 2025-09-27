@@ -1,17 +1,18 @@
+import json
 import os
 import re
+import struct
+from typing import Any, Dict, Optional, Union
+
 import numpy as np
 import torch
-import json
-import struct
-from typing import Dict, Any, Union, Optional
-
 from safetensors.torch import load_file
+from tqdm import tqdm
 
 from musubi_tuner.utils.device_utils import synchronize_device
 
 
-def mem_eff_save_file(tensors: Dict[str, torch.Tensor], filename: str, metadata: Dict[str, Any] = None):
+def mem_eff_save_file(tensors: Dict[str, torch.Tensor], filename: str, metadata: Dict[str, Any] | None = None):
     """
     memory efficient save file
     """
@@ -44,8 +45,6 @@ def mem_eff_save_file(tensors: Dict[str, torch.Tensor], filename: str, metadata:
                 validated[key] = value
         return validated
 
-    # print(f"Using memory efficient save file: {filename}")
-
     header = {}
     offset = 0
     if metadata:
@@ -65,7 +64,7 @@ def mem_eff_save_file(tensors: Dict[str, torch.Tensor], filename: str, metadata:
         f.write(struct.pack("<Q", len(hjson)))
         f.write(hjson)
 
-        for k, v in tensors.items():
+        for k, v in tqdm(tensors.items(), desc=f"Saving model to {filename}...", total=len(tensors)):
             if v.numel() == 0:
                 continue
             if v.is_cuda:
