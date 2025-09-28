@@ -122,6 +122,11 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/09/28
+    - [Qwen-Image-Edit-2509](https://github.com/QwenLM/Qwen-Image)の学習、推論に対応しました。[PR #590](https://github.com/kohya-ss/musubi-tuner/pull/590) 詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md)を参照してください。
+        - 複数枚の制御画像を同時に使用できます。Qwen-Image-Edit-2509公式では3枚までですが、Musubi Tunerでは任意の枚数を指定できます（正しく動作するのは3枚までです）。
+        - DiTモデルの重みが異なるほか、キャッシュ、学習、推論の各スクリプトに、`--edit_plus`オプションが追加されています。
+
 - 2025/09/24
     - Wan2.2のLoRA学習および推論スクリプトに`--force_v2_1_time_embedding`オプションを追加しました。[PR #586](https://github.com/kohya-ss/musubi-tuner/pull/586) このオプションを指定することでVRAM使用量を削減できます。詳細は[Wanのドキュメント](./docs/wan.md#training--学習)を参照してください。
     
@@ -154,11 +159,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
         - block swapと組み合わせて使用することも可能です。
         - 特に長い動画や大きなバッチサイズで学習する際に、VRAMの使用量を削減できます。block swapと組み合わせることでこれらの学習が可能になる場合があります。
         - 詳細はPRおよび[HunyuanVideoのドキュメント](./docs/hunyuan_video.md#memory-optimization)を参照してください。
-
-- 2025/09/06
-    - 新しいLRスケジューラRexを追加しました。[PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513) xzuyn氏に感謝します。
-        - powerを1未満に設定した Polynomial Scheduler に似ていますが、Rexは学習率の減少がより緩やかです。
-        - 詳細は[高度な設定のドキュメント](./docs/advanced_config.md#rex)を参照してください。
 
 ### リリースについて
 

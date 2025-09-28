@@ -124,6 +124,11 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 28, 2025
+    - Support for training and inference of [Qwen-Image-Edit-2509](https://github.com/QwenLM/Qwen-Image) has been added. See [PR #590](https://github.com/kohya-ss/musubi-tuner/pull/590) for details. Please refer to the [Qwen-Image documentation](./docs/qwen_image.md) for more information.
+        - Multiple control images can be used simultaneously. While the official Qwen-Image-Edit-2509 supports up to 3 images, Musubi Tuner allows specifying any number of images (though correct operation is confirmed only up to 3).
+        - Different weights for the DiT model are required, and the `--edit_plus` option has been added to the caching, training, and inference scripts.
+
 - September 24, 2025
     - Added `--force_v2_1_time_embedding` option to Wan2.2 LoRA training and inference scripts. See [PR #586](https://github.com/kohya-ss/musubi-tuner/pull/586) This option can reduce VRAM usage. See [Wan documentation](./docs/wan.md#training--学習) for details.
     
@@ -156,11 +161,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
         - This can be used in combination with block swap.
         - This can reduce VRAM usage, especially when training long videos or large batch sizes. Combining it with block swap may enable training that was previously not possible.
         - See the PR and [HunyuanVideo documentation](./docs/hunyuan_video.md#memory-optimization) for details.
-
-- September 6, 2025
-    - A new LR scheduler, Rex, has been added. Thanks to xzuyn for [PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513).
-        - Similar to the Polynomial Scheduler with power set to less than 1, Rex has a more gradual decrease in learning rate.
-        - See [Advanced Configuration documentation](./docs/advanced_config.md#rex) for details.
 
 ### Releases
 

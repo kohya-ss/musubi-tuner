@@ -63,6 +63,7 @@ VIDEO_EXTENSIONS = [
     ".MPEG",
 ]  # some of them are not tested
 
+# Architecture short names cannot contain underscore
 ARCHITECTURE_HUNYUAN_VIDEO = "hv"
 ARCHITECTURE_HUNYUAN_VIDEO_FULL = "hunyuan_video"
 ARCHITECTURE_WAN = "wan"
@@ -73,6 +74,8 @@ ARCHITECTURE_FLUX_KONTEXT = "fk"
 ARCHITECTURE_FLUX_KONTEXT_FULL = "flux_kontext"
 ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
+ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
+ARCHITECTURE_QWEN_IMAGE_EDIT_FULL = "qwen_image_edit"
 
 
 def glob_images(directory, base="*"):
@@ -287,19 +290,21 @@ def save_latent_cache_flux_kontext(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[torch.Tensor]):
+def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
     """Qwen-Image architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
-    assert control_latent is None or control_latent.dim() == 4, (
+    assert control_latent is None or all(cl.dim() == 4 for cl in control_latent), (
         "control_latent should be 4D tensor (frame, channel, height, width) or None"
     )
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
     if control_latent is not None:
-        _, F, H, W = control_latent.shape
-        sd[f"latents_control_{F}x{H}x{W}_{dtype_str}"] = control_latent.detach().cpu().contiguous()
+        for i, cl in enumerate(control_latent):
+            _, F, H, W = cl.shape
+            sd[f"latents_control_{i}_{F}x{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
@@ -431,6 +436,7 @@ class BucketSelector:
     RESOLUTION_STEPS_FRAMEPACK = 16
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
     RESOLUTION_STEPS_QWEN_IMAGE = 16
+    RESOLUTION_STEPS_QWEN_IMAGE_EDIT = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -438,6 +444,7 @@ class BucketSelector:
         ARCHITECTURE_FRAMEPACK: RESOLUTION_STEPS_FRAMEPACK,
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
+        ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
     }
 
     def __init__(
@@ -499,6 +506,7 @@ class BucketSelector:
     ) -> tuple[int, int]:
         """
         Get the bucket resolution for the given image size, resolution and resolution steps.
+        Return (width, height).
         """
         if reso_steps is None and architecture is None:
             raise ValueError("resolution steps or architecture must be provided")
@@ -1588,7 +1596,9 @@ class ImageDataset(BaseDataset):
                             or self.qwen_image_edit_control_resolution is not None
                         ):
                             # Add control size to bucket_reso to make different control resolutions to different batch
-                            bucket_reso = list(bucket_reso) + list(controls[0].shape[0:2])
+                            bucket_reso = list(bucket_reso)
+                            for control in controls:
+                                bucket_reso = bucket_reso + list(control.shape[0:2])
                             bucket_reso = tuple(bucket_reso)
 
                     if bucket_reso not in batches:

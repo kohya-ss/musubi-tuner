@@ -189,7 +189,7 @@ For Wan2.2 models, if you want to train with either the high-noise model or the 
 
 If you want to train LoRA for both models simultaneously, you need to specify the low-noise model with `--dit` and the high-noise model with `--dit_high_noise`. The two models are switched at the timestep specified by `--timestep_boundary`. The default value is 0.9 for I2V and 0.875 for T2V. `--timestep_boundary` can be specified in the range of 0.0 to 1.0, or in the range of 0 to 1000.
 
-When training Wan2.2 high and low models, you can use `--offload_inactive_dit` to offload the inactive DiT model to the CPU, which can save VRAM (only works when `--blocks_to_swap` is not specified).
+When training Wan2.2 high and low models, you can use `--offload_inactive_dit` to offload the inactive DiT model to the CPU, which can save VRAM (only works when `--blocks_to_swap` is not specified). Please note that in Windows environment, this offloading uses shared VRAM. Even with fp8/fp8_scaled, about 42GB of shared VRAM is required for the two models combined, which means that about 96GB or more of main RAM is required. If you have less main RAM, using `--blocks_to_swap` will use less main RAM.
 
 `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
@@ -229,7 +229,7 @@ Wan2.2モデルの場合、高ノイズ用モデルまたは低ノイズ用モ�
 
 両方のモデルへのLoRAを学習する場合は、`--dit`に低ノイズ用モデルを、`--dit_high_noise`に高ノイズ用モデルを指定します。2つのモデルは`--timestep_boundary`で指定されたタイムステップで切り替わります。デフォルトはI2Vの場合は0.9、T2Vの場合は0.875です。`--timestep_boundary`は0.0から1.0の範囲の値、または0から1000の範囲の値で指定できます。
 
-またWan2.2モデルで両方のモデルを学習するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができ、VRAMを節約できます（`--blocks_to_swap`未指定時のみ有効）。
+またWan2.2モデルで両方のモデルを学習するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができ、VRAMを節約できます（`--blocks_to_swap`未指定時のみ有効）。なお、Windows環境の場合、このオフロードには共有VRAMが使用されます。fp8/fp8_scaledの場合でも2つのモデル合計で約42GBの共有VRAMが必要となり、つまりメインRAMが96GB程度以上必要になりますのでご注意ください。メインRAMが少ない場合、`--blocks_to_swap`を使用する方がメインRAMの使用量は少なくなります。
 
 Wan2.2の場合、I2VとT2Vで`--discrete_flow_shift`を調整する必要があるかもしれません。公式実装によると、推論時のシフト値はT2Vで12.0、I2Vで5.0です。学習時のシフト値は推論時度必ずしも合わせる必要はありませんが、参考になるかもしれません。
 

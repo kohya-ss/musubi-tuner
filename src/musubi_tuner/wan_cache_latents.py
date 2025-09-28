@@ -215,6 +215,10 @@ def main():
 
     args = parser.parse_args()
 
+    if args.disable_cudnn_backend:
+        logger.info("Disabling cuDNN PyTorch backend.")
+        torch.backends.cudnn.enabled = False
+
     if args.clip is not None:
         args.i2v = True
 

@@ -366,6 +366,9 @@ def setup_parser_common() -> argparse.ArgumentParser:
         default=None,
         help="debug mode: not interactive, number of images to show for each dataset",
     )
+    parser.add_argument(
+        "--disable_cudnn_backend", action="store_true", help="Disable CUDNN PyTorch backend. May be useful for AMD GPUs."
+    )
     return parser
 
 

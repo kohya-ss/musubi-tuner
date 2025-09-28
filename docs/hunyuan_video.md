@@ -111,6 +111,8 @@ For additional options, use `python src/musubi_tuner/cache_latents.py --help`.
 
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size`.
 
+If you are using an AMD GPU and/or are experiencing slow latent caching, consider trying `--disable_cudnn_backend`. For some details, see [this pull request](https://github.com/kohya-ss/musubi-tuner/pull/592).
+
 Use `--debug_mode image` to display dataset images and captions in a new window, or `--debug_mode console` to display them in the console (requires `ascii-magic`). 
 
 With `--debug_mode video`, images or videos will be saved in the cache directory (please delete them after checking). The bitrate of the saved video is set to 1Mbps for preview purposes. The images decoded from the original video (not degraded) are used for the cache (for training).

@@ -10,7 +10,7 @@ from accelerate import init_empty_weights
 from diffusers.utils.torch_utils import randn_tensor
 from PIL import Image
 
-from musubi_tuner.dataset import image_video_dataset
+from musubi_tuner.dataset.image_video_dataset import BucketSelector, ARCHITECTURE_QWEN_IMAGE_EDIT
 from musubi_tuner.flux.flux_utils import is_fp8
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.utils import image_utils
@@ -380,10 +380,22 @@ def get_qwen_prompt_embeds_with_image(
     vl_processor: Qwen2VLProcessor,
     vlm: Qwen2_5_VLForConditionalGeneration,
     prompt: Union[str, List[str]],
-    image: ImageInput = None,
+    image: Union[List[ImageInput], ImageInput] = None,
+    mode: str = "edit",
 ):
-    tokenizer_max_length = 1024
-    prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+    r"""
+    Args:
+        prompt (`str` or `List[str]`, *optional*):
+            prompt to be encoded
+        image (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`):
+            image to be encoded
+        mode (`str`, *optional*, defaults to "edit"):
+            mode of the prompt, can be "edit" or "edit-plus"
+    """
+    if mode == "edit":
+        prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+    elif mode == "edit-plus":
+        prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
     prompt_template_encode_start_idx = 64
     # default_sample_size = 128
 
@@ -392,11 +404,43 @@ def get_qwen_prompt_embeds_with_image(
 
     prompt = [prompt] if isinstance(prompt, str) else prompt
 
+    if isinstance(image, list):
+        if len(image) == 0:
+            image = None
+        else:
+            if isinstance(image[0], list):
+                pass  # list of list, it's ok
+            else:
+                assert len(prompt) == 1, "Image must be a list of list when multiple prompts are provided."
+                image = [image]  # wrap to list of list
+
+    elif image is not None:
+        image = [[image]]  # wrap to list of list, not necessary, but for consistency
+
+    assert image is None or len(image) == len(prompt), (
+        f"Number of images {len(image) if image is not None else 0} must match number of prompts {len(prompt)} for batch processing"
+    )
+
+    base_img_prompts = [""] * len(prompt)
+    if image is not None:
+        vl_image_inputs = []  # flat list of images
+        img_prompt_template = "Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
+        for i, img in enumerate(image):
+            if img is None or len(img) == 0:
+                continue
+            if len(img) > 1 and mode != "edit-plus":
+                logger.warning(f"Multiple images {len(img)} provided for prompt {i}, but mode is {mode}, result may be unexpected.")
+            for j in range(len(img)):
+                base_img_prompts[i] += img_prompt_template.format(j + 1)
+            vl_image_inputs.extend(img)
+    else:
+        vl_image_inputs = None
+
     template = prompt_template_encode
     drop_idx = prompt_template_encode_start_idx
-    txt = [template.format(e) for e in prompt]
+    txt = [template.format(base + e) for base, e in zip(base_img_prompts, prompt)]
 
-    model_inputs = vl_processor(text=txt, images=image, padding=True, return_tensors="pt").to(device)
+    model_inputs = vl_processor(text=txt, images=vl_image_inputs, padding=True, return_tensors="pt").to(device)
 
     if is_fp8(dtype):
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
@@ -412,8 +456,8 @@ def get_qwen_prompt_embeds_with_image(
             encoder_hidden_states = vlm(
                 input_ids=model_inputs.input_ids,
                 attention_mask=model_inputs.attention_mask,
-                pixel_values=model_inputs.pixel_values,
-                image_grid_thw=model_inputs.image_grid_thw,
+                pixel_values=model_inputs.pixel_values if vl_image_inputs is not None else None,
+                image_grid_thw=model_inputs.image_grid_thw if vl_image_inputs is not None else None,
                 output_hidden_states=True,
             )
 
@@ -619,6 +663,10 @@ def prepare_latents(batch_size, num_channels_latents, height, width, dtype, devi
     return latents
 
 
+CONDITION_IMAGE_RESOLUTION = (384, 384)
+VAE_IMAGE_RESOLUTION = (1024, 1024)
+
+
 def preprocess_control_image(
     control_image_path: str, resize_to_prefered: bool = True, resize_size: Optional[Tuple[int, int]] = None
 ) -> tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
@@ -640,12 +688,20 @@ def preprocess_control_image(
     control_image = Image.open(control_image_path)
 
     if resize_to_prefered or resize_size is None:
-        resolution = (1024, 1024) if resize_to_prefered else control_image.size
-        resize_size = image_video_dataset.BucketSelector.calculate_bucket_resolution(
-            control_image.size, resolution, architecture=image_video_dataset.ARCHITECTURE_QWEN_IMAGE
+        resolution = VAE_IMAGE_RESOLUTION if resize_to_prefered else control_image.size
+        resize_size = BucketSelector.calculate_bucket_resolution(
+            control_image.size, resolution, architecture=ARCHITECTURE_QWEN_IMAGE_EDIT
         )
 
-    control_image_tensor, control_image_np, _ = image_utils.preprocess_image(control_image, *resize_size)
+        cond_resolution = CONDITION_IMAGE_RESOLUTION if resize_to_prefered else control_image.size
+        cond_resize_size = BucketSelector.calculate_bucket_resolution(
+            control_image.size, cond_resolution, architecture=ARCHITECTURE_QWEN_IMAGE_EDIT
+        )
+    else:
+        cond_resize_size = resize_size
+
+    control_image_tensor, _, _ = image_utils.preprocess_image(control_image, *resize_size)
+    _, control_image_np, _ = image_utils.preprocess_image(control_image, *cond_resize_size)
     return control_image_tensor, control_image_np, None
 
 

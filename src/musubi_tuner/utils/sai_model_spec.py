@@ -9,6 +9,7 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 
 from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_HUNYUAN_VIDEO,
+    ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
     ARCHITECTURE_FRAMEPACK,
     ARCHITECTURE_FLUX_KONTEXT,
@@ -67,6 +68,7 @@ ARCH_WAN = "wan2.1"
 ARCH_FRAMEPACK = "framepack"
 ARCH_FLUX_KONTEXT = "Flux.1-dev"
 ARCH_QWEN_IMAGE = "Qwen-Image"
+ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 
 ADAPTER_LORA = "lora"
 
@@ -75,6 +77,7 @@ IMPL_WAN = "https://github.com/Wan-Video/Wan2.1"
 IMPL_FRAMEPACK = "https://github.com/lllyasviel/FramePack"
 IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
 IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
+IMPL_QWEN_IMAGE_EDIT = IMPL_QWEN_IMAGE
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -147,6 +150,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_QWEN_IMAGE:
         arch = ARCH_QWEN_IMAGE
         impl = IMPL_QWEN_IMAGE
+    elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+        arch = ARCH_QWEN_IMAGE_EDIT
+        impl = IMPL_QWEN_IMAGE_EDIT
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

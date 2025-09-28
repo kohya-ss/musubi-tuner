@@ -235,23 +235,23 @@ def line_to_prompt_dict(line: str) -> dict:
 
             m = re.match(r"i (.+)", parg, re.IGNORECASE)
             if m:  # image path
-                prompt_dict["image_path"] = m.group(1)
+                prompt_dict["image_path"] = m.group(1).strip()
                 continue
 
             m = re.match(r"ei (.+)", parg, re.IGNORECASE)
             if m:  # end image path
-                prompt_dict["end_image_path"] = m.group(1)
+                prompt_dict["end_image_path"] = m.group(1).strip()
                 continue
 
             m = re.match(r"cn (.+)", parg, re.IGNORECASE)
             if m:
-                prompt_dict["control_video_path"] = m.group(1)
+                prompt_dict["control_video_path"] = m.group(1).strip()
                 continue
 
             m = re.match(r"ci (.+)", parg, re.IGNORECASE)
             if m:
                 # can be multiple control images
-                control_image_path = m.group(1)
+                control_image_path = m.group(1).strip()
                 if "control_image_path" not in prompt_dict:
                     prompt_dict["control_image_path"] = []
                 prompt_dict["control_image_path"].append(control_image_path)
@@ -259,7 +259,7 @@ def line_to_prompt_dict(line: str) -> dict:
 
             m = re.match(r"of (.+)", parg, re.IGNORECASE)
             if m:  # output folder
-                prompt_dict["one_frame"] = m.group(1)
+                prompt_dict["one_frame"] = m.group(1).strip()
                 continue
 
         except ValueError as ex:

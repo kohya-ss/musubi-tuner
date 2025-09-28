@@ -291,7 +291,7 @@ video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 
 ### Sample for Image Dataset with Control Images
 
-The dataset with control images. This is used for training the one frame training for FramePack and FLUX.1 Kontext training.
+The dataset with control images. This is used for training the one frame training for FramePack, FLUX.1 Kontext training, and Qwen-Image-Edit training.
 
 The dataset configuration with caption text files is similar to the image dataset, but with an additional `control_directory` parameter.
 
@@ -312,12 +312,12 @@ If multiple control images are specified, the attribute names should be `control
 {"image_path": "/path/to/image2.jpg", "control_path_0": "/path/to/control2_0.png", "control_path_1": "/path/to/control2_1.png", "caption": "A caption for image2"}
 ```
 
-The control images can also have an alpha channel. In this case, the alpha channel of the image is used as a mask for the latent. FLUX.1 Kontext does not use masks.
+The control images can also have an alpha channel. In this case, the alpha channel of the image is used as a mask for the latent. This is only for the one frame training of FramePack.
 
 <details>
 <summary>日本語</summary>
 
-制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習およびFLUX.1 Kontext学習に使用します。
+制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習、FLUX.1 Kontext学習、Qwen-Image-Edit学習に使用します。
 
 キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションは`image_directory`へ格納してください。
 
@@ -325,7 +325,7 @@ The control images can also have an alpha channel. In this case, the alpha chann
 
 メタデータJSONLファイルを使用する場合は、`control_path`を追加してください。複数枚の制御画像を指定する場合は、`control_path_0`, `control_path_1`のように数字を付与してください。
 
-制御画像はアルファチャンネルを持つこともできます。この場合、画像のアルファチャンネルはlatentへのマスクとして使用されます。FLUX.1 Kontextではマスクは使用されません。
+FramePackの単一フレーム学習では、制御画像はアルファチャンネルを持つこともできます。この場合、画像のアルファチャンネルはlatentへのマスクとして使用されます。
 
 </details>
 
@@ -496,15 +496,19 @@ FLUX.1 Kontextのデータセット設定は、制御画像を持つ画像デー
 
 </details>
 
-### Qwen-Image-Edit
+### Qwen-Image-Edit and Qwen-Image-Edit-2509
 
-The Qwen-Image-Edit dataset configuration uses an image dataset with control images. Only one control image can be used.
+The Qwen-Image-Edit dataset configuration uses an image dataset with control images. However, only one control image can be used for the standard model (not `2509`).
 
-If you set `qwen_image_edit_no_resize_control`, it disables resizing of the control image. By default, the control image is resized to the same resolution as the image.
+By default, the control image is resized to the same resolution (and aspect ratio) as the image.
 
-Also, you can specify the resolution of the control image separately from the training image resolution by using `qwen_image_edit_control_resolution`. If you want to resize the control images the same as the official code, specify [1024,1024].
+If you set `qwen_image_edit_no_resize_control`, it disables resizing of the control image. For example, if the image is 960x544 and the control image is 512x512, the control image will remain 512x512.
+
+Also, you can specify the resolution of the control image separately from the training image resolution by using `qwen_image_edit_control_resolution`. If you want to resize the control images the same as the official code, specify [1024,1024]. **We strongly recommend specifying this value.**
 
 `qwen_image_edit_no_resize_control` cannot be specified together with `qwen_image_edit_control_resolution`.
+
+If `qwen_image_edit_no_resize_control` or `qwen_image_edit_control_resolution` is specified, each control image can have a different resolution. The control image is resized according to the specified settings.
 
 ```toml
 [[datasets]]
@@ -523,18 +527,22 @@ When this option is specified, the control image is resized to a resolution to h
 <details>
 <summary>日本語</summary>
 
-Qwen-Image-Editのデータセット設定は、制御画像を持つ画像データセットを使用します。ただし、制御画像は1枚しか使用できません。
+Qwen-Image-Editのデータセット設定は、制御画像を持つ画像データセットを使用します。複数枚の制御画像も使用可能ですが、無印（`2509`でない）モデルでは1枚のみ使用可能です。
 
-`qwen_image_edit_no_resize_control`を設定すると、制御画像のリサイズを無効にします。デフォルトでは、制御画像は画像と同じ解像度にリサイズされます。
+デフォルトでは、制御画像は画像と同じ解像度（およびアスペクト比）にリサイズされます。
 
-また、`qwen_image_edit_control_resolution`を使用することで、制御画像の解像度を学習画像の解像度と異なる値に指定できます。公式のコードと同じように制御画像をリサイズしたい場合は、[1024, 1024]を指定してください。
+`qwen_image_edit_no_resize_control`を設定すると、制御画像のリサイズを無効にします。たとえば、画像が960x544で制御画像が512x512の場合、制御画像は512x512のままになります。
+
+また、`qwen_image_edit_control_resolution`を使用することで、制御画像の解像度を学習画像の解像度と異なる値に指定できます。公式のコードと同じように制御画像をリサイズしたい場合は、[1024, 1024]を指定してください。**この値の指定を強く推奨します。**
 
 `qwen_image_edit_no_resize_control`と `qwen_image_edit_control_resolution`は同時に指定できません。
+
+`qwen_image_edit_no_resize_control`または`qwen_image_edit_control_resolution`が指定された場合、各制御画像は異なる解像度を持つことができます。制御画像は指定された設定に従ってリサイズされます。
 
 ```toml
 [[datasets]]
 qwen_image_edit_no_resize_control = false # オプション、デフォルトはfalse。制御画像のリサイズを無効にします
-qwen_image_edit_control_resolution = [512, 512] # オプション、デフォルトはNone。制御画像の解像度を指定します
+qwen_image_edit_control_resolution = [1024, 1024] # オプション、デフォルトはNone。制御画像の解像度を指定します
 ```
 
 `fp_1f_*`の設定はQwen-Image-Editでは使用しません。
