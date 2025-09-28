@@ -1229,8 +1229,8 @@ def load_wan_model(
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
     """
-    # dit_weight_dtype is None for fp8_scaled
-    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+    # dit_weight_dtype is None for fp8_scaled and mixed_precision_transformer
+    # assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
