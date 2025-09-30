@@ -829,7 +829,7 @@ class ImageDirectoryDatasource(ImageDatasource):
         image_directory: str,
         caption_extension: Optional[str] = None,
         control_directory: Optional[str] = None,
-        control_count_per_image: int = 1,
+        control_count_per_image: Optional[int] = None,
     ):
         super().__init__()
         self.image_directory = image_directory
@@ -865,7 +865,7 @@ class ImageDirectoryDatasource(ImageDatasource):
                         return int(digits_suffix) + 1
 
                     potential_paths.sort(key=sort_key)
-                    if len(potential_paths) < control_count_per_image:
+                    if control_count_per_image is not None and len(potential_paths) < control_count_per_image:
                         logger.error(
                             f"Not enough control images for {image_path}: found {len(potential_paths)}, expected {control_count_per_image}"
                         )
@@ -874,8 +874,22 @@ class ImageDirectoryDatasource(ImageDatasource):
                         )
 
                     # take the first `control_count_per_image` paths
-                    self.control_paths[image_path] = potential_paths[:control_count_per_image]
-            logger.info(f"found {len(self.control_paths)} matching control images")
+                    self.control_paths[image_path] = (
+                        potential_paths[:control_count_per_image] if control_count_per_image is not None else potential_paths
+                    )
+            logger.info(
+                f"found {len(self.control_paths)} matching control images for {'arbitrary' if control_count_per_image is None else control_count_per_image} images"
+            )
+
+            # log the distribution of number of control images
+            count_of_num_control_images = {}
+            for paths in self.control_paths.values():
+                count = len(paths)
+                if count not in count_of_num_control_images:
+                    count_of_num_control_images[count] = 0
+                count_of_num_control_images[count] += 1
+            for count, num_images in count_of_num_control_images.items():
+                logger.info(f"  {num_images} images have {count} control images")
 
             missing_controls = len(self.image_paths) - len(self.control_paths)
             if missing_controls > 0:
@@ -942,7 +956,7 @@ class ImageDirectoryDatasource(ImageDatasource):
 
 
 class ImageJsonlDatasource(ImageDatasource):
-    def __init__(self, image_jsonl_file: str, control_count_per_image: int = 1):
+    def __init__(self, image_jsonl_file: str, control_count_per_image: Optional[int] = None):
         super().__init__()
         self.image_jsonl_file = image_jsonl_file
         self.control_count_per_image = control_count_per_image
@@ -976,15 +990,20 @@ class ImageJsonlDatasource(ImageDatasource):
         # Check if there are control paths in the JSONL
         self.has_control = any("control_path_0" in item for item in self.data)
         if self.has_control:
-            missing_control_images = [
-                item["image_path"]
-                for item in self.data
-                if sum(f"control_path_{i}" not in item for i in range(self.control_count_per_image)) > 0
-            ]
-            if missing_control_images:
-                logger.error(f"Some images do not have control paths in JSONL data: {missing_control_images}")
-                raise ValueError(f"Some images do not have control paths in JSONL data: {missing_control_images}")
-            logger.info(f"found {len(self.data)} images with {self.control_count_per_image} control images per image in JSONL data")
+            if self.control_count_per_image is None:
+                logger.info(f"found {len(self.data)} images with arbitrary control images per image in JSONL data")
+            else:
+                missing_control_images = [
+                    item["image_path"]
+                    for item in self.data
+                    if sum(f"control_path_{i}" not in item for i in range(self.control_count_per_image)) > 0
+                ]
+                if missing_control_images:
+                    logger.error(f"Some images do not have control paths in JSONL data: {missing_control_images}")
+                    raise ValueError(f"Some images do not have control paths in JSONL data: {missing_control_images}")
+                logger.info(
+                    f"found {len(self.data)} images with {self.control_count_per_image} control images per image in JSONL data"
+                )
 
     def is_indexable(self):
         return True
@@ -1002,7 +1021,9 @@ class ImageJsonlDatasource(ImageDatasource):
         controls = None
         if self.has_control:
             controls = []
-            for i in range(self.control_count_per_image):
+            for i in range(self.control_count_per_image or 1000):  # arbitrary large number if control_count_per_image is None
+                if f"control_path_{i}" not in data:
+                    break
                 control_path = data[f"control_path_{i}"]
                 control = Image.open(control_path)
                 if control.mode != "RGB" and control.mode != "RGBA":
@@ -1512,9 +1533,16 @@ class ImageDataset(BaseDataset):
         self.qwen_image_edit_no_resize_control = qwen_image_edit_no_resize_control
         self.qwen_image_edit_control_resolution = qwen_image_edit_control_resolution
 
-        control_count_per_image = 1
-        if fp_1f_clean_indices is not None:
-            control_count_per_image = len(fp_1f_clean_indices)
+        control_count_per_image: Optional[int] = 1
+        if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
+            if fp_1f_clean_indices is not None:
+                control_count_per_image = len(fp_1f_clean_indices)
+            else:
+                control_count_per_image = 1
+        elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
+            control_count_per_image = 1
+        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+            control_count_per_image = None  # can be multiple control images
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(

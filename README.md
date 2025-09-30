@@ -124,6 +124,9 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 30, 2025
+    - Fixed a bug in Qwen-Image-Edit-2509 LoRA training that prevented handling multiple control images correctly. See [PR #612](https://github.com/kohya-ss/musubi-tuner/pull/612)
+
 - September 28, 2025
     - Support for training and inference of [Qwen-Image-Edit-2509](https://github.com/QwenLM/Qwen-Image) has been added. See [PR #590](https://github.com/kohya-ss/musubi-tuner/pull/590) for details. Please refer to the [Qwen-Image documentation](./docs/qwen_image.md) for more information.
         - Multiple control images can be used simultaneously. While the official Qwen-Image-Edit-2509 supports up to 3 images, Musubi Tuner allows specifying any number of images (though correct operation is confirmed only up to 3).
@@ -153,14 +156,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
     - A bug in masking during FLF2V inference in `wan_generate_video.py` has been fixed. Thanks to LittleNyima for [PR #548](https://github.com/kohya-ss/musubi-tuner/pull/548).
     - The loading speed of `.safetensors` files has been improved. See [PR #556](https://github.com/kohya-ss/musubi-tuner/pull/556).
         - Model loading can be up to 1.5 times faster.
-
-- September 8, 2025
-    - Code analysis with ruff has been introduced, and [contribution guidelines](./CONTRIBUTING.md) have been added.
-        - Thanks to arledesma for [Issue #524](https://github.com/kohya-ss/musubi-tuner/issues/524) and [PR #538](https://github.com/kohya-ss/musubi-tuner/pull/538).
-    - Activation CPU offloading has been added. See [PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537).
-        - This can be used in combination with block swap.
-        - This can reduce VRAM usage, especially when training long videos or large batch sizes. Combining it with block swap may enable training that was previously not possible.
-        - See the PR and [HunyuanVideo documentation](./docs/hunyuan_video.md#memory-optimization) for details.
 
 ### Releases
 

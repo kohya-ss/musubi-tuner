@@ -122,6 +122,9 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/09/30
+    - Qwen-Image-Edit-2509のLoRA学習で複数枚の制御画像を正しく取り扱えない不具合を修正しました。[PR #612](https://github.com/kohya-ss/musubi-tuner/pull/612)
+
 - 2025/09/28
     - [Qwen-Image-Edit-2509](https://github.com/QwenLM/Qwen-Image)の学習、推論に対応しました。[PR #590](https://github.com/kohya-ss/musubi-tuner/pull/590) 詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md)を参照してください。
         - 複数枚の制御画像を同時に使用できます。Qwen-Image-Edit-2509公式では3枚までですが、Musubi Tunerでは任意の枚数を指定できます（正しく動作するのは3枚までです）。
@@ -151,14 +154,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - `wan_generate_video.py` のFLF2V推論でマスクが誤っていた不具合が修正されました。[PR #548](https://github.com/kohya-ss/musubi-tuner/pull/548) LittleNyima 氏に感謝します。
     - `.safetensors`ファイルの読み込みを高速化しました。[PR #556](https://github.com/kohya-ss/musubi-tuner/pull/556)
         - モデルの読み込みが最大で1.5倍ほど高速化されます。
-
-- 2025/09/08
-    - ruffによるコード解析を導入しました。またコントリビューションのガイドライン（[英語版](./CONTRIBUTING.md)と[日本語版](./CONTRIBUTING.ja.md)）を追加しました。
-        - [Issue #524](https://github.com/kohya-ss/musubi-tuner/issues/524) および [PR #538](https://github.com/kohya-ss/musubi-tuner/pull/538)　arledesma氏に深く感謝します。
-    - ActivationのCPU offloadingを追加しました。[PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537)
-        - block swapと組み合わせて使用することも可能です。
-        - 特に長い動画や大きなバッチサイズで学習する際に、VRAMの使用量を削減できます。block swapと組み合わせることでこれらの学習が可能になる場合があります。
-        - 詳細はPRおよび[HunyuanVideoのドキュメント](./docs/hunyuan_video.md#memory-optimization)を参照してください。
 
 ### リリースについて
 
