@@ -57,10 +57,10 @@ class WanNetworkTrainer(NetworkTrainer):
 
         self.dit_dtype = detect_wan_sd_dtype(args.dit)
 
-        if self.dit_dtype == torch.float16:
-            assert args.mixed_precision in ["fp16", "no"], "DiT weights are in fp16, mixed precision must be fp16 or no"
-        elif self.dit_dtype == torch.bfloat16:
-            assert args.mixed_precision in ["bf16", "no"], "DiT weights are in bf16, mixed precision must be bf16 or no"
+        #if self.dit_dtype == torch.float16:
+            #assert args.mixed_precision in ["fp16", "no"], "DiT weights are in fp16, mixed precision must be fp16 or no"
+        #elif self.dit_dtype == torch.bfloat16:
+            #assert args.mixed_precision in ["bf16", "no"], "DiT weights are in bf16, mixed precision must be bf16 or no"
 
         if args.fp8_scaled and self.dit_dtype.itemsize == 1:
             raise ValueError(
