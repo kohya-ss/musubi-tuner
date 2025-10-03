@@ -966,14 +966,18 @@ class ImageJsonlDatasource(ImageDatasource):
         # load jsonl
         logger.info(f"load image jsonl from {self.image_jsonl_file}")
         self.data = []
-        with open(self.image_jsonl_file, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.error(f"failed to load json: {line} @ {self.image_jsonl_file}")
-                    raise
-                self.data.append(data)
+        try:
+            with open(self.image_jsonl_file, "r", encoding="utf-8") as f:
+                self.data = json.loads(f.read())
+        except json.decoder.JSONDecodeError:
+            with open(self.image_jsonl_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.error(f"failed to load json: {line} @ {self.image_jsonl_file}")
+                        raise
+                    self.data.append(data)
         logger.info(f"loaded {len(self.data)} images")
 
         # Normalize control paths
