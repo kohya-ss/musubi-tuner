@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 import torch
 
 import logging
@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, mem_eff_save_file
 
 
 def filter_lora_state_dict(
@@ -55,6 +55,7 @@ def load_safetensors_with_lora_and_fp8(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
+    save_merged_model: Optional[str] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -68,6 +69,7 @@ def load_safetensors_with_lora_and_fp8(
         move_to_device (bool): Whether to move tensors to the calculation device after loading.
         target_keys (Optional[List[str]]): Keys to target for optimization.
         exclude_keys (Optional[List[str]]): Keys to exclude from optimization.
+        save_merged_model (Optional[str]]): Path to save the merged model. If None, the model will not be saved.
     """
 
     # if the file name ends with 00001-of-00004 etc, we need to load the files with the same prefix
@@ -209,6 +211,12 @@ def load_safetensors_with_lora_and_fp8(
             # this is a warning, not an error
             logger.warning(f"Warning: not all LoRA keys are used: {', '.join(lora_weight_keys)}")
 
+    if save_merged_model:
+        logger.info(f"Saving merged model to {save_merged_model}")
+        mem_eff_save_file(state_dict, save_merged_model)
+        logger.info("Merged model saved")
+        return state_dict
+
     return state_dict
 
 
@@ -220,7 +228,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
-    weight_hook: callable = None,
+    weight_hook: Optional[Callable] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.

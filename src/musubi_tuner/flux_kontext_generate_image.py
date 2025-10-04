@@ -1,30 +1,26 @@
 import argparse
-from importlib.util import find_spec
-import random
-import os
-import time
 import copy
-from typing import Tuple, Optional, List, Any, Dict
+import logging
+import os
+import random
+import time
+from importlib.util import find_spec
+from typing import Any, Dict, List, Optional, Tuple
 
-from einops import rearrange
 import torch
-from safetensors.torch import load_file, save_file
+from einops import rearrange
 from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 
-from musubi_tuner.flux import flux_utils
+from musubi_tuner.flux import flux_models, flux_utils
 from musubi_tuner.flux.flux_utils import load_flow_model
-from musubi_tuner.flux import flux_models
-
-lycoris_available = find_spec("lycoris") is not None
-
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
+from musubi_tuner.merge_lora import merge_lora_weights
 from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
-from musubi_tuner.wan_generate_video import merge_lora_weights
 
-import logging
-
+lycoris_available = find_spec("lycoris") is not None
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -572,12 +568,8 @@ def generate(
                 args.exclude_patterns,
                 device,
                 args.lycoris,
-                args.save_merged_model,
+                save_merged_model=args.save_merged_model,
             )
-
-            # if we only want to save the model, we can skip the rest
-            if args.save_merged_model:
-                return None, None
 
         # optimize model: fp8 conversion, block swap etc.
         optimize_model(model, args, device)
@@ -929,13 +921,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             first_prompt_args.exclude_patterns,
             device,
             first_prompt_args.lycoris,
-            first_prompt_args.save_merged_model,
+            save_merged_model=first_prompt_args.save_merged_model,
         )
-        if first_prompt_args.save_merged_model:
-            logger.info("Merged DiT model saved. Skipping generation.")
-            del dit_model
-            clean_memory_on_device(device)
-            return
 
     logger.info("Optimizing DiT model...")
     optimize_model(dit_model, first_prompt_args, device)  # Handles device placement, fp8 etc.
@@ -959,7 +946,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
                     prompt_args_item, gen_settings, shared_models_for_generate, current_image_data, current_text_data
                 )
 
-                if latent is None:  # and prompt_args_item.save_merged_model:  # Should be caught earlier
+                if latent is None:
                     continue
 
                 # Save latent if needed (using data from precomputed_image_data for H/W)
@@ -1177,14 +1164,10 @@ def main():
         # For single mode, precomputed data is None, shared_models is None.
         # generate will load all necessary models (VAE, Text/Image Encoders, DiT).
         returned_vae, latent = generate(args, gen_settings)
-        # print(f"Generated latent shape: {latent.shape}")
-        # if args.save_merged_model:
-        #     return
 
         # Save latent and video
         # returned_vae from generate will be used for decoding here.
         save_output(args, returned_vae, latent[0], device)
-
     logger.info("Done!")
 
 

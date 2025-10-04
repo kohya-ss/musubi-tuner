@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 import torch
 from safetensors.torch import load_file
-from tqdm import tqdm
 
 from musubi_tuner.utils.device_utils import synchronize_device
 
@@ -64,7 +63,7 @@ def mem_eff_save_file(tensors: Dict[str, torch.Tensor], filename: str, metadata:
         f.write(struct.pack("<Q", len(hjson)))
         f.write(hjson)
 
-        for k, v in tqdm(tensors.items(), desc=f"Saving model to {filename}...", total=len(tensors)):
+        for k, v in tensors.items():
             if v.numel() == 0:
                 continue
             if v.is_cuda:

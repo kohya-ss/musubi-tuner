@@ -1258,6 +1258,7 @@ def load_qwen_image_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     num_layers: Optional[int] = 60,
+    save_merged_model: Optional[str] = None,
 ) -> QwenImageTransformer2DModel:
     """
     Load a WAN model from the specified checkpoint.
@@ -1274,6 +1275,7 @@ def load_qwen_image_model(
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
         num_layers (int): Number of layers in the DiT model.
+        save_merged_model (Optional[str]): Path to save the merged model. If None, the model will not be saved.
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -1296,6 +1298,7 @@ def load_qwen_image_model(
         dit_weight_dtype=dit_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        save_merged_model=save_merged_model,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

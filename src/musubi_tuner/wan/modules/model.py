@@ -12,16 +12,14 @@ import logging
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-
 from musubi_tuner.wan.modules.attention import flash_attention
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 __all__ = ["WanModel"]
 
@@ -977,6 +975,7 @@ def load_wan_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     use_scaled_mm: bool = False,
+    save_merged_model: Optional[str] = None,
 ) -> WanModel:
     """
     Load a WAN model from the specified checkpoint.
@@ -993,6 +992,7 @@ def load_wan_model(
         fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+        save_merged_model (Optional[str]): Path to save the merged model. If None, the model will not be saved.
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -1034,6 +1034,7 @@ def load_wan_model(
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        save_merged_model=save_merged_model,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

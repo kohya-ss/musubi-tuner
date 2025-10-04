@@ -1,51 +1,43 @@
 import argparse
-import gc
-from importlib.util import find_spec
-import random
-import os
-import re
-import sys
-import time
-import math
 import copy
-from types import ModuleType
-from typing import Tuple, Optional, List, Union, Any, Dict
+import gc
+import logging
+import math
+import os
+import random
+import time
+from importlib.util import find_spec
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import torch
 import accelerate
-from accelerate import Accelerator
-from safetensors.torch import load_file, save_file
-from safetensors import safe_open
-from PIL import Image
 import cv2
 import numpy as np
+import torch
 import torchvision.transforms.functional as TF
+from accelerate import Accelerator
+from PIL import Image
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 
 from musubi_tuner.dataset import image_video_dataset
-from musubi_tuner.networks import lora_wan
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
-from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
-from musubi_tuner.wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
-from musubi_tuner.wan.modules.model import WanModel, load_wan_model, detect_wan_sd_dtype
-from musubi_tuner.wan.modules.vae import WanVAE
-from musubi_tuner.wan.modules.t5 import T5EncoderModel
-from musubi_tuner.wan.modules.clip import CLIPModel
+from musubi_tuner.dataset.image_video_dataset import load_video
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, save_videos_grid, synchronize_device
+from musubi_tuner.merge_lora import merge_lora_weights
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+from musubi_tuner.networks import lora_wan
+from musubi_tuner.utils.device_utils import clean_memory_on_device
+from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.model_utils import str_to_dtype
+from musubi_tuner.wan.configs import SUPPORTED_SIZES, WAN_CONFIGS
+from musubi_tuner.wan.modules.clip import CLIPModel
+from musubi_tuner.wan.modules.model import WanModel, detect_wan_sd_dtype, load_wan_model
+from musubi_tuner.wan.modules.t5 import T5EncoderModel
+from musubi_tuner.wan.modules.vae import WanVAE
 from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
 from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 lycoris_available = find_spec("lycoris") is not None
-if lycoris_available:
-    from lycoris.kohya import create_network_from_weights
-
-from musubi_tuner.utils.model_utils import str_to_dtype
-from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, save_videos_grid, synchronize_device
-from musubi_tuner.dataset.image_video_dataset import load_video
-
-import logging
-
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -646,6 +638,7 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
         use_scaled_mm=args.fp8_fast,
+        save_merged_model=args.save_merged_model if not args.lycoris else None,
     )
     if args.force_v2_1_time_embedding:
         model.set_time_embedding_v2_1(True)
@@ -661,16 +654,8 @@ def load_dit_model(
             args.exclude_patterns,
             device,
             lycoris=True,
+            save_merged_model=args.save_merged_model,
         )
-
-    # if we only want to save the model, we can skip the rest
-    if args.save_merged_model:
-        model.eval().requires_grad_(False)
-        clean_memory_on_device(device)
-        logger.info(f"Saving merged model to {args.save_merged_model}")
-        mem_eff_save_file(model.state_dict(), args.save_merged_model)  # save_file needs a lot of memory
-        logger.info("Model merged and saved. Exiting...")
-        sys.exit(0)
 
     if args.lycoris and args.fp8_scaled:
         # load state dict as-is and optimize to fp8
@@ -726,85 +711,6 @@ def load_dit_model(
     clean_memory_on_device(device)
 
     return model
-
-
-def merge_lora_weights(
-    lora_module: ModuleType,
-    model: torch.nn.Module,
-    lora_weights: List[str],
-    lora_multipliers: List[float],
-    include_patterns: Optional[List[str]],
-    exclude_patterns: Optional[List[str]],
-    device: torch.device,
-    lycoris: bool = False,
-    converter: Optional[callable] = None,
-) -> None:
-    """merge LoRA weights to the model
-
-    Args:
-        lora_module: LoRA module, e.g. lora_wan
-        model: DiT model
-        lora_weights: paths to LoRA weights
-        lora_multipliers: multipliers for LoRA weights
-        include_patterns: regex patterns to include LoRA modules
-        exclude_patterns: regex patterns to exclude LoRA modules
-        device: torch.device
-        lycoris: use LyCORIS
-        converter: Optional[callable] = None
-    """
-    if lora_weights is None or len(lora_weights) == 0:
-        return
-
-    for i, lora_weight in enumerate(lora_weights):
-        if lora_multipliers is not None and len(lora_multipliers) > i:
-            lora_multiplier = lora_multipliers[i]
-        else:
-            lora_multiplier = 1.0
-
-        logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
-        weights_sd = load_file(lora_weight)
-        if converter is not None:
-            weights_sd = converter(weights_sd)
-
-        # apply include/exclude patterns
-        original_key_count = len(weights_sd.keys())
-        if include_patterns is not None and len(include_patterns) > i:
-            include_pattern = include_patterns[i]
-            regex_include = re.compile(include_pattern)
-            weights_sd = {k: v for k, v in weights_sd.items() if regex_include.search(k)}
-            logger.info(f"Filtered keys with include pattern {include_pattern}: {original_key_count} -> {len(weights_sd.keys())}")
-        if exclude_patterns is not None and len(exclude_patterns) > i:
-            original_key_count_ex = len(weights_sd.keys())
-            exclude_pattern = exclude_patterns[i]
-            regex_exclude = re.compile(exclude_pattern)
-            weights_sd = {k: v for k, v in weights_sd.items() if not regex_exclude.search(k)}
-            logger.info(
-                f"Filtered keys with exclude pattern {exclude_pattern}: {original_key_count_ex} -> {len(weights_sd.keys())}"
-            )
-        if len(weights_sd) != original_key_count:
-            remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys()]))
-            remaining_keys.sort()
-            logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
-            if len(weights_sd) == 0:
-                logger.warning("No keys left after filtering.")
-
-        if lycoris:
-            lycoris_net, _ = create_network_from_weights(
-                multiplier=lora_multiplier,
-                file=None,
-                weights_sd=weights_sd,
-                unet=model,
-                text_encoder=None,
-                vae=None,
-                for_inference=True,
-            )
-            lycoris_net.merge_to(None, model, weights_sd, dtype=None, device=device)
-        else:
-            network = lora_module.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=model, for_inference=True)
-            network.merge_to(None, model, weights_sd, device=device, non_blocking=True)
-
-        synchronize_device(device)
-        logger.info("LoRA weights loaded")
 
 
 def prepare_t2v_inputs(

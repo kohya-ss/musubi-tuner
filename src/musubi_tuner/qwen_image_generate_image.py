@@ -1,33 +1,29 @@
 import argparse
-import gc
-from importlib.util import find_spec
-import random
-import os
-import time
 import copy
-from typing import Tuple, Optional, List, Any, Dict
+import gc
+import logging
+import os
+import random
+import time
+from importlib.util import find_spec
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from safetensors.torch import load_file, save_file
 from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
+from musubi_tuner.merge_lora import merge_lora_weights
+from musubi_tuner.networks import lora_qwen_image
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
+from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
-
 lycoris_available = find_spec("lycoris") is not None
-
-from musubi_tuner.networks import lora_qwen_image
-from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
-from musubi_tuner.wan_generate_video import merge_lora_weights
-
-import logging
-
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -256,7 +252,9 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int]:
 
 
 def load_dit_model(
-    args: argparse.Namespace, device: torch.device, dit_weight_dtype: Optional[torch.dtype] = None
+    args: argparse.Namespace,
+    device: torch.device,
+    dit_weight_dtype: Optional[torch.dtype] = None,
 ) -> qwen_image_model.QwenImageTransformer2DModel:
     """load DiT model
 
@@ -302,49 +300,45 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         num_layers=args.num_layers,
+        save_merged_model=args.save_merged_model if not args.lycoris else None,
     )
 
     # merge LoRA weights
-    if args.lycoris:
-        if args.lora_weight is not None and len(args.lora_weight) > 0:
-            merge_lora_weights(
-                lora_qwen_image,
-                model,
-                args.lora_weight,
-                args.lora_multiplier,
-                args.include_patterns,
-                args.exclude_patterns,
-                device,
-                lycoris=True,
-                save_merged_model=args.save_merged_model,
-            )
+    if args.lycoris and args.lora_weight is not None and len(args.lora_weight) > 0:
+        merge_lora_weights(
+            lora_qwen_image,
+            model,
+            args.lora_weight,
+            args.lora_multiplier,
+            args.include_patterns,
+            args.exclude_patterns,
+            device,
+            lycoris=True,
+            save_merged_model=args.save_merged_model,
+        )
 
-        if args.fp8_scaled:
-            # load state dict as-is and optimize to fp8
-            state_dict = model.state_dict()
+    if args.lycoris and args.fp8_scaled:
+        # load state dict as-is and optimize to fp8
+        state_dict = model.state_dict()
 
-            # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
-            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            # state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+        # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
+        move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+        # state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
 
-            from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+        from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
-            # inplace optimization
-            state_dict = optimize_state_dict_with_fp8(
-                state_dict,
-                device,
-                qwen_image_model.FP8_OPTIMIZATION_TARGET_KEYS,
-                qwen_image_model.FP8_OPTIMIZATION_EXCLUDE_KEYS,
-                move_to_device=move_to_device,
-            )
-            apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)  # args.scaled_mm)
+        # inplace optimization
+        state_dict = optimize_state_dict_with_fp8(
+            state_dict,
+            device,
+            qwen_image_model.FP8_OPTIMIZATION_TARGET_KEYS,
+            qwen_image_model.FP8_OPTIMIZATION_EXCLUDE_KEYS,
+            move_to_device=move_to_device,
+        )
+        apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)  # args.scaled_mm)
 
-            info = model.load_state_dict(state_dict, strict=True, assign=True)
-            logger.info(f"Loaded FP8 optimized weights: {info}")
-
-    # if we only want to save the model, we can skip the rest
-    if args.save_merged_model:
-        return None
+        info = model.load_state_dict(state_dict, strict=True, assign=True)
+        logger.info(f"Loaded FP8 optimized weights: {info}")
 
     if not args.fp8_scaled:
         # simple cast to dit_weight_dtype
@@ -622,10 +616,6 @@ def generate(
     if shared_models is None or "model" not in shared_models:
         # load DiT model
         model = load_dit_model(args, device, dit_weight_dtype)
-
-        # if we only want to save the model, we can skip the rest
-        if args.save_merged_model:
-            return None, None
 
         if shared_models is not None:
             shared_models["model"] = model
@@ -1011,9 +1001,6 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     first_prompt_args = all_prompt_args_list[0]
     dit_model = load_dit_model(first_prompt_args, device, dit_weight_dtype)  # Load directly to target device if possible
 
-    if first_prompt_args.save_merged_model:
-        logger.info("Merged DiT model saved. Skipping generation.")
-
     shared_models_for_generate = {"model": dit_model}  # Pass DiT via shared_models
 
     all_latents = []
@@ -1031,7 +1018,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
                 # The VAE instance returned by generate will be None here.
                 _, latent = generate(prompt_args_item, gen_settings, shared_models_for_generate, current_text_data)
 
-                if latent is None:  # and prompt_args_item.save_merged_model:  # Should be caught earlier
+                if latent is None:
                     continue
 
                 # Save latent if needed (using data from precomputed_image_data for H/W)
@@ -1251,9 +1238,6 @@ def main():
         # For single mode, precomputed data is None, shared_models is None.
         # generate will load all necessary models (VAE, Text/Image Encoder, DiT).
         returned_vae, latent = generate(args, gen_settings)
-        # print(f"Generated latent shape: {latent.shape}")
-        # if args.save_merged_model:
-        #     return
 
         # Save latent and video
         # returned_vae from generate will be used for decoding here.
