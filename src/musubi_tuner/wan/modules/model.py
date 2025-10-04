@@ -1039,7 +1039,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         if self.rope_func == "comfy":
             self.rope_embedder = torch.compile(self.rope_embedder, **self.compile_args)
         self.get_time_embedding = torch.compile(self.get_time_embedding, **self.compile_args)
-        self.head = torch.compile(self.head, **self.compile_args)
+        # self.head = torch.compile(self.head, **self.compile_args)
         for block in self.blocks:
             block._forward = torch.compile(block._forward, **self.compile_args)  # Actual rope will be compiled as part of forward
 
