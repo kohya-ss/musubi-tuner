@@ -74,6 +74,7 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 - [概要](#概要)
     - [ハードウェア要件](#ハードウェア要件)
     - [特徴](#特徴)
+    - [ドキュメント](#ドキュメント)
 - [インストール](#インストール)
     - [pipによるインストール](#pipによるインストール)
     - [uvによるインストール](#uvによるインストール)
@@ -97,13 +98,6 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、Qwen-ImageのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、Qwen-Imageのリポジトリとは関係ありません。
 
-アーキテクチャ固有のドキュメントについては、以下を参照してください：
-- [HunyuanVideo](./docs/hunyuan_video.md)
-- [Wan2.1/2.2](./docs/wan.md)
-- [FramePack](./docs/framepack.md)
-- [FLUX.1 Kontext](./docs/flux_kontext.md)
-- [Qwen-Image](./docs/qwen_image.md)
-
 *リポジトリは開発中です。*
 
 ### スポンサー
@@ -121,6 +115,17 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 ### 最近の更新
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2025/10/05
+    - エポックの切替をcollate_fnからDataLoaderの取得ループ開始前に変更しました。[PR #601](https://github.com/kohya-ss/musubi-tuner/pull/601)
+    - これまでの実装ではエポックの最初のデータ取得後に、ARBバケットがシャッフルされます。そのため、エポックの最初のデータは前エポックのARBソート順で取得されます。これによりエポック内でデータの重複や欠落が起きていました。
+    - 各DataSetでは`__getitem__`で共有エポックの変化を検知した直後にARBバケットをシャッフルします。これにより先頭サンプルから新しい順序で取得され、重複・欠落は解消されます。
+    - シャッフルタイミングが前倒しになったため、同一シードでも旧実装と同一のサンプル順序にはなりません
+    - **学習全体への影響**
+        - この修正はエポック境界における先頭サンプルの取り違いを解消するものです。複数エポックで見れば、各サンプルは最終的に欠落・重複なく使用されるため、学習全体に与える影響は軽微です。変更点は「エポック内の消費順序の整合性」を高めるものであり、長期的な学習挙動は同条件では実質的に変わりません（※極端に少ないエポック数や早期打ち切りの場合は順序による差異が観測される可能性があります）。
+
+    - [高度な設定のドキュメント](./docs/advanced_config.md#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定)に、学習時のオプションを設定ファイルで指定する方法を追加しました。[PR #630](https://github.com/kohya-ss/musubi-tuner/pull/630)
+    - ドキュメント構成を整理しました。データセット設定に関するドキュメントを`docs/dataset_config.md`に移動しました。
 
 - 2025/10/03
     - 各学習スクリプトで用いられているblock swap機構を改善し、Windows環境における共有GPUメモリの使用量を大きく削減しました。[PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585)
@@ -144,13 +149,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
         - これによりFP8量子化の精度が向上し、各モデル（HunyuanVideoを除く）学習の安定、推論精度の向上が期待できます。学習、推論速度はわずかに低下します。
         - Qwen-ImageのLoRA学習では、量子化対象モジュールの見直しにより、学習に必要なVRAMが5GB程度削減されます。
         - 詳細は[高度な設定のドキュメント](./docs/advanced_config.md#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化)を参照してください。
-
-- 2025/09/22
-    - FramePackのVAEについて強制的にtilingが有効になっていた不具合を修正しました。`--vae_tiling`オプションを指定するか、`--vae_spatial_tile_sample_min_size`を指定することでtilingが有効になります。[PR #583](https://github.com/kohya-ss/musubi-tuner/pull/583)
-
-- 2025/09/20
-    - `qwen_image_generate_image.py` で`--from_file`での生成が動作しない不具合が修正されました。[PR #553](https://github.com/kohya-ss/musubi-tuner/pull/553) および [PR #557](https://github.com/kohya-ss/musubi-tuner/pull/557) nmfisher 氏に感謝します。
-        - また同スクリプトに`--append_original_name`オプションが追加されました。編集時に元の画像のベース名を出力ファイル名に追加します。
 
 ### リリースについて
 
@@ -188,14 +186,33 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 ### ハードウェア要件
 
 - VRAM: 静止画での学習は12GB以上推奨、動画での学習は24GB以上推奨。
-    - *解像度等の学習設定により異なります。*12GBでは解像度 960x544 以下とし、`--blocks_to_swap`、`--fp8_llm`等の省メモリオプションを使用してください。
+    - *アーキテクチャ、解像度等の学習設定により異なります。*12GBでは解像度 960x544 以下とし、`--blocks_to_swap`、`--fp8_llm`等の省メモリオプションを使用してください。
 - メインメモリ: 64GB以上を推奨、32GB+スワップで動作するかもしれませんが、未検証です。
 
 ### 特徴
 
 - 省メモリに特化
 - Windows対応（Linuxでの動作報告もあります）
-- マルチGPUには対応していません
+- マルチGPU学習（[Accelerate](https://huggingface.co/docs/accelerate/index)を使用）、ドキュメントは後日追加予定
+
+### ドキュメント
+
+各アーキテクチャの詳細、設定、高度な機能については、以下のドキュメントを参照してください。
+
+**アーキテクチャ別:**
+- [HunyuanVideo](./docs/hunyuan_video.md)
+- [Wan2.1/2.2](./docs/wan.md)
+- [Wan2.1/2.2 (1フレーム推論)](./docs/wan_1f.md)
+- [FramePack](./docs/framepack.md)
+- [FramePack (1フレーム推論)](./docs/framepack_1f.md)
+- [FLUX.1 Kontext](./docs/flux_kontext.md)
+- [Qwen-Image](./docs/qwen_image.md)
+
+**共通設定・その他:**
+- [データセット設定](./docs/dataset_config.md)
+- [高度な設定](./docs/advanced_config.md)
+- [学習中のサンプル生成](./docs/sampling_during_training.md)
+- [ツールとユーティリティ](./docs/tools.md)
 
 ## インストール
 
@@ -249,29 +266,17 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ## モデルのダウンロード
 
-モデルのダウンロード手順はアーキテクチャによって異なります。各アーキテクチャの詳細については、以下のドキュメントを参照してください：
-
-- [HunyuanVideoのモデルダウンロード](./docs/hunyuan_video.md#download-the-model--モデルのダウンロード)
-- [Wan2.1/2.2のモデルダウンロード](./docs/wan.md#download-the-model--モデルのダウンロード)
-- [FramePackのモデルダウンロード](./docs/framepack.md#download-the-model--モデルのダウンロード)
-- [FLUX.1 Kontextのモデルダウンロード](./docs/flux_kontext.md#download-the-model--モデルのダウンロード)
-- [Qwen-Imageのモデルダウンロード](./docs/qwen_image.md#download-the-model--モデルのダウンロード)
+モデルのダウンロード手順はアーキテクチャによって異なります。詳細は[ドキュメント](#ドキュメント)セクションにある、各アーキテクチャのドキュメントを参照してください。
 
 ## 使い方
 
 ### データセット設定
 
-[こちら](./src/musubi_tuner/dataset/dataset_config.md)を参照してください。
+[こちら](./docs/dataset_config.md)を参照してください。
 
-### 事前キャッシュと学習
+### 事前キャッシュ
 
-各アーキテクチャは固有の事前キャッシュと学習手順が必要です。詳細については、以下のドキュメントを参照してください：
-
-- [HunyuanVideoの使用方法](./docs/hunyuan_video.md)
-- [Wan2.1/2.2の使用方法](./docs/wan.md)
-- [FramePackの使用方法](./docs/framepack.md)
-- [FLUX.1 Kontextの使用方法](./docs/flux_kontext.md)
-- [Qwen-Imageの使用方法](./docs/qwen_image.md)
+事前キャッシュの手順の詳細は、[ドキュメント](#ドキュメント)セクションにある各アーキテクチャのドキュメントを参照してください。
 
 ### Accelerateの設定
 
@@ -293,18 +298,7 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ### 学習と推論
 
-学習と推論の手順はアーキテクチャによって大きく異なります。詳細な手順については、対応するドキュメントを参照してください：
-
-- [HunyuanVideoの学習と推論](./docs/hunyuan_video.md)
-- [Wan2.1/2.2の学習と推論](./docs/wan.md)
-- [FramePackの学習と推論](./docs/framepack.md)
-- [FLUX.1 Kontextの学習と推論](./docs/flux_kontext.md)
-- [Qwen-Imageの学習と推論](./docs/qwen_image.md)
-
-高度な設定オプションや追加機能については、以下を参照してください：
-- [高度な設定](./docs/advanced_config.md)
-- [学習中のサンプル生成](./docs/sampling_during_training.md)
-- [ツールとユーティリティ](./docs/tools.md)
+学習と推論の手順はアーキテクチャによって大きく異なります。詳細な手順については、[ドキュメント](#ドキュメント)セクションにある対応するアーキテクチャのドキュメント、および各種の設定のドキュメントを参照してください。
 
 ## その他
 

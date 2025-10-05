@@ -105,7 +105,7 @@ The optimal values for `target_index` and `control_index` are unknown. Please sp
 
 **This feature is experimental.** It performs training in a manner similar to one-frame inference.
 
-This currently reuses the dataset settings of the FramePack model. Please refer to the [FramePack documentation](./framepack_1f.md#one-frame-single-frame-training--1フレーム学習) and the [FramePack dataset settings](../src/musubi_tuner/dataset/dataset_config.md#framepack-one-frame-training).
+This currently reuses the dataset settings of the FramePack model. Please refer to the [FramePack documentation](./framepack_1f.md#one-frame-single-frame-training--1フレーム学習) and the [FramePack dataset settings](./dataset_config.md#framepack-one-frame-training).
 
 `fp_1f_clean_indices` corresponds to the `control_index` described below.
 
@@ -141,7 +141,7 @@ The girl wears a school uniform. --i path/to/start.png --ei path/to/end.png --ci
 **この機能は実験的なものです。** 1フレーム推論と同様の方法で学習を行います。
 
 現在は、FramePackモデルのデータセット設定を流用しています。[FramePackのドキュメント](./framepack_1f.md#one-frame-single-frame-training--1フレーム学習)および
-[FramePackのデータセット設定](../src/musubi_tuner/dataset/dataset_config.md#framepack-one-frame-training)を参照してください。
+[FramePackのデータセット設定](./dataset_config.md#framepack-one-frame-training)を参照してください。
 
 `fp_1f_clean_indices` が後述の `control_index` に相当します。
 

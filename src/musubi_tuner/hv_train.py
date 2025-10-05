@@ -69,9 +69,8 @@ def clean_memory_on_device(device: torch.device):
 
 # for collate_fn: epoch and step is multiprocessing.Value
 class collator_class:
-    def __init__(self, epoch, step, dataset):
+    def __init__(self, epoch, dataset):
         self.current_epoch = epoch
-        self.current_step = step
         self.dataset = dataset  # not used if worker_info is not None, in case of multiprocessing
 
     def __call__(self, examples):
@@ -84,7 +83,6 @@ class collator_class:
 
         # set epoch and step
         dataset.set_current_epoch(self.current_epoch.value)
-        dataset.set_current_step(self.current_step.value)
         return examples[0]
 
 

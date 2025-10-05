@@ -91,7 +91,7 @@ The dataset must be an image dataset. If you use caption files, you need to spec
 
 If you use JSONL files, specify them as `{"image_path": "/path/to/target_image1.jpg", "control_path": "/path/to/source_image1.jpg", "caption": "The object changes to red."}`. The `image_path` should point to the images after the change, and `control_path` should point to the starting images. 
 
-For the dataset configuration, see [here](../src/musubi_tuner/dataset/dataset_config.md#sample-for-image-dataset-with-control-images) and [here](../src/musubi_tuner/dataset/dataset_config.md#framepack-one-frame-training). There are also examples for kisekaeichi and 1f-mc settings.
+For the dataset configuration, see [here](./dataset_config.md#sample-for-image-dataset-with-control-images) and [here](./dataset_config.md#framepack-one-frame-training). There are also examples for kisekaeichi and 1f-mc settings.
 
 For single frame training, specify `--one_frame` in `fpack_cache_latents.py` to create the cache. You can also use `--one_frame_no_2x` and `--one_frame_no_4x` options, which have the same meaning as `no_2x` and `no_4x` during inference. It is recommended to set these options to match the inference settings.
 
@@ -126,7 +126,7 @@ The girl wears a school uniform. --i path/to/start_with_alpha.png --ci path/to/r
 
 JSONLファイルを用いる場合は、`{"image_path": "/path/to/target_image1.jpg", "control_path": "/path/to/source_image1.jpg", "caption": "The object changes to red"}`のように指定してください。`image_path`は変化後の画像、`control_path`は開始画像を指定します。
 
-データセットの設定については、[こちら](../src/musubi_tuner/dataset/dataset_config.md#sample-for-image-dataset-with-control-images)と[こちら](../src/musubi_tuner/dataset/dataset_config.md#framepack-one-frame-training)も参照してください。kisekaeichiと1f-mcの設定例もそちらにあります。
+データセットの設定については、[こちら](./dataset_config.md#sample-for-image-dataset-with-control-images)と[こちら](./dataset_config.md#framepack-one-frame-training)も参照してください。kisekaeichiと1f-mcの設定例もそちらにあります。
 
 1フレーム学習時は、`fpack_cache_latents.py`に`--one_frame`を指定してキャッシュを作成してください。また`--one_frame_no_2x`と`--one_frame_no_4x`オプションも利用可能です。推論時の`no_2x`、`no_4x`と同じ意味を持ちますので、推論時と同じ設定にすることをお勧めします。
 

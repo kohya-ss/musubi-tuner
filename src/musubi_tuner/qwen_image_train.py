@@ -148,12 +148,14 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             logger.info(f"Using timestep bucketing. Number of buckets: {args.num_timestep_buckets}")
         self.num_timestep_buckets = args.num_timestep_buckets  # None or int, None makes all the behavior same as before
 
+        current_epoch = Value("i", 0)
+
         blueprint_generator = BlueprintGenerator(ConfigSanitizer())
         logger.info(f"Load dataset config from {args.dataset_config}")
         user_config = config_utils.load_user_config(args.dataset_config)
         blueprint = blueprint_generator.generate(user_config, args, architecture=self.architecture)
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
-            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets
+            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
         )
 
         if train_dataset_group.num_train_items == 0:
@@ -162,10 +164,8 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 " / データセットに学習データがありません。latent/Text Encoderキャッシュを事前に作成したか確認してください"
             )
 
-        current_epoch = Value("i", 0)
-        current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
-        collator = collator_class(current_epoch, current_step, ds_for_collator)
+        collator = collator_class(current_epoch, ds_for_collator)
 
         # prepare accelerator
         logger.info("preparing accelerator")
@@ -529,7 +529,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
             for step, batch in enumerate(train_dataloader):
                 latents = batch["latents"]
-                current_step.value = global_step
 
                 with accelerator.accumulate(training_model):
                     latents = self.scale_shift_latents(latents)

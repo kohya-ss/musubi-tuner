@@ -52,7 +52,7 @@ DiT, VAE, Text Encoder (Qwen2.5-VL) のモデルをダウンロードする必�
 
 ## Pre-caching / 事前キャッシング
 
-If you are using Qwen-Image-Edit or Edit-2509, please also refer to the [Qwen-Image-Edit section](../src/musubi_tuner/dataset/dataset_config.md#qwen-image-edit-and-qwen-image-edit-2509) of the dataset config documentation.
+If you are using Qwen-Image-Edit or Edit-2509, please also refer to the [Qwen-Image-Edit section](./dataset_config.md#qwen-image-edit-and-qwen-image-edit-2509) of the dataset config documentation.
 
 ### Latent Pre-caching / latentの事前キャッシング
 
@@ -72,7 +72,7 @@ python src/musubi_tuner/qwen_image_cache_latents.py \
 <details>
 <summary>日本語</summary>
 
-Qwen-Image-EditまたはEdit-2509を使用する場合は、事前にデータセット設定のドキュメントの[Qwen-Image-Editのセクション](../src/musubi_tuner/dataset/dataset_config.md#qwen-image-edit-and-qwen-image-edit-2509) も参照してください。
+Qwen-Image-EditまたはEdit-2509を使用する場合は、事前にデータセット設定のドキュメントの[Qwen-Image-Editのセクション](./dataset_config.md#qwen-image-edit-and-qwen-image-edit-2509) も参照してください。
 
 latentの事前キャッシングはQwen-Image専用のスクリプトを使用します。
 

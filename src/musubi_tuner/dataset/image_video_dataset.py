@@ -6,7 +6,13 @@ import math
 import os
 import random
 import time
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from multiprocessing.sharedctypes import Synchronized
+
+SharedEpoch = Optional["Synchronized[int]"]
+
 
 import numpy as np
 import torch
@@ -1350,6 +1356,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.architecture = architecture
         self.seed = None
         self.current_epoch = 0
+        self.shared_epoch = None
 
         if not self.enable_bucket:
             self.bucket_no_upscale = False
@@ -1401,24 +1408,13 @@ class BaseDataset(torch.utils.data.Dataset):
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         pass
 
-    def set_seed(self, seed: int):
+    def set_seed(self, seed: int, shared_epoch: SharedEpoch):
         self.seed = seed
+        self.shared_epoch = shared_epoch
 
     def set_current_epoch(self, epoch):
-        if not self.current_epoch == epoch:  # shuffle buckets when epoch is incremented
-            if epoch > self.current_epoch:
-                logger.info("epoch is incremented. current_epoch: {}, epoch: {}".format(self.current_epoch, epoch))
-                num_epochs = epoch - self.current_epoch
-                for _ in range(num_epochs):
-                    self.current_epoch += 1
-                    self.shuffle_buckets()
-                # self.current_epoch seem to be set to 0 again in the next epoch. it may be caused by skipped_dataloader?
-            else:
-                logger.warning("epoch is not incremented. current_epoch: {}, epoch: {}".format(self.current_epoch, epoch))
-                self.current_epoch = epoch
-
-    def set_current_step(self, step):
-        self.current_step = step
+        assert self.shared_epoch is not None, "shared_epoch is None"
+        assert self.shared_epoch.value == epoch, "shared_epoch does not match"
 
     def set_max_train_steps(self, max_train_steps):
         self.max_train_steps = max_train_steps
@@ -1430,7 +1426,17 @@ class BaseDataset(torch.utils.data.Dataset):
         return NotImplementedError
 
     def __getitem__(self, idx):
-        raise NotImplementedError
+        assert self.shared_epoch is not None, "shared_epoch is None"
+        epoch = self.shared_epoch.value
+        if epoch > self.current_epoch:
+            logger.info(f"epoch is incremented. current_epoch: {self.current_epoch}, epoch: {epoch}")
+            num_epochs = epoch - self.current_epoch
+            for _ in range(num_epochs):
+                self.current_epoch += 1
+                self.shuffle_buckets()
+        elif epoch < self.current_epoch:
+            logger.warning(f"epoch is not incremented. current_epoch: {self.current_epoch}, epoch: {epoch}")
+            self.current_epoch = epoch
 
     def _default_retrieve_text_encoder_output_cache_batches(self, datasource: ContentDatasource, batch_size: int, num_workers: int):
         datasource.set_caption_only(True)
@@ -1770,6 +1776,7 @@ class ImageDataset(BaseDataset):
         return len(self.batch_manager)
 
     def __getitem__(self, idx):
+        super().__getitem__(idx)
         return self.batch_manager[idx]
 
 
@@ -2097,6 +2104,7 @@ class VideoDataset(BaseDataset):
         return len(self.batch_manager)
 
     def __getitem__(self, idx):
+        super().__getitem__(idx)
         return self.batch_manager[idx]
 
 
@@ -2111,10 +2119,6 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
     def set_current_epoch(self, epoch):
         for dataset in self.datasets:
             dataset.set_current_epoch(epoch)
-
-    def set_current_step(self, step):
-        for dataset in self.datasets:
-            dataset.set_current_step(step)
 
     def set_max_train_steps(self, max_train_steps):
         for dataset in self.datasets:
