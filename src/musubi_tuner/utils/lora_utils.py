@@ -1,20 +1,18 @@
+import logging
 import os
 import re
+import sys
 from typing import Callable, Dict, List, Optional, Union
+
 import torch
-
-import logging
-
 from tqdm import tqdm
 
+from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization
 from musubi_tuner.utils.device_utils import synchronize_device
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, mem_eff_save_file
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
-
-from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, mem_eff_save_file
 
 
 def filter_lora_state_dict(
@@ -215,7 +213,7 @@ def load_safetensors_with_lora_and_fp8(
         logger.info(f"Saving merged model to {save_merged_model}")
         mem_eff_save_file(state_dict, save_merged_model)
         logger.info("Merged model saved")
-        return state_dict
+        sys.exit(0)
 
     return state_dict
 

@@ -1,4 +1,6 @@
 import argparse
+import re
+import sys
 import logging
 from importlib.util import find_spec
 from types import ModuleType
