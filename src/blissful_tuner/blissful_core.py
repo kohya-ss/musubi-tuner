@@ -149,7 +149,7 @@ def add_blissful_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         parser.add_argument(
             "--simple_modulation",
             action="store_true",
-            help="Use Wan 2.1 style modulation even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus",
+            help="Use Wan 2.1 style time embedding even for Wan 2.2 to save lots of VRAM. With this and --lazy_loading, 2.2 should use same VRAM as 2.1 ceteris paribus",
         )
         parser.add_argument(
             "--lower_precision_attention",

@@ -817,7 +817,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             self.e_dtype = torch.float16
         self.simple_modulation = kwargs.get("simple_modulation", False)
         if self.model_version == "2.2" and self.simple_modulation:
-            logger.info("Using simple (Wan 2.1 style) modulation strategy to save lots of VRAM")
+            logger.info("Using simplified (Wan 2.1 style) timestep embedding to save lots of VRAM")
         self.blocks = nn.ModuleList(
             [
                 WanAttentionBlock(
