@@ -2,7 +2,6 @@ __pycache__/
 .venv
 venv/
 logs/
-uv.lock
 main.exp
 main.lib
 main.obj
@@ -12,3 +11,26 @@ GEMINI.md
 .gemini/
 AGENTS.md
 .vscode/settings.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE files
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
