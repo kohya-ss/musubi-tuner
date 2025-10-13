@@ -152,6 +152,11 @@ def parse_args() -> argparse.Namespace:
         help="one frame inference, default is None, comma separated values from 'no_2x', 'no_4x', 'no_post', 'control_indices' and 'target_index'.",
     )
     parser.add_argument(
+        "--one_frame_auto_resize",
+        action="store_true",
+        help="Automatically adjust height and width based on control image size and given size for one frame inference. Default is False.",
+    )
+    parser.add_argument(
         "--control_image_path", type=str, default=None, nargs="*", help="path to control (reference) image for one frame inference."
     )
     parser.add_argument(
@@ -420,6 +425,13 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int, int]:
     video_seconds = args.video_seconds
     if args.video_sections is not None:
         video_seconds = (args.video_sections * (args.latent_window_size * 4) + 1) / args.fps
+
+    if args.one_frame_inference is not None and args.one_frame_auto_resize and args.control_image_path is not None:
+        with Image.open(args.control_image_path[0]) as control_image:
+            width, height = image_video_dataset.BucketSelector.calculate_bucket_resolution(
+                control_image.size, (width, height), architecture=image_video_dataset.ARCHITECTURE_FRAMEPACK
+            )
+            logger.info(f"Adjusted image size to {width}x{height} based on control image size {control_image.size}")
 
     if height % 8 != 0 or width % 8 != 0:
         raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")

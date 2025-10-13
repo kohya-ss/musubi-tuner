@@ -116,6 +116,14 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/10/13
+    - Qwen-Image-Edit、2509の推論スクリプトで、ピクセル単位での生成画像の一貫性を向上するReference Consistency Mask (RCM)機能を追加しました。[PR #643]
+    (https://github.com/kohya-ss/musubi-tuner/pull/643)
+        - RCMは、生成画像が制御画像と比較してわずかな位置ずれを起こす問題を解決します。詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md#inpainting-and-reference-consistency-mask-rcm)を参照してください。
+    - あわせて同PRにて `--resize_control_to_image_size` オプションが指定されていない場合でも、コントロール画像が出力画像と同じサイズにリサイズされてしまう不具合を修正しました。**生成画像が変化する可能性がありますので、オプションを確認してください。** 
+    - FramePackの1フレーム推論で、`--one_frame_auto_resize`オプションを追加しました。[PR #646](https://github.com/kohya-ss/musubi-tuner/pull/646)
+        - 生成画像の解像度を自動的に調整します。`--one_frame_inference`を指定した場合にのみ有効です。詳細は[FramePackの1フレーム推論のドキュメント](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論)を参照してください。
+
 - 2025/10/05
     - エポックの切替をcollate_fnからDataLoaderの取得ループ開始前に変更しました。[PR #601](https://github.com/kohya-ss/musubi-tuner/pull/601)
     - これまでの実装ではエポックの最初のデータ取得後に、ARBバケットがシャッフルされます。そのため、エポックの最初のデータは前エポックのARBソート順で取得されます。これによりエポック内でデータの重複や欠落が起きていました。

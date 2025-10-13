@@ -118,6 +118,13 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- October 13, 2025
+    - Added Reference Consistency Mask (RCM) feature to Qwen-Image-Edit, 2509 inference script to improve pixel-level consistency of generated images. See [PR #643](https://github.com/kohya-ss/musubi-tuner/pull/643)
+        - RCM addresses the issue of slight positional drift in generated images compared to the control image. For details, refer to the [Qwen-Image documentation](./docs/qwen_image.md#inpainting-and-reference-consistency-mask-rcm).
+    - Fixed a bug where the control image was being resized to match the output image size even when the `--resize_control_to_image_size` option was not specified. **This may change the generated images, so please check your options.**
+    - FramePack 1-frame inference now includes the `--one_frame_auto_resize` option. [PR #646](https://github.com/kohya-ss/musubi-tuner/pull/646)
+        - Automatically adjusts the resolution of the generated image. This option is only effective when `--one_frame_inference` is specified. For details, refer to the [FramePack 1-frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論).
+        
 - October 5, 2025
     - Changed the epoch switching from `collate_fn` to before the start of the DataLoader fetching loop. See [PR #601](https://github.com/kohya-ss/musubi-tuner/pull/601) for more details.
     - In the previous implementation, the ARB buckets were shuffled after fetching the first data of the epoch. Therefore, the first data of the epoch was fetched in the ARB sorted order of the previous epoch. This caused duplication and omission of data within the epoch.

@@ -187,6 +187,8 @@ Normally, specify `--video_sections 1` to indicate only one section (one image).
 
 Increasing `target_index` from the default of 9 may result in larger changes. It has been confirmed that generation can be performed without breaking up to around 40.
 
+The `--one_frame_auto_resize` option has been added to automatically adjust the image size based on the control image size when `--one_frame_inference` is specified. If this option is enabled, the image size will be adjusted to the nearest bucket size with the specified width\*height, based on the control image size while maintaining the aspect ratio. This can be useful when the multiple generation of images with different sizes is required.
+
 The `--end_image_path` is ignored for one frame inference.
 
 <details>
@@ -224,6 +226,8 @@ clean latents 2x、clean latents 4x、postをモデルに渡す場合でも値�
 通常は`--video_sections 1` として1セクションのみ（画像1枚）を指定してください。
 
 `target_index` をデフォルトの9から大きくすると、変化量が大きくなる可能性があります。40程度までは破綻なく生成されることを確認しています。
+
+`--one_frame_auto_resize`オプションが追加されました。`--one_frame_inference`を指定した場合に、制御用画像のサイズに基づいて自動的に画像サイズを調整します。このオプションを有効にすると、画像サイズは、アスペクト比を維持しつつ制御用画像のサイズを基準に、指定された幅\*高さの最も近いバケットサイズに調整されます。異なるサイズの画像を複数生成する必要がある場合に便利です。
 
 `--end_image_path`は無視されます。
 

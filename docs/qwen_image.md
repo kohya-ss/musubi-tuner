@@ -362,7 +362,7 @@ python src/musubi_tuner/qwen_image_generate_image.py \
 - `--prompt`: Prompt for generation.
 - `--guidance_scale` controls the classifier-free guidance scale.
 - For Qwen-Image-Edit:
-  - Add `--edit` flag to enable image editing mode.
+  - Add `--edit` or `--edit_plus` flag to enable image editing mode. `--edit` is for Qwen-Image-Edit, and `--edit_plus` is for Edit-2509.
   - `--control_image_path`: Path to the control (reference) image for editing. Edit-2509 also supports multiple arguments (e.g., `--control_image_path img1.png img2.png img3.png`).
   - `--resize_control_to_image_size`: Resize control image to match the specified image size.
   - `--resize_control_to_official_size`: Resize control image to official size (1M pixels keeping aspect ratio). Recommended for better results.
@@ -399,5 +399,96 @@ Qwen-Imageの推論は専用のスクリプト`qwen_image_generate_image.py`を�
 `--flow_shift`を指定することで、離散フローシフトを設定できます。省略すると、デフォルト値（画像サイズに基づく動的シフト）が使用されます。
 
 `xformers`、`flash`、`sageattn`もattentionモードとして利用可能です。ただし、`sageattn`はまだ動作確認が取れていません。
+
+</details>
+
+### Inpainting and Reference Consistency Mask (RCM)
+
+For Qwen-Image-Edit, inpainting with a mask image and a feature called Reference Consistency Mask (RCM) are available to prevent unintended changes in the background or other areas.
+
+**These features are only available in Edit/Edit-plus mode, and require the first control image to be the same size as the output image.** They cannot be used at the same time.
+
+- `--mask_path`: Specifies the path to a mask image for inpainting. The image should be black and white, where white areas indicate the regions to be inpainted (changed) and black areas indicate the regions to be preserved.
+- `--rcm_threshold`: Enables the Reference Consistency Mask (RCM) feature. RCM is a technique that dynamically creates a mask during the denoising process to prevent unintended modifications to areas that should remain unchanged. It compares the latents of the current generation step with the latents of the control image and protects areas with small differences. Lower values for the threshold result in a larger inpainting area. Typical values are 0.01 to 0.1 for absolute threshold, 0.1 to 0.5 for relative threshold.
+- `--rcm_relative_threshold`: If this flag is set, the `--rcm_threshold` is treated as a relative value (0.0-1.0) to the maximum difference observed in the current step. This can provide more stable results across different steps. If not set, the threshold is an absolute value.
+- `--rcm_kernel_size`: Specifies the kernel size for a Gaussian blur applied before calculating the difference. This helps to create a smoother, more stable mask. Default is 3.
+- `--rcm_dilate_size`: Specifies the size to dilate (expand) the inpainting region of the generated mask. This is useful for ensuring that the edges of the area you want to change are properly modified. Default is 0 (no dilation).
+- `--rcm_debug_save`: When this flag is set, the dynamically generated RCM mask for each step will be saved in the output directory. This is very useful for debugging and adjusting the RCM parameters.
+
+**Example using RCM:**
+
+```bash
+python src/musubi_tuner/qwen_image_generate_image.py \
+    --dit path/to/edit_dit_model \
+    --vae path/to/vae_model \
+    --text_encoder path/to/text_encoder \
+    --edit \
+    --control_image_path path/to/control_image.png \
+    --prompt "Change her dress to red" \
+    --image_size 1024 1024 \
+    --rcm_threshold 0.2 --rcm_relative_threshold \
+    --rcm_kernel_size 3 --rcm_dilate_size 1 \
+    ...
+```
+
+#### Important Usage Notes
+
+-   **Compatibility:** Both RCM and the standard inpainting mask are only effective in **edit mode** (when a control image is provided).
+-   **Requirement:** To use these features, the initial control image must have the **same dimensions** as the final output image. The script will show an error and disable RCM if the sizes do not match.
+-   **Exclusivity:** RCM and `--mask_path` cannot be used at the same time.
+-   **Debugging Tip:** When first using RCM, it is highly recommended to use the `--rcm_debug_save` flag. This will save the masks to the output directory, allowing you to visually inspect how the `threshold` and other parameters are affecting the mask generation.
+
+#### Technical Details of RCM
+
+Reference Consistency Mask (RCM) addresses a common issue in Qwen-Image-Edit where the generated image has a slight positional drift or misalignment compared to the control image. RCM significantly improves the structural stability and positional accuracy of the image editing process.
+
+This feature is implemented based on the idea of dynamically creating a mask during the denoising loop to "anchor" the parts of the image that should remain consistent with the reference (control) image.
+
+**How RCM Works**
+
+For each step in the denoising loop, RCM performs the following actions:
+1.  It calculates a "noisy" version of the original control latent, corresponding to the current timestep `t`.
+2.  It computes the difference between the current generation latent and the noisy control latent.
+3.  Areas with a small difference are considered "consistent" and are masked to be preserved. The sensitivity is controlled by the `rcm_threshold`.
+4.  This mask is then used to reset the consistent regions of the current latent back to the state of the noisy reference latent, just before the `scheduler.step` is called.
+
+This self-correcting mechanism prevents the accumulation of positional errors throughout the denoising process, ensuring that unchanged elements like backgrounds or faces stay perfectly aligned.
+
+<details>
+<summary>日本語</summary>
+
+Qwen-Image-Editにおいて、背景などを意図せず変更してしまうことを防ぐため、マスク画像を使ったInpaintingと、Reference Consistency Mask (RCM) という機能が利用可能です。
+
+**これらの機能はEdit/Edit-plusモードでのみ利用可能で、かつ最初のコントロール画像が出力画像と同じサイズである必要があります。** また、同時に使用することはできません。
+
+- `--mask_path`: Inpainting用のマスク画像へのパスを指定します。白黒のマスク画像で、白の領域がInpainting（変更）される領域、黒の領域が維持される領域を示します。
+- `--rcm_threshold`: Reference Consistency Mask (RCM) 機能を有効にします。RCMは、Denoisingの過程で動的にマスクを生成し、変更すべきでない箇所が意図せず変更されるのを防ぐ技術です。現在の生成ステップのlatentとコントロール画像のlatentを比較し、差が小さい部分を保護します。閾値が低いほど、Inpainting領域は大きくなります。
+- `--rcm_relative_threshold`: このフラグを指定すると、`--rcm_threshold`がそのステップで観測された差分の最大値に対する相対的な値（0.0～1.0）として扱われます。これにより、ステップごとに安定した結果が得られやすくなります。指定しない場合は絶対値として扱われます。絶対値の場合は0.01～0.1、相対値の場合は0.1～0.5が典型的な値です。
+- `--rcm_kernel_size`: 差分を計算する前に適用するガウシアンブラーのカーネルサイズを指定します。これにより、より滑らかで安定したマスクが生成されます。デフォルトは3です。
+- `--rcm_dilate_size`: 生成されたマスクのInpainting領域を膨張（dilate）させるサイズを指定します。変更したい領域の境界部分が確実に変更されるようにしたい場合に便利です。デフォルトは0（膨張なし）です。
+- `--rcm_debug_save`: このフラグを指定すると、各ステップで動的に生成されたRCMのマスクが出力ディレクトリに保存されます。RCMのパラメータを調整する際のデバッグに非常に役立ちます。
+
+**重要な使用上の注意**
+
+-   **互換性:** RCMと標準のinpaintingマスクは、どちらも**Editモード**（制御画像が提供されている場合）でのみ有効です。
+-   **要件:** これらの機能を使用するには、最初の制御画像が最終的な出力画像と**同じサイズ**である必要があります。サイズが一致しない場合、スクリプトはエラーを表示し、RCMを無効にします。
+-   **排他性:** RCMと`--mask_path`は同時に使用できません。
+-   **デバッグのヒント:** 初めてRCMを使用する際は、`--rcm_debug_save`フラグを使用することを強く推奨します。これによりマスクが出力ディレクトリに保存され、`threshold`などのパラメータがマスク生成にどのように影響しているかを視覚的に確認できます。
+
+**RCMの技術的詳細**
+
+Reference Consistency Mask (RCM) は、Qwen-Image-Editにおいて、生成画像が制御画像と比較してわずかな位置ずれを起こすという一般的な問題を解決するためのものです。RCMは、編集プロセスにおける構造的な安定性と位置精度を大幅に向上させます。
+
+この機能は、denoisingループ中に動的にマスクを生成し、参照元（制御画像）と一致すべき部分を「固定（アンカー）」するというアイデアに基づいています。
+
+**RCMの動作原理**
+
+RCMは、denoisingループの各ステップで以下の処理を実行します。
+1.  現在のタイムステップ`t`に対応する、元の制御画像の潜在変数にノイズを加えたバージョンを計算します。
+2.  現在の生成中latentと、ノイズ付加済み制御latentとの差分を計算します。
+3.  差分が小さい領域を「一致している」とみなし、その部分を保持するようにマスクします。この感度は`rcm_threshold`によって制御されます。
+4.  そして、このマスクを使い、`scheduler.step`が呼び出される直前に、一致している領域をノイズ付加済み参照latentの状態にリセットします。
+
+この自己修正的なメカニズムにより、denoisingプロセス全体を通して位置誤差が蓄積されるのを防ぎ、背景や顔のような変更しない要素が完全に位置ずれなく維持されることを保証します。
 
 </details>

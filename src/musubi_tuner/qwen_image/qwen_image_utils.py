@@ -636,7 +636,7 @@ def unpack_latents(latents, height, width, vae_scale_factor=VAE_SCALE_FACTOR) ->
 def pack_latents(latents: torch.Tensor) -> torch.Tensor:
     """
     This function handles (B, C, 1, H, W) and (B, C, H, W) latents. So the logic is a bit weird.
-    It packs the latents into a shape of (B, H/2, W/2, C*4, 2, 2) and then reshapes it to (B, H/2 * W/2, C*4) = (B, Seq, In-Channels)
+    It packs the latents into a shape of (B, H/2, W/2, C, 2, 2) and then reshapes it to (B, H/2 * W/2, C*4) = (B, Seq, In-Channels)
     """
     batch_size = latents.shape[0]
     num_channels_latents = latents.shape[1]
