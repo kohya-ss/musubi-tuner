@@ -90,4 +90,3 @@ SUPPORTED_SIZES = {
 }
 
 
-WAN_CONFIGS["i2v-A14B"].in_dim = 16 # test
