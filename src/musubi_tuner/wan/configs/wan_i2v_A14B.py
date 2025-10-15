@@ -26,7 +26,6 @@ i2v_A14B.dim = 5120
 i2v_A14B.ffn_dim = 13824
 i2v_A14B.freq_dim = 256
 i2v_A14B.in_dim = 36
-i2v_A14B.in_dim = 16 # test
 i2v_A14B.num_heads = 40
 i2v_A14B.num_layers = 40
 i2v_A14B.window_size = (-1, -1)

@@ -549,7 +549,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         model_version="2.1",  # New!
         patch_size=(1, 2, 2),
         text_len=512,
-        in_dim=16,
+        in_dim=36,  # <-- changed from 16 to 36
         dim=2048,
         ffn_dim=8192,
         freq_dim=256,
