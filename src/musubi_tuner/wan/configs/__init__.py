@@ -40,6 +40,7 @@ i2v_14B_FC.__name__ = "Config: Wan-Fun-Control I2V 14B"
 i2v_14B_FC.in_dim = 48
 i2v_14B_FC.is_fun_control = True
 
+# wan2.2_i2v_low_noise_14B_fp16
 WAN_CONFIGS = {
     "t2v-14B": t2v_14B,
     "t2v-1.3B": t2v_1_3B,
@@ -87,3 +88,6 @@ SUPPORTED_SIZES = {
     "i2v-A14B": ("720*1280", "1280*720", "480*832", "832*480"),
     "ti2v-5B": ("704*1280", "1280*704"),
 }
+
+
+WAN_CONFIGS["i2v-A14B"].in_dim = 16 # test

@@ -477,6 +477,8 @@ class WanNetworkTrainer(NetworkTrainer):
 
         if self.high_low_training:
             # load high noise model
+            print("self.config", self.config)
+            # patch_embedding.weight: copying a param with shape torch.Size([5120, 16, 1, 2, 2]) from checkpoint, the shape in current model is torch.Size([5120, 36, 1, 2, 2])
             logger.info(f"Loading high noise model from {self.dit_high_noise_path}")
             model_high_noise = load_wan_model(
                 self.config,

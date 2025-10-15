@@ -2752,6 +2752,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output_dir", type=str, default=None, help="directory to output trained model / 学習後のモデル出力先ディレクトリ"
     )
+    
     parser.add_argument(
         "--output_name",
         type=str,

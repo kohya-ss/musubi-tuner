@@ -357,7 +357,7 @@ def get_task_defaults(task: str, size: Optional[Tuple[int, int]] = None) -> Tupl
     width, height = size if size else (0, 0)
 
     cfg = WAN_CONFIGS[task]
-
+    print("\cfg:", cfg)
     infer_steps = cfg.sample_steps
     boundary = cfg.boundary  # may be None
     flow_shift = cfg.sample_shift
