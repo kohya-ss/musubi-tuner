@@ -130,7 +130,8 @@ class LoRAModule(torch.nn.Module):
                 scale = self.scale
 
             lx = self.lora_up(lx)
-            print(lx.shape, x.shape, " self.multiplier", self.multiplier, scale, self.lora_dim)
+            print(lx.shape, x.shape, " \nself.multiplier", self.multiplier, scale, self.lora_dim)
+            logger.error(f"LoRA forward: {lx.shape}, {x.shape}, {self.multiplier}, {scale}, {self.lora_dim}")
             assert 1==2
             return org_forwarded + lx * self.multiplier * scale
         else:
