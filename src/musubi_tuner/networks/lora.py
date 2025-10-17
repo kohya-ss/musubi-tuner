@@ -130,7 +130,7 @@ class LoRAModule(torch.nn.Module):
                 scale = self.scale
 
             lx = self.lora_up(lx)
-
+            print(lx.shape, self.multiplier, scale, self.lora_dim)
             return org_forwarded + lx * self.multiplier * scale
         else:
             lxs = [lora_down(x) for lora_down in self.lora_down]
