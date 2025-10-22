@@ -485,6 +485,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 args.metadata_tags,
                 timesteps=md_timesteps,
                 is_lora=False,
+                is_edit_plus=args.edit_plus,
             )
 
             metadata_to_save.update(sai_metadata)

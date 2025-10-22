@@ -126,6 +126,7 @@ def build_metadata(
     merged_from: Optional[str] = None,
     timesteps: Optional[Tuple[int, int]] = None,
     is_lora: bool = True,
+    is_edit_plus: bool = False,
 ):
     metadata = {}
     metadata.update(BASE_METADATA)
@@ -152,7 +153,11 @@ def build_metadata(
         arch = ARCH_QWEN_IMAGE
         impl = IMPL_QWEN_IMAGE
     elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
-        arch = ARCH_QWEN_IMAGE_EDIT
+        # Distinguish between regular edit and edit_plus
+        if is_edit_plus:
+            arch = "qwen-image-edit-plus"
+        else:
+            arch = ARCH_QWEN_IMAGE_EDIT
         impl = IMPL_QWEN_IMAGE_EDIT
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
@@ -208,7 +213,11 @@ def build_metadata(
             reso = (reso[0], reso[0])
     else:
         # resolution is defined in dataset, so use default
-        reso = (1280, 720)
+        # Use 1328x1328 for Qwen Image models, 1280x720 for others
+        if architecture in (ARCHITECTURE_QWEN_IMAGE, ARCHITECTURE_QWEN_IMAGE_EDIT):
+            reso = (1328, 1328)
+        else:
+            reso = (1280, 720)
     if isinstance(reso, int):
         reso = (reso, reso)
 
