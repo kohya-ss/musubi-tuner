@@ -29,12 +29,8 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
-IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP"]
+IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP", ".avif", ".AVIF"]
 
-if find_spec("pillow_avif") is not None:
-    import pillow_avif  # noqa: F401 # type: ignore
-
-    IMAGE_EXTENSIONS.extend([".avif", ".AVIF"])
 
 if find_spec("jxlpy") is not None:  # JPEG-XL on Linux
     from jxlpy import JXLImagePlugin  # noqa: F401 # type: ignore
