@@ -985,6 +985,8 @@ class FineTuningTrainer:
                 args.metadata_tags,
                 timesteps=md_timesteps,
                 is_lora=False,
+                custom_res=args.meta_res,
+                custom_arch=args.meta_arch,
             )
 
             save_file(unwrapped_nw.state_dict(), ckpt_file, sai_metadata)

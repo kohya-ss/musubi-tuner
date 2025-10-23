@@ -127,6 +127,8 @@ def build_metadata(
     timesteps: Optional[Tuple[int, int]] = None,
     is_lora: bool = True,
     is_edit_plus: bool = False,
+    custom_res: Optional[str] = None,
+    custom_arch: Optional[str] = None,
 ):
     metadata = {}
     metadata.update(BASE_METADATA)
@@ -161,6 +163,10 @@ def build_metadata(
         impl = IMPL_QWEN_IMAGE_EDIT
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
+
+    # Override with custom architecture if provided (only for Qwen-Image models)
+    if custom_arch is not None and architecture in (ARCHITECTURE_QWEN_IMAGE, ARCHITECTURE_QWEN_IMAGE_EDIT):
+        arch = custom_arch
 
     if is_lora:
         arch += f"/{ADAPTER_LORA}"
@@ -205,23 +211,32 @@ def build_metadata(
     date = datetime.datetime.fromtimestamp(int_ts).isoformat()
     metadata["modelspec.date"] = date
 
-    if reso is not None:
-        # comma separated to tuple
-        if isinstance(reso, str):
-            reso = tuple(map(int, reso.split(",")))
-        if len(reso) == 1:
-            reso = (reso[0], reso[0])
-    else:
-        # resolution is defined in dataset, so use default
-        # Use 1328x1328 for Qwen Image models, 1280x720 for others
+    if custom_res is not None:
+        # Use custom resolution if provided (only for Qwen-Image models)
         if architecture in (ARCHITECTURE_QWEN_IMAGE, ARCHITECTURE_QWEN_IMAGE_EDIT):
-            reso = (1328, 1328)
+            # Custom resolution should be in format like "1328x1328"
+            metadata["modelspec.resolution"] = custom_res
         else:
-            reso = (1280, 720)
-    if isinstance(reso, int):
-        reso = (reso, reso)
+            # For non-Qwen models, still use the custom resolution
+            metadata["modelspec.resolution"] = custom_res
+    else:
+        if reso is not None:
+            # comma separated to tuple
+            if isinstance(reso, str):
+                reso = tuple(map(int, reso.split(",")))
+            if len(reso) == 1:
+                reso = (reso[0], reso[0])
+        else:
+            # resolution is defined in dataset, so use default
+            # Use 1328x1328 for Qwen Image models, 1280x720 for others
+            if architecture in (ARCHITECTURE_QWEN_IMAGE, ARCHITECTURE_QWEN_IMAGE_EDIT):
+                reso = (1328, 1328)
+            else:
+                reso = (1280, 720)
+        if isinstance(reso, int):
+            reso = (reso, reso)
 
-    metadata["modelspec.resolution"] = f"{reso[0]}x{reso[1]}"
+        metadata["modelspec.resolution"] = f"{reso[0]}x{reso[1]}"
 
     # metadata["modelspec.prediction_type"] = PRED_TYPE_EPSILON
     del metadata["modelspec.prediction_type"]
