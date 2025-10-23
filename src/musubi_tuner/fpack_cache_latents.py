@@ -422,8 +422,21 @@ def main():
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
+        if args.skip_existing:
+            batch_to_process = []
+            import os
+            for item in batch:
+                if os.path.exists(item.latent_cache_path):
+                    logger.info(f"Cache file exists, skipping: {item.latent_cache_path}")
+                else:
+                    batch_to_process.append(item)
+            
+            if not batch_to_process:
+                return
+        else:
+            batch_to_process = batch
         encode_and_save_batch(
-            vae, feature_extractor, image_encoder, batch, args.f1, args.one_frame, args.one_frame_no_2x, args.one_frame_no_4x
+            vae, feature_extractor, image_encoder, batch_to_process, args.f1, args.one_frame, args.one_frame_no_2x, args.one_frame_no_4x
         )
 
     # reuse core loop from cache_latents with no change

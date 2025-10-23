@@ -294,11 +294,6 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         action="store_true",
         help="Generate cache for one frame training (single frame, single section).",
     )
-    parser.add_argument(
-        "--skip_existing",
-        action="store_true",
-        help="Skip encoding if the latent cache file already exists.",
-    )
     return parser
 
 

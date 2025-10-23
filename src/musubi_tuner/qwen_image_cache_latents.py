@@ -151,7 +151,20 @@ def main():
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, batch)
+        if args.skip_existing:
+            batch_to_process = []
+            import os
+            for item in batch:
+                if os.path.exists(item.latent_cache_path):
+                    logger.info(f"Cache file exists, skipping: {item.latent_cache_path}")
+                else:
+                    batch_to_process.append(item)
+            
+            if not batch_to_process:
+                return
+        else:
+            batch_to_process = batch
+        encode_and_save_batch(vae, batch_to_process)
 
     # reuse core loop from cache_latents with no change
     cache_latents.encode_datasets(datasets, encode, args)
