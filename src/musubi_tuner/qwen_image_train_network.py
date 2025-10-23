@@ -436,20 +436,20 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             if is_edit:
                 model_pred = model_pred[:, :img_seq_len]
 
-        # unpack latents
-        model_pred = qwen_image_utils.unpack_latents(
+        # flow matching loss - compute loss on raw model output before unpacking
+        latents = latents.to(device=accelerator.device, dtype=network_dtype)
+        target = noise - latents
+
+        # unpack latents for loss calculation
+        model_pred_unpacked = qwen_image_utils.unpack_latents(
             model_pred,
             lat_h * qwen_image_utils.VAE_SCALE_FACTOR,
             lat_w * qwen_image_utils.VAE_SCALE_FACTOR,
             qwen_image_utils.VAE_SCALE_FACTOR,
         )
 
-        # flow matching loss
-        latents = latents.to(device=accelerator.device, dtype=network_dtype)
-        target = noise - latents
-
         # print(model_pred.dtype, target.dtype)
-        return model_pred, target
+        return model_pred_unpacked, target
 
     # endregion model specific
 
