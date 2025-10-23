@@ -296,6 +296,12 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         else:
             transformer = accelerator.prepare(transformer)
 
+        # Ensure DDP is properly configured for models with unused parameters
+        if hasattr(transformer, 'module') and hasattr(transformer.module, 'find_unused_parameters'):
+            transformer.module.find_unused_parameters = True
+        elif hasattr(transformer, 'find_unused_parameters'):
+            transformer.find_unused_parameters = True
+
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
         training_model = transformer
 
@@ -516,7 +522,8 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         # training loop
 
         # log device and dtype for each model
-        logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
+        unwrapped_transformer = accelerator.unwrap_model(transformer)
+        logger.info(f"DiT dtype: {unwrapped_transformer.dtype}, device: {unwrapped_transformer.device}")
 
         clean_memory_on_device(accelerator.device)
 

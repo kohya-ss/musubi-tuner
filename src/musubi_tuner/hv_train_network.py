@@ -148,12 +148,10 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
             if torch.cuda.device_count() > 1
             else None
         ),
-        (
-            DistributedDataParallelKwargs(
-                gradient_as_bucket_view=args.ddp_gradient_as_bucket_view, static_graph=args.ddp_static_graph
-            )
-            if args.ddp_gradient_as_bucket_view or args.ddp_static_graph
-            else None
+        DistributedDataParallelKwargs(
+            find_unused_parameters=True,
+            gradient_as_bucket_view=args.ddp_gradient_as_bucket_view,
+            static_graph=args.ddp_static_graph
         ),
     ]
     kwargs_handlers = [i for i in kwargs_handlers if i is not None]
@@ -1881,6 +1879,12 @@ class NetworkTrainer:
         else:
             transformer = accelerator.prepare(transformer)
 
+        # Ensure DDP is properly configured for models with unused parameters
+        if hasattr(transformer, 'module') and hasattr(transformer.module, 'find_unused_parameters'):
+            transformer.module.find_unused_parameters = True
+        elif hasattr(transformer, 'find_unused_parameters'):
+            transformer.find_unused_parameters = True
+
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
         training_model = network
 
@@ -2116,7 +2120,8 @@ class NetworkTrainer:
         # training loop
 
         # log device and dtype for each model
-        logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
+        unwrapped_transformer = accelerator.unwrap_model(transformer)
+        logger.info(f"DiT dtype: {unwrapped_transformer.dtype}, device: {unwrapped_transformer.device}")
 
         clean_memory_on_device(accelerator.device)
 
