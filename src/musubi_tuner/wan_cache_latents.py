@@ -257,7 +257,21 @@ def main():
 
     # Encode images
     def encode(one_batch: list[ItemInfo]):
-        encode_and_save_batch(vae, clip, args.i2v, one_batch, args.one_frame)
+        if args.skip_existing:
+            batch_to_process = []
+            import os
+            for item in one_batch:
+                if os.path.exists(item.latent_cache_path):
+                    logger.info(f"Cache file exists, skipping: {item.latent_cache_path}")
+                else:
+                    batch_to_process.append(item)
+            
+            if not batch_to_process:
+                return
+        else:
+            batch_to_process = one_batch
+            
+        encode_and_save_batch(vae, clip, args.i2v, batch_to_process, args.one_frame)
 
     cache_latents.encode_datasets(datasets, encode, args)
 
@@ -279,6 +293,11 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "--one_frame",
         action="store_true",
         help="Generate cache for one frame training (single frame, single section).",
+    )
+    parser.add_argument(
+        "--skip_existing",
+        action="store_true",
+        help="Skip encoding if the latent cache file already exists.",
     )
     return parser
 
