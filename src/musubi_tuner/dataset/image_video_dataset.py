@@ -854,7 +854,19 @@ class ImageDirectoryDatasource(ImageDatasource):
             for image_path in self.image_paths:
                 image_basename = os.path.basename(image_path)
                 image_basename_no_ext = os.path.splitext(image_basename)[0]
-                potential_paths = glob.glob(os.path.join(self.control_directory, os.path.splitext(image_basename)[0] + "*.*"))
+                # Use explicit pattern matching instead of glob to avoid prefix collisions
+                potential_paths = []
+                for filename in os.listdir(self.control_directory):
+                    file_no_ext, file_ext = os.path.splitext(filename)
+                    # Match exact basename or basename_digits format
+                    if file_no_ext == image_basename_no_ext:
+                        # Exact match: image1.jpg -> image1.png
+                        potential_paths.append(os.path.join(self.control_directory, filename))
+                    elif file_no_ext.startswith(image_basename_no_ext + "_"):
+                        # Check if suffix is numeric: image1_0.jpg, image1_1.jpg
+                        suffix = file_no_ext[len(image_basename_no_ext) + 1:]
+                        if suffix.isdigit():
+                            potential_paths.append(os.path.join(self.control_directory, filename))
                 if potential_paths:
                     # sort by the digits (`_0000`) suffix, prefer the one without the suffix
                     def sort_key(path):
