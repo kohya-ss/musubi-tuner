@@ -27,9 +27,6 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
-
-
-
 class QwenImageNetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
