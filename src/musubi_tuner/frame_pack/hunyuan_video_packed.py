@@ -2043,6 +2043,7 @@ def load_packed_model(
     for_inference: bool = False,
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
+    save_merged_model: Optional[str] = None,
 ) -> HunyuanVideoTransformer3DModelPacked:
     """
     Load a packed DiT model from a given path.
@@ -2058,6 +2059,7 @@ def load_packed_model(
         for_inference (bool): Whether to create the model for inference.
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): List of state_dicts for LoRA weights.
         lora_multipliers (Optional[List[float]]): List of multipliers for LoRA weights.
+        save_merged_model (Optional[str]]): Path to save the merged model. If None, the model will not be saved.
 
     Returns:
         HunyuanVideoTransformer3DModelPacked: The loaded DiT model.
@@ -2119,6 +2121,7 @@ def load_packed_model(
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        save_merged_model=save_merged_model,
     )
 
     if fp8_scaled:

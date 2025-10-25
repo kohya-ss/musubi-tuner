@@ -5,6 +5,7 @@ from importlib.util import find_spec
 import random
 import os
 import time
+import sys
 from typing import Union
 
 import numpy as np
@@ -668,7 +669,7 @@ def main():
                 logger.info(f"Saving merged model to {args.save_merged_model}")
                 mem_eff_save_file(transformer.state_dict(), args.save_merged_model)  # save_file needs a lot of memory
                 logger.info("Merged model saved")
-                return
+                sys.exit(0)
 
         logger.info(f"Casting model to {dit_weight_dtype}")
         transformer.to(dtype=dit_weight_dtype)
