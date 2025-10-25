@@ -118,6 +118,11 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- October 25, 2025
+    - Fixed a bug in image datasets with control images where the combination of target and control images was not loaded correctly. See [PR #684](https://github.com/kohya-ss/musubi-tuner/pull/684).
+        - **If you are using an image dataset with control images, please recreate the latent cache.**
+        - Since only the first match was used for judgment, when the target images were `a.png` and `ab.png`, and the control images were `a_1.png` and `ab_1.png`, both `a_1.png` and `ab_1.png` were combined with `a.png`.
+
 - October 13, 2025
     - Added Reference Consistency Mask (RCM) feature to Qwen-Image-Edit, 2509 inference script to improve pixel-level consistency of generated images. See [PR #643](https://github.com/kohya-ss/musubi-tuner/pull/643)
         - RCM addresses the issue of slight positional drift in generated images compared to the control image. For details, refer to the [Qwen-Image documentation](./docs/qwen_image.md#inpainting-and-reference-consistency-mask-rcm).

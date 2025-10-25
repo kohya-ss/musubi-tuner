@@ -606,7 +606,7 @@ target_frames = [1, 25, 79] # required for video dataset. list of video lengths 
 
 # NOTE: Please do not include 1 in target_frames if you are using the frame_extraction "chunk". It will make the all frames to be extracted.
 
-frame_extraction = "head" # optional, "head" or "chunk", "slide", "uniform". Default is "head"
+frame_extraction = "head" # optional, "head" or "chunk", "full", "slide", "uniform". Default is "head"
 frame_stride = 1 # optional, default is 1, available for "slide" frame extraction
 frame_sample = 4 # optional, default is 1 (same as "head"), available for "uniform" frame extraction
 max_frames = 129 # optional, default is 129. Maximum number of frames to extract, available for "full" frame extraction

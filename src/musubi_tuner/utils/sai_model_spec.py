@@ -69,6 +69,8 @@ ARCH_FRAMEPACK = "framepack"
 ARCH_FLUX_KONTEXT = "Flux.1-dev"
 ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
+ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
+CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
 
 ADAPTER_LORA = "lora"
 
@@ -117,7 +119,7 @@ def build_metadata(
     architecture: str,
     timestamp: float,
     title: Optional[str] = None,
-    reso: Optional[Union[int, Tuple[int, int]]] = None,
+    reso: Optional[Union[str, int, Tuple[int, int]]] = None,
     author: Optional[str] = None,
     description: Optional[str] = None,
     license: Optional[str] = None,
@@ -125,6 +127,7 @@ def build_metadata(
     merged_from: Optional[str] = None,
     timesteps: Optional[Tuple[int, int]] = None,
     is_lora: bool = True,
+    custom_arch: Optional[str] = None,
 ):
     metadata = {}
     metadata.update(BASE_METADATA)
@@ -151,10 +154,22 @@ def build_metadata(
         arch = ARCH_QWEN_IMAGE
         impl = IMPL_QWEN_IMAGE
     elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
-        arch = ARCH_QWEN_IMAGE_EDIT
+        # We treat Qwen-Image-Edit and Qwen-Image-Edit-Plus the same for architecture and implementation
+        # So we must distinguish them by custom_arch if needed
         impl = IMPL_QWEN_IMAGE_EDIT
+        if custom_arch is None:
+            arch = ARCH_QWEN_IMAGE_EDIT
+        elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS:
+            arch = ARCH_QWEN_IMAGE_EDIT_PLUS
+            custom_arch = None  # clear custom_arch to avoid override later
+        else:
+            arch = ARCH_QWEN_IMAGE_EDIT  # override with custom_arch later
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
+
+    # Override with custom architecture if provided
+    if custom_arch is not None:
+        arch = custom_arch
 
     if is_lora:
         arch += f"/{ADAPTER_LORA}"
@@ -206,8 +221,14 @@ def build_metadata(
         if len(reso) == 1:
             reso = (reso[0], reso[0])
     else:
-        # resolution is defined in dataset, so use default
-        reso = (1280, 720)
+        # resolution is defined in dataset, so use default here
+        # Use 1328x1328 for Qwen-Image models, 1024x1024 for Qwen-Image-Edit models, and 1280x720 for others (this is just a placeholder, actual resolution may vary)
+        if architecture == ARCHITECTURE_QWEN_IMAGE:
+            reso = (1328, 1328)
+        elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+            reso = (1024, 1024)
+        else:
+            reso = (1280, 720)
     if isinstance(reso, int):
         reso = (reso, reso)
 

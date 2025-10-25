@@ -83,9 +83,17 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, bat
         clip_context = None
         y = None
 
-    # control videos
+    # control videos/images
     if batch[0].control_content is not None:
-        control_contents = torch.stack([torch.from_numpy(item.control_content) for item in batch])
+        # Check if control_content is a list (for images) or ndarray (for videos)
+        if isinstance(batch[0].control_content, list):
+            # For images with control images: control_content is list[np.ndarray]
+            # We take the first control image from each item
+            control_contents = torch.stack([torch.from_numpy(item.control_content[0]) for item in batch])
+        else:
+            # For videos with control videos: control_content is np.ndarray
+            control_contents = torch.stack([torch.from_numpy(item.control_content) for item in batch])
+
         if len(control_contents.shape) == 4:
             control_contents = control_contents.unsqueeze(1)
         control_contents = control_contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W

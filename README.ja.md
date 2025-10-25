@@ -116,6 +116,11 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/10/25
+    - 制御画像を持つ画像データセットで、対象画像と制御画像の組み合わせが正しく読み込まれない不具合を修正しました。[PR #684](https://github.com/kohya-ss/musubi-tuner/pull/684)
+        - **制御画像を持つ画像データセットをご利用の場合、latentキャッシュの再作成を行ってください。**
+        - 先頭のマッチだけで判断していたため、対象画像が`a.png`、`ab.png`で、制御画像が`a_1.png`、`ab_1.png`のとき、`a.png`には、`a_1.png`と`ab_1.png`が組み合わされてしまっていました。
+
 - 2025/10/13
     - Qwen-Image-Edit、2509の推論スクリプトで、ピクセル単位での生成画像の一貫性を向上するReference Consistency Mask (RCM)機能を追加しました。[PR #643]
     (https://github.com/kohya-ss/musubi-tuner/pull/643)

@@ -850,10 +850,28 @@ class ImageDirectoryDatasource(ImageDatasource):
             logger.info(f"glob control images in {self.control_directory}")
             self.has_control = True
             self.control_paths = {}
-            for image_path in self.image_paths:
+
+            # sort image paths for matching control images properly: longer names first
+            image_paths_sorted = sorted(self.image_paths, key=lambda p: len(os.path.basename(p)), reverse=True)
+
+            # glob control images first
+            all_control_image_paths = set(glob_images(self.control_directory))
+
+            for image_path in image_paths_sorted:
                 image_basename = os.path.basename(image_path)
                 image_basename_no_ext = os.path.splitext(image_basename)[0]
-                potential_paths = glob.glob(os.path.join(self.control_directory, os.path.splitext(image_basename)[0] + "*.*"))
+
+                # find matching control images
+                potential_paths = [
+                    p
+                    for p in all_control_image_paths
+                    if os.path.basename(p).startswith(image_basename_no_ext + ".")
+                    or os.path.basename(p).startswith(image_basename_no_ext + "_")
+                ]
+
+                # remove to avoid duplicate matching
+                all_control_image_paths.difference_update(potential_paths)
+
                 if potential_paths:
                     # sort by the digits (`_0000`) suffix, prefer the one without the suffix
                     def sort_key(path):

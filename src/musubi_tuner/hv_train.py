@@ -973,13 +973,14 @@ class FineTuningTrainer:
                 ARCHITECTURE_HUNYUAN_VIDEO,
                 time.time(),
                 title,
-                None,
+                args.metadata_reso,
                 args.metadata_author,
                 args.metadata_description,
                 args.metadata_license,
                 args.metadata_tags,
                 timesteps=md_timesteps,
                 is_lora=False,
+                custom_arch=args.metadata_arch,
             )
 
             save_file(unwrapped_nw.state_dict(), ckpt_file, sai_metadata)
