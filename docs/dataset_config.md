@@ -289,15 +289,24 @@ video2: xxxxxxxxxxxxxxxxxxxxxxxxx (25 frames)
 video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 ```
 
-### Sample for Image Dataset with Control Images
+### Sample for Image Dataset with Control (Input) Images
 
-The dataset with control images. This is used for training the one frame training for FramePack, FLUX.1 Kontext training, and Qwen-Image-Edit training.
+This is used for training the one frame training for FramePack (Img2Vid), FLUX.1 Kontext training (Image2Image), and Qwen-Image-Edit training.(Image2Image or Images2Image*). During training, the model will be given the control image and caption, and learn to generate an image/video based on the caption according to `control+caption=image`.
 
 The dataset configuration with caption text files is similar to the image dataset, but with an additional `control_directory` parameter.
 
-The control images are used from the `control_directory` with the same filename (or different extension) as the image, for example, `image_dir/image1.jpg` and `control_dir/image1.png`. The images in `image_directory` should be the target images (the images to be generated during inference, the changed images). The `control_directory` should contain the starting images for inference. The captions should be stored in `image_directory`.
+The control images are used from the `control_directory` with the same filename as the image, for example, `image_dir/image1.jpg` and `control_dir/image1.png`. The images in `image_directory` should be the target images (the images to be generated during inference, the changed images). The `control_directory` should contain the starting images for inference. The captions should be stored in `image_directory`.
 
 If multiple control images are specified, the filenames of the control images should be numbered (excluding the extension). For example, specify `image_dir/image1.jpg` and `control_dir/image1_0.png`, `control_dir/image1_1.png`. You can also specify the numbers with four digits, such as `image1_0000.png`, `image1_0001.png`.
+
+``` toml
+# sample image dataset with control images
+[[datasets]]
+image_directory = "/path/to/image_dir" # (Output Images) The images to be generated during inference. 
+caption_extension = ".txt" # required for caption text files, if general caption extension is not set. Place captions in image_directory
+control_directory = "/path/to/control_dir" # (Input Images) The starting images for inference.
+## Use the same filenames for image pairs in control_dir and output_dir eg /path/to/control_dir/image1.png, /path/to/image_dir/image1.png or /path/to/control_dir/image1_0.png /path/to/control_dir/image1_1.png, /path/to/image_dir/image1.png 
+```
 
 The metadata JSONL file format is the same as the image dataset, but with an additional `control_path` parameter.
 
@@ -500,7 +509,7 @@ FLUX.1 Kontextのデータセット設定は、制御画像を持つ画像デー
 
 The Qwen-Image-Edit dataset configuration uses an image dataset with control images. However, only one control image can be used for the standard model (not `2509`).
 
-By default, the control image is resized to the same resolution (and aspect ratio) as the image.
+By default, the control image is resized to the same resolution (and aspect ratio) as the output image.
 
 If you set `qwen_image_edit_no_resize_control`, it disables resizing of the control image. For example, if the image is 960x544 and the control image is 512x512, the control image will remain 512x512.
 
