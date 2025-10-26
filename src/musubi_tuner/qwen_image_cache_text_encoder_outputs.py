@@ -41,11 +41,15 @@ def encode_and_save_batch(
     # prepare images
     if is_edit:
         images = []
+        has_control_content = True
+        
         for item in batch:
             # item.control_content: list of images (H, W, C), optional (but should be provided for Qwen-Image-Edit)
             if item.control_content is None or len(item.control_content) == 0:
                 logger.warning(f"Item {item.item_key} has no control content for Qwen-Image-Edit, saving without control images.")
-
+                has_control_content = False
+                break  # If any item lacks control content, process entire batch without control images
+            
             # item.control_content, list of np.ndarray, 0-255
             control_content = []
             for cc in item.control_content:
@@ -60,7 +64,7 @@ def encode_and_save_batch(
 
             images.append(control_content)  # vl_processor accepts PIL.Image and np.ndarray
 
-        if len(images) == 0:
+        if not has_control_content or len(images) == 0:
             images = None
     else:
         images = None
