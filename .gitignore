@@ -10,5 +10,6 @@ CLAUDE.md
 GEMINI.md
 .claude/
 .gemini/
+.cursor/
 AGENTS.md
 .vscode/settings.json
