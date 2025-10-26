@@ -44,6 +44,10 @@ conflicts = [
   ],
 ]
 
+[tool.uv.scripts]
+test = "pytest"
+tests = "pytest"
+
 [dependency-groups]
 dev = [
   "ascii-magic==2.3.0",
@@ -51,6 +55,11 @@ dev = [
   "tensorboard",
   "prompt-toolkit==3.0.51",
   "ruff>=0.12.10",
+]
+test = [
+  "pytest>=8.0.0",
+  "pytest-cov>=4.0.0",
+  "pytest-mock>=3.12.0",
 ]
 
 [build-system]
@@ -172,3 +181,69 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/wan/utils/fm_solvers.py" = ["ALL"]
 "src/musubi_tuner/wan/utils/fm_solvers_unipc.py" = ["ALL"]
 "src/musubi_tuner/wan/utils/utils.py" = ["ALL"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--cov=src/musubi_tuner",
+    "--cov-report=term-missing",
+    "--cov-report=html:htmlcov",
+    "--cov-report=xml:coverage.xml",
+    "--cov-fail-under=80",
+    "-v",
+]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "slow: Slow running tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src/musubi_tuner"]
+omit = [
+    "tests/*",
+    "*/test_*.py",
+    "*/*_test.py",
+    "src/musubi_tuner/flux/flux_models.py",
+    "src/musubi_tuner/frame_pack/hunyuan.py",
+    "src/musubi_tuner/frame_pack/hunyuan_video_packed.py",
+    "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py",
+    "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py",
+    "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py",
+    "src/musubi_tuner/modules/scheduling_flow_match_discrete.py",
+    "src/musubi_tuner/modules/unet_causal_3d_blocks.py",
+    "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py",
+    "src/musubi_tuner/qwen_image/qwen_image_model.py",
+    "src/musubi_tuner/wan/configs/*",
+    "src/musubi_tuner/wan/modules/*",
+    "src/musubi_tuner/wan/utils/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+fail_under = 80
+show_missing = true
+skip_covered = false
+
+[tool.coverage.html]
+directory = "htmlcov"
