@@ -42,10 +42,10 @@ def encode_and_save_batch(
     if is_edit:
         images = []
         for item in batch:
-            # item.control_content: list of images (H, W, C), optional
-            assert item.control_content is not None and len(item.control_content) > 0, (
-                f"Item {item.item_key} must have control content for Qwen-Image-Edit"
-            )
+            # item.control_content: list of images (H, W, C), optional (but should be provided for Qwen-Image-Edit)
+            if item.control_content is None or len(item.control_content) == 0:
+                logger.warning(f"Item {item.item_key} has no control content for Qwen-Image-Edit, saving without control images.")
+
             # item.control_content, list of np.ndarray, 0-255
             control_content = []
             for cc in item.control_content:
@@ -59,6 +59,9 @@ def encode_and_save_batch(
                 control_content.append(cc)
 
             images.append(control_content)  # vl_processor accepts PIL.Image and np.ndarray
+
+        if len(images) == 0:
+            images = None
     else:
         images = None
 
@@ -71,7 +74,7 @@ def encode_and_save_batch(
     with torch.no_grad():
         if accelerator is not None:
             with accelerator.autocast():
-                if not is_edit:
+                if images is None:  # no control images
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
                 else:
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
@@ -81,7 +84,7 @@ def encode_and_save_batch(
                     embed = embed.to(torch.bfloat16)
 
         else:
-            if not is_edit:
+            if images is None:  # no control images
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
             else:
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
