@@ -1656,7 +1656,6 @@ class NetworkTrainer:
                 " / モデル読み込み時のnumpyメモリマッピングを無効にします（Wan、FramePack、Qwen-Imageでのみ有効）。これによりメモリ使用量が増える可能性がありますが、場合によっては読み込みが高速化されることがあります"
             )
 
-
         # check model specific arguments
         self.handle_model_specific_args(args)
 

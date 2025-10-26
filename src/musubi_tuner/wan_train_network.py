@@ -513,7 +513,6 @@ class WanNetworkTrainer(NetworkTrainer):
                 args.fp8_scaled,
                 disable_numpy_memmap=args.disable_numpy_memmap,
                 **blissful_kwargs,
-
             )
             # if args.force_v2_1_time_embedding:
             #    model_high_noise.set_time_embedding_v2_1(True)
