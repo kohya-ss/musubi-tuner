@@ -64,9 +64,23 @@ def sample_hunyuan(
     if batch_size is None:
         batch_size = int(prompt_embeds.shape[0])
 
-    latents = torch.randn(
-        (batch_size, 16, (frames + 3) // 4, height // 8, width // 8), generator=generator, device=generator.device
-    ).to(device=device, dtype=torch.float32)
+    if isinstance(generator,  list):
+        latents = torch.stack(
+            [
+                torch.randn(
+                    (1, 16, (frames + 3) // 4, height // 8, width // 8),
+                    generator=g,
+                    device=g.device,
+                ).to(device=device, dtype=torch.float32)
+                for g in generator
+            ],
+            dim=0,
+        ).squeeze(1)
+
+    else:
+        latents = torch.randn(
+            (batch_size, 16, (frames + 3) // 4, height // 8, width // 8), generator=generator, device=generator.device
+        ).to(device=device, dtype=torch.float32)
 
     B, C, T, H, W = latents.shape
     seq_length = T * H * W // 4  # 9*80*80//4 = 14400
