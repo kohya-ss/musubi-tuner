@@ -330,6 +330,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             dit_weight_dtype,
             args.fp8_scaled,
             num_layers=args.num_layers,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
         return model
 

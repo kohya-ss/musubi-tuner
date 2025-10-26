@@ -671,12 +671,12 @@ class Attention(nn.Module):
         hidden_states: torch.FloatTensor,  # Image stream
         encoder_hidden_states: torch.FloatTensor = None,  # Text stream
         encoder_hidden_states_mask: torch.FloatTensor = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,  # We ignore this and use encoder_hidden_states_mask instead
         image_rotary_emb: Optional[torch.Tensor] = None,
         txt_seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
-        if encoder_hidden_states is None:
-            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
+        if encoder_hidden_states is None and txt_seq_lens is None:
+            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream) or txt_seq_lens.")
 
         # Compute QKV for image stream (sample projections)
         img_query = self.to_q(hidden_states)
@@ -724,6 +724,23 @@ class Attention(nn.Module):
         del img_value, txt_value
 
         # Compute joint attention
+        if not self.split_attn:
+            # create attention mask for joint attention
+            if encoder_hidden_states_mask is not None:
+                # encoder_hidden_states_mask: [B, S_txt]
+                attention_mask = torch.cat(
+                    [
+                        torch.ones(
+                            (encoder_hidden_states_mask.shape[0], seq_img), device=encoder_hidden_states_mask.device, dtype=torch.bool
+                        ),
+                        encoder_hidden_states_mask.to(torch.bool)
+                    ]
+                    , dim=1
+                )  # [B, S_img + S_txt]
+                attention_mask = attention_mask[:, None, None, :]  # [B, 1, 1, S] for scaled_dot_product_attention
+            else:
+                attention_mask = None
+
         # joint_query: [B, S, H, D], joint_key: [B, S, H, D], joint_value: [B, S, H, D]
         total_len = seq_img + txt_seq_lens
         qkv = [joint_query, joint_key, joint_value]
@@ -1255,6 +1272,7 @@ def load_qwen_image_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     num_layers: Optional[int] = 60,
+    disable_numpy_memmap: bool = False,
 ) -> QwenImageTransformer2DModel:
     """
     Load a WAN model from the specified checkpoint.
@@ -1271,6 +1289,7 @@ def load_qwen_image_model(
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
         num_layers (int): Number of layers in the DiT model.
+        disable_numpy_memmap (bool): Whether to disable numpy memory mapping when loading weights.
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -1282,7 +1301,6 @@ def load_qwen_image_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
-
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
@@ -1293,6 +1311,7 @@ def load_qwen_image_model(
         dit_weight_dtype=dit_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        disable_numpy_memmap=disable_numpy_memmap,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

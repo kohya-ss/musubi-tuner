@@ -54,6 +54,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
     parser.add_argument("--num_layers", type=int, default=None, help="Number of layers in the DiT model, default is None (60)")
+    parser.add_argument(
+        "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
+    )
     parser.add_argument("--edit", action="store_true", help="Enable Qwen-Image-Edit")
     parser.add_argument("--edit_plus", action="store_true", help="Enable Qwen-Image-Edit-2509 (plus)")
     parser.add_argument("--vae", type=str, default=None, help="VAE directory or path")
@@ -357,6 +360,7 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         num_layers=args.num_layers,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
 
     # merge LoRA weights

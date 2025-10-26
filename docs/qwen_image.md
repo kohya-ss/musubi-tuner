@@ -162,6 +162,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - Add `--edit` or `--edit_plus` flag for Qwen-Image-Edit or Edit-2509 training with control images.
 - Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT), and `--fp8_vl` (for Text Encoder) are available. 
 -  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
+- `--disable_numpy_memmap`: Disables numpy memory mapping for model loading, loading with standard file read. Increases RAM usage but significantly speeds up model loading in some cases.
 
 `--fp8_vl` is recommended for GPUs with less than 16GB of VRAM.
 
@@ -194,6 +195,8 @@ If `--blocks_to_swap` is more than 45, the main RAM usage will increase signific
 
 Qwen-Image-Edit training requires additional memory for the control images.
 
+**Note:** The `--disable_numpy_memmap` option speeds up model loading in some cases with using standard file read instead of using numpy memory mapping. If you encounter slow model weight loading time, this option may help.
+
 <details>
 <summary>日本語</summary>
 
@@ -205,6 +208,7 @@ Qwen-Imageの学習は専用のスクリプト`qwen_image_train_network.py`を�
 - コントロール画像を使ったQwen-Image-Edit/Edit-2509の学習には、それぞれ`--edit`フラグ、`--edit_plus`フラグを追加します。
 - `--fp8_base`や`--fp8_scaled`（DiT用）、`--fp8_vl`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
+- `--disable_numpy_memmap`: モデル読み込み時のnumpyメモリマッピングを無効化し、標準のファイル読み込みで読み込みを行います。RAM使用量は増加しますが、場合によってはモデルの読み込みが大幅に高速化されます。もしモデルの重みの読み込み時間が遅い場合は、このオプションが役立つかもしれません。
 
 GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 
@@ -237,6 +241,8 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 
 Qwen-Image-Editの学習では、コントロール画像のために追加のメモリが必要です。
 
+**備考:** `--disable_numpy_memmap`オプションは、numpyメモリマッピングの代わりに標準のファイル読み込みを使用することで、場合によってはモデルの読み込みを高速化します。モデルの重みの読み込み時間が遅い場合は、このオプションが役立つかもしれません。
+
 </details>
 
 ## Finetuning
@@ -265,6 +271,7 @@ accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/qwen_image_tr
 - `--fused_backward_pass`: Reduces VRAM usage during the backward pass when using Adafactor.
 - `--mem_eff_save`: Reduces main memory (RAM) usage when saving checkpoints.
 - `--blocks_to_swap`: Swaps model blocks between VRAM and main memory to reduce VRAM usage. This is effective when VRAM is limited.
+- `--disable_numpy_memmap`: Disables numpy memory mapping for model loading, loading with standard file read. Increases RAM usage but may speed up model loading in some cases.
 
 `--full_bf16` reduces VRAM usage by about 20GB but may impact model accuracy as the weights are kept in bfloat16. Note that the optimizer state is still kept in float32. In addition, it is recommended to use this with an optimizer that supports stochastic rounding. In this repository, Adafactor optimizer with `--fused_backward_pass` option supports stochastic rounding.
 
@@ -298,6 +305,7 @@ Finetuningは専用のスクリプト`qwen_image_train.py`を使用します。�
 - `--fused_backward_pass`: Adafactor使用時に、backward pass中のVRAM使用量を削減します。
 - `--mem_eff_save`: チェックポイント保存時のメインメモリ（RAM）使用量を削減します。
 - `--blocks_to_swap`: モデルのブロックをVRAMとメインメモリ間でスワップし、VRAM使用量を削減します。VRAMが少ない場合に有効です。
+- `--disable_numpy_memmap`: モデル読み込み時のnumpyメモリマッピングを無効化し、標準のファイル読み込みで読み込みを行います。RAM使用量は増加しますが、場合によってはモデルの読み込みが高速化されます。
 
 `--full_bf16`はVRAM使用量を約20GB削減しますが、重みがbfloat16で保持されるため、モデルの精度に影響を与える可能性があります。オプティマイザの状態はfloat32で保持されます。また、効率的な学習のために、stochastic roundingをサポートするオプティマイザとの併用が推奨されます。このリポジトリでは、`adafactor`オプティマイザに`--fused_backward_pass`オプションの組み合わせでstochastic roundingをサポートしています。
 

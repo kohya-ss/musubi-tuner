@@ -51,6 +51,7 @@ def load_safetensors_with_lora_and_fp8(
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
     quantization_mode: str = "block",
+    disable_numpy_memmap: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -199,6 +200,7 @@ def load_safetensors_with_lora_and_fp8(
         exclude_keys,
         weight_hook=weight_hook,
         quantization_mode=quantization_mode,
+        disable_numpy_memmap=disable_numpy_memmap,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -221,6 +223,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     exclude_keys: Optional[List[str]] = None,
     weight_hook: callable = None,
     quantization_mode: str = "block",
+    disable_numpy_memmap: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
@@ -238,6 +241,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
             move_to_device=move_to_device,
             weight_hook=weight_hook,
             quantization_mode=quantization_mode,
+            disable_numpy_memmap=disable_numpy_memmap,
         )
     else:
         logger.info(
@@ -245,7 +249,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
         )
         state_dict = {}
         for model_file in model_files:
-            with MemoryEfficientSafeOpen(model_file) as f:
+            with MemoryEfficientSafeOpen(model_file, disable_numpy_memmap=disable_numpy_memmap) as f:
                 for key in tqdm(f.keys(), desc=f"Loading {os.path.basename(model_file)}", leave=False):
                     if weight_hook is None and move_to_device:
                         value = f.get_tensor(key, device=calc_device, dtype=dit_weight_dtype)

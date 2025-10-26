@@ -1211,6 +1211,7 @@ def load_wan_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     use_scaled_mm: bool = False,
+    disable_numpy_memmap: bool = False,
     **kwargs,
 ) -> WanModel:
     """
@@ -1228,6 +1229,8 @@ def load_wan_model(
         fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+        use_scaled_mm (bool): Whether to use scaled matrix multiplication for fp8.
+        disable_numpy_memmap (bool): Whether to disable numpy memmap when loading weights.
     """
     # dit_weight_dtype is None for fp8_scaled and mixed_precision_transformer
     # assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -1271,7 +1274,8 @@ def load_wan_model(
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
-        quantization_mode=quantization_mode
+        quantization_mode=quantization_mode,
+        disable_numpy_memmap=disable_numpy_memmap,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix
