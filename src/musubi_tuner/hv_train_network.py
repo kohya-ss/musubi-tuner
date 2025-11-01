@@ -1739,8 +1739,12 @@ class NetworkTrainer:
         transformer.requires_grad_(False)
 
         if blocks_to_swap > 0:
-            logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
-            transformer.enable_block_swap(blocks_to_swap, accelerator.device, supports_backward=True)
+            logger.info(
+                f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}, use pinned memory: {args.use_pinned_memory_for_block_swap}"
+            )
+            transformer.enable_block_swap(
+                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         # load network model for differential training
@@ -2590,6 +2594,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="number of blocks to swap in the model, max XXX / モデル内のブロックの数、最大XXX",
+    )
+    parser.add_argument(
+        "--use_pinned_memory_for_block_swap",
+        action="store_true",
+        help="use pinned memory for block swapping, which may speed up data transfer between CPU and GPU but uses more shared GPU memory on Windows"
+        " / ブロックスワッピングにピン留めメモリを使用する。これによりCPUとGPU間のデータ転送が高速化される可能性があるが、Windowsではより多くの共有GPUメモリを使用する。",
     )
     parser.add_argument(
         "--img_in_txt_in_offloading",

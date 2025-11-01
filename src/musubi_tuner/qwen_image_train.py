@@ -229,7 +229,9 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
-            transformer.enable_block_swap(blocks_to_swap, accelerator.device, supports_backward=True)
+            transformer.enable_block_swap(
+                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         if args.gradient_checkpointing:
