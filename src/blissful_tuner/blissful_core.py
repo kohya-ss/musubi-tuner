@@ -19,7 +19,7 @@ from blissful_tuner.utils import power_seed
 
 logger = BlissfulLogger(__name__, "#8e00ed")
 
-BLISSFUL_VERSION = "0.11.66"
+BLISSFUL_VERSION = "0.12.66"
 
 CFG_SCHEDULE_HELP = """
 Comma-separated list of steps/ranges where CFG should be applied.
