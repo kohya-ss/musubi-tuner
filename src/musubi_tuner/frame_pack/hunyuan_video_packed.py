@@ -1659,7 +1659,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             result = block(*args)
         return result
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool):
+    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
         self.num_double_blocks = len(self.transformer_blocks)
         self.num_single_blocks = len(self.single_transformer_blocks)
@@ -1678,6 +1678,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             double_blocks_to_swap,
             supports_backward,
             device,
+            use_pinned_memory,
             # debug=True # Optional debugging
         )
         self.offloader_single = ModelOffloader(
@@ -1687,6 +1688,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             single_blocks_to_swap,
             supports_backward,
             device,  # , debug=True
+            use_pinned_memory,
         )
         logger.info(
             f"HunyuanVideoTransformer3DModelPacked: Block swap enabled. Swapping {num_blocks} blocks, "

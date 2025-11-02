@@ -118,6 +118,11 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- November 2, 2025
+    - Added `--use_pinned_memory_for_block_swap` option to each training script and improved the block swap process itself. See [PR #700](https://github.com/kohya-ss/musubi-tuner/pull/700).
+        - When specified, this option uses pinned memory for block swap offloading. This may improve block swap performance. However, on Windows environments, it increases shared GPU memory usage. Please refer to the [documentation](./docs/hunyuan_video.md#memory-optimization) for details.
+        - Since in some environments it may be faster not to specify `--use_pinned_memory_for_block_swap`, please try both options.
+
 - October 26, 2025
     - Fixed a bug in Qwen-Image training where attention calculations were incorrect when the batch size was 2 or more and `--split_attn` was not specified. See [PR #688](https://github.com/kohya-ss/musubi-tuner/pull/688).
     - Added `--disable_numpy_memmap` option to Wan, FramePack, and Qwen-Image training and inference scripts. Thank you FurkanGozukara for [PR #681](https://github.com/kohya-ss/musubi-tuner/pull/681). Also see [PR #687](https://github.com/kohya-ss/musubi-tuner/pull/687).
@@ -134,23 +139,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
     - Fixed a bug where the control image was being resized to match the output image size even when the `--resize_control_to_image_size` option was not specified. **This may change the generated images, so please check your options.**
     - FramePack 1-frame inference now includes the `--one_frame_auto_resize` option. [PR #646](https://github.com/kohya-ss/musubi-tuner/pull/646)
         - Automatically adjusts the resolution of the generated image. This option is only effective when `--one_frame_inference` is specified. For details, refer to the [FramePack 1-frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論).
-        
-- October 5, 2025
-    - Changed the epoch switching from `collate_fn` to before the start of the DataLoader fetching loop. See [PR #601](https://github.com/kohya-ss/musubi-tuner/pull/601) for more details.
-    - In the previous implementation, the ARB buckets were shuffled after fetching the first data of the epoch. Therefore, the first data of the epoch was fetched in the ARB sorted order of the previous epoch. This caused duplication and omission of data within the epoch.
-    - Each DataSet now shuffles the ARB buckets immediately after detecting a change in the shared epoch in `__getitem__`. This ensures that data is fetched in the new order from the beginning, eliminating duplication and omission.
-    - Since the shuffle timing has been moved forward, the sample order will not be the same as the old implementation even with the same seed.
-    - **Impact on overall training**:
-        - This fix addresses the issue of incorrect fetching of the first sample at epoch boundaries. Since each sample is ultimately used without omission or duplication over multiple epochs, the overall impact on training is minimal. The change primarily enhances "consistency in consumption order within an epoch," and the long-term training behavior remains practically unchanged under the same conditions (※ there may be observable differences in cases of extremely few epochs or early stopping).
-
-    - Added a method to specify training options in a configuration file in the [Advanced Configuration documentation](./docs/advanced_config.md#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定). See [PR #630](https://github.com/kohya-ss/musubi-tuner/pull/630).
-    - Restructured the documentation. Moved dataset configuration-related documentation to `docs/dataset_config.md`.
-
-- October 3, 2025
-    - Improved the block swap mechanism used in each training script to significantly reduce shared GPU memory usage in Windows environments. See [PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585)
-        - Changed the block swap offload destination from shared GPU memory to CPU memory. This does not change the total memory usage but significantly reduces shared GPU memory usage.
-        - For example, with 32GB of main memory, previously only up to 16GB could be offloaded, but with this change, it can be offloaded up to "32GB - other usage".
-        - Training speed may decrease slightly. For technical details, see [PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585).
 
 ### Releases
 

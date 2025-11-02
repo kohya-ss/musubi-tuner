@@ -987,7 +987,7 @@ class Flux(nn.Module):
 
         logger.info("FLUX: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool):
+    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
         double_blocks_to_swap = num_blocks // 2
         single_blocks_to_swap = (num_blocks - double_blocks_to_swap) * 2 + 1
@@ -998,10 +998,10 @@ class Flux(nn.Module):
         )
 
         self.offloader_double = ModelOffloader(
-            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device  # , debug=True
+            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
         )
         self.offloader_single = ModelOffloader(
-            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
+            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
         )
         logger.info(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."

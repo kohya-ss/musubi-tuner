@@ -116,6 +116,11 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/11/02
+    - 各学習スクリプトに `--use_pinned_memory_for_block_swap` オプションを追加しました。またblock swapの処理自体も改善しました。[PR #700](https://github.com/kohya-ss/musubi-tuner/pull/700)
+        - このオプションを指定すると、block swapのoffloadingにピン留めメモリを使用します。これによりblock swapのパフォーマンスが向上する可能性があります。ただし、Windows環境の場合は共有GPUメモリの使用量が増加します。詳しくは[ドキュメント](./docs/hunyuan_video.md#memory-optimization)を参照してください。
+        - 環境により`--use_pinned_memory_for_block_swap`を指定しない方が高速になる場合があるため、両方を試してみてください。
+
 - 2025/10/26
     - Qwen-Imageの学習で、バッチサイズが2以上で、`--split_attn`が指定されていない場合に、Attentionの計算が正しく行われない不具合を修正しました。[PR #688](https://github.com/kohya-ss/musubi-tuner/pull/688)
     - Wan、FramePack、Qwen-Imageの学習・推論スクリプトに`--disable_numpy_memmap`オプションを追加しました。[PR #681](https://github.com/kohya-ss/musubi-tuner/pull/681) および [PR #687](https://github.com/kohya-ss/musubi-tuner/pull/687)。FurkanGozukara氏に感謝します。
@@ -133,23 +138,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - あわせて同PRにて `--resize_control_to_image_size` オプションが指定されていない場合でも、コントロール画像が出力画像と同じサイズにリサイズされてしまう不具合を修正しました。**生成画像が変化する可能性がありますので、オプションを確認してください。** 
     - FramePackの1フレーム推論で、`--one_frame_auto_resize`オプションを追加しました。[PR #646](https://github.com/kohya-ss/musubi-tuner/pull/646)
         - 生成画像の解像度を自動的に調整します。`--one_frame_inference`を指定した場合にのみ有効です。詳細は[FramePackの1フレーム推論のドキュメント](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論)を参照してください。
-
-- 2025/10/05
-    - エポックの切替をcollate_fnからDataLoaderの取得ループ開始前に変更しました。[PR #601](https://github.com/kohya-ss/musubi-tuner/pull/601)
-    - これまでの実装ではエポックの最初のデータ取得後に、ARBバケットがシャッフルされます。そのため、エポックの最初のデータは前エポックのARBソート順で取得されます。これによりエポック内でデータの重複や欠落が起きていました。
-    - 各DataSetでは`__getitem__`で共有エポックの変化を検知した直後にARBバケットをシャッフルします。これにより先頭サンプルから新しい順序で取得され、重複・欠落は解消されます。
-    - シャッフルタイミングが前倒しになったため、同一シードでも旧実装と同一のサンプル順序にはなりません
-    - **学習全体への影響**
-        - この修正はエポック境界における先頭サンプルの取り違いを解消するものです。複数エポックで見れば、各サンプルは最終的に欠落・重複なく使用されるため、学習全体に与える影響は軽微です。変更点は「エポック内の消費順序の整合性」を高めるものであり、長期的な学習挙動は同条件では実質的に変わりません（※極端に少ないエポック数や早期打ち切りの場合は順序による差異が観測される可能性があります）。
-
-    - [高度な設定のドキュメント](./docs/advanced_config.md#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定)に、学習時のオプションを設定ファイルで指定する方法を追加しました。[PR #630](https://github.com/kohya-ss/musubi-tuner/pull/630)
-    - ドキュメント構成を整理しました。データセット設定に関するドキュメントを`docs/dataset_config.md`に移動しました。
-
-- 2025/10/03
-    - 各学習スクリプトで用いられているblock swap機構を改善し、Windows環境における共有GPUメモリの使用量を大きく削減しました。[PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585)
-        - block swapのoffload先を共有GPUメモリからCPUメモリに変更しました。これによりトータルでのメモリ使用量は変わりませんが、共有GPUメモリの使用量が大幅に削減されます。
-        - たとえば32GBのメインメモリでは、offloadできるのは16GBまででしたが、今回の変更により「32GB-他の使用量」までoffloadできるようになります。
-        - 学習速度はわずかに低下します。技術的詳細は[PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585)を参照してください。
 
 ### リリースについて
 
