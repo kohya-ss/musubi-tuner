@@ -35,12 +35,22 @@ cu128 = [
     "torch>=2.7.1",
     "torchvision>=0.22.1",
 ]
+cu130 = [
+    "torch>=2.9.0",
+    "torchvision>=0.24.0",
+]
+rocm64 = [
+    "torch>=2.7.1",
+    "torchvision>=0.22.1",
+]
 
 [tool.uv]
 conflicts = [
   [
     { extra = "cu124" },
     { extra = "cu128" },
+    { extra = "cu130" },
+    { extra = "rocm64" },
   ],
 ]
 
@@ -61,10 +71,14 @@ build-backend = "hatchling.build"
 torch = [
   { index = "pytorch-cu124", extra = "cu124" },
   { index = "pytorch-cu128", extra = "cu128" },
+  { index = "pytorch-cu130", extra = "cu130" },
+  { index = "pytorch-rocm64", extra = "rocm64" },
 ]
 torchvision = [
   { index = "pytorch-cu124", extra = "cu124" },
   { index = "pytorch-cu128", extra = "cu128" },
+  { index = "pytorch-cu130", extra = "cu130" },
+  { index = "pytorch-rocm64", extra = "rocm64" },
 ]
 
 [[tool.uv.index]]
@@ -75,6 +89,16 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm64"
+url = "https://download.pytorch.org/whl/rocm6.4"
 explicit = true
 
 [tool.ruff]
@@ -172,3 +196,23 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/wan/utils/fm_solvers.py" = ["ALL"]
 "src/musubi_tuner/wan/utils/fm_solvers_unipc.py" = ["ALL"]
 "src/musubi_tuner/wan/utils/utils.py" = ["ALL"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+musubi-tuner = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+cu124 = { features = ["cu124"], solve-group = "default" }
+cu128 = { features = ["cu128"], solve-group = "default" }
+cu130 = { features = ["cu130"], solve-group = "default" }
+rocm64 = { features = ["rocm64"], solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.feature.dev.tasks]
+format = "ruff format"
+lint = "ruff check"
+lint-fix = "ruff check --fix"
