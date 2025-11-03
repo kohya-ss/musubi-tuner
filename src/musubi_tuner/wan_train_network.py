@@ -1,7 +1,7 @@
 import argparse
 from typing import List, Optional
 from PIL import Image
-
+import sys
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -790,6 +790,12 @@ def main():
         args.vae_dtype = "bfloat16"  # make bfloat16 as default for VAE
     if args.optimized_compile and args.dynamo_backend.upper() != "NO":
         error_out(argparse.ArgumentTypeError, "Only one of --optimized_compile and --dynamo_backend may be used.")
+    if args.optimized_compile and sys.platform == "win32":
+        warning_message = "Optimized compile may not working correctly under native Windows! Please consider using WSL/Linux for this feature."
+        logger.warning(warning_message)
+        logger.warning(warning_message)
+        logger.warning(warning_message)
+
     if args.force_v2_1_time_embedding:
         args.simple_modulation = True  # Redirect Musubi flag to existing Blissful flag
     trainer = WanNetworkTrainer()
