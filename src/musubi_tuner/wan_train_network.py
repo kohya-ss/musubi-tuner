@@ -791,7 +791,9 @@ def main():
     if args.optimized_compile and args.dynamo_backend.upper() != "NO":
         error_out(argparse.ArgumentTypeError, "Only one of --optimized_compile and --dynamo_backend may be used.")
     if args.optimized_compile and sys.platform == "win32":
-        warning_message = "Optimized compile may not working correctly under native Windows! Please consider using WSL/Linux for this feature."
+        warning_message = (
+            "Optimized compile may not work correctly under native Windows! Please consider using WSL/Linux for this feature."
+        )
         logger.warning(warning_message)
         logger.warning(warning_message)
         logger.warning(warning_message)
