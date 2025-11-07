@@ -44,6 +44,7 @@ QWEN_IMAGE_KEYS = [
 def convert_from_diffusers(prefix, weights_sd):
     # convert from diffusers(?) to default LoRA
     # Diffusers format: {"diffusion_model.module.name.lora_A.weight": weight, "diffusion_model.module.name.lora_B.weight": weight, ...}
+    # Updated (?) Diffusers format: {"transformer.module.name.lora_A.default.weight": weight, ...} (no prefix "diffusion_model")
     # default LoRA format: {"prefix_module_name.lora_down.weight": weight, "prefix_module_name.lora_up.weight": weight, ...}
 
     # note: Diffusers has no alpha, so alpha is set to rank
@@ -78,10 +79,10 @@ def convert_from_diffusers(prefix, weights_sd):
     return new_weights_sd
 
 
-def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
+def convert_to_diffusers(prefix, diffusers_prefix, diffusers_adapter_name, weights_sd):
     # convert from default LoRA to diffusers
-    if diffusers_prefix is None:
-        diffusers_prefix = "diffusion_model"
+    diffusers_prefix_with_dot_suffix = f"{diffusers_prefix}." if diffusers_prefix else ""
+    diffusers_adapter_name_with_dot_prefix = f".{diffusers_adapter_name}" if diffusers_adapter_name else ""
 
     # make reverse map from LoRA name to base model module name
     lora_name_to_module_name = {}
@@ -130,10 +131,10 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
                     module_name = module_name.replace("attn.", "attn_")  # fix attn
 
             if "lora_down" in key:
-                new_key = f"{diffusers_prefix}.{module_name}.lora_A.weight"
+                new_key = f"{diffusers_prefix_with_dot_suffix}{module_name}.lora_A{diffusers_adapter_name_with_dot_prefix}.weight"
                 dim = weight.shape[0]
             elif "lora_up" in key:
-                new_key = f"{diffusers_prefix}.{module_name}.lora_B.weight"
+                new_key = f"{diffusers_prefix_with_dot_suffix}{module_name}.lora_B{diffusers_adapter_name_with_dot_prefix}.weight"
                 dim = weight.shape[1]
             else:
                 logger.warning(f"unexpected key: {key} in default LoRA format")
@@ -153,7 +154,7 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
     return new_weights_sd
 
 
-def convert(input_file, output_file, target_format, diffusers_prefix):
+def convert(input_file, output_file, target_format, diffusers_prefix, diffusers_adapter_name):
     logger.info(f"loading {input_file}")
     weights_sd = load_file(input_file)
     with safe_open(input_file, framework="pt") as f:
@@ -166,7 +167,7 @@ def convert(input_file, output_file, target_format, diffusers_prefix):
         metadata = metadata or {}
         model_utils.precalculate_safetensors_hashes(new_weights_sd, metadata)
     elif target_format == "other":
-        new_weights_sd = convert_to_diffusers(prefix, diffusers_prefix, weights_sd)
+        new_weights_sd = convert_to_diffusers(prefix, diffusers_prefix, diffusers_adapter_name, weights_sd)
     else:
         raise ValueError(f"unknown target format: {target_format}")
 
@@ -182,7 +183,13 @@ def parse_args():
     parser.add_argument("--output", type=str, required=True, help="output model file")
     parser.add_argument("--target", type=str, required=True, choices=["other", "default"], help="target format")
     parser.add_argument(
-        "--diffusers_prefix", type=str, default=None, help="prefix for Diffusers weights, default is None (use `diffusion_model`)"
+        "--diffusers_prefix",
+        type=str,
+        default=None,
+        help="prefix for Diffusers weights, default is None (use `diffusion_model`), use `-` for no prefix",
+    )
+    parser.add_argument(
+        "--diffusers_adapter_name", type=str, default=None, help="adapter name for Diffusers weights, like `default`"
     )
     args = parser.parse_args()
     return args
@@ -190,7 +197,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    convert(args.input, args.output, args.target, args.diffusers_prefix)
+    if args.diffusers_prefix == "-":
+        args.diffusers_prefix = None
+    elif args.diffusers_prefix is None:
+        args.diffusers_prefix = "diffusion_model"
+    convert(args.input, args.output, args.target, args.diffusers_prefix, args.diffusers_adapter_name)
 
 
 if __name__ == "__main__":
