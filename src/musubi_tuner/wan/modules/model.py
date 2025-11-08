@@ -1263,8 +1263,9 @@ def load_wan_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
-    quantization_mode = "block" if not use_scaled_mm else "tensor"
-    logger.info(f"Using per '{quantization_mode}' quantization mode as scaled_mm/fp8_fast {'is' if use_scaled_mm else 'is not'} enabled")
+    disable_blockwise = kwargs.get("disable_blockwise_quant", False)
+    quantization_mode = "tensor" if use_scaled_mm or disable_blockwise else "block"
+    logger.info(f"Using per '{quantization_mode}' quantization mode.")
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,

@@ -483,6 +483,7 @@ class WanNetworkTrainer(NetworkTrainer):
             "simple_modulation": False if not hasattr(args, "simple_modulation") else args.simple_modulation,
             "optimized_compile": False if not hasattr(args, "optimized_compile") else args.optimized_compile,
             "compile_args": ["inductor", "default", None, "false"] if not hasattr(args, "compile_args") else args.compile_args,
+            "disable_blockwise_quant": False if not hasattr(args, "disable_blockwise_quant") else args.disable_blockwise_quant,
         }
         model = load_wan_model(
             self.config,
@@ -776,6 +777,7 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         default=["inductor", "default", None, "False"],
         help="Torch.compile settings for --optimized_compile. NOT for --dynamo_backend!",
     )
+    parser.add_argument("--disable_blockwise_quant", action="store_true", help="Disable blockwise quantization (experimental).")
     return parser
 
 
