@@ -45,6 +45,7 @@ import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
 from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, resize_image_to_bucket, encode_to_latents
+from musubi_tuner.utils.profiling_util import TorchProfiler
 
 import logging
 
@@ -2134,7 +2135,7 @@ class NetworkTrainer:
             for step, batch in enumerate(train_dataloader):
                 latents = batch["latents"]
 
-                with accelerator.accumulate(training_model):
+                with accelerator.accumulate(training_model), TorchProfiler(enabled=False, filename=f"step{step}.json"):
                     accelerator.unwrap_model(network).on_step_start()
 
                     latents = self.scale_shift_latents(latents)
