@@ -63,7 +63,14 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         if "-00001-of-00" in dit_path:
             logger.info("Pruned model detection is disabled because the weights are split into multiple files.")
             model = qwen_image_model.load_qwen_image_model(
-                accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled
+                accelerator.device,
+                dit_path,
+                attn_mode,
+                split_attn,
+                loading_device,
+                dit_weight_dtype,
+                args.fp8_scaled,
+                disable_numpy_memmap=args.disable_numpy_memmap,
             )
             return model
 
@@ -88,11 +95,18 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         # load weights from disk
         logger.info(f"Loading weights from {dit_path}")
         if block_index_map is None:
-            state_dict = load_safetensors(dit_path, device=loading_device, disable_mmap=True, dtype=dit_weight_dtype)
+            # uses official safetensors loader
+            state_dict = load_safetensors(
+                dit_path,
+                device=loading_device,
+                disable_mmap=True,
+                dtype=dit_weight_dtype,
+                disable_numpy_memmap=args.disable_numpy_memmap,
+            )
         else:
             loading_device = torch.device(loading_device) if loading_device is not None else None
             state_dict = {}
-            with MemoryEfficientSafeOpen(dit_path) as f:
+            with MemoryEfficientSafeOpen(dit_path, disable_numpy_memmap=args.disable_numpy_memmap) as f:
                 for key in f.keys():
                     state_dict_key = key
                     if key.startswith("transformer_blocks."):
@@ -148,12 +162,14 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             logger.info(f"Using timestep bucketing. Number of buckets: {args.num_timestep_buckets}")
         self.num_timestep_buckets = args.num_timestep_buckets  # None or int, None makes all the behavior same as before
 
+        current_epoch = Value("i", 0)
+
         blueprint_generator = BlueprintGenerator(ConfigSanitizer())
         logger.info(f"Load dataset config from {args.dataset_config}")
         user_config = config_utils.load_user_config(args.dataset_config)
         blueprint = blueprint_generator.generate(user_config, args, architecture=self.architecture)
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
-            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets
+            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
         )
 
         if train_dataset_group.num_train_items == 0:
@@ -162,10 +178,8 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 " / データセットに学習データがありません。latent/Text Encoderキャッシュを事前に作成したか確認してください"
             )
 
-        current_epoch = Value("i", 0)
-        current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
-        collator = collator_class(current_epoch, current_step, ds_for_collator)
+        collator = collator_class(current_epoch, ds_for_collator)
 
         # prepare accelerator
         logger.info("preparing accelerator")
@@ -215,7 +229,9 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
-            transformer.enable_block_swap(blocks_to_swap, accelerator.device, supports_backward=True)
+            transformer.enable_block_swap(
+                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         if args.gradient_checkpointing:
@@ -478,13 +494,14 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 self.architecture,
                 time.time(),
                 title,
-                None,
+                args.metadata_reso,
                 args.metadata_author,
                 args.metadata_description,
                 args.metadata_license,
                 args.metadata_tags,
                 timesteps=md_timesteps,
                 is_lora=False,
+                custom_arch=args.metadata_arch,
             )
 
             metadata_to_save.update(sai_metadata)
@@ -529,7 +546,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
             for step, batch in enumerate(train_dataloader):
                 latents = batch["latents"]
-                current_step.value = global_step
 
                 with accelerator.accumulate(training_model):
                     latents = self.scale_shift_latents(latents)

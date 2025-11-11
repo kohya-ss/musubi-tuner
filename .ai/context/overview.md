@@ -4,7 +4,7 @@ This file provides guidance to developers when working with code in this reposit
 
 ## Project Overview
 
-Musubi Tuner is a Python-based training framework for LoRA (Low-Rank Adaptation) models with multiple video generation architectures including HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext and Qwen-Image. The project focuses on memory-efficient training and inference for video generation models.
+Musubi Tuner is a Python-based training framework for LoRA (Low-Rank Adaptation) models with multiple video generation architectures including HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext and Qwen-Image/Qwen-Image-Edit/Qwen-Image-Edit-2509. The project focuses on memory-efficient training and inference for video generation models.
 
 ## Installation and Environment
 
@@ -42,7 +42,7 @@ python src/musubi_tuner/fpack_train_network.py [similar args]
 # FLUX.1 Kontext training
 python src/musubi_tuner/flux_kontext_train_network.py [similar args]
 
-# Qwen-Image training
+# Qwen-Image series training
 python src/musubi_tuner/qwen_image_train_network.py [similar args]
 ```
 
@@ -107,7 +107,7 @@ No formal test suite is present in this repository. The project relies on manual
 
 ### Memory Management
 - Aggressive memory optimization with options like `--blocks_to_swap`, `--fp8_base`, `--fp8_llm`
-- VAE tiling support for handling large resolutions
+- VAE tiling or chunking support for handling large resolutions (depending on architecture)
 - Gradient checkpointing and mixed precision training
 
 ## Development Notes

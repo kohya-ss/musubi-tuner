@@ -96,6 +96,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
+    parser.add_argument(
+        "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
+    )
     parser.add_argument("--vae", type=str, default=None, help="VAE directory or path")
     parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 directory or path")
     parser.add_argument("--text_encoder2", type=str, required=True, help="Text Encoder 2 directory or path")
@@ -147,6 +150,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="one frame inference, default is None, comma separated values from 'no_2x', 'no_4x', 'no_post', 'control_indices' and 'target_index'.",
+    )
+    parser.add_argument(
+        "--one_frame_auto_resize",
+        action="store_true",
+        help="Automatically adjust height and width based on control image size and given size for one frame inference. Default is False.",
     )
     parser.add_argument(
         "--control_image_path", type=str, default=None, nargs="*", help="path to control (reference) image for one frame inference."
@@ -421,6 +429,13 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int, int]:
     if args.video_sections is not None:
         video_seconds = (args.video_sections * (args.latent_window_size * 4) + 1) / args.fps
 
+    if args.one_frame_inference is not None and args.one_frame_auto_resize and args.control_image_path is not None:
+        with Image.open(args.control_image_path[0]) as control_image:
+            width, height = image_video_dataset.BucketSelector.calculate_bucket_resolution(
+                control_image.size, (width, height), architecture=image_video_dataset.ARCHITECTURE_FRAMEPACK
+            )
+            logger.info(f"Adjusted image size to {width}x{height} based on control image size {control_image.size}")
+
     if height % 8 != 0 or width % 8 != 0:
         raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
@@ -470,6 +485,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         for_inference=True,
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
 
     # apply RoPE scaling factor

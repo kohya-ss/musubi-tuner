@@ -631,6 +631,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         self.time_embedding = nn.Sequential(nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+        self.force_v2_1_time_embedding = False  # Override to use 2.1 style time embedding for 2.2 model
 
         # blocks
         cross_attn_type = "t2v_cross_attn" if model_type == "t2v" else "i2v_cross_attn"
@@ -685,6 +686,11 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
     def device(self):
         return self.patch_embedding.weight.device
 
+    def set_time_embedding_v2_1(self, force_v2_1_time_embedding: bool):
+        self.force_v2_1_time_embedding = force_v2_1_time_embedding
+        if force_v2_1_time_embedding:
+            logger.info("WanModel: Using 2.1 style time embedding for time_projection.")
+
     def fp8_optimization(
         self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
     ) -> int:
@@ -727,7 +733,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         print(f"WanModel: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
+    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = blocks_to_swap
         self.num_blocks = len(self.blocks)
 
@@ -736,7 +742,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         ), f"Cannot swap more than {self.num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
 
         self.offloader = ModelOffloader(
-            "wan_attn_block", self.blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device  # , debug=True
+            "wan_attn_block", self.blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
         )
         print(
             f"WanModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. Supports backward: {supports_backward}"
@@ -830,9 +836,15 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # time embeddings
         # with amp.autocast(dtype=torch.float32):
         with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
-            if self.model_version == "2.1":
+            if self.model_version == "2.1" or self.force_v2_1_time_embedding:  # For Wan2.1
                 e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
                 e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+                # e0: torch.Size([1, 6, 5120]), e: torch.Size([1, 5120]), t: torch.Size([1])
+
+                if self.model_version != "2.1":  # Reshape to be compatible with 2.2 blocks
+                    e0 = e0.unsqueeze(1)
+                    e = e.unsqueeze(1)
+                    t = t.unsqueeze(1).expand(-1, seq_len)
             else:  # For Wan2.2
                 if t.dim() == 1:
                     # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
@@ -841,6 +853,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 t = t.flatten()
                 e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float())
                 e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+                # e0: torch.Size([1, 14040, 6, 5120]), e: torch.Size([1, 14040, 5120]), t: torch.Size([14040])
+
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
         # context
@@ -963,6 +977,7 @@ def load_wan_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     use_scaled_mm: bool = False,
+    disable_numpy_memmap: bool = False,
 ) -> WanModel:
     """
     Load a WAN model from the specified checkpoint.
@@ -979,6 +994,8 @@ def load_wan_model(
         fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+        use_scaled_mm (bool): Whether to use scaled matrix multiplication for fp8.
+        disable_numpy_memmap (bool): Whether to disable numpy memmap when loading weights.
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -1020,6 +1037,7 @@ def load_wan_model(
         move_to_device=(loading_device == device),
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        disable_numpy_memmap=disable_numpy_memmap,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

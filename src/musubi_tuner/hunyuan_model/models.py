@@ -664,7 +664,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
     def enable_img_in_txt_in_offloading(self):
         self._enable_img_in_txt_in_offloading = True
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool):
+    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
         self.num_double_blocks = len(self.double_blocks)
         self.num_single_blocks = len(self.single_blocks)
@@ -682,7 +682,9 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self.num_double_blocks,
             double_blocks_to_swap,
             supports_backward,
-            device,  # , debug=True
+            device,
+            use_pinned_memory,
+            # , debug=True
         )
         self.offloader_single = ModelOffloader(
             "single",
@@ -690,7 +692,9 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self.num_single_blocks,
             single_blocks_to_swap,
             supports_backward,
-            device,  # , debug=True
+            device,
+            use_pinned_memory,
+            # , debug=True
         )
         print(
             f"HYVideoDiffusionTransformer: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."

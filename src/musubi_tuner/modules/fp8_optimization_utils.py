@@ -245,6 +245,7 @@ def load_safetensors_with_fp8_optimization(
     weight_hook=None,
     quantization_mode: str = "block",
     block_size: Optional[int] = 64,
+    disable_numpy_memmap: bool = False,
 ) -> dict:
     """
     Load weight tensors from safetensors files and merge LoRA weights into the state dict with explicit FP8 optimization.
@@ -260,6 +261,7 @@ def load_safetensors_with_fp8_optimization(
         weight_hook (callable, optional): Function to apply to each weight tensor before optimization
         quantization_mode (str): Quantization mode, "tensor", "channel", or "block"
         block_size (int, optional): Block size for block-wise quantization (used if quantization_mode is "block")
+        disable_numpy_memmap (bool): Disable numpy memmap when loading safetensors
 
     Returns:
         dict: FP8 optimized state dict
@@ -288,7 +290,7 @@ def load_safetensors_with_fp8_optimization(
     # Process each file
     state_dict = {}
     for model_file in model_files:
-        with MemoryEfficientSafeOpen(model_file) as f:
+        with MemoryEfficientSafeOpen(model_file, disable_numpy_memmap=disable_numpy_memmap) as f:
             keys = f.keys()
             for key in tqdm(keys, desc=f"Loading {os.path.basename(model_file)}", unit="key"):
                 value = f.get_tensor(key)

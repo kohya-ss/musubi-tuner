@@ -470,8 +470,19 @@ class WanNetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         model = load_wan_model(
-            self.config, accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled
+            self.config,
+            accelerator.device,
+            dit_path,
+            attn_mode,
+            split_attn,
+            loading_device,
+            dit_weight_dtype,
+            args.fp8_scaled,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
+        if args.force_v2_1_time_embedding:
+            model.set_time_embedding_v2_1(True)
+
         if self.high_low_training:
             # load high noise model
             logger.info(f"Loading high noise model from {self.dit_high_noise_path}")
@@ -484,7 +495,10 @@ class WanNetworkTrainer(NetworkTrainer):
                 "cpu" if args.offload_inactive_dit else loading_device,
                 dit_weight_dtype,
                 args.fp8_scaled,
+                disable_numpy_memmap=args.disable_numpy_memmap,
             )
+            if args.force_v2_1_time_embedding:
+                model_high_noise.set_time_embedding_v2_1(True)
             if self.blocks_to_swap > 0:
                 # This moves the weights to the appropriate device
                 logger.info(f"Prepare block swap for high noise model, blocks_to_swap={self.blocks_to_swap}")
@@ -697,6 +711,9 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.add_argument("--one_frame", action="store_true", help="Use one frame sampling method for sample generation")
 
     # Wan2.2 specific arguments
+    parser.add_argument(
+        "--force_v2_1_time_embedding", action="store_true", help="Force using 2.1 style time embedding even for Wan 2.2"
+    )
     parser.add_argument("--dit_high_noise", type=str, required=False, default=None, help="DiT checkpoint path for high noise model")
     parser.add_argument(
         "--timestep_boundary",

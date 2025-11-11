@@ -86,9 +86,8 @@ def clean_memory_on_device(device: torch.device):
 
 # for collate_fn: epoch and step is multiprocessing.Value
 class collator_class:
-    def __init__(self, epoch, step, dataset):
+    def __init__(self, epoch, dataset):
         self.current_epoch = epoch
-        self.current_step = step
         self.dataset = dataset  # not used if worker_info is not None, in case of multiprocessing
 
     def __call__(self, examples):
@@ -99,10 +98,9 @@ class collator_class:
         else:
             dataset = self.dataset
 
-        # set epoch and step
+        # set epoch for validation
         dataset.set_current_epoch(self.current_epoch.value)
-        dataset.set_current_step(self.current_step.value)
-        return examples[0]
+        return examples[0]  # batch size is always 1, so we unwrap it here
 
 
 def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
@@ -236,23 +234,23 @@ def line_to_prompt_dict(line: str) -> dict:
 
             m = re.match(r"i (.+)", parg, re.IGNORECASE)
             if m:  # image path
-                prompt_dict["image_path"] = m.group(1)
+                prompt_dict["image_path"] = m.group(1).strip()
                 continue
 
             m = re.match(r"ei (.+)", parg, re.IGNORECASE)
             if m:  # end image path
-                prompt_dict["end_image_path"] = m.group(1)
+                prompt_dict["end_image_path"] = m.group(1).strip()
                 continue
 
             m = re.match(r"cn (.+)", parg, re.IGNORECASE)
             if m:
-                prompt_dict["control_video_path"] = m.group(1)
+                prompt_dict["control_video_path"] = m.group(1).strip()
                 continue
 
             m = re.match(r"ci (.+)", parg, re.IGNORECASE)
             if m:
                 # can be multiple control images
-                control_image_path = m.group(1)
+                control_image_path = m.group(1).strip()
                 if "control_image_path" not in prompt_dict:
                     prompt_dict["control_image_path"] = []
                 prompt_dict["control_image_path"].append(control_image_path)
@@ -260,7 +258,7 @@ def line_to_prompt_dict(line: str) -> dict:
 
             m = re.match(r"of (.+)", parg, re.IGNORECASE)
             if m:  # output folder
-                prompt_dict["one_frame"] = m.group(1)
+                prompt_dict["one_frame"] = m.group(1).strip()
                 continue
 
         except ValueError as ex:
@@ -416,7 +414,7 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower():
+            if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower().endswith("Prodigy".lower()):
                 # tracking d*lr value
                 logs[f"lr/d*lr/{lr_desc}"] = (
                     lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
@@ -433,7 +431,9 @@ class NetworkTrainer:
 
             for i in range(idx, len(lrs)):
                 logs[f"lr/group{i}"] = float(lrs[i])
-                if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower():
+                if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower().endswith(
+                    "Prodigy".lower()
+                ):
                     logs[f"lr/d*lr/group{i}"] = (
                         lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
                     )
@@ -1634,6 +1634,12 @@ class NetworkTrainer:
                 " / SageAttentionは現在学習をサポートしていないようです。`--sdpa`や`--xformers`などの他のオプションを使ってください"
             )
 
+        if args.disable_numpy_memmap:
+            logger.info(
+                "Disabling numpy memory mapping for model loading (for Wan, FramePack and Qwen-Image). This may lead to higher memory usage but can speed up loading in some cases."
+                " / モデル読み込み時のnumpyメモリマッピングを無効にします（Wan、FramePack、Qwen-Imageでのみ有効）。これによりメモリ使用量が増える可能性がありますが、場合によっては読み込みが高速化されることがあります"
+            )
+
         # check model specific arguments
         self.handle_model_specific_args(args)
 
@@ -1655,12 +1661,14 @@ class NetworkTrainer:
             logger.info(f"Using timestep bucketing. Number of buckets: {args.num_timestep_buckets}")
         self.num_timestep_buckets = args.num_timestep_buckets  # None or int, None makes all the behavior same as before
 
+        current_epoch = Value("i", 0)  # shared between processes
+
         blueprint_generator = BlueprintGenerator(ConfigSanitizer())
         logger.info(f"Load dataset config from {args.dataset_config}")
         user_config = config_utils.load_user_config(args.dataset_config)
         blueprint = blueprint_generator.generate(user_config, args, architecture=self.architecture)
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
-            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets
+            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
         )
 
         if train_dataset_group.num_train_items == 0:
@@ -1669,10 +1677,8 @@ class NetworkTrainer:
                 " / データセットに学習データがありません。latent/Text Encoderキャッシュを事前に作成したか確認してください"
             )
 
-        current_epoch = Value("i", 0)
-        current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
-        collator = collator_class(current_epoch, current_step, ds_for_collator)
+        collator = collator_class(current_epoch, ds_for_collator)
 
         # prepare accelerator
         logger.info("preparing accelerator")
@@ -1733,8 +1739,12 @@ class NetworkTrainer:
         transformer.requires_grad_(False)
 
         if blocks_to_swap > 0:
-            logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
-            transformer.enable_block_swap(blocks_to_swap, accelerator.device, supports_backward=True)
+            logger.info(
+                f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}, use pinned memory: {args.use_pinned_memory_for_block_swap}"
+            )
+            transformer.enable_block_swap(
+                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         # load network model for differential training
@@ -2084,12 +2094,13 @@ class NetworkTrainer:
                 self.architecture,
                 time.time(),
                 title,
-                None,
+                args.metadata_reso,
                 args.metadata_author,
                 args.metadata_description,
                 args.metadata_license,
                 args.metadata_tags,
                 timesteps=md_timesteps,
+                custom_arch=args.metadata_arch,
             )
 
             metadata_to_save.update(sai_metadata)
@@ -2132,8 +2143,6 @@ class NetworkTrainer:
 
             for step, batch in enumerate(train_dataloader):
                 latents = batch["latents"]
-                bsz = latents.shape[0]
-                current_step.value = global_step
 
                 with accelerator.accumulate(training_model):
                     accelerator.unwrap_model(network).on_step_start()
@@ -2587,9 +2596,21 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="number of blocks to swap in the model, max XXX / モデル内のブロックの数、最大XXX",
     )
     parser.add_argument(
+        "--use_pinned_memory_for_block_swap",
+        action="store_true",
+        help="use pinned memory for block swapping, which may speed up data transfer between CPU and GPU but uses more shared GPU memory on Windows"
+        " / ブロックスワッピングにピン留めメモリを使用する。これによりCPUとGPU間のデータ転送が高速化される可能性があるが、Windowsではより多くの共有GPUメモリを使用する。",
+    )
+    parser.add_argument(
         "--img_in_txt_in_offloading",
         action="store_true",
         help="offload img_in and txt_in to cpu / img_inとtxt_inをCPUにオフロードする",
+    )
+    parser.add_argument(
+        "--disable_numpy_memmap",
+        action="store_true",
+        help="Disable numpy memory mapping for model loading. Only for Wan, FramePack and Qwen-Image. Increases RAM usage but speeds up model loading in some cases."
+        " / モデル読み込み時のnumpyメモリマッピングを無効にします。Wan、FramePack、Qwen-Imageで有効です。RAM使用量が増えますが、場合によってはモデルの読み込みが高速化されます。",
     )
 
     # parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers")
@@ -2840,6 +2861,18 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="tags for model metadata, separated by comma / メタデータに書き込まれるモデルタグ、カンマ区切り",
+    )
+    parser.add_argument(
+        "--metadata_reso",
+        type=str,
+        default=None,
+        help="resolution for model metadata (e.g., `1024,1024`) / メタデータに書き込まれるモデル解像度（例: `1024,1024`）",
+    )
+    parser.add_argument(
+        "--metadata_arch",
+        type=str,
+        default=None,
+        help="architecture for model metadata / メタデータに書き込まれるモデルアーキテクチャ",
     )
 
     # huggingface settings

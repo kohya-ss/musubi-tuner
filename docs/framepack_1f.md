@@ -91,7 +91,7 @@ The dataset must be an image dataset. If you use caption files, you need to spec
 
 If you use JSONL files, specify them as `{"image_path": "/path/to/target_image1.jpg", "control_path": "/path/to/source_image1.jpg", "caption": "The object changes to red."}`. The `image_path` should point to the images after the change, and `control_path` should point to the starting images. 
 
-For the dataset configuration, see [here](../src/musubi_tuner/dataset/dataset_config.md#sample-for-image-dataset-with-control-images) and [here](../src/musubi_tuner/dataset/dataset_config.md#framepack-one-frame-training). There are also examples for kisekaeichi and 1f-mc settings.
+For the dataset configuration, see [here](./dataset_config.md#sample-for-image-dataset-with-control-images) and [here](./dataset_config.md#framepack-one-frame-training). There are also examples for kisekaeichi and 1f-mc settings.
 
 For single frame training, specify `--one_frame` in `fpack_cache_latents.py` to create the cache. You can also use `--one_frame_no_2x` and `--one_frame_no_4x` options, which have the same meaning as `no_2x` and `no_4x` during inference. It is recommended to set these options to match the inference settings.
 
@@ -126,7 +126,7 @@ The girl wears a school uniform. --i path/to/start_with_alpha.png --ci path/to/r
 
 JSONLファイルを用いる場合は、`{"image_path": "/path/to/target_image1.jpg", "control_path": "/path/to/source_image1.jpg", "caption": "The object changes to red"}`のように指定してください。`image_path`は変化後の画像、`control_path`は開始画像を指定します。
 
-データセットの設定については、[こちら](../src/musubi_tuner/dataset/dataset_config.md#sample-for-image-dataset-with-control-images)と[こちら](../src/musubi_tuner/dataset/dataset_config.md#framepack-one-frame-training)も参照してください。kisekaeichiと1f-mcの設定例もそちらにあります。
+データセットの設定については、[こちら](./dataset_config.md#sample-for-image-dataset-with-control-images)と[こちら](./dataset_config.md#framepack-one-frame-training)も参照してください。kisekaeichiと1f-mcの設定例もそちらにあります。
 
 1フレーム学習時は、`fpack_cache_latents.py`に`--one_frame`を指定してキャッシュを作成してください。また`--one_frame_no_2x`と`--one_frame_no_4x`オプションも利用可能です。推論時の`no_2x`、`no_4x`と同じ意味を持ちますので、推論時と同じ設定にすることをお勧めします。
 
@@ -187,6 +187,8 @@ Normally, specify `--video_sections 1` to indicate only one section (one image).
 
 Increasing `target_index` from the default of 9 may result in larger changes. It has been confirmed that generation can be performed without breaking up to around 40.
 
+The `--one_frame_auto_resize` option has been added to automatically adjust the image size based on the control image size when `--one_frame_inference` is specified. If this option is enabled, the image size will be adjusted to the nearest bucket size with the specified width\*height, based on the control image size while maintaining the aspect ratio. This can be useful when the multiple generation of images with different sizes is required.
+
 The `--end_image_path` is ignored for one frame inference.
 
 <details>
@@ -224,6 +226,8 @@ clean latents 2x、clean latents 4x、postをモデルに渡す場合でも値�
 通常は`--video_sections 1` として1セクションのみ（画像1枚）を指定してください。
 
 `target_index` をデフォルトの9から大きくすると、変化量が大きくなる可能性があります。40程度までは破綻なく生成されることを確認しています。
+
+`--one_frame_auto_resize`オプションが追加されました。`--one_frame_inference`を指定した場合に、制御用画像のサイズに基づいて自動的に画像サイズを調整します。このオプションを有効にすると、画像サイズは、アスペクト比を維持しつつ制御用画像のサイズを基準に、指定された幅\*高さの最も近いバケットサイズに調整されます。異なるサイズの画像を複数生成する必要がある場合に便利です。
 
 `--end_image_path`は無視されます。
 

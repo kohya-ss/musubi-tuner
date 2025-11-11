@@ -120,7 +120,7 @@ python src/musubi_tuner/wan_cache_latents.py --dataset_config path/to/toml --vae
 
 If you're running low on VRAM, specify `--vae_cache_cpu` to use the CPU for the VAE internal cache, which will reduce VRAM usage somewhat.
 
-The control video settings are required for training the Fun-Control model. Please refer to [Dataset Settings](/src/musubi_tuner/dataset/dataset_config.md#sample-for-video-dataset-with-control-images) for details.
+The control video settings are required for training the Fun-Control model. Please refer to [Dataset Settings](./dataset_config.md#sample-for-video-dataset-with-control-images) for details.
 
 <details>
 <summary>日本語</summary>
@@ -133,7 +133,7 @@ latentの事前キャッシングは上のコマンド例を使用してキャ�
 
 VRAMが不足している場合は、`--vae_cache_cpu` を指定するとVAEの内部キャッシュにCPUを使うことで、使用VRAMを多少削減できます。
 
-Fun-Controlモデルを学習する場合は、制御用動画の設定が必要です。[データセット設定](/src/musubi_tuner/dataset/dataset_config.md#sample-for-video-dataset-with-control-images)を参照してください。
+Fun-Controlモデルを学習する場合は、制御用動画の設定が必要です。[データセット設定](./dataset_config.md#sample-for-video-dataset-with-control-images)を参照してください。
 
 </details>
 
@@ -190,11 +190,13 @@ For Wan2.2 models, if you want to train with either the high-noise model or the 
 
 If you want to train LoRA for both models simultaneously, you need to specify the low-noise model with `--dit` and the high-noise model with `--dit_high_noise`. The two models are switched at the timestep specified by `--timestep_boundary`. The default value is 0.9 for I2V and 0.875 for T2V. `--timestep_boundary` can be specified in the range of 0.0 to 1.0, or in the range of 0 to 1000.
 
-When training Wan2.2 high and low models, you can use `--offload_inactive_dit` to offload the inactive DiT model to the CPU, which can save VRAM (only works when `--blocks_to_swap` is not specified).
+When training Wan2.2 high and low models, you can use `--offload_inactive_dit` to offload the inactive DiT model to the CPU, which can save VRAM (only works when `--blocks_to_swap` is not specified). Please note that in Windows environment, this offloading uses shared VRAM. Even with fp8/fp8_scaled, about 42GB of shared VRAM is required for the two models combined, which means that about 96GB or more of main RAM is required. If you have less main RAM, using `--blocks_to_swap` will use less main RAM.
 
 `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 For Wan2.2 models, `--discrete_flow_shift` may need to be adjusted based on I2V and T2V. According to the official implementation, the shift values in inference are 12.0 for T2V and 5.0 for I2V. The shift values during training do not necessarily have to match those during inference, but they may serve as a useful reference.
+
+`--force_v2_1_time_embedding` uses the same shape of time embedding as Wan2.1. This can reduce VRAM usage during inference and training (the larger the resolution and number of frames, the greater the reduction). Although this is different from the official implementation of Wan2.2, it seems that there is no effect on inference or training within the range that has been confirmed.
 
 Don't forget to specify `--network_module networks.lora_wan`.
 
@@ -228,9 +230,11 @@ Wan2.2モデルの場合、高ノイズ用モデルまたは低ノイズ用モ�
 
 両方のモデルへのLoRAを学習する場合は、`--dit`に低ノイズ用モデルを、`--dit_high_noise`に高ノイズ用モデルを指定します。2つのモデルは`--timestep_boundary`で指定されたタイムステップで切り替わります。デフォルトはI2Vの場合は0.9、T2Vの場合は0.875です。`--timestep_boundary`は0.0から1.0の範囲の値、または0から1000の範囲の値で指定できます。
 
-またWan2.2モデルで両方のモデルを学習するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができ、VRAMを節約できます（`--blocks_to_swap`未指定時のみ有効）。
+またWan2.2モデルで両方のモデルを学習するとき、`--offload_inactive_dit`を使用すると、使用していないDiTモデルをCPUにオフロードすることができ、VRAMを節約できます（`--blocks_to_swap`未指定時のみ有効）。なお、Windows環境の場合、このオフロードには共有VRAMが使用されます。fp8/fp8_scaledの場合でも2つのモデル合計で約42GBの共有VRAMが必要となり、つまりメインRAMが96GB程度以上必要になりますのでご注意ください。メインRAMが少ない場合、`--blocks_to_swap`を使用する方がメインRAMの使用量は少なくなります。
 
 Wan2.2の場合、I2VとT2Vで`--discrete_flow_shift`を調整する必要があるかもしれません。公式実装によると、推論時のシフト値はT2Vで12.0、I2Vで5.0です。学習時のシフト値は推論時度必ずしも合わせる必要はありませんが、参考になるかもしれません。
+
+`--force_v2_1_time_embedding` を指定すると、Wan2.1と同じ形状の時間埋め込みを使用します。これにより推論中、学習中のVRAM使用量を削減できます（解像度やフレーム数が大きいほど削減量も大きくなります）。Wan2.2の公式実装とは異なりますが、確認した範囲では推論、学習共に影響はないようです。
 
 `--network_module` に `networks.lora_wan` を指定することを忘れないでください。
 
@@ -317,6 +321,8 @@ Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory con
 
 `--blocks_to_swap` is the number of blocks to swap during inference. The default value is None (no block swap). The maximum value is 39 for 14B model and 29 for 1.3B model.
 
+`--force_v2_1_time_embedding` uses the same shape of time embedding as Wan2.1 for Wan2.2. See the training section for details.
+
 `--vae_cache_cpu` enables VAE cache in main memory. This reduces VRAM usage slightly but processing is slower.
 
 `--compile` enables torch.compile. See [here](/README.md#inference) for details.
@@ -369,6 +375,8 @@ Wan2.2モデルの場合、`--dit`に低ノイズ用モデルを、`--dit_high_n
 `--guidance_scale` でclassifier free guianceのガイダンススケールを指定できます（デフォルト5.0）。Wan2.2の場合は、`--guidance_scale_high_noise` で高ノイズ用モデルのガイダンススケールを別に指定できます。
 
 `--blocks_to_swap` は推論時のblock swapの数です。デフォルト値はNone（block swapなし）です。最大値は14Bモデルの場合39、1.3Bモデルの場合29です。
+
+`--force_v2_1_time_embedding` はWan2.2の場合に有効で、Wan2.1と同じ形状の時間埋め込みを使用します。詳細は学習セクションを参照してください。
 
 `--vae_cache_cpu` を有効にすると、VAEのキャッシュをメインメモリに保持します。VRAM使用量が多少減りますが、処理は遅くなります。
 

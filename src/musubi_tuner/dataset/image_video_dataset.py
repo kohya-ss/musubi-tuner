@@ -6,7 +6,13 @@ import math
 import os
 import random
 import time
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from multiprocessing.sharedctypes import Synchronized
+
+SharedEpoch = Optional["Synchronized[int]"]
+
 
 import numpy as np
 import torch
@@ -24,12 +30,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP"]
+IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP", ".avif", ".AVIF"]
 
-if find_spec("pillow_avif") is not None:
-    import pillow_avif  # noqa: F401 # type: ignore
-
-    IMAGE_EXTENSIONS.extend([".avif", ".AVIF"])
 
 if find_spec("jxlpy") is not None:  # JPEG-XL on Linux
     from jxlpy import JXLImagePlugin  # noqa: F401 # type: ignore
@@ -64,6 +66,7 @@ VIDEO_EXTENSIONS = [
     ".MPEG",
 ]  # some of them are not tested
 
+# Architecture short names cannot contain underscore
 ARCHITECTURE_HUNYUAN_VIDEO = "hv"
 ARCHITECTURE_HUNYUAN_VIDEO_FULL = "hunyuan_video"
 ARCHITECTURE_WAN = "wan"
@@ -74,6 +77,8 @@ ARCHITECTURE_FLUX_KONTEXT = "fk"
 ARCHITECTURE_FLUX_KONTEXT_FULL = "flux_kontext"
 ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
+ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
+ARCHITECTURE_QWEN_IMAGE_EDIT_FULL = "qwen_image_edit"
 
 
 def glob_images(directory, base="*"):
@@ -288,19 +293,21 @@ def save_latent_cache_flux_kontext(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[torch.Tensor]):
+def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
     """Qwen-Image architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
-    assert control_latent is None or control_latent.dim() == 4, (
+    assert control_latent is None or all(cl.dim() == 4 for cl in control_latent), (
         "control_latent should be 4D tensor (frame, channel, height, width) or None"
     )
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
     if control_latent is not None:
-        _, F, H, W = control_latent.shape
-        sd[f"latents_control_{F}x{H}x{W}_{dtype_str}"] = control_latent.detach().cpu().contiguous()
+        for i, cl in enumerate(control_latent):
+            _, F, H, W = cl.shape
+            sd[f"latents_control_{i}_{F}x{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
@@ -432,6 +439,7 @@ class BucketSelector:
     RESOLUTION_STEPS_FRAMEPACK = 16
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
     RESOLUTION_STEPS_QWEN_IMAGE = 16
+    RESOLUTION_STEPS_QWEN_IMAGE_EDIT = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -439,6 +447,7 @@ class BucketSelector:
         ARCHITECTURE_FRAMEPACK: RESOLUTION_STEPS_FRAMEPACK,
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
+        ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
     }
 
     def __init__(
@@ -500,6 +509,7 @@ class BucketSelector:
     ) -> tuple[int, int]:
         """
         Get the bucket resolution for the given image size, resolution and resolution steps.
+        Return (width, height).
         """
         if reso_steps is None and architecture is None:
             raise ValueError("resolution steps or architecture must be provided")
@@ -822,7 +832,7 @@ class ImageDirectoryDatasource(ImageDatasource):
         image_directory: str,
         caption_extension: Optional[str] = None,
         control_directory: Optional[str] = None,
-        control_count_per_image: int = 1,
+        control_count_per_image: Optional[int] = None,
     ):
         super().__init__()
         self.image_directory = image_directory
@@ -841,10 +851,28 @@ class ImageDirectoryDatasource(ImageDatasource):
             logger.info(f"glob control images in {self.control_directory}")
             self.has_control = True
             self.control_paths = {}
-            for image_path in self.image_paths:
+
+            # sort image paths for matching control images properly: longer names first
+            image_paths_sorted = sorted(self.image_paths, key=lambda p: len(os.path.basename(p)), reverse=True)
+
+            # glob control images first
+            all_control_image_paths = set(glob_images(self.control_directory))
+
+            for image_path in image_paths_sorted:
                 image_basename = os.path.basename(image_path)
                 image_basename_no_ext = os.path.splitext(image_basename)[0]
-                potential_paths = glob.glob(os.path.join(self.control_directory, os.path.splitext(image_basename)[0] + "*.*"))
+
+                # find matching control images
+                potential_paths = [
+                    p
+                    for p in all_control_image_paths
+                    if os.path.basename(p).startswith(image_basename_no_ext + ".")
+                    or os.path.basename(p).startswith(image_basename_no_ext + "_")
+                ]
+
+                # remove to avoid duplicate matching
+                all_control_image_paths.difference_update(potential_paths)
+
                 if potential_paths:
                     # sort by the digits (`_0000`) suffix, prefer the one without the suffix
                     def sort_key(path):
@@ -858,7 +886,7 @@ class ImageDirectoryDatasource(ImageDatasource):
                         return int(digits_suffix) + 1
 
                     potential_paths.sort(key=sort_key)
-                    if len(potential_paths) < control_count_per_image:
+                    if control_count_per_image is not None and len(potential_paths) < control_count_per_image:
                         logger.error(
                             f"Not enough control images for {image_path}: found {len(potential_paths)}, expected {control_count_per_image}"
                         )
@@ -867,8 +895,22 @@ class ImageDirectoryDatasource(ImageDatasource):
                         )
 
                     # take the first `control_count_per_image` paths
-                    self.control_paths[image_path] = potential_paths[:control_count_per_image]
-            logger.info(f"found {len(self.control_paths)} matching control images")
+                    self.control_paths[image_path] = (
+                        potential_paths[:control_count_per_image] if control_count_per_image is not None else potential_paths
+                    )
+            logger.info(
+                f"found {len(self.control_paths)} matching control images for {'arbitrary' if control_count_per_image is None else control_count_per_image} images"
+            )
+
+            # log the distribution of number of control images
+            count_of_num_control_images = {}
+            for paths in self.control_paths.values():
+                count = len(paths)
+                if count not in count_of_num_control_images:
+                    count_of_num_control_images[count] = 0
+                count_of_num_control_images[count] += 1
+            for count, num_images in count_of_num_control_images.items():
+                logger.info(f"  {num_images} images have {count} control images")
 
             missing_controls = len(self.image_paths) - len(self.control_paths)
             if missing_controls > 0:
@@ -935,7 +977,7 @@ class ImageDirectoryDatasource(ImageDatasource):
 
 
 class ImageJsonlDatasource(ImageDatasource):
-    def __init__(self, image_jsonl_file: str, control_count_per_image: int = 1):
+    def __init__(self, image_jsonl_file: str, control_count_per_image: Optional[int] = None):
         super().__init__()
         self.image_jsonl_file = image_jsonl_file
         self.control_count_per_image = control_count_per_image
@@ -969,15 +1011,20 @@ class ImageJsonlDatasource(ImageDatasource):
         # Check if there are control paths in the JSONL
         self.has_control = any("control_path_0" in item for item in self.data)
         if self.has_control:
-            missing_control_images = [
-                item["image_path"]
-                for item in self.data
-                if sum(f"control_path_{i}" not in item for i in range(self.control_count_per_image)) > 0
-            ]
-            if missing_control_images:
-                logger.error(f"Some images do not have control paths in JSONL data: {missing_control_images}")
-                raise ValueError(f"Some images do not have control paths in JSONL data: {missing_control_images}")
-            logger.info(f"found {len(self.data)} images with {self.control_count_per_image} control images per image in JSONL data")
+            if self.control_count_per_image is None:
+                logger.info(f"found {len(self.data)} images with arbitrary control images per image in JSONL data")
+            else:
+                missing_control_images = [
+                    item["image_path"]
+                    for item in self.data
+                    if sum(f"control_path_{i}" not in item for i in range(self.control_count_per_image)) > 0
+                ]
+                if missing_control_images:
+                    logger.error(f"Some images do not have control paths in JSONL data: {missing_control_images}")
+                    raise ValueError(f"Some images do not have control paths in JSONL data: {missing_control_images}")
+                logger.info(
+                    f"found {len(self.data)} images with {self.control_count_per_image} control images per image in JSONL data"
+                )
 
     def is_indexable(self):
         return True
@@ -995,7 +1042,9 @@ class ImageJsonlDatasource(ImageDatasource):
         controls = None
         if self.has_control:
             controls = []
-            for i in range(self.control_count_per_image):
+            for i in range(self.control_count_per_image or 1000):  # arbitrary large number if control_count_per_image is None
+                if f"control_path_{i}" not in data:
+                    break
                 control_path = data[f"control_path_{i}"]
                 control = Image.open(control_path)
                 if control.mode != "RGB" and control.mode != "RGBA":
@@ -1322,6 +1371,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.architecture = architecture
         self.seed = None
         self.current_epoch = 0
+        self.shared_epoch = None
 
         if not self.enable_bucket:
             self.bucket_no_upscale = False
@@ -1373,24 +1423,13 @@ class BaseDataset(torch.utils.data.Dataset):
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         pass
 
-    def set_seed(self, seed: int):
+    def set_seed(self, seed: int, shared_epoch: SharedEpoch):
         self.seed = seed
+        self.shared_epoch = shared_epoch
 
     def set_current_epoch(self, epoch):
-        if not self.current_epoch == epoch:  # shuffle buckets when epoch is incremented
-            if epoch > self.current_epoch:
-                logger.info("epoch is incremented. current_epoch: {}, epoch: {}".format(self.current_epoch, epoch))
-                num_epochs = epoch - self.current_epoch
-                for _ in range(num_epochs):
-                    self.current_epoch += 1
-                    self.shuffle_buckets()
-                # self.current_epoch seem to be set to 0 again in the next epoch. it may be caused by skipped_dataloader?
-            else:
-                logger.warning("epoch is not incremented. current_epoch: {}, epoch: {}".format(self.current_epoch, epoch))
-                self.current_epoch = epoch
-
-    def set_current_step(self, step):
-        self.current_step = step
+        assert self.shared_epoch is not None, "shared_epoch is None"
+        assert self.shared_epoch.value == epoch, "shared_epoch does not match"
 
     def set_max_train_steps(self, max_train_steps):
         self.max_train_steps = max_train_steps
@@ -1402,7 +1441,17 @@ class BaseDataset(torch.utils.data.Dataset):
         return NotImplementedError
 
     def __getitem__(self, idx):
-        raise NotImplementedError
+        assert self.shared_epoch is not None, "shared_epoch is None"
+        epoch = self.shared_epoch.value
+        if epoch > self.current_epoch:
+            logger.info(f"epoch is incremented. current_epoch: {self.current_epoch}, epoch: {epoch}")
+            num_epochs = epoch - self.current_epoch
+            for _ in range(num_epochs):
+                self.current_epoch += 1
+                self.shuffle_buckets()
+        elif epoch < self.current_epoch:
+            logger.warning(f"epoch is not incremented. current_epoch: {self.current_epoch}, epoch: {epoch}")
+            self.current_epoch = epoch
 
     def _default_retrieve_text_encoder_output_cache_batches(self, datasource: ContentDatasource, batch_size: int, num_workers: int):
         datasource.set_caption_only(True)
@@ -1505,9 +1554,16 @@ class ImageDataset(BaseDataset):
         self.qwen_image_edit_no_resize_control = qwen_image_edit_no_resize_control
         self.qwen_image_edit_control_resolution = qwen_image_edit_control_resolution
 
-        control_count_per_image = 1
-        if fp_1f_clean_indices is not None:
-            control_count_per_image = len(fp_1f_clean_indices)
+        control_count_per_image: Optional[int] = 1
+        if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
+            if fp_1f_clean_indices is not None:
+                control_count_per_image = len(fp_1f_clean_indices)
+            else:
+                control_count_per_image = 1
+        elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
+            control_count_per_image = 1
+        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+            control_count_per_image = None  # can be multiple control images
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
@@ -1589,7 +1645,9 @@ class ImageDataset(BaseDataset):
                             or self.qwen_image_edit_control_resolution is not None
                         ):
                             # Add control size to bucket_reso to make different control resolutions to different batch
-                            bucket_reso = list(bucket_reso) + list(controls[0].shape[0:2])
+                            bucket_reso = list(bucket_reso)
+                            for control in controls:
+                                bucket_reso = bucket_reso + list(control.shape[0:2])
                             bucket_reso = tuple(bucket_reso)
 
                     if bucket_reso not in batches:
@@ -1733,6 +1791,7 @@ class ImageDataset(BaseDataset):
         return len(self.batch_manager)
 
     def __getitem__(self, idx):
+        super().__getitem__(idx)
         return self.batch_manager[idx]
 
 
@@ -2060,6 +2119,7 @@ class VideoDataset(BaseDataset):
         return len(self.batch_manager)
 
     def __getitem__(self, idx):
+        super().__getitem__(idx)
         return self.batch_manager[idx]
 
 
@@ -2074,10 +2134,6 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
     def set_current_epoch(self, epoch):
         for dataset in self.datasets:
             dataset.set_current_epoch(epoch)
-
-    def set_current_step(self, step):
-        for dataset in self.datasets:
-            dataset.set_current_step(step)
 
     def set_max_train_steps(self, max_train_steps):
         for dataset in self.datasets:

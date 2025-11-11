@@ -9,8 +9,13 @@ from textwrap import dedent, indent
 import json
 from pathlib import Path
 
-# from toolz import curry
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from multiprocessing.sharedctypes import Synchronized
+
+SharedEpoch = Optional["Synchronized[int]"]
+
 
 import toml
 import voluptuous
@@ -260,7 +265,10 @@ class BlueprintGenerator:
 
 # if training is True, it will return a dataset group for training, otherwise for caching
 def generate_dataset_group_by_blueprint(
-    dataset_group_blueprint: DatasetGroupBlueprint, training: bool = False, num_timestep_buckets: Optional[int] = None
+    dataset_group_blueprint: DatasetGroupBlueprint,
+    training: bool = False,
+    num_timestep_buckets: Optional[int] = None,
+    shared_epoch: SharedEpoch = None,
 ) -> DatasetGroup:
     datasets: List[Union[ImageDataset, VideoDataset]] = []
 
@@ -343,7 +351,7 @@ def generate_dataset_group_by_blueprint(
     seed = random.randint(0, 2**31)  # actual seed is seed + epoch_no
     for i, dataset in enumerate(datasets):
         # logger.info(f"[Dataset {i}]")
-        dataset.set_seed(seed)
+        dataset.set_seed(seed, shared_epoch)
         if training:
             dataset.prepare_for_training(num_timestep_buckets=num_timestep_buckets)
 

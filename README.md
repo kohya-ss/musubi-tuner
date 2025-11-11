@@ -18,6 +18,7 @@
   - [Overview](#overview)
     - [Hardware Requirements](#hardware-requirements)
     - [Features](#features)
+    - [Documentation](#documentation)
   - [Installation](#installation)
     - [pip based installation](#pip-based-installation)
     - [uv based installation](#uv-based-installation-experimental)
@@ -42,14 +43,7 @@
 
 This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, and Qwen-Image architectures. 
 
-This repository is unofficial and not affiliated with the official HunyuanVideo/Wan2.1/2.2/FramePack/FLUX.1 Kontext/Qwen-Image repositories. 
-
-For architecture-specific documentation, please refer to:
-- [HunyuanVideo](./docs/hunyuan_video.md)
-- [Wan2.1/2.2](./docs/wan.md)
-- [FramePack](./docs/framepack.md)
-- [FLUX.1 Kontext](./docs/flux_kontext.md)
-- [Qwen-Image](./docs/qwen_image.md)
+This repository is unofficial and not affiliated with the official HunyuanVideo/Wan2.1/2.2/FramePack/FLUX.1 Kontext/Qwen-Image repositories.
 
 *This repository is under development.*
 
@@ -69,40 +63,27 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- September 23, 2025
-    - The method of quantization when the `--fp8_scaled` option is specified has been changed from per-tensor to block-wise scaling. See [PR #575](https://github.com/kohya-ss/musubi-tuner/pull/575) [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564) for more details.
-        - This improves the accuracy of FP8 quantization, leading to more stable training and improved inference accuracy for each model (except HunyuanVideo). Training and inference speed may decrease slightly.
-        - For LoRA training of Qwen-Image, the required VRAM for training is reduced by about 5GB due to a review of the quantized modules.
-        - See [Advanced Configuration documentation](./docs/advanced_config.md#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化) for details.
+- November 2, 2025
+    - Added `--use_pinned_memory_for_block_swap` option to each training script and improved the block swap process itself. See [PR #700](https://github.com/kohya-ss/musubi-tuner/pull/700).
+        - When specified, this option uses pinned memory for block swap offloading. This may improve block swap performance. However, on Windows environments, it increases shared GPU memory usage. Please refer to the [documentation](./docs/hunyuan_video.md#memory-optimization) for details.
+        - Since in some environments it may be faster not to specify `--use_pinned_memory_for_block_swap`, please try both options.
 
-- September 22, 2025
-    - A bug in FramePack where VAE was forcibly set to tiling has been fixed. Tiling is now enabled by specifying the `--vae_tiling` option or by setting `--vae_spatial_tile_sample_min_size`. See [PR #583](https://github.com/kohya-ss/musubi-tuner/pull/583)
+- October 26, 2025
+    - Fixed a bug in Qwen-Image training where attention calculations were incorrect when the batch size was 2 or more and `--split_attn` was not specified. See [PR #688](https://github.com/kohya-ss/musubi-tuner/pull/688).
+    - Added `--disable_numpy_memmap` option to Wan, FramePack, and Qwen-Image training and inference scripts. Thank you FurkanGozukara for [PR #681](https://github.com/kohya-ss/musubi-tuner/pull/681). Also see [PR #687](https://github.com/kohya-ss/musubi-tuner/pull/687).
+        - When specified, this option disables numpy memory mapping during model loading. This may speed up model loading in some environments (e.g., RunPod), but increases RAM usage.
 
-- September 20, 2025
-    - A bug in `qwen_image_generate_image.py` where generation with `--from_file` did not work has been fixed. Thanks to nmfisher for [PR #553](https://github.com/kohya-ss/musubi-tuner/pull/553). Followed by [PR #557](https://github.com/kohya-ss/musubi-tuner/pull/557).
-        - Additionally, the `--append_original_name` option has been added to the same script. This appends the base name of the original image to the output file name during editing.
+- October 25, 2025
+    - Fixed a bug in image datasets with control images where the combination of target and control images was not loaded correctly. See [PR #684](https://github.com/kohya-ss/musubi-tuner/pull/684).
+        - **If you are using an image dataset with control images, please recreate the latent cache.**
+        - Since only the first match was used for judgment, when the target images were `a.png` and `ab.png`, and the control images were `a_1.png` and `ab_1.png`, both `a_1.png` and `ab_1.png` were combined with `a.png`.
 
-- September 14, 2025
-    - A bug was fixed that caused an error when training LoRA for Qwen-Image with `--fp8_base` specified and `--fp8_scaled` not specified using FlashAttention or xformers. See [PR #559](https://github.com/kohya-ss/musubi-tuner/pull/559).
-        - However, it is recommended to specify `--fp8_scaled` unless you are running out of memory.
-
-- September 13, 2025
-    - A bug in masking during FLF2V inference in `wan_generate_video.py` has been fixed. Thanks to LittleNyima for [PR #548](https://github.com/kohya-ss/musubi-tuner/pull/548).
-    - The loading speed of `.safetensors` files has been improved. See [PR #556](https://github.com/kohya-ss/musubi-tuner/pull/556).
-        - Model loading can be up to 1.5 times faster.
-
-- September 8, 2025
-    - Code analysis with ruff has been introduced, and [contribution guidelines](./CONTRIBUTING.md) have been added.
-        - Thanks to arledesma for [Issue #524](https://github.com/kohya-ss/musubi-tuner/issues/524) and [PR #538](https://github.com/kohya-ss/musubi-tuner/pull/538).
-    - Activation CPU offloading has been added. See [PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537).
-        - This can be used in combination with block swap.
-        - This can reduce VRAM usage, especially when training long videos or large batch sizes. Combining it with block swap may enable training that was previously not possible.
-        - See the PR and [HunyuanVideo documentation](./docs/hunyuan_video.md#memory-optimization) for details.
-
-- September 6, 2025
-    - A new LR scheduler, Rex, has been added. Thanks to xzuyn for [PR #513](https://github.com/kohya-ss/musubi-tuner/pull/513).
-        - Similar to the Polynomial Scheduler with power set to less than 1, Rex has a more gradual decrease in learning rate.
-        - See [Advanced Configuration documentation](./docs/advanced_config.md#rex) for details.
+- October 13, 2025
+    - Added Reference Consistency Mask (RCM) feature to Qwen-Image-Edit, 2509 inference script to improve pixel-level consistency of generated images. See [PR #643](https://github.com/kohya-ss/musubi-tuner/pull/643)
+        - RCM addresses the issue of slight positional drift in generated images compared to the control image. For details, refer to the [Qwen-Image documentation](./docs/qwen_image.md#inpainting-and-reference-consistency-mask-rcm).
+    - Fixed a bug where the control image was being resized to match the output image size even when the `--resize_control_to_image_size` option was not specified. **This may change the generated images, so please check your options.**
+    - FramePack 1-frame inference now includes the `--one_frame_auto_resize` option. [PR #646](https://github.com/kohya-ss/musubi-tuner/pull/646)
+        - Automatically adjusts the resolution of the generated image. This option is only effective when `--one_frame_inference` is specified. For details, refer to the [FramePack 1-frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論).
 
 ### Releases
 
@@ -147,7 +128,26 @@ This approach ensures that you have full control over the instructions given to 
 
 - Memory-efficient implementation
 - Windows compatibility confirmed (Linux compatibility confirmed by community)
-- Multi-GPU support not implemented
+- Multi-GPU training (using [Accelerate](https://huggingface.co/docs/accelerate/index)), documentation will be added later
+
+### Documentation
+
+For detailed information on specific architectures, configurations, and advanced features, please refer to the documentation below.
+
+**Architecture-specific:**
+- [HunyuanVideo](./docs/hunyuan_video.md)
+- [Wan2.1/2.2](./docs/wan.md)
+- [Wan2.1/2.2 (Single Frame)](./docs/wan_1f.md)
+- [FramePack](./docs/framepack.md)
+- [FramePack (Single Frame)](./docs/framepack_1f.md)
+- [FLUX.1 Kontext](./docs/flux_kontext.md)
+- [Qwen-Image](./docs/qwen_image.md)
+
+**Common Configuration & Usage:**
+- [Dataset Configuration](./docs/dataset_config.md)
+- [Advanced Configuration](./docs/advanced_config.md)
+- [Sampling during Training](./docs/sampling_during_training.md)
+- [Tools and Utilities](./docs/tools.md)
 
 ## Installation
 
@@ -205,29 +205,18 @@ Follow the instructions to add the uv path manually until you reboot your system
 
 ## Model Download
 
-Model download procedures vary by architecture. Please refer to the specific documentation for your chosen architecture:
-
-- [HunyuanVideo model download](./docs/hunyuan_video.md#download-the-model--モデルのダウンロード)
-- [Wan2.1/2.2 model download](./docs/wan.md#download-the-model--モデルのダウンロード)
-- [FramePack model download](./docs/framepack.md#download-the-model--モデルのダウンロード)
-- [FLUX.1 Kontext model download](./docs/flux_kontext.md#download-the-model--モデルのダウンロード)
-- [Qwen-Image model download](./docs/qwen_image.md#download-the-model--モデルのダウンロード)
+Model download procedures vary by architecture. Please refer to the architecture-specific documents in the [Documentation](#documentation) section for instructions.
 
 ## Usage
 
+
 ### Dataset Configuration
 
-Please refer to [dataset configuration guide](./src/musubi_tuner/dataset/dataset_config.md).
+Please refer to [here](./docs/dataset_config.md).
 
-### Pre-caching and Training
+### Pre-caching
 
-Each architecture requires specific pre-caching and training procedures. Please refer to the appropriate documentation:
-
-- [HunyuanVideo usage guide](./docs/hunyuan_video.md)
-- [Wan2.1/2.2 usage guide](./docs/wan.md)
-- [FramePack usage guide](./docs/framepack.md)
-- [FLUX.1 Kontext usage guide](./docs/flux_kontext.md)
-- [Qwen-Image usage guide](./docs/qwen_image.md)
+Pre-caching procedures vary by architecture. Please refer to the architecture-specific documents in the [Documentation](#documentation) section for instructions.
 
 ### Configuration of Accelerate
 
@@ -248,18 +237,7 @@ Run `accelerate config` to configure Accelerate. Choose appropriate values for e
 
 ### Training and Inference
 
-Training and inference procedures vary significantly by architecture. Please refer to the specific documentation for detailed instructions:
-
-- [HunyuanVideo training and inference](./docs/hunyuan_video.md)
-- [Wan2.1/2.2 training and inference](./docs/wan.md)
-- [FramePack training and inference](./docs/framepack.md)
-- [FLUX.1 Kontext training and inference](./docs/flux_kontext.md)
-- [Qwen-Image training and inference](./docs/qwen_image.md)
-
-For advanced configuration options and additional features, refer to:
-- [Advanced configuration](./docs/advanced_config.md)
-- [Sample generation during training](./docs/sampling_during_training.md)
-- [Tools and utilities](./docs/tools.md)
+Training and inference procedures vary significantly by architecture. Please refer to the architecture-specific documents in the [Documentation](#documentation) section and the various configuration documents for detailed instructions.
 
 ## Miscellaneous
 

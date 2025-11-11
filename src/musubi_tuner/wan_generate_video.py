@@ -73,8 +73,14 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path")
     parser.add_argument("--dit_high_noise", type=str, default=None, help="DiT checkpoint path for high noise (optional)")
+    parser.add_argument(
+        "--force_v2_1_time_embedding", action="store_true", help="Force using 2.1 style time embedding even for Wan 2.2"
+    )
     parser.add_argument("--offload_inactive_dit", action="store_true", help="Offload DiT model to CPU")
     parser.add_argument("--lazy_loading", action="store_true", help="Enable lazy loading for DiT models")
+    parser.add_argument(
+        "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
+    )
     parser.add_argument("--vae", type=str, default=None, help="VAE checkpoint path")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is bfloat16")
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
@@ -642,7 +648,10 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
         use_scaled_mm=args.fp8_fast,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
+    if args.force_v2_1_time_embedding:
+        model.set_time_embedding_v2_1(True)
 
     # merge LoRA weights
     if args.lycoris:
@@ -1483,6 +1492,11 @@ def run_sampling(
             # update latent
             latent = temp_x0.squeeze(0)
 
+    if len(models) > 1 and args.lazy_loading:  # lazy loading
+        del model
+        gc.collect()
+        clean_memory_on_device(device)
+
     return latent
 
 
@@ -1838,13 +1852,14 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         vae = load_vae(args, cfg, device, vae_dtype)
         vae.to_device(device)
 
+        clip = None
         if not cfg.v2_2:
             clip = load_clip_model(args, cfg, device)
             clip.model.to(device)
 
         # Process each image and encode with CLIP
         for prompt_data in prompts_data:
-            if "image_path" not in prompt_data:
+            if "image_path" not in prompt_data and args.image_path is None:
                 continue
 
             if not cfg.v2_2:
@@ -1863,7 +1878,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
                 if prompt_args.end_image_path is not None and os.path.exists(prompt_args.end_image_path):
                     end_img = Image.open(prompt_args.end_image_path).convert("RGB")
                     end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
-                    end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
+                    with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
+                        end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
                     clip_context = torch.concat([clip_context, end_clip_context], dim=0)
             else:
                 clip_context = None
@@ -2103,7 +2119,8 @@ def process_interactive(args: argparse.Namespace) -> None:
 
                 # Move model to CPU after generation
                 for model in models:
-                    model.to("cpu")
+                    if model is not None:  # not lazy loading
+                        model.to("cpu")
 
                 # Save latent if needed
                 height, width, _ = check_inputs(prompt_args)

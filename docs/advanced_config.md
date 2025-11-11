@@ -4,6 +4,7 @@
 
 ## Table of contents / 目次
 
+- [Using configuration files to specify training options](#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定)
 - [How to specify `network_args`](#how-to-specify-network_args--network_argsの指定方法)
 - [LoRA+](#lora)
 - [Select the target modules of LoRA](#select-the-target-modules-of-lora--loraの対象モジュールを選択する)
@@ -18,6 +19,81 @@
 - [Schedule Free Optimizer](#schedule-free-optimizer--スケジュールフリーオプティマイザ)
 
 [Post-Hoc EMA merging for LoRA](tools.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ) is described in the [Tools](tools.md) document.
+
+## Using configuration files to specify training options / 設定ファイルを使用した学習オプションの指定
+
+Instead of specifying all training options on the command line, you can use a `.toml` configuration file to specify them. This can make it easier to manage and reuse training configurations.
+
+Specify the configuration file with the `--config_file` option. The `.toml` extension can be omitted.
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --config_file config.toml
+```
+
+The configuration file is a TOML file that can contain any of the command-line options. The file can be organized into sections for readability, but all sections are flattened when parsed, so the section names are ignored.
+
+<details>
+<summary>日本語</summary>
+
+すべての学習オプションをコマンドラインで指定する代わりに、`.toml`設定ファイルを使用して指定することができます。これにより、学習設定の管理や再利用が容易になります。
+
+`--config_file`オプションで設定ファイルを指定します。`.toml`拡張子は省略できます。
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --config_file config.toml
+```
+
+設定ファイルは、コマンドラインオプションのいずれかを含むことができるTOMLファイルです。ファイルは読みやすさのためにセクションに分けることができますが、解析時にすべてのセクションがフラット化されるため、セクション名は無視されます。
+
+</details>
+
+### Example configuration file / 設定ファイルの例
+
+```toml
+# config.toml
+dit = "/path/to/dit"
+dataset_config = "/path/to/dataset.toml"
+network_module = "networks.lora"
+network_dim = 32
+network_alpha = 16
+
+[optimizer]
+optimizer_type = "AdamW"
+learning_rate = 1e-4
+
+[training]
+max_train_epochs = 10
+save_every_n_epochs = 2
+mixed_precision = "bf16"
+
+[output]
+output_dir = "/path/to/output"
+output_name = "my_lora"
+logging_dir = "./logs"
+```
+
+All options can be specified in the top level or within sections. When parsed, the section structure is ignored and all key-value pairs are combined into a single namespace.
+
+Options specified on the command line will override those in the configuration file.
+
+```bash
+# This will use the config file but override the learning_rate
+accelerate launch --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --config_file config --learning_rate 2e-4
+```
+
+<details>
+<summary>日本語</summary>
+
+すべてのオプションは、トップレベルまたはセクション内に指定できます。解析時には、セクション構造は無視され、すべてのキーと値のペアが単一のネームスペースに結合されます。
+
+コマンドラインで指定されたオプションは、設定ファイルのオプションを上書きします。
+
+```bash
+# 設定ファイルを使用しますが、learning_rateを上書きします
+accelerate launch --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --config_file config --learning_rate 2e-4
+```
+
+</details>
 
 ## How to specify `network_args` / `network_args`の指定方法
 

@@ -379,6 +379,10 @@ def main():
 
     args = parser.parse_args()
 
+    if args.disable_cudnn_backend:
+        logger.info("Disabling cuDNN PyTorch backend.")
+        torch.backends.cudnn.enabled = False
+
     if args.vae_dtype is not None:
         raise ValueError("VAE dtype is not supported in FramePack")
     # if args.batch_size != 1:

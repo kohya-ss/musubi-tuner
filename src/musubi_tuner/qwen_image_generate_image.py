@@ -12,6 +12,9 @@ import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from tqdm import tqdm
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+from PIL import Image
 
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
@@ -50,7 +53,11 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
     parser.add_argument("--num_layers", type=int, default=None, help="Number of layers in the DiT model, default is None (60)")
+    parser.add_argument(
+        "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
+    )
     parser.add_argument("--edit", action="store_true", help="Enable Qwen-Image-Edit")
+    parser.add_argument("--edit_plus", action="store_true", help="Enable Qwen-Image-Edit-2509 (plus)")
     parser.add_argument("--vae", type=str, default=None, help="VAE directory or path")
     parser.add_argument("--vae_enable_tiling", action="store_true", help="Enable tiling for VAE decoding. Default is False.")
     parser.add_argument("--text_encoder", type=str, required=True, help="Text Encoder 1 (Qwen2.5-VL) directory or path")
@@ -76,9 +83,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image_size", type=int, nargs=2, default=[256, 256], help="image size, height and width")
     parser.add_argument(
         "--control_image_path",
+        nargs="*",
         type=str,
         default=None,
-        help="path to control (reference) image for Qwen-Image-Edit, by default resized and cropped to 1M pixels keeping aspect ratio.",
+        help="path to control (reference) image(s) for Qwen-Image-Edit, by default resized and cropped to 1M pixels keeping aspect ratio.",
+    )
+    parser.add_argument(
+        "--mask_path",
+        type=str,
+        default=None,
+        help="path to mask image for Qwen-Image or Qwen-Image-Edit, white for inpainting region",
     )
     parser.add_argument("--resize_control_to_image_size", action="store_true", help="resize control image to match image size")
     parser.add_argument(
@@ -119,6 +133,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
     parser.add_argument(
+        "--use_pinned_memory_for_block_swap",
+        action="store_true",
+        help="use pinned memory for block swapping, which may speed up data transfer between CPU and GPU but uses more shared GPU memory on Windows",
+    )
+    parser.add_argument(
         "--output_type",
         type=str,
         default="images",
@@ -134,9 +153,35 @@ def parse_args() -> argparse.Namespace:
         "--append_original_name", action="store_true", help="append original base name when saving images when editing"
     )
 
+    # Reference Consistency Mask (RCM)
+    parser.add_argument(
+        "--rcm_threshold",
+        type=float,
+        default=None,
+        help="RCM (Reference Consistency Mask) threshold, default is None (disabled). Lower values mean larger inpainting region. "
+        "Typical values are 0.1 to 0.5 for relative threshold, 0.01 to 0.1 for absolute threshold.",
+    )
+    parser.add_argument(
+        "--rcm_relative_threshold",
+        action="store_true",
+        help="If set, the RCM threshold is relative to the max of diff_per_channel. Default is False.",
+    )
+    parser.add_argument("--rcm_kernel_size", type=int, default=3, help="RCM Gaussian kernel size, default is 3")
+    parser.add_argument("--rcm_dilate_size", type=int, default=0, help="RCM mask dilation size, default is 0 (no dilation)")
+    parser.add_argument(
+        "--rcm_debug_save",
+        action="store_true",
+        help="If set, save the RCM mask for debugging. Cannot be overridden by prompt line.",
+    )
+
     # arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
+    parser.add_argument(
+        "--bell",
+        action="store_true",
+        help="Ring bell when done. For interactive mode, ring bell on each iteration. For other modes, ring bell at the end.",
+    )
 
     args = parser.parse_args()
 
@@ -169,6 +214,7 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
 
     # Create dictionary of overrides
     overrides = {"prompt": prompt}
+    overrides["control_image_path"] = []
 
     for part in parts[1:]:
         if not part.strip():
@@ -190,16 +236,24 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
             overrides["guidance_scale"] = float(value)
         elif option == "fs":
             overrides["flow_shift"] = float(value)
-        # elif option == "i":
-        #     overrides["image_path"] = value
-        # elif option == "im":
-        #     overrides["image_mask_path"] = value
-        # elif option == "cn":
-        #     overrides["control_path"] = value
+        elif option == "m":
+            overrides["mask_path"] = value
         elif option == "n":
             overrides["negative_prompt"] = value
         elif option == "ci":  # control_image_path
-            overrides["control_image_path"] = value
+            overrides["control_image_path"].append(value)
+        elif option == "rcm_th":
+            overrides["rcm_threshold"] = float(value)
+        elif option == "rcm_rel_th":
+            overrides["rcm_relative_threshold"] = value.lower() in ("1", "true", "yes")
+        elif option == "rcm_ks":
+            overrides["rcm_kernel_size"] = int(value)
+        elif option == "rcm_ds":
+            overrides["rcm_dilate_size"] = int(value)
+
+    # If no control_image_path was provided, remove the empty list
+    if not overrides["control_image_path"]:
+        del overrides["control_image_path"]
 
     return overrides
 
@@ -295,6 +349,7 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         num_layers=args.num_layers,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
 
     # merge LoRA weights
@@ -371,7 +426,9 @@ def load_dit_model(
 
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
-        model.enable_block_swap(args.blocks_to_swap, device, supports_backward=False)
+        model.enable_block_swap(
+            args.blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
+        )
         model.move_to_device_except_swap_blocks(device)
         model.prepare_block_swap_before_forward()
     else:
@@ -393,30 +450,35 @@ def prepare_image_inputs(
     """Prepare image-related inputs for Kontext: AE encoding."""
     height, width = check_inputs(args)
 
-    if args.control_image_path is not None:
-        control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
-            args.control_image_path, args.resize_control_to_official_size, (width, height)
-        )
-
-        # VAE encoding
-        logger.info("Encoding control image to latent space with VAE")
+    control_latents = []
+    control_image_nps = []
+    if args.control_image_path is not None and len(args.control_image_path) > 0:
         vae_original_device = vae.device
         vae.to(device)
 
-        with torch.no_grad():
-            control_latent = vae.encode_pixels_to_latents(control_image_tensor.to(device, vae.dtype))
-        control_latent = control_latent.to(torch.bfloat16).to("cpu")
+        for path in args.control_image_path:
+            control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
+                path, args.resize_control_to_official_size, (width, height) if args.resize_control_to_image_size else None
+            )
 
-        vae.to(vae_original_device)  # Move VAE back to its original device
-        clean_memory_on_device(device)
+            # VAE encoding
+            logger.info("Encoding control image to latent space with VAE")
 
-        control_latent = control_latent.cpu()
+            with torch.no_grad():
+                control_latent = vae.encode_pixels_to_latents(control_image_tensor.to(device, vae.dtype))
+            control_latent = control_latent.to(torch.bfloat16).to("cpu")
+
+            control_latents.append(control_latent)
+            control_image_nps.append(control_image_np)
+
+            vae.to(vae_original_device)  # Move VAE back to its original device
+            clean_memory_on_device(device)
 
     else:
-        control_latent = None
-        control_image_np = None
+        control_latents = None
+        control_image_nps = None
 
-    return control_latent, control_image_np
+    return control_latents, control_image_nps
 
 
 def decode_latent(
@@ -441,7 +503,7 @@ def decode_latent(
 
 
 def prepare_text_inputs(
-    args: argparse.Namespace, image: Optional[np.ndarray], device: torch.device, shared_models: Optional[Dict] = None
+    args: argparse.Namespace, images: Optional[List[np.ndarray]], device: torch.device, shared_models: Optional[Dict] = None
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Prepare text-related inputs for I2V: LLM encoding."""
 
@@ -463,7 +525,7 @@ def prepare_text_inputs(
         tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(
             args.text_encoder, dtype=vl_dtype, device=vl_device, disable_mmap=True
         )
-        if args.edit:
+        if args.edit or args.edit_plus:
             vl_processor = qwen_image_utils.load_vl_processor()
         else:
             vl_processor = None
@@ -498,42 +560,43 @@ def prepare_text_inputs(
 
         text_encoder.to(vl_device)  # If text_encoder_cpu is True, this will be CPU
 
-    is_edit = args.edit  # Qwen-Image-Edit or Qwen-Image
+    is_edit = args.edit or args.edit_plus  # Qwen-Image-Edit or Qwen-Image
+    mode = None if not is_edit else ("edit" if args.edit else "edit-plus")
 
-    def get_embeds(p: str, im: Optional[np.ndarray]) -> tuple[torch.Tensor, torch.Tensor]:
-        nonlocal tokenizer, text_encoder, vl_processor, is_edit
+    def get_embeds(p: str, ims: Optional[List[np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
+        nonlocal tokenizer, text_encoder, vl_processor, is_edit, mode
         if not is_edit:
             return qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
         else:
-            return qwen_image_utils.get_qwen_prompt_embeds_with_image(vl_processor, text_encoder, p, im)
+            return qwen_image_utils.get_qwen_prompt_embeds_with_image(vl_processor, text_encoder, p, ims, mode=mode)
 
-    logger.info(f"Encoding prompt with Text Encoder. Control image: {image.shape if image is not None else None}")
+    logger.info(f"Encoding prompt with Text Encoder. Control images: {len(images) if images is not None else None}")
 
     prompt = args.prompt
 
-    # cache_key includes this because embed may be changed if resize_resize_control_to_image_size is True
+    # cache_key includes this because embed may be changed if resize_control_to_image_size is True
     height, width = check_inputs(args)
-    cache_key = (prompt, args.control_image_path, (width, height))  # control_image_path may be None
+    cache_key = (prompt, tuple(args.control_image_path) if args.control_image_path is not None else None, (width, height))
 
     if cache_key in conds_cache:
         embed, mask = conds_cache[cache_key]
     else:
         move_models_to_device_if_needed()
 
-        embed, mask = get_embeds(prompt, image)
+        embed, mask = get_embeds(prompt, images)
         embed = embed.cpu()
         mask = mask.cpu()
 
         conds_cache[cache_key] = (embed, mask)
 
     negative_prompt = args.negative_prompt
-    cache_key = (negative_prompt, args.control_image_path, (width, height))
+    cache_key = (negative_prompt, tuple(args.control_image_path) if args.control_image_path is not None else None, (width, height))
     if cache_key in conds_cache:
         negative_embed, negative_mask = conds_cache[cache_key]
     else:
         move_models_to_device_if_needed()
 
-        negative_embed, negative_mask = get_embeds(negative_prompt, image)
+        negative_embed, negative_mask = get_embeds(negative_prompt, images)
         negative_embed = negative_embed.cpu()
         negative_mask = negative_mask.cpu()
 
@@ -572,7 +635,7 @@ def generate(
     Returns:
         tuple: (flux_models.AutoEncoder model (vae) or None, torch.Tensor generated latent)
     """
-    is_edit = args.edit  # Qwen-Image-Edit or Qwen-Image
+    is_edit = args.edit or args.edit_plus  # Qwen-Image-Edit/Edit-2509 or Qwen-Image
     assert is_edit and args.control_image_path is not None or not is_edit, "Qwen-Image-Edit requires control_image_path"
 
     device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
@@ -586,7 +649,7 @@ def generate(
         logger.info("Using precomputed text data.")
         context = precomputed_text_data["context"]
         context_null = precomputed_text_data["context_null"]
-        control_latent, control_image_np = precomputed_text_data.get("control", (None, None))
+        control_latents, control_image_nps = precomputed_text_data.get("control", (None, None))
 
         # VAE is not loaded here if data is precomputed; decoding VAE is handled by caller (e.g., process_batch_prompts)
         # vae_instance_for_return remains None
@@ -603,8 +666,8 @@ def generate(
             vae_instance_for_return = qwen_image_utils.load_vae(args.vae, device=device, disable_mmap=True)
             vae_instance_for_return.eval()
 
-        control_latent, control_image_np = prepare_image_inputs(args, device, vae_instance_for_return)
-        context, context_null = prepare_text_inputs(args, control_image_np, device, shared_models)
+        control_latents, control_image_nps = prepare_image_inputs(args, device, vae_instance_for_return)
+        context, context_null = prepare_text_inputs(args, control_image_nps, device, shared_models)
 
     if shared_models is None or "model" not in shared_models:
         # load DiT model
@@ -655,11 +718,13 @@ def generate(
     else:
         img_shapes = [
             [
-                (1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2),  # image
-                (1, control_latent.shape[-2] // 2, control_latent.shape[-1] // 2),  # control
+                (1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2)  # image
+                # (1, control_latent.shape[-2] // 2, control_latent.shape[-1] // 2),  # control
             ]
+            + [(1, cl.shape[-2] // 2, cl.shape[-1] // 2) for cl in control_latents]  # control(s)
         ]
-        control_latent = qwen_image_utils.pack_latents(control_latent)
+        control_latent = [qwen_image_utils.pack_latents(cl) for cl in control_latents]  # B, C, 1, H, W -> B, H*W, C
+        control_latent = torch.cat(control_latent, dim=1)  # concat controls in the sequence dimension
         control_latent = control_latent.to(device)
     logger.info(f"Embed: {embed.shape}, negative_embed: {negative_embed.shape}, img_shapes: {img_shapes}")
 
@@ -669,16 +734,68 @@ def generate(
     image_seq_len = latents.shape[1]
 
     mu = qwen_image_utils.calculate_shift_qwen_image(image_seq_len)
-    logger.info(f"Using mu={mu} for FlowMatchingDiscreteScheduler")
+    logger.info(f"Using mu={mu} for FlowMatchEulerDiscreteScheduler")
     scheduler = qwen_image_utils.get_scheduler(args.flow_shift)
-    # mu is kwarg for FlowMatchingDiscreteScheduler
+    # mu is kwarg for FlowMatchEulerDiscreteScheduler
     timesteps, n = qwen_image_utils.retrieve_timesteps(scheduler, num_inference_steps, device, sigmas=sigmas, mu=mu)
     assert n == num_inference_steps, f"Expected steps={num_inference_steps}, got {n} from scheduler."
 
-    num_warmup_steps = 0  # because FlowMatchingDiscreteScheduler.order is 1, we don't need warmup steps
+    num_warmup_steps = 0  # because FlowMatchEulerDiscreteScheduler.order is 1, we don't need warmup steps
 
     # handle guidance
     guidance = None  # guidance_embeds is false for Qwen-Image
+
+    # inpainting mask and RCM
+    has_same_size_control = is_edit and len(img_shapes[0]) > 1 and img_shapes[0][1] == img_shapes[0][0]
+    if args.mask_path is not None and os.path.isfile(args.mask_path):
+        if not is_edit or not has_same_size_control:
+            logger.error("Mask image is only supported for Qwen-Image-Edit with control image of the same size as output.")
+            inpainting_mask = None
+        else:
+            inpainting_mask, _, _ = qwen_image_utils.preprocess_control_image(
+                args.mask_path, False, (width, height)
+            )  # -1 to 1, NCHW, N=1
+            inpainting_mask = inpainting_mask[:, 0:1]  # 1,1,H,W
+            inpainting_mask = F.interpolate(
+                inpainting_mask,
+                size=(height // (VAE_SCALE_FACTOR * 2), width // (VAE_SCALE_FACTOR * 2)),
+                mode="bilinear",
+                align_corners=False,
+            )
+            inpainting_mask = (inpainting_mask + 1.0) / 2.0  # -1 to 1 -> 0 to 1
+            # Capture the true (H, W) before flattening
+            mask_h, mask_w = inpainting_mask.shape[-2], inpainting_mask.shape[-1]
+            inpainting_mask = inpainting_mask.reshape(inpainting_mask.shape[0], -1, 1)  # 1,H*W,1
+            inpainting_mask = inpainting_mask.to(device, dtype=torch.bfloat16)
+
+            logger.info(f"Using inpainting mask from {args.mask_path}, resized to ({mask_h}, {mask_w}) (HxW)")
+    else:
+        inpainting_mask = None
+
+    rcm_enabled = args.rcm_threshold is not None and is_edit  # Reference Consistency Mask (RCM) is only for Qwen-Image-Edit
+    if rcm_enabled or inpainting_mask is not None:
+        if rcm_enabled:
+            if inpainting_mask is not None:
+                logger.error("RCM (Reference Consistency Mask) cannot be used with inpainting mask.")
+                rcm_enabled = False
+            elif not has_same_size_control:
+                logger.error("RCM (Reference Consistency Mask) requires control image to be the same size as the output image.")
+                rcm_enabled = False
+            else:
+                logger.info(
+                    f"RCM (Reference Consistency Mask) enabled. threshold: {args.rcm_threshold}, relative: {args.rcm_relative_threshold}, "
+                    f"kernel_size: {args.rcm_kernel_size}, dilate_size: {args.rcm_dilate_size}"
+                )
+
+        noise = latents
+        control_latent_1st = control_latent[:, : latents.shape[1]]
+        debug_save_prefix = (
+            f"{os.path.splitext(os.path.basename(args.control_image_path[0]))[0]}"
+            + f"_th{args.rcm_threshold}_rel{int(args.rcm_relative_threshold)}_ks{args.rcm_kernel_size}_ds{args.rcm_dilate_size}_"
+        )
+    else:
+        noise = None
+        control_latent_1st = None
 
     # 6. Denoising loop
     do_cfg = args.guidance_scale != 1.0
@@ -724,6 +841,77 @@ def generate(
                 noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
                 noise_pred = comb_pred * (cond_norm / noise_norm)
 
+            # Reference Consistency Mask (RCM) or inpainting
+            if rcm_enabled and i > 0 or inpainting_mask is not None:
+                t_n = t / 1000
+                noisy_control_latent = control_latent_1st * (1 - t_n) + noise * t_n
+
+                if rcm_enabled and i > 0:
+                    # RCM for Qwen-Image-Edit
+                    latents_reshaped = qwen_image_utils.unpack_latents(latents, height, width)  # B,c,1,h,w, c=C//4,h=H*2, w=W*2
+                    noisy_control_latent_reshaped = qwen_image_utils.unpack_latents(
+                        noisy_control_latent, height, width
+                    )  # B,c,1,h,w
+                    latents_reshaped = latents_reshaped.squeeze(2)  # B,c,h,w
+                    noisy_control_latent_reshaped = noisy_control_latent_reshaped.squeeze(2)  # B,c,h,w
+
+                    # apply blur to both latents to make smoother
+                    if args.rcm_kernel_size > 1:
+                        kernel_size = args.rcm_kernel_size | 1  # Ensure odd kernel size
+                        latents_reshaped = TF.gaussian_blur(latents_reshaped, [kernel_size, kernel_size])
+                        noisy_control_latent_reshaped = TF.gaussian_blur(noisy_control_latent_reshaped, [kernel_size, kernel_size])
+
+                    diff = torch.abs(latents_reshaped - noisy_control_latent_reshaped)  # B,c,h,w
+
+                    diff_per_channel = diff.mean(dim=1, keepdim=True)  # mean over channels, (B, 1, h, w)
+                    th = (
+                        args.rcm_threshold
+                        if not args.rcm_relative_threshold
+                        else args.rcm_threshold * diff_per_channel.max().item()
+                    )
+                    latent_mask = (diff_per_channel >= th).to(dtype=torch.bfloat16)  # 1.0 for inpainting region, 0.0 for keep
+
+                    # resize mask to match packed latent size (H//16, W//16)
+                    latent_mask = F.interpolate(
+                        latent_mask,
+                        size=(height // (VAE_SCALE_FACTOR * 2), width // (VAE_SCALE_FACTOR * 2)),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+
+                    if args.rcm_debug_save:
+                        logger.info(
+                            f"Self-masking at step {i}, t={t}, t_n={t_n}, "
+                            f"diff_per_channel: min {diff_per_channel.min().item():.6f}, max {diff_per_channel.max().item():.6f}, mean {diff_per_channel.mean().item():.6f}, th {th:.6f}"
+                        )
+
+                    # dilate the mask to make inpainting region larger
+                    if args.rcm_dilate_size > 0:
+                        # Use max pooling for dilation, which expands the area while keeping the mask smooth.
+                        latent_mask = F.max_pool2d(
+                            latent_mask, kernel_size=args.rcm_dilate_size * 2 + 1, stride=1, padding=args.rcm_dilate_size
+                        )
+
+                    # visualize mask for debugging, H*W -> H, W
+                    if args.rcm_debug_save:
+                        mask_np = (
+                            latent_mask[0, :]
+                            .reshape(int(height / (VAE_SCALE_FACTOR * 2)), int(width / (VAE_SCALE_FACTOR * 2)))
+                            .float()
+                            .cpu()
+                            .numpy()
+                            * 255
+                        ).astype(np.uint8)
+                        mask_image = Image.fromarray(mask_np)
+                        mask_image.save(os.path.join(args.save_path, f"{debug_save_prefix}rcm_mask_{i:02d}.png"))
+
+                    # reshape mask to (B, H*W, 1)
+                    latent_mask = latent_mask.reshape(latent_mask.shape[0], -1, 1)
+
+                    latents = latents * latent_mask + noisy_control_latent * (1.0 - latent_mask)
+                elif inpainting_mask is not None:
+                    latents = latents * inpainting_mask + noisy_control_latent * (1.0 - inpainting_mask)
+
             # compute the previous noisy sample x_t -> x_t-1
             latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
@@ -753,8 +941,13 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
 
     seed = args.seed
 
-    if args.append_original_name and args.edit and args.control_image_path is not None:
-        original_base_name = os.path.basename(args.control_image_path)
+    if (
+        args.append_original_name
+        and (args.edit or args.edit_plus)
+        and args.control_image_path is not None
+        and len(args.control_image_path) > 0
+    ):
+        original_base_name = os.path.basename(args.control_image_path[0])
         original_base_name = os.path.splitext(original_base_name)[0]
         original_name = f"_{original_base_name}"
     else:
@@ -849,8 +1042,13 @@ def save_output(
     if args.output_type == "images" or args.output_type == "latent_images":
         # save images
         if original_base_names is None or len(original_base_names) == 0:
-            if args.append_original_name and args.edit and args.control_image_path is not None:
-                original_base_name = os.path.basename(args.control_image_path)
+            if (
+                args.append_original_name
+                and (args.edit or args.edit_plus)
+                and args.control_image_path is not None
+                and len(args.control_image_path) > 0
+            ):
+                original_base_name = os.path.basename(args.control_image_path[0])
                 original_base_name = os.path.splitext(original_base_name)[0]
                 original_name = f"_{original_base_name}"
             else:
@@ -903,7 +1101,7 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True)
     shared_models["tokenizer"] = tokenizer
     shared_models["text_encoder"] = text_encoder
-    if args.edit:
+    if args.edit or args.edit_plus:
         vl_processor = qwen_image_utils.load_vl_processor()
         shared_models["vl_processor"] = vl_processor
     return shared_models
@@ -942,7 +1140,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     tokenizer_batch, text_encoder_batch = qwen_image_utils.load_qwen2_5_vl(
         args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True
     )
-    vl_processor_batch = qwen_image_utils.load_vl_processor() if args.edit else None
+    is_edit = args.edit or args.edit_plus  # Indicates edit modes (Qwen-Image-Edit or Edit-plus), not plain Qwen-Image
+    vl_processor_batch = qwen_image_utils.load_vl_processor() if is_edit else None
 
     # Text Encoder to device for this phase
     vl_device = torch.device("cpu") if args.text_encoder_cpu else device
@@ -960,7 +1159,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         "conds_cache": conds_cache_batch,
     }
 
-    if args.edit:
+    if is_edit:
         vae_for_batch.to(device)  # Move VAE to device for control image encoding
 
         for i, prompt_args_item in enumerate(all_prompt_args_list):
@@ -1037,6 +1236,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     del shared_models_for_generate["model"]
     del dit_model
+    gc.collect()
     clean_memory_on_device(device)
     synchronize_device(device)  # Ensure memory is freed before loading VAE for decoding
 
@@ -1128,6 +1328,9 @@ def process_interactive(args: argparse.Namespace) -> None:
                 # returned_vae from generate will be used for decoding here.
                 save_output(prompt_args, returned_vae, latent[0], device)
 
+                if args.bell:
+                    print("\a")  # Bell sound
+
             except KeyboardInterrupt:
                 print("\nInterrupted. Continue (Ctrl+D or Ctrl+Z (Windows) to exit)")
                 continue
@@ -1164,7 +1367,7 @@ def main():
     logger.info(f"Using device: {device}")
     args.device = device
 
-    if args.edit:
+    if args.edit or args.edit_plus:
         logger.info("Running in Qwen-Image-Edit mode")
 
     if latents_mode:
@@ -1224,6 +1427,9 @@ def main():
         prompts_data = preprocess_prompts_for_batch(prompt_lines, args)
         process_batch_prompts(prompts_data, args)
 
+        if args.bell:
+            print("\a")  # Bell sound
+
     elif args.interactive:
         # Interactive mode
         process_interactive(args)
@@ -1243,6 +1449,9 @@ def main():
         # Save latent and video
         # returned_vae from generate will be used for decoding here.
         save_output(args, returned_vae, latent, device)
+
+        if args.bell:
+            print("\a")  # Bell sound
 
     logger.info("Done!")
 

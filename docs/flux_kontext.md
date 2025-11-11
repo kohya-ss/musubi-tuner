@@ -50,7 +50,7 @@ python src/musubi_tuner/flux_kontext_cache_latents.py \
 - Note that the `--vae` argument is required, not `--ae`.
 - Uses `flux_kontext_cache_latents.py`.
 - The dataset must be an image dataset.
-- The `control_images` in the dataset config is used as the reference image. See [Dataset Config](../src/musubi_tuner/dataset/dataset_config.md#flux1-kontext-dev) for details.
+- The `control_images` in the dataset config is used as the reference image. See [Dataset Config](./dataset_config.md#flux1-kontext-dev) for details.
 
 <details>
 <summary>日本語</summary>
@@ -60,7 +60,7 @@ latentの事前キャッシングはFLUX.1 Kontext専用のスクリプトを使
 - `flux_kontext_cache_latents.py`を使用します。
 - `--ae`ではなく、`--vae`引数を指定してください。
 - データセットは画像データセットである必要があります。
-- データセット設定の`control_images`が参照画像として使用されます。詳細は[データセット設定](../src/musubi_tuner/dataset/dataset_config.md#flux1-kontext-dev)を参照してください。
+- データセット設定の`control_images`が参照画像として使用されます。詳細は[データセット設定](./dataset_config.md#flux1-kontext-dev)を参照してください。
 
 </details>
 
