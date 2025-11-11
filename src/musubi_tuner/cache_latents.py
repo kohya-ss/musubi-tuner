@@ -277,8 +277,11 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
                 batch = filtered_batch
 
             bs = args.batch_size if args.batch_size is not None else len(batch)
-            for i in range(0, len(batch), bs):
-                encode(batch[i : i + bs])
+            for j in range(0, len(batch), bs):
+                if args.num_shards is not None and args.shard_index is not None:
+                    if (j // bs) % args.num_shards != args.shard_index:
+                        continue
+                encode(batch[j : j + bs])
 
         # normalize paths
         all_latent_cache_paths = [os.path.normpath(p) for p in all_latent_cache_paths]
@@ -355,6 +358,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument("--num_workers", type=int, default=None, help="number of workers for dataset. default is cpu count-1")
     parser.add_argument("--skip_existing", action="store_true", help="skip existing cache files")
     parser.add_argument("--keep_cache", action="store_true", help="keep cache files not in dataset")
+    parser.add_argument("--num_shards", type=int, default=None, help="number of shards for multi-processing cache encoding")
+    parser.add_argument("--shard_index", type=int, default=None, help="shard index for multi-processing cache encoding")
     parser.add_argument("--debug_mode", type=str, default=None, choices=["image", "console", "video"], help="debug mode")
     parser.add_argument("--console_width", type=int, default=80, help="debug mode: console width")
     parser.add_argument(
