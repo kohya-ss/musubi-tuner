@@ -370,6 +370,10 @@ class ModelOffloader(Offloader):
                     self.remove_handles.append(handle)
 
     def set_forward_only(self, forward_only: bool):
+        # switching must wait for all pending transfers
+        for block_idx in list(self.futures.keys()):
+            self._wait_blocks_move(block_idx)
+
         self.forward_only = forward_only
 
     def __del__(self):
@@ -432,11 +436,40 @@ class ModelOffloader(Offloader):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
 
-        # if backward is enabled, we do not swap blocks in forward pass more than blocks_to_swap, because it should be on GPU
-        if not self.forward_only and block_idx >= self.blocks_to_swap:
+        if not self.forward_only:
+            # if backward is enabled, we do not swap blocks in forward pass more than blocks_to_swap, because it should be on GPU
+            if block_idx >= self.blocks_to_swap:
+                return
+            block_idx_to_cpu = block_idx
+            block_idx_to_cuda = self.num_blocks - self.blocks_to_swap + block_idx
+            block_idx_to_cuda = block_idx_to_cuda % self.num_blocks  # this does nothing for backward offloading
+            self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
             return
 
+        # We use two strategies here for forward-only offloading:
+        # 1. If blocks_to_swap is less than half of num_blocks, we swap the num_blocks blocks without wrapping around.
+        #   This reduces the number of swaps, so it is especially useful for small blocks_to_swap or lightweight models like Qwen-Image
+        # 2. If blocks_to_swap is more than half of num_blocks, we swap the blocks with wrapping around.
+        #   This is the common strategy used in most offloading implementations. It transfers all blocks in a wrapping manner.
+        #   This is useful for large blocks_to_swap or heavyweight models like Wan/HunyuanVideo, where the transfer time is less significant compared to computation time.
+
+        # current block to swap out (to CPU)
         block_idx_to_cpu = block_idx
-        block_idx_to_cuda = self.num_blocks - self.blocks_to_swap + block_idx
-        block_idx_to_cuda = block_idx_to_cuda % self.num_blocks  # this works for forward-only offloading
+
+        if self.blocks_to_swap < (self.num_blocks // 2):
+            # strategy 1: no wrap around
+            # If the current block is in the middle blocks that are not swapped, do nothing
+            if self.blocks_to_swap <= block_idx < self.num_blocks - self.blocks_to_swap:
+                return
+            if block_idx < self.blocks_to_swap:
+                # move the next block to cuda
+                block_idx_to_cuda = (self.num_blocks - self.blocks_to_swap + block_idx) % self.num_blocks
+            else:
+                # move the previous block to cuda
+                block_idx_to_cuda = block_idx - (self.num_blocks - self.blocks_to_swap)
+        else:
+            # strategy 2: with wrap around
+            block_idx_to_cuda = self.num_blocks - self.blocks_to_swap + block_idx
+            block_idx_to_cuda = block_idx_to_cuda % self.num_blocks  # this works for forward-only offloading
+
         self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)

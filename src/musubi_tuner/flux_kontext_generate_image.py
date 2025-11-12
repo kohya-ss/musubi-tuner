@@ -113,6 +113,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
     parser.add_argument(
+        "--use_pinned_memory_for_block_swap",
+        action="store_true",
+        help="use pinned memory for block swapping, which may speed up data transfer between CPU and GPU but uses more shared GPU memory on Windows",
+    )
+    parser.add_argument(
         "--output_type",
         type=str,
         default="images",
@@ -343,7 +348,9 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
 
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
-        model.enable_block_swap(args.blocks_to_swap, device, supports_backward=False)
+        model.enable_block_swap(
+            args.blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
+        )
         model.move_to_device_except_swap_blocks(device)
         model.prepare_block_swap_before_forward()
     else:

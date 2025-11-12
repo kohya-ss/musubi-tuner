@@ -449,6 +449,11 @@ def parse_args():
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
     )
     parser.add_argument("--blocks_to_swap", type=int, default=None, help="number of blocks to swap in the model")
+    parser.add_argument(
+        "--use_pinned_memory_for_block_swap",
+        action="store_true",
+        help="use pinned memory for block swapping, which may speed up data transfer between CPU and GPU but uses more shared GPU memory on Windows",
+    )
     parser.add_argument("--img_in_txt_in_offloading", action="store_true", help="offload img_in and txt_in to cpu")
     parser.add_argument(
         "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="output type"
@@ -734,7 +739,9 @@ def main():
 
         if blocks_to_swap > 0:
             logger.info(f"Enable swap {blocks_to_swap} blocks to CPU from device: {device}")
-            transformer.enable_block_swap(blocks_to_swap, device, supports_backward=False)
+            transformer.enable_block_swap(
+                blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            )
             transformer.move_to_device_except_swap_blocks(device)
             transformer.prepare_block_swap_before_forward()
         else:
