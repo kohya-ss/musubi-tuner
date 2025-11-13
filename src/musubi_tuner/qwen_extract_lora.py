@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 import time
+from threading import Event
+from typing import Optional
 
 import torch
 from safetensors import safe_open
@@ -12,6 +14,15 @@ from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+class LoRACancellationError(RuntimeError):
+    """Raised when LoRA extraction is cancelled by user."""
+
+
+def _check_cancel(cancel_event: Optional[Event]):
+    if cancel_event and cancel_event.is_set():
+        raise LoRACancellationError("LoRA extraction cancelled")
 
 
 def _str_to_dtype(p):
@@ -70,6 +81,7 @@ def svd(
     clamp_quantile: float = 0.99,
     mem_eff_safe_open: bool = False,
     no_metadata: bool = False,
+    cancel_event: Optional[Event] = None,
 ):
     calc_dtype = torch.float
     save_dtype = _str_to_dtype(save_precision)
@@ -95,6 +107,7 @@ def svd(
 
         lora_weights = {}
         for unified_key in tqdm(selected_keys):
+            _check_cancel(cancel_event)
             ko = org_keys_map[unified_key]
             kt = tuned_keys_map[unified_key]
             v_o = f_org.get_tensor(ko)
@@ -131,6 +144,7 @@ def svd(
 
     lora_sd = {}
     for unified_key, (up_weight, down_weight) in lora_weights.items():
+        _check_cancel(cancel_event)
         lora_name = _loar_name_from_key(unified_key)
         lora_sd[lora_name + ".lora_up.weight"] = up_weight
         lora_sd[lora_name + ".lora_down.weight"] = down_weight
