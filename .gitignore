@@ -12,3 +12,6 @@ GEMINI.md
 .gemini/
 AGENTS.md
 .vscode/settings.json
+# pixi environments
+.pixi/*
+!.pixi/config.toml
