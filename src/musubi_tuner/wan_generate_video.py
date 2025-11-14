@@ -46,13 +46,7 @@ from blissful_tuner.utils import power_seed
 from blissful_tuner.blissful_logger import BlissfulLogger
 from blissful_tuner.prompt_management import MiniT5Wrapper, process_wildcards, prepare_wan_special_inputs
 from blissful_tuner.blissful_core import add_blissful_args, parse_blissful_args
-from blissful_tuner.common_extensions import (
-    save_media_advanced,
-    prepare_v2v_noise,
-    prepare_i2i_noise,
-    prepare_metadata,
-    BlissfulKeyboardManager,
-)
+from blissful_tuner.common_extensions import save_media_advanced, prepare_v2v_noise, prepare_i2i_noise, prepare_metadata
 
 # blissful end
 lycoris_available = find_spec("lycoris") is not None
@@ -1503,7 +1497,6 @@ def run_sampling(
     latent = latent.to(latent_storage_device)
     if args.preview_latent_every:  # blissful
         previewer = LatentPreviewer(args, noise, scheduler, device, torch.float16, model_type="wan")
-    km = BlissfulKeyboardManager()
     # cfg skip
     apply_cfg_array = []
     num_timesteps = len(timesteps)
@@ -1635,7 +1628,7 @@ def run_sampling(
         latent_model_input = [latent.to(device)]
 
         with accelerator.autocast(), torch.no_grad():
-            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c, km=km, nag_context=nag_context)[0].to(
+            noise_pred_cond = model(latent_model_input, t=timestep, **arg_c, nag_context=nag_context)[0].to(
                 latent_storage_device
             )  # Cond is always the same
             apply_cfg = apply_cfg_array[i]  # Will we do any CFG or just proceed with cond?
@@ -1648,12 +1641,12 @@ def run_sampling(
                 skip_block_indices = None  # e.g. normal uncond
                 if apply_slg and not do_slg_pass:  # args.slg_mode != "original" so args.slg_mode == "uncond"
                     skip_block_indices = args.slg_layers  # uncond with layer skips
-                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null, skip_block_indices=skip_block_indices, km=km)[
-                    0
-                ].to(latent_storage_device)  # uncond
+                noise_pred_uncond = model(latent_model_input, t=timestep, **arg_null, skip_block_indices=skip_block_indices)[0].to(
+                    latent_storage_device
+                )  # uncond
 
                 if args.perp_neg is not None:  # Are we using perpendicular negative? It needs a third model pass (nocond).
-                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_true_uncond, km=km)[0].to(
+                    noise_pred_nocond = model(latent_model_input, t=timestep, **arg_true_uncond)[0].to(
                         latent_storage_device
                     )  # Then calculate nocond
                     noise_pred = perpendicular_negative_cfg(
@@ -1667,9 +1660,9 @@ def run_sampling(
                     noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 if do_slg_pass:  # Do SLG original? This mode uses 3 model passes, cond, uncond, and uncond with layer skip and it's calc comes after normal CFG
-                    skip_layer_out = model(latent_model_input, t=timestep, **arg_null, km=km, skip_block_indices=args.slg_layers)[
-                        0
-                    ].to(latent_storage_device)
+                    skip_layer_out = model(latent_model_input, t=timestep, **arg_null, skip_block_indices=args.slg_layers)[0].to(
+                        latent_storage_device
+                    )
                     noise_pred = noise_pred + args.slg_scale * (
                         noise_pred_cond - skip_layer_out
                     )  # SD3 SLG formula: scaled = scaled + (pos_out - skip_layer_out) * self.slg
@@ -1686,15 +1679,12 @@ def run_sampling(
 
             # update latent
             latent = temp_x0.squeeze(0)
-            if km.early_exit_requested:
-                latent = None  # None is a sentinel for early exit and bypasses decode etc, just does clean up
-                break
-            if args.preview_latent_every is not None and (i + 1) % args.preview_latent_every == 0:
-                previewer.preview(latent)
-            if args.preview_latent_every is not None and i + 1 == len(timesteps):
-                del previewer  # Free memory in prepartion for return e.g. interactive
+            if args.preview_latent_every is not None:
+                if (i + 1) % args.preview_latent_every == 0:
+                    previewer.preview(latent)
+                elif i + 1 == len(timesteps):
+                    del previewer  # Free memory in prepartion for return e.g. interactive
 
-    km.terminate()
     if len(models) > 1 and args.lazy_loading:  # lazy loading
         del model
         gc.collect()

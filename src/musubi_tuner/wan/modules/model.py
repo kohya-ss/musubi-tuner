@@ -594,7 +594,7 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        x_orig_dtype = x.dtype  # Don't change x dtyp
+        x_orig_dtype = x.dtype  # Don't change x dtype
         s0, s1, s2, s3, s4, s5 = self.get_modulation(e)  # All will be self.attention_dtype
         del e
 
@@ -602,7 +602,7 @@ class WanAttentionBlock(nn.Module):
         q_in = self.norm1(x).to(self.attention_dtype, copy=False)
         fi1 = q_in.addcmul(q_in, s1).add(s0).contiguous()  # Output will be self.attention_dtype because q_in, s0, s1 are
         y = self.self_attn(fi1, seq_lens, grid_sizes, freqs)  # Maybe could change dtype depending on the last three
-        x = x + (y.to(self.attention_dtype, copy=False) * s2).to(x_orig_dtype, copy=False)  # (Potentially) upcast calc, then match x
+        x = x.addcmul(y.to(self.attention_dtype, copy=False), s2).to(x_orig_dtype, copy=False)  # (Potentially) upcast calc, then match x
         del y
 
         # Cross-attn
@@ -613,8 +613,8 @@ class WanAttentionBlock(nn.Module):
 
         # FFN
         ff_in = self.norm2(x).to(self.attention_dtype, copy=False)
-        y = self.ffn((ff_in * (1 + s4) + s3).contiguous())  # Should output self.attention_dtype because ff_in, s3, s4 will be as well.
-        x = x + (y.to(self.attention_dtype, copy=False) * s5).to(x_orig_dtype, copy=False)  # (Potentially) upcast calc, then match x, upcast probably redundant
+        y = self.ffn(s3.addcmul(ff_in, (1 + s4)).contiguous())  # Should output self.attention_dtype because ff_in, s3, s4 will be as well.
+        x = x.addcmul(y.to(self.attention_dtype, copy=False), s5).to(x_orig_dtype, copy=False)  # (Potentially) upcast calc, then match x, upcast probably redundant
         del y
         return x
 
@@ -655,11 +655,12 @@ class Head(nn.Module):
         """
         if self.model_version == "2.1" or self.simple_modulation:
             e = (self.modulation.to(self.attention_dtype, copy=False) + e.unsqueeze(1)).chunk(2, dim=1)
-            x = self.head(self.norm(x) * (1 + e[1]) + e[0])
+            # x = self.head(self.norm(x) * (1 + e[1]) + e[0])
+            x = self.head(e[0].addcmul(self.norm(x), (1 + e[1])))
         else:  # For Wan2.2
             e = (self.modulation.unsqueeze(0).to(self.attention_dtype, copy=False) + e.unsqueeze(2)).chunk(2, dim=2)
-            x = self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2))
-
+            # x = self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2))
+            x = self.head(e[0].squeeze(2).addcmul(self.norm(x), (1 + e[1].squeeze(2))))
         return x
 
 
@@ -1043,7 +1044,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.blocks:
             block._forward = torch.compile(block._forward, **self.compile_args)  # Actual rope will be compiled as part of forward
 
-    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None, km=None, nag_context=None):
+    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None, nag_context=None):
         r"""
         Forward pass through the diffusion model
 
@@ -1056,8 +1057,6 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 List of text embeddings each with shape [L, C]
             seq_len (`int`):
                 Maximum sequence length for positional encoding
-            km ( KeyboardManager):
-                Allows user to break cleanly from inference between model calls
             clip_fea (Tensor, *optional*):
                 CLIP image features for image-to-video mode
             y (List[Tensor], *optional*):
@@ -1071,9 +1070,6 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
-        if km is not None and km.early_exit_requested:
-            return x  # If we don't return something useful other code will fail before we can break cleanly so just return x as is.
-
         if self.optimized_compile:
             self.blissful_optimize()
         apply_nag = nag_context is not None

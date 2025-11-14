@@ -11,7 +11,7 @@ from musubi_tuner.hunyuan_model.embed_layers import TimestepEmbedder, PatchEmbed
 from musubi_tuner.hunyuan_model.attention import attention, parallel_attention, get_cu_seqlens
 from musubi_tuner.hunyuan_model.posemb_layers import apply_rotary_emb
 from musubi_tuner.hunyuan_model.mlp_layers import MLP, MLPEmbedder, FinalLayer
-from musubi_tuner.hunyuan_model.modulate_layers import ModulateDiT, modulate, apply_gate
+from musubi_tuner.hunyuan_model.modulate_layers import ModulateDiT, modulate
 from musubi_tuner.hunyuan_model.token_refiner import SingleTokenRefiner
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.utils.device_utils import synchronize_device, clean_memory_on_device
@@ -226,19 +226,27 @@ class MMDoubleStreamBlock(nn.Module):
         attn = None
 
         # Calculate the img bloks.
-        img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate)
+        # img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate)
+        img = torch.addcmul(img, self.img_attn_proj(img_attn), img_mod1_gate.unsqueeze(1))
         img_attn = None
-        img = img + apply_gate(
-            self.img_mlp(modulate(self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale)),
-            gate=img_mod2_gate,
+        # img = img + apply_gate(
+        #     self.img_mlp(modulate(self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale)),
+        #     gate=img_mod2_gate,
+        # )
+        img = torch.addcmul(
+            img, self.img_mlp(modulate(self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale)), img_mod2_gate.unsqueeze(1)
         )
 
         # Calculate the txt bloks.
-        txt = txt + apply_gate(self.txt_attn_proj(txt_attn), gate=txt_mod1_gate)
+        # txt = txt + apply_gate(self.txt_attn_proj(txt_attn), gate=txt_mod1_gate)
+        txt = torch.addcmul(txt, self.txt_attn_proj(txt_attn), txt_mod1_gate.unsqueeze(1))
         txt_attn = None
-        txt = txt + apply_gate(
-            self.txt_mlp(modulate(self.txt_norm2(txt), shift=txt_mod2_shift, scale=txt_mod2_scale)),
-            gate=txt_mod2_gate,
+        # txt = txt + apply_gate(
+        #     self.txt_mlp(modulate(self.txt_norm2(txt), shift=txt_mod2_shift, scale=txt_mod2_scale)),
+        #     gate=txt_mod2_gate,
+        # )
+        txt = torch.addcmul(
+            txt, self.txt_mlp(modulate(self.txt_norm2(txt), shift=txt_mod2_shift, scale=txt_mod2_scale)), txt_mod2_gate.unsqueeze(1)
         )
 
         return img, txt
@@ -415,7 +423,8 @@ class MMSingleStreamBlock(nn.Module):
         mlp = None
         output = self.linear2(attn_mlp)
         attn_mlp = None
-        return x + apply_gate(output, gate=mod_gate)
+        # return x + apply_gate(output, gate=mod_gate)
+        return torch.addcmul(x, output, mod_gate.unsqueeze(1))
 
     # def forward(
     #     self,

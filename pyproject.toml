@@ -34,7 +34,6 @@ dependencies = [
     "rich>=12.0.0",
     "rich-argparse>=1.5.0",
     "rich-tracebacks>=1.0.0",
-    "pynput>=1.7.0",
     "prompt-toolkit==3.0.51",
 ]
 
