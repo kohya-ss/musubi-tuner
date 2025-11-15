@@ -106,6 +106,14 @@ extend-exclude = [
   "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py",
   "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py",
   "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py",
+  "src/musubi_tuner/longcat_video/modules/__init__.py",
+  "src/musubi_tuner/longcat_video/modules/attention.py",
+  "src/musubi_tuner/longcat_video/modules/blocks.py",
+  "src/musubi_tuner/longcat_video/modules/longcat_video_dit.py",
+  "src/musubi_tuner/longcat_video/modules/lora_utils.py",
+  "src/musubi_tuner/longcat_video/modules/rope_3d.py",
+  "src/musubi_tuner/longcat_video/modules/scheduling_flow_match_euler_discrete.py",
+  "src/musubi_tuner/longcat_video/utils/bucket_config.py",
   "src/musubi_tuner/modules/scheduling_flow_match_discrete.py",
   "src/musubi_tuner/modules/unet_causal_3d_blocks.py",
   "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py",
@@ -151,6 +159,14 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py" = ["ALL"]
 "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py" = ["ALL"]
 "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/modules/__init__.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/modules/attention.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/modules/blocks.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/modules/longcat_video_dit.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/modules/lora_utils.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/modules/rope_3d.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/modules/scheduling_flow_match_euler_discrete.py" = ["ALL"]
+"src/musubi_tuner/longcat_video/utils/bucket_config.py" = ["ALL"]
 "src/musubi_tuner/modules/scheduling_flow_match_discrete.py" = ["ALL"]
 "src/musubi_tuner/modules/unet_causal_3d_blocks.py" = ["ALL"]
 "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py" = ["ALL"]
@@ -172,3 +188,4 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/wan/utils/fm_solvers.py" = ["ALL"]
 "src/musubi_tuner/wan/utils/fm_solvers_unipc.py" = ["ALL"]
 "src/musubi_tuner/wan/utils/utils.py" = ["ALL"]
+
