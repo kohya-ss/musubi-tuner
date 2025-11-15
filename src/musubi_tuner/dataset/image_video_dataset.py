@@ -23,6 +23,7 @@ import av
 
 from musubi_tuner.utils import safetensors_utils
 from musubi_tuner.utils.model_utils import dtype_to_str
+from musubi_tuner.longcat_video.text_utils import collate_longcat_text_encoder
 
 import logging
 
@@ -79,6 +80,8 @@ ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
 ARCHITECTURE_QWEN_IMAGE_EDIT_FULL = "qwen_image_edit"
+ARCHITECTURE_LONGCAT = "lc"
+ARCHITECTURE_LONGCAT_FULL = "longcat_video"
 
 
 def glob_images(directory, base="*"):
@@ -234,6 +237,25 @@ def save_latent_cache_wan(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_WAN_FULL)
 
 
+def save_latent_cache_longcat(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    image_latent: Optional[torch.Tensor] = None,
+) -> None:
+    """LongCat architecture."""
+
+    assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu()}
+
+    if image_latent is not None:
+        sd[f"latents_image_{F}x{H}x{W}_{dtype_str}"] = image_latent.detach().cpu()
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_LONGCAT_FULL)
+
+
 def save_latent_cache_framepack(
     item_info: ItemInfo,
     latent: torch.Tensor,
@@ -362,6 +384,23 @@ def save_text_encoder_output_cache_wan(item_info: ItemInfo, embed: torch.Tensor)
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_WAN_FULL)
 
 
+def save_text_encoder_output_cache_longcat(item_info: ItemInfo, embed: torch.Tensor, mask: Optional[torch.Tensor] = None) -> None:
+    """LongCat architecture (UMT5 encoder)."""
+
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    embed_cpu = embed.detach().cpu()
+    if embed_cpu.ndim == 1:
+        embed_cpu = embed_cpu.unsqueeze(0)
+    sd[f"varlen_t5_{dtype_str}"] = embed_cpu
+
+    if mask is not None:
+        mask_cpu = mask.detach().cpu().to(torch.int32)
+        sd["varlen_t5_mask"] = mask_cpu
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_LONGCAT_FULL)
+
+
 def save_text_encoder_output_cache_framepack(
     item_info: ItemInfo, llama_vec: torch.Tensor, llama_attention_mask: torch.Tensor, clip_l_pooler: torch.Tensor
 ):
@@ -448,6 +487,7 @@ class BucketSelector:
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
+        ARCHITECTURE_LONGCAT: RESOLUTION_STEPS_WAN,
     }
 
     def __init__(
@@ -670,7 +710,11 @@ def load_video(
 
 class BucketBatchManager:
     def __init__(
-        self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
+        self,
+        bucketed_item_info: dict[tuple[Any], list[ItemInfo]],
+        batch_size: int,
+        num_timestep_buckets: Optional[int] = None,
+        architecture: Optional[str] = None,
     ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
@@ -678,6 +722,7 @@ class BucketBatchManager:
         self.bucket_resos.sort()
         self.num_timestep_buckets = num_timestep_buckets
         self.timestep_pool = None
+        self.architecture = architecture
 
         # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
         self.bucket_batch_indices: list[tuple[tuple[Any], int]] = []
@@ -773,6 +818,9 @@ class BucketBatchManager:
 
                 if is_varlen_key:
                     varlen_keys.add(content_key)
+
+        if self.architecture == ARCHITECTURE_LONGCAT:
+            collate_longcat_text_encoder(batch_tensor_data)
 
         for key in batch_tensor_data.keys():
             if key not in varlen_keys:
@@ -1775,7 +1823,9 @@ class ImageDataset(BaseDataset):
             bucketed_item_info[bucket_reso] = bucket
 
         # prepare batch manager
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
+        self.batch_manager = BucketBatchManager(
+            bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets, architecture=self.architecture
+        )
         self.batch_manager.show_bucket_info()
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
@@ -1798,6 +1848,7 @@ class ImageDataset(BaseDataset):
 class VideoDataset(BaseDataset):
     TARGET_FPS_HUNYUAN = 24.0
     TARGET_FPS_WAN = 16.0
+    TARGET_FPS_LONGCAT = 15.0
     TARGET_FPS_FRAMEPACK = 30.0
     TARGET_FPS_FLUX_KONTEXT = 1.0  # VideoDataset is not used for Flux Kontext, but this is a placeholder
 
@@ -1848,6 +1899,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_WAN:
             self.target_fps = VideoDataset.TARGET_FPS_WAN
+        elif self.architecture == ARCHITECTURE_LONGCAT:
+            self.target_fps = VideoDataset.TARGET_FPS_LONGCAT
         elif self.architecture == ARCHITECTURE_FRAMEPACK:
             self.target_fps = VideoDataset.TARGET_FPS_FRAMEPACK
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
@@ -2103,7 +2156,9 @@ class VideoDataset(BaseDataset):
             bucketed_item_info[bucket_reso] = bucket
 
         # prepare batch manager
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
+        self.batch_manager = BucketBatchManager(
+            bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets, architecture=self.architecture
+        )
         self.batch_manager.show_bucket_info()
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
