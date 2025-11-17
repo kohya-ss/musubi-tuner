@@ -678,18 +678,28 @@ VAE_IMAGE_RESOLUTION = (1024, 1024)
 
 
 def preprocess_control_image(
-    control_image_path: str, resize_to_prefered: bool = True, resize_size: Optional[Tuple[int, int]] = None
+    control_image_path: str,
+    resize_to_prefered: bool = True,
+    resize_size: Optional[Tuple[int, int]] = None,
+    cond_resize_size: Optional[Tuple[int, int]] = None,
 ) -> tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
     """
-    Preprocess the control image for the model. See `preprocess_image` for details.
+    Preprocess the control image for the model. See `image_utils.preprocess_image` for details.
+    If resize_to_prefered is True, the image will be resized to the preferred resolutions.
+    If resize_to_prefered is False and resize_size is provided, the image will be resized to the given size for VAE,
+    and cond_resize_size will be used for condition image resizing.
+    If resize_to_prefered is False and resize_size is None, the image is resized to bucket resolution based on its original size, same for cond_resize_size.
 
     Args:
         control_image_path (str): Path to the control image.
         resize_to_prefered (bool): Whether to resize the image to the preferred resolution (based on the model's requirements).
         resize_size (Optional[Tuple[int, int]]): Override target size for resizing if resize_to_prefered is False, with (width, height).
+        cond_resize_size (Optional[Tuple[int, int]]): Override target size for condition image resizing if resize_to_prefered is False, with (width, height).
 
     Returns:
-        Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]: same as `preprocess_image`, but alpha is always None
+        Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]: Tuple of [image for VAE, image for VLM, alpha],
+            same as `preprocess_image`, but alpha is always None.
+
     """
     # See:
     # https://github.com/huggingface/diffusers/pull/12188
@@ -698,17 +708,15 @@ def preprocess_control_image(
     control_image = Image.open(control_image_path)
 
     if resize_to_prefered or resize_size is None:
-        resolution = VAE_IMAGE_RESOLUTION if resize_to_prefered else control_image.size
+        vae_resolution = VAE_IMAGE_RESOLUTION if resize_to_prefered else control_image.size
         resize_size = BucketSelector.calculate_bucket_resolution(
-            control_image.size, resolution, architecture=ARCHITECTURE_QWEN_IMAGE_EDIT
+            control_image.size, vae_resolution, architecture=ARCHITECTURE_QWEN_IMAGE_EDIT
         )
-
+    if resize_to_prefered or cond_resize_size is None:
         cond_resolution = CONDITION_IMAGE_RESOLUTION if resize_to_prefered else control_image.size
         cond_resize_size = BucketSelector.calculate_bucket_resolution(
             control_image.size, cond_resolution, architecture=ARCHITECTURE_QWEN_IMAGE_EDIT
         )
-    else:
-        cond_resize_size = resize_size
 
     control_image_tensor, _, _ = image_utils.preprocess_image(control_image, *resize_size)
     _, control_image_np, _ = image_utils.preprocess_image(control_image, *cond_resize_size)

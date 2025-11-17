@@ -95,7 +95,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to mask image for Qwen-Image or Qwen-Image-Edit, white for inpainting region",
     )
-    parser.add_argument("--resize_control_to_image_size", action="store_true", help="resize control image to match image size")
+    parser.add_argument(
+        "--resize_control_to_image_size",
+        action="store_true",
+        help="resize control image to match image size, image for VLM is not resized",
+    )
+    parser.add_argument("--no_control_for_vlm", action="store_true", help="do not use control image for VLM")
     parser.add_argument(
         "--resize_control_to_official_size",
         action="store_true",
@@ -448,8 +453,14 @@ def prepare_image_inputs(
 
         for path in args.control_image_path:
             control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
-                path, args.resize_control_to_official_size, (width, height) if args.resize_control_to_image_size else None
+                path,
+                args.resize_control_to_official_size,
+                resize_size=(width, height) if args.resize_control_to_image_size else None,
+                cond_resize_size=None,  # use default size for VLM
             )
+            print(f"Control image shape for VAE: {control_image_tensor.shape}, for VLM: {control_image_np.shape}")
+            if args.no_control_for_vlm:
+                control_image_np = None
 
             # VAE encoding
             logger.info("Encoding control image to latent space with VAE")
@@ -555,9 +566,11 @@ def prepare_text_inputs(
 
     def get_embeds(p: str, ims: Optional[List[np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
         nonlocal tokenizer, text_encoder, vl_processor, is_edit, mode
-        if not is_edit:
+        if not is_edit or ims is None or all(im is None for im in ims):
+            print("Getting prompt embeds without images")
             return qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
         else:
+            print("Getting prompt embeds with images")
             return qwen_image_utils.get_qwen_prompt_embeds_with_image(vl_processor, text_encoder, p, ims, mode=mode)
 
     logger.info(f"Encoding prompt with Text Encoder. Control images: {len(images) if images is not None else None}")
