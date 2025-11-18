@@ -1081,7 +1081,7 @@ class NetworkTrainer:
                 line += "#" * int(w / max_weighting * CONSOLE_WIDTH)
                 print(line)
 
-    def sample_images(self, accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
+    def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
         """architecture independent sample images"""
         if not should_sample_images(args, steps, epoch):
             return
@@ -1563,6 +1563,12 @@ class NetworkTrainer:
 
         return transformer
 
+    def compile_transformer(self, args, transformer):
+        transformer: HYVideoDiffusionTransformer = transformer
+        return model_utils.compile_transformer(
+            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=self.blocks_to_swap > 0
+        )
+
     def scale_shift_latents(self, latents):
         latents = latents * vae_module.SCALING_FACTOR
         return latents
@@ -1629,6 +1635,15 @@ class NetworkTrainer:
     # endregion model specific
 
     def train(self, args):
+        if torch.cuda.is_available():
+            if args.cuda_allow_tf32:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                logger.info("Enabled TF32 on CUDA / CUDAでTF32を有効化しました")
+            if args.cuda_cudnn_benchmark:
+                torch.backends.cudnn.benchmark = True
+                logger.info("Enabled cuDNN benchmark / cuDNNベンチマークを有効化しました")
+
         # check required arguments
         if args.dataset_config is None:
             raise ValueError("dataset_config is required / dataset_configが必要です")
@@ -1907,6 +1922,10 @@ class NetworkTrainer:
         else:
             transformer = accelerator.prepare(transformer)
 
+        if args.compile:
+            transformer = self.compile_transformer(args, transformer)
+            transformer.__dict__["_orig_mod"] = transformer  # for annoying accelerator checks
+
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
         training_model = network
 
@@ -2158,6 +2177,8 @@ class NetworkTrainer:
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
             for step, batch in enumerate(train_dataloader):
+                # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
+
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):
@@ -2217,6 +2238,8 @@ class NetworkTrainer:
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
+                    if global_step == 0:
+                        progress_bar.reset()  # exclude first step from progress bar, because it may take long due to initializations
                     progress_bar.update(1)
                     global_step += 1
 
@@ -2341,7 +2364,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="config file for dataset / データセットの設定ファイル",
     )
 
-    # training settings
+    # model settings
     parser.add_argument(
         "--sdpa",
         action="store_true",
@@ -2374,7 +2397,55 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="use split attention for attention calculation (split batch size=1, affects memory usage and speed)"
         " / attentionを分割して計算する（バッチサイズ=1に分割、メモリ使用量と速度に影響）",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile (requires Triton) / torch.compileを有効にする（Tritonが必要）",
+    )
+    parser.add_argument(
+        "--compile_backend",
+        type=str,
+        default="inductor",
+        help="torch.compile backend (default: inductor) / torch.compileのバックエンド（デフォルト: inductor）",
+    )
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        default="default",  # 学習用のデフォルト
+        choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+        help="torch.compile mode (default: default) / torch.compileのモード（デフォルト: default）",
+    )
+    parser.add_argument(
+        "--compile_dynamic",
+        type=str,
+        default=None,
+        choices=["true", "false", "auto"],
+        help="Dynamic shapes mode for torch.compile (default: None, same as auto)"
+        " / torch.compileの動的形状モード（デフォルト: None、autoと同じ動作）",
+    )
+    parser.add_argument(
+        "--compile_fullgraph",
+        action="store_true",
+        help="Enable fullgraph mode in torch.compile / torch.compileでフルグラフモードを有効にする",
+    )
+    parser.add_argument(
+        "--compile_cache_size_limit",
+        type=int,
+        default=None,
+        help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
+    )
+    parser.add_argument(
+        "--cuda_allow_tf32",
+        action="store_true",
+        help="Allow TF32 on Ampere or higher GPUs / Ampere以降のGPUでTF32を許可する",
+    )
+    parser.add_argument(
+        "--cuda_cudnn_benchmark",
+        action="store_true",
+        help="Enable cudnn benchmark for possibly faster training / cudnnのベンチマークを有効にして学習の高速化を図る",
+    )
 
+    # training settings
     parser.add_argument("--max_train_steps", type=int, default=1600, help="training steps / 学習ステップ数")
     parser.add_argument(
         "--max_train_epochs",

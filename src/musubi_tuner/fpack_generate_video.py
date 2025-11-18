@@ -24,9 +24,16 @@ from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, soft_append_bc
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
+from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
+from musubi_tuner.hv_generate_video import (
+    get_time_flag,
+    save_images_grid,
+    synchronize_device,
+    setup_parser_compile,
+)
+
 from musubi_tuner.wan_generate_video import merge_lora_weights
 from musubi_tuner.frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
 
@@ -273,14 +280,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
     )
-    parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
-    parser.add_argument(
-        "--compile_args",
-        nargs=4,
-        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-        default=["inductor", "default", "False", "False"],
-        help="Torch.compile settings",
-    )
+
+    setup_parser_compile(parser)
 
     # MagCache
     parser.add_argument(
@@ -552,21 +553,6 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         llm_multiplier, clip_multiplier = args.te_multiplier
         model = rescale_text_encoders_hunyuan(llm_multiplier, clip_multiplier, model)
 
-    if args.compile:
-        compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-        logger.info(
-            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-        )
-        torch._dynamo.config.cache_size_limit = 32
-        for i in range(len(model.transformer_blocks)):
-            model.transformer_blocks[i] = torch.compile(
-                model.transformer_blocks[i],
-                backend=compile_backend,
-                mode=compile_mode,
-                dynamic=compile_dynamic.lower() in "true",
-                fullgraph=compile_fullgraph.lower() in "true",
-            )
-
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
         model.enable_block_swap(
@@ -577,6 +563,11 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
     else:
         # make sure the model is on the right device
         model.to(device)
+
+    if args.compile:
+        model = model_utils.compile_transformer(
+            args, model, [model.transformer_blocks, model.single_transformer_blocks], disable_linear=args.blocks_to_swap > 0
+        )
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)

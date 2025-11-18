@@ -416,7 +416,7 @@ By specifying `--video_path`, video2video inference is possible. Specify a video
 
 Note that video2video inference is experimental.
 
-`--compile` option enables PyTorch's compile feature (experimental). Requires triton. On Windows, also requires Visual C++ build tools installed and PyTorch>=2.6.0 (Visual C++ build tools is also required). You can pass arguments to the compiler with `--compile_args`.
+`--compile` option enables PyTorch's compile feature (experimental). Requires triton. On Windows, also requires Visual C++ build tools installed and PyTorch>=2.6.0 (Visual C++ build tools is also required). See [the torch.compile documentation](torch_compile.md) for details.
 
 The `--compile` option takes a long time to run the first time, but speeds up on subsequent runs.
 
@@ -462,7 +462,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 なおvideo2video推論の処理は実験的なものです。
 
-`--compile`オプションでPyTorchのコンパイル機能を有効にします（実験的機能）。tritonのインストールが必要です。また、WindowsではVisual C++ build toolsが必要で、かつPyTorch>=2.6.0でのみ動作します。`--compile_args`でコンパイル時の引数を渡すことができます。
+`--compile`オプションでPyTorchのコンパイル機能を有効にします（実験的機能）。tritonのインストールが必要です。また、WindowsではVisual C++ build toolsが必要で、かつPyTorch>=2.6.0でのみ動作します。詳細は[torch.compileのドキュメント](torch_compile.md)を参照してください。
 
 `--compile`は初回実行時にかなりの時間がかかりますが、2回目以降は高速化されます。
 

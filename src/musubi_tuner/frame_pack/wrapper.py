@@ -27,7 +27,7 @@ def fm_wrapper(transformer, t_scale=1000.0):
         sigma = sigma.float()
 
         x = x.to(dtype)
-        timestep = (sigma * t_scale).to(dtype)
+        timestep = sigma * t_scale  # sigma is already float32
 
         if concat_latent is None:
             hidden_states = x

@@ -25,7 +25,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-
+from musubi_tuner.utils import model_utils
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 logger = BlissfulLogger(__name__, "green")
@@ -500,6 +500,15 @@ class FramePackNetworkTrainer(NetworkTrainer):
             device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn, disable_numpy_memmap=args.disable_numpy_memmap
         )
         return model
+
+    def compile_transformer(self, args, transformer):
+        transformer: HunyuanVideoTransformer3DModelPacked = transformer
+        return model_utils.compile_transformer(
+            args,
+            transformer,
+            [transformer.transformer_blocks, transformer.single_transformer_blocks],
+            disable_linear=self.blocks_to_swap > 0,
+        )
 
     def scale_shift_latents(self, latents):
         # FramePack VAE includes scaling

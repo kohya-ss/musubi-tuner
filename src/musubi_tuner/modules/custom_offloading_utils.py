@@ -60,7 +60,7 @@ def swap_weight_devices_no_cuda(device: torch.device, layer_to_cpu: nn.Module, l
 
 def weighs_to_device(layer: nn.Module, device: torch.device):
     for module in layer.modules():
-        if hasattr(module, "weight") and module.weight is not None:
+        if hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear"):
             module.weight.data = module.weight.data.to(device, non_blocking=device.type != "cpu")
 
 
@@ -144,7 +144,11 @@ class Offloader:
         with T.section("find modules"):
             modules_to_cpu = {k: v for k, v in layer_to_cpu.named_modules()}
             for module_to_cuda_name, module_to_cuda in layer_to_cuda.named_modules():
-                if hasattr(module_to_cuda, "weight") and module_to_cuda.weight is not None:
+                if (
+                    hasattr(module_to_cuda, "weight")
+                    and module_to_cuda.weight is not None
+                    and module_to_cuda.__class__.__name__.endswith("Linear")
+                ):
                     module_to_cpu = modules_to_cpu.get(module_to_cuda_name, None)
                     if module_to_cpu is not None and module_to_cpu.weight.shape == module_to_cuda.weight.shape:
                         weight_swap_jobs.append(

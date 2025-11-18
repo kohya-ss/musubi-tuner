@@ -26,6 +26,7 @@ from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscret
 from musubi_tuner.networks import lora
 from rich_argparse import RichHelpFormatter
 from musubi_tuner.convert_lora import convert_from_diffusers
+from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
@@ -377,6 +378,46 @@ def decode_latents(args, latents, device):
     return image
 
 
+def setup_parser_compile(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile (requires Triton) / torch.compileを有効にする（Tritonが必要）",
+    )
+    parser.add_argument(
+        "--compile_backend",
+        type=str,
+        default="inductor",
+        help="torch.compile backend (default: inductor) / torch.compileのバックエンド（デフォルト: inductor）",
+    )
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        default="default",  # 学習用のデフォルト
+        choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+        help="torch.compile mode (default: default) / torch.compileのモード（デフォルト: default）",
+    )
+    parser.add_argument(
+        "--compile_dynamic",
+        type=str,
+        default=None,
+        choices=["true", "false", "auto"],
+        help="Dynamic shapes mode for torch.compile (default: None, same as auto)"
+        " / torch.compileの動的形状モード（デフォルト: None、autoと同じ動作）",
+    )
+    parser.add_argument(
+        "--compile_fullgraph",
+        action="store_true",
+        help="Enable fullgraph mode in torch.compile / torch.compileでフルグラフモードを有効にする",
+    )
+    parser.add_argument(
+        "--compile_cache_size_limit",
+        type=int,
+        default=None,
+        help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="HunyuanVideo inference script", formatter_class=RichHelpFormatter)
 
@@ -464,14 +505,15 @@ def parse_args():
         "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
     )
     parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
-    parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     parser.add_argument(
         "--compile_args",
         nargs=4,
         metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-        default=["inductor", "default", "False", "False"],
-        help="Torch.compile settings",
+        # default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        default=None,
+        help="[Deprecated] Torch.compile settings. Use individual args instead.",
     )
+    setup_parser_compile(parser)
     parser = add_blissful_args(parser)
     args = parser.parse_args()
     args = parse_blissful_args(args)
@@ -711,31 +753,6 @@ def main():
             llm_multiplier, clip_multiplier = args.te_multiplier
             transformer = rescale_text_encoders_hunyuan(llm_multiplier, clip_multiplier, transformer)
 
-        if args.compile:
-            compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-            logger.info(
-                f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-            )
-            torch._dynamo.config.cache_size_limit = 32
-            for i, block in enumerate(transformer.single_blocks):
-                compiled_block = torch.compile(
-                    block,
-                    backend=compile_backend,
-                    mode=compile_mode,
-                    dynamic=compile_dynamic.lower() in "true",
-                    fullgraph=compile_fullgraph.lower() in "true",
-                )
-                transformer.single_blocks[i] = compiled_block
-            for i, block in enumerate(transformer.double_blocks):
-                compiled_block = torch.compile(
-                    block,
-                    backend=compile_backend,
-                    mode=compile_mode,
-                    dynamic=compile_dynamic.lower() in "true",
-                    fullgraph=compile_fullgraph.lower() in "true",
-                )
-                transformer.double_blocks[i] = compiled_block
-
         if blocks_to_swap > 0:
             logger.info(f"Enable swap {blocks_to_swap} blocks to CPU from device: {device}")
             transformer.enable_block_swap(
@@ -749,6 +766,18 @@ def main():
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")
             transformer.enable_img_in_txt_in_offloading()
+
+        if args.compile:
+            if args.compile_args is not None:
+                # deprecated
+                args.compile_backend, args.compile_mode, args.compile_dynamic, compile_fullgraph = args.compile_args
+                args.compile_dynamic = args.compile_dynamic.lower()
+                args.compile_fullgraph = compile_fullgraph.lower() in "true"
+                args.compile_cache_size_limit = 32  # old default value
+
+            transformer = model_utils.compile_transformer(
+                args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=blocks_to_swap > 0
+            )
 
         # load scheduler
         if "dpm" in args.scheduler:
