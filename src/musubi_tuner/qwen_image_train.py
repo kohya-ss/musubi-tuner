@@ -519,10 +519,17 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
             metadata_to_save.update(sai_metadata)
 
+            state_dict = unwrapped_model.state_dict()
+
+            # if model is compiled, get original model state dict
+            if "transformer_blocks.0._orig_mod.attn.add_k_proj.bias" in state_dict:
+                logger.info("detected compiled model, getting original model state dict for saving")
+                state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
             if use_memory_efficient_saving:
-                mem_eff_save_file(unwrapped_model.state_dict(), ckpt_file, metadata_to_save)
+                mem_eff_save_file(state_dict, ckpt_file, metadata_to_save)
             else:
-                save_file(unwrapped_model.state_dict(), ckpt_file, metadata_to_save)
+                save_file(state_dict, ckpt_file, metadata_to_save)
 
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
