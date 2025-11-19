@@ -1565,8 +1565,9 @@ class NetworkTrainer:
 
     def compile_transformer(self, args, transformer):
         transformer: HYVideoDiffusionTransformer = transformer
+        disable_linear = self.blocks_to_swap > 0 and not args.allow_linear_for_compile
         return model_utils.compile_transformer(
-            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=self.blocks_to_swap > 0
+            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=disable_linear
         )
 
     def scale_shift_latents(self, latents):
@@ -2433,6 +2434,11 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
+    )
+    parser.add_argument(
+        "--allow_linear_for_compile",
+        action="store_true",
+        help="Allow compiling linear layers of the model. Will use less VRAM but can sometimes cause issues with block swap",
     )
     parser.add_argument(
         "--cuda_allow_tf32",

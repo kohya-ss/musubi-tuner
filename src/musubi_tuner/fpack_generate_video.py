@@ -566,7 +566,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
 
     if args.compile:
         model = model_utils.compile_transformer(
-            args, model, [model.transformer_blocks, model.single_transformer_blocks], disable_linear=args.blocks_to_swap > 0
+            args, model, [model.transformer_blocks, model.single_transformer_blocks], disable_linear=args.disable_linear_for_compile
         )
 
     model.eval().requires_grad_(False)

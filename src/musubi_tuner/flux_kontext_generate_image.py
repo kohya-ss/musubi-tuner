@@ -330,7 +330,7 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
 
     if args.compile:
         model = model_utils.compile_transformer(
-            args, model, [model.double_blocks, model.single_blocks], disable_linear=args.blocks_to_swap > 0
+            args, model, [model.double_blocks, model.single_blocks], disable_linear=args.disable_linear_for_compile
         )
 
     model.eval().requires_grad_(False)

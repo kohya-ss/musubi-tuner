@@ -416,6 +416,11 @@ def setup_parser_compile(parser: argparse.ArgumentParser):
         default=None,
         help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
     )
+    parser.add_argument(
+        "--disable_linear_for_compile",
+        action="store_true",
+        help="Disable compiling linear layers of the model. Will use more VRAM but can work around compile issues with block swap",
+    )
 
 
 def parse_args():
@@ -776,7 +781,10 @@ def main():
                 args.compile_cache_size_limit = 32  # old default value
 
             transformer = model_utils.compile_transformer(
-                args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=blocks_to_swap > 0
+                args,
+                transformer,
+                [transformer.double_blocks, transformer.single_blocks],
+                disable_linear=args.disable_linear_for_compile,
             )
 
         # load scheduler

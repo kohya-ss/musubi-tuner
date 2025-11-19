@@ -765,7 +765,7 @@ def load_dit_model(
             args.compile_fullgraph = compile_fullgraph.lower() in "true"
             args.compile_cache_size_limit = 32  # old default value
 
-        model = model_utils.compile_transformer(args, model, [model.blocks], disable_linear=args.blocks_to_swap > 0)
+        model = model_utils.compile_transformer(args, model, [model.blocks], disable_linear=args.disable_linear_for_compile)
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)

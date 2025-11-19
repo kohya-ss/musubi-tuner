@@ -439,7 +439,9 @@ def load_dit_model(
         model.to(device)
 
     if args.compile:
-        model = model_utils.compile_transformer(args, model, [model.transformer_blocks], disable_linear=args.blocks_to_swap > 0)
+        model = model_utils.compile_transformer(
+            args, model, [model.transformer_blocks], disable_linear=args.disable_linear_for_compile
+        )
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
