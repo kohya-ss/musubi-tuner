@@ -1779,7 +1779,7 @@ class NetworkTrainer:
 
                 weights_sd = load_file(weight_path)
                 module = network_module.create_arch_network_from_weights(
-                    multiplier, weights_sd, unet=transformer, for_inference=True
+                    multiplier, weights_sd, unet=transformer, for_inference=True, architecture=self.architecture
                 )
                 module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
 
@@ -1795,7 +1795,9 @@ class NetworkTrainer:
         if args.dim_from_weights:
             logger.info(f"Loading network from weights: {args.dim_from_weights}")
             weights_sd = load_file(args.dim_from_weights)
-            network, _ = network_module.create_arch_network_from_weights(1, weights_sd, unet=transformer)
+            network, _ = network_module.create_arch_network_from_weights(
+                1, weights_sd, unet=transformer, architecture=self.architecture
+            )
         else:
             # We use the name create_arch_network for compatibility with LyCORIS
             if hasattr(network_module, "create_arch_network"):
@@ -1807,6 +1809,7 @@ class NetworkTrainer:
                     None,
                     transformer,
                     neuron_dropout=args.network_dropout,
+                    architecture=self.architecture,
                     **net_kwargs,
                 )
             else:
