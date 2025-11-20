@@ -44,7 +44,6 @@ DEFAULT_EXCLUTE_PATTERNS = {
 
 
 class LoHaModule(torch.nn.Module):
-
     def __init__(
         self,
         lora_name,
@@ -146,7 +145,13 @@ class LoHaModule(torch.nn.Module):
         diff_weight, scale = self._compute_diff_weight(apply_rank_dropout=True)
         if self.is_conv2d:
             delta = F.conv2d(
-                x_for_delta, diff_weight, bias=None, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups
+                x_for_delta,
+                diff_weight,
+                bias=None,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                groups=self.groups,
             )
         else:
             delta = F.linear(x_for_delta, diff_weight)
@@ -699,7 +704,7 @@ class LoHaNetwork(torch.nn.Module):
 
             if ratio != 1.0:
                 keys_scaled += 1
-                scale_factor = ratio ** 0.25  # distribute scaling across four factorized matrices
+                scale_factor = ratio**0.25  # distribute scaling across four factorized matrices
                 lora.hada_w1_a.data *= scale_factor
                 lora.hada_w1_b.data *= scale_factor
                 lora.hada_w2_a.data *= scale_factor
