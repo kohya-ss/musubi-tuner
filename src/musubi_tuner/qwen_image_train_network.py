@@ -22,6 +22,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS
 
 import logging
@@ -349,6 +350,12 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             disable_numpy_memmap=args.disable_numpy_memmap,
         )
         return model
+
+    def compile_transformer(self, args, transformer):
+        transformer: qwen_image_model.QwenImageTransformer2DModel = transformer
+        return model_utils.compile_transformer(
+            args, transformer, [transformer.transformer_blocks], disable_linear=self.blocks_to_swap > 0
+        )
 
     def scale_shift_latents(self, latents):
         return latents

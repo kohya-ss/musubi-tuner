@@ -199,7 +199,7 @@ def attention(
             del q, k, v
         else:
             x = flash_attn_func(q, k, v, dropout_p=drop_rate, causal=causal)
-            del q, k, v
+            del q, k, v  # this causes error in compiled mode with fullgraph=True
 
     elif mode == "sageattn":
         x = sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)

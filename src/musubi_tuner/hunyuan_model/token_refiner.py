@@ -88,10 +88,12 @@ class IndividualTokenRefinerBlock(nn.Module):
         # Self-Attention
         attn = attention(q, k, v, mode="torch", attn_mask=attn_mask)
 
-        x = x + apply_gate(self.self_attn_proj(attn), gate_msa)
+        # x = x + apply_gate(self.self_attn_proj(attn), gate_msa)
+        x = torch.addcmul(x, self.self_attn_proj(attn), gate_msa.unsqueeze(1))
 
         # FFN Layer
-        x = x + apply_gate(self.mlp(self.norm2(x)), gate_mlp)
+        # x = x + apply_gate(self.mlp(self.norm2(x)), gate_mlp)
+        x = torch.addcmul(x, self.mlp(self.norm2(x)), gate_mlp.unsqueeze(1))
 
         return x
 

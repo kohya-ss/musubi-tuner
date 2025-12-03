@@ -517,6 +517,10 @@ class WanNetworkTrainer(NetworkTrainer):
 
         return model
 
+    def compile_transformer(self, args, transformer):
+        transformer: WanModel = transformer
+        return model_utils.compile_transformer(args, transformer, [transformer.blocks], disable_linear=self.blocks_to_swap > 0)
+
     def scale_shift_latents(self, latents):
         return latents
 
@@ -575,6 +579,17 @@ class WanNetworkTrainer(NetworkTrainer):
 
     def swap_high_low_weights(self, args: argparse.Namespace, accelerator: Accelerator, model: WanModel):
         if self.current_model_is_high_noise != self.next_model_is_high_noise:
+
+            def patch_fn(state_dict):
+                if not args.compile:
+                    return state_dict
+                for key in list(state_dict.keys()):
+                    if key.startswith("blocks.") and "._orig_mod." not in key:
+                        tokens = key.split(".")
+                        new_key = ".".join(tokens[:2] + ["_orig_mod"] + tokens[2:])
+                        state_dict[new_key] = state_dict.pop(key)
+                return state_dict
+
             if self.blocks_to_swap == 0:
                 # If offloading inactive DiT, move the model to CPU first
                 if args.offload_inactive_dit:
@@ -584,7 +599,7 @@ class WanNetworkTrainer(NetworkTrainer):
 
                 state_dict = model.state_dict()  # CPU or accelerator.device
 
-                info = model.load_state_dict(self.dit_inactive_state_dict, strict=True, assign=True)
+                info = model.load_state_dict(patch_fn(self.dit_inactive_state_dict), strict=True, assign=True)
                 assert len(info.missing_keys) == 0, f"Missing keys: {info.missing_keys}"
                 assert len(info.unexpected_keys) == 0, f"Unexpected keys: {info.unexpected_keys}"
 
@@ -597,7 +612,7 @@ class WanNetworkTrainer(NetworkTrainer):
                 # If block swap is enabled, we cannot use offloading inactive DiT, because weights are partially on CPU
                 state_dict = model.state_dict()  # CPU or accelerator.device
 
-                info = model.load_state_dict(self.dit_inactive_state_dict, strict=True, assign=True)
+                info = model.load_state_dict(patch_fn(self.dit_inactive_state_dict), strict=True, assign=True)
                 assert len(info.missing_keys) == 0, f"Missing keys: {info.missing_keys}"
                 assert len(info.unexpected_keys) == 0, f"Unexpected keys: {info.unexpected_keys}"
 
