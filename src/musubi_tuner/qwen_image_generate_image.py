@@ -19,6 +19,7 @@ from PIL import Image
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
+from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 
@@ -26,7 +27,7 @@ lycoris_available = find_spec("lycoris") is not None
 
 from musubi_tuner.networks import lora_qwen_image
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, setup_parser_compile, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 
 import logging
@@ -152,6 +153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--append_original_name", action="store_true", help="append original base name when saving images when editing"
     )
+    setup_parser_compile(parser)
 
     # Reference Consistency Mask (RCM)
     parser.add_argument(
@@ -409,21 +411,6 @@ def load_dit_model(
 
         model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # if args.compile:
-    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-    #     logger.info(
-    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-    #     )
-    #     torch._dynamo.config.cache_size_limit = 32
-    #     for i in range(len(model.blocks)):
-    #         model.blocks[i] = torch.compile(
-    #             model.blocks[i],
-    #             backend=compile_backend,
-    #             mode=compile_mode,
-    #             dynamic=compile_dynamic.lower() in "true",
-    #             fullgraph=compile_fullgraph.lower() in "true",
-    #         )
-
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
         model.enable_block_swap(
@@ -434,6 +421,9 @@ def load_dit_model(
     else:
         # make sure the model is on the right device
         model.to(device)
+
+    if args.compile:
+        model = model_utils.compile_transformer(args, model, [model.transformer_blocks], disable_linear=args.blocks_to_swap > 0)
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
@@ -802,7 +792,7 @@ def generate(
     scheduler.set_begin_index(0)
     with tqdm(total=num_inference_steps, desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
-            timestep = t.expand(latents.shape[0]).to(latents.dtype)
+            timestep = t.expand(latents.shape[0])  # keep dtype as float32 for better precision; avoid bfloat16 precision issues
 
             latent_model_input = latents
             if is_edit:

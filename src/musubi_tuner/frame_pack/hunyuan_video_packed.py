@@ -1063,11 +1063,11 @@ class HunyuanVideoIndividualTokenRefinerBlock(nn.Module):
         del norm_hidden_states  # free memory
 
         gate_msa, gate_mlp = self.norm_out(temb)
-        hidden_states = hidden_states + attn_output * gate_msa
+        hidden_states = torch.addcmul(hidden_states, attn_output, gate_msa)
         del attn_output, gate_msa  # free memory
 
         ff_output = self.ff(self.norm2(hidden_states))
-        hidden_states = hidden_states + ff_output * gate_mlp
+        hidden_states = torch.addcmul(hidden_states, ff_output, gate_mlp)
         del ff_output, gate_mlp  # free memory
 
         return hidden_states
@@ -1434,9 +1434,9 @@ class HunyuanVideoTransformerBlock(nn.Module):
         del norm_hidden_states, norm_encoder_hidden_states, freqs_cis  # free memory
 
         # 3. Modulation and residual connection
-        hidden_states = hidden_states + attn_output * gate_msa
+        hidden_states = torch.addcmul(hidden_states, attn_output, gate_msa)
         del attn_output, gate_msa  # free memory
-        encoder_hidden_states = encoder_hidden_states + context_attn_output * c_gate_msa
+        encoder_hidden_states = torch.addcmul(encoder_hidden_states, context_attn_output, c_gate_msa)
         del context_attn_output, c_gate_msa  # free memory
 
         norm_hidden_states = self.norm2(hidden_states)
@@ -1444,7 +1444,7 @@ class HunyuanVideoTransformerBlock(nn.Module):
 
         norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
         del shift_mlp, scale_mlp  # free memory
-        norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp) + c_shift_mlp
+        norm_encoder_hidden_states = torch.addcmul(c_shift_mlp, norm_encoder_hidden_states, (1 + c_scale_mlp))
         del c_shift_mlp, c_scale_mlp  # free memory
 
         # 4. Feed-forward
@@ -1453,9 +1453,9 @@ class HunyuanVideoTransformerBlock(nn.Module):
         context_ff_output = self.ff_context(norm_encoder_hidden_states)
         del norm_encoder_hidden_states  # free memory
 
-        hidden_states = hidden_states + gate_mlp * ff_output
+        hidden_states = torch.addcmul(hidden_states, gate_mlp, ff_output)
         del ff_output, gate_mlp  # free memory
-        encoder_hidden_states = encoder_hidden_states + c_gate_mlp * context_ff_output
+        encoder_hidden_states = torch.addcmul(encoder_hidden_states, c_gate_mlp, context_ff_output)
         del context_ff_output, c_gate_mlp  # free memory
 
         return hidden_states, encoder_hidden_states

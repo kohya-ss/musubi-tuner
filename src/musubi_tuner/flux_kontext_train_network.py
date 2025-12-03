@@ -19,6 +19,8 @@ from musubi_tuner.hv_train_network import (
 
 import logging
 
+from musubi_tuner.utils import model_utils
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -280,6 +282,12 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
             fp8_scaled=args.fp8_scaled,
         )
         return model
+
+    def compile_transformer(self, args, transformer):
+        transformer: flux_models.Flux = transformer
+        return model_utils.compile_transformer(
+            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=self.blocks_to_swap > 0
+        )
 
     def scale_shift_latents(self, latents):
         return latents

@@ -15,12 +15,13 @@ from tqdm import tqdm
 from musubi_tuner.flux import flux_utils
 from musubi_tuner.flux.flux_utils import load_flow_model
 from musubi_tuner.flux import flux_models
+from musubi_tuner.utils import model_utils
 
 lycoris_available = find_spec("lycoris") is not None
 
 from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, setup_parser_compile, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 
 import logging
@@ -109,6 +110,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
     parser.add_argument(
+        "--use_pinned_memory_for_block_swap",
+        action="store_true",
+        help="use pinned memory for block swapping, which may speed up data transfer between CPU and GPU but uses more shared GPU memory on Windows",
+    )
+    parser.add_argument(
         "--output_type",
         type=str,
         default="images",
@@ -120,14 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
     )
-    # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
-    # parser.add_argument(
-    #     "--compile_args",
-    #     nargs=4,
-    #     metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-    #     default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
-    #     help="Torch.compile settings",
-    # )
+    setup_parser_compile(parser)
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
@@ -308,29 +307,21 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
         if target_device is not None and target_dtype is not None:
             model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # if args.compile:
-    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-    #     logger.info(
-    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-    #     )
-    #     torch._dynamo.config.cache_size_limit = 32
-    #     for i in range(len(model.blocks)):
-    #         model.blocks[i] = torch.compile(
-    #             model.blocks[i],
-    #             backend=compile_backend,
-    #             mode=compile_mode,
-    #             dynamic=compile_dynamic.lower() in "true",
-    #             fullgraph=compile_fullgraph.lower() in "true",
-    #         )
-
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
-        model.enable_block_swap(args.blocks_to_swap, device, supports_backward=False)
+        model.enable_block_swap(
+            args.blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
+        )
         model.move_to_device_except_swap_blocks(device)
         model.prepare_block_swap_before_forward()
     else:
         # make sure the model is on the right device
         model.to(device)
+
+    if args.compile:
+        model = model_utils.compile_transformer(
+            args, model, [model.double_blocks, model.single_blocks], disable_linear=args.blocks_to_swap > 0
+        )
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)

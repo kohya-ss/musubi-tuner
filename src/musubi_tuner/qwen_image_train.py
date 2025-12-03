@@ -125,6 +125,15 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
     # endregion model specific
 
     def train(self, args):
+        if torch.cuda.is_available():
+            if args.cuda_allow_tf32:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                logger.info("Enabled TF32 on CUDA / CUDAでTF32を有効化しました")
+            if args.cuda_cudnn_benchmark:
+                torch.backends.cudnn.benchmark = True
+                logger.info("Enabled cuDNN benchmark / cuDNNベンチマークを有効化しました")
+
         # check required arguments
         if args.dataset_config is None:
             raise ValueError("dataset_config is required / dataset_configが必要です")
@@ -311,6 +320,10 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             accelerator.unwrap_model(transformer).prepare_block_swap_before_forward()
         else:
             transformer = accelerator.prepare(transformer)
+
+        if args.compile:
+            transformer = self.compile_transformer(args, transformer)
+            transformer.__dict__["_orig_mod"] = transformer  # for annoying accelerator checks
 
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
         training_model = transformer
@@ -506,10 +519,17 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
             metadata_to_save.update(sai_metadata)
 
+            state_dict = unwrapped_model.state_dict()
+
+            # if model is compiled, get original model state dict
+            if "transformer_blocks.0._orig_mod.attn.add_k_proj.bias" in state_dict:
+                logger.info("detected compiled model, getting original model state dict for saving")
+                state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
             if use_memory_efficient_saving:
-                mem_eff_save_file(unwrapped_model.state_dict(), ckpt_file, metadata_to_save)
+                mem_eff_save_file(state_dict, ckpt_file, metadata_to_save)
             else:
-                save_file(unwrapped_model.state_dict(), ckpt_file, metadata_to_save)
+                save_file(state_dict, ckpt_file, metadata_to_save)
 
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
@@ -596,6 +616,8 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
+                    if global_step == 0:
+                        progress_bar.reset()  # exclude first step from progress bar, because it may take long due to initializations
                     progress_bar.update(1)
                     global_step += 1
 

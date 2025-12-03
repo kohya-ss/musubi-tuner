@@ -550,7 +550,9 @@ class FeedForward(nn.Module):
             hidden_states = module(hidden_states)
         return hidden_states
 
-
+# torch.inductor does not support code generation for complex
+# This breaks fullgraph=True
+@torch.compiler.disable
 def apply_rotary_emb_qwen(
     x: torch.Tensor,
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
@@ -910,9 +912,9 @@ class QwenImageTransformerBlock(nn.Module):
         del attn_output
 
         # Apply attention gates and add residual (like in Megatron)
-        hidden_states = hidden_states + img_gate1 * img_attn_output
+        hidden_states = torch.addcmul(hidden_states, img_gate1, img_attn_output)
         del img_gate1, img_attn_output
-        encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
+        encoder_hidden_states = torch.addcmul(encoder_hidden_states, txt_gate1, txt_attn_output)
         del txt_gate1, txt_attn_output
 
         # Process image stream - norm2 + MLP
@@ -921,7 +923,7 @@ class QwenImageTransformerBlock(nn.Module):
         del img_normed2, img_mod2
         img_mlp_output = self.img_mlp(img_modulated2)
         del img_modulated2
-        hidden_states = hidden_states + img_gate2 * img_mlp_output
+        hidden_states = torch.addcmul(hidden_states, img_gate2, img_mlp_output)
         del img_gate2, img_mlp_output
 
         # Process text stream - norm2 + MLP
@@ -930,7 +932,7 @@ class QwenImageTransformerBlock(nn.Module):
         del txt_normed2, txt_mod2
         txt_mlp_output = self.txt_mlp(txt_modulated2)
         del txt_modulated2
-        encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
+        encoder_hidden_states = torch.addcmul(encoder_hidden_states, txt_gate2, txt_mlp_output)
         del txt_gate2, txt_mlp_output
 
         # Clip to prevent overflow for fp16
@@ -1098,7 +1100,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor = None,
         encoder_hidden_states_mask: torch.Tensor = None,
-        timestep: torch.LongTensor = None,
+        timestep: torch.Tensor = None,
         img_shapes: Optional[List[Tuple[int, int, int]]] = None,
         txt_seq_lens: Optional[List[int]] = None,
         guidance: torch.Tensor = None,  # TODO: this should probably be removed
@@ -1114,7 +1116,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                 Conditional embeddings (embeddings computed from the input conditions such as prompts) to use.
             encoder_hidden_states_mask (`torch.Tensor` of shape `(batch_size, text_sequence_length)`):
                 Mask of the input conditions.
-            timestep ( `torch.LongTensor`):
+            timestep ( `torch.Tensor`):
                 Used to indicate denoising step.
             attention_kwargs (`dict`, *optional*):
                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
