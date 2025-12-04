@@ -157,14 +157,16 @@ class HunyuanVideo_1_5_DiffusionTransformer(nn.Module):
 
         print("HunyuanVideo-1.5: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool = False):
+    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
 
         assert self.blocks_to_swap < self.num_double_blocks - 2, (
-            f"Cannot swap more than {self.num_double_blocks - 2} double blocks.Requested {self.blocks_to_swap} double blocks."
+            f"Cannot swap more than {self.num_double_blocks - 2} double blocks. Requested {self.blocks_to_swap} double blocks."
         )
 
-        self.offloader_double = ModelOffloader(self.double_blocks, self.blocks_to_swap, device, supports_backward=supports_backward)
+        self.offloader_double = ModelOffloader(
+            "double", self.double_blocks, len(self.double_blocks), self.blocks_to_swap, supports_backward, device, use_pinned_memory
+        )
         print(
             f"HunyuanVideo-1.5: Block swap enabled. Swapping {num_blocks} blocks to device {device}. Supports backward: {supports_backward}"
         )
@@ -354,7 +356,7 @@ class HunyuanVideo_1_5_DiffusionTransformer(nn.Module):
                 self.offloader_double.wait_for_block(index)
             img, txt = block(img, txt, vec, freqs_cis, attn_params)
             if self.blocks_to_swap:
-                self.offloader_double.submit_move_blocks(self.double_blocks, index)
+                self.offloader_double.submit_move_blocks_forward(self.double_blocks, index)
         del txt, attn_params, freqs_cis
 
         # Apply final projection to output space
