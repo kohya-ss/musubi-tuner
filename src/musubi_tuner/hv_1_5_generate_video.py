@@ -462,15 +462,6 @@ def prepare_i2v_or_t2v_inputs(
     # get video dimensions
     height, width, frames = check_inputs(args)
 
-    # set seed
-    seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
-    if not args.cpu_noise:
-        seed_g = torch.Generator(device=device)
-        seed_g.manual_seed(seed)
-    else:
-        # ComfyUI compatible noise
-        seed_g = torch.manual_seed(seed)
-
     # configure negative prompt
     n_prompt = args.negative_prompt if args.negative_prompt else ""
 
@@ -1310,8 +1301,6 @@ def main():
         width = latents.shape[-1]
         height *= 16
         width *= 16
-        video_length = latents.shape[1]
-        video_length = (video_length - 1) * 4 + 1
         args.seed = seeds[0]
 
         save_output(latent[0], args, height, width, original_base_names)
