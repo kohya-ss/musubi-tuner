@@ -1162,7 +1162,6 @@ def process_interactive(args: argparse.Namespace) -> None:
                     }
 
                 # 2. Encode prompt. Models are moved back to original device after encoding
-                encoded_context = {}
                 with torch.no_grad():
                     arg_c, arg_null = prepare_i2v_or_t2v_inputs(prompt_args, device, vae, shared_models)
 
