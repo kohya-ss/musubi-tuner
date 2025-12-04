@@ -237,7 +237,6 @@ class AttnBlock(nn.Module):
             frm_start = frame * seq_hw
             frm_end = frm_start + seq_hw
             q_slice = q[:, :, frm_start:frm_end, :]
-            q_slice = q[:, :, frm_start:frm_end, :]
             k_slice = k[:, :, :frm_end, :]
             v_slice = v[:, :, :frm_end, :]
             out[:, :, frm_start:frm_end, :] = nn.functional.scaled_dot_product_attention(q_slice, k_slice, v_slice)
