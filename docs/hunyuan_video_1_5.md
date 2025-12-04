@@ -251,6 +251,33 @@ For sample video generation during training, PyTorch Dynamo optimization, and ot
 
 </details>
 
+### Coverting LoRA weights to ComfyUI format / LoRA重みをComfyUI形式に変換する
+
+A script is provided to convert HunyuanVideo 1.5 LoRA weights to ComfyUI format.
+
+```bash
+python src/musubi_tuner/networks/convert_hunyuan_video_1_5_lora_to_comfy.py \
+    path/to/hv_1_5_lora.safetensors \
+    path/to/output_comfy_lora.safetensors
+```
+
+- The script is `convert_hunyuan_video_1_5_lora_to_comfy.py`.
+- The first argument is the input HunyuanVideo 1.5 LoRA weights file.
+- The second argument is the output ComfyUI-format LoRA weights file.
+- `--reverse` option is available to convert from ComfyUI format to HunyuanVideo 1.5 format. Only works for LoRA weights converted by this script.
+
+<details>
+<summary>日本語</summary>
+
+HunyuanVideo 1.5のLoRA重みをComfyUI形式に変換するスクリプトが提供されています。
+
+- スクリプトは`convert_hunyuan_video_1_5_lora_to_comfy.py`です。
+- 最初の引数は入力のHunyuanVideo 1.5 LoRA重みファイルです。
+- 2番目の引数は出力のComfyUI形式のLoRA重みファイルです。
+- `--reverse`オプションで、ComfyUI形式からHunyuanVideo 1.5形式への変換も可能です。このオプションは、このスクリプトで変換されたLoRA重みに対してのみ機能します。  
+
+</details>
+
 ## Inference / 推論
 
 Inference uses a dedicated script `hv_1_5_generate_video.py`.
