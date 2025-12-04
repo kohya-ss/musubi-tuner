@@ -1090,7 +1090,6 @@ def process_interactive(args: argparse.Namespace) -> None:
     shared_models = None
     vae = None
     model = None
-    clip = None
 
     print("Interactive mode. Enter prompts (Ctrl+D or Ctrl+Z (Windows) to exit):")
 
