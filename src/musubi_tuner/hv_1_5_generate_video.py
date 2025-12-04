@@ -1199,7 +1199,7 @@ def process_interactive(args: argparse.Namespace) -> None:
                 # Decode and save output
                 if prompt_args.output_type != "latent":
                     if vae is None:
-                        vae = load_vae(args, cfg, device, vae_dtype)
+                        vae = load_vae(args, cfg, device)
 
                     vae.to(device)
                     video = decode_latent(latent.unsqueeze(0), prompt_args)
