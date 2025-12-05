@@ -654,7 +654,11 @@ def generate(
         vae.to("cpu")
 
     # load DiT models
-    model = load_dit_model(args, args.dit, args.lora_weight, args.lora_multiplier, device, dit_weight_dtype)
+    if shared_models is not None and "model" in shared_models:
+        model = shared_models["model"]
+        logger.info("Using pre-loaded DiT model from shared models")
+    else:
+        model = load_dit_model(args, args.dit, args.lora_weight, args.lora_multiplier, device, dit_weight_dtype)
 
     # if we only want to save the model, we can skip the rest
     if args.save_merged_model:
@@ -973,8 +977,12 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     logger.info("Loading VAE, text encoders and image processors to encode all prompts/images")
     if is_i2v:
         vae = load_vae(args, device, vae_dtype)
+        feature_extractor, image_encoder = load_image_encoders(args)
+        image_encoder.to(device)
     else:
         vae = None
+        feature_extractor = None
+        image_encoder = None
     tokenizer_vlm, text_encoder_vlm, tokenizer_byt5, text_encoder_byt5 = load_text_encoders(args)
     vl_device = torch.device("cpu") if args.text_encoder_cpu else device
     text_encoder_vlm.to(vl_device)
@@ -986,6 +994,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         "tokenizer_byt5": tokenizer_byt5,
         "text_encoder_byt5": text_encoder_byt5,
         "vae": vae,
+        "feature_extractor": feature_extractor if is_i2v else None,
+        "image_encoder": image_encoder if is_i2v else None,
     }
     encoded_contexts = {}
 
@@ -998,6 +1008,13 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # Free tokenizers and text encoders and clean memory
     del tokenizer_vlm, text_encoder_vlm, tokenizer_byt5, text_encoder_byt5
+    del feature_extractor, image_encoder
+
+    if vae is not None:
+        vae.to("cpu")
+    synchronize_device(device)
+
+    gc.collect()
     clean_memory_on_device(device)
 
     # 4. Load DiT model, 5. Merge LoRA weights if needed, and 6. Optimize model
@@ -1009,7 +1026,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         return
 
     # Create shared models dict for generate function
-    shared_models = {"vae": vae, "model": model, "encoded_contexts": encoded_contexts}
+    shared_models.update({"vae": vae, "model": model, "encoded_contexts": encoded_contexts})
 
     # 7. Generate for each prompt
     all_latents = []
@@ -1033,7 +1050,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         all_prompt_args.append(prompt_args)
 
     # 8. Free DiT model
-    del model
+    del model, shared_models
     synchronize_device(device)
 
     # wait for 5 seconds until block swap is done
@@ -1060,7 +1077,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             # Save as video or images
             if prompt_args.output_type == "video" or prompt_args.output_type == "both":
                 save_video(video, prompt_args)
-            elif prompt_args.output_type == "images":
+            elif prompt_args.output_type == "images" or prompt_args.output_type == "latent_images":
                 save_images(video, prompt_args)
 
         # Free VAE
@@ -1077,9 +1094,8 @@ def process_interactive(args: argparse.Namespace) -> None:
         args: Base command line arguments
     """
     gen_settings = get_generation_settings(args)
-    device, cfg, dit_dtype, dit_weight_dtype, vae_dtype = (
+    device, dit_dtype, dit_weight_dtype, vae_dtype = (
         gen_settings.device,
-        gen_settings.cfg,
         gen_settings.dit_dtype,
         gen_settings.dit_weight_dtype,
         gen_settings.vae_dtype,
@@ -1168,13 +1184,14 @@ def process_interactive(args: argparse.Namespace) -> None:
                         model.to(device)
 
                 # Create shared models dict
-                shared_models = {"vae": vae, "model": model, "encoded_context": (arg_c, arg_null)}
+                shared_models.update({"vae": vae, "model": model, "encoded_context": (arg_c, arg_null)})
 
                 # Generate latent
                 latent = generate(prompt_args, gen_settings, shared_models)
 
                 # Move model to CPU after generation
                 model.to("cpu")
+                clean_memory_on_device(device)
 
                 # Save latent if needed
                 height, width, _ = check_inputs(prompt_args)
@@ -1188,14 +1205,14 @@ def process_interactive(args: argparse.Namespace) -> None:
                 # Decode and save output
                 if prompt_args.output_type != "latent":
                     if vae is None:
-                        vae = load_vae(args, cfg, device)
+                        vae = load_vae(args, device)
 
                     vae.to(device)
-                    video = decode_latent(latent.unsqueeze(0), prompt_args)
+                    video = decode_latent(latent, prompt_args)
 
                     if prompt_args.output_type == "video" or prompt_args.output_type == "both":
                         save_video(video, prompt_args)
-                    elif prompt_args.output_type == "images":
+                    elif prompt_args.output_type == "images" or prompt_args.output_type == "latent_images":
                         save_images(video, prompt_args)
 
                     # Move VAE to CPU after use
