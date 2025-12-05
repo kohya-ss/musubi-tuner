@@ -63,6 +63,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- December 5, 2025
+    - Added support for HunyuanVideo 1.5. See [PR #748](https://github.com/kohya-ss/musubi-tuner/pull/748).
+        - LoRA training for T2V and I2V is now supported. Please refer to the [documentation](./docs/hunyuan_video_1_5.md) for details.
+
 - November 16, 2025
     - Breaking Change: Fixed the argument for the `--compile_dynamic` option when using `torch.compile`. See [PR #727](https://github.com/kohya-ss/musubi-tuner/pull/727).
         - Changed to specify `true`, `false`, or `auto` for the `--compile_dynamic` argument. The default is equivalent to `auto`.
