@@ -386,7 +386,10 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         # Check if this batch has I2V conditioning (first frame latents)
         cond_latents = batch.get("latents_image", None)
         if cond_latents is None:
-            assert not self.i2v_training, "Expected latents_image for I2V training"
+            assert not self.i2v_training, (
+                "Expected latents_image for I2V training. Add `--i2v` and `--image_encoder` arguments for `hv_1_5_cache_latents` script."
+                + " / I2V学習ではlatents_imageが必要です。`hv_1_5_cache_latents`スクリプトに`--i2v`と`--image_encoder`引数を追加してください。"
+            )
             # For T2V batches, create zero conditioning tensor
             # Extra channel (+1) is the conditioning mask, all zeros means "no conditioning"
             cond_latents = torch.zeros(
