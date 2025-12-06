@@ -14,7 +14,12 @@ logging.basicConfig(level=logging.INFO)
 
 
 from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, TensorWeightAdapter, WeightTransformHooks
+from musubi_tuner.utils.safetensors_utils import (
+    MemoryEfficientSafeOpen,
+    TensorWeightAdapter,
+    WeightTransformHooks,
+    get_split_weight_filenames,
+)
 
 
 def filter_lora_state_dict(
@@ -80,19 +85,9 @@ def load_safetensors_with_lora_and_fp8(
 
     extended_model_files = []
     for model_file in model_files:
-        basename = os.path.basename(model_file)
-        match = re.match(r"^(.*?)(\d+)-of-(\d+)\.safetensors$", basename)
-        if match:
-            prefix = basename[: match.start(2)]
-            count = int(match.group(3))
-            state_dict = {}
-            for i in range(count):
-                filename = f"{prefix}{i + 1:05d}-of-{count:05d}.safetensors"
-                filepath = os.path.join(os.path.dirname(model_file), filename)
-                if os.path.exists(filepath):
-                    extended_model_files.append(filepath)
-                else:
-                    raise FileNotFoundError(f"File {filepath} not found")
+        split_filenames = get_split_weight_filenames(model_file)
+        if split_filenames is not None:
+            extended_model_files.extend(split_filenames)
         else:
             extended_model_files.append(model_file)
     model_files = extended_model_files

@@ -318,6 +318,29 @@ def load_safetensors(
         return state_dict
 
 
+def get_split_weight_filenames(file_path: str) -> Optional[list[str]]:
+    """
+    Get the list of split weight filenames (full paths) if the file name ends with 00001-of-00004 etc.
+    Returns None if the file is not split.
+    """
+    basename = os.path.basename(file_path)
+    match = re.match(r"^(.*?)(\d+)-of-(\d+)\.safetensors$", basename)
+    if match:
+        prefix = basename[: match.start(2)]
+        count = int(match.group(3))
+        filenames = []
+        for i in range(count):
+            filename = f"{prefix}{i + 1:05d}-of-{count:05d}.safetensors"
+            filepath = os.path.join(os.path.dirname(file_path), filename)
+            if os.path.exists(filepath):
+                filenames.append(filepath)
+            else:
+                raise FileNotFoundError(f"File {filepath} not found")
+        return filenames
+    else:
+        return None
+
+
 def load_split_weights(
     file_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False, dtype: Optional[torch.dtype] = None
 ) -> Dict[str, torch.Tensor]:
@@ -328,19 +351,11 @@ def load_split_weights(
     device = torch.device(device)
 
     # if the file name ends with 00001-of-00004 etc, we need to load the files with the same prefix
-    basename = os.path.basename(file_path)
-    match = re.match(r"^(.*?)(\d+)-of-(\d+)\.safetensors$", basename)
-    if match:
-        prefix = basename[: match.start(2)]
-        count = int(match.group(3))
+    split_filenames = get_split_weight_filenames(file_path)
+    if split_filenames is not None:
         state_dict = {}
-        for i in range(count):
-            filename = f"{prefix}{i + 1:05d}-of-{count:05d}.safetensors"
-            filepath = os.path.join(os.path.dirname(file_path), filename)
-            if os.path.exists(filepath):
-                state_dict.update(load_safetensors(filepath, device=device, disable_mmap=disable_mmap, dtype=dtype))
-            else:
-                raise FileNotFoundError(f"File {filepath} not found")
+        for filename in split_filenames:
+            state_dict.update(load_safetensors(filename, device=device, disable_mmap=disable_mmap, dtype=dtype))
     else:
         state_dict = load_safetensors(file_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
     return state_dict
@@ -441,7 +456,6 @@ class TensorWeightAdapter:
         else:
             # concat hook: concatenated key is requested only once, so we do not cache the result
             tensors = {}
-            print(new_key, self.new_key_to_original_key_map[new_key])
             for original_key in self.new_key_to_original_key_map[new_key]:
                 tensor = self.original_f.get_tensor(original_key, device=device, dtype=dtype)
                 tensors[original_key] = tensor
