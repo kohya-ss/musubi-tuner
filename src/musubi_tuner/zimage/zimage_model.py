@@ -32,6 +32,7 @@ from musubi_tuner.modules.attention import AttentionParams, attention
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.safetensors_utils import WeightTransformHooks
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -765,6 +766,34 @@ def load_zimage_model(
 
     model = create_model(attn_mode, split_attn, dit_weight_dtype, use_16bit_for_attention=use_16bit_for_attention)
 
+    replace_keys = {
+        "all_final_layer.2-1.": "final_layer.",
+        "all_x_embedder.2-1.": "x_embedder.",
+        ".attention.to_out.0.bias": ".attention.out.bias",
+        ".attention.norm_k.weight": ".attention.k_norm.weight",
+        ".attention.norm_q.weight": ".attention.q_norm.weight",
+        ".attention.to_out.0.weight": ".attention.out.weight",
+    }
+    replace_keys_reverse = {v: k for k, v in replace_keys.items()}
+
+    def comfyui_z_image_weight_split_hook(
+        key: str, value: Optional[torch.Tensor]
+    ) -> Tuple[Optional[list[str]], Optional[list[torch.Tensor]]]:
+        # Use split hook for key conversion
+        for k, v in replace_keys_reverse.items():
+            if k in key:
+                key = key.replace(k, v)
+                return [key], [value] if value is not None else None
+
+        # convert to separate Q, K, V weights/biases
+        if "attention.qkv.weight" in key:
+            new_keys = [key.replace("qkv", module) for module in ["to_q", "to_k", "to_v"]]
+            return new_keys, list(torch.chunk(value, 3, dim=0)) if value is not None else None
+
+        return None, None
+
+    hooks = WeightTransformHooks(split_hook=comfyui_z_image_weight_split_hook)
+
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
     sd = load_safetensors_with_lora_and_fp8(
@@ -778,6 +807,7 @@ def load_zimage_model(
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
         disable_numpy_memmap=disable_numpy_memmap,
+        weight_transform_hooks=hooks,
     )
 
     if fp8_scaled:

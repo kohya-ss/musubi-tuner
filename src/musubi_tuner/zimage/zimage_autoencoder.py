@@ -421,6 +421,68 @@ def load_autoencoder_kl(vae_path: str, device: Union[str, torch.device] = "cpu",
     # VAE (fp32 for better precision)
     logger.info(f"Loading VAE from {vae_path}")
     state_dict = load_safetensors(vae_path, device=device, disable_mmap=disable_mmap)
+
+    # Convert ComfyUI keys to standard keys if necessary
+    def convert_comfyui_state_dict(sd):
+        if "encoder.down.0.block.0.conv1.weight" not in sd:
+            return sd
+
+        new_sd = {}
+        for key, value in sd.items():
+            new_key = key
+
+            if "decoder." in new_key:
+                new_key = new_key.replace("decoder.norm_out.", "decoder.conv_norm_out.")
+                new_key = new_key.replace(".mid.attn_1.", ".mid_block.attentions.0.")
+                if ".attentions.0." in new_key:
+                    new_key = new_key.replace(".k.", ".to_k.")
+                    new_key = new_key.replace(".q.", ".to_q.")
+                    new_key = new_key.replace(".v.", ".to_v.")
+                    new_key = new_key.replace(".proj_out.", ".to_out.0.")
+                    new_key = new_key.replace(".norm.", ".group_norm.")
+                if ".mid.block_" in new_key:
+                    new_key = new_key.replace(".mid.block_1", ".mid_block.resnets.0")
+                    new_key = new_key.replace(".mid.block_2", ".mid_block.resnets.1")
+                if ".up." in new_key:
+                    new_key = new_key.replace(".up.0.", ".up_blocks.3.")
+                    new_key = new_key.replace(".up.1.", ".up_blocks.2.")
+                    new_key = new_key.replace(".up.2.", ".up_blocks.1.")
+                    new_key = new_key.replace(".up.3.", ".up_blocks.0.")
+                    new_key = new_key.replace(".block.", ".resnets.")
+                    new_key = new_key.replace(".nin_shortcut.", ".conv_shortcut.")
+                    new_key = new_key.replace(".upsample.", ".upsamplers.0.")
+            elif "encoder." in new_key:
+                new_key = new_key.replace("encoder.norm_out.", "encoder.conv_norm_out.")
+                new_key = new_key.replace(".mid.attn_1.", ".mid_block.attentions.0.")
+                if ".attentions.0." in new_key:
+                    new_key = new_key.replace(".k.", ".to_k.")
+                    new_key = new_key.replace(".q.", ".to_q.")
+                    new_key = new_key.replace(".v.", ".to_v.")
+                    new_key = new_key.replace(".proj_out.", ".to_out.0.")
+                    new_key = new_key.replace(".norm.", ".group_norm.")
+                if ".mid.block_" in new_key:
+                    new_key = new_key.replace(".mid.block_1", ".mid_block.resnets.0")
+                    new_key = new_key.replace(".mid.block_2", ".mid_block.resnets.1")
+                if ".down." in new_key:
+                    new_key = new_key.replace(".down.0.", ".down_blocks.0.")
+                    new_key = new_key.replace(".down.1.", ".down_blocks.1.")
+                    new_key = new_key.replace(".down.2.", ".down_blocks.2.")
+                    new_key = new_key.replace(".down.3.", ".down_blocks.3.")
+                    new_key = new_key.replace(".block.", ".resnets.")
+                    new_key = new_key.replace(".nin_shortcut.", ".conv_shortcut.")
+                    new_key = new_key.replace(".downsample.", ".downsamplers.0.")
+
+            # Conv2d with kernel size 1 to Linear
+            if "attentions" in new_key and value.dim() == 4 and value.shape[2] == 1 and value.shape[3] == 1:
+                value = value.squeeze(-1).squeeze(-1)
+
+            new_sd[new_key] = value
+
+        logger.info("Converted ComfyUI AutoencoderKL state dict keys to diffusers format")
+        return new_sd
+
+    state_dict = convert_comfyui_state_dict(state_dict)
+
     info = vae.load_state_dict(state_dict, strict=True, assign=True)
     logger.info(f"Loaded VAE: {info}")
     vae.to(device, dtype=torch.float32)  # VAE in fp32 for better precision

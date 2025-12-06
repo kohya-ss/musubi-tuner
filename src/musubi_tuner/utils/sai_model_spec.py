@@ -235,7 +235,7 @@ def build_metadata(
             reso = (reso[0], reso[0])
     else:
         # resolution is defined in dataset, so use default here
-        # Use 1328x1328 for Qwen-Image models, 1024x1024 for Qwen-Image-Edit models, 
+        # Use 1328x1328 for Qwen-Image models, 1024x1024 for Qwen-Image-Edit models,
         # and 1024x1024 for Z-Image models, and 1280x720 for others (this is just a placeholder, actual resolution may vary)
         if architecture == ARCHITECTURE_QWEN_IMAGE:
             reso = (1328, 1328)

@@ -456,7 +456,6 @@ class TensorWeightAdapter:
         else:
             # concat hook: concatenated key is requested only once, so we do not cache the result
             tensors = {}
-            print(new_key, self.new_key_to_original_key_map[new_key])
             for original_key in self.new_key_to_original_key_map[new_key]:
                 tensor = self.original_f.get_tensor(original_key, device=device, dtype=dtype)
                 tensors[original_key] = tensor
