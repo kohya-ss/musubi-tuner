@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 import logging
 
+from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import DiagonalGaussianDistribution
 from musubi_tuner.utils.safetensors_utils import load_safetensors
 
 logger = logging.getLogger(__name__)
@@ -391,7 +392,9 @@ class AutoencoderKL(nn.Module):
         enc = self.encoder(x)
         if self.quant_conv is not None:
             enc = self.quant_conv(enc)
-        return enc
+        posterior = DiagonalGaussianDistribution(enc)
+        return posterior
+
 
 
 def load_autoencoder_kl(vae_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False) -> AutoencoderKL:
@@ -419,3 +422,34 @@ def load_autoencoder_kl(vae_path: str, device: Union[str, torch.device] = "cpu",
     logger.info(f"Loaded VAE: {info}")
     vae.to(device, dtype=torch.float32)  # VAE in fp32 for better precision
     return vae
+
+
+if __name__ == "__main__":
+    import sys
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    ckpt_path = sys.argv[1]
+    original_image = Image.open(sys.argv[2]).convert("RGB")
+
+    vae = load_autoencoder_kl(ckpt_path, device=device)
+    vae.eval()
+
+    image_np = np.array(original_image).astype(np.float32) / 127.5 - 1.0
+    image_tensor = torch.from_numpy(image_np).permute(2, 0, 1).unsqueeze(0).to(device)  # B, C, H, W
+
+    with torch.no_grad():
+        print("Encoding and decoding...")
+        latents = vae.encode(image_tensor).mode()
+        print("Latents shape:", latents.shape)
+
+        reconstructed = vae.decode(latents)
+        print("Reconstructed shape:", reconstructed.shape)
+
+    reconstructed = (reconstructed.clamp(-1.0, 1.0) + 1.0) * 127.5
+    reconstructed = reconstructed.squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+    reconstructed_image = Image.fromarray(reconstructed)
+    reconstructed_image.save("reconstructed.png")
