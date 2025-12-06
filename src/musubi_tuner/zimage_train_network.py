@@ -38,7 +38,10 @@ class ZImageNetworkTrainer(NetworkTrainer):
         return ARCHITECTURE_Z_IMAGE_FULL
 
     def handle_model_specific_args(self, args):
-        self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
+        self.dit_dtype = (
+            torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32
+        )
+        args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
         self._control_training = False
         self.default_guidance_scale = 1.0  # embedded guidance scale for inference? Z-Image default is usually 1.0 or 2.5? Inference script defaults to 0.0 guidance, but 2.5 embedded cfg scale.
@@ -287,7 +290,6 @@ class ZImageNetworkTrainer(NetworkTrainer):
         if not args.split_attn and bsize > 1:
             padded_len = math.ceil((max_len + image_sequence_length) / zimage_config.SEQ_MULTI_OF) * zimage_config.SEQ_MULTI_OF
             max_len = int(padded_len) - image_sequence_length
-            print(txt_seq_lens, padded_len, max_len)
             llm_mask = torch.zeros(bsize, max_len, dtype=torch.bool, device=llm_embed[0].device)
             for i, x in enumerate(txt_seq_lens):
                 llm_mask[i, :x] = True
@@ -328,6 +330,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Z-Image specific parser setup"""
+    # parser.add_argument("--dit_dtype", type=str, default=None, help="data type for DiT, default is bfloat16")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT")
     parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3 text encoder checkpoint path")
     parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder model")
@@ -346,7 +349,6 @@ def main():
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    args.dit_dtype = None
     if args.vae_dtype is not None:
         logger.warning("vae_dtype is not used in Z-Image architecture (always float32)")
 
