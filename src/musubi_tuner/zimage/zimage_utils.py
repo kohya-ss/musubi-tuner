@@ -139,7 +139,7 @@ def get_text_embeds(
     """
     prompt = [prompt] if isinstance(prompt, str) else prompt
 
-    logger.info(f"Encoding prompts: {prompt}. Applying chat template.")
+    # logger.info(f"Encoding prompts: {prompt}. Applying chat template.")
     formatted_prompts = []
     for p in prompt:
         messages = [{"role": "user", "content": p}]

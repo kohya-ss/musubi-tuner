@@ -382,6 +382,10 @@ class AutoencoderKL(nn.Module):
     def dtype(self):
         return next(self.parameters()).dtype
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def decode(self, z: torch.FloatTensor, return_dict: bool = True) -> torch.FloatTensor:
         if self.post_quant_conv is not None:
             z = self.post_quant_conv(z)
@@ -394,7 +398,6 @@ class AutoencoderKL(nn.Module):
             enc = self.quant_conv(enc)
         posterior = DiagonalGaussianDistribution(enc)
         return posterior
-
 
 
 def load_autoencoder_kl(vae_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False) -> AutoencoderKL:

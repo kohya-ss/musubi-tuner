@@ -25,6 +25,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
 
 from musubi_tuner.modules.attention import AttentionParams, attention
@@ -35,6 +36,7 @@ from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.zimage import zimage_config
 from musubi_tuner.zimage.zimage_config import (
     ADALN_EMBED_DIM,
@@ -96,8 +98,28 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
-    def forward(self, x):
+        self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
+
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
+        self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
+
+    def _forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+    def forward(self, x):
+        if self.training and self.gradient_checkpointing:
+            forward_fn = self._forward
+            if self.activation_cpu_offloading:
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.w1.device)
+            return checkpoint(forward_fn, x, use_reentrant=False)
+        else:
+            return self._forward(x)
 
 
 def apply_rotary_emb(x_in: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
@@ -108,59 +130,15 @@ def apply_rotary_emb(x_in: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tenso
         return x_out.type_as(x_in)
 
 
-def _process_mask(attn_mask: Optional[torch.Tensor], dtype: torch.dtype):
-    if attn_mask is None:
-        return None
-
-    if attn_mask.ndim == 2:
-        attn_mask = attn_mask[:, None, None, :]
-
-    # Convert bool mask to float additive mask
-    if attn_mask.dtype == torch.bool:
-        # NOTE: We skip checking for all-True mask (torch.all) to avoid graph breaks in torch.compile
-        new_mask = torch.zeros_like(attn_mask, dtype=dtype)
-        new_mask.masked_fill_(~attn_mask, float("-inf"))
-        return new_mask
-
-    return attn_mask
-
-
-def _native_attention_wrapper(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attn_mask: Optional[torch.Tensor] = None,
-    dropout_p: float = 0.0,
-    is_causal: bool = False,
-    scale: Optional[float] = None,
-    backend_kernel=None,
-) -> torch.Tensor:
-    query = query.transpose(1, 2)
-    key = key.transpose(1, 2)
-    value = value.transpose(1, 2)
-    attn_mask = _process_mask(attn_mask, query.dtype)
-
-    if backend_kernel is not None:
-        with torch.nn.attention.sdpa_kernel(backend_kernel):
-            out = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, scale=scale
-            )
-    else:
-        out = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, scale=scale
-        )
-
-    return out.transpose(1, 2).contiguous()
-
-
 class ZImageAttention(nn.Module):
     _attention_backend = None
 
-    def __init__(self, dim: int, n_heads: int, n_kv_heads: int, qk_norm: bool = True, eps: float = 1e-5):
+    def __init__(self, dim: int, n_heads: int, n_kv_heads: int, qk_norm: bool = True, eps: float = 1e-5, use_16bit: bool = False):
         super().__init__()
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.head_dim = dim // n_heads
+        self.use_16bit = use_16bit
 
         self.to_q = nn.Linear(dim, n_heads * self.head_dim, bias=False)
         self.to_k = nn.Linear(dim, n_kv_heads * self.head_dim, bias=False)
@@ -169,6 +147,17 @@ class ZImageAttention(nn.Module):
 
         self.norm_q = RMSNorm(self.head_dim, eps=eps) if qk_norm else None
         self.norm_k = RMSNorm(self.head_dim, eps=eps) if qk_norm else None
+
+        self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
+
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
+        self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     def forward(
         self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
@@ -190,7 +179,8 @@ class ZImageAttention(nn.Module):
             query = apply_rotary_emb(query, freqs_cis)
             key = apply_rotary_emb(key, freqs_cis)
 
-        dtype = query.dtype
+        # query.dtype is float32. It is imcompatible with FlashAttention, so we convert to the original dtype if use_16bit is set.
+        dtype = query.dtype if not self.use_16bit else value.dtype
         query, key = query.to(dtype), key.to(dtype)
 
         # Call attention
@@ -206,14 +196,24 @@ class ZImageAttention(nn.Module):
 
 
 class ZImageTransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, dim: int, n_heads: int, n_kv_heads: int, norm_eps: float, qk_norm: bool, modulation=True):
+    def __init__(
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        n_kv_heads: int,
+        norm_eps: float,
+        qk_norm: bool,
+        modulation=True,
+        use_16bit: bool = False,
+    ):
         super().__init__()
         self.dim = dim
         self.head_dim = dim // n_heads
         self.layer_id = layer_id
         self.modulation = modulation
 
-        self.attention = ZImageAttention(dim, n_heads, n_kv_heads, qk_norm, norm_eps)
+        self.attention = ZImageAttention(dim, n_heads, n_kv_heads, qk_norm, norm_eps, use_16bit=use_16bit)
         self.feed_forward = FeedForward(dim=dim, hidden_dim=int(dim / 3 * 8))
 
         self.attention_norm1 = RMSNorm(dim, eps=norm_eps)
@@ -224,7 +224,22 @@ class ZImageTransformerBlock(nn.Module):
         if modulation:
             self.adaLN_modulation = nn.ModuleList([nn.Linear(min(dim, ADALN_EMBED_DIM), 4 * dim, bias=True)])
 
-    def forward(
+        self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
+
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
+        self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
+        self.feed_forward.enable_gradient_checkpointing(activation_cpu_offloading=activation_cpu_offloading)
+        self.attention.enable_gradient_checkpointing(activation_cpu_offloading=activation_cpu_offloading)
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
+        self.feed_forward.disable_gradient_checkpointing()
+        self.attention.disable_gradient_checkpointing()
+
+    def _forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
@@ -246,6 +261,21 @@ class ZImageTransformerBlock(nn.Module):
             x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
 
         return x
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        adaln_input: Optional[torch.Tensor] = None,
+        attn_params: Optional[AttentionParams] = None,
+    ):
+        if self.training and self.gradient_checkpointing:
+            forward_fn = self._forward
+            if self.activation_cpu_offloading:
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.feed_forward.device)
+            return checkpoint(forward_fn, x, freqs_cis, adaln_input, attn_params, use_reentrant=False)
+        else:
+            return self._forward(x, freqs_cis, adaln_input, attn_params)
 
 
 class FinalLayer(nn.Module):
@@ -324,6 +354,7 @@ class ZImageTransformer2DModel(nn.Module):
         axes_lens=ROPE_AXES_LENS,
         attn_mode: str = "torch",
         split_attn: bool = False,
+        use_16bit_for_attention: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -352,14 +383,18 @@ class ZImageTransformer2DModel(nn.Module):
 
         self.noise_refiner = nn.ModuleList(
             [
-                ZImageTransformerBlock(1000 + layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=True)
+                ZImageTransformerBlock(
+                    1000 + layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=True, use_16bit=use_16bit_for_attention
+                )
                 for layer_id in range(n_refiner_layers)
             ]
         )
 
         self.context_refiner = nn.ModuleList(
             [
-                ZImageTransformerBlock(layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=False)
+                ZImageTransformerBlock(
+                    layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=False, use_16bit=use_16bit_for_attention
+                )
                 for layer_id in range(n_refiner_layers)
             ]
         )
@@ -374,7 +409,10 @@ class ZImageTransformer2DModel(nn.Module):
         self.cap_pad_token = nn.Parameter(torch.empty((1, dim)))
 
         self.layers = nn.ModuleList(
-            [ZImageTransformerBlock(layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm) for layer_id in range(n_layers)]
+            [
+                ZImageTransformerBlock(layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, use_16bit=use_16bit_for_attention)
+                for layer_id in range(n_layers)
+            ]
         )
 
         head_dim = dim // n_heads
@@ -385,7 +423,7 @@ class ZImageTransformer2DModel(nn.Module):
         self.rope_embedder = RopeEmbedder(theta=rope_theta, axes_dims=axes_dims, axes_lens=axes_lens)
 
         self.gradient_checkpointing = False
-        self.cpu_offload_checkpointing = False
+        self.activation_cpu_offloading = False
         self.blocks_to_swap = None
 
         self.offloader = None
@@ -401,16 +439,16 @@ class ZImageTransformer2DModel(nn.Module):
 
     def enable_gradient_checkpointing(self, cpu_offload: bool = False):
         self.gradient_checkpointing = True
-        self.cpu_offload_checkpointing = cpu_offload
+        self.activation_cpu_offloading = cpu_offload
 
         for block in self.noise_refiner + self.context_refiner + self.layers:
-            block.enable_gradient_checkpointing(cpu_offload=cpu_offload)
+            block.enable_gradient_checkpointing(activation_cpu_offloading=cpu_offload)
 
         print(f"Z-Image: Gradient checkpointing enabled. CPU offload: {cpu_offload}")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
-        self.cpu_offload_checkpointing = False
+        self.activation_cpu_offloading = False
 
         for block in self.noise_refiner + self.context_refiner + self.layers:
             block.disable_gradient_checkpointing()
@@ -659,7 +697,9 @@ FP8_OPTIMIZATION_TARGET_KEYS = [".layers."]
 FP8_OPTIMIZATION_EXCLUDE_KEYS = ["_embedder", "final_layer"]
 
 
-def create_model(attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype]) -> ZImageTransformer2DModel:
+def create_model(
+    attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype], use_16bit_for_attention: bool = False
+) -> ZImageTransformer2DModel:
     with init_empty_weights():
         logger.info("Creating ZImageTransformer2DModel")
         model = ZImageTransformer2DModel(
@@ -680,6 +720,7 @@ def create_model(attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype])
             axes_lens=zimage_config.ROPE_AXES_LENS,
             attn_mode=attn_mode,
             split_attn=split_attn,
+            use_16bit_for_attention=use_16bit_for_attention,
         )
         if dtype is not None:
             model.to(dtype)
@@ -697,6 +738,7 @@ def load_zimage_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     disable_numpy_memmap: bool = False,
+    use_16bit_for_attention: bool = False,
 ) -> ZImageTransformer2DModel:
     """
     Load a Z-Image model from the specified checkpoint.
@@ -713,6 +755,7 @@ def load_zimage_model(
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
         disable_numpy_memmap (bool): Whether to disable numpy memory mapping when loading weights.
+        use_16bit_for_attention (bool): Whether to use 16-bit precision for attention computations.
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -720,7 +763,7 @@ def load_zimage_model(
     device = torch.device(device)
     loading_device = torch.device(loading_device)
 
-    model = create_model(attn_mode, split_attn, dit_weight_dtype)
+    model = create_model(attn_mode, split_attn, dit_weight_dtype, use_16bit_for_attention=use_16bit_for_attention)
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")

@@ -70,8 +70,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
             if "negative_prompt" not in prompt_dict:
                 prompt_dict["negative_prompt"] = ""  # empty negative prompt, this is not used if guidance_scale<=1.0
 
-            prompts = [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]
-            for prompt in prompts:
+            for prompt in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]:
                 if prompt is None or prompt in sample_prompts_te_outputs:
                     continue
 
@@ -179,11 +178,11 @@ class ZImageNetworkTrainer(NetworkTrainer):
             latent_model_input = latents.to(model.dtype)
             latent_model_input = latent_model_input.unsqueeze(2)  # Add frame dimension [B, C, F, H, W]
 
-            with torch.no_grad():
+            with accelerator.autocast(), torch.no_grad():
                 model_out = model(latent_model_input, timestep, embed, mask)
 
             if do_cfg:
-                with torch.no_grad():
+                with accelerator.autocast(), torch.no_grad():
                     negative_model_out = model(latent_model_input, timestep, negative_embed, negative_mask)
                 noise_pred = negative_model_out + guidance_scale * (model_out - negative_model_out)
             else:
@@ -237,6 +236,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
             dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
             disable_numpy_memmap=args.disable_numpy_memmap,
+            use_16bit_for_attention=not args.use_32bit_attention,
         )
         return model
 
@@ -273,7 +273,6 @@ class ZImageNetworkTrainer(NetworkTrainer):
         # latents: [B, C, H, W]
         # noisy_model_input: [B, C, H, W]
         image_sequence_length = (latents.shape[2] // model.all_patch_size[0]) * (latents.shape[3] // model.all_patch_size[0])
-        print(f"image_sequence_length: {image_sequence_length}")
 
         # Add frame dimension F=1
         noisy_model_input = noisy_model_input.unsqueeze(2)  # [B, C, 1, H, W]
@@ -284,12 +283,9 @@ class ZImageNetworkTrainer(NetworkTrainer):
         txt_seq_lens = [x.shape[0] for x in llm_embed]
 
         max_len = max(txt_seq_lens)
-        llm_embed = [torch.nn.functional.pad(x, (0, 0, 0, max_len - x.shape[0])) for x in llm_embed]
-        llm_embed = torch.stack(llm_embed, dim=0)  # B, L, D
-
         # if not split_attn, we need to make attention mask
         if not args.split_attn and bsize > 1:
-            padded_len = (math.ceil(max_len + image_sequence_length) / zimage_config.SEQ_MULTI_OF) * zimage_config.SEQ_MULTI_OF
+            padded_len = math.ceil((max_len + image_sequence_length) / zimage_config.SEQ_MULTI_OF) * zimage_config.SEQ_MULTI_OF
             max_len = int(padded_len) - image_sequence_length
             print(txt_seq_lens, padded_len, max_len)
             llm_mask = torch.zeros(bsize, max_len, dtype=torch.bool, device=llm_embed[0].device)
@@ -297,6 +293,10 @@ class ZImageNetworkTrainer(NetworkTrainer):
                 llm_mask[i, :x] = True
         else:
             llm_mask = None  # if split_attn, vl_mask is not used
+
+        llm_embed = [torch.nn.functional.pad(x, (0, 0, 0, max_len - x.shape[0])) for x in llm_embed]
+        llm_embed = torch.stack(llm_embed, dim=0)  # B, L, D
+
         # print(f"llm_embed shape: {llm_embed.shape}, vl_mask shape: {vl_mask.shape if vl_mask is not None else None}")
 
         # Timesteps
@@ -305,7 +305,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         # Prepare inputs on device
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
         llm_embed = llm_embed.to(device=accelerator.device, dtype=network_dtype)
-        llm_mask = llm_mask.to(device=accelerator.device)
+        llm_mask = llm_mask.to(device=accelerator.device) if llm_mask is not None else None
         t_input = t_input.to(device=accelerator.device, dtype=network_dtype)
 
         # Enable grad
@@ -314,12 +314,13 @@ class ZImageNetworkTrainer(NetworkTrainer):
             llm_embed.requires_grad_(True)
 
         # Call model
-        model_pred = model(x=noisy_model_input, t=t_input, cap_feats=llm_embed, cap_mask=llm_mask)
+        with accelerator.autocast():
+            model_pred = model(x=noisy_model_input, t=t_input, cap_feats=llm_embed, cap_mask=llm_mask)
 
         # model_pred: [B, C, F, H, W]
         model_pred = model_pred.squeeze(2)  # [B, C, H, W]
 
-        # Target
+        # Target: Opposite of usual Flow matching
         target = latents - noise
 
         return model_pred, target
@@ -330,7 +331,11 @@ def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT")
     parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3 text encoder checkpoint path")
     parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder model")
-    # Add other necessary args
+    parser.add_argument(
+        "--use_32bit_attention",
+        action="store_true",
+        help="use 32-bit precision for attention computations in DiT model even when using mixed precision (original behavior)",
+    )
     return parser
 
 

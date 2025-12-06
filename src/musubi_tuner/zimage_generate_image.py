@@ -103,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  #  "flash2", "flash3",
         help="attention mode",
     )
+    parser.add_argument(
+        "--use_32bit_attention",
+        action="store_true",
+        help="use 32-bit precision for attention computations in DiT model even when using mixed precision (original behavior)",
+    )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
     parser.add_argument(
         "--use_pinned_memory_for_block_swap",
@@ -281,6 +286,7 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         disable_numpy_memmap=args.disable_numpy_memmap,
+        use_16bit_for_attention=not args.use_32bit_attention,
     )
 
     # merge LoRA weights
