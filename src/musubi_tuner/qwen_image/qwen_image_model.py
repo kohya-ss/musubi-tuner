@@ -334,7 +334,24 @@ class QwenEmbedRope(nn.Module):
                 max_vid_index = max(height, width, max_vid_index)
 
         max_len = max(txt_seq_lens)
-        txt_freqs = self.pos_freqs[max_vid_index : max_vid_index + max_len, ...]
+
+        # txt_freqs = self.pos_freqs[max_vid_index : max_vid_index + max_len, ...]
+
+        # TODO make this optional
+        _, height,width=video_fhw[0]
+        if self.scale_rope:
+            height, width = height // 2, width // 2
+        frame_freqs, height_freqs, width_freqs = self.pos_freqs.split([x // 2 for x in self.axes_dim], dim=1)
+        
+        txt_freqs = torch.cat(
+            [
+                frame_freqs[max(height, width) : max(height, width) + max_len, :],
+                height_freqs[height : height + max_len, :],
+                width_freqs[width : width + max_len, :]
+            ], 
+            dim=-1
+        )
+
         vid_freqs = torch.cat(vid_freqs, dim=0)
 
         return vid_freqs, txt_freqs
