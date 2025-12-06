@@ -1,18 +1,27 @@
 import json
+import math
 from typing import Optional, Union
 import logging
 
+import numpy as np
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, AutoTokenizer
 from accelerate import init_empty_weights
 
 from musubi_tuner.utils.safetensors_utils import load_split_weights
+from musubi_tuner.zimage import zimage_autoencoder, zimage_config
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
 ZIMAGE_ID = "Tongyi-MAI/Z-Image-Turbo"
+
+
+def shift_scale_latents_for_decode(latents: torch.Tensor) -> torch.Tensor:
+    """Shift and scale latents before decoding with the VAE. latents should be casted to float32 before calling this function."""
+    latents = (latents / zimage_autoencoder.ZIMAGE_VAE_SCALING_FACTOR) + zimage_autoencoder.ZIMAGE_VAE_SHIFT_FACTOR
+    return latents
 
 
 def load_qwen3(
@@ -174,3 +183,96 @@ def load_qwen3(
     tokenizer = AutoTokenizer.from_pretrained(ZIMAGE_ID, subfolder="tokenizer")
     print(tokenizer)
     return tokenizer, qwen3
+
+
+def get_text_embeds(
+    tokenizer: AutoTokenizer,
+    text_encoder: Qwen3ForCausalLM,
+    prompt: Union[list[str], str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Get text embeddings from the text encoder.
+    Applies chat template to each prompt before encoding.
+
+    Args:
+        tokenizer (AutoTokenizer): The tokenizer to use.
+        text_encoder (Qwen3ForCausalLM): The text encoder model.
+        prompt (list[str] | str): The input prompt(s).
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing the prompt embeddings and attention masks.
+    """
+    prompt = [prompt] if isinstance(prompt, str) else prompt
+
+    logger.info(f"Encoding prompts: {prompt}. Applying chat template.")
+    formatted_prompts = []
+    for p in prompt:
+        messages = [{"role": "user", "content": p}]
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        formatted_prompts.append(formatted_prompt)
+
+    text_inputs = tokenizer(
+        formatted_prompts,
+        padding="max_length",
+        max_length=zimage_config.DEFAULT_MAX_SEQUENCE_LENGTH,
+        truncation=True,
+        return_tensors="pt",
+    )
+
+    text_input_ids = text_inputs.input_ids.to(text_encoder.device)
+    prompt_masks = text_inputs.attention_mask.to(text_encoder.device).bool()
+
+    with torch.no_grad():
+        prompt_embeds = text_encoder(input_ids=text_input_ids, attention_mask=prompt_masks, output_hidden_states=True).hidden_states[-2]
+    return prompt_embeds, prompt_masks
+
+
+def trim_embeds_and_mask_to_max_text_length(
+    prompt_embeds: torch.Tensor, prompt_masks: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Trim embeddings and masks to the maximum text length."""
+    max_text_length = prompt_masks.sum(dim=1).max().item()
+    prompt_embeds = prompt_embeds[:, :max_text_length, :]
+    prompt_masks = prompt_masks[:, :max_text_length]
+    return prompt_embeds, prompt_masks
+
+
+def get_timesteps_sigmas(num_inference_steps: int, shift: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Retrieve timesteps based on Z-Image's sigma schedule with shift."""
+    # calculate sigmas to get sigma_min and sigma_max
+    num_train_timesteps = zimage_config.DEFAULT_SCHEDULER_NUM_TRAIN_TIMESTEPS
+    timesteps = np.linspace(1, num_train_timesteps, num_train_timesteps, dtype=np.float32)[::-1].copy()
+    sigmas = timesteps / num_train_timesteps
+
+    sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
+
+    timesteps = sigmas * num_train_timesteps
+    sigma_min = sigmas[-1]
+    sigma_max = sigmas[0]  # always 1.0
+
+    # get timesteps based on sigma_min and sigma_max for num_inference_steps
+    timesteps = np.linspace(sigma_max * num_train_timesteps, sigma_min * num_train_timesteps, num_inference_steps + 1)[:-1]
+    sigmas = timesteps / num_train_timesteps  # 0-1 range
+
+    timesteps = torch.from_numpy(timesteps).to(dtype=torch.float32)
+    sigmas = torch.from_numpy(sigmas).to(dtype=torch.float32)
+
+    return timesteps, sigmas
+
+
+def step(model_output: torch.Tensor, sample: torch.Tensor, sigmas: torch.Tensor, step_index: int) -> torch.Tensor:
+    """Predict the sample at the previous timestep."""
+    sample = sample.to(torch.float32)
+    sigma_idx = step_index
+    sigma = sigmas[sigma_idx]
+    sigma_next = sigmas[sigma_idx + 1]
+
+    dt = sigma_next - sigma
+    prev_sample = sample + dt * model_output
+    prev_sample = prev_sample.to(model_output.dtype)
+    return prev_sample
