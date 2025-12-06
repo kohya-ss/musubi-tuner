@@ -495,6 +495,16 @@ def prepare_i2v_or_t2v_inputs(
             tokenizer_byt5, text_encoder_byt5, ""
         )
 
+        # move to CPU to free GPU memory
+        embed = embed.to("cpu")
+        mask = mask.to("cpu")
+        embed_byt5 = embed_byt5.to("cpu")
+        mask_byt5 = mask_byt5.to("cpu")
+        negative_embed = negative_embed.to("cpu")
+        negative_mask = negative_mask.to("cpu")
+        negative_embed_byt5 = negative_embed_byt5.to("cpu")
+        negative_mask_byt5 = negative_mask_byt5.to("cpu")
+
     # free text encoder and clean memory. if shared_models is not None, we need to move the models back to original device
     if shared_models is not None:
         text_encoder_vlm.to(vlm_original_device)
@@ -534,6 +544,7 @@ def prepare_i2v_or_t2v_inputs(
         with torch.no_grad():
             image_encoder_output = hf_clip_vision_encode(img_np, feature_extractor, image_encoder)
         image_encoder_last_hidden_state = image_encoder_output.last_hidden_state  # float16
+        image_encoder_last_hidden_state = image_encoder_last_hidden_state.to("cpu")
 
         logger.info("Encoding complete")
 
@@ -554,15 +565,16 @@ def prepare_i2v_or_t2v_inputs(
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=True), torch.no_grad():
             cond_latents = vae.encode(img_tensor)[0].mode()
             cond_latents = cond_latents * vae.scaling_factor
+            cond_latents = cond_latents.to("cpu")
 
         logger.info("Encoding complete")
 
         # prepare mask for image latent
-        latent_mask = torch.zeros(1, 1, lat_f, lat_h, lat_w, device=device)
+        latent_mask = torch.zeros(1, 1, lat_f, lat_h, lat_w, device="cpu")
         latent_mask[0, 0, 0, :, :] = 1.0  # first frame is image
 
         latents_concat = torch.zeros(
-            1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w, dtype=torch.float32, device=device
+            1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w, dtype=torch.float32, device="cpu"
         )
         latents_concat[:, :, 0:1, :, :] = cond_latents
 
@@ -575,7 +587,7 @@ def prepare_i2v_or_t2v_inputs(
         # T2V mode
         image_encoder_last_hidden_state = None
         cond_latents = torch.zeros(
-            1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS + 1, lat_f, lat_h, lat_w, dtype=torch.float32, device=device
+            1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS + 1, lat_f, lat_h, lat_w, dtype=torch.float32, device="cpu"
         )
 
     context = (embed, mask, embed_byt5, mask_byt5, image_encoder_last_hidden_state, cond_latents)
@@ -704,9 +716,23 @@ def generate(
     do_cfg = args.guidance_scale != 1.0
 
     latents = noise.to(dit_dtype)
-    cond_latents = cond_latents.to(dit_dtype)
-    cond_latents_null = cond_latents_null.to(dit_dtype)
-    print(f"Timesteps: {timesteps}")
+    cond_latents = cond_latents.to(device, dit_dtype)
+    cond_latents_null = cond_latents_null.to(device, dit_dtype)
+
+    embed = embed.to(device, dit_dtype)
+    mask = mask.to(device)
+    embed_byt5 = embed_byt5.to(device, dit_dtype)
+    mask_byt5 = mask_byt5.to(device)
+    if image_encoder_last_hidden_state is not None:
+        image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(device, dit_dtype)
+
+    negative_embed = negative_embed.to(device, dit_dtype)
+    negative_mask = negative_mask.to(device)
+    negative_embed_byt5 = negative_embed_byt5.to(device, dit_dtype)
+    negative_mask_byt5 = negative_mask_byt5.to(device)
+    if image_encoder_last_hidden_state_null is not None:
+        image_encoder_last_hidden_state_null = image_encoder_last_hidden_state_null.to(device, dit_dtype)
+
     with tqdm(total=len(timesteps), desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
             timestep = t.expand(latents.shape[0])  # keep dtype as float32 for better precision; avoid bfloat16 precision issues
