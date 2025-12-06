@@ -767,6 +767,7 @@ def load_zimage_model(
     model = create_model(attn_mode, split_attn, dit_weight_dtype, use_16bit_for_attention=use_16bit_for_attention)
 
     replace_keys = {
+        "all_final_layer.2-1.linear": "final_layer.linear",
         "all_final_layer.2-1.adaLN_modulation": "final_layer.adaLN_modulation",
         "all_x_embedder.2-1.bias": "x_embedder.bias",
         "all_x_embedder.2-1.weight": "x_embedder.weight",
