@@ -1,8 +1,7 @@
 import argparse
-from typing import Optional, List, Dict, Any
+from typing import Optional
 import math
 
-from einops import rearrange
 import torch
 from tqdm import tqdm
 from accelerate import Accelerator
