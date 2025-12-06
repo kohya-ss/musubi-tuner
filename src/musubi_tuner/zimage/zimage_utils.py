@@ -5,11 +5,11 @@ import logging
 
 import numpy as np
 import torch
-from transformers import Qwen3Config, Qwen3ForCausalLM, AutoTokenizer
+from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen2Tokenizer
 from accelerate import init_empty_weights
 
 from musubi_tuner.utils.safetensors_utils import load_split_weights
-from musubi_tuner.zimage import zimage_autoencoder, zimage_config
+from musubi_tuner.zimage import zimage_config
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -20,7 +20,7 @@ ZIMAGE_ID = "Tongyi-MAI/Z-Image-Turbo"
 
 def shift_scale_latents_for_decode(latents: torch.Tensor) -> torch.Tensor:
     """Shift and scale latents before decoding with the VAE. latents should be casted to float32 before calling this function."""
-    latents = (latents / zimage_autoencoder.ZIMAGE_VAE_SCALING_FACTOR) + zimage_autoencoder.ZIMAGE_VAE_SHIFT_FACTOR
+    latents = (latents / zimage_config.ZIMAGE_VAE_SCALING_FACTOR) + zimage_config.ZIMAGE_VAE_SHIFT_FACTOR
     return latents
 
 
@@ -30,7 +30,7 @@ def load_qwen3(
     device: Union[str, torch.device],
     disable_mmap: bool = False,
     state_dict: Optional[dict] = None,
-) -> tuple[AutoTokenizer, Qwen3ForCausalLM]:
+) -> tuple[Qwen2Tokenizer, Qwen3ForCausalLM]:
     QWEN3_CONFIG_JSON = """
 {
   "architectures": [
@@ -74,25 +74,14 @@ def load_qwen3(
         logger.info(f"Loading state dict from {ckpt_path}")
         sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
 
-    # convert prefixes
-    for key in list(sd.keys()):
-        if key.startswith("model."):
-            new_key = key.replace("model.", "model.language_model.", 1)
-        elif key.startswith("visual."):
-            new_key = key.replace("visual.", "model.visual.", 1)
-        else:
-            continue
-        if key not in sd:
-            logger.warning(f"Key {key} not found in state dict, skipping.")
-            continue
-        sd[new_key] = sd.pop(key)
+    sd["lm_head.weight"] = sd["model.embed_tokens.weight"]  # tie weights
 
     info = qwen3.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Qwen3: {info}")
     qwen3.to(device)
 
     if dtype is not None:
-        if dtype.itemsize() == 1:  # torch.float8
+        if dtype.itemsize == 1:  # torch.float8
             # prepare Qwen3 for fp8
             org_dtype = torch.bfloat16  # model weight is fp8 in loading, but original dtype is bfloat16
             logger.info(f"prepare Qwen3 for fp8: set to {dtype} from {org_dtype}")
@@ -100,7 +89,7 @@ def load_qwen3(
 
             # prepare LLM for fp8
             def prepare_fp8(vl_model: Qwen3ForCausalLM, target_dtype):
-                def forward_hook(module):
+                def rms_norm_forward_hook(module):
                     def forward(hidden_states):
                         input_dtype = hidden_states.dtype
                         hidden_states = hidden_states.to(torch.float32)
@@ -111,66 +100,13 @@ def load_qwen3(
 
                     return forward
 
-                def decoder_forward_hook(module):
-                    def forward(
-                        hidden_states: torch.Tensor,
-                        attention_mask: Optional[torch.Tensor] = None,
-                        position_ids: Optional[torch.LongTensor] = None,
-                        past_key_value: Optional[tuple[torch.Tensor]] = None,
-                        output_attentions: Optional[bool] = False,
-                        use_cache: Optional[bool] = False,
-                        cache_position: Optional[torch.LongTensor] = None,
-                        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-                        **kwargs,
-                    ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
-                        residual = hidden_states
-
-                        hidden_states = module.input_layernorm(hidden_states)
-
-                        # Self Attention
-                        hidden_states, self_attn_weights = module.self_attn(
-                            hidden_states=hidden_states,
-                            attention_mask=attention_mask,
-                            position_ids=position_ids,
-                            past_key_value=past_key_value,
-                            output_attentions=output_attentions,
-                            use_cache=use_cache,
-                            cache_position=cache_position,
-                            position_embeddings=position_embeddings,
-                            **kwargs,
-                        )
-                        input_dtype = hidden_states.dtype
-                        hidden_states = residual.to(torch.float32) + hidden_states.to(torch.float32)
-                        hidden_states = hidden_states.to(input_dtype)
-
-                        # Fully Connected
-                        residual = hidden_states
-                        hidden_states = module.post_attention_layernorm(hidden_states)
-                        hidden_states = module.mlp(hidden_states)
-                        hidden_states = residual + hidden_states
-
-                        outputs = (hidden_states,)
-
-                        if output_attentions:
-                            outputs += (self_attn_weights,)
-
-                        return outputs
-
-                    return forward
-
                 for module in vl_model.modules():
                     if module.__class__.__name__ in ["Embedding"]:
                         # print("set", module.__class__.__name__, "to", target_dtype)
                         module.to(target_dtype)
-                    if module.__class__.__name__ in ["Qwen2RMSNorm"]:
+                    if module.__class__.__name__ in ["Qwen3RMSNorm"]:
                         # print("set", module.__class__.__name__, "hooks")
-                        module.forward = forward_hook(module)
-                    if module.__class__.__name__ in ["Qwen2_5_VLDecoderLayer"]:
-                        # print("set", module.__class__.__name__, "hooks")
-                        module.forward = decoder_forward_hook(module)
-                    if module.__class__.__name__ in ["Qwen2_5_VisionRotaryEmbedding"]:
-                        # print("set", module.__class__.__name__, "hooks")
-                        module.to(target_dtype)
+                        module.forward = rms_norm_forward_hook(module)
 
             prepare_fp8(qwen3, org_dtype)
 
@@ -180,13 +116,12 @@ def load_qwen3(
     # Load tokenizer
     # TODO change to specific tokenizer class
     logger.info(f"Loading tokenizer from {ZIMAGE_ID}")
-    tokenizer = AutoTokenizer.from_pretrained(ZIMAGE_ID, subfolder="tokenizer")
-    print(tokenizer)
+    tokenizer = Qwen2Tokenizer.from_pretrained(ZIMAGE_ID, subfolder="tokenizer")
     return tokenizer, qwen3
 
 
 def get_text_embeds(
-    tokenizer: AutoTokenizer,
+    tokenizer: Qwen2Tokenizer,
     text_encoder: Qwen3ForCausalLM,
     prompt: Union[list[str], str],
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -195,7 +130,7 @@ def get_text_embeds(
     Applies chat template to each prompt before encoding.
 
     Args:
-        tokenizer (AutoTokenizer): The tokenizer to use.
+        tokenizer (Qwen2Tokenizer): The tokenizer to use.
         text_encoder (Qwen3ForCausalLM): The text encoder model.
         prompt (list[str] | str): The input prompt(s).
 
@@ -228,39 +163,67 @@ def get_text_embeds(
     prompt_masks = text_inputs.attention_mask.to(text_encoder.device).bool()
 
     with torch.no_grad():
-        prompt_embeds = text_encoder(input_ids=text_input_ids, attention_mask=prompt_masks, output_hidden_states=True).hidden_states[-2]
+        text_encoder_params = text_encoder.parameters()
+        text_encoder_params.__next__()  # skip first param (embedding)
+        second_param = text_encoder_params.__next__()
+        if second_param.dtype.itemsize == 1:  # torch.float8
+            with torch.autocast(device_type=text_encoder.device.type, dtype=torch.bfloat16):
+                prompt_embeds = text_encoder(
+                    input_ids=text_input_ids, attention_mask=prompt_masks, output_hidden_states=True
+                ).hidden_states[-2]
+        else:
+            prompt_embeds = text_encoder(
+                input_ids=text_input_ids, attention_mask=prompt_masks, output_hidden_states=True
+            ).hidden_states[-2]
     return prompt_embeds, prompt_masks
 
 
-def trim_embeds_and_mask_to_max_text_length(
-    prompt_embeds: torch.Tensor, prompt_masks: torch.Tensor
+def trim_pad_embeds_and_mask(
+    image_length: int, prompt_embeds: torch.Tensor, prompt_masks: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Trim embeddings and masks to the maximum text length."""
+    """
+    Trim and pad embeddings and masks to the divisible of SEQ_MULTI_OF according to the maximum image and text length.
+    If the batch size is 1, this function will trim the embeddings and masks to the actual text length without padding.
+    """
+    if prompt_embeds.shape[0] == 1:
+        actual_text_length = int(prompt_masks.sum(dim=1).item())
+        prompt_embeds = prompt_embeds[:, :actual_text_length, :]
+        prompt_masks = prompt_masks[:, :actual_text_length]
+        return prompt_embeds, prompt_masks
+
     max_text_length = prompt_masks.sum(dim=1).max().item()
-    prompt_embeds = prompt_embeds[:, :max_text_length, :]
-    prompt_masks = prompt_masks[:, :max_text_length]
+    total_length = image_length + max_text_length
+    padded_total_length = math.ceil(total_length / zimage_config.SEQ_MULTI_OF) * zimage_config.SEQ_MULTI_OF
+    pad_length = padded_total_length - total_length
+    max_text_length += pad_length
+    if max_text_length > prompt_embeds.shape[1]:
+        # pad
+        pad_size = max_text_length - prompt_embeds.shape[1]
+        pad_embeds = torch.zeros(
+            (prompt_embeds.shape[0], pad_size, prompt_embeds.shape[2]), dtype=prompt_embeds.dtype, device=prompt_embeds.device
+        )
+        prompt_embeds = torch.cat([prompt_embeds, pad_embeds], dim=1)
+        pad_masks = torch.zeros((prompt_masks.shape[0], pad_size), dtype=prompt_masks.dtype, device=prompt_masks.device)
+        prompt_masks = torch.cat([prompt_masks, pad_masks], dim=1)
+    else:
+        # trim
+        prompt_embeds = prompt_embeds[:, :max_text_length, :]
+        prompt_masks = prompt_masks[:, :max_text_length]
     return prompt_embeds, prompt_masks
 
 
 def get_timesteps_sigmas(num_inference_steps: int, shift: float) -> tuple[torch.Tensor, torch.Tensor]:
     """Retrieve timesteps based on Z-Image's sigma schedule with shift."""
-    # calculate sigmas to get sigma_min and sigma_max
     num_train_timesteps = zimage_config.DEFAULT_SCHEDULER_NUM_TRAIN_TIMESTEPS
-    timesteps = np.linspace(1, num_train_timesteps, num_train_timesteps, dtype=np.float32)[::-1].copy()
-    sigmas = timesteps / num_train_timesteps
+    timesteps = np.linspace(num_train_timesteps, 1, num_inference_steps + 1)[:-1]
+    sigmas = timesteps / num_train_timesteps  # 0-1 range
 
     sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
-
     timesteps = sigmas * num_train_timesteps
-    sigma_min = sigmas[-1]
-    sigma_max = sigmas[0]  # always 1.0
-
-    # get timesteps based on sigma_min and sigma_max for num_inference_steps
-    timesteps = np.linspace(sigma_max * num_train_timesteps, sigma_min * num_train_timesteps, num_inference_steps + 1)[:-1]
-    sigmas = timesteps / num_train_timesteps  # 0-1 range
 
     timesteps = torch.from_numpy(timesteps).to(dtype=torch.float32)
     sigmas = torch.from_numpy(sigmas).to(dtype=torch.float32)
+    sigmas = torch.cat([sigmas, torch.zeros(1, dtype=sigmas.dtype, device=sigmas.device)], dim=0)  # add final sigma 0
 
     return timesteps, sigmas
 

@@ -381,27 +381,17 @@ class AutoencoderKL(nn.Module):
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def decode(self, z: torch.FloatTensor, return_dict: bool = True) -> AutoencoderKLOutput:
+    def decode(self, z: torch.FloatTensor, return_dict: bool = True) -> torch.FloatTensor:
         if self.post_quant_conv is not None:
             z = self.post_quant_conv(z)
-
         dec = self.decoder(z)
+        return dec
 
-        if not return_dict:
-            return (dec,)
-
-        return AutoencoderKLOutput(sample=dec)
-
-    def encode(self, x: torch.FloatTensor, return_dict: bool = True) -> AutoencoderKLOutput:
+    def encode(self, x: torch.FloatTensor, return_dict: bool = True) -> torch.FloatTensor:
         enc = self.encoder(x)
-
         if self.quant_conv is not None:
             enc = self.quant_conv(enc)
-
-        if not return_dict:
-            return (enc,)
-
-        return AutoencoderKLOutput(sample=enc)
+        return enc
 
 
 def load_autoencoder_kl(vae_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False) -> AutoencoderKL:

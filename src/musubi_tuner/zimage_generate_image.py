@@ -7,14 +7,10 @@ import time
 import copy
 from typing import Tuple, Optional, List, Any, Dict
 
-import numpy as np
 import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from tqdm import tqdm
-import torch.nn.functional as F
-import torchvision.transforms.functional as TF
-from PIL import Image
 
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
@@ -67,7 +63,13 @@ def parse_args() -> argparse.Namespace:
 
     # inference
     parser.add_argument(
-        "--guidance_scale", type=float, default=4.0, help="Guidance scale for classifier free guidance. Default is 4.0."
+        "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=0.0,
+        help="Guidance scale for classifier free guidance. Default is 0.0 (no guidance).",
     )
     parser.add_argument("--prompt", type=str, default=None, help="prompt for generation")
     parser.add_argument("--negative_prompt", type=str, default=None, help="negative prompt for generation")
@@ -83,8 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--flow_shift",
         type=float,
-        default=None,
-        help="Shift factor for flow matching schedulers. Default is None (default).",
+        default=3.0,
+        help="Shift factor for flow matching schedulers. Default is 3.0.",
     )
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
@@ -223,7 +225,7 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int]:
     height = args.image_size[0]
     width = args.image_size[1]
 
-    if height % 16 != 0 or width % 16 != 0:
+    if height % (zimage_config.ZIMAGE_VAE_SCALE_FACTOR * 2) != 0 or width % (zimage_config.ZIMAGE_VAE_SCALE_FACTOR * 2) != 0:
         raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
 
     return height, width
@@ -278,7 +280,6 @@ def load_dit_model(
         args.fp8_scaled and not args.lycoris,
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
-        num_layers=args.num_layers,
         disable_numpy_memmap=args.disable_numpy_memmap,
     )
 
@@ -449,17 +450,21 @@ def prepare_text_inputs(
         conds_cache[cache_key] = (embed, mask)
 
     negative_prompt = args.negative_prompt
-    cache_key = negative_prompt
-    if cache_key in conds_cache:
-        negative_embed, negative_mask = conds_cache[cache_key]
+    if negative_prompt is not None:
+        cache_key = negative_prompt
+        if cache_key in conds_cache:
+            negative_embed, negative_mask = conds_cache[cache_key]
+        else:
+            move_models_to_device_if_needed()
+
+            negative_embed, negative_mask = zimage_utils.get_text_embeds(tokenizer, text_encoder, negative_prompt)
+            negative_embed = negative_embed.cpu()
+            negative_mask = negative_mask.cpu()
+
+            conds_cache[cache_key] = (negative_embed, negative_mask)
     else:
-        move_models_to_device_if_needed()
-
-        negative_embed, negative_mask = zimage_utils.get_text_embeds(tokenizer, text_encoder, negative_prompt)
-        negative_embed = negative_embed.cpu()
-        negative_mask = negative_mask.cpu()
-
-        conds_cache[cache_key] = (negative_embed, negative_mask)
+        negative_embed = None
+        negative_mask = None
 
     if not (shared_models and "text_encoder" in shared_models):  # if loaded locally
         # There is a bug text_encoder is not freed from GPU memory when text encoder is fp8. Needs gc.collect()
@@ -495,7 +500,6 @@ def generate(
         torch.Tensor generated latents
     """
     device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
-    vae_instance_for_return = None
 
     # prepare seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
@@ -526,7 +530,7 @@ def generate(
         model.prepare_block_swap_before_forward()
 
     # set random generator
-    seed_g = torch.Generator(device="cpu")
+    seed_g = torch.Generator(device="cpu" if args.cpu_noise else device)
     seed_g.manual_seed(seed)
 
     height, width = check_inputs(args)
@@ -538,26 +542,30 @@ def generate(
 
     embed = context["embed"].to(device, dtype=torch.bfloat16)
     mask = context["mask"].to(device, dtype=torch.bfloat16)
-    negative_embed = context_null["embed"].to(device, dtype=torch.bfloat16)
-    negative_mask = context_null["mask"].to(device, dtype=torch.bfloat16)
-
-    # The batch size is 1, so we can trim embeds as the length of the prompt
-    embed, _ = zimage_utils.trim_embeds_and_mask_to_max_text_length(embed, mask)
-    mask = None  # No attention mask needed after trimming
-    negative_embed, _ = zimage_utils.trim_embeds_and_mask_to_max_text_length(negative_embed, negative_mask)
-    negative_mask = None
+    negative_embed = context_null["embed"].to(device, dtype=torch.bfloat16) if context_null["embed"] is not None else None
+    negative_mask = context_null["mask"].to(device, dtype=torch.bfloat16) if context_null["mask"] is not None else None
 
     # 4. Prepare latent variables
-    vae_scale = zimage_config.ZIMAGE_VAE_SCALE_FACTOR
-    height_latent = 2 * (int(height) // vae_scale)  # Z-Image uses factor 2 for latent height and width
+    vae_scale = zimage_config.ZIMAGE_VAE_SCALE_FACTOR * 2
+    height_latent = 2 * (int(height) // vae_scale)  # divisible by 16
     width_latent = 2 * (int(width) // vae_scale)
     shape = (1, model.in_channels, height_latent, width_latent)
 
-    latents = torch.randn(shape, generator=seed_g, device=device, dtype=torch.float32)
+    latents = torch.randn(shape, generator=seed_g, device="cpu" if args.cpu_noise else device, dtype=torch.float32).to(device)
+    image_sequence_length = (height_latent // model.all_patch_size[0]) * (width_latent // model.all_patch_size[0])
+
+    # The batch size is 1, so we can trim embeds as the length of the prompt
+    embed, _ = zimage_utils.trim_pad_embeds_and_mask(image_sequence_length, embed, mask)
+    mask = None  # No attention mask needed after trimming
+    if negative_embed is not None:
+        negative_embed, _ = zimage_utils.trim_pad_embeds_and_mask(image_sequence_length, negative_embed, negative_mask)
+        negative_mask = None
 
     # 5. Prepare timesteps
     num_inference_steps = args.infer_steps
     timesteps, sigmas = zimage_utils.get_timesteps_sigmas(num_inference_steps, args.flow_shift)
+    timesteps = timesteps.to(device)
+    sigmas = sigmas.to(device)
 
     # 6. Denoising loop
     do_cfg = args.guidance_scale > 1.0  # 0 for no CFG
@@ -570,11 +578,13 @@ def generate(
             latent_model_input = latents.to(model.dtype)
             latent_model_input = latent_model_input.unsqueeze(2)  # Add frame dimension
 
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True), torch.no_grad():
+            # with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True), torch.no_grad():
+            with torch.no_grad():
                 model_out = model(latent_model_input, timestep, embed, mask)
 
             if do_cfg:
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True), torch.no_grad():
+                # with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True), torch.no_grad():
+                with torch.no_grad():
                     neg_model_out = model(latent_model_input, timestep, negative_embed, negative_mask)
                 noise_pred = model_out + args.guidance_scale * (model_out - neg_model_out)
             else:
@@ -584,6 +594,20 @@ def generate(
             latents = zimage_utils.step(noise_pred.to(torch.float32), latents, sigmas, i)
 
             pbar.update(1)
+
+    # Only clean up shared models if they were created within this function
+    if shared_models is None:
+        # free memory
+        del model
+        synchronize_device(device)
+
+        # wait for 5 seconds until block swap is done
+        if args.blocks_to_swap > 0:
+            logger.info("Waiting for 5 seconds to finish block swap")
+            time.sleep(5)
+
+        gc.collect()
+        clean_memory_on_device(device)
 
     return latents
 
@@ -647,8 +671,8 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     image_name = f"{time_flag}_{seed}{original_name}"
-    sample = sample.unsqueeze(0)  # CHW -> BCHW, where B=1, C=3
-    save_images_grid(sample, save_path, image_name, rescale=False, create_subdir=False)
+    sample = sample.unsqueeze(0).unsqueeze(2)  # CHW -> BCFHW, where B=1, C=3, F=1, H, W
+    save_images_grid(sample, save_path, image_name, rescale=True, create_subdir=False)
     logger.info(f"Sample images saved to: {save_path}/{image_name}")
 
     return f"{save_path}/{image_name}"
@@ -690,6 +714,8 @@ def save_output(
         # save images
         if original_base_names is not None:
             original_name = f"_{original_base_names[0]}"
+        else:
+            original_name = None
         save_images(video, args, original_name)
 
 
@@ -1054,16 +1080,15 @@ def main():
 
         # Generate latent
         gen_settings = get_generation_settings(args)
+
         # For single mode, precomputed data is None, shared_models is None.
         # generate will load all necessary models (VAE, Text/Image Encoder, DiT).
-        returned_vae, latent = generate(args, gen_settings)
-        # print(f"Generated latent shape: {latent.shape}")
-        # if args.save_merged_model:
-        #     return
+        latent = generate(args, gen_settings)
 
         # Save latent and video
-        # returned_vae from generate will be used for decoding here.
-        save_output(args, returned_vae, latent, device)
+        vae = zimage_autoencoder.load_autoencoder_kl(args.vae, device, disable_mmap=True)
+        vae.eval()
+        save_output(args, vae, latent, device)
 
         if args.bell:
             print("\a")  # Bell sound
