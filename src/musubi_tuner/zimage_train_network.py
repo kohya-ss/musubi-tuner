@@ -170,9 +170,6 @@ class ZImageNetworkTrainer(NetworkTrainer):
         timesteps = timesteps.to(device)
         sigmas = sigmas.to(device)
 
-        # Denoising loop
-        model.eval()
-
         # Z-Image inference loop
         for i, t in enumerate(tqdm(timesteps, desc="Sampling")):
             timestep = t.expand(latents.shape[0])
