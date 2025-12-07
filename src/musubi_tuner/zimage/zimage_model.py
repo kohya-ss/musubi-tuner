@@ -107,25 +107,19 @@ class FeedForward(nn.Module):
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
         self.gradient_checkpointing = False
-        self.activation_cpu_offloading = False
 
-    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
+    def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
-        self.activation_cpu_offloading = activation_cpu_offloading
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
-        self.activation_cpu_offloading = False
 
     def _forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def forward(self, x):
         if self.training and self.gradient_checkpointing:
-            forward_fn = self._forward
-            if self.activation_cpu_offloading:
-                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.w1.device)
-            return checkpoint(forward_fn, x, use_reentrant=False)
+            return checkpoint(self._forward, x, use_reentrant=False)
         else:
             return self._forward(x)
 
@@ -157,17 +151,14 @@ class ZImageAttention(nn.Module):
         self.norm_k = RMSNorm(self.head_dim, eps=eps) if qk_norm else None
 
         self.gradient_checkpointing = False
-        self.activation_cpu_offloading = False
 
-    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
+    def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
-        self.activation_cpu_offloading = activation_cpu_offloading
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
-        self.activation_cpu_offloading = False
 
-    def forward(
+    def _forward(
         self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
     ) -> torch.Tensor:
         query = self.to_q(hidden_states)
@@ -201,6 +192,14 @@ class ZImageAttention(nn.Module):
 
         output = self.to_out[0](hidden_states)
         return output
+
+    def forward(
+        self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
+    ) -> torch.Tensor:
+        if self.training and self.gradient_checkpointing:
+            return checkpoint(self._forward, hidden_states, freqs_cis, attn_params, use_reentrant=False)
+        else:
+            return self._forward(hidden_states, freqs_cis, attn_params)
 
 
 class ZImageTransformerBlock(nn.Module):
@@ -238,8 +237,8 @@ class ZImageTransformerBlock(nn.Module):
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
         self.activation_cpu_offloading = activation_cpu_offloading
-        self.feed_forward.enable_gradient_checkpointing(activation_cpu_offloading=activation_cpu_offloading)
-        self.attention.enable_gradient_checkpointing(activation_cpu_offloading=activation_cpu_offloading)
+        self.feed_forward.enable_gradient_checkpointing()
+        self.attention.enable_gradient_checkpointing()
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -284,7 +283,7 @@ class ZImageTransformerBlock(nn.Module):
         if self.training and self.gradient_checkpointing:
             forward_fn = self._forward
             if self.activation_cpu_offloading:
-                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.feed_forward.device)
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.feed_forward.w1.weight.device)
             return checkpoint(forward_fn, x, freqs_cis, adaln_input, attn_params, use_reentrant=False)
         else:
             return self._forward(x, freqs_cis, adaln_input, attn_params)
@@ -475,7 +474,7 @@ class ZImageTransformer2DModel(nn.Module):
             "double", self.layers, len(self.layers), self.blocks_to_swap, supports_backward, device, use_pinned_memory
         )
         print(
-            f"Z-Image: Block swap enabled. Swapping {num_blocks} blocks to device {device}. Supports backward: {supports_backward}"
+            f"Z-Image: Block swap enabled. Swapping {num_blocks} of {self.num_blocks} blocks to device {device}. Supports backward: {supports_backward}"
         )
 
     def switch_block_swap_for_inference(self):
@@ -696,6 +695,8 @@ class ZImageTransformer2DModel(nn.Module):
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.layers, index)
+
+        unified = unified.to(device)  # ensure unified is on the correct device when activation CPU offloading is used
 
         # Apply final layer
         unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
