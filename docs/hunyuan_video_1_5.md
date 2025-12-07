@@ -169,7 +169,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - It is not yet clear whether `--mixed_precision bf16` or `fp16` is better for HunyuanVideo 1.5 training.
 - The timestep sampling settings for HunyuanVideo 1.5 training are unclear, but it may be good to base them on `--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 2.0` and adjust as needed.
 - The recommended optimizer is `--optimizer_type Muon`, but it is only available in PyTorch 2.9 and later. If your PyTorch version is older, use `--optimizer_type adamw8bit` or similar.
-- Memory saving options like `--fp8_scaled` (for DiT) and `--fp8_vl` (for Text Encoder) are available.
+- Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT) and `--fp8_vl` (for Text Encoder) are available.
 - `--gradient_checkpointing` is available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 <details>
@@ -195,14 +195,14 @@ I2V学習を行う場合、`--task i2v`を指定し、`--image_encoder`パスを
 - HunyuanVideo 1.5の学習に`--mixed_precision bf16`と`fp16`のどちらが良いかはまだ不明です。
 - HunyuanVideo 1.5のタイムステップサンプリング設定は不明ですが、`--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 2.0`をベースに調整すると良いかもしれません。
 - オプティマイザには`--optimizer_type Muon`を推奨しますが、PyTorch 2.9以降でのみ利用可能です。PyTorchのバージョンが古い場合は`--optimizer_type adamw8bit`などを使用してください。
-- `--fp8_scaled`（DiT用）や`--fp8_vl`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
+- `--fp8_base`、`--fp8_scaled`（DiT用）や`--fp8_vl`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
 
 </details>
 
 ### Memory Optimization
 
-- `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower.
+- `--fp8_base` and `--fp8_scaled` options are available to reduce memory usage of DiT (specify both together). Quality may degrade slightly.
 - `--fp8_vl` option is available to reduce memory usage of Text Encoder (Qwen2.5-VL).
 - `--vae_sample_size` (default 128) controls VAE tiling size. Set to 256 if VRAM is sufficient for better quality. Set to 0 to disable tiling.
 - `--vae_enable_patch_conv` enables patch-based convolution in VAE for memory optimization.
@@ -212,7 +212,7 @@ I2V学習を行う場合、`--task i2v`を指定し、`--image_encoder`パスを
 <details>
 <summary>日本語</summary>
 
-- DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。品質はやや低下する可能性があります。
+- DiTのメモリ使用量を削減するために、`--fp8_base`と`--fp8_scaled`オプションを指定可能です（同時に指定してください）。品質はやや低下する可能性があります。
 - Text Encoder (Qwen2.5-VL)のメモリ使用量を削減するために、`--fp8_vl`オプションを指定可能です。
 - `--vae_sample_size`（デフォルト128）でVAEのタイリングサイズを制御します。VRAMが十分な場合は256に設定すると品質が向上します。0に設定するとタイリングを無効にします。
 - `--vae_enable_patch_conv`でVAEのパッチベース畳み込みを有効にし、メモリを最適化します。
@@ -313,7 +313,7 @@ python src/musubi_tuner/hv_1_5_generate_video.py \
     --image_path path/to/image.jpg \
     --prompt "A cat walking" \
     --video_size 720 1280 --video_length 21 --infer_steps 25 \
-    --attn_mode sdpa --fp8_scaled \
+    --attn_mode torch --fp8_scaled \
     --save_path path/to/save/dir --output_type video \
     --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
 ```
