@@ -116,8 +116,13 @@ def attention(
 
     # If split attn is False, attention mask is provided and all sequence lengths are same, we can trim the sequence
     seqlen_trimmed = False
-    # TODO do not trim when using flash attention or sageattn with cu_seqlens. And consider performance impact for compiled models.
-    if not attn_params.split_attn and attn_params.attention_mask is not None and attn_params.seqlens is not None:
+    # Trim if all seqlens are same, and not using flash or sageattn (which can handle masks efficiently)
+    if (
+        not attn_params.split_attn
+        and attn_params.attention_mask is not None
+        and attn_params.seqlens is not None
+        and (attn_params.attn_mode != "flash" and attn_params.attn_mode != "sageattn")
+    ):
         if torch.all(attn_params.seqlens == attn_params.seqlens[0]):
             seqlen = attn_params.seqlens[0].item()
             q = q[:, :seqlen]
