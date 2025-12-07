@@ -765,12 +765,9 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     # Load text encoders to CPU
     # vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
     vl_dtype = torch.bfloat16  # Default dtype for Text Encoder
-    tokenizer, text_encoder = zimage_utils.load_qwen2_5_vl(args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True)
+    tokenizer, text_encoder = zimage_utils.load_qwen3(args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True)
     shared_models["tokenizer"] = tokenizer
     shared_models["text_encoder"] = text_encoder
-    if args.edit or args.edit_plus:
-        vl_processor = zimage_utils.load_vl_processor()
-        shared_models["vl_processor"] = vl_processor
     return shared_models
 
 
@@ -804,17 +801,14 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     # Text Encoder loaded to CPU by load_text_encoder
     # vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
     vl_dtype = torch.bfloat16  # Default dtype for Text Encoder
-    tokenizer_batch, text_encoder_batch = zimage_utils.load_qwen2_5_vl(
+    tokenizer_batch, text_encoder_batch = zimage_utils.load_qwen3(
         args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True
     )
-    is_edit = args.edit or args.edit_plus  # Indicates edit modes (Qwen-Image-Edit or Edit-plus), not plain Qwen-Image
-    vl_processor_batch = zimage_utils.load_vl_processor() if is_edit else None
 
     # Text Encoder to device for this phase
-    vl_device = torch.device("cpu") if args.text_encoder_cpu else device
-    text_encoder_batch.to(vl_device)  # Moved into prepare_text_inputs logic
+    llm_device = torch.device("cpu") if args.text_encoder_cpu else device
+    text_encoder_batch.to(llm_device)  # Moved into prepare_text_inputs logic
 
-    all_precomputed_image_data = []  # For control images in Qwen-Image-Edit
     all_precomputed_text_data = []
     conds_cache_batch = {}
 
@@ -822,7 +816,6 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     temp_shared_models_txt = {
         "tokenizer": tokenizer_batch,
         "text_encoder": text_encoder_batch,  # on GPU
-        "vl_processor": vl_processor_batch,
         "conds_cache": conds_cache_batch,
     }
 
@@ -830,10 +823,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         logger.info(f"Text preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
 
         # prepare_text_inputs will move text_encoders to device temporarily, and handles edit or not
-        context, context_null = prepare_text_inputs(
-            prompt_args_item, all_precomputed_image_data[i][1], device, temp_shared_models_txt
-        )
-        text_data = {"context": context, "context_null": context_null, "control": all_precomputed_image_data[i]}
+        context, context_null = prepare_text_inputs(prompt_args_item, device, temp_shared_models_txt)
+        text_data = {"context": context, "context_null": context_null}
         all_precomputed_text_data.append(text_data)
 
     # Models should be removed from device after prepare_text_inputs
@@ -865,7 +856,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
                 # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
                 # It will use the DiT model from shared_models_for_generate.
                 # The VAE instance returned by generate will be None here.
-                _, latent = generate(prompt_args_item, gen_settings, shared_models_for_generate, current_text_data)
+                latent = generate(prompt_args_item, gen_settings, shared_models_for_generate, current_text_data)
 
                 if latent is None:  # and prompt_args_item.save_merged_model:  # Should be caught earlier
                     continue
@@ -932,6 +923,11 @@ def process_interactive(args: argparse.Namespace) -> None:
     shared_models = load_shared_models(args)
     shared_models["conds_cache"] = {}  # Initialize empty cache for interactive mode
 
+    # Load VAE for interactive mode
+    logger.info("Loading VAE for interactive mode...")
+    vae = zimage_autoencoder.load_autoencoder_kl(args.vae, device="cpu", disable_mmap=True)
+    vae.eval()
+
     print("Interactive mode. Enter prompts (Ctrl+D or Ctrl+Z (Windows) to exit):")
 
     try:
@@ -967,7 +963,7 @@ def process_interactive(args: argparse.Namespace) -> None:
                 # Generate latent
                 # For interactive, precomputed data is None. shared_models contains text/image encoders.
                 # generate will load VAE internally.
-                returned_vae, latent = generate(prompt_args, gen_settings, shared_models)
+                latent = generate(prompt_args, gen_settings, shared_models)
 
                 # # If not one_frame_inference, move DiT model to CPU after generation
                 # if prompt_args.blocks_to_swap > 0:
@@ -978,10 +974,10 @@ def process_interactive(args: argparse.Namespace) -> None:
 
                 # Save latent and video
                 # returned_vae from generate will be used for decoding here.
-                save_output(prompt_args, returned_vae, latent[0], device)
+                save_output(prompt_args, vae, latent[0], device)
 
                 if args.bell:
-                    print("\a")  # Bell sound
+                    print("\a")
 
             except KeyboardInterrupt:
                 print("\nInterrupted. Continue (Ctrl+D or Ctrl+Z (Windows) to exit)")
