@@ -246,6 +246,7 @@ IMAGE_ENCODER_CONFIG = {
 }
 
 
+# TODO do not take args, take only necessary parameters
 def load_image_encoders(args):
     logger.info("Loading image encoder feature extractor")
     feature_extractor = SiglipImageProcessor(**FEATURE_EXTRACTOR_CONFIG)

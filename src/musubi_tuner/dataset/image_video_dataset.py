@@ -78,6 +78,10 @@ ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
 ARCHITECTURE_QWEN_IMAGE_EDIT_FULL = "qwen_image_edit"
+ARCHITECTURE_HUNYUAN_VIDEO_1_5 = "hv15"
+ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL = "hunyuan_video_1_5"
+ARCHITECTURE_Z_IMAGE = "zi"
+ARCHITECTURE_Z_IMAGE_FULL = "z_image"
 
 
 def glob_images(directory, base="*"):
@@ -311,6 +315,41 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
+def save_latent_cache_hunyuan_video_1_5(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    image_latent: Optional[torch.Tensor],
+    vision_feature: Optional[torch.Tensor],
+):
+    """HunyuanVideo 1.5 architecture"""
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd: dict[str, torch.Tensor] = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu()}
+
+    if image_latent is not None:
+        dtype_str = dtype_to_str(image_latent.dtype)
+        _, F, H, W = image_latent.shape
+        sd[f"latents_image_{F}x{H}x{W}_{dtype_str}"] = image_latent.detach().cpu()
+
+    if vision_feature is not None:
+        dtype_str = dtype_to_str(vision_feature.dtype)
+        sd[f"siglip_{dtype_str}"] = vision_feature.detach().cpu()
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
+
+
+def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
+    """Z-Image architecture. No control latent is supported."""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+
+    C, H, W = latent.shape
+    F = 1
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -396,6 +435,25 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
+def save_text_encoder_output_cache_hunyuan_video_1_5(item_info: ItemInfo, embed: torch.Tensor, byt5_embed: torch.Tensor):
+    """Hunyuan-Video 1.5 architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
+    dtype_str = dtype_to_str(byt5_embed.dtype)
+    sd[f"varlen_byt5_embed_{dtype_str}"] = byt5_embed.detach().cpu()
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
+
+
+def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Tensor):
+    """Z-Image architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
+
+
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
@@ -439,6 +497,8 @@ class BucketSelector:
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
     RESOLUTION_STEPS_QWEN_IMAGE = 16
     RESOLUTION_STEPS_QWEN_IMAGE_EDIT = 16
+    RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5 = 16
+    RESOLUTION_STEPS_Z_IMAGE = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -447,6 +507,8 @@ class BucketSelector:
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
+        ARCHITECTURE_HUNYUAN_VIDEO_1_5: RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5,
+        ARCHITECTURE_Z_IMAGE: RESOLUTION_STEPS_Z_IMAGE,
     }
 
     def __init__(
@@ -1799,6 +1861,7 @@ class VideoDataset(BaseDataset):
     TARGET_FPS_WAN = 16.0
     TARGET_FPS_FRAMEPACK = 30.0
     TARGET_FPS_FLUX_KONTEXT = 1.0  # VideoDataset is not used for Flux Kontext, but this is a placeholder
+    TARGET_FPS_HUNYUAN_VIDEO_1_5 = 24.0
 
     def __init__(
         self,
@@ -1851,6 +1914,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_FRAMEPACK
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             self.target_fps = VideoDataset.TARGET_FPS_FLUX_KONTEXT
+        elif self.architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
+            self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 

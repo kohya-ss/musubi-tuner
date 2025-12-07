@@ -9,11 +9,13 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 
 from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_HUNYUAN_VIDEO,
+    ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
     ARCHITECTURE_FRAMEPACK,
     ARCHITECTURE_FLUX_KONTEXT,
     ARCHITECTURE_QWEN_IMAGE,
+    ARCHITECTURE_Z_IMAGE,
 )
 
 logger = BlissfulLogger(__name__, "green")
@@ -71,6 +73,8 @@ ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
 CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
+ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
+ARCH_Z_IMAGE = "Z-Image"
 
 ADAPTER_LORA = "lora"
 
@@ -80,6 +84,8 @@ IMPL_FRAMEPACK = "https://github.com/lllyasviel/FramePack"
 IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
 IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
 IMPL_QWEN_IMAGE_EDIT = IMPL_QWEN_IMAGE
+IMPL_HUNYUAN_VIDEO_1_5 = "https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5"
+IMPL_Z_IMAGE = "https://github.com/Tongyi-MAI/Z-Image"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -164,6 +170,12 @@ def build_metadata(
             custom_arch = None  # clear custom_arch to avoid override later
         else:
             arch = ARCH_QWEN_IMAGE_EDIT  # override with custom_arch later
+    elif architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
+        arch = ARCH_HUNYUAN_VIDEO_1_5
+        impl = IMPL_HUNYUAN_VIDEO_1_5
+    elif architecture == ARCHITECTURE_Z_IMAGE:
+        arch = ARCH_Z_IMAGE
+        impl = IMPL_Z_IMAGE
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 
@@ -222,10 +234,12 @@ def build_metadata(
             reso = (reso[0], reso[0])
     else:
         # resolution is defined in dataset, so use default here
-        # Use 1328x1328 for Qwen-Image models, 1024x1024 for Qwen-Image-Edit models, and 1280x720 for others (this is just a placeholder, actual resolution may vary)
+        # Use 1328x1328 for Qwen-Image, 1024x1024 for Qwen-Image-Edit and Z-Image, or 1280x720 for others (this is just a placeholder, actual resolution may vary)
         if architecture == ARCHITECTURE_QWEN_IMAGE:
             reso = (1328, 1328)
         elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+            reso = (1024, 1024)
+        elif architecture == ARCHITECTURE_Z_IMAGE:
             reso = (1024, 1024)
         else:
             reso = (1280, 720)
