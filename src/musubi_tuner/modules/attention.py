@@ -116,7 +116,7 @@ def attention(
 
     # If split attn is False, attention mask is provided and all sequence lengths are same, we can trim the sequence
     seqlen_trimmed = False
-    # Trim if all seqlens are same, and not using flash or sageattn (which can handle masks efficiently)
+    # Trim if all seqlens are the same, for attention modes other than flash or sageattn (which can handle masks efficiently)
     if (
         not attn_params.split_attn
         and attn_params.attention_mask is not None
