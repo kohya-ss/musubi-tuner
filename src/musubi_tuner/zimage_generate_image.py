@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated image(s)")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
     parser.add_argument(
-        "--embedded_cfg_scale", type=float, default=2.5, help="Embeded CFG scale (distilled CFG Scale), default is 2.5"
+        "--embedded_cfg_scale", type=float, default=2.5, help="Embedded CFG scale (distilled CFG Scale), default is 2.5"
     )
 
     # Flow Matching
