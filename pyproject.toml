@@ -35,6 +35,9 @@ cu128 = [
     "torch>=2.7.1",
     "torchvision>=0.22.1",
 ]
+gui = [
+    "gradio>=4.0.0",
+]
 
 [tool.uv]
 conflicts = [

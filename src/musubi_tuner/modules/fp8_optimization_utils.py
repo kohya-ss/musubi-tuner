@@ -8,7 +8,7 @@ import logging
 
 from tqdm import tqdm
 
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, TensorWeightAdapter, WeightTransformHooks
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -246,6 +246,7 @@ def load_safetensors_with_fp8_optimization(
     quantization_mode: str = "block",
     block_size: Optional[int] = 64,
     disable_numpy_memmap: bool = False,
+    weight_transform_hooks: Optional[WeightTransformHooks] = None,
 ) -> dict:
     """
     Load weight tensors from safetensors files and merge LoRA weights into the state dict with explicit FP8 optimization.
@@ -262,6 +263,7 @@ def load_safetensors_with_fp8_optimization(
         quantization_mode (str): Quantization mode, "tensor", "channel", or "block"
         block_size (int, optional): Block size for block-wise quantization (used if quantization_mode is "block")
         disable_numpy_memmap (bool): Disable numpy memmap when loading safetensors
+        weight_transform_hooks (WeightTransformHooks, optional): Hooks for weight transformation during loading
 
     Returns:
         dict: FP8 optimized state dict
@@ -290,7 +292,9 @@ def load_safetensors_with_fp8_optimization(
     # Process each file
     state_dict = {}
     for model_file in model_files:
-        with MemoryEfficientSafeOpen(model_file, disable_numpy_memmap=disable_numpy_memmap) as f:
+        with MemoryEfficientSafeOpen(model_file, disable_numpy_memmap=disable_numpy_memmap) as original_f:
+            f = TensorWeightAdapter(weight_transform_hooks, original_f) if weight_transform_hooks is not None else original_f
+
             keys = f.keys()
             for key in tqdm(keys, desc=f"Loading {os.path.basename(model_file)}", unit="key"):
                 value = f.get_tensor(key)

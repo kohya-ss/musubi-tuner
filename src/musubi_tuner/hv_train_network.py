@@ -1211,6 +1211,9 @@ class NetworkTrainer:
             logger.info(f"control video path: {control_video_path}")
 
         # inference: architecture dependent
+        was_train = transformer.training
+        transformer.eval()
+
         video = self.do_inference(
             accelerator,
             args,
@@ -1230,6 +1233,8 @@ class NetworkTrainer:
             image_path=image_path,
             control_video_path=control_video_path,
         )
+
+        transformer.train(was_train)
 
         # Save video
         if video is None:
