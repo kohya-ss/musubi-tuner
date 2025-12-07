@@ -1979,6 +1979,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     del shared_models_for_generate["model"]
     del dit_model
+    gc.collect()
     clean_memory_on_device(device)
     synchronize_device(device)  # Ensure memory is freed before loading VAE for decoding
 
@@ -2062,12 +2063,14 @@ def process_interactive(args: argparse.Namespace) -> None:
                 returned_vae, latent = generate(prompt_args, gen_settings, shared_models)
 
                 # If not one_frame_inference, move DiT model to CPU after generation
-                if not prompt_args.one_frame_inference:
-                    if prompt_args.blocks_to_swap > 0:
-                        logger.info("Waiting for 5 seconds to finish block swap")
-                        time.sleep(5)
-                    model = shared_models.get("model")
-                    model.to("cpu")  # Move DiT model to CPU after generation
+                # if not prompt_args.one_frame_inference:
+                if prompt_args.blocks_to_swap > 0:
+                    logger.info("Waiting for 5 seconds to finish block swap")
+                    time.sleep(5)
+                model = shared_models.get("model")
+                model.to("cpu")  # Move DiT model to CPU after generation
+                clean_memory_on_device(device)
+                synchronize_device(device)  # Ensure memory is freed before loading VAE for decoding
 
                 # Save latent and video
                 # returned_vae from generate will be used for decoding here.
