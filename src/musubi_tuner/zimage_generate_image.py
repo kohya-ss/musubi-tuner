@@ -219,7 +219,7 @@ def apply_overrides(args: argparse.Namespace, overrides: Dict[str, Any]) -> argp
 
 
 def check_inputs(args: argparse.Namespace) -> Tuple[int, int]:
-    """Validate video size and length
+    """Validate image size
 
     Args:
         args: command line arguments
