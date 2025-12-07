@@ -88,8 +88,15 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return output * self.weight
+        # original implementation. kept for reference
+        # output = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        # return output * self.weight
+
+        # cast to float32 for numerical stability
+        x_f = x.float()
+        w_f = self.weight.float()
+        out = x_f * torch.rsqrt(x_f.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (out * w_f).to(x.dtype)
 
 
 class FeedForward(nn.Module):
@@ -250,12 +257,16 @@ class ZImageTransformerBlock(nn.Module):
         if self.modulation:
             assert adaln_input is not None
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation[0](adaln_input).unsqueeze(1).chunk(4, dim=2)
+            del adaln_input
             gate_msa, gate_mlp = gate_msa.tanh(), gate_mlp.tanh()
             scale_msa, scale_mlp = 1.0 + scale_msa, 1.0 + scale_mlp
 
             attn_out = self.attention(self.attention_norm1(x) * scale_msa, freqs_cis=freqs_cis, attn_params=attn_params)
+            del scale_msa
             x = x + gate_msa * self.attention_norm2(attn_out)
+            del gate_msa
             x = x + gate_mlp * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
+            del scale_mlp, gate_mlp
         else:
             attn_out = self.attention(self.attention_norm1(x), freqs_cis=freqs_cis, attn_params=attn_params)
             x = x + self.attention_norm2(attn_out)
@@ -322,16 +333,13 @@ class RopeEmbedder:
         device = ids.device
 
         if self.freqs_cis is None:
-            self.freqs_cis = self.precompute_freqs_cis(self.axes_dims, self.axes_lens, theta=self.theta)
-            self.freqs_cis = [freqs_cis.to(device) for freqs_cis in self.freqs_cis]
-        else:
-            if self.freqs_cis[0].device != device:
-                self.freqs_cis = [freqs_cis.to(device) for freqs_cis in self.freqs_cis]
+            # [torch.Size([1536, 16]), torch.Size([512, 24]), torch.Size([512, 24])]
+            self.freqs_cis = self.precompute_freqs_cis(self.axes_dims, self.axes_lens, theta=self.theta)  # keep on cpu
 
         result = []
         for i in range(len(self.axes_dims)):
             index = ids[:, i]
-            result.append(self.freqs_cis[i][index])
+            result.append(self.freqs_cis[i].to(device)[index])
         return torch.cat(result, dim=-1)
 
 
@@ -641,6 +649,7 @@ class ZImageTransformer2DModel(nn.Module):
         # Create position IDs and RoPE for x (same for all samples since images have same size)
         x_pos_ids = self.create_image_position_ids(F_tokens, H_tokens, W_tokens, cap_seq_len, device)
         x_freqs_cis = self.rope_embedder(x_pos_ids)  # [x_seq_len, head_dim]
+        del x_pos_ids
         x_freqs_cis = x_freqs_cis.unsqueeze(0).expand(B, -1, -1)  # [B, x_seq_len, head_dim]
 
         # Apply noise refiner
@@ -660,6 +669,7 @@ class ZImageTransformer2DModel(nn.Module):
         # Create position IDs and RoPE for captions
         cap_pos_ids = self.create_caption_position_ids(cap_seq_len, device)
         cap_freqs_cis = self.rope_embedder(cap_pos_ids)  # [cap_seq_len, head_dim]
+        del cap_pos_ids
         cap_freqs_cis = cap_freqs_cis.unsqueeze(0).expand(B, -1, -1)  # [B, cap_seq_len, head_dim]
 
         # Apply context refiner
@@ -672,7 +682,9 @@ class ZImageTransformer2DModel(nn.Module):
         # Concatenate x and cap_feats for unified processing
         # Order: [x tokens, caption tokens]
         unified = torch.cat([x, cap_feats], dim=1)  # [B, x_seq_len + cap_seq_len, dim]
+        del x, cap_feats
         unified_freqs_cis = torch.cat([x_freqs_cis, cap_freqs_cis], dim=1)  # [B, x_seq_len + cap_seq_len, head_dim]
+        del x_freqs_cis, cap_freqs_cis
 
         # Apply main transformer layers
         attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, x_seq_len, cap_mask)
