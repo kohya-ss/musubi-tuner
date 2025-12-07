@@ -58,6 +58,11 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/12/07
+    - Z-Image Turboに対応しました。[PR #757](https://github.com/kohya-ss/musubi-tuner/pull/757)
+        - Turboモデル（蒸留モデル）のため学習が不安定かもしれません。フィードバックを歓迎します。
+        - 詳細は[ドキュメント](./docs/zimage.md)を参照してください。
+
 - 2025/12/05
     - HunyuanVideo 1.5に対応しました。[PR #748](https://github.com/kohya-ss/musubi-tuner/pull/748)
         - T2V、I2VのLoRA学習が可能です。詳細は[ドキュメント](./docs/hunyuan_video_1_5.md)を参照してください。
@@ -75,16 +80,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - 各学習スクリプトに `--use_pinned_memory_for_block_swap` オプションを追加しました。またblock swapの処理自体も改善しました。[PR #700](https://github.com/kohya-ss/musubi-tuner/pull/700)
         - このオプションを指定すると、block swapのoffloadingにピン留めメモリを使用します。これによりblock swapのパフォーマンスが向上する可能性があります。ただし、Windows環境の場合は共有GPUメモリの使用量が増加します。詳しくは[ドキュメント](./docs/hunyuan_video.md#memory-optimization)を参照してください。
         - 環境により`--use_pinned_memory_for_block_swap`を指定しない方が高速になる場合があるため、両方を試してみてください。
-
-- 2025/10/26
-    - Qwen-Imageの学習で、バッチサイズが2以上で、`--split_attn`が指定されていない場合に、Attentionの計算が正しく行われない不具合を修正しました。[PR #688](https://github.com/kohya-ss/musubi-tuner/pull/688)
-    - Wan、FramePack、Qwen-Imageの学習・推論スクリプトに`--disable_numpy_memmap`オプションを追加しました。[PR #681](https://github.com/kohya-ss/musubi-tuner/pull/681) および [PR #687](https://github.com/kohya-ss/musubi-tuner/pull/687)。FurkanGozukara氏に感謝します。
-        - このオプションを指定すると、モデルの読み込み時にnumpyのメモリマッピングを無効にします。一部の環境（RunPodなど）でモデル読み込みが高速化される可能性があります。ただし、RAM使用量が増加します。
-
-- 2025/10/25
-    - 制御画像を持つ画像データセットで、対象画像と制御画像の組み合わせが正しく読み込まれない不具合を修正しました。[PR #684](https://github.com/kohya-ss/musubi-tuner/pull/684)
-        - **制御画像を持つ画像データセットをご利用の場合、latentキャッシュの再作成を行ってください。**
-        - 先頭のマッチだけで判断していたため、対象画像が`a.png`、`ab.png`で、制御画像が`a_1.png`、`ab_1.png`のとき、`a.png`には、`a_1.png`と`ab_1.png`が組み合わされてしまっていました。
 
 ### リリースについて
 
