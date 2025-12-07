@@ -69,7 +69,7 @@ def main(args):
                 alpha = state_dict.pop(f"{lora_name}.alpha")
                 split_dims = [down_weight.size(0) // 3] * 3  # assume equal split for Q, K, V
 
-                lora_name_prefix = lora_name.replace("_qkv", "")
+                lora_name_prefix = lora_name.replace("qkv", "")
 
                 # dense weight (rank*3, in_dim)
                 split_weights = torch.chunk(down_weight, len(split_dims), dim=0)
@@ -130,7 +130,7 @@ def main(args):
                     up_weight[weight_index : weight_index + split_dims[i], i * rank : (i + 1) * rank] = up_weights[i]
                     weight_index += split_dims[i]
 
-                new_lora_name = lora_name_prefix + "_qkv"
+                new_lora_name = lora_name_prefix + "qkv"
                 state_dict[f"{new_lora_name}.lora_down.weight"] = down_weight
                 state_dict[f"{new_lora_name}.lora_up.weight"] = up_weight
 
