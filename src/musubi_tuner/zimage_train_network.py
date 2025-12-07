@@ -196,7 +196,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         vae.to(device)
         vae.eval()
 
-        logger.info(f"Decoding video from latents: {latents.shape}")
+        logger.info(f"Decoding image from latents: {latents.shape}")
         latents = zimage_utils.shift_scale_latents_for_decode(latents)
         with torch.no_grad():
             pixels = vae.decode(latents)
