@@ -44,7 +44,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
         self._control_training = False
-        self.default_guidance_scale = 1.0  # embedded guidance scale for inference? Z-Image default is usually 1.0 or 2.5? Inference script defaults to 0.0 guidance, but 2.5 embedded cfg scale.
+        self.default_guidance_scale = 0.0  # not used for Turbo model
 
     def process_sample_prompts(
         self,
