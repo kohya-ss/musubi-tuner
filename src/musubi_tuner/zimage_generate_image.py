@@ -663,7 +663,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     """Save images to directory
 
     Args:
-        sample: Video tensor
+        sample: Image tensor
         args: command line arguments
         original_base_name: Original base name (if latents are loaded from files)
 
