@@ -34,7 +34,7 @@ def create_arch_network(
         exclude_patterns = ast.literal_eval(exclude_patterns)
 
     # exclude if 'norm' in the name of the module
-    exclude_patterns.append(r".*(_norm|norm_).*")
+    exclude_patterns.append(r".*(_modulation|_refiner).*")
 
     kwargs["exclude_patterns"] = exclude_patterns
 
