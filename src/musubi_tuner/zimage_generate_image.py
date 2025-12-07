@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negative_prompt", type=str, default=None, help="negative prompt for generation")
     parser.add_argument("--image_size", type=int, nargs=2, default=[256, 256], help="image size, height and width")
     parser.add_argument("--infer_steps", type=int, default=25, help="number of inference steps, default is 25")
-    parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
+    parser.add_argument("--save_path", type=str, required=True, help="path to save generated image(s)")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
     parser.add_argument(
         "--embedded_cfg_scale", type=float, default=2.5, help="Embeded CFG scale (distilled CFG Scale), default is 2.5"
