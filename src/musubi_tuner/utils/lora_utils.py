@@ -17,7 +17,6 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
-
 def filter_lora_state_dict(
     weights_sd: Dict[str, torch.Tensor],
     include_pattern: Optional[str] = None,
