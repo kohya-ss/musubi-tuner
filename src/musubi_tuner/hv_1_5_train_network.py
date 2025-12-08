@@ -471,9 +471,9 @@ def hv1_5_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     )
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for DiT, default is bfloat16")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT")
-    parser.add_argument("--text_encoder", type=str, default=None, required=True, help="text encoder (Qwen2.5-VL) checkpoint path")
+    parser.add_argument("--text_encoder", type=str, default=None, help="text encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder model")
-    parser.add_argument("--byt5", type=str, default=None, required=True, help="BYT5 checkpoint path")
+    parser.add_argument("--byt5", type=str, default=None, help="BYT5 checkpoint path")
     parser.add_argument("--image_encoder", type=str, default=None, help="SigLIP image encoder path (for I2V cache compatibility)")
     parser.add_argument(
         "--vae_sample_size",

@@ -607,7 +607,7 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
     )
-    parser.add_argument("--image_encoder", type=str, required=True, help="Image encoder (CLIP) checkpoint path or directory")
+    parser.add_argument("--image_encoder", type=str, default=None, help="Image encoder (CLIP) checkpoint path or directory")
     parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
     parser.add_argument("--bulk_decode", action="store_true", help="decode all frames at once in sample generation")
     parser.add_argument("--f1", action="store_true", help="Use F1 sampling method for sample generation")
