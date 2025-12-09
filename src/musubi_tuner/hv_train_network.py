@@ -34,6 +34,7 @@ from diffusers.optimization import (
 )
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
+from musubi_tuner import convert_lora
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape, HYVideoDiffusionTransformer
 import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
@@ -1303,6 +1304,16 @@ class NetworkTrainer:
     def control_training(self) -> bool:
         return self._control_training
 
+    def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module: lora_module):
+        keys = list(weights_sd.keys())
+        if keys[0].startswith("lora_"):
+            return weights_sd  # default format
+        if keys[0].startswith("diffusion_model.") or keys[0].startswith("transformer."):
+            # Diffusers? format
+            logger.info("converting LoRA weights from diffusers format to default format")
+            return convert_lora.convert_from_diffusers("lora_unet_", weights_sd)
+        return weights_sd  # unknown format, return as is
+
     def process_sample_prompts(
         self,
         args: argparse.Namespace,
@@ -1783,6 +1794,7 @@ class NetworkTrainer:
                 accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
 
                 weights_sd = load_file(weight_path)
+                weights_sd = self.convert_weight_keys(weights_sd, args.network_module)
                 module = network_module.create_arch_network_from_weights(
                     multiplier, weights_sd, unet=transformer, for_inference=True
                 )

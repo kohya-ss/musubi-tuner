@@ -11,7 +11,7 @@ This feature is experimental.
 <details>
 <summary>日本語</summary>
 
-このドキュメントは、Musubi Tunerフレームワーク内でのZ-Imageアーキテクチャの使用法について説明しています。Z-Imageはテキストから画像を生成することができるモデルアーキテクチャです。
+このドキュメントは、Musubi Tunerフレームワーク内でのZ-Imageアーキテクチャの使用法について説明しています。Z-Imageはテキストから画像を生成することができるモデルアーキテクチャです。Z-Imageは現在蒸留モデルであるTurbo版しかリリースされていないため、学習は不安定です。モデルのダウンロードの項も参照してください。
 
 事前キャッシング、学習、推論のオプションは`--help`で確認してください。HunyuanVideoと共通のオプションが多くありますので、必要に応じて[HunyuanVideoのドキュメント](./hunyuan_video.md)も参照してください。
 
@@ -21,7 +21,11 @@ This feature is experimental.
 
 ## Download the model / モデルのダウンロード
 
-You need to download the DiT, VAE, and Text Encoder (Qwen3) models. You can use either of the following:
+You need to download the DiT, VAE, and Text Encoder (Qwen3) models. 
+
+Since the base model has not been released, it is recommended to use AI Toolkit/ostris's De-Turbo model. Download `z_image_de_turbo_v1_bf16.safetensors` from [ostris/Z-Image-De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) and use it as the DiT model.
+
+The Turbo version DiT, VAE, and Text Encoder can be obtained from Tongyi-MAI's official repository or ComfyUI weights. You can use either of the following:
 
 - **Official Repository**: [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/)
     - For DiT and Text Encoder, download all the split files and specify the first file (e.g., `00001-of-00004.safetensors`) in the arguments.
@@ -34,10 +38,18 @@ You need to prepare the following models:
 - **VAE**: The autoencoder model.
 - **Text Encoder**: Qwen3 model.
 
+As another option, you can also use ostris's [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) to train by combining the Turbo version with an adapter. In this case, download `zimage_turbo_training_adapter_v2.safetensors`, etc., and specify this LoRA weight in the `--base_weights` option during training.
+
+We would like to express our deep gratitude to ostris for providing the De-Turbo model and Training Adapter.
+
 <details>
 <summary>日本語</summary>
 
-DiT, VAE, Text Encoder (Qwen3) のモデルをダウンロードする必要があります。以下のいずれかを使用してください：
+DiT, VAE, Text Encoder (Qwen3) のモデルをダウンロードする必要があります。
+
+Baseモデルがリリースされていないため、AI Toolkit/ostris氏のDe-Turboモデルを使用することをお勧めします。[ostris/Z-Image-De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) から `z_image_de_turbo_v1_bf16.safetensors` をダウンロードし、DiTモデルとして使用してください。
+
+Turbo版のDiT、VAEとText EncoderはTongyi-MAIの公式リポジトリまたはComfyUI用重みから取得できます。以下のいずれかを使用してください：
 
 - **公式リポジトリ**: [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/)
     - DiT、Text Encoderは、分割された複数のファイルをすべてダウンロードし、引数には `00001-of-00004.safetensors` のような最初のファイルを指定してください。
@@ -49,6 +61,10 @@ DiT, VAE, Text Encoder (Qwen3) のモデルをダウンロードする必要が�
 - **DiT**: Transformerモデル。
 - **VAE**: Autoencoderモデル。
 - **Text Encoder**: Qwen3モデル。
+
+別のオプションとして、ostris氏の [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) を使用して、Turbo版とAdapterを組み合わせて学習することもできます。この場合は、`zimage_turbo_training_adapter_v2.safetensors` 等をダウンロードし、学習時に `--base_weights` オプションにこのLoRA重みを指定してください。
+
+De-TurboモデルおよびTraining Adapterを提供してくださった ostris 氏に深く感謝します。
 
 </details>
 
@@ -211,6 +227,25 @@ Z-ImageのLoRA重みをComfyUI形式に変換するスクリプトが提供さ�
 - `--split_attn`を指定すると、attentionを分割して処理し、VRAM使用量をわずかに減らします。
 
 </details>
+
+### Sample images during training with De-Turbo model or Training Adapter / De-TurboモデルまたはTraining Adapterで学習中にサンプル画像を生成する
+
+When training with the De-Turbo model or Training Adapter, add negative prompt and CFG scale to the sampling options to generate sample images with CFG. It is also recommended to increase the number of steps. `--l` specifies the CFG scale.
+
+```text
+A beautiful landscape painting of mountains during sunset.  --n bad quality --w 1280 --h 720 --fs 3 --s 20 --d 1234 --l 5
+```
+
+<details>
+<summary>日本語</summary>
+ 
+ De-TurboモデルまたはTraining Adapterで学習する場合、サンプリングオプションにネガティブプロンプトとCFGスケールを追加して、CFGありでサンプル画像を生成してください。またステップ数も増やすことをお勧めします。`--l`でCFGスケールを指定します。
+ 
+ ```text
+A beautiful landscape painting of mountains during sunset.  --n bad quality --w 1280 --h 720 --fs 3 --s 20 --d 1234 --l 5
+```
+
+ </details>
 
 ## Inference / 推論
 
