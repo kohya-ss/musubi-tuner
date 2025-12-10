@@ -113,8 +113,10 @@ def construct_ui():
                         "Please enter a project directory path.", 
                         gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                         gr.update(), gr.update(), gr.update(),
+                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                         gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+                        gr.update(),
+                        gr.update(), gr.update()
                     )
                 try:
                     os.makedirs(os.path.join(path, "training"), exist_ok=True)
@@ -141,11 +143,8 @@ def construct_ui():
                     new_prec = settings.get("mixed_precision", "bf16")
                     new_grad_cp = settings.get("gradient_checkpointing", True)
                     new_fp8_s = settings.get("fp8_scaled", True)
-                    new_fp8_s = settings.get("fp8_scaled", True)
                     new_fp8_l = settings.get("fp8_llm", True)
                     new_add_args = settings.get("additional_args", "")
-
-                    # Post-processing params
 
                     # Post-processing params
                     new_in_lora = settings.get("input_lora_path", "")
@@ -164,7 +163,6 @@ def construct_ui():
                         preview_content,
                         new_vae, new_te1, new_te2,
                         new_dit, new_out_nm, new_lr, new_epochs, new_save_n,
-                        new_dit, new_out_nm, new_lr, new_epochs, new_save_n,
                         new_flow, new_swap, new_prec, new_grad_cp, new_fp8_s, new_fp8_l,
                         new_add_args,
                         new_in_lora, new_out_comfy
@@ -172,9 +170,11 @@ def construct_ui():
                 except Exception as e:
                     return (
                         f"Error initializing project: {str(e)}", 
-                        gr.update(), gr.update(), gr.update(),
                         gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                        gr.update(), gr.update(), gr.update(),
                         gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                        gr.update(),
                         gr.update(), gr.update()
                     )
 
