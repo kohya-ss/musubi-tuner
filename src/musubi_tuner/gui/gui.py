@@ -11,20 +11,20 @@ i18n = gr.I18n(en=I18N_DATA["en"], ja=I18N_DATA["ja"])
 
 
 def construct_ui():
-    with gr.Blocks(title=i18n("app_title")) as demo:
+    # I18N doesn't work for gr.Blocks title
+    # with gr.Blocks(title=i18n("app_title")) as demo:
+    with gr.Blocks(title="Musubi Tuner GUI") as demo:
         gr.Markdown(i18n("app_header"))
         gr.Markdown(i18n("app_desc"))
 
         with gr.Accordion(i18n("acc_project"), open=True):
             gr.Markdown(i18n("desc_project"))
             with gr.Row():
-                project_dir = gr.Textbox(label=i18n("lbl_proj_dir"), placeholder=i18n("ph_proj_dir"))
+                project_dir = gr.Textbox(label=i18n("lbl_proj_dir"), placeholder=i18n("ph_proj_dir"), max_lines=1)
 
             # Placeholder for project initialization or loading
             init_btn = gr.Button(i18n("btn_init_project"))
             project_status = gr.Markdown("")
-
-            # Old init_project removed, replaced by logic in 'Dataset Settings' block to handle loading settings.
 
         with gr.Accordion(i18n("acc_model"), open=True):
             gr.Markdown(i18n("desc_model"))
@@ -40,7 +40,7 @@ def construct_ui():
                 vram_size = gr.Dropdown(label=i18n("lbl_vram"), choices=["12", "16", "24", "32", ">32"], value="24")
 
             with gr.Row():
-                comfy_models_dir = gr.Textbox(label=i18n("lbl_comfy_dir"), placeholder=i18n("ph_comfy_dir"))
+                comfy_models_dir = gr.Textbox(label=i18n("lbl_comfy_dir"), placeholder=i18n("ph_comfy_dir"), max_lines=1)
 
             # Validation for ComfyUI models directory
             models_status = gr.Markdown("")
@@ -133,8 +133,8 @@ def construct_ui():
                     new_model = settings.get("model_arch", "Qwen-Image")
                     new_vram = settings.get("vram_size", "16")
                     new_comfy = settings.get("comfy_models_dir", "")
-                    new_w = settings.get("resolution_w", 1024)
-                    new_h = settings.get("resolution_h", 1024)
+                    new_w = settings.get("resolution_w", 1328)
+                    new_h = settings.get("resolution_h", 1328)
                     new_batch = settings.get("batch_size", 1)
                     new_vae = settings.get("vae_path", "")
                     new_te1 = settings.get("text_encoder1_path", "")
@@ -165,6 +165,11 @@ def construct_ui():
                     msg = f"Project initialized at {path}. 'training' folder ready."
                     if settings:
                         msg += " Settings loaded."
+                    msg += " Configure the dataset in the 'training' folder. Images and caption files (same name as image, extension is '.txt') should be placed in the 'training' folder."
+                    msg += "\n\nプロジェクトが初期化されました。 'training' フォルダが準備されました。"
+                    if settings:
+                        msg += "設定が読み込まれました。"
+                    msg += "'training' フォルダに、画像とキャプションファイル（画像と同じファイル名で拡張子は '.txt'）を配置してください。"
 
                     return (
                         msg,
@@ -274,9 +279,9 @@ num_repeats = 1
             with gr.Row():
                 set_preprocessing_defaults_btn = gr.Button(i18n("btn_set_paths"))
             with gr.Row():
-                vae_path = gr.Textbox(label=i18n("lbl_vae_path"), placeholder=i18n("ph_vae_path"))
-                text_encoder1_path = gr.Textbox(label=i18n("lbl_te1_path"), placeholder=i18n("ph_te1_path"))
-                text_encoder2_path = gr.Textbox(label=i18n("lbl_te2_path"), placeholder=i18n("ph_te2_path"))
+                vae_path = gr.Textbox(label=i18n("lbl_vae_path"), placeholder=i18n("ph_vae_path"), max_lines=1)
+                text_encoder1_path = gr.Textbox(label=i18n("lbl_te1_path"), placeholder=i18n("ph_te1_path"), max_lines=1)
+                text_encoder2_path = gr.Textbox(label=i18n("lbl_te2_path"), placeholder=i18n("ph_te2_path"), max_lines=1)
 
             with gr.Row():
                 cache_latents_btn = gr.Button(i18n("btn_cache_latents"))
@@ -495,10 +500,10 @@ num_repeats = 1
             with gr.Row():
                 set_training_defaults_btn = gr.Button(i18n("btn_rec_params"))
             with gr.Row():
-                dit_path = gr.Textbox(label=i18n("lbl_dit_path"), placeholder=i18n("ph_dit_path"))
+                dit_path = gr.Textbox(label=i18n("lbl_dit_path"), placeholder=i18n("ph_dit_path"), max_lines=1)
 
             with gr.Row():
-                output_name = gr.Textbox(label=i18n("lbl_output_name"), value="my_lora")
+                output_name = gr.Textbox(label=i18n("lbl_output_name"), value="my_lora", max_lines=1)
 
             with gr.Group():
                 gr.Markdown(i18n("header_basic_params"))
@@ -535,8 +540,8 @@ num_repeats = 1
             with gr.Row():
                 set_post_proc_defaults_btn = gr.Button(i18n("btn_set_paths"))
             with gr.Row():
-                input_lora = gr.Textbox(label=i18n("lbl_input_lora"), placeholder=i18n("ph_input_lora"))
-                output_comfy_lora = gr.Textbox(label=i18n("lbl_output_comfy"), placeholder=i18n("ph_output_comfy"))
+                input_lora = gr.Textbox(label=i18n("lbl_input_lora"), placeholder=i18n("ph_input_lora"), max_lines=1)
+                output_comfy_lora = gr.Textbox(label=i18n("lbl_output_comfy"), placeholder=i18n("ph_output_comfy"), max_lines=1)
 
             convert_btn = gr.Button(i18n("btn_convert"))
             conversion_log = gr.Textbox(label=i18n("lbl_conversion_log"), lines=5, interactive=False)
@@ -617,6 +622,7 @@ num_repeats = 1
                 return "Error: dataset_config.toml not found. Please generate it."
 
             output_dir = os.path.join(project_path, "models")
+            logging_dir = os.path.join(project_path, "logs")
 
             # Save settings
             save_project_settings(
@@ -692,6 +698,10 @@ num_repeats = 1
                 "--persistent_data_loader_workers",
                 "--seed",
                 "42",
+                "--logging_dir",
+                logging_dir,
+                "--log_with",
+                "tensorboard",
             ]
 
             if prec != "no":
@@ -705,12 +715,16 @@ num_repeats = 1
                 inner_cmd.append("--fp8_scaled")
 
             if fp8_l:
-                inner_cmd.append("--fp8_llm")
+                if model == "Z-Image-Turbo":
+                    inner_cmd.append("--fp8_llm")
+                elif model == "Qwen-Image":
+                    inner_cmd.append("--fp8_vl")
 
             if swap > 0:
                 inner_cmd.extend(["--blocks_to_swap", str(int(swap))])
 
             inner_cmd.append("--sdpa")
+            inner_cmd.append("--split_attn")
 
             # Model specific command modification
             if model == "Z-Image-Turbo":
@@ -731,7 +745,7 @@ num_repeats = 1
             inner_cmd_str = subprocess.list2cmdline(inner_cmd)
 
             # Chain commands: Run training -> echo message -> pause >nul (hides default message)
-            final_cmd_str = f"{inner_cmd_str} & echo. & echo Training finished. Press any key to close this window... & pause >nul"
+            final_cmd_str = f"{inner_cmd_str} & echo. & echo Training finished. Press any key to close this window... 学習が完了しました。このウィンドウを閉じるには任意のキーを押してください。 & pause >nul"
 
             try:
                 # Open in new console window

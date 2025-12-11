@@ -29,7 +29,7 @@ class ConfigManager:
                 },
             },
             "Qwen-Image": {
-                "resolution": (1024, 1024),
+                "resolution": (1328, 1328),
                 "vae_subpath": ["vae", "qwen_image_vae.safetensors"],
                 "te1_subpath": ["text_encoders", "qwen_2.5_vl_7b.safetensors"],
                 "te2_subpath": None,
