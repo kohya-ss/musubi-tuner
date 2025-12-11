@@ -329,7 +329,7 @@ def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     """Z-Image specific parser setup"""
     # parser.add_argument("--dit_dtype", type=str, default=None, help="data type for DiT, default is bfloat16")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT")
-    parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3 text encoder checkpoint path")
+    parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3 text encoder checkpoint path")
     parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder model")
     parser.add_argument(
         "--use_32bit_attention",

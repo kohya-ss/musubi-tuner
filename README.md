@@ -63,6 +63,12 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- December 9, 2025
+    - LoRA weights in Diffusers format can now be loaded with the `--base_weights` option in training scripts. See [PR #772](https://github.com/kohya-ss/musubi-tuner/pull/772).
+        - This allows training using Z-Image-Turbo's Training Adapter, etc.
+    - Updated the [documentation](./docs/zimage.md) on how to perform LoRA training for Z-Image-Turbo using De-Turbo models or Training Adapters.
+    - We would like to express our deep gratitude to ostris for providing these.
+
 - December 7, 2025
     - Added support for Z-Image Turbo. See [PR #757](https://github.com/kohya-ss/musubi-tuner/pull/757).
         - Since this is a Turbo (distilled) model, training may be unstable. Feedback is welcome.
