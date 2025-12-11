@@ -1,6 +1,9 @@
 import gradio as gr
 import os
 import toml
+from musubi_tuner.gui.config_manager import ConfigManager
+
+config_manager = ConfigManager()
 
 # UI Text Dictionary for potential i18n
 UI_TEXT = {
@@ -21,8 +24,9 @@ UI_TEXT = {
 - **FP8**: further reduces memory usage by using 8-bit floating point arithmetic.
 """,
     "post_proc_btn_desc": "Set default Input/Output paths based on Project Directory and Output Name.",
-    "additional_args_desc": "Enter any additional command line arguments here. They will be appended to the training command."
+    "additional_args_desc": "Enter any additional command line arguments here. They will be appended to the training command.",
 }
+
 
 def construct_ui():
     with gr.Blocks(title="Musubi Tuner GUI") as demo:
@@ -33,7 +37,7 @@ def construct_ui():
             gr.Markdown(UI_TEXT["project_desc"])
             with gr.Row():
                 project_dir = gr.Textbox(label="Project Working Directory", placeholder="Absolute path to your project folder")
-            
+
             # Placeholder for project initialization or loading
             init_btn = gr.Button("Initialize/Load Project")
             project_status = gr.Markdown("")
@@ -47,13 +51,15 @@ def construct_ui():
                     label="Model Architecture",
                     choices=[
                         "Z-Image",
+                        "Qwen-Image",
                     ],
-                    value="Z-Image"
+                    value="Z-Image",
                 )
-                
+                vram_size = gr.Dropdown(label="VRAM Size (GB)", choices=["12", "16", "24", "32", ">32"], value="24")
+
             with gr.Row():
                 comfy_models_dir = gr.Textbox(label="ComfyUI Models Directory", placeholder="Absolute path to ComfyUI/models")
-            
+
             # Validation for ComfyUI models directory
             models_status = gr.Markdown("")
             validate_models_btn = gr.Button("Validate Models Directory")
@@ -62,7 +68,7 @@ def construct_ui():
             gr.Markdown("### 3. Dataset Settings")
             gr.Markdown(UI_TEXT["dataset_desc"])
             with gr.Row():
-                set_resolution_btn = gr.Button("Set Recommended Resolution")
+                set_rec_settings_btn = gr.Button("Set Recommended Resolution & Batch Size")
             with gr.Row():
                 resolution_w = gr.Number(label="Resolution Width", value=1024, precision=0)
                 resolution_h = gr.Number(label="Resolution Height", value=1024, precision=0)
@@ -100,7 +106,7 @@ def construct_ui():
                     settings = load_project_settings(project_path)
                     # Update with new values
                     settings.update(kwargs)
-                    
+
                     settings_path = os.path.join(project_path, "musubi_project.toml")
                     with open(settings_path, "w", encoding="utf-8") as f:
                         toml.dump(settings, f)
@@ -110,20 +116,39 @@ def construct_ui():
             def init_project(path):
                 if not path:
                     return (
-                        "Please enter a project directory path.", 
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                        "Please enter a project directory path.",
                         gr.update(),
-                        gr.update(), gr.update()
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
                     )
                 try:
                     os.makedirs(os.path.join(path, "training"), exist_ok=True)
-                    
+
                     # Load settings if available
                     settings = load_project_settings(path)
                     new_model = settings.get("model_arch", "Z-Image")
+                    new_vram = settings.get("vram_size", "24")
                     new_comfy = settings.get("comfy_models_dir", "")
                     new_w = settings.get("resolution_w", 1024)
                     new_h = settings.get("resolution_h", 1024)
@@ -131,7 +156,7 @@ def construct_ui():
                     new_vae = settings.get("vae_path", "")
                     new_te1 = settings.get("text_encoder1_path", "")
                     new_te2 = settings.get("text_encoder2_path", "")
-                    
+
                     # Training params
                     new_dit = settings.get("dit_path", "")
                     new_out_nm = settings.get("output_name", "my_lora")
@@ -155,53 +180,87 @@ def construct_ui():
 
                     msg = f"Project initialized at {path}. 'training' folder ready."
                     if settings:
-                         msg += " Settings loaded."
+                        msg += " Settings loaded."
 
                     return (
                         msg,
-                        new_model, new_comfy, new_w, new_h, new_batch,
+                        new_model,
+                        new_vram,
+                        new_comfy,
+                        new_w,
+                        new_h,
+                        new_batch,
                         preview_content,
-                        new_vae, new_te1, new_te2,
-                        new_dit, new_out_nm, new_lr, new_epochs, new_save_n,
-                        new_flow, new_swap, new_prec, new_grad_cp, new_fp8_s, new_fp8_l,
+                        new_vae,
+                        new_te1,
+                        new_te2,
+                        new_dit,
+                        new_out_nm,
+                        new_lr,
+                        new_epochs,
+                        new_save_n,
+                        new_flow,
+                        new_swap,
+                        new_prec,
+                        new_grad_cp,
+                        new_fp8_s,
+                        new_fp8_l,
                         new_add_args,
-                        new_in_lora, new_out_comfy
+                        new_in_lora,
+                        new_out_comfy,
                     )
                 except Exception as e:
                     return (
-                        f"Error initializing project: {str(e)}", 
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                        f"Error initializing project: {str(e)}",
                         gr.update(),
-                        gr.update(), gr.update()
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
                     )
 
-
-
-            def generate_config(project_path, w, h, batch, model_val, comfy_val, vae_val, te1_val, te2_val):
+            def generate_config(project_path, w, h, batch, model_val, vram_val, comfy_val, vae_val, te1_val, te2_val):
                 if not project_path:
                     return "Error: Project directory not specified.", ""
-                
+
                 # Save project settings first
                 save_project_settings(
-                    project_path, 
-                    model_arch=model_val, 
-                    comfy_models_dir=comfy_val, 
-                    resolution_w=w, 
-                    resolution_h=h, 
-                    batch_size=batch, 
-                    vae_path=vae_val, 
-                    text_encoder1_path=te1_val, 
-                    text_encoder2_path=te2_val
+                    project_path,
+                    model_arch=model_val,
+                    vram_size=vram_val,
+                    comfy_models_dir=comfy_val,
+                    resolution_w=w,
+                    resolution_h=h,
+                    batch_size=batch,
+                    vae_path=vae_val,
+                    text_encoder1_path=te1_val,
+                    text_encoder2_path=te2_val,
                 )
 
                 # Normalize paths
                 project_path = os.path.abspath(project_path)
                 image_dir = os.path.join(project_path, "training").replace("\\", "/")
                 cache_dir = os.path.join(project_path, "cache").replace("\\", "/")
-                
+
                 toml_content = f"""# Auto-generated by Musubi Tuner GUI
 
 [general]
@@ -224,12 +283,6 @@ num_repeats = 1
                 except Exception as e:
                     return f"Error generating config: {str(e)}", ""
 
-
-
-
-
-
-
         with gr.Accordion("4. Preprocessing", open=False):
             gr.Markdown("Pre-calculate latents and text encoder outputs to speed up training.")
             with gr.Row():
@@ -238,76 +291,66 @@ num_repeats = 1
                 vae_path = gr.Textbox(label="VAE Path", placeholder="Path to VAE model")
                 text_encoder1_path = gr.Textbox(label="Text Encoder 1 Path", placeholder="Path to Text Encoder 1")
                 text_encoder2_path = gr.Textbox(label="Text Encoder 2 Path", placeholder="Path to Text Encoder 2 (Optional)")
-            
+
             with gr.Row():
                 cache_latents_btn = gr.Button("Cache Latents")
                 cache_text_btn = gr.Button("Cache Text Encoder Outputs")
-            
+
             # Simple output area for caching logs
             caching_output = gr.Textbox(label="Caching Log Output", lines=10, interactive=False)
 
             def validate_models_dir(path):
                 if not path:
                     return "Please enter a ComfyUI models directory."
-                
+
                 required_subdirs = ["diffusion_models", "vae", "text_encoders"]
                 missing = []
                 for d in required_subdirs:
                     if not os.path.join(path, d) or not os.path.exists(os.path.join(path, d)):
                         missing.append(d)
-                
+
                 if missing:
                     return f"Error: Missing subdirectories in models folder: {', '.join(missing)}"
-                
+
                 return "Valid ComfyUI models directory structure found."
 
-            def set_recommended_resolution(project_path, model_arch):
-                w, h = 1024, 1024
-                if model_arch == "Z-Image":
-                    w, h = 1024, 1024
-                
+            def set_recommended_settings(project_path, model_arch, vram_val):
+                w, h = config_manager.get_resolution(model_arch)
+                chk_batch = config_manager.get_batch_size(model_arch, vram_val)
+
                 if project_path:
-                    save_project_settings(project_path, resolution_w=w, resolution_h=h)
-                return w, h
+                    save_project_settings(project_path, resolution_w=w, resolution_h=h, batch_size=chk_batch)
+                return w, h, chk_batch
 
             def set_preprocessing_defaults(project_path, comfy_models_dir, model_arch):
-                 if not comfy_models_dir:
-                     return gr.update(), gr.update(), gr.update()
-                 
-                 vae_default = ""
-                 te1_default = ""
-                 te2_default = ""
+                if not comfy_models_dir:
+                    return gr.update(), gr.update(), gr.update()
 
-                 if model_arch == "Z-Image":
-                     vae_default = os.path.join(comfy_models_dir, "vae", "ae.safetensors")
-                     te1_default = os.path.join(comfy_models_dir, "text_encoders", "qwen_3_4b.safetensors")
-                 
-                 if project_path:
-                      save_project_settings(
-                          project_path,
-                          vae_path=vae_default,
-                          text_encoder1_path=te1_default,
-                          text_encoder2_path=te2_default
-                      )
+                vae_default, te1_default, te2_default = config_manager.get_preprocessing_paths(model_arch, comfy_models_dir)
+                if not te2_default:
+                    te2_default = ""  # Ensure empty string for text input
 
-                 return vae_default, te1_default, te2_default
-            
-            def set_training_defaults(project_path, comfy_models_dir, model_arch):
-                dit_default = ""
-                if model_arch == "Z-Image":
-                     if comfy_models_dir:
-                        dit_default = os.path.join(comfy_models_dir, "diffusion_models", "z_image_turbo_bf16.safetensors")
-                
-                lr = 1e-4
-                epochs = 16
-                save_n = 1
-                flow = 2.0
-                swap = 0
-                prec = "bf16"
-                grad_cp = True
-                fp8_s = True
-                fp8_l = True
-                
+                if project_path:
+                    save_project_settings(
+                        project_path, vae_path=vae_default, text_encoder1_path=te1_default, text_encoder2_path=te2_default
+                    )
+
+                return vae_default, te1_default, te2_default
+
+            def set_training_defaults(project_path, comfy_models_dir, model_arch, vram_val):
+                defaults = config_manager.get_training_defaults(model_arch, vram_val, comfy_models_dir)
+
+                dit_default = defaults.get("dit_path", "")
+                lr = defaults.get("learning_rate", 1e-4)
+                epochs = defaults.get("num_epochs", 16)
+                save_n = defaults.get("save_every_n_epochs", 1)
+                flow = defaults.get("discrete_flow_shift", 2.0)
+                swap = defaults.get("block_swap", 0)
+                prec = defaults.get("mixed_precision", "bf16")
+                grad_cp = defaults.get("gradient_checkpointing", True)
+                fp8_s = defaults.get("fp8_scaled", True)
+                fp8_l = defaults.get("fp8_llm", True)
+
                 if project_path:
                     save_project_settings(
                         project_path,
@@ -320,24 +363,23 @@ num_repeats = 1
                         mixed_precision=prec,
                         gradient_checkpointing=grad_cp,
                         fp8_scaled=fp8_s,
-                        fp8_llm=fp8_l
+                        fp8_llm=fp8_l,
+                        vram_size=vram_val,  # Ensure VRAM size is saved
                     )
 
                 return dit_default, lr, epochs, save_n, flow, swap, prec, grad_cp, fp8_s, fp8_l
-            
+
             def set_post_processing_defaults(project_path, output_nm):
                 if not project_path or not output_nm:
                     return gr.update(), gr.update()
-                
+
                 models_dir = os.path.join(project_path, "models")
                 in_lora = os.path.join(models_dir, f"{output_nm}.safetensors")
                 out_lora = os.path.join(models_dir, f"{output_nm}_comfy.safetensors")
-                
+
                 save_project_settings(project_path, input_lora_path=in_lora, output_comfy_lora_path=out_lora)
-                
+
                 return in_lora, out_lora
-
-
 
             import subprocess
             import sys
@@ -345,20 +387,20 @@ num_repeats = 1
             def run_command(command):
                 try:
                     process = subprocess.Popen(
-                        command, 
-                        stdout=subprocess.PIPE, 
-                        stderr=subprocess.STDOUT, 
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
                         shell=True,
                         text=True,
-                        encoding='utf-8',
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                        encoding="utf-8",
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                     )
-                    
+
                     output_log = ""
                     for line in process.stdout:
                         output_log += line
                         yield output_log
-                    
+
                     process.wait()
                     if process.returncode != 0:
                         output_log += f"\nError: Process exited with code {process.returncode}"
@@ -371,24 +413,24 @@ num_repeats = 1
                 if not project_path:
                     yield "Error: Project directory not set."
                     return
-                
+
                 # Save settings first
                 save_project_settings(
-                    project_path, 
-                    model_arch=model, 
-                    comfy_models_dir=comfy, 
-                    resolution_w=w, 
-                    resolution_h=h, 
-                    batch_size=batch, 
-                    vae_path=vae_path_val, 
-                    text_encoder1_path=te1, 
-                    text_encoder2_path=te2
+                    project_path,
+                    model_arch=model,
+                    comfy_models_dir=comfy,
+                    resolution_w=w,
+                    resolution_h=h,
+                    batch_size=batch,
+                    vae_path=vae_path_val,
+                    text_encoder1_path=te1,
+                    text_encoder2_path=te2,
                 )
 
                 if not vae_path_val:
                     yield "Error: VAE path not set."
                     return
-                
+
                 if not os.path.exists(vae_path_val):
                     yield f"Error: VAE model not found at {vae_path_val}"
                     return
@@ -399,112 +441,106 @@ num_repeats = 1
                     return
 
                 script_path = os.path.join("src", "musubi_tuner", "zimage_cache_latents.py")
-                
-                cmd = [
-                    sys.executable,
-                    script_path,
-                    "--dataset_config", config_path,
-                    "--vae", vae_path_val
-                ]
-                
+
+                cmd = [sys.executable, script_path, "--dataset_config", config_path, "--vae", vae_path_val]
+
                 command_str = " ".join(cmd)
                 yield f"Starting Latent Caching...\nCommand: {command_str}\n\n"
-                
+
                 yield from run_command(command_str)
-
-
 
             def cache_text_encoder(project_path, te1_path_val, te2_path_val, vae, model, comfy, w, h, batch):
                 if not project_path:
                     yield "Error: Project directory not set."
                     return
-                
+
                 # Save settings first
                 save_project_settings(
-                    project_path, 
-                    model_arch=model, 
-                    comfy_models_dir=comfy, 
-                    resolution_w=w, 
-                    resolution_h=h, 
-                    batch_size=batch, 
-                    vae_path=vae, 
-                    text_encoder1_path=te1_path_val, 
-                    text_encoder2_path=te2_path_val
+                    project_path,
+                    model_arch=model,
+                    comfy_models_dir=comfy,
+                    resolution_w=w,
+                    resolution_h=h,
+                    batch_size=batch,
+                    vae_path=vae,
+                    text_encoder1_path=te1_path_val,
+                    text_encoder2_path=te2_path_val,
                 )
 
                 if not te1_path_val:
                     yield "Error: Text Encoder 1 path not set."
                     return
-                
+
                 if not os.path.exists(te1_path_val):
                     yield f"Error: Text Encoder 1 model not found at {te1_path_val}"
                     return
-                
+
                 # Z-Image only uses te1 for now, but keeping te2 in signature if needed later or for other models
-                
+
                 config_path = os.path.join(project_path, "dataset_config.toml")
                 if not os.path.exists(config_path):
                     yield f"Error: dataset_config.toml not found in {project_path}. Please generate it first."
                     return
 
                 script_path = os.path.join("src", "musubi_tuner", "zimage_cache_text_encoder_outputs.py")
-                
+
                 cmd = [
                     sys.executable,
                     script_path,
-                    "--dataset_config", config_path,
-                    "--text_encoder", te1_path_val,
-                    "--batch_size", "1" # Conservative default
+                    "--dataset_config",
+                    config_path,
+                    "--text_encoder",
+                    te1_path_val,
+                    "--batch_size",
+                    "1",  # Conservative default
                 ]
-                
+
                 command_str = " ".join(cmd)
                 yield f"Starting Text Encoder Caching...\nCommand: {command_str}\n\n"
-                
+
                 yield from run_command(command_str)
-
-
 
         with gr.Accordion("5. Training", open=False):
             gr.Markdown(UI_TEXT["training_basic_desc"])
             training_model_info = gr.Markdown(UI_TEXT["training_zimage_desc"])
-            
+
             with gr.Row():
                 set_training_defaults_btn = gr.Button("Set Recommended Parameters")
             with gr.Row():
                 dit_path = gr.Textbox(label="Base Model / DiT Path", placeholder="Path to DiT model")
-            
+
             with gr.Row():
                 output_name = gr.Textbox(label="Output LoRA Name", value="my_lora")
-                
+
             with gr.Group():
                 gr.Markdown("### Basic Parameters")
                 with gr.Row():
                     learning_rate = gr.Number(label="Learning Rate", value=1e-4)
                     num_epochs = gr.Number(label="Epochs", value=16)
                     save_every_n_epochs = gr.Number(label="Save Every N Epochs", value=1)
-            
+
             with gr.Group():
                 with gr.Accordion("Advanced Parameters", open=False):
                     gr.Markdown(UI_TEXT["training_detailed_desc"])
                     with gr.Row():
                         discrete_flow_shift = gr.Number(label="Discrete Flow Shift", value=2.0)
                     block_swap = gr.Slider(label="Block Swap (0-28)", minimum=0, maximum=28, step=1, value=0)
-                
+
                 with gr.Row():
                     mixed_precision = gr.Dropdown(label="Mixed Precision", choices=["bf16", "fp16", "no"], value="bf16")
                     gradient_checkpointing = gr.Checkbox(label="Gradient Checkpointing", value=True)
-                
+
                 with gr.Row():
                     fp8_scaled = gr.Checkbox(label="FP8 Scaled (DiT) - Enables --fp8_base and --fp8_scaled", value=True)
                     fp8_llm = gr.Checkbox(label="FP8 LLM (Text Encoder)", value=True)
-            
+
             with gr.Accordion("Additional Options", open=False):
                 gr.Markdown(UI_TEXT["additional_args_desc"])
                 additional_args = gr.Textbox(label="Additional Optional Arguments", placeholder="--arg value --flag")
-            
+
             training_status = gr.Markdown("")
             start_training_btn = gr.Button("Start Training (New Window)", variant="primary")
-            
+
         with gr.Accordion("6. Post-Processing", open=False):
             gr.Markdown("Convert Z-Image LoRA to ComfyUI format.")
             with gr.Row():
@@ -512,7 +548,7 @@ num_repeats = 1
             with gr.Row():
                 input_lora = gr.Textbox(label="Input LoRA Path", placeholder="Path to trained .safetensors file")
                 output_comfy_lora = gr.Textbox(label="Output ComfyUI LoRA Path", placeholder="Path to save converted model")
-            
+
             convert_btn = gr.Button("Convert to ComfyUI Format")
             conversion_log = gr.Textbox(label="Conversion Log", lines=5, interactive=False)
 
@@ -520,50 +556,63 @@ num_repeats = 1
             if not project_path:
                 yield "Error: Project directory not set."
                 return
-            
+
             # Save settings
             save_project_settings(
                 project_path,
-                model_arch=model, 
-                comfy_models_dir=comfy, 
-                resolution_w=w, 
-                resolution_h=h, 
-                batch_size=batch, 
-                vae_path=vae, 
-                text_encoder1_path=te1, 
+                model_arch=model,
+                comfy_models_dir=comfy,
+                resolution_w=w,
+                resolution_h=h,
+                batch_size=batch,
+                vae_path=vae,
+                text_encoder1_path=te1,
                 text_encoder2_path=te2,
                 input_lora_path=input_path,
-                output_comfy_lora_path=output_path
+                output_comfy_lora_path=output_path,
             )
 
             if not input_path or not output_path:
                 yield "Error: Input and Output paths must be specified."
                 return
-            
+
             if not os.path.exists(input_path):
                 yield f"Error: Input file not found at {input_path}"
                 return
-            
+
             # Script path
             script_path = os.path.join("src", "musubi_tuner", "networks", "convert_z_image_lora_to_comfy.py")
             if not os.path.exists(script_path):
                 yield f"Error: Conversion script not found at {script_path}"
                 return
 
-            cmd = [
-                sys.executable,
-                script_path,
-                input_path,
-                output_path
-            ]
-            
+            cmd = [sys.executable, script_path, input_path, output_path]
+
             command_str = " ".join(cmd)
             yield f"Starting Conversion...\nCommand: {command_str}\n\n"
-            
+
             yield from run_command(command_str)
 
-        def start_training(project_path, dit, vae, te1, output_nm, lr, epochs, save_n, flow_shift, swap, prec, grad_cp, fp8_s, fp8_l, add_args):
+        def start_training(
+            project_path,
+            model,
+            dit,
+            vae,
+            te1,
+            output_nm,
+            lr,
+            epochs,
+            save_n,
+            flow_shift,
+            swap,
+            prec,
+            grad_cp,
+            fp8_s,
+            fp8_l,
+            add_args,
+        ):
             import shlex
+
             if not project_path:
                 return "Error: Project directory not set."
             if not dit:
@@ -576,9 +625,9 @@ num_repeats = 1
             dataset_config = os.path.join(project_path, "dataset_config.toml")
             if not os.path.exists(dataset_config):
                 return "Error: dataset_config.toml not found. Please generate it."
-            
+
             output_dir = os.path.join(project_path, "models")
-            
+
             # Save settings
             save_project_settings(
                 project_path,
@@ -595,56 +644,82 @@ num_repeats = 1
                 fp8_llm=fp8_l,
                 vae_path=vae,
                 text_encoder1_path=te1,
-                additional_args=add_args
+                additional_args=add_args,
             )
-            
+
             # Construct command for cmd /c to run and then pause
             # We assume 'accelerate' is in the PATH.
             script_path = os.path.join("src", "musubi_tuner", "zimage_train_network.py")
-            
+
             # Inner command list - arguments for accelerate launch
             inner_cmd = [
-                "accelerate", "launch",
-                "--num_cpu_threads_per_process", "1",
-                "--mixed_precision", prec,
+                "accelerate",
+                "launch",
+                "--num_cpu_threads_per_process",
+                "1",
+                "--mixed_precision",
+                prec,
                 script_path,
-                "--dit", dit,
-                "--vae", vae,
-                "--text_encoder", te1,
-                "--dataset_config", dataset_config,
-                "--output_dir", output_dir,
-                "--output_name", output_nm,
-                "--network_module", "networks.lora_zimage", 
-                "--network_dim", "32",
-                "--optimizer_type", "adamw8bit",
-                "--learning_rate", str(lr),
-                "--max_train_epochs", str(int(epochs)),
-                "--save_every_n_epochs", str(int(save_n)),
-                "--timestep_sampling", "shift",
-                "--weighting_scheme", "none",
-                "--discrete_flow_shift", str(flow_shift),
-                "--max_data_loader_n_workers", "2",
+                "--dit",
+                dit,
+                "--vae",
+                vae,
+                "--text_encoder",
+                te1,
+                "--dataset_config",
+                dataset_config,
+                "--output_dir",
+                output_dir,
+                "--output_name",
+                output_nm,
+                "--network_module",
+                "networks.lora_zimage",
+                "--network_dim",
+                "32",
+                "--optimizer_type",
+                "adamw8bit",
+                "--learning_rate",
+                str(lr),
+                "--max_train_epochs",
+                str(int(epochs)),
+                "--save_every_n_epochs",
+                str(int(save_n)),
+                "--timestep_sampling",
+                "shift",
+                "--weighting_scheme",
+                "none",
+                "--discrete_flow_shift",
+                str(flow_shift),
+                "--max_data_loader_n_workers",
+                "2",
                 "--persistent_data_loader_workers",
-                "--seed", "42"
+                "--seed",
+                "42",
             ]
 
             if prec != "no":
                 inner_cmd.extend(["--mixed_precision", prec])
-            
+
             if grad_cp:
                 inner_cmd.append("--gradient_checkpointing")
-            
+
             if fp8_s:
                 inner_cmd.append("--fp8_base")
                 inner_cmd.append("--fp8_scaled")
-            
+
             if fp8_l:
                 inner_cmd.append("--fp8_llm")
-            
+
             if swap > 0:
                 inner_cmd.extend(["--blocks_to_swap", str(int(swap))])
-            
+
             inner_cmd.append("--sdpa")
+
+            # Model specific command modification
+            if model == "Z-Image":
+                pass
+            elif model == "Qwen-Image":
+                pass
 
             # Parse and append additional args
             if add_args:
@@ -657,15 +732,15 @@ num_repeats = 1
             # Construct the full command string for cmd /c
             # list2cmdline will quote arguments as needed for Windows
             inner_cmd_str = subprocess.list2cmdline(inner_cmd)
-            
+
             # Chain commands: Run training -> echo message -> pause >nul (hides default message)
-            final_cmd_str = f'{inner_cmd_str} & echo. & echo Training finished. Press any key to close this window... & pause >nul'
+            final_cmd_str = f"{inner_cmd_str} & echo. & echo Training finished. Press any key to close this window... & pause >nul"
 
             try:
                 # Open in new console window
-                flags = subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
+                flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
                 # Pass explicit 'cmd', '/c', string to ensure proper execution
-                subprocess.Popen(['cmd', '/c', final_cmd_str], creationflags=flags, shell=False)
+                subprocess.Popen(["cmd", "/c", final_cmd_str], creationflags=flags, shell=False)
                 return f"Training started in a new window!\n\nCommand: {inner_cmd_str}"
             except Exception as e:
                 return f"Error starting training: {str(e)}"
@@ -673,19 +748,22 @@ num_repeats = 1
         def update_model_info(model):
             if model == "Z-Image":
                 return UI_TEXT["training_zimage_desc"]
+            elif model == "Qwen-Image":
+                return "Qwen-Image specific notes here."
             return ""
 
         # Event wiring moved to end to prevent UnboundLocalError
         init_btn.click(
-            fn=init_project, 
-            inputs=[project_dir], 
+            fn=init_project,
+            inputs=[project_dir],
             outputs=[
-                project_status, 
-                model_arch, 
-                comfy_models_dir, 
-                resolution_w, 
-                resolution_h, 
-                batch_size, 
+                project_status,
+                model_arch,
+                vram_size,
+                comfy_models_dir,
+                resolution_w,
+                resolution_h,
+                batch_size,
                 toml_preview,
                 vae_path,
                 text_encoder1_path,
@@ -703,94 +781,139 @@ num_repeats = 1
                 fp8_llm,
                 additional_args,
                 input_lora,
-                output_comfy_lora
-            ]
+                output_comfy_lora,
+            ],
         )
 
-        model_arch.change(
-            fn=update_model_info,
-            inputs=[model_arch],
-            outputs=[training_model_info]
-        )
-        
+        model_arch.change(fn=update_model_info, inputs=[model_arch], outputs=[training_model_info])
+
         gen_toml_btn.click(
-            fn=generate_config, 
+            fn=generate_config,
             inputs=[
-                project_dir, resolution_w, resolution_h, batch_size, model_arch, comfy_models_dir,
-                vae_path, text_encoder1_path, text_encoder2_path
-            ], 
-            outputs=[dataset_status, toml_preview]
+                project_dir,
+                resolution_w,
+                resolution_h,
+                batch_size,
+                model_arch,
+                vram_size,
+                comfy_models_dir,
+                vae_path,
+                text_encoder1_path,
+                text_encoder2_path,
+            ],
+            outputs=[dataset_status, toml_preview],
         )
 
-        validate_models_btn.click(
-              fn=validate_models_dir,
-              inputs=[comfy_models_dir],
-              outputs=[models_status]
-         )
+        validate_models_btn.click(fn=validate_models_dir, inputs=[comfy_models_dir], outputs=[models_status])
 
-        set_resolution_btn.click(
-            fn=set_recommended_resolution,
-            inputs=[project_dir, model_arch],
-            outputs=[resolution_w, resolution_h]
+        set_rec_settings_btn.click(
+            fn=set_recommended_settings,
+            inputs=[project_dir, model_arch, vram_size],
+            outputs=[resolution_w, resolution_h, batch_size],
         )
 
         set_preprocessing_defaults_btn.click(
             fn=set_preprocessing_defaults,
             inputs=[project_dir, comfy_models_dir, model_arch],
-            outputs=[vae_path, text_encoder1_path, text_encoder2_path]
+            outputs=[vae_path, text_encoder1_path, text_encoder2_path],
         )
 
         set_post_proc_defaults_btn.click(
-            fn=set_post_processing_defaults,
-            inputs=[project_dir, output_name],
-            outputs=[input_lora, output_comfy_lora]
+            fn=set_post_processing_defaults, inputs=[project_dir, output_name], outputs=[input_lora, output_comfy_lora]
         )
 
         set_training_defaults_btn.click(
             fn=set_training_defaults,
-            inputs=[project_dir, comfy_models_dir, model_arch],
-            outputs=[dit_path, learning_rate, num_epochs, save_every_n_epochs, discrete_flow_shift, block_swap, mixed_precision, gradient_checkpointing, fp8_scaled, fp8_llm]
+            inputs=[project_dir, comfy_models_dir, model_arch, vram_size],
+            outputs=[
+                dit_path,
+                learning_rate,
+                num_epochs,
+                save_every_n_epochs,
+                discrete_flow_shift,
+                block_swap,
+                mixed_precision,
+                gradient_checkpointing,
+                fp8_scaled,
+                fp8_llm,
+            ],
         )
 
         cache_latents_btn.click(
             fn=cache_latents,
             inputs=[
-                project_dir, vae_path, text_encoder1_path, text_encoder2_path,
-                model_arch, comfy_models_dir, resolution_w, resolution_h, batch_size
+                project_dir,
+                vae_path,
+                text_encoder1_path,
+                text_encoder2_path,
+                model_arch,
+                comfy_models_dir,
+                resolution_w,
+                resolution_h,
+                batch_size,
             ],
-            outputs=[caching_output]
+            outputs=[caching_output],
         )
 
         cache_text_btn.click(
             fn=cache_text_encoder,
             inputs=[
-                project_dir, text_encoder1_path, text_encoder2_path, vae_path,
-                model_arch, comfy_models_dir, resolution_w, resolution_h, batch_size
+                project_dir,
+                text_encoder1_path,
+                text_encoder2_path,
+                vae_path,
+                model_arch,
+                comfy_models_dir,
+                resolution_w,
+                resolution_h,
+                batch_size,
             ],
-            outputs=[caching_output]
+            outputs=[caching_output],
         )
 
         start_training_btn.click(
             fn=start_training,
             inputs=[
-                project_dir, dit_path, vae_path, text_encoder1_path, output_name,
-                learning_rate, num_epochs, save_every_n_epochs, discrete_flow_shift, block_swap,
-                mixed_precision, gradient_checkpointing, fp8_scaled, fp8_llm, additional_args
+                project_dir,
+                model_arch,
+                dit_path,
+                vae_path,
+                text_encoder1_path,
+                output_name,
+                learning_rate,
+                num_epochs,
+                save_every_n_epochs,
+                discrete_flow_shift,
+                block_swap,
+                mixed_precision,
+                gradient_checkpointing,
+                fp8_scaled,
+                fp8_llm,
+                additional_args,
             ],
-            outputs=[training_status]
+            outputs=[training_status],
         )
 
         convert_btn.click(
             fn=convert_lora_to_comfy,
             inputs=[
-                project_dir, input_lora, output_comfy_lora, 
-                model_arch, comfy_models_dir, resolution_w, resolution_h, batch_size, 
-                vae_path, text_encoder1_path, text_encoder2_path
+                project_dir,
+                input_lora,
+                output_comfy_lora,
+                model_arch,
+                comfy_models_dir,
+                resolution_w,
+                resolution_h,
+                batch_size,
+                vae_path,
+                text_encoder1_path,
+                text_encoder2_path,
             ],
-            outputs=[conversion_log]
+            outputs=[conversion_log],
         )
 
     return demo
+
 
 if __name__ == "__main__":
     demo = construct_ui()
