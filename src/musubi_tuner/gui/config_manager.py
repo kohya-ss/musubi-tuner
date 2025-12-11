@@ -4,12 +4,12 @@ import os
 class ConfigManager:
     def __init__(self):
         self.models = {
-            "Z-Image": {
+            "Z-Image-Turbo": {
                 "resolution": (1024, 1024),
                 "vae_subpath": ["vae", "ae.safetensors"],
                 "te1_subpath": ["text_encoders", "qwen_3_4b.safetensors"],
                 "te2_subpath": None,
-                "dit_subpath": ["diffusion_models", "z_image_turbo_bf16.safetensors"],
+                "dit_subpath": ["diffusion_models", "z_image_de_turbo_v1_bf16.safetensors"],
                 "training_base": {
                     "learning_rate": 1e-4,
                     "num_epochs": 16,
@@ -22,7 +22,7 @@ class ConfigManager:
                 },
                 "vram_settings": {
                     "12": {"batch_size": 1, "block_swap": 20, "fp8_llm": True},
-                    "16": {"batch_size": 1, "block_swap": 12, "fp8_llm": True},
+                    "16": {"batch_size": 1, "block_swap": 12, "fp8_llm": False},
                     "24": {"batch_size": 1, "block_swap": 0, "fp8_llm": False},
                     "32": {"batch_size": 2, "block_swap": 0, "fp8_llm": False},
                     ">32": {"batch_size": 4, "block_swap": 0, "fp8_llm": False},
@@ -30,10 +30,10 @@ class ConfigManager:
             },
             "Qwen-Image": {
                 "resolution": (1024, 1024),
-                "vae_subpath": ["vae", "ae.safetensors"],
-                "te1_subpath": ["text_encoders", "qwen_image_te.safetensors"],
+                "vae_subpath": ["vae", "qwen_image_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "qwen_2.5_vl_7b.safetensors"],
                 "te2_subpath": None,
-                "dit_subpath": ["diffusion_models", "qwen_image_dit.safetensors"],
+                "dit_subpath": ["diffusion_models", "qwen_image_bf16.safetensors"],
                 "training_base": {
                     "learning_rate": 1e-4,
                     "num_epochs": 16,
@@ -58,9 +58,9 @@ class ConfigManager:
         return self.models.get(model_name, {}).get("resolution", (1024, 1024))
 
     def get_batch_size(self, model_name, vram_size):
-        # Default to "24" if vram_size is not provided or invalid, as a safe middle ground
+        # Default to "16" if vram_size is not provided or invalid, as a safe middle ground
         if not vram_size:
-            vram_size = "24"
+            vram_size = "16"
 
         vram_conf = self.models.get(model_name, {}).get("vram_settings", {}).get(vram_size, {})
         return vram_conf.get("batch_size", 1)
@@ -83,7 +83,7 @@ class ConfigManager:
         base = conf.get("training_base", {}).copy()
 
         if not vram_size:
-            vram_size = "24"
+            vram_size = "16"
 
         # Merge VRAM settings
         vram_conf = conf.get("vram_settings", {}).get(vram_size, {})

@@ -26,7 +26,7 @@ I18N_DATA = {
         "btn_gen_config": "Generate Dataset Config",
         "lbl_toml_preview": "TOML Preview",
         "acc_preprocessing": "4. Preprocessing",
-        "desc_preprocessing": "Pre-calculate latents and text encoder outputs to speed up training.",
+        "desc_preprocessing": "Pre-calculate latents and text encoder outputs required for training.",
         "btn_set_paths": "Set Default Paths",
         "lbl_vae_path": "VAE Path",
         "ph_vae_path": "Path to VAE model",
@@ -39,7 +39,7 @@ I18N_DATA = {
         "lbl_cache_log": "Caching Log Output",
         "acc_training": "5. Training",
         "desc_training_basic": "Configure the training parameters.",
-        "desc_training_zimage": "Recommended: Use **bf16** for mixed precision. Z-Image requires specific attention to Flow Shift.",
+        "desc_training_zimage": "Recommended: Use **bf16** for mixed precision. Because Base model is not released yet, please use `z_image_de_turbo_v1_bf16.safetensors` as Base model.",
         "btn_rec_params": "Set Recommended Parameters",
         "lbl_dit_path": "Base Model / DiT Path",
         "ph_dit_path": "Path to DiT model",
@@ -54,9 +54,9 @@ I18N_DATA = {
 - **Learning Rate**: Controls how much the model weights are updated during training. Lower values are safer but slower.
 - **Epochs**: One complete pass through the entire training dataset.
 - **Save Every N Epochs**: How often to save the model and generate sample images.
-- **Discrete Flow Shift**: A parameter specific to flow matching models. 2.0 is recommended for Z-Image.
+- **Discrete Flow Shift**: A parameter specific to flow matching models.
 - **Block Swap**: Offloads model blocks to CPU to save VRAM. Higher values save more VRAM but slow down training.
-- **Mixed Precision**: bf16 is recommended for modern GPUs (RTX 30xx+). fp16 uses less memory but is less stable.
+- **Mixed Precision**: fp16 and bf16 are both supported. Which is better depends on the model architecture. For bf16, RTX30xx or higher is required.
 - **Gradient Checkpointing**: Saves VRAM by recomputing activations during backward pass.
 - **FP8**: further reduces memory usage by using 8-bit floating point arithmetic.
 """,
@@ -106,7 +106,7 @@ I18N_DATA = {
         "btn_gen_config": "データセット設定(TOML)を生成",
         "lbl_toml_preview": "TOML プレビュー",
         "acc_preprocessing": "4. 前処理 (Preprocessing)",
-        "desc_preprocessing": "学習を高速化するためにLatentsとテキストエンコーダーの出力を事前計算します。",
+        "desc_preprocessing": "学習に必要となるLatentsとテキストエンコーダーの出力を事前計算します。",
         "btn_set_paths": "デフォルトパスを設定",
         "lbl_vae_path": "VAE パス",
         "ph_vae_path": "VAEモデルへのパス",
@@ -119,7 +119,7 @@ I18N_DATA = {
         "lbl_cache_log": "キャッシュログ出力",
         "acc_training": "5. 学習 (Training)",
         "desc_training_basic": "学習パラメータを設定してください。",
-        "desc_training_zimage": "推奨: 混合精度には **bf16** を使用してください。Z-ImageはFlow Shiftに注意が必要です。",
+        "desc_training_zimage": "推奨: 混合精度には **bf16** を使用してください。Baseモデルがリリースされていないため、ostris氏の `z_image_de_turbo_v1_bf16.safetensors` を使用してください。",
         "btn_rec_params": "推奨パラメータを設定",
         "lbl_dit_path": "ベースモデル / DiT パス",
         "ph_dit_path": "DiTモデルへのパス",
@@ -134,9 +134,9 @@ I18N_DATA = {
 - **学習率 (Learning Rate)**: 学習中にモデルの重みをどれくらい更新するかを制御します。低い値の方が安全ですが、学習が遅くなります。
 - **エポック数 (Epochs)**: 学習データセット全体を通す回数です。
 - **保存頻度 (Save Every N Epochs)**: モデルの保存とサンプル生成を行う頻度です。
-- **Discrete Flow Shift**: Flow Matchingモデル特有のパラメータです。Z-Imageでは2.0が推奨されます。
+- **Discrete Flow Shift**: Flow Matchingモデル特有のパラメータです。
 - **Block Swap**: VRAMを節約するためにモデルブロックをCPUにオフロードします。値を大きくするとVRAMを節約できますが、学習が遅くなります。
-- **混合精度 (Mixed Precision)**: 最新のGPU(RTX 30xx以降)ではbf16が推奨されます。fp16はメモリ使用量が少ないですが、安定性が低いです。
+- **混合精度 (Mixed Precision)**: モデルアーキテクチャによりfp16とbf16のどちらが適しているかは異なります。bf16はRTX30xx以降のGPUが必要です。
 - **Gradient Checkpointing**: Backwardパス中にアクティベーションを再計算することでVRAMを節約します。
 - **FP8**: 8ビット浮動小数点演算を使用することでメモリ使用量をさらに削減します。
 """,
@@ -150,7 +150,7 @@ I18N_DATA = {
         "desc_additional_args": "追加のコマンドライン引数を入力してください。これらは学習コマンドに追加されます。",
         "lbl_additional_args": "追加のオプション引数",
         "ph_additional_args": "--arg value --flag",
-        "btn_start_training": "学習を開始 (新しいウィンドウ)",
+        "btn_start_training": "学習を開始 (新しいウィンドウが開きます)",
         "acc_post_processing": "6. 後処理 (Post-Processing)",
         "desc_post_proc": "Z-Image LoRAをComfyUI形式に変換します。",
         "lbl_input_lora": "入力 LoRA パス",

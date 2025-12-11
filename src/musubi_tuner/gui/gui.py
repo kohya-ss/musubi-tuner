@@ -32,10 +32,10 @@ def construct_ui():
                 model_arch = gr.Dropdown(
                     label=i18n("lbl_model_arch"),
                     choices=[
-                        "Z-Image",
                         "Qwen-Image",
+                        "Z-Image-Turbo",
                     ],
-                    value="Z-Image",
+                    value="Z-Image-Turbo",
                 )
                 vram_size = gr.Dropdown(label=i18n("lbl_vram"), choices=["12", "16", "24", "32", ">32"], value="24")
 
@@ -129,8 +129,8 @@ def construct_ui():
 
                     # Load settings if available
                     settings = load_project_settings(path)
-                    new_model = settings.get("model_arch", "Z-Image")
-                    new_vram = settings.get("vram_size", "24")
+                    new_model = settings.get("model_arch", "Qwen-Image")
+                    new_vram = settings.get("vram_size", "16")
                     new_comfy = settings.get("comfy_models_dir", "")
                     new_w = settings.get("resolution_w", 1024)
                     new_h = settings.get("resolution_h", 1024)
@@ -629,9 +629,15 @@ num_repeats = 1
                 additional_args=add_args,
             )
 
+            # Model specific command modification
+            if model == "Z-Image-Turbo":
+                arch_name = "zimage"
+            elif model == "Qwen-Image":
+                arch_name = "qwen_image"
+
             # Construct command for cmd /c to run and then pause
             # We assume 'accelerate' is in the PATH.
-            script_path = os.path.join("src", "musubi_tuner", "zimage_train_network.py")
+            script_path = os.path.join("src", "musubi_tuner", f"{arch_name}_train_network.py")
 
             # Inner command list - arguments for accelerate launch
             inner_cmd = [
@@ -655,7 +661,7 @@ num_repeats = 1
                 "--output_name",
                 output_nm,
                 "--network_module",
-                "networks.lora_zimage",
+                f"networks.lora_{arch_name}",
                 "--network_dim",
                 "32",
                 "--optimizer_type",
@@ -698,7 +704,7 @@ num_repeats = 1
             inner_cmd.append("--sdpa")
 
             # Model specific command modification
-            if model == "Z-Image":
+            if model == "Z-Image-Turbo":
                 pass
             elif model == "Qwen-Image":
                 pass
@@ -728,7 +734,7 @@ num_repeats = 1
                 return f"Error starting training: {str(e)}"
 
         def update_model_info(model):
-            if model == "Z-Image":
+            if model == "Z-Image-Turbo":
                 return i18n("desc_training_zimage")
             elif model == "Qwen-Image":
                 return i18n("desc_qwen_notes")
