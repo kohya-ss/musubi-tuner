@@ -162,14 +162,14 @@ def construct_ui():
                     # Load dataset config content
                     preview_content = load_dataset_config_content(path)
 
-                    msg = f"Project initialized at {path}. 'training' folder ready."
+                    msg = f"Project initialized at {path}. "
                     if settings:
                         msg += " Settings loaded."
-                    msg += " Configure the dataset in the 'training' folder. Images and caption files (same name as image, extension is '.txt') should be placed in the 'training' folder."
-                    msg += "\n\nプロジェクトが初期化されました。 'training' フォルダが準備されました。"
+                    msg += " 'training' folder ready. Configure the dataset in the 'training' folder. Images and caption files (same name as image, extension is '.txt') should be placed in the 'training' folder."
+                    msg += "\n\nプロジェクトが初期化されました。"
                     if settings:
                         msg += "設定が読み込まれました。"
-                    msg += "'training' フォルダに、画像とキャプションファイル（画像と同じファイル名で拡張子は '.txt'）を配置してください。"
+                    msg += "'training' フォルダが準備されました。画像とキャプションファイル（画像と同じファイル名で拡張子は '.txt'）を配置してください。"
 
                     return (
                         msg,
@@ -231,7 +231,7 @@ def construct_ui():
 
             def generate_config(project_path, w, h, batch, model_val, vram_val, comfy_val, vae_val, te1_val, te2_val):
                 if not project_path:
-                    return "Error: Project directory not specified.", ""
+                    return "Error: Project directory not specified.\nエラー: プロジェクトディレクトリが指定されていません。", ""
 
                 # Save project settings first
                 save_project_settings(
@@ -270,9 +270,9 @@ num_repeats = 1
                     config_path = os.path.join(project_path, "dataset_config.toml")
                     with open(config_path, "w", encoding="utf-8") as f:
                         f.write(toml_content)
-                    return f"Successfully generated config at {config_path}", toml_content
+                    return f"Successfully generated config at / 設定ファイルが作成されました: {config_path}", toml_content
                 except Exception as e:
-                    return f"Error generating config: {str(e)}", ""
+                    return f"Error generating config / 設定ファイルの生成に失敗しました: {str(e)}", ""
 
         with gr.Accordion(i18n("acc_preprocessing"), open=False):
             gr.Markdown(i18n("desc_preprocessing"))
@@ -292,7 +292,7 @@ num_repeats = 1
 
             def validate_models_dir(path):
                 if not path:
-                    return "Please enter a ComfyUI models directory."
+                    return "Please enter a ComfyUI models directory. / ComfyUIのmodelsディレクトリを入力してください。"
 
                 required_subdirs = ["diffusion_models", "vae", "text_encoders"]
                 missing = []
@@ -301,9 +301,9 @@ num_repeats = 1
                         missing.append(d)
 
                 if missing:
-                    return f"Error: Missing subdirectories in models folder: {', '.join(missing)}"
+                    return f"Error: Missing subdirectories in models folder / modelsフォルダに以下のサブディレクトリが見つかりません: {', '.join(missing)}"
 
-                return "Valid ComfyUI models directory structure found."
+                return "Valid ComfyUI models directory structure found / 有効なComfyUI modelsディレクトリ構造が見つかりました。"
 
             def set_recommended_settings(project_path, model_arch, vram_val):
                 w, h = config_manager.get_resolution(model_arch)
@@ -396,15 +396,15 @@ num_repeats = 1
 
                     process.wait()
                     if process.returncode != 0:
-                        output_log += f"\nError: Process exited with code {process.returncode}"
+                        output_log += f"\nError: Process exited with code / プロセスが次のコードでエラー終了しました: {process.returncode}"
                         yield output_log
 
                 except Exception as e:
-                    yield f"Error executing command: {str(e)}"
+                    yield f"Error executing command / コマンドの実行中にエラーが発生しました: {str(e)}"
 
             def cache_latents(project_path, vae_path_val, te1, te2, model, comfy, w, h, batch):
                 if not project_path:
-                    yield "Error: Project directory not set."
+                    yield "Error: Project directory not set. / プロジェクトディレクトリが設定されていません。"
                     return
 
                 # Save settings first
@@ -421,16 +421,16 @@ num_repeats = 1
                 )
 
                 if not vae_path_val:
-                    yield "Error: VAE path not set."
+                    yield "Error: VAE path not set. / VAEのパスが設定されていません。"
                     return
 
                 if not os.path.exists(vae_path_val):
-                    yield f"Error: VAE model not found at {vae_path_val}"
+                    yield f"Error: VAE model not found at / 指定されたパスにVAEモデルが見つかりません: {vae_path_val}"
                     return
 
                 config_path = os.path.join(project_path, "dataset_config.toml")
                 if not os.path.exists(config_path):
-                    yield f"Error: dataset_config.toml not found in {project_path}. Please generate it first."
+                    yield f"Error: dataset_config.toml not found in {project_path}. Please generate it first. / dataset_config.tomlが {project_path} に見つかりません。先に設定ファイルを生成してください。"
                     return
 
                 script_path = os.path.join("src", "musubi_tuner", "zimage_cache_latents.py")
@@ -438,13 +438,13 @@ num_repeats = 1
                 cmd = [sys.executable, script_path, "--dataset_config", config_path, "--vae", vae_path_val]
 
                 command_str = " ".join(cmd)
-                yield f"Starting Latent Caching...\nCommand: {command_str}\n\n"
+                yield f"Starting Latent Caching. Please wait for the first log to appear. / Latentのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_str}\n\n"
 
                 yield from run_command(command_str)
 
             def cache_text_encoder(project_path, te1_path_val, te2_path_val, vae, model, comfy, w, h, batch):
                 if not project_path:
-                    yield "Error: Project directory not set."
+                    yield "Error: Project directory not set. / プロジェクトディレクトリが設定されていません。"
                     return
 
                 # Save settings first
@@ -461,18 +461,18 @@ num_repeats = 1
                 )
 
                 if not te1_path_val:
-                    yield "Error: Text Encoder 1 path not set."
+                    yield "Error: Text Encoder 1 path not set. / Text Encoder 1のパスが設定されていません。"
                     return
 
                 if not os.path.exists(te1_path_val):
-                    yield f"Error: Text Encoder 1 model not found at {te1_path_val}"
+                    yield f"Error: Text Encoder 1 model not found at / 指定されたパスにText Encoder 1モデルが見つかりません: {te1_path_val}"
                     return
 
                 # Z-Image only uses te1 for now, but keeping te2 in signature if needed later or for other models
 
                 config_path = os.path.join(project_path, "dataset_config.toml")
                 if not os.path.exists(config_path):
-                    yield f"Error: dataset_config.toml not found in {project_path}. Please generate it first."
+                    yield f"Error: dataset_config.toml not found in {project_path}. Please generate it first. / dataset_config.tomlが {project_path} に見つかりません。先に設定ファイルを生成してください。"
                     return
 
                 script_path = os.path.join("src", "musubi_tuner", "zimage_cache_text_encoder_outputs.py")
@@ -489,7 +489,7 @@ num_repeats = 1
                 ]
 
                 command_str = " ".join(cmd)
-                yield f"Starting Text Encoder Caching...\nCommand: {command_str}\n\n"
+                yield f"Starting Text Encoder Caching. Please wait for the first log to appear. / Text Encoderのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_str}\n\n"
 
                 yield from run_command(command_str)
 
@@ -548,7 +548,7 @@ num_repeats = 1
 
         def convert_lora_to_comfy(project_path, input_path, output_path, model, comfy, w, h, batch, vae, te1, te2):
             if not project_path:
-                yield "Error: Project directory not set."
+                yield "Error: Project directory not set. / プロジェクトディレクトリが設定されていません。"
                 return
 
             # Save settings
@@ -567,23 +567,23 @@ num_repeats = 1
             )
 
             if not input_path or not output_path:
-                yield "Error: Input and Output paths must be specified."
+                yield "Error: Input and Output paths must be specified. / 入力・出力パスを指定してください。"
                 return
 
             if not os.path.exists(input_path):
-                yield f"Error: Input file not found at {input_path}"
+                yield f"Error: Input file not found at {input_path} / 入力ファイルが見つかりません: {input_path}"
                 return
 
             # Script path
             script_path = os.path.join("src", "musubi_tuner", "networks", "convert_z_image_lora_to_comfy.py")
             if not os.path.exists(script_path):
-                yield f"Error: Conversion script not found at {script_path}"
+                yield f"Error: Conversion script not found at {script_path} / 変換スクリプトが見つかりません: {script_path}"
                 return
 
             cmd = [sys.executable, script_path, input_path, output_path]
 
             command_str = " ".join(cmd)
-            yield f"Starting Conversion...\nCommand: {command_str}\n\n"
+            yield f"Starting Conversion. / 変換を開始します。\nCommand: {command_str}\n\n"
 
             yield from run_command(command_str)
 
@@ -609,17 +609,18 @@ num_repeats = 1
             import shlex
 
             if not project_path:
-                return "Error: Project directory not set."
+                return "Error: Project directory not set. / プロジェクトディレクトリが設定されていません。"
             if not dit:
-                return "Error: Base Model / DiT Path not set."
+                return "Error: Base Model / DiT Path not set. / Base Model / DiTのパスが設定されていません。"
             if not vae:
-                return "Error: VAE Path not set (configure in Preprocessing)."
+                return "Error: VAE Path not set (configure in Preprocessing). / VAEのパスが設定されていません (Preprocessingで設定してください)。"
             if not te1:
-                return "Error: Text Encoder 1 Path not set (configure in Preprocessing)."
+                return "Error: Text Encoder 1 Path not set (configure in Preprocessing). / Text Encoder 1のパスが設定されていません (Preprocessingで設定してください)。"
+
 
             dataset_config = os.path.join(project_path, "dataset_config.toml")
             if not os.path.exists(dataset_config):
-                return "Error: dataset_config.toml not found. Please generate it."
+                return "Error: dataset_config.toml not found. Please generate it. / dataset_config.toml が見つかりません。生成してください。"
 
             output_dir = os.path.join(project_path, "models")
             logging_dir = os.path.join(project_path, "logs")
@@ -738,7 +739,7 @@ num_repeats = 1
                     split_args = shlex.split(add_args)
                     inner_cmd.extend(split_args)
                 except Exception as e:
-                    return f"Error parsing additional arguments: {str(e)}"
+                    return f"Error parsing additional arguments / 追加引数の解析に失敗しました: {str(e)}"
 
             # Construct the full command string for cmd /c
             # list2cmdline will quote arguments as needed for Windows
@@ -752,9 +753,9 @@ num_repeats = 1
                 flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
                 # Pass explicit 'cmd', '/c', string to ensure proper execution
                 subprocess.Popen(["cmd", "/c", final_cmd_str], creationflags=flags, shell=False)
-                return f"Training started in a new window!\n\nCommand: {inner_cmd_str}"
+                return f"Training started in a new window! / 新しいウィンドウで学習が開始されました！\nCommand: {inner_cmd_str}"
             except Exception as e:
-                return f"Error starting training: {str(e)}"
+                return f"Error starting training / 学習の開始に失敗しました: {str(e)}"
 
         def update_model_info(model):
             if model == "Z-Image-Turbo":
