@@ -123,6 +123,7 @@ def construct_ui():
                         gr.update(),
                         gr.update(),
                         gr.update(),
+                        gr.update(),
                     )
                 try:
                     os.makedirs(os.path.join(path, "training"), exist_ok=True)
@@ -142,6 +143,7 @@ def construct_ui():
                     # Training params
                     new_dit = settings.get("dit_path", "")
                     new_out_nm = settings.get("output_name", "my_lora")
+                    new_dim = settings.get("network_dim", 4)
                     new_lr = settings.get("learning_rate", 1e-4)
                     new_epochs = settings.get("num_epochs", 16)
                     new_save_n = settings.get("save_every_n_epochs", 1)
@@ -178,6 +180,7 @@ def construct_ui():
                         new_te2,
                         new_dit,
                         new_out_nm,
+                        new_dim,
                         new_lr,
                         new_epochs,
                         new_save_n,
@@ -194,6 +197,7 @@ def construct_ui():
                 except Exception as e:
                     return (
                         f"Error initializing project: {str(e)}",
+                        gr.update(),
                         gr.update(),
                         gr.update(),
                         gr.update(),
@@ -323,6 +327,7 @@ num_repeats = 1
                 defaults = config_manager.get_training_defaults(model_arch, vram_val, comfy_models_dir)
 
                 dit_default = defaults.get("dit_path", "")
+                dim = defaults.get("network_dim", 4)
                 lr = defaults.get("learning_rate", 1e-4)
                 epochs = defaults.get("num_epochs", 16)
                 save_n = defaults.get("save_every_n_epochs", 1)
@@ -337,6 +342,7 @@ num_repeats = 1
                     save_project_settings(
                         project_path,
                         dit_path=dit_default,
+                        network_dim=dim,
                         learning_rate=lr,
                         num_epochs=epochs,
                         save_every_n_epochs=save_n,
@@ -349,7 +355,7 @@ num_repeats = 1
                         vram_size=vram_val,  # Ensure VRAM size is saved
                     )
 
-                return dit_default, lr, epochs, save_n, flow, swap, prec, grad_cp, fp8_s, fp8_l
+                return dit_default, dim, lr, epochs, save_n, flow, swap, prec, grad_cp, fp8_s, fp8_l
 
             def set_post_processing_defaults(project_path, output_nm):
                 if not project_path or not output_nm:
@@ -497,6 +503,7 @@ num_repeats = 1
             with gr.Group():
                 gr.Markdown(i18n("header_basic_params"))
                 with gr.Row():
+                    network_dim = gr.Number(label=i18n("lbl_dim"), value=4)
                     learning_rate = gr.Number(label=i18n("lbl_lr"), value=1e-4)
                     num_epochs = gr.Number(label=i18n("lbl_epochs"), value=16)
                     save_every_n_epochs = gr.Number(label=i18n("lbl_save_every"), value=1)
@@ -582,6 +589,7 @@ num_repeats = 1
             vae,
             te1,
             output_nm,
+            dim,
             lr,
             epochs,
             save_n,
@@ -615,6 +623,7 @@ num_repeats = 1
                 project_path,
                 dit_path=dit,
                 output_name=output_nm,
+                network_dim=dim,
                 learning_rate=lr,
                 num_epochs=epochs,
                 save_every_n_epochs=save_n,
@@ -663,7 +672,7 @@ num_repeats = 1
                 "--network_module",
                 f"networks.lora_{arch_name}",
                 "--network_dim",
-                "32",
+                str(int(dim)),
                 "--optimizer_type",
                 "adamw8bit",
                 "--learning_rate",
@@ -758,6 +767,7 @@ num_repeats = 1
                 text_encoder2_path,
                 dit_path,
                 output_name,
+                network_dim,
                 learning_rate,
                 num_epochs,
                 save_every_n_epochs,
@@ -815,6 +825,7 @@ num_repeats = 1
             inputs=[project_dir, comfy_models_dir, model_arch, vram_size],
             outputs=[
                 dit_path,
+                network_dim,
                 learning_rate,
                 num_epochs,
                 save_every_n_epochs,
@@ -868,6 +879,7 @@ num_repeats = 1
                 vae_path,
                 text_encoder1_path,
                 output_name,
+                network_dim,
                 learning_rate,
                 num_epochs,
                 save_every_n_epochs,
