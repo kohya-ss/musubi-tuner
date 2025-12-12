@@ -35,7 +35,7 @@ def construct_ui():
                         "Qwen-Image",
                         "Z-Image-Turbo",
                     ],
-                    value="Z-Image-Turbo",
+                    value="Qwen-Image",
                 )
                 vram_size = gr.Dropdown(label=i18n("lbl_vram"), choices=["12", "16", "24", "32", ">32"], value="24")
 
