@@ -26,7 +26,7 @@ def construct_ui():
             init_btn = gr.Button(i18n("btn_init_project"))
             project_status = gr.Markdown("")
 
-        with gr.Accordion(i18n("acc_model"), open=True):
+        with gr.Accordion(i18n("acc_model"), open=False):
             gr.Markdown(i18n("desc_model"))
             with gr.Row():
                 model_arch = gr.Dropdown(
@@ -389,23 +389,25 @@ num_repeats = 1
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                     )
 
-                    output_log = ""
+                    output_log = command + "\n\n"
                     for line in process.stdout:
                         output_log += line
                         yield output_log
 
                     process.wait()
                     if process.returncode != 0:
-                        output_log += f"\nError: Process exited with code / プロセスが次のコードでエラー終了しました: {process.returncode}"
+                        output_log += (
+                            f"\nError: Process exited with code / プロセスが次のコードでエラー終了しました: {process.returncode}"
+                        )
                         yield output_log
                     else:
-                        output_log += f"\nProcess completed successfully / プロセスが正常に完了しました"
+                        output_log += "\nProcess completed successfully / プロセスが正常に完了しました"
                         yield output_log
 
                 except Exception as e:
                     yield f"Error executing command / コマンドの実行中にエラーが発生しました: {str(e)}"
 
-            def cache_latents(project_path, vae_path_val, te1, te2, model, comfy, w, h, batch):
+            def cache_latents(project_path, vae_path_val, te1, te2, model, comfy, w, h, batch, vram_val):
                 if not project_path:
                     yield "Error: Project directory not set. / プロジェクトディレクトリが設定されていません。"
                     return
@@ -440,15 +442,15 @@ num_repeats = 1
                 if model == "Qwen-Image":
                     script_name = "qwen_image_cache_latents.py"
 
+                script_path = os.path.join("src", "musubi_tuner", script_name)
+
+                cmd = [sys.executable, script_path, "--dataset_config", config_path, "--vae", vae_path_val]
+
                 # Placeholder for argument modification
                 if model == "Z-Image-Turbo":
                     pass
                 elif model == "Qwen-Image":
                     pass
-
-                script_path = os.path.join("src", "musubi_tuner", script_name)
-
-                cmd = [sys.executable, script_path, "--dataset_config", config_path, "--vae", vae_path_val]
 
                 command_str = " ".join(cmd)
                 yield f"Starting Latent Caching. Please wait for the first log to appear. / Latentのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_str}\n\n"
@@ -539,11 +541,12 @@ num_repeats = 1
                     save_every_n_epochs = gr.Number(label=i18n("lbl_save_every"), value=1)
 
             with gr.Group():
+                with gr.Row():
+                    discrete_flow_shift = gr.Number(label=i18n("lbl_flow_shift"), value=2.0)
+                    block_swap = gr.Slider(label=i18n("lbl_block_swap"), minimum=0, maximum=60, step=1, value=0)
+
                 with gr.Accordion(i18n("accordion_advanced"), open=False):
                     gr.Markdown(i18n("desc_training_detailed"))
-                    with gr.Row():
-                        discrete_flow_shift = gr.Number(label=i18n("lbl_flow_shift"), value=2.0)
-                    block_swap = gr.Slider(label=i18n("lbl_block_swap"), minimum=0, maximum=28, step=1, value=0)
 
                 with gr.Row():
                     mixed_precision = gr.Dropdown(label=i18n("lbl_mixed_precision"), choices=["bf16", "fp16", "no"], value="bf16")
@@ -637,11 +640,12 @@ num_repeats = 1
                 return "Error: Project directory not set. / プロジェクトディレクトリが設定されていません。"
             if not dit:
                 return "Error: Base Model / DiT Path not set. / Base Model / DiTのパスが設定されていません。"
+            if not os.path.exists(dit):
+                return f"Error: Base Model / DiT file not found at {dit} / " f"Base Model / DiTファイルが見つかりません: {dit}"
             if not vae:
                 return "Error: VAE Path not set (configure in Preprocessing). / VAEのパスが設定されていません (Preprocessingで設定してください)。"
             if not te1:
                 return "Error: Text Encoder 1 Path not set (configure in Preprocessing). / Text Encoder 1のパスが設定されていません (Preprocessingで設定してください)。"
-
 
             dataset_config = os.path.join(project_path, "dataset_config.toml")
             if not os.path.exists(dataset_config):
@@ -684,10 +688,23 @@ num_repeats = 1
             inner_cmd = [
                 "accelerate",
                 "launch",
+                # accelerate args: we don't configure default_config.yaml, so we need to specify all here
                 "--num_cpu_threads_per_process",
                 "1",
                 "--mixed_precision",
                 prec,
+                "--dynamo_backend=no",
+                "--gpu_ids",
+                "all",
+                "--machine_rank",
+                "0",
+                "--main_training_function",
+                "main",
+                "--num_machines",
+                "1",
+                "--num_processes",
+                "1",
+                # script and its args
                 script_path,
                 "--dit",
                 dit,
@@ -890,6 +907,7 @@ num_repeats = 1
                 resolution_w,
                 resolution_h,
                 batch_size,
+                vram_size,
             ],
             outputs=[caching_output],
         )

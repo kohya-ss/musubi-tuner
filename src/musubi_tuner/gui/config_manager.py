@@ -21,11 +21,11 @@ class ConfigManager:
                     "fp8_llm": True,
                 },
                 "vram_settings": {
-                    "12": {"batch_size": 1, "block_swap": 20, "fp8_llm": True},
-                    "16": {"batch_size": 1, "block_swap": 12, "fp8_llm": False},
-                    "24": {"batch_size": 1, "block_swap": 0, "fp8_llm": False},
-                    "32": {"batch_size": 2, "block_swap": 0, "fp8_llm": False},
-                    ">32": {"batch_size": 4, "block_swap": 0, "fp8_llm": False},
+                    "12": {"batch_size": 1, "block_swap": 0, "fp8_scaled": True, "fp8_llm": True},
+                    "16": {"batch_size": 2, "block_swap": 0, "fp8_scaled": True, "fp8_llm": False},
+                    "24": {"batch_size": 1, "block_swap": 0, "fp8_scaled": False, "fp8_llm": False},
+                    "32": {"batch_size": 2, "block_swap": 0, "fp8_scaled": False, "fp8_llm": False},
+                    ">32": {"batch_size": 8, "block_swap": 0, "fp8_scaled": False, "fp8_llm": False},
                 },
             },
             "Qwen-Image": {
@@ -38,18 +38,18 @@ class ConfigManager:
                     "learning_rate": 1e-4,
                     "num_epochs": 16,
                     "save_every_n_epochs": 1,
-                    "discrete_flow_shift": 1.0,
+                    "discrete_flow_shift": 2.2,
                     "mixed_precision": "bf16",
                     "gradient_checkpointing": True,
                     "fp8_scaled": True,
                     "fp8_llm": True,
                 },
                 "vram_settings": {
-                    "12": {"batch_size": 1, "block_swap": 20, "fp8_llm": True},
-                    "16": {"batch_size": 1, "block_swap": 12, "fp8_llm": True},
-                    "24": {"batch_size": 1, "block_swap": 0, "fp8_llm": False},
-                    "32": {"batch_size": 2, "block_swap": 0, "fp8_llm": False},
-                    ">32": {"batch_size": 4, "block_swap": 0, "fp8_llm": False},
+                    "12": {"batch_size": 1, "block_swap": 46, "fp8_scaled": True, "fp8_llm": True},
+                    "16": {"batch_size": 1, "block_swap": 34, "fp8_scaled": True, "fp8_llm": True},
+                    "24": {"batch_size": 1, "block_swap": 10, "fp8_scaled": True, "fp8_llm": False},
+                    "32": {"batch_size": 2, "block_swap": 0, "fp8_scaled": True, "fp8_llm": False},
+                    ">32": {"batch_size": 2, "block_swap": 0, "fp8_scaled": False, "fp8_llm": False},
                 },
             },
         }
@@ -92,6 +92,8 @@ class ConfigManager:
             base["block_swap"] = vram_conf["block_swap"]
         if "fp8_llm" in vram_conf:
             base["fp8_llm"] = vram_conf["fp8_llm"]
+        if "fp8_scaled" in vram_conf:
+            base["fp8_scaled"] = vram_conf["fp8_scaled"]
 
         # DiT path
         dit_sub = conf.get("dit_subpath")
