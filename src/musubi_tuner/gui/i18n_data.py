@@ -57,7 +57,7 @@ I18N_DATA = {
 - **Save Every N Epochs**: How often to save the model and generate sample images.
 - **Discrete Flow Shift**: A parameter specific to flow matching models.
 - **Block Swap**: Offloads model blocks to CPU to save VRAM. Higher values save more VRAM but slow down training.
-- **Mixed Precision**: fp16 and bf16 are both supported. Which is better depends on the model architecture. For bf16, RTX30xx or higher is required.
+- **Mixed Precision**: fp16 and bf16 are both supported; which is better depends on the model architecture. For bf16, RTX30xx or higher is required.
 - **Gradient Checkpointing**: Saves VRAM by recomputing activations during backward pass.
 - **FP8**: Further reduces memory usage by using 8-bit floating point arithmetic.
 """,
