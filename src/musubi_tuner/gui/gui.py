@@ -705,7 +705,7 @@ num_repeats = 1
             if not dit:
                 return "Error: Base Model / DiT Path not set. / Base Model / DiTのパスが設定されていません。"
             if not os.path.exists(dit):
-                return f"Error: Base Model / DiT file not found at {dit} / " f"Base Model / DiTファイルが見つかりません: {dit}"
+                return f"Error: Base Model / DiT file not found at {dit} / Base Model / DiTファイルが見つかりません: {dit}"
             if not vae:
                 return "Error: VAE Path not set (configure in Preprocessing). / VAEのパスが設定されていません (Preprocessingで設定してください)。"
             if not te1:
