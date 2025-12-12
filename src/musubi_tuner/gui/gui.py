@@ -322,7 +322,7 @@ num_repeats = 1
                 required_subdirs = ["diffusion_models", "vae", "text_encoders"]
                 missing = []
                 for d in required_subdirs:
-                    if not os.path.join(path, d) or not os.path.exists(os.path.join(path, d)):
+                    if not os.path.exists(os.path.join(path, d)):
                         missing.append(d)
 
                 if missing:
