@@ -39,7 +39,7 @@ I18N_DATA = {
         "lbl_cache_log": "Caching Log Output",
         "acc_training": "5. Training",
         "desc_training_basic": "Configure the training parameters. If you train with the same name again, the previous LoRA will be overwritten.",
-        "desc_training_zimage": "Recommended: Use **bf16** for mixed precision. Because Base model is not released yet, please use `z_image_de_turbo_v1_bf16.safetensors` as Base model.",
+        "desc_training_zimage": "Recommended: Use **bf16** for mixed precision. Because the base model has not been released yet, please use `z_image_de_turbo_v1_bf16.safetensors` as the base model.",
         "btn_rec_params": "Set Recommended Parameters",
         "lbl_dit_path": "Base Model / DiT Path",
         "ph_dit_path": "Path to DiT model",
