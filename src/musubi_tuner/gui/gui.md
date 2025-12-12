@@ -185,7 +185,7 @@ my_lora_project/
 ### Step 2: Model Selection
 
 1. **Model Architecture**: Select the model you want to train
-   - `Z-Image-Turbo` - Faster training, slightly unstable LoRA training because the Base model is not released yet
+   - `Z-Image-Turbo` - Faster training; LoRA training may be slightly unstable because the Base model is not released yet
    - `Qwen-Image` - Higher quality, requires more VRAM
 
 2. **VRAM Size**: Select your GPU's VRAM size
