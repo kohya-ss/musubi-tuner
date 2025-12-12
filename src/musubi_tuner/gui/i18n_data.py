@@ -51,7 +51,7 @@ I18N_DATA = {
         "lbl_save_every": "Save Every N Epochs",
         "accordion_advanced": "Advanced Parameters",
         "desc_training_detailed": """
-### detailed explanation
+### Detailed Explanation
 - **Learning Rate**: Controls how much the model weights are updated during training. Lower values are safer but slower.
 - **Epochs**: One complete pass through the entire training dataset.
 - **Save Every N Epochs**: How often to save the model and generate sample images.
