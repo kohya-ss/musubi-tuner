@@ -332,11 +332,11 @@ num_repeats = 1
 
             def set_recommended_settings(project_path, model_arch, vram_val):
                 w, h = config_manager.get_resolution(model_arch)
-                chk_batch = config_manager.get_batch_size(model_arch, vram_val)
+                recommended_batch_size = config_manager.get_batch_size(model_arch, vram_val)
 
                 if project_path:
-                    save_project_settings(project_path, resolution_w=w, resolution_h=h, batch_size=chk_batch)
-                return w, h, chk_batch
+                    save_project_settings(project_path, resolution_w=w, resolution_h=h, batch_size=recommended_batch_size)
+                return w, h, recommended_batch_size
 
             def set_preprocessing_defaults(project_path, comfy_models_dir, model_arch):
                 if not comfy_models_dir:
