@@ -389,7 +389,21 @@ num_repeats = 1
                         sample_h=sample_h_default,
                     )
 
-                return dit_default, dim, lr, epochs, save_n, flow, swap, prec, grad_cp, fp8_s, fp8_l, sample_w_default, sample_h_default
+                return (
+                    dit_default,
+                    dim,
+                    lr,
+                    epochs,
+                    save_n,
+                    flow,
+                    swap,
+                    prec,
+                    grad_cp,
+                    fp8_s,
+                    fp8_l,
+                    sample_w_default,
+                    sample_h_default,
+                )
 
             def set_post_processing_defaults(project_path, output_nm):
                 if not project_path or not output_nm:
