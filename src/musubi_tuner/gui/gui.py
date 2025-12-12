@@ -124,6 +124,12 @@ def construct_ui():
                         gr.update(),
                         gr.update(),
                         gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
                     )
                 try:
                     os.makedirs(os.path.join(path, "training"), exist_ok=True)
@@ -154,6 +160,14 @@ def construct_ui():
                     new_fp8_s = settings.get("fp8_scaled", True)
                     new_fp8_l = settings.get("fp8_llm", True)
                     new_add_args = settings.get("additional_args", "")
+
+                    # Sample image params
+                    new_sample_enable = settings.get("sample_images", False)
+                    new_sample_every_n = settings.get("sample_every_n_epochs", 1)
+                    new_sample_prompt = settings.get("sample_prompt", "")
+                    new_sample_negative = settings.get("sample_negative_prompt", "")
+                    new_sample_w = settings.get("sample_w", new_w)
+                    new_sample_h = settings.get("sample_h", new_h)
 
                     # Post-processing params
                     new_in_lora = settings.get("input_lora_path", "")
@@ -196,12 +210,23 @@ def construct_ui():
                         new_fp8_s,
                         new_fp8_l,
                         new_add_args,
+                        new_sample_enable,
+                        new_sample_every_n,
+                        new_sample_prompt,
+                        new_sample_negative,
+                        new_sample_w,
+                        new_sample_h,
                         new_in_lora,
                         new_out_comfy,
                     )
                 except Exception as e:
                     return (
                         f"Error initializing project: {str(e)}",
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
+                        gr.update(),
                         gr.update(),
                         gr.update(),
                         gr.update(),
@@ -343,6 +368,8 @@ num_repeats = 1
                 fp8_s = defaults.get("fp8_scaled", True)
                 fp8_l = defaults.get("fp8_llm", True)
 
+                sample_w_default, sample_h_default = config_manager.get_resolution(model_arch)
+
                 if project_path:
                     save_project_settings(
                         project_path,
@@ -358,9 +385,11 @@ num_repeats = 1
                         fp8_scaled=fp8_s,
                         fp8_llm=fp8_l,
                         vram_size=vram_val,  # Ensure VRAM size is saved
+                        sample_w=sample_w_default,
+                        sample_h=sample_h_default,
                     )
 
-                return dit_default, dim, lr, epochs, save_n, flow, swap, prec, grad_cp, fp8_s, fp8_l
+                return dit_default, dim, lr, epochs, save_n, flow, swap, prec, grad_cp, fp8_s, fp8_l, sample_w_default, sample_h_default
 
             def set_post_processing_defaults(project_path, output_nm):
                 if not project_path or not output_nm:
@@ -556,6 +585,21 @@ num_repeats = 1
                     fp8_scaled = gr.Checkbox(label=i18n("lbl_fp8_scaled"), value=True)
                     fp8_llm = gr.Checkbox(label=i18n("lbl_fp8_llm"), value=True)
 
+            with gr.Group():
+                gr.Markdown(i18n("header_sample_images"))
+                sample_images = gr.Checkbox(label=i18n("lbl_enable_sample"), value=False)
+                with gr.Row():
+                    sample_prompt = gr.Textbox(label=i18n("lbl_sample_prompt"), placeholder=i18n("ph_sample_prompt"))
+                with gr.Row():
+                    sample_negative_prompt = gr.Textbox(
+                        label=i18n("lbl_sample_negative_prompt"),
+                        placeholder=i18n("ph_sample_negative_prompt"),
+                    )
+                with gr.Row():
+                    sample_w = gr.Number(label=i18n("lbl_sample_w"), value=1024, precision=0)
+                    sample_h = gr.Number(label=i18n("lbl_sample_h"), value=1024, precision=0)
+                    sample_every_n = gr.Number(label=i18n("lbl_sample_every_n"), value=1, precision=0)
+
             with gr.Accordion(i18n("accordion_additional"), open=False):
                 gr.Markdown(i18n("desc_additional_args"))
                 additional_args = gr.Textbox(label=i18n("lbl_additional_args"), placeholder=i18n("ph_additional_args"))
@@ -633,6 +677,12 @@ num_repeats = 1
             fp8_s,
             fp8_l,
             add_args,
+            should_sample_images,
+            sample_every_n,
+            sample_prompt_val,
+            sample_negative_prompt_val,
+            sample_w_val,
+            sample_h_val,
         ):
             import shlex
 
@@ -672,6 +722,12 @@ num_repeats = 1
                 vae_path=vae,
                 text_encoder1_path=te1,
                 additional_args=add_args,
+                sample_images=should_sample_images,
+                sample_every_n_epochs=sample_every_n,
+                sample_prompt=sample_prompt_val,
+                sample_negative_prompt=sample_negative_prompt_val,
+                sample_w=sample_w_val,
+                sample_h=sample_h_val,
             )
 
             # Model specific command modification
@@ -746,6 +802,40 @@ num_repeats = 1
                 "--log_with",
                 "tensorboard",
             ]
+
+            # Sample image generation options
+            if should_sample_images:
+                sample_prompt_path = os.path.join(project_path, "sample_prompt.txt")
+                templates = {
+                    # prompt, negative prompt, width, height, flow shift, steps, CFG scale, seed
+                    "Qwen-Image": "{prompt} --n {neg} --w {w} --h {h} --fs 2.2 --s 20 --l 4.0 --d 1234",
+                    "Z-Image-Turbo": "{prompt} --n {neg} --w {w} --h {h} --fs 3.0 --s 20 --l 5.0 --d 1234",
+                }
+                template = templates.get(model, templates["Z-Image-Turbo"])
+                prompt_str = (sample_prompt_val or "").replace("\n", " ").strip()
+                neg_str = (sample_negative_prompt_val or "").replace("\n", " ").strip()
+                try:
+                    w_int = int(sample_w_val)
+                    h_int = int(sample_h_val)
+                except Exception:
+                    return "Error: Sample width/height must be integers. / サンプル画像の幅と高さは整数で指定してください。"
+
+                line = template.format(prompt=prompt_str, neg=neg_str, w=w_int, h=h_int)
+                try:
+                    with open(sample_prompt_path, "w", encoding="utf-8") as f:
+                        f.write(line + "\n")
+                except Exception as e:
+                    return f"Error writing sample_prompt.txt / sample_prompt.txt の作成に失敗しました: {str(e)}"
+
+                inner_cmd.extend(
+                    [
+                        "--sample_prompts",
+                        sample_prompt_path,
+                        "--sample_at_first",
+                        "--sample_every_n_epochs",
+                        str(int(sample_every_n)),
+                    ]
+                )
 
             if prec != "no":
                 inner_cmd.extend(["--mixed_precision", prec])
@@ -835,6 +925,12 @@ num_repeats = 1
                 fp8_scaled,
                 fp8_llm,
                 additional_args,
+                sample_images,
+                sample_every_n,
+                sample_prompt,
+                sample_negative_prompt,
+                sample_w,
+                sample_h,
                 input_lora,
                 output_comfy_lora,
             ],
@@ -892,6 +988,8 @@ num_repeats = 1
                 gradient_checkpointing,
                 fp8_scaled,
                 fp8_llm,
+                sample_w,
+                sample_h,
             ],
         )
 
@@ -949,6 +1047,12 @@ num_repeats = 1
                 fp8_scaled,
                 fp8_llm,
                 additional_args,
+                sample_images,
+                sample_every_n,
+                sample_prompt,
+                sample_negative_prompt,
+                sample_w,
+                sample_h,
             ],
             outputs=[training_status],
         )
