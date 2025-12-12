@@ -398,6 +398,9 @@ num_repeats = 1
                     if process.returncode != 0:
                         output_log += f"\nError: Process exited with code / プロセスが次のコードでエラー終了しました: {process.returncode}"
                         yield output_log
+                    else:
+                        output_log += f"\nProcess completed successfully / プロセスが正常に完了しました"
+                        yield output_log
 
                 except Exception as e:
                     yield f"Error executing command / コマンドの実行中にエラーが発生しました: {str(e)}"
@@ -433,7 +436,17 @@ num_repeats = 1
                     yield f"Error: dataset_config.toml not found in {project_path}. Please generate it first. / dataset_config.tomlが {project_path} に見つかりません。先に設定ファイルを生成してください。"
                     return
 
-                script_path = os.path.join("src", "musubi_tuner", "zimage_cache_latents.py")
+                script_name = "zimage_cache_latents.py"
+                if model == "Qwen-Image":
+                    script_name = "qwen_image_cache_latents.py"
+
+                # Placeholder for argument modification
+                if model == "Z-Image-Turbo":
+                    pass
+                elif model == "Qwen-Image":
+                    pass
+
+                script_path = os.path.join("src", "musubi_tuner", script_name)
 
                 cmd = [sys.executable, script_path, "--dataset_config", config_path, "--vae", vae_path_val]
 
@@ -442,7 +455,7 @@ num_repeats = 1
 
                 yield from run_command(command_str)
 
-            def cache_text_encoder(project_path, te1_path_val, te2_path_val, vae, model, comfy, w, h, batch):
+            def cache_text_encoder(project_path, te1_path_val, te2_path_val, vae, model, comfy, w, h, batch, vram_val):
                 if not project_path:
                     yield "Error: Project directory not set. / プロジェクトディレクトリが設定されていません。"
                     return
@@ -475,7 +488,11 @@ num_repeats = 1
                     yield f"Error: dataset_config.toml not found in {project_path}. Please generate it first. / dataset_config.tomlが {project_path} に見つかりません。先に設定ファイルを生成してください。"
                     return
 
-                script_path = os.path.join("src", "musubi_tuner", "zimage_cache_text_encoder_outputs.py")
+                script_name = "zimage_cache_text_encoder_outputs.py"
+                if model == "Qwen-Image":
+                    script_name = "qwen_image_cache_text_encoder_outputs.py"
+
+                script_path = os.path.join("src", "musubi_tuner", script_name)
 
                 cmd = [
                     sys.executable,
@@ -487,6 +504,14 @@ num_repeats = 1
                     "--batch_size",
                     "1",  # Conservative default
                 ]
+
+                # Model-specific argument modification
+                if model == "Z-Image-Turbo":
+                    pass
+                elif model == "Qwen-Image":
+                    # Add --fp8_vl for low VRAM (16GB or less)
+                    if vram_val in ["12", "16"]:
+                        cmd.append("--fp8_vl")
 
                 command_str = " ".join(cmd)
                 yield f"Starting Text Encoder Caching. Please wait for the first log to appear. / Text Encoderのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_str}\n\n"
@@ -881,6 +906,7 @@ num_repeats = 1
                 resolution_w,
                 resolution_h,
                 batch_size,
+                vram_size,
             ],
             outputs=[caching_output],
         )
