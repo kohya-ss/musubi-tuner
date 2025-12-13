@@ -109,6 +109,21 @@ extend-exclude = [
   "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py",
   "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py",
   "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py",
+  "src/musubi_tuner/kandinsky/models/__init__.py",
+  "src/musubi_tuner/kandinsky/models/attention.py",
+  "src/musubi_tuner/kandinsky/models/dit.py",
+  "src/musubi_tuner/kandinsky/models/nn.py",
+  "src/musubi_tuner/kandinsky/models/parallelize.py",
+  "src/musubi_tuner/kandinsky/models/text_embedders.py",
+  "src/musubi_tuner/kandinsky/models/utils.py",
+  "src/musubi_tuner/kandinsky/models/vae.py",
+  "src/musubi_tuner/kandinsky/__init__.py",
+  "src/musubi_tuner/kandinsky/generation_utils.py",
+  "src/musubi_tuner/kandinsky/i2i_pipeline.py",
+  "src/musubi_tuner/kandinsky/i2v_pipeline.py",
+  "src/musubi_tuner/kandinsky/t2i_pipeline.py",
+  "src/musubi_tuner/kandinsky/t2v_pipeline.py",
+  "src/musubi_tuner/kandinsky/utils.py",
   "src/musubi_tuner/modules/scheduling_flow_match_discrete.py",
   "src/musubi_tuner/modules/unet_causal_3d_blocks.py",
   "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py",
@@ -154,6 +169,21 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py" = ["ALL"]
 "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py" = ["ALL"]
 "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/__init__.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/attention.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/dit.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/nn.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/parallelize.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/text_embedders.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/utils.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/models/vae.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/__init__.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/generation_utils.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/i2i_pipeline.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/i2v_pipeline.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/t2i_pipeline.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/t2v_pipeline.py" = ["ALL"]
+"src/musubi_tuner/kandinsky/utils.py" = ["ALL"]
 "src/musubi_tuner/modules/scheduling_flow_match_discrete.py" = ["ALL"]
 "src/musubi_tuner/modules/unet_causal_3d_blocks.py" = ["ALL"]
 "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py" = ["ALL"]
