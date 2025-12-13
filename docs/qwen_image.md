@@ -275,7 +275,7 @@ accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/qwen_image_tr
 
 `--full_bf16` reduces VRAM usage by about 20GB but may impact model accuracy as the weights are kept in bfloat16. Note that the optimizer state is still kept in float32. In addition, it is recommended to use this with an optimizer that supports stochastic rounding. In this repository, Adafactor optimizer with `--fused_backward_pass` option supports stochastic rounding.
 
-For `--mem_eff_save`, please note that when saving the optimizer state with `--save_state`, the conventional saving method is used, which will still require about 40GB of main memory.
+When using `--mem_eff_save`, please note that traditional saving methods are still used when saving the optimizer state in `--save_state`, requiring about 40GB of main memory.
 
 `--edit` or `--edit_plus` option allows for finetuning of Qwen-Image-Edit/Edit-2509 (unverified).
 
@@ -309,7 +309,7 @@ Finetuningは専用のスクリプト`qwen_image_train.py`を使用します。�
 
 `--full_bf16`はVRAM使用量を約20GB削減しますが、重みがbfloat16で保持されるため、モデルの精度に影響を与える可能性があります。オプティマイザの状態はfloat32で保持されます。また、効率的な学習のために、stochastic roundingをサポートするオプティマイザとの併用が推奨されます。このリポジトリでは、`adafactor`オプティマイザに`--fused_backward_pass`オプションの組み合わせでstochastic roundingをサポートしています。
 
-`--mem_eff_save`を使用する場合、`--save_state`でオプティマイザの状態を保存する際に従来の保存方法が使用されるため、約40GBのメインメモリが依然として必要であることに注意してください。
+`--mem_eff_save`を使用する場合でも、`--save_state`においてはオプティマイザの状態を保存する際に従来の保存方法が依然として使用されるため、約40GBのメインメモリが必要であることに注意してください。
 
 `--edit`または`--edit_plus`オプションを追加するとQwen-Image-Edit/Edit-2509のfinetuningが可能です（未検証です）。
 
