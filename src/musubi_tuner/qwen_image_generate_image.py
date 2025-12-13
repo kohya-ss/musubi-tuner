@@ -19,7 +19,6 @@ from PIL import Image
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
-from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 
@@ -27,7 +26,7 @@ lycoris_available = find_spec("lycoris") is not None
 
 from musubi_tuner.networks import lora_qwen_image
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, setup_parser_compile, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 
 import logging
@@ -88,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="path to control (reference) image(s) for Qwen-Image-Edit, by default resized and cropped to 1M pixels keeping aspect ratio.",
+    )
+    parser.add_argument(
+        "--image_path",
+        type=str,
+        default=None,
+        help="path to image for Qwen-Image or Qwen-Image-Edit for inpainting",
     )
     parser.add_argument(
         "--mask_path",
@@ -153,7 +158,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--append_original_name", action="store_true", help="append original base name when saving images when editing"
     )
-    setup_parser_compile(parser)
 
     # Reference Consistency Mask (RCM)
     parser.add_argument(
@@ -411,6 +415,21 @@ def load_dit_model(
 
         model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
+    # if args.compile:
+    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
+    #     logger.info(
+    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+    #     )
+    #     torch._dynamo.config.cache_size_limit = 32
+    #     for i in range(len(model.blocks)):
+    #         model.blocks[i] = torch.compile(
+    #             model.blocks[i],
+    #             backend=compile_backend,
+    #             mode=compile_mode,
+    #             dynamic=compile_dynamic.lower() in "true",
+    #             fullgraph=compile_fullgraph.lower() in "true",
+    #         )
+
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
         model.enable_block_swap(
@@ -422,9 +441,6 @@ def load_dit_model(
         # make sure the model is on the right device
         model.to(device)
 
-    if args.compile:
-        model = model_utils.compile_transformer(args, model, [model.transformer_blocks], disable_linear=args.blocks_to_swap > 0)
-
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
 
@@ -434,7 +450,7 @@ def load_dit_model(
 # endregion
 
 
-def prepare_image_inputs(
+def prepare_control_image_inputs(
     args: argparse.Namespace, device: torch.device, vae: AutoencoderKLQwenImage
 ) -> tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
     """Prepare image-related inputs for Kontext: AE encoding."""
@@ -470,6 +486,37 @@ def prepare_image_inputs(
 
     return control_latents, control_image_nps
 
+def prepare_image_inputs(
+    args: argparse.Namespace, device: torch.device, vae: AutoencoderKLQwenImage
+) -> tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+    """Prepare image-related inputs for Kontext: AE encoding."""
+    height, width = check_inputs(args)
+
+    latent = []
+    image_np = []
+    if args.image_path is not None:
+        vae_original_device = vae.device
+        vae.to(device)
+
+        image_tensor, image_np, _ = qwen_image_utils.preprocess_control_image(
+            args.image_path, args.resize_control_to_official_size, (width, height) if args.resize_control_to_image_size else None
+        )
+
+        # VAE encoding
+        logger.info("Encoding image to latent space with VAE")
+
+        with torch.no_grad():
+            latent = vae.encode_pixels_to_latents(image_tensor.to(device, vae.dtype))
+        latent = latent.to(torch.bfloat16).to("cpu")
+
+        vae.to(vae_original_device)  # Move VAE back to its original device
+        clean_memory_on_device(device)
+
+    else:
+        latent = None
+        image_np = None
+
+    return latent, image_np
 
 def decode_latent(
     vae: AutoencoderKLQwenImage, latent: torch.Tensor, device: torch.device, enable_tiling: bool = False
@@ -656,7 +703,7 @@ def generate(
             vae_instance_for_return = qwen_image_utils.load_vae(args.vae, device=device, disable_mmap=True)
             vae_instance_for_return.eval()
 
-        control_latents, control_image_nps = prepare_image_inputs(args, device, vae_instance_for_return)
+        control_latents, control_image_nps = prepare_control_image_inputs(args, device, vae_instance_for_return)
         context, context_null = prepare_text_inputs(args, control_image_nps, device, shared_models)
 
     if shared_models is None or "model" not in shared_models:
@@ -703,6 +750,7 @@ def generate(
     # 4. Prepare latent variables
     num_channels_latents = model.in_channels // 4
     latents = qwen_image_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, seed_g)
+
     if not is_edit:
         img_shapes = [(1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2)]
     else:
@@ -741,7 +789,7 @@ def generate(
         if not is_edit or not has_same_size_control:
             logger.error("Mask image is only supported for Qwen-Image-Edit with control image of the same size as output.")
             inpainting_mask = None
-        else:
+        else:            
             inpainting_mask, _, _ = qwen_image_utils.preprocess_control_image(
                 args.mask_path, False, (width, height)
             )  # -1 to 1, NCHW, N=1
@@ -778,7 +826,13 @@ def generate(
                 )
 
         noise = latents
-        control_latent_1st = control_latent[:, : latents.shape[1]]
+
+        if args.image_path:
+            control_latent_1st, image_nps = prepare_image_inputs(args, device, vae_instance_for_return)
+            control_latent_1st = control_latent_1st.to(device)
+            control_latent_1st = qwen_image_utils.pack_latents(control_latent_1st)
+        else:
+            control_latent_1st = control_latent[:, : latents.shape[1]]
         debug_save_prefix = (
             f"{os.path.splitext(os.path.basename(args.control_image_path[0]))[0]}"
             + f"_th{args.rcm_threshold}_rel{int(args.rcm_relative_threshold)}_ks{args.rcm_kernel_size}_ds{args.rcm_dilate_size}_"
@@ -787,12 +841,13 @@ def generate(
         noise = None
         control_latent_1st = None
 
+
     # 6. Denoising loop
     do_cfg = args.guidance_scale != 1.0
     scheduler.set_begin_index(0)
     with tqdm(total=num_inference_steps, desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
-            timestep = t.expand(latents.shape[0])  # keep dtype as float32 for better precision; avoid bfloat16 precision issues
+            timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
             latent_model_input = latents
             if is_edit:
@@ -1155,7 +1210,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         for i, prompt_args_item in enumerate(all_prompt_args_list):
             logger.info(f"Preprocessing control image for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             assert prompt_args_item.control_image_path is not None, "Qwen-Image-Edit requires control_image_path"
-            control_data = prepare_image_inputs(prompt_args_item, device, vae_for_batch)
+            control_data = prepare_control_image_inputs(prompt_args_item, device, vae_for_batch)
             all_precomputed_image_data.append(control_data)
 
         vae_for_batch.to("cpu")  # Move VAE back to CPU after control image encoding
