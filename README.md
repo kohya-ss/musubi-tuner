@@ -66,6 +66,8 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
 - December 13, 2025
     - Added support for finetuning Qwen-Image. See [PR #778](https://github.com/kohya-ss/musubi-tuner/pull/778). Many thanks to sdbds for this contribution.
         - Please refer to the [documentation](./docs/zimage.md#finetuning) for details.
+    - Added a very simple GUI tool. See [PR #779](https://github.com/kohya-ss/musubi-tuner/pull/779).
+        - Currently supports LoRA training for Z-Image-Turbo and Qwen-Image. Please refer to the [documentation](./src/musubi_tuner/gui/gui.md) for details.
 
 - December 9, 2025
     - LoRA weights in Diffusers format can now be loaded with the `--base_weights` option in training scripts. See [PR #772](https://github.com/kohya-ss/musubi-tuner/pull/772).

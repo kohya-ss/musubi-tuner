@@ -61,6 +61,8 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
 - 2025/12/13
     - Z-Imageのfinetuningに対応しました。[PR #778](https://github.com/kohya-ss/musubi-tuner/pull/778) sdbds氏に深く感謝します。
         - 詳細は[ドキュメント](./docs/zimage.md#finetuning)を参照してください。
+    - ごくシンプルなGUIツールを追加しました。[PR #779](https://github.com/kohya-ss/musubi-tuner/pull/779)
+        - 現在はZ-Image-TurboとQwen-ImageのLoRA学習に対応しています。詳細は[ドキュメント](./src/musubi_tuner/gui/gui.ja.md)を参照してください。
 
 - 2025/12/09
     - Diffusers形式のLoRA重みを学習スクリプトの `--base_weights` オプションで読み込めるようになりました。[PR #772](https://github.com/kohya-ss/musubi-tuner/pull/772) これによりZ-Image-TurboのTraining Adapter等を使用して学習できます。
