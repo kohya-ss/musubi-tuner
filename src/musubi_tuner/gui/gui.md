@@ -194,6 +194,7 @@ my_lora_project/
 3. **ComfyUI Models Directory**: Enter the path to your ComfyUI `models` folder
    - Example: `C:\ComfyUI\models`
    - This folder should contain `vae`, `text_encoders`, and `diffusion_models` subfolders
+   - Required models can be found in the [Required Model Files](#required-model-files) section below
 
 4. Click **"Validate ComfyUI Models Directory"** to verify the folder structure
 
@@ -241,8 +242,8 @@ Before training, you need to cache the latents and text encoder outputs. This co
 
 3. **Basic Parameters** (can use defaults):
    - **LoRA Dim**: LoRA rank/dimension (4-32, higher = more capacity but larger file)
-   - **Learning Rate**: How fast the model learns (default: 2e-4 (0.0002), can increase up to ~1e-3 for faster training)
-   - **Epochs**: Number of times to train on all images
+   - **Learning Rate**: How fast the model learns (default: 1e-3 (0.001), can decrease if training is unstable)
+   - **Epochs**: Number of times to train on all images. Default is adjusted based on image count; reduce if overfitting occurs.
    - **Save Every N Epochs**: How often to save checkpoints
 
 4. **Advanced Parameters** (expand "Advanced Parameters" accordion):
@@ -273,6 +274,30 @@ Z-Image LoRAs need to be converted for use in ComfyUI. Follow these steps:
    - **Input LoRA Path**: Path to your trained LoRA
    - **Output ComfyUI LoRA Path**: Where to save the converted LoRA
 3. Click **"Convert to ComfyUI Format"**
+
+---
+
+## Required Model Files
+
+### Z-Image-Turbo
+
+For text encoder and VAE model files, download them from the appropriate directory under `split_files` here: https://huggingface.co/Comfy-Org/z_image_turbo
+
+| Type | Model file |
+|------|------------|
+| diffusion-models | Use `z_image_de_turbo_v1_bf16.safetensors` from ostris's [De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) |
+| text-encoders | `qwen_3_4b.safetensors` |
+| VAE | `ae.safetensors` |
+
+### Qwen-Image
+
+Download the required model files from the appropriate directory under `split_files` here: https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI
+
+| Type | Model file |
+|------|------------|
+| diffusion-models | `qwen_image_bf16.safetensors` |
+| text-encoders | `qwen_2.5_vl_7b.safetensors` |
+| VAE | `qwen_image_vae.safetensors` |
 
 ---
 
@@ -314,7 +339,7 @@ Z-Image LoRAs need to be converted for use in ComfyUI. Follow these steps:
 | Base Model / DiT Path | Path to the base diffusion model (DiT). |
 | Output Name | Base name for saved LoRA files (without extension). |
 | LoRA Dim | LoRA rank/dimension. Higher values capture more detail but create larger files. Common values: 4, 8, 16, 32. |
-| Learning Rate | Speed of training. Higher = faster learning but may overshoot. Default: 2e-4 (0.0002). |
+| Learning Rate | Speed of training. Higher = faster learning but may overshoot. Default: 1e-3 (0.001). |
 | Epochs | Number of complete passes through all training images. |
 | Save Every N Epochs | Frequency of checkpoint saves. Also controls sample image generation frequency. |
 | Discrete Flow Shift | Flow matching parameter that affects training dynamics. Model-specific defaults are recommended. |

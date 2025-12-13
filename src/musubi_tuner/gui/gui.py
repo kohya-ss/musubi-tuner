@@ -1,3 +1,4 @@
+import glob
 import gradio as gr
 import os
 import toml
@@ -354,12 +355,26 @@ num_repeats = 1
                 return vae_default, te1_default, te2_default
 
             def set_training_defaults(project_path, comfy_models_dir, model_arch, vram_val):
+                # Get number of images from project_path to adjust num_epochs later
+                cache_dir = os.path.join(project_path, "cache")
+                pattern = "*" + ("_qi" if model_arch == "Qwen-Image" else "_zi") + ".safetensors"
+                num_images = len(glob.glob(os.path.join(cache_dir, pattern))) if os.path.exists(cache_dir) else 0
+
+                # Get training defaults from config manager
                 defaults = config_manager.get_training_defaults(model_arch, vram_val, comfy_models_dir)
+
+                # Adjust num_epochs based on number of images (simple heuristic)
+                default_num_steps = defaults.get("default_num_steps", 1000)
+                if num_images > 0:
+                    adjusted_epochs = max(1, int((default_num_steps / num_images)))
+                else:
+                    adjusted_epochs = 16  # Fallback default
+                sample_every_n_epochs = (adjusted_epochs // 4) if adjusted_epochs >= 4 else 1
 
                 dit_default = defaults.get("dit_path", "")
                 dim = defaults.get("network_dim", 4)
                 lr = defaults.get("learning_rate", 1e-4)
-                epochs = defaults.get("num_epochs", 16)
+                epochs = adjusted_epochs
                 save_n = defaults.get("save_every_n_epochs", 1)
                 flow = defaults.get("discrete_flow_shift", 2.0)
                 swap = defaults.get("block_swap", 0)
@@ -385,6 +400,7 @@ num_repeats = 1
                         fp8_scaled=fp8_s,
                         fp8_llm=fp8_l,
                         vram_size=vram_val,  # Ensure VRAM size is saved
+                        sample_every_n_epochs=sample_every_n_epochs,
                         sample_w=sample_w_default,
                         sample_h=sample_h_default,
                     )
@@ -401,6 +417,7 @@ num_repeats = 1
                     grad_cp,
                     fp8_s,
                     fp8_l,
+                    sample_every_n_epochs,
                     sample_w_default,
                     sample_h_default,
                 )
@@ -1002,6 +1019,7 @@ num_repeats = 1
                 gradient_checkpointing,
                 fp8_scaled,
                 fp8_llm,
+                sample_every_n,
                 sample_w,
                 sample_h,
             ],

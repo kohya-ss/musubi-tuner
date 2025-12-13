@@ -194,6 +194,7 @@ my_lora_project/
 3. **ComfyUI Models Directory（ComfyUIモデルディレクトリ）**：ComfyUIの`models`フォルダのパスを入力
    - 例：`C:\ComfyUI\models`
    - このフォルダには`vae`、`text_encoders`、`diffusion_models`サブフォルダが含まれている必要があります
+   - 必要なモデルは[こちら](#使用するモデル一覧)を参考にしてください
 
 4. **「Validate ComfyUI Models Directory」** をクリックしてフォルダ構造を確認
 
@@ -241,8 +242,8 @@ my_lora_project/
 
 3. **基本パラメータ**（デフォルト値を使用可能）：
    - **LoRA Dim**：LoRAのランク/次元（4-32、大きいほど容量が増えるがファイルサイズも増加）
-   - **Learning Rate**：学習速度（デフォルト：2e-4 (0.0002)、学習ステップ数を短縮したい場合は 1e-3 程度までの範囲で増やすことが可能）
-   - **Epochs**：全画像での学習回数
+   - **Learning Rate**：学習速度（デフォルト：1e-3 (0.001)、学習が不安定な場合は1e-4程度まで減少させることを推奨）
+   - **Epochs**：全画像での学習回数。デフォルトは画像数に基づいて調整されます。過学習になる場合は減少させてください。
    - **Save Every N Epochs**：チェックポイントを保存する頻度
 
 4. **詳細パラメータ**（「Advanced Parameters」アコーディオンを展開）：
@@ -273,6 +274,30 @@ Z-ImageのLoRAは、ComfyUIで使用するために変換が必要です。以�
    - **Input LoRA Path**：学習済みLoRAへのパス
    - **Output ComfyUI LoRA Path**：変換後のLoRAの保存先
 3. **「Convert to ComfyUI Format」** をクリック
+
+---
+
+## 使用するモデル一覧
+
+### Z-Image-Turbo
+
+text-encodersとvaeモデルファイルは、[こちら](https://huggingface.co/Comfy-Org/z_image_turbo) の `split_files` 以下の適切なディレクトリからダウンロードしてください。
+
+| 種類 | モデルファイル |
+|----------------------|--------------|
+| diffusion-models        | safetensors ostris氏の[De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo)から z_image_de_turbo_v1_bf16.safetensors を使用|
+| text-encoders       | qwen_3_4b.safetensors |
+| VAE                 | ae.safetensors |
+
+### Qwen-Image
+
+[こちら](https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI)の`split_files`以下の適切なディレクトリから必要なモデルファイルをダウンロードしてください。
+
+| 種類                | モデルファイル               |
+|----------------------|-----------------------------|
+| diffusion-models        | qwen_image_bf16.safetensors |
+| text-encoders       | qwen_2.5_vl_7b.safetensors |
+| VAE | qwen_image_vae.safetensors |
 
 ---
 
@@ -314,7 +339,7 @@ Z-ImageのLoRAは、ComfyUIで使用するために変換が必要です。以�
 | Base Model / DiT Path | ベースとなるdiffusionモデル（DiT）へのパス。 |
 | Output Name | 保存されるLoRAファイルのベース名（拡張子なし）。 |
 | LoRA Dim | LoRAのランク/次元。大きいほど詳細をキャプチャできますが、ファイルサイズも増加。一般的な値：4、8、16、32。 |
-| Learning Rate | 学習速度。大きいほど速く学習しますが、オーバーシュートする可能性があります。デフォルト：2e-4（0.0002）。 |
+| Learning Rate | 学習速度。大きいほど速く学習しますが、オーバーシュートする可能性があります。デフォルト：1e-3（0.001）。 |
 | Epochs | 全学習画像を何回学習するか。 |
 | Save Every N Epochs | チェックポイントを保存する頻度。サンプル画像の生成頻度も制御します。 |
 | Discrete Flow Shift | 学習のダイナミクスに影響するflow matchingパラメータ。モデル固有のデフォルト値が推奨されます。 |

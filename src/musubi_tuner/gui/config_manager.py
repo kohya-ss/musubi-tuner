@@ -11,8 +11,8 @@ class ConfigManager:
                 "te2_subpath": None,
                 "dit_subpath": ["diffusion_models", "z_image_de_turbo_v1_bf16.safetensors"],
                 "training_base": {
-                    "learning_rate": 2e-4,
-                    "num_epochs": 16,
+                    "learning_rate": 1e-3,
+                    "default_num_steps": 500,
                     "save_every_n_epochs": 1,
                     "discrete_flow_shift": 2.0,
                     "mixed_precision": "bf16",
@@ -35,8 +35,8 @@ class ConfigManager:
                 "te2_subpath": None,
                 "dit_subpath": ["diffusion_models", "qwen_image_bf16.safetensors"],
                 "training_base": {
-                    "learning_rate": 2e-4,
-                    "num_epochs": 16,
+                    "learning_rate": 1e-3,
+                    "default_num_steps": 1000,
                     "save_every_n_epochs": 1,
                     "discrete_flow_shift": 2.2,
                     "mixed_precision": "bf16",
