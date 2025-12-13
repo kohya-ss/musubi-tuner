@@ -35,7 +35,7 @@ def construct_ui():
                         "Qwen-Image",
                         "Z-Image-Turbo",
                     ],
-                    value="Z-Image-Turbo",
+                    value="Qwen-Image",
                 )
                 vram_size = gr.Dropdown(label=i18n("lbl_vram"), choices=["12", "16", "24", "32", ">32"], value="24")
 
@@ -322,7 +322,7 @@ num_repeats = 1
                 required_subdirs = ["diffusion_models", "vae", "text_encoders"]
                 missing = []
                 for d in required_subdirs:
-                    if not os.path.join(path, d) or not os.path.exists(os.path.join(path, d)):
+                    if not os.path.exists(os.path.join(path, d)):
                         missing.append(d)
 
                 if missing:
@@ -332,11 +332,11 @@ num_repeats = 1
 
             def set_recommended_settings(project_path, model_arch, vram_val):
                 w, h = config_manager.get_resolution(model_arch)
-                chk_batch = config_manager.get_batch_size(model_arch, vram_val)
+                recommended_batch_size = config_manager.get_batch_size(model_arch, vram_val)
 
                 if project_path:
-                    save_project_settings(project_path, resolution_w=w, resolution_h=h, batch_size=chk_batch)
-                return w, h, chk_batch
+                    save_project_settings(project_path, resolution_w=w, resolution_h=h, batch_size=recommended_batch_size)
+                return w, h, recommended_batch_size
 
             def set_preprocessing_defaults(project_path, comfy_models_dir, model_arch):
                 if not comfy_models_dir:
@@ -705,7 +705,7 @@ num_repeats = 1
             if not dit:
                 return "Error: Base Model / DiT Path not set. / Base Model / DiTのパスが設定されていません。"
             if not os.path.exists(dit):
-                return f"Error: Base Model / DiT file not found at {dit} / " f"Base Model / DiTファイルが見つかりません: {dit}"
+                return f"Error: Base Model / DiT file not found at {dit} / Base Model / DiTファイルが見つかりません: {dit}"
             if not vae:
                 return "Error: VAE Path not set (configure in Preprocessing). / VAEのパスが設定されていません (Preprocessingで設定してください)。"
             if not te1:

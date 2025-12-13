@@ -39,7 +39,7 @@ I18N_DATA = {
         "lbl_cache_log": "Caching Log Output",
         "acc_training": "5. Training",
         "desc_training_basic": "Configure the training parameters. If you train with the same name again, the previous LoRA will be overwritten.",
-        "desc_training_zimage": "Recommended: Use **bf16** for mixed precision. Because Base model is not released yet, please use `z_image_de_turbo_v1_bf16.safetensors` as Base model.",
+        "desc_training_zimage": "Recommended: Use **bf16** for mixed precision. Because the base model has not been released yet, please use `z_image_de_turbo_v1_bf16.safetensors` as the base model.",
         "btn_rec_params": "Set Recommended Parameters",
         "lbl_dit_path": "Base Model / DiT Path",
         "ph_dit_path": "Path to DiT model",
@@ -51,15 +51,15 @@ I18N_DATA = {
         "lbl_save_every": "Save Every N Epochs",
         "accordion_advanced": "Advanced Parameters",
         "desc_training_detailed": """
-### detailed explanation
+### Detailed Explanation
 - **Learning Rate**: Controls how much the model weights are updated during training. Lower values are safer but slower.
 - **Epochs**: One complete pass through the entire training dataset.
 - **Save Every N Epochs**: How often to save the model and generate sample images.
 - **Discrete Flow Shift**: A parameter specific to flow matching models.
 - **Block Swap**: Offloads model blocks to CPU to save VRAM. Higher values save more VRAM but slow down training.
-- **Mixed Precision**: fp16 and bf16 are both supported. Which is better depends on the model architecture. For bf16, RTX30xx or higher is required.
+- **Mixed Precision**: fp16 and bf16 are both supported; which is better depends on the model architecture. For bf16, RTX30xx or higher is required.
 - **Gradient Checkpointing**: Saves VRAM by recomputing activations during backward pass.
-- **FP8**: further reduces memory usage by using 8-bit floating point arithmetic.
+- **FP8**: Further reduces memory usage by using 8-bit floating point arithmetic.
 """,
         "lbl_flow_shift": "Discrete Flow Shift",
         "lbl_block_swap": "Block Swap (0-28)",
