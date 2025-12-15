@@ -446,7 +446,21 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
             metadata_to_save.update(sai_metadata)
 
-            state_dict = unwrapped_model.state_dict()
+            # temporarily remove self-referencing _orig_mod to avoid infinite recursion in state_dict()
+            has_self_ref_orig_mod_module = (
+                hasattr(unwrapped_model, "_modules")
+                and "_orig_mod" in unwrapped_model._modules
+                and unwrapped_model._modules["_orig_mod"] is unwrapped_model
+            )
+            if has_self_ref_orig_mod_module:
+                del unwrapped_model._modules["_orig_mod"]
+
+            try:
+                state_dict = unwrapped_model.state_dict()
+            finally:
+                # restore _orig_mod after state_dict() if it was removed
+                if has_self_ref_orig_mod_module:
+                    unwrapped_model._modules["_orig_mod"] = unwrapped_model
 
             # if model is compiled, get original model state dict
             if any("_orig_mod." in k for k in state_dict.keys()):
