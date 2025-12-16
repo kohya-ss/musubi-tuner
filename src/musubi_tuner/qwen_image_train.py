@@ -566,7 +566,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         # training loop
 
         # log device and dtype for each model
-        logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
+        logger.info(f"DiT dtype: {accelerator.unwrap_model(transformer).dtype}, device: {accelerator.unwrap_model(transformer).device}")
 
         clean_memory_on_device(accelerator.device)
 

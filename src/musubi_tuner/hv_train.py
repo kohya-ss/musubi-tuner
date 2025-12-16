@@ -134,9 +134,11 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
         ),
         (
             DistributedDataParallelKwargs(
-                gradient_as_bucket_view=args.ddp_gradient_as_bucket_view, static_graph=args.ddp_static_graph
+                find_unused_parameters=args.ddp_find_unused_parameters,
+                gradient_as_bucket_view=args.ddp_gradient_as_bucket_view,
+                static_graph=args.ddp_static_graph
             )
-            if args.ddp_gradient_as_bucket_view or args.ddp_static_graph
+            if args.ddp_find_unused_parameters or args.ddp_gradient_as_bucket_view or args.ddp_static_graph
             else None
         ),
     ]
@@ -1005,7 +1007,7 @@ class FineTuningTrainer:
         # training loop
 
         # log device and dtype for each model
-        logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
+        logger.info(f"DiT dtype: {accelerator.unwrap_model(transformer).dtype}, device: {accelerator.unwrap_model(transformer).device}")
 
         clean_memory_on_device(accelerator.device)
 
@@ -1339,6 +1341,11 @@ def setup_parser() -> argparse.ArgumentParser:
         "--ddp_static_graph",
         action="store_true",
         help="enable static_graph for DDP / DDPでstatic_graphを有効にする",
+    )
+    parser.add_argument(
+        "--ddp_find_unused_parameters",
+        action="store_true",
+        help="enable find_unused_parameters for DDP. According to PyTorch docs, specifying True when not necessary will slow down training / DDPでfind_unused_parametersを有効にする。PyTorchのドキュメントによると、不要な場合にTrueを指定すると学習が遅くなる",
     )
 
     parser.add_argument(
