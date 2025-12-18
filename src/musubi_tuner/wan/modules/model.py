@@ -851,12 +851,13 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # head
         self.head = Head(dim, out_dim, patch_size, eps, model_version=self.model_version, lower_precision_attention=self.lower_precision_attention, simple_modulation=self.simple_modulation)  # New!
 
-        # buffers (don't use register_buffer otherwise dtype will be changed in to())
+        # buffers - register freqs as a buffer so it moves with the model
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
-        self.freqs = torch.cat(
+        freqs_tensor = torch.cat(
             [rope_params(1024, d - 4 * (d // 6)), rope_params(1024, 2 * (d // 6)), rope_params(1024, 2 * (d // 6))], dim=1
         )
+        self.register_buffer("freqs", freqs_tensor)
         self.freqs_fhw = {}
 
         if self.model_version == "2.1" and (model_type == "i2v" or model_type == "flf2v"):
@@ -1074,8 +1075,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             self.blissful_optimize()
         apply_nag = nag_context is not None
         device = self.patch_embedding.weight.device
-        if self.freqs.device != device:
-            self.freqs = self.freqs.to(device)
+        # freqs is now a buffer and moves with the model, no need for device check
 
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
