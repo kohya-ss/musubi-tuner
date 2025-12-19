@@ -1212,8 +1212,12 @@ class NetworkTrainer:
             logger.info(f"control video path: {control_video_path}")
 
         # inference: architecture dependent
-        was_train = transformer.training
-        transformer.eval()
+        # Check if transformer has self-referencing _orig_mod (compiled model hack)
+        # If so, skip eval/train to avoid infinite recursion
+        has_self_ref_orig_mod = getattr(transformer, "_orig_mod", None) is transformer
+        was_train = transformer.training if not has_self_ref_orig_mod else True
+        if not has_self_ref_orig_mod:
+            transformer.eval()
 
         video = self.do_inference(
             accelerator,
@@ -1235,7 +1239,8 @@ class NetworkTrainer:
             control_video_path=control_video_path,
         )
 
-        transformer.train(was_train)
+        if not has_self_ref_orig_mod:
+            transformer.train(was_train)
 
         # Save video
         if video is None:
