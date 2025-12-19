@@ -2187,6 +2187,12 @@ class NetworkTrainer:
         # log device and dtype for each model
         logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
 
+        # log mask loss settings
+        if args.use_mask_loss:
+            logger.info("Mask-weighted loss training enabled")
+            logger.info(f"  mask_loss_scale: {args.mask_loss_scale}")
+            logger.info(f"  mask_min_weight: {args.mask_min_weight}")
+
         clean_memory_on_device(accelerator.device)
 
         optimizer_train_fn()  # Set training mode
@@ -2232,7 +2238,28 @@ class NetworkTrainer:
                     # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                     # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                    # Apply mask-weighted loss if mask weights are present in the batch
+                    mask_weights = batch.get("mask_weights", None)
+                    if mask_weights is not None and args.use_mask_loss:
+                        # mask_weights shape: (B, 1, F, H, W) - expand to match loss shape (B, C, F, H, W)
+                        mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
+                        mask_weights = mask_weights.expand_as(loss)
+
+                        # Apply optional minimum weight (so masked regions still get some training signal)
+                        if hasattr(args, "mask_min_weight") and args.mask_min_weight > 0:
+                            mask_weights = mask_weights * (1.0 - args.mask_min_weight) + args.mask_min_weight
+
+                        # Apply optional scale factor
+                        if hasattr(args, "mask_loss_scale") and args.mask_loss_scale != 1.0:
+                            mask_weights = mask_weights * args.mask_loss_scale
+
+                        # Apply mask weighting to loss
+                        loss = loss * mask_weights
+
+                        # Use weighted mean: sum(loss) / sum(weights) to avoid bias toward larger mask areas
+                        loss = loss.sum() / (mask_weights.sum() + 1e-8)
+                    else:
+                        loss = loss.mean()  # mean loss over all elements in batch
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
@@ -2819,6 +2846,30 @@ def setup_parser_common() -> argparse.ArgumentParser:
         default=None,
         choices=["image", "console"],
         help="show timesteps in image or console, and return to console / タイムステップを画像またはコンソールに表示し、コンソールに戻る",
+    )
+
+    # mask loss settings
+    parser.add_argument(
+        "--use_mask_loss",
+        action="store_true",
+        help="Enable mask-weighted loss training. Requires mask_directory in dataset config. "
+        "White regions (255) get full training weight, black regions (0) are ignored. "
+        "/ マスク重み付き損失学習を有効にする。データセット設定でmask_directoryが必要。"
+        "白い領域(255)は完全な学習重みを取得し、黒い領域(0)は無視される。",
+    )
+    parser.add_argument(
+        "--mask_loss_scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for mask weights (default: 1.0). Higher values increase contrast between masked and unmasked regions. "
+        "/ マスク重みのスケール係数（デフォルト：1.0）。値を大きくするとマスク領域とマスク外領域のコントラストが増加。",
+    )
+    parser.add_argument(
+        "--mask_min_weight",
+        type=float,
+        default=0.0,
+        help="Minimum weight for masked-out regions (default: 0.0). Set to 0.1-0.2 to give some training signal to background regions. "
+        "/ マスク外領域の最小重み（デフォルト：0.0）。0.1-0.2に設定すると背景領域にもある程度の学習シグナルを与える。",
     )
 
     # network settings

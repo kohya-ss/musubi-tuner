@@ -1,7 +1,9 @@
 import argparse
 from typing import Optional
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -120,13 +122,37 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, bat
     #             img = Image.fromarray(images[b, f])
     #             img.save(f"./logs/decode_{fln}_{b}_{f:03d}.jpg")
 
+    # Process mask content - downsample to latent space dimensions
+    # Latent dimensions: (C, F, H/8, W/8) for WAN VAE with stride 8
+    # Note: Mixed-mask batches are handled at training time in BucketBatchManager.__getitem__
+    # which pads missing masks with ones for proper batch alignment
+    _, _, lat_f, lat_h, lat_w = latent.shape
+
     for i, item in enumerate(batch):
         l = latent[i]
         cctx = clip_context[i] if clip is not None else None
         y_i = y[i] if i2v else None
         control_latent_i = control_latent[i] if control_latent is not None else None
+
+        # Process mask for this item if it has one
+        mask_weights_i = None
+        if item.mask_content is not None:
+            # mask_content is (H, W) grayscale numpy array with values 0-255
+            mask = torch.from_numpy(item.mask_content).unsqueeze(0).unsqueeze(0)  # 1, 1, H, W
+
+            # Normalize mask from 0-255 to 0-1
+            mask = mask.float() / 255.0
+
+            # Downsample mask to latent space dimensions using area interpolation
+            mask = F.interpolate(mask, size=(lat_h, lat_w), mode="area")  # 1, 1, lat_h, lat_w
+
+            # Expand to match latent frame count (for images, lat_f is typically 1)
+            mask = mask.unsqueeze(2).expand(-1, -1, lat_f, -1, -1)  # 1, 1, F, lat_h, lat_w
+
+            mask_weights_i = mask.squeeze(0)  # 1, F, lat_h, lat_w
+
         # print(f"save latent cache: {item.latent_cache_path}, latent shape: {l.shape}")
-        save_latent_cache_wan(item, l, cctx, y_i, control_latent_i)
+        save_latent_cache_wan(item, l, cctx, y_i, control_latent_i, mask_weights=mask_weights_i)
 
 
 def encode_and_save_batch_one_frame(vae: WanVAE, clip: Optional[CLIPModel], batch: list[ItemInfo]):

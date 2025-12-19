@@ -174,6 +174,10 @@ class ItemInfo:
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
 
+        # Mask for mask-weighted loss training (grayscale, 0-255 -> normalized to 0-1 weights)
+        # np.ndarray for video/image masks
+        self.mask_content: Optional[np.ndarray] = None
+
         # FramePack architecture specific
         self.fp_latent_window_size: Optional[int] = None
         self.fp_1f_clean_indices: Optional[list[int]] = None  # indices of clean latents for 1f
@@ -213,6 +217,7 @@ def save_latent_cache_wan(
     image_latent: Optional[torch.Tensor],
     control_latent: Optional[torch.Tensor],
     f_indices: Optional[list[int]] = None,
+    mask_weights: Optional[torch.Tensor] = None,
 ):
     """Wan architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
@@ -233,6 +238,11 @@ def save_latent_cache_wan(
     if f_indices is not None:
         dtype_str = dtype_to_str(torch.int32)
         sd[f"f_indices_{dtype_str}"] = torch.tensor(f_indices, dtype=torch.int32)
+
+    if mask_weights is not None:
+        # Save mask weights in latent space dimensions (F, H, W) as float32 for precision
+        mask_dtype_str = dtype_to_str(torch.float32)
+        sd[f"mask_weights_{F}x{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().cpu().float()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_WAN_FULL)
 
@@ -805,13 +815,20 @@ class BucketBatchManager:
         bucket = self.buckets[bucket_reso]
         start = batch_idx * self.batch_size
         end = min(start + self.batch_size, len(bucket))
+        batch_size = end - start
 
         batch_tensor_data = {}
         varlen_keys = set()
-        for item_info in bucket[start:end]:
+        # Track mask_weights presence per item for proper batch alignment
+        mask_weights_per_item = []  # list of (tensor or None) per item
+
+        for item_idx, item_info in enumerate(bucket[start:end]):
             sd_latent = load_file(item_info.latent_cache_path)
             sd_te = load_file(item_info.text_encoder_output_cache_path)
             sd = {**sd_latent, **sd_te}
+
+            # Track if this item has mask_weights
+            item_mask_weights = None
 
             # TODO refactor this
             for key in sd.keys():
@@ -827,6 +844,13 @@ class BucketBatchManager:
                     content_key = content_key.rsplit("_", 1)[0]  # remove dtype
                     if content_key.startswith("latents_"):
                         content_key = content_key.rsplit("_", 1)[0]  # remove FxHxW
+                    elif content_key.startswith("mask_weights_"):
+                        content_key = "mask_weights"  # normalize mask_weights_FxHxW to mask_weights
+                        item_mask_weights = sd[key]  # store for later handling
+
+                # Skip mask_weights here - we handle it separately below for proper alignment
+                if content_key == "mask_weights":
+                    continue
 
                 if content_key not in batch_tensor_data:
                     batch_tensor_data[content_key] = []
@@ -835,9 +859,35 @@ class BucketBatchManager:
                 if is_varlen_key:
                     varlen_keys.add(content_key)
 
+            mask_weights_per_item.append(item_mask_weights)
+
         for key in batch_tensor_data.keys():
             if key not in varlen_keys:
                 batch_tensor_data[key] = torch.stack(batch_tensor_data[key])
+
+        # Handle mask_weights with proper batch alignment
+        # If any item has mask_weights, all items need one (use ones for missing)
+        any_has_mask = any(m is not None for m in mask_weights_per_item)
+        if any_has_mask:
+            # Find a template shape from any existing mask
+            template_shape = None
+            template_mask = None
+            for m in mask_weights_per_item:
+                if m is not None:
+                    template_shape = m.shape
+                    template_mask = m
+                    break
+
+            # Build aligned mask_weights list
+            aligned_masks = []
+            for m in mask_weights_per_item:
+                if m is not None:
+                    aligned_masks.append(m)
+                else:
+                    # Use all-ones mask (full training weight) for items without masks
+                    aligned_masks.append(torch.ones_like(template_mask))
+
+            batch_tensor_data["mask_weights"] = torch.stack(aligned_masks)
 
         if self.timestep_pool is not None:
             batch_tensor_data["timesteps"] = self.timestep_pool[idx][: end - start]  # use the pre-generated timesteps
@@ -1582,6 +1632,7 @@ class ImageDataset(BaseDataset):
         image_directory: Optional[str] = None,
         image_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
+        mask_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
         fp_latent_window_size: Optional[int] = 9,
         fp_1f_clean_indices: Optional[list[int]] = None,
@@ -1607,6 +1658,7 @@ class ImageDataset(BaseDataset):
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
         self.control_directory = control_directory
+        self.mask_directory = mask_directory
         self.fp_latent_window_size = fp_latent_window_size
         self.fp_1f_clean_indices = fp_1f_clean_indices
         self.fp_1f_target_index = fp_1f_target_index
@@ -1614,6 +1666,14 @@ class ImageDataset(BaseDataset):
         self.flux_kontext_no_resize_control = flux_kontext_no_resize_control
         self.qwen_image_edit_no_resize_control = qwen_image_edit_no_resize_control
         self.qwen_image_edit_control_resolution = qwen_image_edit_control_resolution
+
+        # Set up mask paths if mask_directory is specified
+        self.mask_paths: Optional[dict[str, str]] = None
+        if mask_directory is not None:
+            self.mask_paths = {}
+            logger.info(f"glob mask images in {mask_directory}")
+            all_mask_paths = set(glob_images(mask_directory))
+            logger.info(f"found {len(all_mask_paths)} mask images")
 
         control_count_per_image: Optional[int] = 1
         if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
@@ -1634,6 +1694,29 @@ class ImageDataset(BaseDataset):
             self.datasource = ImageJsonlDatasource(image_jsonl_file, control_count_per_image)
         else:
             raise ValueError("image_directory or image_jsonl_file must be specified")
+
+        # Match mask paths to image paths if mask_directory is specified
+        if mask_directory is not None and self.mask_paths is not None:
+            image_paths = self.datasource.image_paths if hasattr(self.datasource, 'image_paths') else []
+            if hasattr(self.datasource, 'data'):  # JSONL datasource
+                image_paths = [item['image_path'] for item in self.datasource.data]
+
+            for image_path in image_paths:
+                image_basename = os.path.basename(image_path)
+                image_basename_no_ext = os.path.splitext(image_basename)[0]
+
+                # Find matching mask image
+                for mask_path in all_mask_paths:
+                    mask_basename = os.path.basename(mask_path)
+                    mask_basename_no_ext = os.path.splitext(mask_basename)[0]
+                    if mask_basename_no_ext == image_basename_no_ext:
+                        self.mask_paths[image_path] = mask_path
+                        break
+
+            logger.info(f"matched {len(self.mask_paths)} mask images to training images")
+            if len(self.mask_paths) != len(image_paths):
+                missing_masks = len(image_paths) - len(self.mask_paths)
+                logger.warning(f"{missing_masks} training images do not have matching mask images")
 
         if self.cache_directory is None:
             self.cache_directory = self.image_directory
@@ -1675,7 +1758,7 @@ class ImageDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_size, item_key, image, caption, controls = future.result()
+                    original_size, item_key, image, caption, controls, mask = future.result()
                     bucket_height, bucket_width = image.shape[:2]
                     bucket_reso = (bucket_width, bucket_height)
 
@@ -1711,6 +1794,10 @@ class ImageDataset(BaseDataset):
                                 bucket_reso = bucket_reso + list(control.shape[0:2])
                             bucket_reso = tuple(bucket_reso)
 
+                    # Store mask content for mask-weighted loss training
+                    if mask is not None:
+                        item_info.mask_content = mask
+
                     if bucket_reso not in batches:
                         batches[bucket_reso] = []
                     batches[bucket_reso].append(item_info)
@@ -1731,7 +1818,7 @@ class ImageDataset(BaseDataset):
 
         for fetch_op in self.datasource:
             # fetch and resize image in a separate thread
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image]]:
+            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image], Optional[np.ndarray]]:
                 image_key, image, caption, controls = op()
                 image: Image.Image
                 image_size = image.size
@@ -1762,7 +1849,14 @@ class ImageDataset(BaseDataset):
                             resized_control = resize_image_to_bucket(control, bucket_reso)
                             resized_controls.append(resized_control)
 
-                return image_size, image_key, image, caption, resized_controls
+                # Load and resize mask if available
+                resized_mask = None
+                if self.mask_paths is not None and image_key in self.mask_paths:
+                    mask_path = self.mask_paths[image_key]
+                    mask = Image.open(mask_path).convert("L")  # Convert to grayscale
+                    resized_mask = resize_image_to_bucket(mask, bucket_reso)  # returns np.ndarray
+
+                return image_size, image_key, image, caption, resized_controls, resized_mask
 
             future = executor.submit(fetch_and_resize, fetch_op)
             futures.append(future)
@@ -1880,6 +1974,7 @@ class VideoDataset(BaseDataset):
         video_directory: Optional[str] = None,
         video_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
+        mask_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
         fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
@@ -1899,6 +1994,7 @@ class VideoDataset(BaseDataset):
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
         self.control_directory = control_directory
+        self.mask_directory = mask_directory
         self.frame_extraction = frame_extraction
         self.frame_stride = frame_stride
         self.frame_sample = frame_sample

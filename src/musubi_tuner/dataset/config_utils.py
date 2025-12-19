@@ -46,6 +46,7 @@ class ImageDatasetParams(BaseDatasetParams):
     image_directory: Optional[str] = None
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
+    mask_directory: Optional[str] = None  # Directory containing mask images for mask-weighted loss training
 
     # FramePack dependent parameters
     fp_latent_window_size: Optional[int] = 9
@@ -62,6 +63,7 @@ class VideoDatasetParams(BaseDatasetParams):
     video_directory: Optional[str] = None
     video_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
+    mask_directory: Optional[str] = None  # Directory containing mask images/videos for mask-weighted loss training
     target_frames: Sequence[int] = (1,)
     frame_extraction: Optional[str] = "head"
     frame_stride: Optional[int] = 1
@@ -120,6 +122,7 @@ class ConfigSanitizer:
         "image_jsonl_file": str,
         "cache_directory": str,
         "control_directory": str,
+        "mask_directory": str,
         "fp_latent_window_size": int,
         "fp_1f_clean_indices": [int],
         "fp_1f_target_index": int,
@@ -132,6 +135,7 @@ class ConfigSanitizer:
         "video_directory": str,
         "video_jsonl_file": str,
         "control_directory": str,
+        "mask_directory": str,
         "target_frames": [int],
         "frame_extraction": str,
         "frame_stride": int,

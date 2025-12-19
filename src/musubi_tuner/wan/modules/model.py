@@ -851,13 +851,14 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # head
         self.head = Head(dim, out_dim, patch_size, eps, model_version=self.model_version, lower_precision_attention=self.lower_precision_attention, simple_modulation=self.simple_modulation)  # New!
 
-        # buffers - register freqs as a buffer so it moves with the model
+        # buffers - register freqs as a non-persistent buffer so it moves with the model
+        # but is not saved to state_dict (recomputed on init for backward compatibility)
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
         freqs_tensor = torch.cat(
             [rope_params(1024, d - 4 * (d // 6)), rope_params(1024, 2 * (d // 6)), rope_params(1024, 2 * (d // 6))], dim=1
         )
-        self.register_buffer("freqs", freqs_tensor)
+        self.register_buffer("freqs", freqs_tensor, persistent=False)
         self.freqs_fhw = {}
 
         if self.model_version == "2.1" and (model_type == "i2v" or model_type == "flf2v"):
@@ -1279,6 +1280,11 @@ def load_wan_model(
     for key in list(sd.keys()):
         if key.startswith("model.diffusion_model."):
             sd[key[22:]] = sd.pop(key)
+
+    # Backward/forward compatibility: older checkpoints won't have freqs, and some intermediate
+    # checkpoints may have saved it when it was a persistent buffer. freqs is deterministic and
+    # recomputed at init, so ignore it if present.
+    sd.pop("freqs", None)
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm, exclude_ffn_from_scaled_mm=True)
