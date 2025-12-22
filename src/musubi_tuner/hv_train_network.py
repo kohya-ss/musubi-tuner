@@ -700,19 +700,17 @@ class NetworkTrainer:
         )
 
     def resume_from_local_or_hf_if_specified(self, accelerator: Accelerator, args: argparse.Namespace) -> bool:
-        epoch_to_start = 0
         global_step = 0
 
         if not args.resume:
-            return epoch_to_start, global_step
+            return global_step
 
         if not args.resume_from_huggingface:
             logger.info(f"resume training from local state: {args.resume}")
             accelerator.load_state(args.resume)
             scheduler_state = torch.load(os.path.join(args.resume, "scheduler.bin"))
-            epoch_to_start = scheduler_state["last_epoch"]
-            global_step = scheduler_state["_step_count"]
-            return epoch_to_start, global_step
+            global_step = scheduler_state["last_epoch"]
+            return global_step
 
         logger.info(f"resume training from huggingface state: {args.resume}")
         repo_id = args.resume.split("/")[0] + "/" + args.resume.split("/")[1]
@@ -757,7 +755,7 @@ class NetworkTrainer:
         dirname = os.path.dirname(results[0])
         accelerator.load_state(dirname)
 
-        return True
+        return global_step
 
     def get_bucketed_timestep(self) -> float:
         if self.num_timestep_buckets is None or self.num_timestep_buckets <= 1:
@@ -1979,7 +1977,7 @@ class NetworkTrainer:
         accelerator.register_load_state_pre_hook(load_model_hook)
 
         # resume from local or huggingface. accelerator.step is set
-        epoch_to_start, global_step = self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
+        global_step = self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
         print(f"epoch_to_start: {epoch_to_start}")
         print(f"initial_step: {global_step}")
 
