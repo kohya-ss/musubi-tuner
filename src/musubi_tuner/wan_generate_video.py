@@ -52,7 +52,8 @@ from blissful_tuner.common_extensions import save_media_advanced, prepare_v2v_no
 # blissful end
 lycoris_available = find_spec("lycoris") is not None
 if lycoris_available:
-    from lycoris.kohya import create_network_from_weights
+    # LyCORIS 3.x doesn't export create_network_from_weights, use our adapter
+    from musubi_tuner.networks.lycoris import create_network_from_weights
 
 logger = BlissfulLogger(__name__, "green")
 
@@ -857,6 +858,7 @@ def merge_lora_weights(
                 text_encoder=None,
                 vae=None,
                 for_inference=True,
+                extra_unet_targets=["WanAttentionBlock"],
             )
             lycoris_net.merge_to(None, model, weights_sd, dtype=None, device=device)
         else:

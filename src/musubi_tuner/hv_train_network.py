@@ -1880,7 +1880,11 @@ class NetworkTrainer:
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
-        trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
+        # LyCORIS 3.x requires both text_encoder_lr and unet_lr
+        # Use 0 for text_encoder_lr since we're not training text encoders for DiT models
+        trainable_params, lr_descriptions = network.prepare_optimizer_params(
+            text_encoder_lr=0, unet_lr=args.learning_rate
+        )
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
@@ -2121,6 +2125,7 @@ class NetworkTrainer:
         epoch_to_start = 0
         global_step = 0
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
+        warned_scale_weight_norms_unsupported = False
 
         loss_recorder = train_utils.LossRecorder()
         del train_dataset_group
@@ -2278,13 +2283,20 @@ class NetworkTrainer:
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
-                if args.scale_weight_norms:
-                    keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
-                        args.scale_weight_norms, accelerator.device
-                    )
-                    max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
-                else:
-                    keys_scaled, mean_norm, maximum_norm = None, None, None
+                keys_scaled, mean_norm, maximum_norm = None, None, None
+                if args.scale_weight_norms and accelerator.sync_gradients:
+                    unwrapped_network = accelerator.unwrap_model(network)
+                    if hasattr(unwrapped_network, "apply_max_norm_regularization"):
+                        keys_scaled, mean_norm, maximum_norm = unwrapped_network.apply_max_norm_regularization(
+                            args.scale_weight_norms, accelerator.device
+                        )
+                        max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
+                    elif not warned_scale_weight_norms_unsupported:
+                        warned_scale_weight_norms_unsupported = True
+                        logger.warning(
+                            f"--scale_weight_norms was set to {args.scale_weight_norms}, but the current network "
+                            f"module ({type(unwrapped_network).__name__}) does not support apply_max_norm_regularization(); skipping."
+                        )
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
@@ -2323,7 +2335,7 @@ class NetworkTrainer:
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)
 
-                if args.scale_weight_norms:
+                if args.scale_weight_norms and keys_scaled is not None:
                     progress_bar.set_postfix(**{**max_mean_logs, **logs})
 
                 if len(accelerator.trackers) > 0:

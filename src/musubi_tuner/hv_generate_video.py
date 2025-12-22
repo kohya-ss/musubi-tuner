@@ -43,7 +43,8 @@ from blissful_tuner.prompt_management import rescale_text_encoders_hunyuan
 logger = BlissfulLogger(__name__, "green")
 lycoris_available = find_spec("lycoris") is not None
 if lycoris_available:
-    from lycoris.kohya import create_network_from_weights
+    # LyCORIS 3.x doesn't export create_network_from_weights, use our adapter
+    from musubi_tuner.networks.lycoris import create_network_from_weights
 
 
 def get_time_flag():
