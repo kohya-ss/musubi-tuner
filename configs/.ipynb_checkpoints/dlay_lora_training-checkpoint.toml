@@ -1,0 +1,98 @@
+# =============================================================================
+# DLAY Persona LoRA + AdamW8bit Training Configuration
+# Wan2.2-T2V-A14B
+# =============================================================================
+# Usage:
+#   accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
+#       src/musubi_tuner/wan_train_network.py --config_file configs/dlay_lora_training.toml
+#
+# Command line arguments override values in this file
+# =============================================================================
+
+# =============================================================================
+# MODEL PATHS
+# =============================================================================
+[model]
+task = "t2v-A14B"
+dit = "/root/models/wan22/dit/wan2.2_t2v_14B_low_noise_fp16.safetensors"
+dit_high_noise = "/root/models/wan22/dit/wan2.2_t2v_14B_high_noise_fp16.safetensors"
+t5 = "/root/models/wan22/text_encoder/models_t5_umt5-xxl-enc-bf16.pth"
+vae = "/root/models/wan22/vae/wan_2.1_vae.safetensors"
+
+# =============================================================================
+# DATASET
+# =============================================================================
+[dataset]
+dataset_config = "/root/blissful-tuner/configs/dlay_dataset.toml"
+
+# =============================================================================
+# NETWORK (Standard LoRA)
+# =============================================================================
+[network]
+network_module = "networks.lora_wan"
+network_dim = 64
+network_alpha = 32
+network_args = [
+    "loraplus_lr_ratio=4"
+]
+
+# =============================================================================
+# OPTIMIZER (AdamW8bit with LoRA+)
+# =============================================================================
+[optimizer]
+optimizer_type = "adamw8bit"
+learning_rate = 1.5e-4
+lr_scheduler = "cosine"
+lr_warmup_steps = 100
+
+# =============================================================================
+# TRAINING
+# =============================================================================
+[training]
+mixed_precision = "bf16"
+gradient_accumulation_steps = 2
+max_train_epochs = 24
+save_every_n_epochs = 4
+seed = 42
+
+# Timestep settings
+timestep_sampling = "shift"
+discrete_flow_shift = 3.0
+timestep_boundary = 875
+num_timestep_buckets = 5
+
+# Mask-weighted loss
+use_mask_loss = true
+mask_loss_scale = 1.5
+mask_min_weight = 0.1
+
+# Attention
+sdpa = true
+rope_func = "comfy"
+
+# =============================================================================
+# SAMPLING
+# =============================================================================
+[sampling]
+sample_prompts = "/root/blissful-tuner/sample_prompts_dlay.txt"
+sample_every_n_epochs = 4
+sample_at_first = true
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+[output]
+output_dir = "./output/dlay_lora"
+output_name = "dlay_persona_lora"
+logging_dir = "./output/dlay_lora/logs"
+log_prefix = "dlay_lora_"
+
+# =============================================================================
+# ADVANCED OPTIMIZATIONS (Blackwell B300)
+# =============================================================================
+[advanced]
+compile = true
+compile_mode = "default"
+compile_cache_size_limit = 32
+cuda_allow_tf32 = true
+cuda_cudnn_benchmark = true

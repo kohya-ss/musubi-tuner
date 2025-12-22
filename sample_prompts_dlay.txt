@@ -1,0 +1,9 @@
+# Sample prompts for DLAY persona training
+# Lines starting with # are ignored
+# Add width/height per prompt to avoid the 256x256 default sampler output.
+
+A Candid Close-up at Eye-level with Handheld motion. DLAY, a man is taking a selfie in a grassy outdoor setting, smiling at the camera. He wears a light gray t-shirt. Natural daylight creates warm illumination with trees and green foliage visible in the blurred background. --w 1024 --h 1024 --s 30 --g 6.5 --fs 12.0
+A High-fidelity Medium shot at Eye-level with Static camera. DLAY, a man is standing in a modern interior wearing a white dress shirt and dark charcoal suit jacket, looking directly at the camera with a neutral expression. Warm artificial lighting from a contemporary office or event space illuminates him evenly. --w 1024 --h 1024 --s 30 --g 6.5 --fs 12.0
+A Candid Medium shot at Eye-level with Handheld motion. DLAY, a man and happy smile, wears a white tank top with green and navy life vest, positioned on water. The background shows calm blue water with forested shoreline, bright natural daylight. --w 1024 --h 1024 --s 30 --g 6.5 --fs 12.0
+A High-fidelity Close-up at Eye-level with Static camera. DLAY, a man and neutral expression, wears a light cardigan over white shirt, looking to the side. The background shows warm interior lighting with blurred warm-toned lamps creating soft bokeh effect. --w 1024 --h 1024 --s 30 --g 6.5 --fs 12.0
+A raw documentary close-up at eye-level with static camera. DLAY, a man in a gray t-shirt, maintains a serious expression indoors. Window grid patterns and soft diffused interior lighting create a moody, contemplative atmosphere. --w 1024 --h 1024 --s 30 --g 6.5 --fs 12.0

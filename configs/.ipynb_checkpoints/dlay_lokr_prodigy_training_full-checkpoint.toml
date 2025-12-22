@@ -1,0 +1,183 @@
+# =============================================================================
+# DLAY Persona LyCORIS LoKr + ProdigyPlusScheduleFree Training Configuration
+# Wan2.2-T2V-A14B
+# =============================================================================
+# Usage:
+#   accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
+#       src/musubi_tuner/wan_train_network.py --config_file configs/dlay_lokr_prodigy_training.toml
+#
+# Command line arguments override values in this file
+# =============================================================================
+
+# =============================================================================
+# MODEL PATHS
+# =============================================================================
+[model]
+task = "t2v-A14B"
+dit = "/root/models/wan22/dit/wan2.2_t2v_low_noise_14B_fp16.safetensors"
+dit_high_noise = "/root/models/wan22/dit/wan2.2_t2v_high_noise_14B_fp16.safetensors"
+t5 = "/root/models/wan22/text_encoder/models_t5_umt5-xxl-enc-bf16.pth"
+vae = "/root/models/wan22/vae/wan_2.1_vae.safetensors"
+
+# =============================================================================
+# DATASET
+# =============================================================================
+[dataset]
+dataset_config = "/root/blissful-tuner/configs/dlay_dataset.toml"
+
+# =============================================================================
+# NETWORK (LyCORIS LoKr + DoRA) - HIGH QUALITY CONFIG
+# =============================================================================
+# Optimized for maximum quality without full-rank training
+# File size: ~50-100MB (vs ~2MB with default settings)
+[network]
+network_module = "musubi_tuner.networks.lycoris"
+network_dim = 128
+network_alpha = 128
+network_args = [
+    "algo=lokr",
+    "preset=full",
+    "rank_dropout=0.00",
+    "factor=4", 
+    # Larger factorization for more parameters/expressiveness
+    # Enhanced decomposition (both Kronecker matrices get LoRA decomposition)
+    # DoRA: Weight-Decomposed Low-Rank Adaptation (better fine-tuning quality)
+    "full_matrix=True",
+    "use_tucker=True",
+    "conv_dim=0",
+    "conv_alpha=0",
+    "dora_wd=True",
+    "wd_on_output=True",
+    "decompose_both=True",
+    "use_scalar=True"
+    # Skip conv layers (Wan2.2 DiT only has 1 Conv3d for patch embedding)
+]
+
+# =============================================================================
+# OPTIMIZER (ProdigyPlusScheduleFree) - OPTIMIZED FOR LYCORIS + MASKED LOSS
+# =============================================================================
+# Based on prodigy-plus-schedule-free v2.0.0 README + persona training analysis
+# Optimized for: 269 images, mask-weighted loss, long training runs
+[optimizer]
+optimizer_type = "prodigyplus.ProdigyPlusScheduleFree"
+learning_rate = 1.0
+optimizer_args = [
+    # Betas: (0.95, 0.99) recommended for Schedule-Free per recent research
+    # Higher beta1 (0.95) provides stronger momentum smoothing for noisy masked loss
+    "betas=(0.95, 0.99)",
+
+    # Prodigy LR adaptation
+    "d_coef=1.0",                # Aggressive LR multiplier (optimal for small focused datasets)
+    "d0=1e-6",                   # Initial LR guess (higher than default 1e-6)
+    "d_limiter=True",            # Prevent over-estimated LRs early in training
+
+    # Weight decay (lower for LoRA/LyCORIS training)
+    "weight_decay=0.0",
+    "weight_decay_by_lr=True",
+
+    # Schedule-Free settings
+    "use_bias_correction=False", # CRITICAL: True would dampen LR adaptation 10×
+    "schedulefree_c=0",         # Refined SF-Adam for long runs (50-200 recommended)
+                                 # 75 = balanced responsive + stable for masked loss
+
+    # Stability features
+    "use_stableadamw=True",      # Internal gradient scaling (no external clipping needed)
+    "eps=1e-8",
+
+    # Memory optimizations
+    "factored=True",             # Low-rank second moment approximation
+    "factored_fp32=True",        # FP32 for factored state (stability)
+    "stochastic_rounding=False",  # Helps with bf16 training
+
+    # Per-group LR adaptation
+    "split_groups=False",
+    "split_groups_mean=False",   # Full per-group adaptation (v2.0.0 default)
+
+    # Anti-overfitting for small datasets (269 images)
+    "use_orthograd=False",        # Orthogonal gradient projection - prevents memorization
+                                 # Projects g_orth = g - (g·w/|w|²)w to force generalizable features
+
+    # ADOPT for masked loss noisy gradients (10:1 weight ratio)
+    "use_adopt=False"             # Updates second moment AFTER param update
+                                 # Better gradient estimation under high variance
+]
+lr_scheduler = "constant"
+max_grad_norm = 0  # IMPORTANT: No gradient clipping with ProdigyPlus
+
+# =============================================================================
+# TRAINING
+# =============================================================================
+[training]
+mixed_precision = "fp16"
+gradient_accumulation_steps = 1
+seed = 42
+
+# Training duration (use steps instead of epochs for easier tracking)
+# With 269 images × 3 resolutions, batch=2, grad_accum=2: ~200 steps/epoch
+max_train_steps = 5000
+save_every_n_steps = 250
+save_state = true
+save_last_n_steps = 2000
+save_last_n_steps_state = 2000
+
+# Timestep settings
+timestep_sampling = "sigmoid"
+discrete_flow_shift = 1.0
+timestep_boundary = 875
+num_timestep_buckets = 5
+
+# Memory optimizationu,m f
+# gradient_checkpointing: Trades compute for memory (recomputes activations during backward)
+# With B300's 275GB VRAM, you can disable this for faster training
+gradient_checkpointing = false
+# gradient_checkpointing_cpu_offload = false  # Only used if gradient_checkpointing = true
+blocks_to_swap = 0
+use_pinned_memory_for_block_swap = false
+
+# Mask-weighted loss
+use_mask_loss = false
+mask_loss_scale = 1.0
+mask_min_weight = 0.1
+
+# Regularization
+scale_weight_norms = 1.0  # Limit weight norms to prevent overfitting
+
+# Attention - Flash-Attention 2.8.3 (SM103 optimized for B300)
+# Options: sdpa (PyTorch SDPA), flash_attn (Flash-Attention 2), xformers, flash3, sage_attn
+# flash_attn is stable and uses your custom SM103-compiled Flash-Attention 2.8.3
+flash_attn = true
+rope_func = "comfy"
+
+# =============================================================================
+# SAMPLING
+# =============================================================================
+[sampling]
+sample_prompts = "/root/blissful-tuner/sample_prompts_dlay.txt"
+sample_every_n_steps = 250
+sample_at_first = false
+
+# Checkpointing / retention
+save_every_n_steps = 250        # save model + (optionally) state every 250 steps
+save_state = true               # also save optimizer/EMA/etc. for exact resume
+save_last_n_steps = 2_000       # keep models for the last 2k steps worth of saves
+save_last_n_steps_state = 2_000 # keep states for the last 2k steps worth of saves
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+[output]
+output_dir = "/root/output/dlay_lokr_prodigy_FULL_MATRIX-v3"
+output_name = "dlay_persona_full_matrix_lokr_prodigy-v3"
+logging_dir = "/root/output/dlay_lokr_prodigy_full_matrix-v3/logs"
+log_prefix = "dlay_lokr_prodigy_full_matrix-v3"
+
+# =============================================================================
+# ADVANCED OPTIMIZATIONS (Blackwell B300)
+# =============================================================================
+[advanced]
+# Re-enabled after removing rank_dropout (which caused device mismatch with dynamo)
+compile = true
+compile_mode = "max-autotune-no-cudagraphs"
+compile_cache_size_limit = 50
+cuda_allow_tf32 = true
+cuda_cudnn_benchmark = true

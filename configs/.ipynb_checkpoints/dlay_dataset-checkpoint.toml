@@ -1,0 +1,85 @@
+# =============================================================================
+# DLAY Persona Dataset Configuration for Wan2.2-T2V-A14B
+# =============================================================================
+# Multi-resolution training: 1024x1024, 512x512, 256x256
+# Same source images, automatically resized during VAE caching
+# =============================================================================
+
+# =============================================================================
+# GENERAL SETTINGS (apply to all datasets unless overridden)
+# =============================================================================
+[general]
+caption_extension = ".txt"     # Caption file extension
+batch_size = 3                 # Batch size per GPU
+enable_bucket = true           # Enable aspect ratio bucketing
+bucket_no_upscale = false      # Allow upscaling in buckets
+
+# =============================================================================
+# PRIMARY RESOLUTION: 1024x1024 (Native)
+# =============================================================================
+# Your source images are 1024x1024, so this uses native resolution
+[[datasets]]
+image_directory = "/root/DATASETS/DLAY/wan"
+cache_directory = "/root/DATASETS/DLAY/wan_cache_1024"
+mask_directory = "/root/DATASETS/DLAY/mask_weighted"
+resolution = [1024, 1024]
+num_repeats = 1
+
+# =============================================================================
+# MEDIUM RESOLUTION: 512x512 (Downscaled)
+# =============================================================================
+# Same images downscaled 2x - faster training, captures broader features
+[[datasets]]
+image_directory = "/root/DATASETS/DLAY/wan"
+cache_directory = "/root/DATASETS/DLAY/wan_cache_512"
+mask_directory = "/root/DATASETS/DLAY/mask_weighted"
+resolution = [512, 512]
+num_repeats = 1
+
+# =============================================================================
+# SMALL RESOLUTION: 256x256 (Downscaled)
+# =============================================================================
+# Same images downscaled 4x - very fast training, captures coarse features
+[[datasets]]
+image_directory = "/root/DATASETS/DLAY/wan"
+cache_directory = "/root/DATASETS/DLAY/wan_cache_256"
+mask_directory = "/root/DATASETS/DLAY/mask_weighted"
+resolution = [256, 256]
+num_repeats = 1
+
+# =============================================================================
+# MULTI-RESOLUTION TRAINING NOTES
+# =============================================================================
+# Benefits:
+#   - Model learns features at multiple scales
+#   - Improves generalization and robustness
+#   - Lower resolutions train faster (useful for early epochs)
+#
+# How it works:
+#   - Each resolution generates separate VAE latent caches
+#   - During training, batches are sampled from all resolutions
+#   - num_repeats controls the balance between resolutions
+#
+# Tuning tips:
+#   - Increase num_repeats for resolutions you want to emphasize
+#   - For persona LoRA, 1024x1024 is usually most important
+#   - Lower resolutions help with style/composition learning
+#
+# To disable multi-resolution:
+#   - Comment out or remove the 512x512 and 256x256 datasets
+#   - Rename cache_directory back to "wan_cache_main" for single resolution
+# =============================================================================
+
+# =============================================================================
+# OPTIONAL: Additional datasets can be added below
+# =============================================================================
+
+# Example: Add video dataset for Wan2.2 video training
+# [[datasets]]
+# video_directory = "/path/to/videos"
+# cache_directory = "/path/to/video_cache"
+# target_frames = [1, 17, 33, 49]  # Must be N*4+1 for Wan
+# frame_extraction = "head"
+# source_fps = 30.0
+# resolution = [1024, 1024]
+# num_repeats = 1
