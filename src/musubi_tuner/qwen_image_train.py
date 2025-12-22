@@ -566,7 +566,11 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         # training loop
 
         # log device and dtype for each model
-        logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
+        unwrapped_transformer = accelerator.unwrap_model(transformer)
+        first_param = next(iter(unwrapped_transformer.parameters()), None)
+        logger.info(
+            f"DiT dtype: {first_param.dtype if first_param is not None else None}, device: {first_param.device if first_param is not None else accelerator.device}"
+        )
 
         clean_memory_on_device(accelerator.device)
 
