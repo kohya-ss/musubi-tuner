@@ -700,13 +700,19 @@ class NetworkTrainer:
         )
 
     def resume_from_local_or_hf_if_specified(self, accelerator: Accelerator, args: argparse.Namespace) -> bool:
+        epoch_to_start = 0
+        global_step = 0
+
         if not args.resume:
-            return False
+            return epoch_to_start, global_step
 
         if not args.resume_from_huggingface:
             logger.info(f"resume training from local state: {args.resume}")
             accelerator.load_state(args.resume)
-            return True
+            scheduler_state = torch.load(os.path.join(args.resume, "scheduler.bin"))
+            epoch_to_start = scheduler_state["last_epoch"]
+            global_step = scheduler_state["_step_count"]
+            return epoch_to_start, global_step
 
         logger.info(f"resume training from huggingface state: {args.resume}")
         repo_id = args.resume.split("/")[0] + "/" + args.resume.split("/")[1]
@@ -1973,7 +1979,7 @@ class NetworkTrainer:
         accelerator.register_load_state_pre_hook(load_model_hook)
 
         # resume from local or huggingface. accelerator.step is set
-        self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
+        epoch_to_start, global_step = self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
 
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -2091,11 +2097,8 @@ class NetworkTrainer:
                 init_kwargs=init_kwargs,
             )
 
-        # TODO skip until initial step
-        progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
+        progress_bar = tqdm(range(args.max_train_steps), initial=global_step, smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
 
-        epoch_to_start = 0
-        global_step = 0
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
         loss_recorder = train_utils.LossRecorder()
