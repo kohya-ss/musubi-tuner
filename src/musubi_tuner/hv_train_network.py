@@ -1976,14 +1976,15 @@ class NetworkTrainer:
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-        # resume from local or huggingface. accelerator.step is set
-        global_step = self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
-        print(f"epoch_to_start: {epoch_to_start}")
-        print(f"initial_step: {global_step}")
-
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+
+        # resume from local or huggingface. accelerator.step is set
+        global_step = self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
+        print(f"initial_step: {global_step}")
+        epoch_to_start = global_step // num_update_steps_per_epoch
+        print(f"epoch_to_start: {epoch_to_start}")
 
         # 学習する
         # total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
