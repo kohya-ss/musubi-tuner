@@ -1980,6 +1980,8 @@ class NetworkTrainer:
 
         # resume from local or huggingface. accelerator.step is set
         epoch_to_start, global_step = self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
+        print(f"epoch_to_start: {epoch_to_start}")
+        print(f"initial_step: {global_step}")
 
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -2153,7 +2155,7 @@ class NetworkTrainer:
                 os.remove(old_ckpt_file)
 
         # For --sample_at_first
-        if should_sample_images(args, global_step, epoch=0):
+        if global_step == 0 and should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
             self.sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()
