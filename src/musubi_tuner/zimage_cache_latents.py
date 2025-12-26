@@ -96,7 +96,7 @@ def main():
     if args.vae_dtype is not None:
         logger.warning("VAE dtype is specified but Z-Image VAE always uses float32 for better precision.")
 
-    device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+    device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
     device = torch.device(device)
 
     # Load dataset config
