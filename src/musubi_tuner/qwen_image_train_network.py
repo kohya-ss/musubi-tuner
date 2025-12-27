@@ -348,6 +348,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             attn_mode,
             split_attn,
             args.model_version == "edit-2511",
+            args.is_layered,
+            args.is_layered,
             loading_device,
             dit_weight_dtype,
             args.fp8_scaled,

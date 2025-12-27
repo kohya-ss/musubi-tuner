@@ -80,7 +80,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prompt", type=str, default=None, help="prompt for generation")
     parser.add_argument("--negative_prompt", type=str, default=None, help="negative prompt for generation")
+    parser.add_argument(
+        "--automatic_prompt_lang_for_layered",
+        type=str,
+        default=None,
+        choices=["en", "cn"],
+        help="Automatic prompt language for layered images. Enabled only when prompt is not provided and model is layered.",
+    )
+    # CFG normalization is always enabled for Musubi Tuner
+    # parser.add_argument("--cfg_normalize", action="store_true", help="normalize cfg scale by number of layers")
     parser.add_argument("--image_size", type=int, nargs=2, default=[256, 256], help="image size, height and width")
+    parser.add_argument("--output_layers", type=int, default=4, help="number of output layers for layered model, default is 4")
     parser.add_argument(
         "--control_image_path",
         nargs="*",
@@ -112,7 +122,7 @@ def parse_args() -> argparse.Namespace:
         "--flow_shift",
         type=float,
         default=None,
-        help="Shift factor for flow matching schedulers. Default is None (default).",
+        help="Shift factor for flow matching schedulers. Default is None (use dynamic shifting based on image resolution).",
     )
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
@@ -346,6 +356,8 @@ def load_dit_model(
         args.attn_mode,
         False,
         args.model_version == "edit-2511",
+        args.is_layered,
+        args.is_layered,
         loading_device,
         loading_weight_dtype,
         args.fp8_scaled and not args.lycoris,
@@ -435,6 +447,12 @@ def load_dit_model(
 # endregion
 
 
+def load_vae(args: argparse.Namespace, device: torch.device) -> AutoencoderKLQwenImage:
+    input_channels = 4 if args.is_layered else 3
+    vae = qwen_image_utils.load_vae(args.vae, input_channels=input_channels, device=device, disable_mmap=True)
+    return vae
+
+
 def prepare_image_inputs(
     args: argparse.Namespace, device: torch.device, vae: AutoencoderKLQwenImage
 ) -> tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
@@ -451,6 +469,10 @@ def prepare_image_inputs(
             control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
                 path, args.resize_control_to_official_size, (width, height) if args.resize_control_to_image_size else None
             )
+            if not args.is_layered:
+                # drop alpha channel for non-layered model
+                control_image_tensor = control_image_tensor[:, :3]
+                control_image_np = control_image_np[:, :, :3]
 
             # VAE encoding
             logger.info("Encoding control image to latent space with VAE")
@@ -475,22 +497,37 @@ def prepare_image_inputs(
 def decode_latent(
     vae: AutoencoderKLQwenImage, latent: torch.Tensor, device: torch.device, enable_tiling: bool = False
 ) -> torch.Tensor:
-    logger.info(f"Decoding image. Latent shape {latent.shape}, device {device}")
-    if latent.ndim == 4:  # CFHW
-        latent = latent.unsqueeze(0)  # add batch dimension if not present
+    """
+    Accepts following latent shapes (batch dimension is required, batch size must be 1):
+    - (1, C, H, W): single image
+    - (1, C, 1, H, W): single image with frame dimension
+    - (1, L, C, H, W): images with layer dimension
 
+    Returns:
+    - pixels: (L, 3, H, W) or (1, 3, H, W)
+    """
+    logger.info(f"Decoding image. Latent shape {latent.shape}, device {device}")
+    if latent.ndim == 4:  # 1 C H W
+        latent = latent.unsqueeze(2)  # add frame dimension, becomes 1 C 1 H W
+    if latent.shape[2] != 1:  # 1 L C H W
+        latent = latent.permute(1, 2, 0, 3, 4)  # 1 L C H W -> L C 1 H W
+
+    pixels_list = []
     vae.to(device)
     if enable_tiling:
         vae.enable_tiling()
     else:
         vae.disable_tiling()
     with torch.no_grad():
-        pixels = vae.decode_to_pixels(latent.to(device))  # decode to pixels
+        for i in range(latent.shape[0]):  # for each layer
+            pixels = vae.decode_to_pixels(latent[i : i + 1].to(device))  # decode to pixels
+            pixels_list.append(pixels)
+    pixels = torch.cat(pixels_list, dim=0)  # L 3 H W or 1 3 H W
     pixels = pixels.to("cpu", dtype=torch.float32)  # move to CPU and convert to float32 (bfloat16 is not supported by numpy)
     vae.to("cpu")
 
     logger.info(f"Decoded. Pixel shape {pixels.shape}")
-    return pixels[0]  # remove batch dimension
+    return pixels
 
 
 def prepare_text_inputs(
@@ -510,13 +547,11 @@ def prepare_text_inputs(
 
         # text_encoder is on device (batched inference) or CPU (interactive inference)
     else:  # Load if not in shared_models
-        # T5XXL is float16 by default, but it causes NaN values in some cases, so we use bfloat16 (or fp8 if specified)
-        # vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
         vl_dtype = torch.bfloat16  # Default dtype for Text Encoder
         tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(
             args.text_encoder, dtype=vl_dtype, device=vl_device, disable_mmap=True
         )
-        if args.is_edit:
+        if args.is_edit or (args.is_layered and args.automatic_prompt_lang_for_layered is not None):
             vl_processor = qwen_image_utils.load_vl_processor()
         else:
             vl_processor = None
@@ -552,7 +587,7 @@ def prepare_text_inputs(
         text_encoder.to(vl_device)  # If text_encoder_cpu is True, this will be CPU
 
     def get_embeds(p: str, ims: Optional[List[np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
-        if not args.is_edit:
+        if not args.is_edit:  # original or layered generation without image input
             return qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
         else:
             return qwen_image_utils.get_qwen_prompt_embeds_with_image(
@@ -562,6 +597,12 @@ def prepare_text_inputs(
     logger.info(f"Encoding prompt with Text Encoder. Control images: {len(images) if images is not None else None}")
 
     prompt = args.prompt
+
+    if args.is_layered and args.automatic_prompt_lang_for_layered is not None and (prompt is None or prompt.strip() == ""):
+        # automatic prompt generation for layered images
+        use_en = args.automatic_prompt_lang_for_layered == "en"
+        prompt = qwen_image_utils.get_image_caption(vl_processor, text_encoder, images, use_en_prompt=use_en)
+        logger.info(f"Generated automatic prompt for layered images: {prompt}")
 
     # cache_key includes this because embed may be changed if resize_control_to_image_size is True
     height, width = check_inputs(args)
@@ -650,12 +691,13 @@ def generate(
             vae_instance_for_return = shared_models["vae"]
         else:
             # the dtype of VAE weights is float32, but we can load it as bfloat16 for better performance in future
-            # vae_instance_for_return = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
-            vae_instance_for_return = qwen_image_utils.load_vae(args.vae, device=device, disable_mmap=True)
+            vae_instance_for_return = load_vae(args, device)
             vae_instance_for_return.eval()
 
         control_latents, control_image_nps = prepare_image_inputs(args, device, vae_instance_for_return)
         context, context_null = prepare_text_inputs(args, control_image_nps, device, shared_models)
+
+    assert not args.is_layered or len(control_latents) == 1, "Qwen-Image-Layered supports only one control image."
 
     if shared_models is None or "model" not in shared_models:
         # load DiT model
@@ -700,15 +742,19 @@ def generate(
 
     # 4. Prepare latent variables
     num_channels_latents = model.in_channels // 4
-    latents = qwen_image_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, seed_g)
-    if not args.is_edit:
+    num_layers = args.output_layers if args.is_layered else 0  # output layers for layered model, 0 for original or edit
+
+    ### the generated first image is combined image
+    latents = qwen_image_utils.prepare_latents(
+        1, num_layers + 1, num_channels_latents, height, width, torch.bfloat16, device, seed_g
+    )
+
+    if not (args.is_edit or args.is_layered):
         img_shapes = [(1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2)]
     else:
         img_shapes = [
-            [
-                (1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2)  # image
-                # (1, control_latent.shape[-2] // 2, control_latent.shape[-1] // 2),  # control
-            ]
+            # image
+            [(1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2) for _ in range(num_layers + 1)]
             + [(1, cl.shape[-2] // 2, cl.shape[-1] // 2) for cl in control_latents]  # control(s)
         ]
         control_latent = [qwen_image_utils.pack_latents(cl) for cl in control_latents]  # B, C, 1, H, W -> B, H*W, C
@@ -721,7 +767,12 @@ def generate(
     sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
     image_seq_len = latents.shape[1]
 
-    mu = qwen_image_utils.calculate_shift_qwen_image(image_seq_len)
+    if not args.is_layered:
+        mu = qwen_image_utils.calculate_shift_qwen_image(image_seq_len)
+    else:
+        base_seqlen = 256 * 256 / 16 / 16
+        mu = (image_seq_len / base_seqlen) ** 0.5
+
     logger.info(f"Using mu={mu} for FlowMatchEulerDiscreteScheduler")
     scheduler = qwen_image_utils.get_scheduler(args.flow_shift)
     # mu is kwarg for FlowMatchEulerDiscreteScheduler
@@ -788,12 +839,13 @@ def generate(
     # 6. Denoising loop
     do_cfg = args.guidance_scale != 1.0
     scheduler.set_begin_index(0)
+    is_rgb = None if not args.is_layered else torch.zeros(1, dtype=torch.long, device=device)  # batch size 1
     with tqdm(total=num_inference_steps, desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
             timestep = t.expand(latents.shape[0])  # keep dtype as float32 for better precision; avoid bfloat16 precision issues
 
             latent_model_input = latents
-            if args.is_edit:
+            if args.is_edit or args.is_layered:
                 latent_model_input = torch.cat([latents, control_latent], dim=1)
 
             with torch.no_grad():
@@ -805,8 +857,9 @@ def generate(
                     encoder_hidden_states=embed,
                     img_shapes=img_shapes,
                     txt_seq_lens=txt_seq_lens,
+                    additional_t_cond=is_rgb,
                 )
-                if args.is_edit:
+                if args.is_edit or args.is_layered:
                     noise_pred = noise_pred[:, : latents.shape[1], :]  # trim to latents shape
 
             if do_cfg:
@@ -819,8 +872,9 @@ def generate(
                         encoder_hidden_states=negative_embed,
                         img_shapes=img_shapes,
                         txt_seq_lens=negative_txt_seq_lens,
+                        additional_t_cond=is_rgb,
                     )
-                if args.is_edit:
+                if args.is_edit or args.is_layered:
                     neg_noise_pred = neg_noise_pred[:, : latents.shape[1], :]  # trim to latents shape
 
                 comb_pred = neg_noise_pred + args.guidance_scale * (noise_pred - neg_noise_pred)
@@ -906,6 +960,7 @@ def generate(
             if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
                 pbar.update()
 
+    # BC1HW for non-layered (backward compatibility) or layered with num_layers=1, BLCHW for layered
     latents = qwen_image_utils.unpack_latents(latents, height, width)
 
     return vae_instance_for_return, latents
@@ -977,9 +1032,12 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
-    image_name = f"{time_flag}_{seed}{original_name}"
-    sample = sample.unsqueeze(0).unsqueeze(2)  # C,HW -> BCTHW, where B=1, C=3, T=1
-    save_images_grid(sample, save_path, image_name, rescale=False, create_subdir=False)
+    sample = sample.unsqueeze(2)  # BCHW -> BCFHW, where B=L, C=3, F=1
+
+    for i in range(sample.shape[0]):
+        layer_suffix = "" if sample.shape[0] == 1 else f"_layer{i}"
+        image_name = f"{time_flag}{layer_suffix}_{seed}{original_name}"
+        save_images_grid(sample[i : i + 1], save_path, image_name, rescale=False, create_subdir=False)
     logger.info(f"Sample images saved to: {save_path}/{image_name}")
 
     return f"{save_path}/{image_name}"
@@ -1018,9 +1076,9 @@ def save_output(
     if latent.ndim == 2:  # S,C. For packed latents from other inference scripts
         latent = latent.unsqueeze(0)
         height, width = check_inputs(args)  # Get height/width from args
-        latent = qwen_image_utils.unpack_latents(latent, height, width)
+        latent = qwen_image_utils.unpack_latents(latent, height, width)  # BC1HW or BLCHW
 
-    video = decode_latent(vae, latent, device, args.vae_enable_tiling)
+    video = decode_latent(vae, latent, device, args.vae_enable_tiling)  # L,3,H,W
 
     if args.output_type == "images" or args.output_type == "latent_images":
         # save images
@@ -1107,7 +1165,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # 1. Prepare VAE
     logger.info("Loading VAE for batch generation...")
-    vae_for_batch = qwen_image_utils.load_vae(args.vae, device="cpu", disable_mmap=True)
+    vae_for_batch = load_vae(args, device="cpu")
     vae_for_batch.eval()
 
     all_prompt_args_list = [apply_overrides(args, pd) for pd in prompts_data]  # Create all arg instances first
@@ -1265,7 +1323,7 @@ def process_interactive(args: argparse.Namespace) -> None:
     print("Interactive mode. Enter prompts (Ctrl+D or Ctrl+Z (Windows) to exit):")
 
     try:
-        import prompt_toolkit
+        import prompt_toolkit  # type: ignore
     except ImportError:
         logger.warning("prompt_toolkit not found. Using basic input instead.")
         prompt_toolkit = None
@@ -1384,9 +1442,6 @@ def main():
             seeds.append(seed)
             logger.info(f"Loaded latent from {latent_path}. Shape: {latents.shape}")
 
-            if latents.ndim == 5:  # [BCTHW]
-                latents = latents.squeeze(0)  # [CTHW]
-
             latents_list.append(latents)
 
         # latent = torch.stack(latents_list, dim=0)  # [N, ...], must be same shape
@@ -1394,7 +1449,7 @@ def main():
         for i, latent in enumerate(latents_list):
             args.seed = seeds[i]
 
-            vae = qwen_image_utils.load_vae(args.vae, device=device, disable_mmap=True)
+            vae = load_vae(args, device=device)
             vae.eval()
             save_output(args, vae, latent, device, original_base_names)
 

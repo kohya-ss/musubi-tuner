@@ -7,24 +7,30 @@ from musubi_tuner.dataset import image_video_dataset
 
 
 # prepare image
-def preprocess_image(image: Image, w: int, h: int) -> Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
+def preprocess_image(
+    image: Image, w: int, h: int, handle_alpha: bool = False
+) -> Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
     """
     Preprocess the image for the model.
     Args:
         image (Image): The input image. RGB or RGBA format.
         w (int): The target bucket width.
         h (int): The target bucket height.
+        handle_alpha (bool): Whether to handle alpha channel for tensor and numpy array.
     Returns:
         Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
             - image_tensor: The preprocessed image tensor (NCHW format). -1.0 to 1.0.
             - image_np: The original image as a numpy array (HWC format). 0 to 255.
-            - alpha: The alpha channel if present, otherwise None.
+            - alpha: The alpha channel of the image if present in original size, otherwise None.
     """
     if image.mode == "RGBA":
         alpha = image.split()[-1]
     else:
         alpha = None
-    image = image.convert("RGB")
+    if handle_alpha:
+        image = image.convert("RGBA")
+    else:
+        image = image.convert("RGB")
 
     image_np = np.array(image)  # PIL to numpy, HWC
 
