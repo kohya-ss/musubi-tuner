@@ -129,7 +129,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
                 ),
                 timeout=timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
             )
-            if torch.cuda.device_count() > 1
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1
             else None
         ),
         (
