@@ -67,19 +67,19 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, bat
         msk[:, 1:] = 0
         msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
         msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
-        msk = msk.transpose(1, 2)  # 1, F, 4, H, W -> 1, 4, F, H, W
-        msk = msk.repeat(B, 1, 1, 1, 1)  # B, 4, F, H, W
+        msk = msk.transpose(1, 2)  # 1, num_frames, 4, H, W -> 1, 4, num_frames, H, W
+        msk = msk.repeat(B, 1, 1, 1, 1)  # B, 4, num_frames, H, W
 
         # Zero padding for the required number of frames only
         padding_frames = num_frames - 1  # The first frame is the input image
         images_resized = torch.concat([images, torch.zeros(B, 3, padding_frames, h, w, device=vae.device)], dim=2)
         with torch.amp.autocast(device_type=vae.device.type, dtype=vae.dtype), torch.no_grad():
             y = vae.encode(images_resized)
-        y = torch.stack(y, dim=0)  # B, C, F, H, W
+        y = torch.stack(y, dim=0)  # B, C, num_frames, H, W
 
         y = y[:, :, :num_frames]  # may be not needed
         y = y.to(vae.dtype)  # convert to bfloat16
-        y = torch.concat([msk, y], dim=1)  # B, 4 + C, F, H, W
+        y = torch.concat([msk, y], dim=1)  # B, 4 + C, num_frames, H, W
 
     else:
         clip_context = None

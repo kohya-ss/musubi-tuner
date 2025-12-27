@@ -1866,7 +1866,11 @@ class NetworkTrainer:
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
-        trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
+        # LyCORIS 3.x requires both text_encoder_lr and unet_lr
+        # Use 0 for text_encoder_lr since we're not training text encoders for DiT models
+        trainable_params, lr_descriptions = network.prepare_optimizer_params(
+            text_encoder_lr=0, unet_lr=args.learning_rate
+        )
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )

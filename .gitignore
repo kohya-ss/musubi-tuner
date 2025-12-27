@@ -2,6 +2,8 @@ __pycache__/
 .venv
 venv/
 logs/
+output/
+wandb/
 uv.lock
 main.exp
 main.lib
@@ -16,5 +18,4 @@ AGENTS.md
 .mcp.json
 # START blissful-tuner
 .pylintrc
-
 

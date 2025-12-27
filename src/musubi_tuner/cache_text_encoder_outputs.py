@@ -71,6 +71,7 @@ def prepare_cache_files_and_paths(datasets: list[BaseDataset]):
 
 
 def process_text_encoder_batches(
+    args: argparse.Namespace,
     num_workers: Optional[int],
     skip_existing: bool,
     batch_size: int,
@@ -112,8 +113,11 @@ def process_text_encoder_batches(
                 batch = filtered_batch
 
             bs = batch_size if batch_size is not None else len(batch)
-            for i in range(0, len(batch), bs):
-                encode(batch[i : i + bs])
+            for j in range(0, len(batch), bs):
+                if args.num_shards is not None and args.shard_index is not None:
+                    if (j // bs) % args.num_shards != args.shard_index:
+                        continue
+                encode(batch[j : j + bs])
 
 
 def post_process_cache_files(
@@ -171,6 +175,7 @@ def main():
         encode_and_save_batch(text_encoder_1, batch, is_llm=True, accelerator=accelerator)
 
     process_text_encoder_batches(
+        args,
         args.num_workers,
         args.skip_existing,
         args.batch_size,
@@ -194,6 +199,7 @@ def main():
         encode_and_save_batch(text_encoder_2, batch, is_llm=False, accelerator=None)
 
     process_text_encoder_batches(
+        args,
         args.num_workers,
         args.skip_existing,
         args.batch_size,
@@ -218,6 +224,8 @@ def setup_parser_common():
         "--batch_size", type=int, default=None, help="batch size, override dataset config if dataset batch size > this"
     )
     parser.add_argument("--num_workers", type=int, default=None, help="number of workers for dataset. default is cpu count-1")
+    parser.add_argument("--num_shards", type=int, default=None, help="number of shards for multi-processing cache encoding")
+    parser.add_argument("--shard_index", type=int, default=None, help="shard index for multi-processing cache encoding")
     parser.add_argument("--skip_existing", action="store_true", help="skip existing cache files")
     parser.add_argument("--keep_cache", action="store_true", help="keep cache files not in dataset")
     return parser
