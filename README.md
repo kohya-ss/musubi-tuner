@@ -118,6 +118,16 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- December 27, 2025
+    - Added support for Qwen-Image-Edit-2511. See [PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808).
+        - Please refer to the [documentation](./docs/qwen_image.md) for details such as checkpoints and options.
+        - In the caching, training, and inference scripts, specify `--model_version` option as `edit-2511`.
+
+- December 25, 2025
+    - Added support for LoRA training of Kandinsky 5. See [PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774). Many thanks to AkaneTendo25 for this contribution.
+        - Please refer to the [documentation](./docs/kandinsky5.md) for details.
+        - **Note that some weight specifications are in Hugging Face ID format. We plan to change to direct *.safetensors specification like other models soon, so please be aware.**
+
 - December 13, 2025
     - Added support for finetuning Qwen-Image. See [PR #778](https://github.com/kohya-ss/musubi-tuner/pull/778). Many thanks to sdbds for this contribution.
         - Please refer to the [documentation](./docs/zimage.md#finetuning) for details.
@@ -138,20 +148,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
 - December 5, 2025
     - Added support for HunyuanVideo 1.5. See [PR #748](https://github.com/kohya-ss/musubi-tuner/pull/748).
         - LoRA training for T2V and I2V is now supported. Please refer to the [documentation](./docs/hunyuan_video_1_5.md) for details.
-
-- November 16, 2025
-    - Breaking Change: Fixed the argument for the `--compile_dynamic` option when using `torch.compile`. See [PR #727](https://github.com/kohya-ss/musubi-tuner/pull/727).
-        - Changed to specify `true`, `false`, or `auto` for the `--compile_dynamic` argument. The default is equivalent to `auto`.
-    - Experimentally changed so that the first step during training is not included in the elapsed time of the progress bar. See [PR #728](https://github.com/kohya-ss/musubi-tuner/pull/728). Feedback is welcome.
-
-- November 15, 2025
-    - Added support for `torch.compile` in training and inference scripts. See [PR #722](https://github.com/kohya-ss/musubi-tuner/pull/722).
-        - By specifying the `--compile` option, training and inference will utilize `torch.compile`. Please refer to the [documentation](./docs/torch_compile.md) for details.
-
-- November 2, 2025
-    - Added `--use_pinned_memory_for_block_swap` option to each training script and improved the block swap process itself. See [PR #700](https://github.com/kohya-ss/musubi-tuner/pull/700).
-        - When specified, this option uses pinned memory for block swap offloading. This may improve block swap performance. However, on Windows environments, it increases shared GPU memory usage. Please refer to the [documentation](./docs/hunyuan_video.md#memory-optimization) for details.
-        - Since in some environments it may be faster not to specify `--use_pinned_memory_for_block_swap`, please try both options.
 
 ### Releases
 

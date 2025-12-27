@@ -18,6 +18,7 @@ import inspect
 import numbers
 from typing import Any, Dict, List, Optional, Tuple, Union
 import math
+from math import prod
 
 # import numpy as np
 import torch
@@ -809,6 +810,7 @@ class QwenImageTransformerBlock(nn.Module):
         eps: float = 1e-6,
         attn_mode: str = "torch",
         split_attn: bool = False,
+        zero_cond_t: bool = False,
     ):
         super().__init__()
 
@@ -852,10 +854,34 @@ class QwenImageTransformerBlock(nn.Module):
         self.txt_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.txt_mlp = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
 
-    def _modulate(self, x, mod_params):
+        self.zero_cond_t = zero_cond_t
+
+    def _modulate(self, x, mod_params, timestep_zero_index: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply modulation to input tensor"""
+        # x: [b, l, d], shift/scale/gate: [b, d] (or [2*b, d] when `zero_cond_t=True`)
         shift, scale, gate = mod_params.chunk(3, dim=-1)
-        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1), gate.unsqueeze(1)
+
+        if timestep_zero_index is not None:
+            actual_batch = shift.size(0) // 2
+            shift_base, shift_ext = shift[:actual_batch], shift[actual_batch:]
+            scale_base, scale_ext = scale[:actual_batch], scale[actual_batch:]
+            gate_base, gate_ext = gate[:actual_batch], gate[actual_batch:]
+
+            shift_base = shift_base.unsqueeze(1)
+            shift_ext = shift_ext.unsqueeze(1)
+            scale_base = scale_base.unsqueeze(1)
+            scale_ext = scale_ext.unsqueeze(1)
+            gate_base = gate_base.unsqueeze(1)
+            gate_ext = gate_ext.unsqueeze(1)
+
+            return torch.cat(
+                [x[:, :timestep_zero_index] * (1 + scale_base) + shift_base, x[:, timestep_zero_index:] * (1 + scale_ext) + shift_ext], dim=1
+            ), torch.cat([gate_base.expand(-1, timestep_zero_index, -1), gate_ext.expand(-1, x.size(1) - timestep_zero_index, -1)], dim=1)
+        else:
+            shift_result = shift.unsqueeze(1)
+            scale_result = scale.unsqueeze(1)
+            gate_result = gate.unsqueeze(1)
+            return x * (1 + scale_result) + shift_result, gate_result
 
     def forward(
         self,
@@ -866,9 +892,12 @@ class QwenImageTransformerBlock(nn.Module):
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         txt_seq_lens: Optional[torch.Tensor] = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
+        timestep_zero_index: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Get modulation parameters for both streams
         img_mod_params = self.img_mod(temb)  # [B, 6*dim]
+        if self.zero_cond_t:
+            temb = torch.chunk(temb, 2, dim=0)[0]
         txt_mod_params = self.txt_mod(temb)  # [B, 6*dim]
 
         # Split modulation parameters for norm1 and norm2
@@ -879,7 +908,7 @@ class QwenImageTransformerBlock(nn.Module):
 
         # Process image stream - norm1 + modulation
         img_normed = self.img_norm1(hidden_states)
-        img_modulated, img_gate1 = self._modulate(img_normed, img_mod1)
+        img_modulated, img_gate1 = self._modulate(img_normed, img_mod1, timestep_zero_index)
         del img_normed, img_mod1
 
         # Process text stream - norm1 + modulation
@@ -916,7 +945,7 @@ class QwenImageTransformerBlock(nn.Module):
 
         # Process image stream - norm2 + MLP
         img_normed2 = self.img_norm2(hidden_states)
-        img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2)
+        img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2, timestep_zero_index)
         del img_normed2, img_mod2
         img_mlp_output = self.img_mlp(img_modulated2)
         del img_modulated2
@@ -965,6 +994,12 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
             Whether to use guidance embeddings for guidance-distilled variant of the model.
         axes_dims_rope (`Tuple[int]`, defaults to `(16, 56, 56)`):
             The dimensions to use for the rotary positional embeddings.
+        attn_mode (`str`, defaults to `"torch"`):
+            The attention implementation to use.
+        split_attn (`bool`, defaults to `False`):
+            Whether to split the attention computation to save memory.
+        zero_cond_t (`bool`, defaults to `False`):
+            Whether to use zero conditioning for time embeddings.
     """
 
     # _supports_gradient_checkpointing = True
@@ -985,6 +1020,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         axes_dims_rope: Tuple[int, int, int] = (16, 56, 56),
         attn_mode: str = "torch",
         split_attn: bool = False,
+        zero_cond_t: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -1010,6 +1046,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                     attention_head_dim=attention_head_dim,
                     attn_mode=attn_mode,
                     split_attn=split_attn,
+                    zero_cond_t=zero_cond_t,
                 )
                 for _ in range(num_layers)
             ]
@@ -1019,6 +1056,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
 
         self.gradient_checkpointing = False
+        self.zero_cond_t = zero_cond_t
         self.activation_cpu_offloading = False
 
         # offloading
@@ -1147,6 +1185,27 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         hidden_states = self.img_in(hidden_states)
 
         timestep = timestep.to(hidden_states.dtype)
+
+        if self.zero_cond_t:
+            if img_shapes is None:
+                raise ValueError("`img_shapes` must be provided when `zero_cond_t=True`.")
+
+            timestep = torch.cat([timestep, timestep * 0], dim=0)
+
+            sample = img_shapes[0]  # img_shapes always has single entry for musubi tuner
+            if isinstance(sample, (tuple, list)) and len(sample) == 3 and all(isinstance(x, numbers.Integral) for x in sample):
+                base_len = int(prod(sample))
+            else:
+                if not (isinstance(sample, (tuple, list)) and len(sample) >= 1):
+                    raise ValueError("Invalid `img_shapes` entry for `zero_cond_t=True`.")
+                base = sample[0]
+                if not (isinstance(base, (tuple, list)) and len(base) == 3):
+                    raise ValueError("Invalid `img_shapes` entry for `zero_cond_t=True`.")
+                base_len = int(prod(base))
+            timestep_zero_index = base_len
+        else:
+            timestep_zero_index = None
+
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
         encoder_hidden_states = self.txt_in(encoder_hidden_states)
 
@@ -1178,6 +1237,8 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                     temb,
                     image_rotary_emb,
                     txt_seq_lens,
+                    attention_kwargs,
+                    timestep_zero_index,
                 )
 
             else:
@@ -1189,6 +1250,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                     image_rotary_emb=image_rotary_emb,
                     txt_seq_lens=txt_seq_lens,
                     joint_attention_kwargs=attention_kwargs,
+                    timestep_zero_index=timestep_zero_index,
                 )
 
             if self.blocks_to_swap:
@@ -1196,6 +1258,9 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
 
         if input_device != hidden_states.device:
             hidden_states = hidden_states.to(input_device)
+
+        if self.zero_cond_t:
+            temb = temb.chunk(2, dim=0)[0]
 
         # Use only the image part (hidden_states) from the dual-stream blocks
         hidden_states = self.norm_out(hidden_states, temb)
@@ -1219,10 +1284,10 @@ FP8_OPTIMIZATION_EXCLUDE_KEYS = [
 
 
 def create_model(
-    attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
+    attn_mode: str, split_attn: bool, zero_cond_t: bool, dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
 ) -> QwenImageTransformer2DModel:
     with init_empty_weights():
-        logger.info("Creating QwenImageTransformer2DModel")
+        logger.info(f"Creating QwenImageTransformer2DModel. Attn mode: {attn_mode}, split_attn: {split_attn}, zero_cond_t: {zero_cond_t}, num_layers: {num_layers} ")
         """
         {
             "_class_name": "QwenImageTransformer2DModel",
@@ -1257,6 +1322,7 @@ def create_model(
             axes_dims_rope=(16, 56, 56),
             attn_mode=attn_mode,
             split_attn=split_attn,
+            zero_cond_t=zero_cond_t,
         )
         if dtype is not None:
             model.to(dtype)
@@ -1268,6 +1334,7 @@ def load_qwen_image_model(
     dit_path: str,
     attn_mode: str,
     split_attn: bool,
+    zero_cond_t: bool,
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype],
     fp8_scaled: bool = False,
@@ -1284,6 +1351,7 @@ def load_qwen_image_model(
         dit_path (str): Path to the DiT model checkpoint.
         attn_mode (str): Attention mode to use, e.g., "torch", "flash", etc.
         split_attn (bool): Whether to use split attention.
+        zero_cond_t (bool): Whether the model uses zero conditioning for time embeddings.
         loading_device (Union[str, torch.device]): Device to load the model weights on.
         dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
             If None, it will be loaded as is (same as the state_dict) or scaled for fp8. if not None, model weights will be casted to this dtype.
@@ -1299,7 +1367,7 @@ def load_qwen_image_model(
     device = torch.device(device)
     loading_device = torch.device(loading_device)
 
-    model = create_model(attn_mode, split_attn, dit_weight_dtype, num_layers=num_layers)
+    model = create_model(attn_mode, split_attn, zero_cond_t, dit_weight_dtype, num_layers=num_layers)
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
@@ -1316,10 +1384,14 @@ def load_qwen_image_model(
         disable_numpy_memmap=disable_numpy_memmap,
     )
 
-    # remove "model.diffusion_model." prefix: 1.3B model has this prefix
+    # remove "model.diffusion_model."
     for key in list(sd.keys()):
         if key.startswith("model.diffusion_model."):
             sd[key[22:]] = sd.pop(key)
+
+    if "__index_timestep_zero__" in sd: # ComfyUI flag for edit-2511
+        assert zero_cond_t, "Found __index_timestep_zero__ in state_dict, the model must be '2511' variant."
+        sd.pop("__index_timestep_zero__")
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)

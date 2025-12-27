@@ -116,6 +116,16 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/12/27
+    - Qwen-Image-Edit-2511に対応しました。[PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808)
+        - チェックポイントやオプションの詳細など、詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
+        - キャッシュ作成、学習、推論の各スクリプトで、`--model_version` オプションに `edit-2511` を指定してください。
+
+- 2025/12/25
+    - Kandinsky 5のLoRA学習に対応しました。[PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774) AkaneTendo25氏に深く感謝します。
+        - 詳細は[ドキュメント](./docs/kandinsky5.md)を参照してください。
+        - **重みの指定が一部、Hugging FaceのID形式になっています。近日中に（他のモデルと同様の）*.safetensorsの直接指定方式に変更予定ですのでご注意ください。**
+
 - 2025/12/13
     - Z-Imageのfinetuningに対応しました。[PR #778](https://github.com/kohya-ss/musubi-tuner/pull/778) sdbds氏に深く感謝します。
         - 詳細は[ドキュメント](./docs/zimage.md#finetuning)を参照してください。
@@ -135,20 +145,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
 - 2025/12/05
     - HunyuanVideo 1.5に対応しました。[PR #748](https://github.com/kohya-ss/musubi-tuner/pull/748)
         - T2V、I2VのLoRA学習が可能です。詳細は[ドキュメント](./docs/hunyuan_video_1_5.md)を参照してください。
-
-- 2025/11/16
-    - 破壊的変更: `torch.compile`使用時の、`--compile_dynamic`オプションの引数を修正しました。[PR #727](https://github.com/kohya-ss/musubi-tuner/pull/727)
-        - `--compile_dynamic`の引数に`true`、`false`、`auto`を指定するように変更しました。デフォルトは`auto`相当です。
-    - 学習時に最初のステップが進捗バーの経過時間に含まれないように、試験的に変更しました。[PR #728](https://github.com/kohya-ss/musubi-tuner/pull/728) ご意見をお聞かせください。
-
-- 2025/11/15
-    - 学習および推論スクリプトで `torch.compile` を使用できるようになりました。[PR #722](https://github.com/kohya-ss/musubi-tuner/pull/722)
-        - `--compile` オプションを指定すると、`torch.compile` を使用して学習および推論を行います。詳細は[ドキュメント](./docs/torch_compile.md)を参照してください。
-
-- 2025/11/02
-    - 各学習スクリプトに `--use_pinned_memory_for_block_swap` オプションを追加しました。またblock swapの処理自体も改善しました。[PR #700](https://github.com/kohya-ss/musubi-tuner/pull/700)
-        - このオプションを指定すると、block swapのoffloadingにピン留めメモリを使用します。これによりblock swapのパフォーマンスが向上する可能性があります。ただし、Windows環境の場合は共有GPUメモリの使用量が増加します。詳しくは[ドキュメント](./docs/hunyuan_video.md#memory-optimization)を参照してください。
-        - 環境により`--use_pinned_memory_for_block_swap`を指定しない方が高速になる場合があるため、両方を試してみてください。
 
 ### リリースについて
 
