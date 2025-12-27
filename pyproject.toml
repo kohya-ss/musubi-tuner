@@ -123,8 +123,6 @@ extend-exclude = [
   "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py",
   "src/musubi_tuner/modules/scheduling_flow_match_discrete.py",
   "src/musubi_tuner/modules/unet_causal_3d_blocks.py",
-  "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py",
-  "src/musubi_tuner/qwen_image/qwen_image_model.py",
   "src/musubi_tuner/wan/configs/__init__.py",
   "src/musubi_tuner/wan/configs/shared_config.py",
   "src/musubi_tuner/wan/configs/wan_i2v_14B.py",
@@ -168,8 +166,6 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py" = ["ALL"]
 "src/musubi_tuner/modules/scheduling_flow_match_discrete.py" = ["ALL"]
 "src/musubi_tuner/modules/unet_causal_3d_blocks.py" = ["ALL"]
-"src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py" = ["ALL"]
-"src/musubi_tuner/qwen_image/qwen_image_model.py" = ["ALL"]
 "src/musubi_tuner/wan/configs/__init__.py" = ["ALL"]
 "src/musubi_tuner/wan/configs/shared_config.py" = ["ALL"]
 "src/musubi_tuner/wan/configs/wan_i2v_14B.py" = ["ALL"]

@@ -34,7 +34,7 @@ from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 import logging
 
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
-from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper, to_cpu, to_device
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -628,6 +628,7 @@ class FeedForward(nn.Module):
             hidden_states = module(hidden_states)
         return hidden_states
 
+
 # torch.inductor does not support code generation for complex
 # This breaks fullgraph=True
 @torch.compiler.disable
@@ -814,11 +815,13 @@ class Attention(nn.Module):
                 attention_mask = torch.cat(
                     [
                         torch.ones(
-                            (encoder_hidden_states_mask.shape[0], seq_img), device=encoder_hidden_states_mask.device, dtype=torch.bool
+                            (encoder_hidden_states_mask.shape[0], seq_img),
+                            device=encoder_hidden_states_mask.device,
+                            dtype=torch.bool,
                         ),
-                        encoder_hidden_states_mask.to(torch.bool)
-                    ]
-                    , dim=1
+                        encoder_hidden_states_mask.to(torch.bool),
+                    ],
+                    dim=1,
                 )  # [B, S_img + S_txt]
                 attention_mask = attention_mask[:, None, None, :]  # [B, 1, 1, S] for scaled_dot_product_attention
             else:
@@ -955,8 +958,14 @@ class QwenImageTransformerBlock(nn.Module):
             gate_ext = gate_ext.unsqueeze(1)
 
             return torch.cat(
-                [x[:, :timestep_zero_index] * (1 + scale_base) + shift_base, x[:, timestep_zero_index:] * (1 + scale_ext) + shift_ext], dim=1
-            ), torch.cat([gate_base.expand(-1, timestep_zero_index, -1), gate_ext.expand(-1, x.size(1) - timestep_zero_index, -1)], dim=1)
+                [
+                    x[:, :timestep_zero_index] * (1 + scale_base) + shift_base,
+                    x[:, timestep_zero_index:] * (1 + scale_ext) + shift_ext,
+                ],
+                dim=1,
+            ), torch.cat(
+                [gate_base.expand(-1, timestep_zero_index, -1), gate_ext.expand(-1, x.size(1) - timestep_zero_index, -1)], dim=1
+            )
         else:
             shift_result = shift.unsqueeze(1)
             scale_result = scale.unsqueeze(1)
@@ -1102,7 +1111,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         split_attn: bool = False,
         zero_cond_t: bool = False,
         use_additional_t_cond: bool = False,
-        use_layer3d_rope: bool = False, 
+        use_layer3d_rope: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -1166,16 +1175,24 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         self.activation_cpu_offloading = False
         print("QwenModel: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(
+        self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False
+    ):
         self.blocks_to_swap = blocks_to_swap
         self.num_blocks = len(self.transformer_blocks)
 
-        assert (
-            self.blocks_to_swap <= self.num_blocks - 1
-        ), f"Cannot swap more than {self.num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
+        assert self.blocks_to_swap <= self.num_blocks - 1, (
+            f"Cannot swap more than {self.num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
+        )
 
         self.offloader = ModelOffloader(
-            "qwen-image-block", self.transformer_blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device, use_pinned_memory
+            "qwen-image-block",
+            self.transformer_blocks,
+            self.num_blocks,
+            self.blocks_to_swap,
+            supports_backward,
+            device,
+            use_pinned_memory,
         )
         # , debug=True
         print(
@@ -1186,13 +1203,13 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         if self.blocks_to_swap:
             self.offloader.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            print(f"QwenModel: Block swap set to forward only.")
+            print("QwenModel: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            print(f"QwenModel: Block swap set to forward and backward.")
+            print("QwenModel: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
@@ -1225,7 +1242,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         txt_seq_lens: Optional[List[int]] = None,
         guidance: torch.Tensor = None,  # TODO: this should probably be removed
         attention_kwargs: Optional[Dict[str, Any]] = None,
-                additional_t_cond=None,
+        additional_t_cond=None,
     ) -> torch.Tensor:
         """
         The [`QwenTransformer2DModel`] forward method.
@@ -1366,11 +1383,18 @@ FP8_OPTIMIZATION_EXCLUDE_KEYS = [
 
 
 def create_model(
-    attn_mode: str, split_attn: bool, zero_cond_t: bool, use_additional_t_cond: bool, use_layer3d_rope: bool,
-    dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
+    attn_mode: str,
+    split_attn: bool,
+    zero_cond_t: bool,
+    use_additional_t_cond: bool,
+    use_layer3d_rope: bool,
+    dtype: Optional[torch.dtype],
+    num_layers: Optional[int] = 60,
 ) -> QwenImageTransformer2DModel:
     with init_empty_weights():
-        logger.info(f"Creating QwenImageTransformer2DModel. Attn mode: {attn_mode}, split_attn: {split_attn}, zero_cond_t: {zero_cond_t}, num_layers: {num_layers} ")
+        logger.info(
+            f"Creating QwenImageTransformer2DModel. Attn mode: {attn_mode}, split_attn: {split_attn}, zero_cond_t: {zero_cond_t}, num_layers: {num_layers} "
+        )
         """
         {
             "_class_name": "QwenImageTransformer2DModel",
@@ -1407,7 +1431,7 @@ def create_model(
             split_attn=split_attn,
             zero_cond_t=zero_cond_t,
             use_additional_t_cond=use_additional_t_cond,
-            use_layer3d_rope =use_layer3d_rope,
+            use_layer3d_rope=use_layer3d_rope,
         )
         if dtype is not None:
             model.to(dtype)
@@ -1456,7 +1480,9 @@ def load_qwen_image_model(
     device = torch.device(device)
     loading_device = torch.device(loading_device)
 
-    model = create_model(attn_mode, split_attn, zero_cond_t, use_additional_t_cond, use_layer3d_rope, dit_weight_dtype, num_layers=num_layers)
+    model = create_model(
+        attn_mode, split_attn, zero_cond_t, use_additional_t_cond, use_layer3d_rope, dit_weight_dtype, num_layers=num_layers
+    )
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
@@ -1478,7 +1504,7 @@ def load_qwen_image_model(
         if key.startswith("model.diffusion_model."):
             sd[key[22:]] = sd.pop(key)
 
-    if "__index_timestep_zero__" in sd: # ComfyUI flag for edit-2511
+    if "__index_timestep_zero__" in sd:  # ComfyUI flag for edit-2511
         assert zero_cond_t, "Found __index_timestep_zero__ in state_dict, the model must be '2511' variant."
         sd.pop("__index_timestep_zero__")
 

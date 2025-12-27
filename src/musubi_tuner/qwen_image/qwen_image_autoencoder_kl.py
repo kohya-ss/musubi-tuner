@@ -57,7 +57,9 @@ class DiagonalGaussianDistribution(object):
             rand_device = generator.device
         else:
             rand_device = self.parameters.device
-        sample = torch.randn(self.mean.shape, generator=generator, device=rand_device, dtype=self.parameters.dtype).to(self.parameters.device)
+        sample = torch.randn(self.mean.shape, generator=generator, device=rand_device, dtype=self.parameters.dtype).to(
+            self.parameters.device
+        )
         x = self.mean + self.std * sample
         return x
 
@@ -790,7 +792,9 @@ class AutoencoderKLQwenImage(nn.Module):  # ModelMixin, ConfigMixin, FromOrigina
         self.quant_conv = QwenImageCausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.post_quant_conv = QwenImageCausalConv3d(z_dim, z_dim, 1)
 
-        self.decoder = QwenImageDecoder3d(base_dim, z_dim, dim_mult, num_res_blocks, attn_scales, self.temperal_upsample, dropout, input_channels)
+        self.decoder = QwenImageDecoder3d(
+            base_dim, z_dim, dim_mult, num_res_blocks, attn_scales, self.temperal_upsample, dropout, input_channels
+        )
 
         self.spatial_compression_ratio = 2 ** len(self.temperal_downsample)
 
