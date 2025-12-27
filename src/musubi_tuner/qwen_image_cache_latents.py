@@ -2,14 +2,16 @@ import argparse
 import logging
 from typing import List
 
+import numpy as np
 import torch
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import (
-    ARCHITECTURE_QWEN_IMAGE_EDIT,
-    ItemInfo,
     ARCHITECTURE_QWEN_IMAGE,
+    ARCHITECTURE_QWEN_IMAGE_EDIT,
+    ARCHITECTURE_QWEN_IMAGE_LAYERED,
+    ItemInfo,
     save_latent_cache_qwen_image,
 )
 from musubi_tuner.qwen_image import qwen_image_utils
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def preprocess_contents_qwen_image(batch: List[ItemInfo]) -> tuple[torch.Tensor]:
+def preprocess_contents_qwen_image(batch: List[ItemInfo], is_layered: bool) -> tuple[torch.Tensor]:
     # item.content: target image (H, W, C)
     # item.control_content: list of images (H, W, C), optional
 
@@ -28,11 +30,19 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo]) -> tuple[torch.Tensor]
     # Currently control images must have same size as target images. The length of control images can vary.
     contents = []
     controls = []
+    n_channels = 4 if is_layered else 3  # layered model uses 4 channels for control images (RGBA), otherwise 3 channels (RGB
     for item in batch:
-        contents.append(torch.from_numpy(item.content))  # target image
+        content = item.content
+        if is_layered and content.shape[2] == 3:
+            # add alpha channel with full opacity: Qwen-Image-Layered VAE expects 4 channels
+            h, w, _ = content.shape
+            alpha_channel = np.ones((h, w, 1), dtype=content.dtype) * 255
+            content = np.concatenate([content, alpha_channel], axis=2)  # H, W, 4
+
+        contents.append(torch.from_numpy(content))  # target image
 
         if item.control_content is not None and len(item.control_content) > 0:
-            controls.append([torch.from_numpy(cc[..., :3]) for cc in item.control_content])  # ensure RGB, remove alpha if present
+            controls.append([torch.from_numpy(cc[..., :n_channels]) for cc in item.control_content])
 
     contents = torch.stack(contents, dim=0)  # B, H, W, C
     contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
@@ -47,9 +57,9 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo]) -> tuple[torch.Tensor]
     return contents, controls
 
 
-def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage, batch: List[ItemInfo]):
+def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage, batch: List[ItemInfo], is_layered: bool):
     # item.content: target image (H, W, C)
-    contents, controls = preprocess_contents_qwen_image(batch)  # B, C, H, W and list of (C, F, H, W)
+    contents, controls = preprocess_contents_qwen_image(batch, is_layered)  # B, C, H, W and list of (C, F, H, W)
     contents = contents.unsqueeze(2)  # (B, C, 1, H, W), Qwen-Image VAE needs F axis
 
     with torch.no_grad():
@@ -94,6 +104,16 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
         target_latent = latents[b]  # 1, C, H, W. Target latents for this image (ground truth)
         control_latent = control_latents[b] if control_latents is not None else None  # list of (1, C, H, W) or None
 
+        if is_layered:
+            # for layered model, control latents are treated as list of output layers: target_latent is base + layers from control_latent
+            original_target_latent = target_latent
+            target_latent = torch.concat([target_latent] + control_latent[0], dim=0)  # (num_layers+1, C, H, W)
+            
+            # (C, num_layers+1, H, W), because saving function expects (C, F, H, W) format (video latents)
+            target_latent = target_latent.transpose(0, 1)
+            
+            control_latent = [original_target_latent]
+
         print(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}, "
             f"control latents shape: {[cl.shape for cl in control_latent] if control_latent is not None else None}"
@@ -129,7 +149,13 @@ def main():
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
-    architecture = ARCHITECTURE_QWEN_IMAGE_EDIT if args.is_edit else ARCHITECTURE_QWEN_IMAGE
+    if args.is_edit:
+        architecture = ARCHITECTURE_QWEN_IMAGE_EDIT
+    elif args.is_layered:
+        architecture = ARCHITECTURE_QWEN_IMAGE_LAYERED
+    else:
+        architecture = ARCHITECTURE_QWEN_IMAGE
+
     blueprint = blueprint_generator.generate(user_config, args, architecture=architecture)
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
@@ -144,12 +170,13 @@ def main():
     assert args.vae is not None, "VAE checkpoint is required"
 
     logger.info(f"Loading VAE model from {args.vae}")
-    vae = qwen_image_utils.load_vae(args.vae, device=device, disable_mmap=True)
+    input_channels = 4 if args.is_layered else 3
+    vae = qwen_image_utils.load_vae(args.vae, input_channels, device=device, disable_mmap=True)
     vae.to(device)
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, batch)
+        encode_and_save_batch(vae, batch, args.is_layered)
 
     # reuse core loop from cache_latents with no change
     cache_latents.encode_datasets(datasets, encode, args)

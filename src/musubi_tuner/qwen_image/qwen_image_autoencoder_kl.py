@@ -27,21 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-# from ...configuration_utils import ConfigMixin, register_to_config
-# from ...loaders import FromOriginalModelMixin
-# from ...utils import logging
-# from ...utils.accelerate_utils import apply_forward_hook
-# from ..activations import get_activation
-# from ..modeling_outputs import AutoencoderKLOutput
-# from ..modeling_utils import ModelMixin
-# from .vae import DecoderOutput, DiagonalGaussianDistribution
-
-# TODO remove dependency on diffusers
-from diffusers.utils.torch_utils import randn_tensor
-
 from musubi_tuner.qwen_image.qwen_image_modules import get_activation
-
-# logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 import logging
 
@@ -67,11 +53,12 @@ class DiagonalGaussianDistribution(object):
 
     def sample(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
         # make sure sample is on the same device as the parameters and has same dtype
-        sample = randn_tensor(
-            self.mean.shape,
-            generator=generator,
-            device=self.parameters.device,
-            dtype=self.parameters.dtype,
+        if generator is not None and generator.device.type != self.parameters.device.type:
+            rand_device = generator.device
+        else:
+            rand_device = self.parameters.device
+        sample = torch.randn(self.mean.shape, generator=generator, device=rand_device, dtype=self.parameters.dtype).to(
+            self.parameters.device
         )
         x = self.mean + self.std * sample
         return x
@@ -448,6 +435,7 @@ class QwenImageEncoder3d(nn.Module):
         attn_scales (list of float): Scales at which to apply attention mechanisms.
         temperal_downsample (list of bool): Whether to downsample temporally in each block.
         dropout (float): Dropout rate for the dropout layers.
+        input_channels (int): Number of input channels.
         non_linearity (str): Type of non-linearity to use.
     """
 
@@ -460,6 +448,7 @@ class QwenImageEncoder3d(nn.Module):
         attn_scales=[],
         temperal_downsample=[True, True, False],
         dropout=0.0,
+        input_channels: int = 3,
         non_linearity: str = "silu",
     ):
         super().__init__()
@@ -476,7 +465,7 @@ class QwenImageEncoder3d(nn.Module):
         scale = 1.0
 
         # init block
-        self.conv_in = QwenImageCausalConv3d(3, dims[0], 3, padding=1)
+        self.conv_in = QwenImageCausalConv3d(input_channels, dims[0], 3, padding=1)
 
         # downsample blocks
         self.down_blocks = nn.ModuleList([])
@@ -624,6 +613,7 @@ class QwenImageDecoder3d(nn.Module):
         attn_scales (list of float): Scales at which to apply attention mechanisms.
         temperal_upsample (list of bool): Whether to upsample temporally in each block.
         dropout (float): Dropout rate for the dropout layers.
+        output_channels (int): Number of output channels.
         non_linearity (str): Type of non-linearity to use.
     """
 
@@ -636,6 +626,7 @@ class QwenImageDecoder3d(nn.Module):
         attn_scales=[],
         temperal_upsample=[False, True, True],
         dropout=0.0,
+        output_channels: int = 3,
         non_linearity: str = "silu",
     ):
         super().__init__()
@@ -687,7 +678,7 @@ class QwenImageDecoder3d(nn.Module):
 
         # output blocks
         self.norm_out = QwenImageRMS_norm(out_dim, images=False)
-        self.conv_out = QwenImageCausalConv3d(out_dim, 3, 3, padding=1)
+        self.conv_out = QwenImageCausalConv3d(out_dim, output_channels, 3, padding=1)
 
         self.gradient_checkpointing = False
 
@@ -785,6 +776,7 @@ class AutoencoderKLQwenImage(nn.Module):  # ModelMixin, ConfigMixin, FromOrigina
             2.8251,
             1.9160,
         ],
+        input_channels: int = 3,
     ) -> None:
         super().__init__()
 
@@ -795,12 +787,14 @@ class AutoencoderKLQwenImage(nn.Module):  # ModelMixin, ConfigMixin, FromOrigina
         self.latents_std = latents_std
 
         self.encoder = QwenImageEncoder3d(
-            base_dim, z_dim * 2, dim_mult, num_res_blocks, attn_scales, self.temperal_downsample, dropout
+            base_dim, z_dim * 2, dim_mult, num_res_blocks, attn_scales, self.temperal_downsample, dropout, input_channels
         )
         self.quant_conv = QwenImageCausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.post_quant_conv = QwenImageCausalConv3d(z_dim, z_dim, 1)
 
-        self.decoder = QwenImageDecoder3d(base_dim, z_dim, dim_mult, num_res_blocks, attn_scales, self.temperal_upsample, dropout)
+        self.decoder = QwenImageDecoder3d(
+            base_dim, z_dim, dim_mult, num_res_blocks, attn_scales, self.temperal_upsample, dropout, input_channels
+        )
 
         self.spatial_compression_ratio = 2 ** len(self.temperal_downsample)
 

@@ -79,6 +79,8 @@ ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
 ARCHITECTURE_QWEN_IMAGE_EDIT_FULL = "qwen_image_edit"
+ARCHITECTURE_QWEN_IMAGE_LAYERED = "qil"
+ARCHITECTURE_QWEN_IMAGE_LAYERED_FULL = "qwen_image_layered"
 ARCHITECTURE_KANDINSKY5 = "k5"
 ARCHITECTURE_KANDINSKY5_FULL = "kandinsky5"
 ARCHITECTURE_HUNYUAN_VIDEO_1_5 = "hv15"
@@ -99,7 +101,7 @@ def glob_images(directory, base="*"):
     return img_paths
 
 
-def glob_videos(directory, base="*"):
+def glob_videos(directory, caption_extension, base="*"):
     video_paths = []
     for ext in VIDEO_EXTENSIONS:
         if base == "*":
@@ -108,6 +110,19 @@ def glob_videos(directory, base="*"):
             video_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ext))))
     video_paths = list(set(video_paths))  # remove duplicates
     video_paths.sort()
+
+    # add image sequences with captions as videos
+    caption_paths = glob.glob(os.path.join(glob.escape(directory), "*" + caption_extension))
+    img_paths = glob_images(directory, base)
+    img_bases = {}
+    for img_path in img_paths:
+        img_base = os.path.splitext(os.path.basename(img_path))[0]
+        img_bases[img_base] = img_path
+    for caption_path in caption_paths:
+        caption_base = os.path.splitext(os.path.basename(caption_path))[0]
+        if caption_base in img_bases:
+            video_paths.append(img_bases[caption_base])  # treat image sequence as video
+
     return video_paths
 
 
@@ -557,6 +572,7 @@ class BucketSelector:
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
+        ARCHITECTURE_QWEN_IMAGE_LAYERED: RESOLUTION_STEPS_QWEN_IMAGE,  # use same steps as Qwen-Image
         ARCHITECTURE_KANDINSKY5: RESOLUTION_STEPS_KANDINSKY5,
         ARCHITECTURE_HUNYUAN_VIDEO_1_5: RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5,
         ARCHITECTURE_Z_IMAGE: RESOLUTION_STEPS_Z_IMAGE,
@@ -664,12 +680,28 @@ def load_video(
     bucket_reso: Optional[tuple[int, int]] = None,
     source_fps: Optional[float] = None,
     target_fps: Optional[float] = None,
+    keep_alpha: bool = False,
 ) -> list[np.ndarray]:
     """
     bucket_reso: if given, resize the video to the bucket resolution, (width, height)
     """
+
+    def get_image_files(video_path: str) -> list[str]:
+        # load images in the directory or image sequence
+        if os.path.isdir(video_path):
+            image_files = glob_images(video_path)
+            image_files.sort()
+        else:
+            image_files = [video_path]  # first frame
+            body, ext = os.path.splitext(video_path)
+            additional_images = glob.glob(f"{body}_*{ext}")
+            additional_images.sort()
+            image_files.extend(additional_images)
+        return image_files
+
     if source_fps is None or target_fps is None:
-        if os.path.isfile(video_path):
+        ext = os.path.splitext(video_path)[1].lower()
+        if os.path.isfile(video_path) and ext in VIDEO_EXTENSIONS:
             container = av.open(video_path)
             video = []
             for i, frame in enumerate(container.decode(video=0)):
@@ -691,8 +723,7 @@ def load_video(
             container.close()
         else:
             # load images in the directory
-            image_files = glob_images(video_path)
-            image_files.sort()
+            image_files = get_image_files(video_path)
             video = []
             for i in range(len(image_files)):
                 if start_frame is not None and i < start_frame:
@@ -701,7 +732,11 @@ def load_video(
                     break
 
                 image_file = image_files[i]
-                image = Image.open(image_file).convert("RGB")
+                image = Image.open(image_file)
+                if not keep_alpha:
+                    image = image.convert("RGB")
+                else:
+                    image = image.convert("RGBA")  # ensure has alpha channel
 
                 if bucket_selector is not None and bucket_reso is None:
                     bucket_reso = bucket_selector.get_bucket_resolution(image.size)  # calc resolution from first frame
@@ -746,8 +781,7 @@ def load_video(
             container.close()
         else:
             # load images in the directory
-            image_files = glob_images(video_path)
-            image_files.sort()
+            image_files = get_image_files(video_path)
             video = []
             frame_index_with_fraction = 0.0
             previous_frame_index = -1
@@ -767,7 +801,11 @@ def load_video(
                     break
 
                 image_file = image_files[i]
-                image = Image.open(image_file).convert("RGB")
+                image = Image.open(image_file)
+                if not keep_alpha:
+                    image = image.convert("RGB")
+                else:
+                    image = image.convert("RGBA")  # ensure has alpha channel
 
                 if bucket_selector is not None and bucket_reso is None:
                     bucket_reso = bucket_selector.get_bucket_resolution(image.size)  # calc resolution from first frame
@@ -1219,7 +1257,7 @@ class VideoDatasource(ContentDatasource):
         start_frame: Optional[int] = None,
         end_frame: Optional[int] = None,
         bucket_selector: Optional[BucketSelector] = None,
-    ) -> tuple[str, list[Image.Image], str]:
+    ) -> list[Image.Image]:
         # this method can resize the video if bucket_selector is given to reduce the memory usage
 
         start_frame = start_frame if start_frame is not None else self.start_frame
@@ -1227,7 +1265,13 @@ class VideoDatasource(ContentDatasource):
         bucket_selector = bucket_selector if bucket_selector is not None else self.bucket_selector
 
         video = load_video(
-            video_path, start_frame, end_frame, bucket_selector, source_fps=self.source_fps, target_fps=self.target_fps
+            video_path,
+            start_frame,
+            end_frame,
+            bucket_selector,
+            source_fps=self.source_fps,
+            target_fps=self.target_fps,
+            keep_alpha=True,
         )
         return video
 
@@ -1275,7 +1319,7 @@ class VideoDirectoryDatasource(VideoDatasource):
 
         # glob videos
         logger.info(f"glob videos in {self.video_directory}")
-        self.video_paths = glob_videos(self.video_directory)
+        self.video_paths = glob_videos(self.video_directory, self.caption_extension)
         logger.info(f"found {len(self.video_paths)} videos")
 
         # glob control images if specified
@@ -1332,7 +1376,7 @@ class VideoDirectoryDatasource(VideoDatasource):
         bucket_selector: Optional[BucketSelector] = None,
     ) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
         video_path = self.video_paths[idx]
-        video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)
+        video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)  # with alpha
 
         _, caption = self.get_caption(idx)
 
@@ -1957,6 +2001,7 @@ class VideoDataset(BaseDataset):
         self.source_fps = source_fps
         self.fp_latent_window_size = fp_latent_window_size
 
+        self.frame_divisible_by = 4  # all architectures require frames to be divisible by 4
         if self.architecture == ARCHITECTURE_HUNYUAN_VIDEO:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_WAN:
@@ -1969,6 +2014,9 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
+        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_LAYERED:
+            self.target_fps = source_fps  # no conversion
+            self.frame_divisible_by = 1  # no requirement
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
@@ -1977,7 +2025,7 @@ class VideoDataset(BaseDataset):
             target_frames.sort()
 
             # round each value to N*4+1
-            rounded_target_frames = [(f - 1) // 4 * 4 + 1 for f in target_frames]
+            rounded_target_frames = [(f - 1) // self.frame_divisible_by * self.frame_divisible_by + 1 for f in target_frames]
             rouneded_target_frames = list(set(rounded_target_frames))
             rouneded_target_frames.sort()
 
@@ -2096,7 +2144,7 @@ class VideoDataset(BaseDataset):
                     elif self.frame_extraction == "full":
                         # select all frames
                         target_frame = min(frame_count, self.max_frames)
-                        target_frame = (target_frame - 1) // 4 * 4 + 1  # round to N*4+1
+                        target_frame = (target_frame - 1) // self.frame_divisible_by * self.frame_divisible_by + 1  # round to N*4+1
                         crop_pos_and_frames.append((0, target_frame))
                     else:
                         raise ValueError(f"frame_extraction {self.frame_extraction} is not supported")

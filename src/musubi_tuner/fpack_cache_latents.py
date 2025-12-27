@@ -49,6 +49,7 @@ def encode_and_save_batch(
         contents = contents.unsqueeze(1)  # B, H, W, C -> B, F, H, W, C
 
     contents = contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
+    contents = contents[:, :3, :, :, :]  # only use RGB channels
     contents = contents.to(vae.device, dtype=vae.dtype)
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 

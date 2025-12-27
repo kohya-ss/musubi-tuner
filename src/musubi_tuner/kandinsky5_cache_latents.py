@@ -42,6 +42,7 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
     inputs = torch.stack(videos, dim=0)  # B, F, H, W, C
     inputs = inputs.to(device=vae.device, dtype=vae.dtype)
     inputs = inputs.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
+    inputs = inputs[:, :3, :, :, :]  # keep only first 3 channels if RGBA
     inputs = inputs / 127.5 - 1.0
 
     # Optionally enforce NABLA-friendly spatial multiples of 128 (latents multiples of 16).
