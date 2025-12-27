@@ -924,7 +924,7 @@ num_repeats = 1
             # Construct the full command string
             # list2cmdline will quote arguments as needed
             inner_cmd_str = subprocess.list2cmdline(inner_cmd)
-            is_windows = (os.name == "nt")
+            is_windows = os.name == "nt"
 
             # Chain commands: Run training -> echo message -> pause >nul (hides default message)
             if is_windows:
@@ -941,7 +941,7 @@ num_repeats = 1
                     flags = subprocess.CREATE_NEW_CONSOLE
                     # Pass explicit 'cmd', '/c', string to ensure proper execution
                     cmd_list = ["cmd", "/c"].extend(cmd_list)
-                
+
                 subprocess.Popen(cmd_list, creationflags=flags, shell=(is_windows is False))
                 if is_windows:
                     return f"Training started in a new window! / 新しいウィンドウで学習が開始されました！\nCommand: {inner_cmd_str}"
@@ -1145,4 +1145,4 @@ num_repeats = 1
 
 if __name__ == "__main__":
     demo = construct_ui()
-    demo.launch(i18n=i18n, server_name="0.0.0.0")
+    demo.launch(i18n=i18n)

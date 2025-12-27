@@ -1010,7 +1010,15 @@ def main():
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0
 
     # Set device
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
+    device = (
+        args.device
+        if args.device is not None
+        else "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.mps.is_available()
+        else "cpu"
+    )
     device = torch.device(device)
     logger.info(f"Using device: {device}")
     args.device = device

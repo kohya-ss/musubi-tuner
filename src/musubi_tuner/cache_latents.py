@@ -300,8 +300,16 @@ def main():
     parser = hv_setup_parser(parser)
 
     args = parser.parse_args()
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
-    
+    device = (
+        args.device
+        if args.device is not None
+        else "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.mps.is_available()
+        else "cpu"
+    )
+
     device = torch.device(device)
 
     # Load dataset config
