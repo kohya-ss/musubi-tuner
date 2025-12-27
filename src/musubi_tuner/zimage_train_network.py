@@ -136,7 +136,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         control_video_path=None,
     ):
         """architecture dependent inference"""
-        model: zimage_model.ZImageTransformer2DModel = transformer
+        model: zimage_model.ZImageTransformer2DModel = accelerator.unwrap_model(transformer)
         device = accelerator.device
 
         # Get embeddings
@@ -179,11 +179,11 @@ class ZImageNetworkTrainer(NetworkTrainer):
             latent_model_input = latent_model_input.unsqueeze(2)  # Add frame dimension [B, C, F, H, W]
 
             with accelerator.autocast(), torch.no_grad():
-                model_out = model(latent_model_input, timestep, embed, mask)
+                model_out = transformer(latent_model_input, timestep, embed, mask)
 
             if do_cfg:
                 with accelerator.autocast(), torch.no_grad():
-                    negative_model_out = model(latent_model_input, timestep, negative_embed, negative_mask)
+                    negative_model_out = transformer(latent_model_input, timestep, negative_embed, negative_mask)
                 noise_pred = negative_model_out + guidance_scale * (model_out - negative_model_out)
             else:
                 noise_pred = model_out
@@ -267,7 +267,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
     ):
-        model: zimage_model.ZImageTransformer2DModel = transformer
+        model: zimage_model.ZImageTransformer2DModel = accelerator.unwrap_model(transformer)
         bsize = latents.shape[0]
 
         # latents: [B, C, H, W]
@@ -314,7 +314,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
 
         # Call model
         with accelerator.autocast():
-            model_pred = model(x=noisy_model_input, t=t_input, cap_feats=llm_embed, cap_mask=llm_mask)
+            model_pred = transformer(x=noisy_model_input, t=t_input, cap_feats=llm_embed, cap_mask=llm_mask)
 
         # model_pred: [B, C, F, H, W]
         model_pred = model_pred.squeeze(2)  # [B, C, H, W]

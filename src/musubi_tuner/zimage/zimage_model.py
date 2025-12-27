@@ -99,6 +99,12 @@ class RMSNorm(nn.Module):
         return (out * w_f).to(x.dtype)
 
 
+def clamp_fp16(x):
+    if x.dtype == torch.float16:
+        return torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
+    return x
+
+
 class FeedForward(nn.Module):
     def __init__(self, dim: int, hidden_dim: int):
         super().__init__()
@@ -114,14 +120,17 @@ class FeedForward(nn.Module):
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
 
-    def _forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+    def _forward(self, x, apply_fp16_downscale=False):
+        x3 = self.w3(x)
+        if x.dtype == torch.float16 and apply_fp16_downscale:
+            x3.div_(32)
+        return self.w2(clamp_fp16(F.silu(self.w1(x)) * x3))
 
-    def forward(self, x):
+    def forward(self, x, apply_fp16_downscale=False):
         if self.training and self.gradient_checkpointing:
             return checkpoint(self._forward, x, use_reentrant=False)
         else:
-            return self._forward(x)
+            return self._forward(x, apply_fp16_downscale)
 
 
 def apply_rotary_emb(x_in: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
@@ -191,6 +200,8 @@ class ZImageAttention(nn.Module):
         hidden_states = hidden_states.to(dtype)
 
         output = self.to_out[0](hidden_states)
+        if output.dtype == torch.float16:
+            output.div_(4)
         return output
 
     def forward(
@@ -262,13 +273,15 @@ class ZImageTransformerBlock(nn.Module):
 
             attn_out = self.attention(self.attention_norm1(x) * scale_msa, freqs_cis=freqs_cis, attn_params=attn_params)
             del scale_msa
-            x = x + gate_msa * self.attention_norm2(attn_out)
+            x = x + gate_msa * self.attention_norm2(clamp_fp16(attn_out))
             del gate_msa
-            x = x + gate_mlp * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
+            x = x + gate_mlp * self.ffn_norm2(
+                clamp_fp16(self.feed_forward(self.ffn_norm1(x) * scale_mlp, apply_fp16_downscale=True))
+            )
             del scale_mlp, gate_mlp
         else:
             attn_out = self.attention(self.attention_norm1(x), freqs_cis=freqs_cis, attn_params=attn_params)
-            x = x + self.attention_norm2(attn_out)
+            x = x + self.attention_norm2(clamp_fp16(attn_out))
             x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
 
         return x
