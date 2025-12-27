@@ -31,6 +31,7 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, bat
         contents = contents.unsqueeze(1)  # B, H, W, C -> B, F, H, W, C
 
     contents = contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
+    contents = contents[:, :3, :, :, :]  # keep only first 3 channels if RGBA
     contents = contents.to(vae.device, dtype=vae.dtype)
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 
@@ -97,6 +98,7 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, bat
         if len(control_contents.shape) == 4:
             control_contents = control_contents.unsqueeze(1)
         control_contents = control_contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
+        control_contents = control_contents[:, :3, :, :, :]  # keep only first 3 channels if RGBA
         control_contents = control_contents.to(vae.device, dtype=vae.dtype)
         control_contents = control_contents / 127.5 - 1.0  # normalize to [-1, 1]
         with torch.amp.autocast(device_type=vae.device.type, dtype=vae.dtype), torch.no_grad():

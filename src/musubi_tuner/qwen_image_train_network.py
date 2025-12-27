@@ -13,6 +13,8 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_QWEN_IMAGE_EDIT_FULL,
+    ARCHITECTURE_QWEN_IMAGE_LAYERED,
+    ARCHITECTURE_QWEN_IMAGE_LAYERED_FULL,
 )
 from musubi_tuner.qwen_image import qwen_image_autoencoder_kl, qwen_image_model, qwen_image_utils
 from musubi_tuner.hv_train_network import (
@@ -35,18 +37,27 @@ class QwenImageNetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
         self.is_edit = None
+        self.is_layered = None
 
     # region model specific
 
     @property
     def architecture(self) -> str:
-        assert self.is_edit is not None
-        return ARCHITECTURE_QWEN_IMAGE_EDIT if self.is_edit else ARCHITECTURE_QWEN_IMAGE
+        assert self.is_edit is not None and self.is_layered is not None
+        if self.is_layered:
+            return ARCHITECTURE_QWEN_IMAGE_LAYERED
+        if self.is_edit:
+            return ARCHITECTURE_QWEN_IMAGE_EDIT
+        return ARCHITECTURE_QWEN_IMAGE
 
     @property
     def architecture_full_name(self) -> str:
-        assert self.is_edit is not None
-        return ARCHITECTURE_QWEN_IMAGE_EDIT_FULL if self.is_edit else ARCHITECTURE_QWEN_IMAGE_FULL
+        assert self.is_edit is not None and self.is_layered is not None
+        if self.is_layered:
+            return ARCHITECTURE_QWEN_IMAGE_LAYERED_FULL
+        if self.is_edit:
+            return ARCHITECTURE_QWEN_IMAGE_EDIT_FULL
+        return ARCHITECTURE_QWEN_IMAGE_FULL
 
     def handle_model_specific_args(self, args):
         self.dit_dtype = torch.bfloat16
@@ -54,6 +65,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         self._control_training = False
         self.default_guidance_scale = 1.0  # not used
         self.is_edit = args.is_edit
+        self.is_layered = args.is_layered
 
         if args.metadata_arch is None and args.model_version == "edit-2509":
             args.metadata_arch = CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS  # to notify Edit-Plus mode for sai_model_spec
@@ -89,21 +101,29 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         with torch.amp.autocast(device_type=device.type, dtype=vl_dtype), torch.no_grad():
             for prompt_dict in prompts:
+                width, height = prompt_dict.get("width", 256), prompt_dict.get("height", 256)
+                width = (width // 8) * 8
+                height = (height // 8) * 8
+
                 is_edit = self.is_edit
                 if is_edit:
                     # Load control image
-                    # assert "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0, (
-                    #     "control_image_path not found in sample prompt"
-                    # )
                     if "control_image_path" not in prompt_dict or len(prompt_dict["control_image_path"]) == 0:
-                        is_edit = False
+                        is_edit = False  # override to text-to-image if no control image provided
+                if args.is_layered:
+                    assert "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) == 1, (
+                        "Layered training requires one control (source) image per sample"
+                    )
 
-                if is_edit:
+                if is_edit or self.is_layered:
+                    resize_to_official = not args.is_layered
+                    resize_size = None if not resize_to_official else (width, height)
+
                     control_image_paths = prompt_dict["control_image_path"]
                     control_image_tensors = []
                     for control_image_path in control_image_paths:
                         control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
-                            control_image_path, True
+                            control_image_path, resize_to_official, resize_size=resize_size
                         )
                         control_image_tensors.append(control_image_tensor)
                         control_image_nps[control_image_path] = control_image_np
@@ -114,6 +134,13 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
                 if "negative_prompt" not in prompt_dict:
                     prompt_dict["negative_prompt"] = " "
+
+                if args.is_layered and prompt_dict.get("prompt", "").strip() == "":  # in ["", "."]:
+                    # generate automatic prompt for layered images
+                    image = control_image_nps[control_image_paths[0]]  # use the first control image for captioning
+                    prompt = qwen_image_utils.get_image_caption(vl_processor, text_encoder, image, use_en_prompt=True)
+                    logger.info(f"Generated automatic prompt for layered images: {prompt}")
+                    prompt_dict["prompt"] = prompt
 
                 for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", " ")]:
                     embed_key = embed_key_fn(p, control_image_paths)
@@ -202,15 +229,20 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         # 4. Prepare latent variables
         num_channels_latents = model.in_channels // 4
+        num_layers = 0 if not args.is_layered else frame_count
         # latents is packed
-        latents = qwen_image_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, generator)
+        latents = qwen_image_utils.prepare_latents(
+            1, num_layers + 1, num_channels_latents, height, width, torch.bfloat16, device, generator
+        )
         img_shapes = [(1, height // qwen_image_utils.VAE_SCALE_FACTOR // 2, width // qwen_image_utils.VAE_SCALE_FACTOR // 2)]
+        if args.is_layered:
+            img_shapes = img_shapes * (num_layers + 1)
 
         if is_edit:
             if "control_image_path" not in sample_parameter or len(sample_parameter["control_image_path"]) == 0:
                 is_edit = False
 
-        if is_edit:
+        if is_edit or self.is_layered:
             # 4.1 Prepare control latents
             logger.info("Preparing control latents from control image")
             control_image_tensors = sample_parameter.get("control_image_tensors")  # list of tensors
@@ -237,7 +269,11 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         sigmas = np.linspace(1.0, 1 / sample_steps, sample_steps)
         image_seq_len = latents.shape[1]
 
-        mu = qwen_image_utils.calculate_shift_qwen_image(image_seq_len)
+        if not self.is_layered:
+            mu = qwen_image_utils.calculate_shift_qwen_image(image_seq_len)
+        else:
+            base_seqlen = 256 * 256 / 16 / 16
+            mu = (image_seq_len / base_seqlen) ** 0.5
         scheduler = qwen_image_utils.get_scheduler(discrete_flow_shift)
         # mu is kwarg for FlowMatchingDiscreteScheduler
         timesteps, n = qwen_image_utils.retrieve_timesteps(scheduler, sample_steps, device, sigmas=sigmas, mu=mu)
@@ -250,6 +286,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         # 6. Denoising loop
         do_cfg = do_classifier_free_guidance and cfg_scale > 1.0
+        is_rgb = None if not args.is_layered else torch.zeros(latents.shape[0], dtype=torch.long, device=device)  # batch size 1
         scheduler.set_begin_index(0)
         # with progress_bar(total=sample_steps) as pbar:
 
@@ -258,7 +295,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
                 latent_model_input = latents
-                if is_edit:
+                if is_edit or args.is_layered:
                     latent_model_input = torch.cat([latents, control_latent], dim=1)
 
                 with torch.no_grad():
@@ -270,8 +307,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                         encoder_hidden_states=vl_embed,
                         img_shapes=img_shapes,
                         txt_seq_lens=txt_seq_lens,
+                        additional_t_cond=is_rgb,
                     )
-                    if is_edit:
+                    if is_edit or args.is_layered:
                         noise_pred = noise_pred[:, :image_seq_len]
 
                 if do_cfg:
@@ -284,8 +322,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                             encoder_hidden_states=negative_vl_embed,
                             img_shapes=img_shapes,
                             txt_seq_lens=negative_txt_seq_lens,
+                            additional_t_cond=is_rgb,
                         )
-                    if is_edit:
+                    if is_edit or args.is_layered:
                         neg_noise_pred = neg_noise_pred[:, :image_seq_len]
                     comb_pred = neg_noise_pred + cfg_scale * (noise_pred - neg_noise_pred)
 
@@ -299,6 +338,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
                     pbar.update()
 
+        # BC1HW for non-layered (backward compatibility) or layered with num_layers=1, BLCHW for layered
         latents = qwen_image_utils.unpack_latents(latents, height, width)
 
         # Move VAE to the appropriate device for sampling
@@ -307,8 +347,17 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         # Decode latents to video
         logger.info(f"Decoding video from latents: {latents.shape}")
+        if latents.shape[2] != 1:  # 1 L C H W
+            latents = latents.permute(1, 2, 0, 3, 4)  # 1 L C H W -> L C 1 H W
+        pixels_list = []
         with torch.no_grad():
-            pixels = vae.decode_to_pixels(latents.to(device))  # decode to pixels, 0-1
+            for i in range(latents.shape[0]):
+                latents_i = latents[i : i + 1].to(device)
+                pixels_i = vae.decode_to_pixels(latents_i)  # decode to pixels, 0-1
+                pixels_list.append(pixels_i.to(torch.float32).cpu())
+                del latents_i, pixels_i
+        latents = None
+        pixels = torch.cat(pixels_list, dim=0)  # L C H W
         del latents
 
         logger.info("Decoding complete")
@@ -324,7 +373,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         vae_path = args.vae
 
         logger.info(f"Loading VAE model from {vae_path}")
-        vae = qwen_image_utils.load_vae(args.vae, device="cpu", disable_mmap=True)
+        input_channels = 4 if args.is_layered else 3
+        vae = qwen_image_utils.load_vae(args.vae, input_channels=input_channels, device="cpu", disable_mmap=True)
         vae.eval()
         return vae
 
@@ -383,7 +433,13 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         is_edit = self.is_edit
 
         bsize = latents.shape[0]
-        latents = batch["latents"]  # B, C, 1, H, W
+        latents = batch["latents"]  # B, C, 1, H, W for non-layered, B, C, L, H, W for layered
+        if args.is_layered:
+            num_layers = latents.shape[2] - 1  # 1st latent is base, rest are layers
+            latents = latents.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
+        else:
+            assert latents.shape[2] == 1, "Expected latents shape B, C, 1, H, W for non-layered model"
+            num_layers = 0
 
         # pack latents
         lat_h = latents.shape[3]
@@ -404,6 +460,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             if num_control_images == 0:
                 is_edit = False  # no control images found, treat as text-to-image
             # assert num_control_images > 0, "No control latents found in the batch for Qwen-Image-Edit"
+        elif args.is_layered:
+            num_control_images = 1
 
         if is_edit:
             latents_control = []
@@ -449,7 +507,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             vl_mask = vl_mask.to(device=accelerator.device)  # bool
 
         img_shapes = [(1, lat_h // 2, lat_w // 2)]
-        if is_edit:
+        if args.is_layered:
+            img_shapes = img_shapes * (num_layers + 1)
+        if is_edit or args.is_layered:
             img_shapes = [img_shapes + [(1, sh[-2] // 2, sh[-1] // 2) for sh in latents_control_shapes]]
 
         # print(
@@ -458,6 +518,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         guidance = None
         timesteps = timesteps / 1000.0
+        is_rgb = None if not args.is_layered else torch.zeros(latents.shape[0], dtype=torch.long, device=accelerator.device)  # batch size bsize
         with accelerator.autocast():
             model_pred = model(
                 hidden_states=noisy_model_input,
@@ -467,8 +528,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 encoder_hidden_states=vl_embed,
                 img_shapes=img_shapes,
                 txt_seq_lens=txt_seq_lens,
+                additional_t_cond=is_rgb,
             )
-            if is_edit:
+            if is_edit or args.is_layered:
                 model_pred = model_pred[:, :img_seq_len]
 
         # unpack latents
