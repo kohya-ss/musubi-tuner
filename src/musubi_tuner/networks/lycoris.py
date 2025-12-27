@@ -3,6 +3,7 @@
 # LyCORIS: Lora beYond Conventional methods, Other Rank adaptation Implementations
 
 import os
+import inspect
 from typing import Dict, List, Optional, Union
 import torch
 import torch.nn as nn
@@ -61,11 +62,12 @@ def create_network(
         network_alpha = 1.0
         logger.info(f"No network_alpha specified, using default: {network_alpha}")
 
-    # Extract algorithm from kwargs, default to 'lora' if not specified
-    algo = kwargs.get('algo', 'lora')
+    # LyCORIS (kohya) expects network_module (e.g. "lokr"), but many callers think in terms of "algo".
+    # Support both, preferring explicit network_module.
+    network_module = kwargs.pop("network_module", None) or kwargs.pop("algo", None) or "lora"
 
     # Log the configuration
-    logger.info(f"Creating LyCORIS network with algorithm: {algo}")
+    logger.info(f"Creating LyCORIS network with module: {network_module}")
     logger.info(f"Network config - dim: {network_dim}, alpha: {network_alpha}, multiplier: {multiplier}")
 
     # Handle conv-specific dimensions if provided
@@ -75,7 +77,7 @@ def create_network(
         logger.info(f"Conv layers - dim: {conv_dim}, alpha: {conv_alpha}")
 
     # Log LoKR-specific parameters if using LoKR
-    if algo == 'lokr':
+    if network_module == "lokr":
         lokr_params = {
             'factor': kwargs.get('factor', 'default'),
             'decompose_both': kwargs.get('decompose_both', 'default'),
@@ -92,8 +94,16 @@ def create_network(
         'multiplier': multiplier,
         'lora_dim': network_dim,
         'alpha': network_alpha,
-        'algo': algo,  # Algorithm selection: lora, locon, loha, lokr, etc.
     }
+    # LyCORIS API compatibility: some versions use network_module, some accept algo.
+    init_params = inspect.signature(LycorisNetworkKohya.__init__).parameters
+    if "network_module" in init_params:
+        lycoris_kwargs["network_module"] = network_module
+    elif "algo" in init_params:
+        lycoris_kwargs["algo"] = network_module
+    else:
+        # Fallback: pass network_module (will be captured by **kwargs in most LyCORIS versions).
+        lycoris_kwargs["network_module"] = network_module
 
     # Only add optional parameters if they're not None
     if neuron_dropout is not None:
@@ -105,13 +115,13 @@ def create_network(
 
     # Add any remaining kwargs not already handled
     for k, v in kwargs.items():
-        if k not in ['algo', 'conv_dim', 'conv_alpha', 'neuron_dropout']:
+        if k not in ['conv_dim', 'conv_alpha', 'neuron_dropout']:
             lycoris_kwargs[k] = v
 
     network = LycorisNetworkKohya(**lycoris_kwargs)
 
     # Log success
-    logger.info(f"Successfully created LyCORIS network using {algo} algorithm")
+    logger.info(f"Successfully created LyCORIS network using {network_module} module")
 
     return network
 
@@ -154,7 +164,7 @@ def create_network_from_weights(
     # LyCORIS saves metadata about dimensions in the state dict
     modules_dim = {}
     modules_alpha = {}
-    algo = None
+    detected_module = None
 
     for key, value in weights_sd.items():
         if "." not in key:
@@ -164,14 +174,14 @@ def create_network_from_weights(
         parts = key.split(".")
         module_name = parts[0]
 
-        # Detect algorithm from weight keys if possible
-        if algo is None:
+        # Detect module type from weight keys if possible
+        if detected_module is None:
             if "lokr" in key.lower():
-                algo = "lokr"
+                detected_module = "lokr"
             elif "loha" in key.lower() or "hada" in key:
-                algo = "loha"
+                detected_module = "loha"
             elif "locon" in key.lower() or ("conv" in key and "lora" in key):
-                algo = "locon"
+                detected_module = "locon"
             # Default will be set to 'lora' if not detected
 
         if "alpha" in key:
@@ -181,12 +191,12 @@ def create_network_from_weights(
             dim = value.shape[0]
             modules_dim[module_name] = dim
 
-    # Set default algorithm if not detected
-    if algo is None:
-        algo = kwargs.get('algo', 'lora')
-        logger.info(f"Algorithm not detected from weights, using: {algo}")
+    # Set default module if not detected
+    if detected_module is None:
+        detected_module = kwargs.pop("network_module", None) or kwargs.pop("algo", None) or "lora"
+        logger.info(f"Module not detected from weights, using: {detected_module}")
     else:
-        logger.info(f"Detected algorithm from weights: {algo}")
+        logger.info(f"Detected module from weights: {detected_module}")
 
     # Get a representative dimension and alpha if individual module configs not found
     if not modules_dim:
@@ -200,7 +210,7 @@ def create_network_from_weights(
         # Use the first alpha found or default to 1.0
         network_alpha = list(modules_alpha.values())[0] if modules_alpha else 1.0
 
-    logger.info(f"Loading LyCORIS network from weights - algo: {algo}, dim: {network_dim}, alpha: {network_alpha}")
+    logger.info(f"Loading LyCORIS network from weights - module: {detected_module}, dim: {network_dim}, alpha: {network_alpha}")
 
     # Create network with detected/specified configuration
     # Build kwargs dict, only including non-None parameters
@@ -210,8 +220,14 @@ def create_network_from_weights(
         'multiplier': multiplier,
         'lora_dim': network_dim,
         'alpha': network_alpha,
-        'algo': algo,
     }
+    init_params = inspect.signature(LycorisNetworkKohya.__init__).parameters
+    if "network_module" in init_params:
+        lycoris_kwargs["network_module"] = detected_module
+    elif "algo" in init_params:
+        lycoris_kwargs["algo"] = detected_module
+    else:
+        lycoris_kwargs["network_module"] = detected_module
 
     # Only add optional parameters if they're not None/empty
     if modules_dim:
@@ -221,7 +237,7 @@ def create_network_from_weights(
 
     # Add any remaining kwargs not already handled
     for k, v in kwargs.items():
-        if k not in ['algo', 'modules_dim', 'modules_alpha']:
+        if k not in ['modules_dim', 'modules_alpha']:
             lycoris_kwargs[k] = v
 
     network = LycorisNetworkKohya(**lycoris_kwargs)

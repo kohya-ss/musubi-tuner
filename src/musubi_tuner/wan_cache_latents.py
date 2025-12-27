@@ -60,10 +60,10 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, bat
 
         # encode image latent for I2V
         B, _, _, lat_h, lat_w = latent.shape
-        F = contents.shape[2]
+        num_frames = contents.shape[2]
 
         # Create mask for the required number of frames
-        msk = torch.ones(1, F, lat_h, lat_w, dtype=vae.dtype, device=vae.device)
+        msk = torch.ones(1, num_frames, lat_h, lat_w, dtype=vae.dtype, device=vae.device)
         msk[:, 1:] = 0
         msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
         msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
@@ -71,13 +71,13 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, bat
         msk = msk.repeat(B, 1, 1, 1, 1)  # B, 4, F, H, W
 
         # Zero padding for the required number of frames only
-        padding_frames = F - 1  # The first frame is the input image
+        padding_frames = num_frames - 1  # The first frame is the input image
         images_resized = torch.concat([images, torch.zeros(B, 3, padding_frames, h, w, device=vae.device)], dim=2)
         with torch.amp.autocast(device_type=vae.device.type, dtype=vae.dtype), torch.no_grad():
             y = vae.encode(images_resized)
         y = torch.stack(y, dim=0)  # B, C, F, H, W
 
-        y = y[:, :, :F]  # may be not needed
+        y = y[:, :, :num_frames]  # may be not needed
         y = y.to(vae.dtype)  # convert to bfloat16
         y = torch.concat([msk, y], dim=1)  # B, 4 + C, F, H, W
 
@@ -211,9 +211,9 @@ def encode_and_save_batch_one_frame(vae: WanVAE, clip: Optional[CLIPModel], batc
     B, C, _, lat_h, lat_w = latent.shape
     for i, item in enumerate(batch):
         latent = target_latent[i]  # C, 1, H, W
-        F = contents.shape[2]  # number of frames
-        y = torch.zeros((4 + C, F, lat_h, lat_w), dtype=vae.dtype, device=vae.device)  # conditioning
-        l = torch.zeros((C, F, lat_h, lat_w), dtype=vae.dtype, device=vae.device)  # training latent
+        num_frames = contents.shape[2]  # number of frames
+        y = torch.zeros((4 + C, num_frames, lat_h, lat_w), dtype=vae.dtype, device=vae.device)  # conditioning
+        l = torch.zeros((C, num_frames, lat_h, lat_w), dtype=vae.dtype, device=vae.device)  # training latent
 
         # Create latent and mask for the required number of frames
         control_latent_indices = item.fp_1f_clean_indices
