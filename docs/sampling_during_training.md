@@ -96,6 +96,8 @@ If you train the model with control images (such as FramePack one frame inferenc
 
 `--f` option is treated as the number of output layers.
 
+The prompt can be omitted when generating sample images during Qwen-Image-Layered training. In this case, the prompt is generated based on the control image by Qwen2.5-VL.
+
 ※ Since Qwen-Image-Layered models generate "original image + multiple layer images", the number of images generated is the number specified by the `--f` option + 1. The second and subsequent images are separated layer images.
 
 <details>
@@ -131,6 +133,8 @@ classifier free guidance（ネガティブプロンプト）を必要とする�
 **Qwen-Image-Layeredの学習中のサンプルイメージ生成**
 
 `--f`オプションが出力レイヤー数として扱われます。
+
+Qwen-Image-Layeredの学習中にサンプル画像を生成する際、プロンプトは省略可能です。この場合、プロンプトはQwen2.5-VLによってコントロール画像に基づいて生成されます。
 
 ※ Qwen-Image-Layeredモデルは「元画像＋複数のレイヤー画像」を生成するため、`--f`オプションで指定した数＋1枚の画像が生成されます。2枚目以降が分離されたレイヤー画像です。
 

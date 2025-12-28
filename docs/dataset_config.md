@@ -34,7 +34,7 @@ caption_extension = ".txt"
 batch_size = 1
 enable_bucket = true
 bucket_no_upscale = false
-# multiple_targets = true # optional, default is false. Set to true for Qwen-Image-Layered training.
+# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training.
 
 [[datasets]]
 image_directory = "/path/to/image_dir"
@@ -50,7 +50,7 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 
 `num_repeats` is also available. It is optional, default is 1 (no repeat). It repeats the images (or videos) that many times to expand the dataset. For example, if `num_repeats = 2` and there are 20 images in the dataset, each image will be duplicated twice (with the same caption) to have a total of 40 images. It is useful to balance the multiple datasets with different sizes.
 
-For Qwen-Image-Layered training, set `multiple_targets = true`. Also, in the `image_directory`, for each "image to be trained + segmentation (layer) results" combination, store the following (if `caption_extension` is `.txt`):
+For Qwen-Image-Layered training, set `multiple_target = true`. Also, in the `image_directory`, for each "image to be trained + segmentation (layer) results" combination, store the following (if `caption_extension` is `.txt`):
 
 |Item|Example|Note|
 |---|---|---|
@@ -73,7 +73,7 @@ resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no
 
 `[[datasets]]`以下を追加することで、他のデータセットを追加できます。各データセットには異なる設定を持てます。
 
-Qwen-Image-Layeredの学習の場合、`multiple_targets = true`を設定してください。また、`image_directory`内に、それぞれの「学習する画像＋分割結果」組み合わせごとに、以下を格納してください（`caption_extension`が`.txt`の場合）。
+Qwen-Image-Layeredの学習の場合、`multiple_target = true`を設定してください。また、`image_directory`内に、それぞれの「学習する画像＋分割結果」組み合わせごとに、以下を格納してください（`caption_extension`が`.txt`の場合）。
 
 |項目|例|備考|
 |---|---|---|
@@ -98,7 +98,7 @@ resolution = [960, 544]
 batch_size = 1
 enable_bucket = true
 bucket_no_upscale = false
-# multiple_targets = true # optional, default is false. Set to true for Qwen-Image-Layered training. 
+# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training. 
 
 [[datasets]]
 image_jsonl_file = "/path/to/metadata.jsonl"
@@ -115,7 +115,7 @@ JSONL file format for metadata:
 {"image_path": "/path/to/image2.jpg", "caption": "A caption for image2"}
 ```
 
-For Qwen-Image-Layered training, set `multiple_targets = true`. Also, in the metadata JSONL file, for each "image to be trained + segmentation (layer) results" combination, specify the image paths with numbered attributes like `image_path_0`, `image_path_1`, etc.
+For Qwen-Image-Layered training, set `multiple_target = true`. Also, in the metadata JSONL file, for each "image to be trained + segmentation (layer) results" combination, specify the image paths with numbered attributes like `image_path_0`, `image_path_1`, etc.
 
 ```json
 {"image_path_0": "/path/to/image1_base.png", "image_path_1": "/path/to/image1_layer1.png", "image_path_2": "/path/to/image1_layer2.png", "caption": "A caption for image1"}
@@ -131,7 +131,7 @@ metadata jsonl ファイルを使用する場合、caption_extension は必要�
 
 キャプションによるデータセットと同様に、複数のデータセットを追加できます。各データセットには異なる設定を持てます。
 
-Qwen-Image-Layeredの学習の場合、`multiple_targets = true`を設定してください。また、metadata jsonl ファイル内で、各画像に対して複数のターゲット画像を指定する場合は、`image_path_0`, `image_path_1`のように数字を付与してください。
+Qwen-Image-Layeredの学習の場合、`multiple_target = true`を設定してください。また、metadata jsonl ファイル内で、各画像に対して複数のターゲット画像を指定する場合は、`image_path_0`, `image_path_1`のように数字を付与してください。
 
 </details>
 
