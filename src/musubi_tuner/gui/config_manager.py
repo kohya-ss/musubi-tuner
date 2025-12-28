@@ -52,17 +52,191 @@ class ConfigManager:
                     ">32": {"batch_size": 2, "block_swap": 0, "fp8_scaled": False, "fp8_llm": False},
                 },
             },
+            "Wan 2.1 (T2V-14B)": {
+                "resolution": (1280, 720),
+                "vae_subpath": ["vae", "wan_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+                "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+                "dit_subpath": ["diffusion_models", "wan2.1_t2v_14b_bf16.safetensors"],
+                "training_base": {
+                    "learning_rate": 2e-4,
+                    "discrete_flow_shift": 1.0,
+                    "mixed_precision": "bf16",
+                    "gradient_checkpointing": True,
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 20, "fp8_scaled": True},
+                    "32": {"batch_size": 2, "block_swap": 10, "fp8_scaled": True},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
+            "Wan 2.1 (I2V-14B)": {
+                "resolution": (1280, 720),
+                "vae_subpath": ["vae", "wan_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+                "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+                "dit_subpath": ["diffusion_models", "wan2.1_i2v_14b_bf16.safetensors"],
+                "training_base": {
+                    "learning_rate": 2e-4,
+                    "discrete_flow_shift": 1.0,
+                    "mixed_precision": "bf16",
+                    "gradient_checkpointing": True,
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 20, "fp8_scaled": True},
+                    "32": {"batch_size": 2, "block_swap": 10, "fp8_scaled": True},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
+            "Wan 2.2 (T2V-5B)": {
+                "resolution": (1024, 1024),
+                "vae_subpath": ["vae", "wan_2.2_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+                "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+                "dit_subpath": ["diffusion_models", "wan2.2_t2v_5b_bf16.safetensors"],
+                "training_base": {
+                    "learning_rate": 2e-4,
+                    "discrete_flow_shift": 1.0,
+                    "mixed_precision": "bf16",
+                    "gradient_checkpointing": True,
+                },
+                "vram_settings": {
+                    "16": {"batch_size": 1, "block_swap": 20, "fp8_scaled": True},
+                    "24": {"batch_size": 1, "block_swap": 0, "fp8_scaled": True},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
+            "Wan 2.2 (T2V-14B)": {
+                "resolution": (1280, 720),
+                "vae_subpath": ["vae", "wan_2.2_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+                "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+                "dit_subpath": ["diffusion_models", "wan2.2_t2v_14b_bf16.safetensors"],
+                "training_base": {
+                    "learning_rate": 2e-4,
+                    "discrete_flow_shift": 1.0,
+                    "mixed_precision": "bf16",
+                    "gradient_checkpointing": True,
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 20, "fp8_scaled": True},
+                    "32": {"batch_size": 2, "block_swap": 10, "fp8_scaled": True},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
+            "Wan 2.2 (I2V-14B)": {
+                "resolution": (1280, 720),
+                "vae_subpath": ["vae", "wan_2.2_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+                "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+                "dit_subpath": ["diffusion_models", "wan2.2_i2v_14b_bf16.safetensors"],
+                "training_base": {
+                    "learning_rate": 2e-4,
+                    "discrete_flow_shift": 1.0,
+                    "mixed_precision": "bf16",
+                    "gradient_checkpointing": True,
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 20, "fp8_scaled": True},
+                    "32": {"batch_size": 2, "block_swap": 10, "fp8_scaled": True},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
+            "HunyuanVideo": {
+                "resolution": (960, 544),
+                "vae_subpath": ["vae", "hunyuan_video_vae_bf16.safetensors"],
+                "te1_subpath": ["text_encoders", "llm"],
+                "te2_subpath": ["text_encoders", "clip"],
+                "dit_subpath": ["diffusion_models", "hunyuan_video_7b_bf16.safetensors"],
+                "training_base": {
+                    "learning_rate": 1e-4,
+                    "discrete_flow_shift": 7.0,
+                    "mixed_precision": "bf16",
+                    "gradient_checkpointing": True,
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 36, "fp8_scaled": True, "fp8_llm": True},
+                    "32": {"batch_size": 1, "block_swap": 18, "fp8_scaled": True},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
+            "Hunyuan 1.5": {
+                "resolution": (1280, 720),
+                "vae_subpath": ["vae", "hunyuan_video1.5_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "qwen2.5_vl_7b"],
+                "te2_subpath": ["text_encoders", "byt5"],
+                "dit_subpath": ["diffusion_models", "hunyuan_video1.5_t2v_7b.safetensors"],
+                "training_base": {
+                    "learning_rate": 2e-4,
+                    "discrete_flow_shift": 7.0,
+                    "mixed_precision": "bf16",
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 51, "fp8_scaled": True},
+                    ">32": {"batch_size": 2, "block_swap": 0},
+                },
+            },
+            "FramePack": {
+                "resolution": (1280, 720),
+                "vae_subpath": ["vae", "fpack_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "llama"],
+                "te2_subpath": ["text_encoders", "clip"],
+                "dit_subpath": ["diffusion_models", "fpack_dit.safetensors"],
+                "training_base": {
+                    "learning_rate": 1e-4,
+                    "mixed_precision": "bf16",
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 38},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
+            "Flux.1 Kontext": {
+                "resolution": (1024, 1024),
+                "vae_subpath": ["vae", "ae.safetensors"],
+                "te1_subpath": ["text_encoders", "t5-v1_1-xxl"],
+                "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+                "dit_subpath": ["diffusion_models", "flux1-dev-kontext.safetensors"],
+                "training_base": {
+                    "learning_rate": 4e-4,
+                    "discrete_flow_shift": 3.0,
+                    "mixed_precision": "bf16",
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 10, "fp8_scaled": True},
+                    ">32": {"batch_size": 2, "block_swap": 0},
+                },
+            },
+            "Kandinsky 5": {
+                "resolution": (1024, 1024),
+                "vae_subpath": ["vae", "k5_vae.safetensors"],
+                "te1_subpath": ["text_encoders", "k5_te1.safetensors"],
+                "te2_subpath": ["text_encoders", "k5_te2.safetensors"],
+                "dit_subpath": ["diffusion_models", "k5_dit.safetensors"],
+                "training_base": {
+                    "learning_rate": 1e-4,
+                    "discrete_flow_shift": 1.0,
+                    "mixed_precision": "bf16",
+                },
+                "vram_settings": {
+                    "24": {"batch_size": 1, "block_swap": 20, "fp8_scaled": True},
+                    ">32": {"batch_size": 4, "block_swap": 0},
+                },
+            },
         }
 
     def get_resolution(self, model_name):
         return self.models.get(model_name, {}).get("resolution", (1024, 1024))
 
     def get_batch_size(self, model_name, vram_size):
-        # Default to "16" if vram_size is not provided or invalid, as a safe middle ground
         if not vram_size:
             vram_size = "16"
 
         vram_conf = self.models.get(model_name, {}).get("vram_settings", {}).get(vram_size, {})
+        if not vram_conf:
+            # Try to find a fallback if exact size not matched (e.g. if 16 is selected but only 24+ defined)
+            vram_conf = self.models.get(model_name, {}).get("vram_settings", {}).get("24", {})
+        
         return vram_conf.get("batch_size", 1)
 
     def get_preprocessing_paths(self, model_name, comfy_models_dir):
@@ -87,13 +261,13 @@ class ConfigManager:
 
         # Merge VRAM settings
         vram_conf = conf.get("vram_settings", {}).get(vram_size, {})
+        if not vram_conf:
+             vram_conf = conf.get("vram_settings", {}).get("24", {})
+
         # Only take relevant keys for training params (block_swap), ignore batch_size as it's for dataset
-        if "block_swap" in vram_conf:
-            base["block_swap"] = vram_conf["block_swap"]
-        if "fp8_llm" in vram_conf:
-            base["fp8_llm"] = vram_conf["fp8_llm"]
-        if "fp8_scaled" in vram_conf:
-            base["fp8_scaled"] = vram_conf["fp8_scaled"]
+        for key in ["block_swap", "fp8_llm", "fp8_scaled"]:
+            if key in vram_conf:
+                base[key] = vram_conf[key]
 
         # DiT path
         dit_sub = conf.get("dit_subpath")
