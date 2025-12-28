@@ -459,9 +459,6 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                     break
             if num_control_images == 0:
                 is_edit = False  # no control images found, treat as text-to-image
-            # assert num_control_images > 0, "No control latents found in the batch for Qwen-Image-Edit"
-        elif args.is_layered:
-            num_control_images = 1
 
         if is_edit:
             latents_control = []
@@ -473,6 +470,15 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 lc = qwen_image_utils.pack_latents(lc)  # B, H*W, C. H*W is the sequence length L
                 latents_control.append(lc)
             latents_control = torch.cat(latents_control, dim=1)  # B, L, C. L is the total sequence length of all control images
+
+            noisy_model_input = torch.cat([noisy_model_input, latents_control], dim=1)  # B, L+Lc, C
+        elif args.is_layered:
+            # use 1st target image as control
+            num_control_images = 1
+            latents_control = latents[:, 0:1]  # B, 1, C, H, W
+            latents_control = latents_control.transpose(1, 2)  # B, C, 1, H, W, to match with Edit model
+            latents_control_shapes = [latents_control.shape]
+            latents_control = qwen_image_utils.pack_latents(latents_control)  # B, H*W, C
 
             noisy_model_input = torch.cat([noisy_model_input, latents_control], dim=1)  # B, L+Lc, C
         else:
@@ -518,7 +524,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         guidance = None
         timesteps = timesteps / 1000.0
-        is_rgb = None if not args.is_layered else torch.zeros(latents.shape[0], dtype=torch.long, device=accelerator.device)  # batch size bsize
+        is_rgb = (
+            None if not args.is_layered else torch.zeros(latents.shape[0], dtype=torch.long, device=accelerator.device)
+        )  # batch size bsize
         with accelerator.autocast():
             model_pred = model(
                 hidden_states=noisy_model_input,

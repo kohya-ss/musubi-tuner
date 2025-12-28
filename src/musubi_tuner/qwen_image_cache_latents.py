@@ -29,24 +29,39 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo], is_layered: bool) -> t
     # Stack batch into target tensor (B,H,W,C) in RGB order and control images list of tensors (H, W, C)
     # Currently control images must have same size as target images. The length of control images can vary.
     contents = []
-    controls = []
-    n_channels = 4 if is_layered else 3  # layered model uses 4 channels for control images (RGBA), otherwise 3 channels (RGB
-    for item in batch:
-        content = item.content
-        if is_layered and content.shape[2] == 3:
-            # add alpha channel with full opacity: Qwen-Image-Layered VAE expects 4 channels
-            h, w, _ = content.shape
-            alpha_channel = np.ones((h, w, 1), dtype=content.dtype) * 255
-            content = np.concatenate([content, alpha_channel], axis=2)  # H, W, 4
+    if not is_layered:
+        for item in batch:
+            content = item.content
+            content = content[0] if isinstance(content, list) else content  # (H, W, C)
+            contents.append(torch.from_numpy(content))  # target image
 
-        contents.append(torch.from_numpy(content))  # target image
+        contents = torch.stack(contents, dim=0)  # B, H, W, C
+        contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
+        contents = contents.unsqueeze(2)  # (B, C, 1, H, W), Qwen-Image VAE needs F axis
 
-        if item.control_content is not None and len(item.control_content) > 0:
-            controls.append([torch.from_numpy(cc[..., :n_channels]) for cc in item.control_content])
+    else:
+        for item in batch:
+            # for layered model, item.content is list of images: base + layers
+            assert isinstance(item.content, list), (
+                f"For layered model, target image must be multiple / レイヤードモデルではターゲット画像は複数である必要があります: {item.item_key}"
+            )
+            first_image = item.content[0]
+            if first_image.shape[-1] == 3:
+                # add alpha channel with full opacity
+                first_image = np.concatenate([first_image, 255 * np.ones_like(first_image[..., :1])], axis=-1)
+                item.content[0] = first_image
 
-    contents = torch.stack(contents, dim=0)  # B, H, W, C
-    contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
+            content_tensors = [torch.from_numpy(c) for c in item.content]  # list of (H, W, C)
+            contents.append(torch.stack(content_tensors, dim=0))  # (num_layers, H, W, C)
+        contents = torch.stack(contents, dim=0)  # (B, num_layers, H, W, C)
+        contents = contents.permute(0, 4, 1, 2, 3)  # (B, C, num_layers, H, W)
+
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
+
+    controls = []
+    for item in batch:
+        if item.control_content is not None and len(item.control_content) > 0:
+            controls.append([torch.from_numpy(cc[..., :3]) for cc in item.control_content])  # ensure RGB, remove alpha if present
 
     if len(controls) > 0:  # controls is list of list of (H, W, C), where H, W can vary
         controls = [[c.permute(2, 0, 1) for c in cl] for cl in controls]  # list of list of (H, W, C) -> list of list of (C, H, W)
@@ -59,11 +74,15 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo], is_layered: bool) -> t
 
 def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage, batch: List[ItemInfo], is_layered: bool):
     # item.content: target image (H, W, C)
-    contents, controls = preprocess_contents_qwen_image(batch, is_layered)  # B, C, H, W and list of (C, F, H, W)
-    contents = contents.unsqueeze(2)  # (B, C, 1, H, W), Qwen-Image VAE needs F axis
+    contents, controls = preprocess_contents_qwen_image(batch, is_layered)  # B, C, L, H, W and list of (C, F, H, W)
 
     with torch.no_grad():
-        latents = vae.encode_pixels_to_latents(contents.to(vae.device, dtype=vae.dtype))
+        latents = []
+        for l in range(contents.shape[2]):  # for each frame/layer
+            lat = vae.encode_pixels_to_latents(contents[:, :, l : l + 1, :, :].to(vae.device, dtype=vae.dtype))  # (B, C, 1, H, W)
+            latents.append(lat)
+        latents = torch.cat(latents, dim=2)  # (B, C, F, H, W)
+
         if controls is not None:
             control_latents = [
                 [vae.encode_pixels_to_latents(c.to(vae.device, dtype=vae.dtype).unsqueeze(0))[0] for c in cl] for cl in controls
@@ -101,19 +120,8 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
     # save cache for each item in the batch
     for b, item in enumerate(batch):
-        target_latent = latents[b]  # 1, C, H, W. Target latents for this image (ground truth)
+        target_latent = latents[b]  # L, C, H, W. Target latents for this image (ground truth)
         control_latent = control_latents[b] if control_latents is not None else None  # list of (1, C, H, W) or None
-
-        if is_layered:
-            # for layered model, control latents are treated as list of output layers: target_latent is base + layers from control_latent
-            original_target_latent = target_latent
-            target_latent = torch.concat([target_latent] + control_latent[0], dim=0)  # (num_layers+1, C, H, W)
-            
-            # (C, num_layers+1, H, W), because saving function expects (C, F, H, W) format (video latents)
-            target_latent = target_latent.transpose(0, 1)
-            
-            control_latent = [original_target_latent]
-
         print(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}, "
             f"control latents shape: {[cl.shape for cl in control_latent] if control_latent is not None else None}"

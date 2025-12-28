@@ -89,7 +89,7 @@ ARCHITECTURE_Z_IMAGE = "zi"
 ARCHITECTURE_Z_IMAGE_FULL = "z_image"
 
 
-def glob_images(directory, base="*"):
+def glob_images(directory, base="*", caption_extension=None):
     img_paths = []
     for ext in IMAGE_EXTENSIONS:
         if base == "*":
@@ -97,11 +97,26 @@ def glob_images(directory, base="*"):
         else:
             img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ext))))
     img_paths = list(set(img_paths))  # remove duplicates
+
+    # check for caption files and only keep images with captions
+    if caption_extension is not None:
+        caption_paths = glob.glob(os.path.join(glob.escape(directory), "*" + caption_extension))
+        caption_bases = set()
+        for caption_path in caption_paths:
+            caption_base = os.path.splitext(os.path.basename(caption_path))[0]
+            caption_bases.add(caption_base)
+        filtered_img_paths = []
+        for img_path in img_paths:
+            img_base = os.path.splitext(os.path.basename(img_path))[0]
+            if img_base in caption_bases:
+                filtered_img_paths.append(img_path)
+        img_paths = filtered_img_paths
+
     img_paths.sort()
     return img_paths
 
 
-def glob_videos(directory, caption_extension, base="*"):
+def glob_videos(directory, base="*"):
     video_paths = []
     for ext in VIDEO_EXTENSIONS:
         if base == "*":
@@ -110,19 +125,6 @@ def glob_videos(directory, caption_extension, base="*"):
             video_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ext))))
     video_paths = list(set(video_paths))  # remove duplicates
     video_paths.sort()
-
-    # add image sequences with captions as videos
-    caption_paths = glob.glob(os.path.join(glob.escape(directory), "*" + caption_extension))
-    img_paths = glob_images(directory, base)
-    img_bases = {}
-    for img_path in img_paths:
-        img_base = os.path.splitext(os.path.basename(img_path))[0]
-        img_bases[img_base] = img_path
-    for caption_path in caption_paths:
-        caption_base = os.path.splitext(os.path.basename(caption_path))[0]
-        if caption_base in img_bases:
-            video_paths.append(img_bases[caption_base])  # treat image sequence as video
-
     return video_paths
 
 
@@ -177,7 +179,7 @@ class ItemInfo:
         original_size: tuple[int, int],
         bucket_size: Optional[tuple[Any]] = None,
         frame_count: Optional[int] = None,
-        content: Optional[np.ndarray] = None,
+        content: Optional[Union[np.ndarray, list[np.ndarray]]] = None,
         latent_cache_path: Optional[str] = None,
     ) -> None:
         self.item_key = item_key
@@ -202,7 +204,8 @@ class ItemInfo:
         return (
             f"ItemInfo(item_key={self.item_key}, caption={self.caption}, "
             + f"original_size={self.original_size}, bucket_size={self.bucket_size}, "
-            + f"frame_count={self.frame_count}, latent_cache_path={self.latent_cache_path}, content={self.content.shape if self.content is not None else None})"
+            + f"frame_count={self.frame_count}, latent_cache_path={self.latent_cache_path}, "
+            + f"content={[c.shape for c in self.content] if isinstance(self.content, list) else (self.content.shape if self.content is not None else None)})"
         )
 
 
@@ -680,28 +683,12 @@ def load_video(
     bucket_reso: Optional[tuple[int, int]] = None,
     source_fps: Optional[float] = None,
     target_fps: Optional[float] = None,
-    keep_alpha: bool = False,
 ) -> list[np.ndarray]:
     """
     bucket_reso: if given, resize the video to the bucket resolution, (width, height)
     """
-
-    def get_image_files(video_path: str) -> list[str]:
-        # load images in the directory or image sequence
-        if os.path.isdir(video_path):
-            image_files = glob_images(video_path)
-            image_files.sort()
-        else:
-            image_files = [video_path]  # first frame
-            body, ext = os.path.splitext(video_path)
-            additional_images = glob.glob(f"{body}_*{ext}")
-            additional_images.sort()
-            image_files.extend(additional_images)
-        return image_files
-
     if source_fps is None or target_fps is None:
-        ext = os.path.splitext(video_path)[1].lower()
-        if os.path.isfile(video_path) and ext in VIDEO_EXTENSIONS:
+        if os.path.isfile(video_path):
             container = av.open(video_path)
             video = []
             for i, frame in enumerate(container.decode(video=0)):
@@ -723,7 +710,8 @@ def load_video(
             container.close()
         else:
             # load images in the directory
-            image_files = get_image_files(video_path)
+            image_files = glob_images(video_path)
+            image_files.sort()
             video = []
             for i in range(len(image_files)):
                 if start_frame is not None and i < start_frame:
@@ -732,11 +720,7 @@ def load_video(
                     break
 
                 image_file = image_files[i]
-                image = Image.open(image_file)
-                if not keep_alpha:
-                    image = image.convert("RGB")
-                else:
-                    image = image.convert("RGBA")  # ensure has alpha channel
+                image = Image.open(image_file).convert("RGB")
 
                 if bucket_selector is not None and bucket_reso is None:
                     bucket_reso = bucket_selector.get_bucket_resolution(image.size)  # calc resolution from first frame
@@ -781,7 +765,8 @@ def load_video(
             container.close()
         else:
             # load images in the directory
-            image_files = get_image_files(video_path)
+            image_files = glob_images(video_path)
+            image_files.sort()
             video = []
             frame_index_with_fraction = 0.0
             previous_frame_index = -1
@@ -801,11 +786,7 @@ def load_video(
                     break
 
                 image_file = image_files[i]
-                image = Image.open(image_file)
-                if not keep_alpha:
-                    image = image.convert("RGB")
-                else:
-                    image = image.convert("RGBA")  # ensure has alpha channel
+                image = Image.open(image_file).convert("RGB")
 
                 if bucket_selector is not None and bucket_reso is None:
                     bucket_reso = bucket_selector.get_bucket_resolution(image.size)  # calc resolution from first frame
@@ -967,7 +948,7 @@ class ImageDatasource(ContentDatasource):
     def __init__(self):
         super().__init__()
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str]:
+    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, list[Image.Image]]:
         """
         Returns image data as a tuple of image path, image, and caption for the given index.
         Key must be unique and valid as a file name.
@@ -983,18 +964,72 @@ class ImageDirectoryDatasource(ImageDatasource):
         caption_extension: Optional[str] = None,
         control_directory: Optional[str] = None,
         control_count_per_image: Optional[int] = None,
+        multiple_target: bool = False,
     ):
         super().__init__()
         self.image_directory = image_directory
         self.caption_extension = caption_extension
         self.control_directory = control_directory
         self.control_count_per_image = control_count_per_image
+        self.multiple_target = multiple_target
         self.current_idx = 0
 
         # glob images
         logger.info(f"glob images in {self.image_directory}")
-        self.image_paths = glob_images(self.image_directory)
+        self.image_paths = glob_images(self.image_directory, caption_extension=self.caption_extension)
         logger.info(f"found {len(self.image_paths)} images")
+
+        # check if multiple-target images exist
+        self.target_paths: dict[str, list[str]] = {}  # image_path -> list of target image paths
+
+        if self.multiple_target:
+            # sort by length, longer first
+            sorted_image_paths = sorted(self.image_paths, key=lambda p: len(os.path.basename(p)), reverse=True)
+
+            all_image_paths = set(glob_images(self.image_directory))  # image1.jpg, image1_1.jpg, image1_2.jpg, ...
+            multiple_target_candidates = all_image_paths - set(sorted_image_paths)  # those not in the images with captions
+
+            if len(multiple_target_candidates) > 0:
+                logger.info("checking for multiple-target images")
+                for image_path in sorted_image_paths:
+                    image_path_no_ext = os.path.splitext(image_path)[0]
+
+                    # find matching multiple-target images
+                    potential_paths = [p for p in multiple_target_candidates if p.startswith(image_path_no_ext + "_")]
+
+                    if potential_paths:
+                        # sort by the digits (`_0000`) suffix
+                        def sort_key(path):
+                            path_no_ext = os.path.splitext(path)[0]
+                            digits_suffix = path_no_ext.rsplit("_", 1)[-1]
+                            if not digits_suffix.isdigit():
+                                raise ValueError(f"Invalid digits suffix in {path_no_ext}")
+                            return int(digits_suffix)
+
+                        potential_paths.sort(key=sort_key)
+                        self.target_paths[image_path] = potential_paths
+
+                        # remove to avoid duplicate matching
+                        multiple_target_candidates.difference_update(potential_paths)
+
+                # check the number of targets: all multiple-target images should have the same number of targets
+                num_targets = 0
+                for image_path, paths in self.target_paths.items():
+                    if num_targets == 0:
+                        num_targets = len(paths)
+                    elif num_targets != len(paths):
+                        logger.error(
+                            f"All multiple-target images must have the same number of targets / 全ての複数ターゲット画像は同じ数のターゲットを持つ必要があります: {image_path}"
+                        )
+                        raise ValueError(
+                            f"All multiple-target images must have the same number of targets / 全ての複数ターゲット画像は同じ数のターゲットを持つ必要があります: {image_path}"
+                        )
+
+                if num_targets == 0:
+                    logger.error("no multiple-target images found, but multiple_target is set to True")
+                    raise ValueError("no multiple-target images found, but multiple_target is set to True")
+
+                logger.info(f"found multiple-target images, max targets per image: {num_targets}")
 
         # glob control images if specified
         if self.control_directory is not None:
@@ -1074,9 +1109,19 @@ class ImageDirectoryDatasource(ImageDatasource):
     def __len__(self):
         return len(self.image_paths)
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str, Optional[Image.Image]]:
+    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
         image_path = self.image_paths[idx]
-        image = Image.open(image_path).convert("RGB")
+        image_paths = [image_path]
+        if self.multiple_target:
+            # load multiple-target images
+            image_paths += self.target_paths.get(image_path, [])
+
+        images = []
+        for p in image_paths:
+            img = Image.open(p)
+            if img.mode != "RGB" and img.mode != "RGBA":
+                img = img.convert("RGB")
+            images.append(img)
 
         _, caption = self.get_caption(idx)
 
@@ -1089,7 +1134,7 @@ class ImageDirectoryDatasource(ImageDatasource):
                     control = control.convert("RGB")
                 controls.append(control)
 
-        return image_path, image, caption, controls
+        return image_path, images, caption, controls
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
@@ -1127,10 +1172,11 @@ class ImageDirectoryDatasource(ImageDatasource):
 
 
 class ImageJsonlDatasource(ImageDatasource):
-    def __init__(self, image_jsonl_file: str, control_count_per_image: Optional[int] = None):
+    def __init__(self, image_jsonl_file: str, control_count_per_image: Optional[int] = None, multiple_target: bool = False):
         super().__init__()
         self.image_jsonl_file = image_jsonl_file
         self.control_count_per_image = control_count_per_image
+        self.multiple_target = multiple_target
         self.current_idx = 0
 
         # load jsonl
@@ -1182,10 +1228,27 @@ class ImageJsonlDatasource(ImageDatasource):
     def __len__(self):
         return len(self.data)
 
-    def get_image_data(self, idx: int) -> tuple[str, Image.Image, str, Optional[list[Image.Image]]]:
+    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
         data = self.data[idx]
-        image_path = data["image_path"]
-        image = Image.open(image_path).convert("RGB")
+        image_path = data.get("image_path", data.get("image_path_0"))
+        image_paths = [image_path]
+        if self.multiple_target:
+            # load multiple-target images
+            image_base, image_ext = os.path.splitext(image_path)
+            while True:
+                next_index = len(image_paths)  # start from 1
+                next_image_path = f"{image_base}_{next_index}{image_ext}"
+                if os.path.exists(next_image_path):
+                    image_paths.append(next_image_path)
+                else:
+                    break
+
+        images = []
+        for path in image_paths:
+            img = Image.open(path)
+            if img.mode != "RGB" and img.mode != "RGBA":
+                img = img.convert("RGB")
+            images.append(img)
 
         caption = data["caption"]
 
@@ -1201,7 +1264,7 @@ class ImageJsonlDatasource(ImageDatasource):
                     control = control.convert("RGB")
                 controls.append(control)
 
-        return image_path, image, caption, controls
+        return image_path, images, caption, controls
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]
@@ -1265,13 +1328,7 @@ class VideoDatasource(ContentDatasource):
         bucket_selector = bucket_selector if bucket_selector is not None else self.bucket_selector
 
         video = load_video(
-            video_path,
-            start_frame,
-            end_frame,
-            bucket_selector,
-            source_fps=self.source_fps,
-            target_fps=self.target_fps,
-            keep_alpha=True,
+            video_path, start_frame, end_frame, bucket_selector, source_fps=self.source_fps, target_fps=self.target_fps
         )
         return video
 
@@ -1319,7 +1376,7 @@ class VideoDirectoryDatasource(VideoDatasource):
 
         # glob videos
         logger.info(f"glob videos in {self.video_directory}")
-        self.video_paths = glob_videos(self.video_directory, self.caption_extension)
+        self.video_paths = glob_videos(self.video_directory)
         logger.info(f"found {len(self.video_paths)} videos")
 
         # glob control images if specified
@@ -1376,7 +1433,7 @@ class VideoDirectoryDatasource(VideoDatasource):
         bucket_selector: Optional[BucketSelector] = None,
     ) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
         video_path = self.video_paths[idx]
-        video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)  # with alpha
+        video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)
 
         _, caption = self.get_caption(idx)
 
@@ -1678,6 +1735,7 @@ class ImageDataset(BaseDataset):
         image_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
+        multiple_target: bool = False,
         fp_latent_window_size: Optional[int] = 9,
         fp_1f_clean_indices: Optional[list[int]] = None,
         fp_1f_target_index: Optional[int] = None,
@@ -1702,6 +1760,7 @@ class ImageDataset(BaseDataset):
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
         self.control_directory = control_directory
+        self.multiple_target = multiple_target
         self.fp_latent_window_size = fp_latent_window_size
         self.fp_1f_clean_indices = fp_1f_clean_indices
         self.fp_1f_target_index = fp_1f_target_index
@@ -1723,10 +1782,10 @@ class ImageDataset(BaseDataset):
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
-                image_directory, caption_extension, control_directory, control_count_per_image
+                image_directory, caption_extension, control_directory, control_count_per_image, multiple_target
             )
         elif image_jsonl_file is not None:
-            self.datasource = ImageJsonlDatasource(image_jsonl_file, control_count_per_image)
+            self.datasource = ImageJsonlDatasource(image_jsonl_file, control_count_per_image, multiple_target)
         else:
             raise ValueError("image_directory or image_jsonl_file must be specified")
 
@@ -1770,11 +1829,14 @@ class ImageDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_size, item_key, image, caption, controls = future.result()
+                    original_size, item_key, images, caption, controls = future.result()
+                    image = images[0]  # use the first image as the main content
                     bucket_height, bucket_width = image.shape[:2]
                     bucket_reso = (bucket_width, bucket_height)
 
-                    item_info = ItemInfo(item_key, caption, original_size, bucket_reso, content=image)
+                    item_info = ItemInfo(
+                        item_key, caption, original_size, bucket_reso, content=image if len(images) == 1 else images
+                    )
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
 
                     # for VLM, which require image in addition to text, like Qwen-Image-Edit
@@ -1827,12 +1889,13 @@ class ImageDataset(BaseDataset):
         for fetch_op in self.datasource:
             # fetch and resize image in a separate thread
             def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image]]:
-                image_key, image, caption, controls = op()
-                image: Image.Image
+                image_key, images, caption, controls = op()
+                images: list[Image.Image]
+                image: Image.Image = images[0]  # use the first image as the main content
                 image_size = image.size
 
                 bucket_reso = buckset_selector.get_bucket_resolution(image_size)
-                image = resize_image_to_bucket(image, bucket_reso)  # returns np.ndarray
+                images = [resize_image_to_bucket(img, bucket_reso) for img in images]  # list of np.ndarray
 
                 resized_controls = None
                 if controls is not None:
@@ -1857,7 +1920,7 @@ class ImageDataset(BaseDataset):
                             resized_control = resize_image_to_bucket(control, bucket_reso)
                             resized_controls.append(resized_control)
 
-                return image_size, image_key, image, caption, resized_controls
+                return image_size, image_key, images, caption, resized_controls
 
             future = executor.submit(fetch_and_resize, fetch_op)
             futures.append(future)
@@ -2014,9 +2077,6 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
-        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_LAYERED:
-            self.target_fps = source_fps  # no conversion
-            self.frame_divisible_by = 1  # no requirement
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 

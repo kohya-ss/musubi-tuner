@@ -47,12 +47,14 @@ class ImageDatasetParams(BaseDatasetParams):
     image_directory: Optional[str] = None
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
+    multiple_target: Optional[bool] = False
 
     # FramePack dependent parameters
     fp_latent_window_size: Optional[int] = 9
     fp_1f_clean_indices: Optional[Sequence[int]] = None
     fp_1f_target_index: Optional[int] = None
     fp_1f_no_post: Optional[bool] = False
+
     flux_kontext_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
     qwen_image_edit_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
     qwen_image_edit_control_resolution: Optional[Tuple[int, int]] = None  # if set, control images are resized to this resolution
