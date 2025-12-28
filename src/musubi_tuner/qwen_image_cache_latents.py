@@ -187,7 +187,7 @@ def main():
         encode_and_save_batch(vae, batch, args.is_layered)
 
     # reuse core loop from cache_latents with no change
-    cache_latents.encode_datasets(datasets, encode, args)
+    cache_latents.encode_datasets(datasets, encode, args, supports_alpha=args.is_layered)
 
 
 if __name__ == "__main__":

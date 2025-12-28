@@ -49,7 +49,6 @@ def encode_and_save_batch(
         contents = contents.unsqueeze(1)  # B, H, W, C -> B, F, H, W, C
 
     contents = contents.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
-    contents = contents[:, :3, :, :, :]  # only use RGB channels
     contents = contents.to(vae.device, dtype=vae.dtype)
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 
@@ -444,6 +443,13 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
         all_latent_cache_paths = []
         for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
             batch: list[ItemInfo] = batch  # type: ignore
+
+            # make sure content has 3 channels
+            for item in batch:
+                if isinstance(item.content, np.ndarray) and item.content.shape[-1] == 4:
+                    item.content = item.content[..., :3]
+                else:
+                    item.content = [img[..., :3] if img.shape[-1] == 4 else img for img in item.content]
 
             # latent_cache_path is "{basename}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
             # For video dataset,we expand it to "{basename}_{section_idx:04d}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
