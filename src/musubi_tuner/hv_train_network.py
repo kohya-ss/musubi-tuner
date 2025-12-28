@@ -377,6 +377,7 @@ class NetworkTrainer:
         self.blocks_to_swap = None
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
+        self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1145,7 +1146,8 @@ class NetworkTrainer:
         width = (width // 8) * 8
         height = (height // 8) * 8
 
-        frame_count = (frame_count - 1) // 4 * 4 + 1  # 1, 5, 9, 13, ... For HunyuanVideo and Wan2.1
+        # 1, 5, 9, 13, ... For HunyuanVideo and Wan2.1
+        frame_count = (frame_count - 1) // self.vae_frame_stride * self.vae_frame_stride + 1
 
         if self.i2v_training:
             image_path = sample_parameter.get("image_path", None)

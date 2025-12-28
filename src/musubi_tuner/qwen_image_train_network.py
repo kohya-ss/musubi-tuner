@@ -38,6 +38,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         super().__init__()
         self.is_edit = None
         self.is_layered = None
+        self.vae_frame_stride = 1  # for Qwen-Image, frame stride is 1
 
     # region model specific
 
@@ -117,7 +118,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
                 if is_edit or self.is_layered:
                     resize_to_official = not args.is_layered
-                    resize_size = None if not resize_to_official else (width, height)
+                    resize_size = None if resize_to_official else (width, height)
 
                     control_image_paths = prompt_dict["control_image_path"]
                     control_image_tensors = []
@@ -437,6 +438,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         if args.is_layered:
             num_layers = latents.shape[2] - 1  # 1st latent is base, rest are layers
             latents = latents.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
+            noise = noise.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
+            noisy_model_input = noisy_model_input.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
         else:
             assert latents.shape[2] == 1, "Expected latents shape B, C, 1, H, W for non-layered model"
             num_layers = 0
@@ -444,7 +447,6 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # pack latents
         lat_h = latents.shape[3]
         lat_w = latents.shape[4]
-        # print(noisy_model_input.shape, bsize, latents.shape[1], lat_h, lat_w)
         noisy_model_input = qwen_image_utils.pack_latents(noisy_model_input)
         img_seq_len = noisy_model_input.shape[1]
 

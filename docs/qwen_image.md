@@ -201,6 +201,12 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     ...
 ```
 
+**Qwen-Image-Layered Training:**
+
+For training Qwen-Image-Layered models with layered control images, add the `--model_version layered` option. Note that VAE is different for this architecture. Please use the VAE model for Qwen-Image-Layered.
+
+---
+
 - Uses `qwen_image_train_network.py`.
 - **Requires** specifying `--dit`, `--vae`, and `--text_encoder`.
 - `--mixed_precision bf16` is recommended for Qwen-Image training.
@@ -222,6 +228,8 @@ If you specify `--split_attn`, the attention computation will be split, slightly
 Don't forget to specify `--network_module networks.lora_qwen_image`.
 
 The appropriate settings for each parameter are unknown. Feedback is welcome.
+
+For sample image generation during Qwen-Image-Layered training, please refer to [this document](./sampling_during_training.md#sample-image-generation-during-qwen-image-layered-training--qwen-image-layeredの学習中のサンプルイメージ生成).
 
 ### VRAM Usage Estimates with Memory Saving Options
 
@@ -245,7 +253,7 @@ Qwen-Image-Edit training requires additional memory for the control images.
 <details>
 <summary>日本語</summary>
 
-Qwen-Imageの学習は専用のスクリプト`qwen_image_train_network.py`を使用します。
+Qwen-Imageの学習は専用のスクリプト`qwen_image_train_network.py`を使用します。コマンドライン例は英語版を参照してください。
 
 - `qwen_image_train_network.py`を使用します。
 - `--dit`、`--vae`、`--text_encoder`を指定する必要があります。
@@ -268,6 +276,8 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 `--network_module networks.lora_qwen_image`を指定することを忘れないでください。
 
 それぞれのパラメータの適切な設定は不明です。フィードバックをお待ちしています。
+
+Qwen-Image-Layeredにおける学習中のサンプル画像生成については、[こちらのドキュメント](./sampling_during_training.md#sample-image-generation-during-qwen-image-layered-training--qwen-image-layeredの学習中のサンプルイメージ生成)を参照してください。
 
 ### メモリ節約オプションを使用した場合のVRAM使用量の目安
 

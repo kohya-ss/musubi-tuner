@@ -2064,7 +2064,7 @@ class VideoDataset(BaseDataset):
         self.source_fps = source_fps
         self.fp_latent_window_size = fp_latent_window_size
 
-        self.frame_divisible_by = 4  # all architectures require frames to be divisible by 4
+        self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4
         if self.architecture == ARCHITECTURE_HUNYUAN_VIDEO:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_WAN:
@@ -2085,7 +2085,7 @@ class VideoDataset(BaseDataset):
             target_frames.sort()
 
             # round each value to N*4+1
-            rounded_target_frames = [(f - 1) // self.frame_divisible_by * self.frame_divisible_by + 1 for f in target_frames]
+            rounded_target_frames = [(f - 1) // self.vae_frame_stride * self.vae_frame_stride + 1 for f in target_frames]
             rouneded_target_frames = list(set(rounded_target_frames))
             rouneded_target_frames.sort()
 
@@ -2204,7 +2204,7 @@ class VideoDataset(BaseDataset):
                     elif self.frame_extraction == "full":
                         # select all frames
                         target_frame = min(frame_count, self.max_frames)
-                        target_frame = (target_frame - 1) // self.frame_divisible_by * self.frame_divisible_by + 1  # round to N*4+1
+                        target_frame = (target_frame - 1) // self.vae_frame_stride * self.vae_frame_stride + 1  # round to N*4+1
                         crop_pos_and_frames.append((0, target_frame))
                     else:
                         raise ValueError(f"frame_extraction {self.frame_extraction} is not supported")
