@@ -1254,7 +1254,8 @@ class NetworkTrainer:
             wandb = None
 
         if video.shape[2] == 1:
-            image_paths = save_images_grid(video, save_dir, save_path, create_subdir=False)
+            # In Qwen-Image-Layered, video is (N, C, 1, H, W) where N=Layers, otherwise (1, C, 1, H, W)
+            image_paths = save_images_grid(video, save_dir, save_path, n_rows=video.shape[0], create_subdir=False)
             if wandb_tracker is not None and wandb is not None:
                 for image_path in image_paths:
                     wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)

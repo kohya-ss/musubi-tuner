@@ -367,7 +367,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         vae.to("cpu")
         clean_memory_on_device(device)
 
-        pixels = pixels.unsqueeze(2)  # add a dummy dimension for video frames, B C H W -> B C 1 H W
+        pixels = pixels.unsqueeze(2)  # add a dummy dimension for video frames, L C H W -> L C 1 H W
         return pixels
 
     def load_vae(self, args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
