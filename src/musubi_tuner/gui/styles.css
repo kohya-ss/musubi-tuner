@@ -1,6 +1,3 @@
-/* Musubi Tuner GUI Custom Styles */
-
-/* ========== Root Variables ========== */
 :root {
     --primary-color: #4a90d9;
     --primary-hover: #3a7bc8;
@@ -15,8 +12,6 @@
     --radius-lg: 12px;
 }
 
-/* ========== Accordion Styling ========== */
-/* Ensure accordions are visible on white backgrounds */
 .gradio-accordion {
     border: 1px solid var(--border-color) !important;
     border-radius: var(--radius-md) !important;
@@ -38,22 +33,18 @@
     border-bottom: 1px solid var(--border-color) !important;
 }
 
-/* ========== Component Width Constraints ========== */
-/* Prevent components from stretching full width */
 .gradio-textbox,
 .gradio-number,
 .gradio-dropdown {
     max-width: 400px !important;
 }
 
-/* Larger width for path inputs */
 .path-input,
 .gradio-textbox[label*="Path"],
 .gradio-textbox[label*="Directory"] {
     max-width: 600px !important;
 }
 
-/* ========== Button Styling ========== */
 .gradio-button {
     max-width: 250px !important;
     min-width: 120px !important;
@@ -70,7 +61,6 @@
     border-color: var(--primary-hover) !important;
 }
 
-/* Remove button specific styling */
 .remove-dataset-btn {
     max-width: 180px !important;
     min-width: 140px !important;
@@ -85,7 +75,6 @@
     border-color: #bd2130 !important;
 }
 
-/* ========== Dataset Card Styling ========== */
 .dataset-card {
     border: 2px solid var(--primary-color) !important;
     border-radius: var(--radius-lg) !important;
@@ -114,7 +103,6 @@
     gap: 8px !important;
 }
 
-/* ========== Group Styling ========== */
 .gradio-group {
     border: 1px solid var(--border-color) !important;
     border-radius: var(--radius-md) !important;
@@ -123,7 +111,6 @@
     background-color: var(--bg-card) !important;
 }
 
-/* ========== Mode Toggle ========== */
 .mode-toggle-container {
     background-color: var(--bg-light);
     border: 1px solid var(--border-color);
@@ -140,7 +127,6 @@
     color: #24292f;
 }
 
-/* ========== Tab Styling ========== */
 .gradio-tabs>.tab-nav {
     border-bottom: 2px solid var(--border-color) !important;
 }
@@ -154,35 +140,28 @@
     border-bottom: 2px solid var(--primary-color) !important;
     color: var(--primary-color) !important;
 }
-
-/* ========== Row Layouts ========== */
 .gradio-row {
     gap: 16px !important;
     align-items: flex-start !important;
 }
 
-/* Compact rows for buttons */
 .button-row {
     gap: 8px !important;
 }
 
-/* ========== Slider Styling ========== */
 .gradio-slider {
     max-width: 400px !important;
 }
 
-/* ========== Checkbox Styling ========== */
 .gradio-checkbox {
     max-width: 300px !important;
 }
 
-/* ========== Code Block Styling ========== */
 .gradio-code {
     border-radius: var(--radius-md) !important;
     border: 1px solid var(--border-color) !important;
 }
 
-/* ========== Markdown Headers in Groups ========== */
 .gradio-group>.gradio-markdown h3 {
     margin-top: 0 !important;
     margin-bottom: 12px !important;
@@ -191,7 +170,6 @@
     color: #24292f !important;
 }
 
-/* ========== Status Messages ========== */
 .status-success {
     color: #28a745;
     font-weight: 500;
@@ -207,7 +185,6 @@
     font-weight: 500;
 }
 
-/* ========== Advanced Section Indicator ========== */
 .advanced-indicator {
     font-size: 0.85em;
     color: #6c757d;
@@ -217,7 +194,6 @@
     border-radius: 4px;
 }
 
-/* ========== Responsive Adjustments ========== */
 @media (max-width: 768px) {
 
     .gradio-textbox,
