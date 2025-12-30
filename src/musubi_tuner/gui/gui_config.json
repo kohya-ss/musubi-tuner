@@ -1,11 +1,4 @@
 {
-    "ui_settings": {
-        "default_mode": "simple",
-        "modes": [
-            "simple",
-            "advanced"
-        ]
-    },
     "models": {
         "Z-Image-Turbo": {
             "resolution": [

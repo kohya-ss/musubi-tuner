@@ -28,13 +28,6 @@ def load_config() -> Dict[str, Any]:
         print(f"Warning: Failed to parse config file: {e}. Using empty config.")
         return {}
 
-
-def get_ui_mode_default() -> str:
-    """Get the default UI mode (simple or advanced)."""
-    config = load_config()
-    return config.get("ui_settings", {}).get("default_mode", "simple")
-
-
 def get_model_list() -> List[str]:
     """Get list of all available model names."""
     config = load_config()
