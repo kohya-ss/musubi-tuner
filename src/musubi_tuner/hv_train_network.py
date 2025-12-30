@@ -822,6 +822,7 @@ class NetworkTrainer:
             or args.timestep_sampling == "logsnr"
             or args.timestep_sampling == "qinglong_flux"
             or args.timestep_sampling == "qinglong_qwen"
+            or args.timestep_sampling == "flux2_shift"
         ):
 
             def compute_sampling_timesteps(org_timesteps: Optional[torch.Tensor]) -> torch.Tensor:
@@ -857,6 +858,8 @@ class NetworkTrainer:
                         # we are pre-packed so must adjust for packed size
                         if args.timestep_sampling == "flux_shift":
                             mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                        elif args.timestep_sampling == "flux2_shift":
+                            mu = train_utils.get_lin_function(y1=0.5, y2=1.15)(h * w)
                         elif args.timestep_sampling == "qwen_shift":
                             mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)((h // 2) * (w // 2))
                         # def time_shift(mu: float, sigma: float, t: torch.Tensor):
@@ -2705,7 +2708,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timestep_sampling",
-        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift", "qwen_shift", "logsnr", "qinglong_flux", "qinglong_qwen"],
+        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift", "qwen_shift", "logsnr", "qinglong_flux", "qinglong_qwen"],
         default="sigma",
         help="Method to sample timesteps: sigma-based, uniform random, sigmoid of random normal, shift of sigmoid and flux shift."
         " / タイムステップをサンプリングする方法：sigma、random uniform、random normalのsigmoid、sigmoidのシフト、flux shift。",

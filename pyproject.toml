@@ -17,7 +17,7 @@ dependencies = [
     # "sageattention>=1.0.6",
     "toml==0.10.2",
     "tqdm==4.67.1",
-    "transformers==4.54.1",
+    "transformers==4.56.1",
     "voluptuous==0.15.2",
     # Wan2.1
     "ftfy==6.3.1",
