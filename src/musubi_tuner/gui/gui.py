@@ -13,12 +13,6 @@ from musubi_tuner.gui import arg_loader
 
 config_manager = ConfigManager()
 
-def load_custom_css():
-    css_path = os.path.join(os.path.dirname(__file__), "styles.css")
-    try:
-        with open(css_path, "r", encoding="utf-8") as f: return f.read()
-    except FileNotFoundError: return ""
-
 I18N_CACHE = None
 CURRENT_LANG = None
 
@@ -163,10 +157,7 @@ def load_project_settings(project_path):
     except: pass
     return settings
 
-# --- Main UI Construction ---
-
 def construct_ui():
-    custom_css = load_custom_css()
     ui_components = {}
     model_arg_groups = {}
     arg_defs_map = arg_loader.get_all_args_map()
@@ -636,6 +627,6 @@ def construct_ui():
     return demo
 
 if __name__ == "__main__":
-    with gr.Blocks(title="Musubi Tuner GUI", css=load_custom_css()) as demo:
+    with gr.Blocks(title="Musubi Tuner GUI") as demo:
         construct_ui()
     demo.launch()
