@@ -1,23 +1,11 @@
 {
     "models": {
         "Z-Image-Turbo": {
-            "resolution": [
-                1024,
-                1024
-            ],
-            "vae_subpath": [
-                "vae",
-                "ae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "qwen_3_4b.safetensors"
-            ],
+            "resolution": [1024, 1024],
+            "vae_subpath": ["vae", "ae.safetensors"],
+            "te1_subpath": ["text_encoders", "qwen_3_4b.safetensors"],
             "te2_subpath": null,
-            "dit_subpath": [
-                "diffusion_models",
-                "z_image_de_turbo_v1_bf16.safetensors"
-            ],
+            "dit_subpath": ["diffusion_models", "z_image_de_turbo_v1_bf16.safetensors"],
             "training_base": {
                 "learning_rate": 1e-3,
                 "discrete_flow_shift": 2.0,
@@ -27,61 +15,20 @@
                 "fp8_llm": true
             },
             "vram_settings": {
-                "12": {
-                    "batch_size": 1,
-                    "block_swap": 0,
-                    "fp8_scaled": true,
-                    "fp8_llm": true
-                },
-                "16": {
-                    "batch_size": 2,
-                    "block_swap": 0,
-                    "fp8_scaled": true,
-                    "fp8_llm": false
-                },
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 0,
-                    "fp8_scaled": false,
-                    "fp8_llm": false
-                },
-                "32": {
-                    "batch_size": 2,
-                    "block_swap": 0,
-                    "fp8_scaled": false,
-                    "fp8_llm": false
-                },
-                ">32": {
-                    "batch_size": 8,
-                    "block_swap": 0,
-                    "fp8_scaled": false,
-                    "fp8_llm": false
-                }
+                "12": { "batch_size": 1, "blocks_to_swap": 0, "fp8_scaled": true, "fp8_llm": true },
+                "16": { "batch_size": 2, "blocks_to_swap": 0, "fp8_scaled": true, "fp8_llm": false },
+                "24": { "batch_size": 1, "blocks_to_swap": 0, "fp8_scaled": false, "fp8_llm": false },
+                "32": { "batch_size": 2, "blocks_to_swap": 0, "fp8_scaled": false, "fp8_llm": false },
+                ">32": { "batch_size": 8, "blocks_to_swap": 0, "fp8_scaled": false, "fp8_llm": false }
             },
-            "script": "zimage_train_network.py",
-            "script_args": [
-                "--dit",
-                "--text_encoder"
-            ]
+            "script": "zimage_train_network.py"
         },
         "Qwen-Image": {
-            "resolution": [
-                1328,
-                1328
-            ],
-            "vae_subpath": [
-                "vae",
-                "qwen_image_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "qwen_2.5_vl_7b.safetensors"
-            ],
+            "resolution": [1328, 1328],
+            "vae_subpath": ["vae", "qwen_image_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "qwen_2.5_vl_7b.safetensors"],
             "te2_subpath": null,
-            "dit_subpath": [
-                "diffusion_models",
-                "qwen_image_bf16.safetensors"
-            ],
+            "dit_subpath": ["diffusion_models", "qwen_image_bf16.safetensors"],
             "training_base": {
                 "learning_rate": 1e-3,
                 "discrete_flow_shift": 2.2,
@@ -91,1458 +38,354 @@
                 "fp8_llm": true
             },
             "vram_settings": {
-                "12": {
-                    "batch_size": 1,
-                    "block_swap": 46,
-                    "fp8_scaled": true,
-                    "fp8_llm": true
-                },
-                "16": {
-                    "batch_size": 1,
-                    "block_swap": 34,
-                    "fp8_scaled": true,
-                    "fp8_llm": true
-                },
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 10,
-                    "fp8_scaled": true,
-                    "fp8_llm": false
-                },
-                "32": {
-                    "batch_size": 2,
-                    "block_swap": 0,
-                    "fp8_scaled": true,
-                    "fp8_llm": false
-                },
-                ">32": {
-                    "batch_size": 2,
-                    "block_swap": 0,
-                    "fp8_scaled": false,
-                    "fp8_llm": false
-                }
+                "12": { "batch_size": 1, "blocks_to_swap": 46, "fp8_scaled": true, "fp8_llm": true },
+                "16": { "batch_size": 1, "blocks_to_swap": 34, "fp8_scaled": true, "fp8_llm": true },
+                "24": { "batch_size": 1, "blocks_to_swap": 10, "fp8_scaled": true, "fp8_llm": false },
+                "32": { "batch_size": 2, "blocks_to_swap": 0, "fp8_scaled": true, "fp8_llm": false },
+                ">32": { "batch_size": 2, "blocks_to_swap": 0, "fp8_scaled": false, "fp8_llm": false }
             },
-            "script": "qwen_image_train_network.py",
-            "script_args": [
-                "--dit",
-                "--text_encoder"
-            ]
+            "script": "qwen_image_train_network.py"
         },
         "Wan 2.1 (T2V-14B)": {
-            "resolution": [
-                1280,
-                720
-            ],
-            "vae_subpath": [
-                "vae",
-                "wan_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "google_umt5-xxl"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip-vit-large-patch14"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "wan2.1_t2v_14b_bf16.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 2e-4,
-                "discrete_flow_shift": 1.0,
-                "mixed_precision": "bf16",
-                "gradient_checkpointing": true
-            },
+            "resolution": [1280, 720],
+            "vae_subpath": ["vae", "wan_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+            "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+            "dit_subpath": ["diffusion_models", "wan2.1_t2v_14b_bf16.safetensors"],
+            "training_base": { "learning_rate": 2e-4, "discrete_flow_shift": 1.0, "mixed_precision": "bf16", "gradient_checkpointing": true },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 20,
-                    "fp8_scaled": true
-                },
-                "32": {
-                    "batch_size": 2,
-                    "block_swap": 10,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 20, "fp8_scaled": true },
+                "32": { "batch_size": 2, "blocks_to_swap": 10, "fp8_scaled": true },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "wan_train_network.py",
             "task": "t2v-14B"
         },
         "Wan 2.1 (I2V-14B)": {
-            "resolution": [
-                1280,
-                720
-            ],
-            "vae_subpath": [
-                "vae",
-                "wan_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "google_umt5-xxl"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip-vit-large-patch14"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "wan2.1_i2v_14b_bf16.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 2e-4,
-                "discrete_flow_shift": 1.0,
-                "mixed_precision": "bf16",
-                "gradient_checkpointing": true
-            },
+            "resolution": [1280, 720],
+            "vae_subpath": ["vae", "wan_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+            "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+            "dit_subpath": ["diffusion_models", "wan2.1_i2v_14b_bf16.safetensors"],
+            "training_base": { "learning_rate": 2e-4, "discrete_flow_shift": 1.0, "mixed_precision": "bf16", "gradient_checkpointing": true },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 20,
-                    "fp8_scaled": true
-                },
-                "32": {
-                    "batch_size": 2,
-                    "block_swap": 10,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 20, "fp8_scaled": true },
+                "32": { "batch_size": 2, "blocks_to_swap": 10, "fp8_scaled": true },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "wan_train_network.py",
             "task": "i2v-14B"
         },
         "Wan 2.2 (T2V-5B)": {
-            "resolution": [
-                1024,
-                1024
-            ],
-            "vae_subpath": [
-                "vae",
-                "wan_2.2_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "google_umt5-xxl"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip-vit-large-patch14"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "wan2.2_t2v_5b_bf16.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 2e-4,
-                "discrete_flow_shift": 1.0,
-                "mixed_precision": "bf16",
-                "gradient_checkpointing": true
-            },
+            "resolution": [1024, 1024],
+            "vae_subpath": ["vae", "wan_2.2_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+            "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+            "dit_subpath": ["diffusion_models", "wan2.2_t2v_5b_bf16.safetensors"],
+            "training_base": { "learning_rate": 2e-4, "discrete_flow_shift": 1.0, "mixed_precision": "bf16", "gradient_checkpointing": true },
             "vram_settings": {
-                "16": {
-                    "batch_size": 1,
-                    "block_swap": 20,
-                    "fp8_scaled": true
-                },
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 0,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "16": { "batch_size": 1, "blocks_to_swap": 20, "fp8_scaled": true },
+                "24": { "batch_size": 1, "blocks_to_swap": 0, "fp8_scaled": true },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "wan_train_network.py",
             "task": "t2v-5B"
         },
         "Wan 2.2 (T2V-14B)": {
-            "resolution": [
-                1280,
-                720
-            ],
-            "vae_subpath": [
-                "vae",
-                "wan_2.2_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "google_umt5-xxl"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip-vit-large-patch14"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "wan2.2_t2v_14b_bf16.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 2e-4,
-                "discrete_flow_shift": 1.0,
-                "mixed_precision": "bf16",
-                "gradient_checkpointing": true
-            },
+            "resolution": [1280, 720],
+            "vae_subpath": ["vae", "wan_2.2_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+            "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+            "dit_subpath": ["diffusion_models", "wan2.2_t2v_14b_bf16.safetensors"],
+            "training_base": { "learning_rate": 2e-4, "discrete_flow_shift": 1.0, "mixed_precision": "bf16", "gradient_checkpointing": true },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 20,
-                    "fp8_scaled": true
-                },
-                "32": {
-                    "batch_size": 2,
-                    "block_swap": 10,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 20, "fp8_scaled": true },
+                "32": { "batch_size": 2, "blocks_to_swap": 10, "fp8_scaled": true },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "wan_train_network.py",
             "task": "t2v-14B"
         },
         "Wan 2.2 (I2V-14B)": {
-            "resolution": [
-                1280,
-                720
-            ],
-            "vae_subpath": [
-                "vae",
-                "wan_2.2_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "google_umt5-xxl"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip-vit-large-patch14"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "wan2.2_i2v_14b_bf16.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 2e-4,
-                "discrete_flow_shift": 1.0,
-                "mixed_precision": "bf16",
-                "gradient_checkpointing": true
-            },
+            "resolution": [1280, 720],
+            "vae_subpath": ["vae", "wan_2.2_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "google_umt5-xxl"],
+            "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+            "dit_subpath": ["diffusion_models", "wan2.2_i2v_14b_bf16.safetensors"],
+            "training_base": { "learning_rate": 2e-4, "discrete_flow_shift": 1.0, "mixed_precision": "bf16", "gradient_checkpointing": true },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 20,
-                    "fp8_scaled": true
-                },
-                "32": {
-                    "batch_size": 2,
-                    "block_swap": 10,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 20, "fp8_scaled": true },
+                "32": { "batch_size": 2, "blocks_to_swap": 10, "fp8_scaled": true },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "wan_train_network.py",
             "task": "i2v-14B"
         },
         "HunyuanVideo": {
-            "resolution": [
-                960,
-                544
-            ],
-            "vae_subpath": [
-                "vae",
-                "hunyuan_video_vae_bf16.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "llm"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "hunyuan_video_7b_bf16.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 1e-4,
-                "discrete_flow_shift": 7.0,
-                "mixed_precision": "bf16",
-                "gradient_checkpointing": true
-            },
+            "resolution": [960, 544],
+            "vae_subpath": ["vae", "hunyuan_video_vae_bf16.safetensors"],
+            "te1_subpath": ["text_encoders", "llm"],
+            "te2_subpath": ["text_encoders", "clip"],
+            "dit_subpath": ["diffusion_models", "hunyuan_video_7b_bf16.safetensors"],
+            "training_base": { "learning_rate": 1e-4, "discrete_flow_shift": 7.0, "mixed_precision": "bf16", "gradient_checkpointing": true },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 36,
-                    "fp8_scaled": true,
-                    "fp8_llm": true
-                },
-                "32": {
-                    "batch_size": 1,
-                    "block_swap": 18,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 36, "fp8_scaled": true, "fp8_llm": true },
+                "32": { "batch_size": 1, "blocks_to_swap": 18, "fp8_scaled": true },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "hv_train_network.py"
         },
         "Hunyuan 1.5": {
-            "resolution": [
-                1280,
-                720
-            ],
-            "vae_subpath": [
-                "vae",
-                "hunyuan_video1.5_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "qwen2.5_vl_7b"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "byt5"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "hunyuan_video1.5_t2v_7b.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 2e-4,
-                "discrete_flow_shift": 7.0,
-                "mixed_precision": "bf16"
-            },
+            "resolution": [1280, 720],
+            "vae_subpath": ["vae", "hunyuan_video1.5_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "qwen2.5_vl_7b"],
+            "te2_subpath": ["text_encoders", "byt5"],
+            "dit_subpath": ["diffusion_models", "hunyuan_video1.5_t2v_7b.safetensors"],
+            "training_base": { "learning_rate": 2e-4, "discrete_flow_shift": 7.0, "mixed_precision": "bf16" },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 51,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 2,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 51, "fp8_scaled": true },
+                ">32": { "batch_size": 2, "blocks_to_swap": 0 }
             },
             "script": "hv_1_5_train_network.py"
         },
         "FramePack": {
-            "resolution": [
-                1280,
-                720
-            ],
-            "vae_subpath": [
-                "vae",
-                "fpack_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "llama"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "fpack_dit.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 1e-4,
-                "mixed_precision": "bf16"
-            },
+            "resolution": [1280, 720],
+            "vae_subpath": ["vae", "fpack_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "llama"],
+            "te2_subpath": ["text_encoders", "clip"],
+            "dit_subpath": ["diffusion_models", "fpack_dit.safetensors"],
+            "training_base": { "learning_rate": 1e-4, "mixed_precision": "bf16" },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 38
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 38 },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "fpack_train_network.py"
         },
         "Flux.1 Kontext": {
-            "resolution": [
-                1024,
-                1024
-            ],
-            "vae_subpath": [
-                "vae",
-                "ae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "t5-v1_1-xxl"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "clip-vit-large-patch14"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "flux1-dev-kontext.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 4e-4,
-                "discrete_flow_shift": 3.0,
-                "mixed_precision": "bf16"
-            },
+            "resolution": [1024, 1024],
+            "vae_subpath": ["vae", "ae.safetensors"],
+            "te1_subpath": ["text_encoders", "t5-v1_1-xxl"],
+            "te2_subpath": ["text_encoders", "clip-vit-large-patch14"],
+            "dit_subpath": ["diffusion_models", "flux1-dev-kontext.safetensors"],
+            "training_base": { "learning_rate": 4e-4, "discrete_flow_shift": 3.0, "mixed_precision": "bf16" },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 10,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 2,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 10, "fp8_scaled": true },
+                ">32": { "batch_size": 2, "blocks_to_swap": 0 }
             },
             "script": "flux_kontext_train_network.py"
         },
         "Kandinsky 5": {
-            "resolution": [
-                1024,
-                1024
-            ],
-            "vae_subpath": [
-                "vae",
-                "k5_vae.safetensors"
-            ],
-            "te1_subpath": [
-                "text_encoders",
-                "k5_te1.safetensors"
-            ],
-            "te2_subpath": [
-                "text_encoders",
-                "k5_te2.safetensors"
-            ],
-            "dit_subpath": [
-                "diffusion_models",
-                "k5_dit.safetensors"
-            ],
-            "training_base": {
-                "learning_rate": 1e-4,
-                "discrete_flow_shift": 1.0,
-                "mixed_precision": "bf16"
-            },
+            "resolution": [1024, 1024],
+            "vae_subpath": ["vae", "k5_vae.safetensors"],
+            "te1_subpath": ["text_encoders", "k5_te1.safetensors"],
+            "te2_subpath": ["text_encoders", "k5_te2.safetensors"],
+            "dit_subpath": ["diffusion_models", "k5_dit.safetensors"],
+            "training_base": { "learning_rate": 1e-4, "discrete_flow_shift": 1.0, "mixed_precision": "bf16" },
             "vram_settings": {
-                "24": {
-                    "batch_size": 1,
-                    "block_swap": 20,
-                    "fp8_scaled": true
-                },
-                ">32": {
-                    "batch_size": 4,
-                    "block_swap": 0
-                }
+                "24": { "batch_size": 1, "blocks_to_swap": 20, "fp8_scaled": true },
+                ">32": { "batch_size": 4, "blocks_to_swap": 0 }
             },
             "script": "kandinsky5_train_network.py"
         }
     },
     "training_args": {
         "essential": [
-            {
-                "name": "output_name",
-                "type": "text",
-                "default": "my_lora",
-                "label": "lbl_output_name",
-                "cli_arg": "--output_name"
-            },
-            {
-                "name": "network_dim",
-                "type": "number",
-                "default": 16,
-                "label": "lbl_dim",
-                "cli_arg": "--network_dim"
-            },
-            {
-                "name": "learning_rate",
-                "type": "number",
-                "default": 1e-4,
-                "label": "lbl_lr",
-                "cli_arg": "--learning_rate"
-            },
-            {
-                "name": "num_epochs",
-                "type": "number",
-                "default": 16,
-                "label": "lbl_epochs",
-                "cli_arg": "--max_train_epochs"
-            },
-            {
-                "name": "save_every_n_epochs",
-                "type": "number",
-                "default": 1,
-                "label": "lbl_save_every",
-                "cli_arg": "--save_every_n_epochs"
-            },
-            {
-                "name": "discrete_flow_shift",
-                "type": "number",
-                "default": 2.0,
-                "label": "lbl_flow_shift",
-                "cli_arg": "--discrete_flow_shift"
-            }
+            { "name": "output_name", "type": "text", "default": "my_lora" },
+            { "name": "network_dim", "type": "number", "default": 16 },
+            { "name": "learning_rate", "type": "number", "default": 1e-4 },
+            { "name": "max_train_epochs", "type": "number", "default": 16 },
+            { "name": "save_every_n_epochs", "type": "number", "default": 1 },
+            { "name": "discrete_flow_shift", "type": "number", "default": 2.0 }
         ],
         "advanced": {
             "optimizer": [
-                {
-                    "name": "optimizer_type",
-                    "type": "dropdown",
-                    "default": "AdamW8bit",
-                    "label": "lbl_optimizer_type",
-                    "cli_arg": "--optimizer_type",
-                    "choices": [
-                        "AdamW",
-                        "AdamW64bit",
-                        "AdamW8bit",
-                        "Adafactor",
-                        "DAdaptAdam",
-                        "DAdaptAdaGrad",
-                        "DAdaptAdan",
-                        "DAdaptLion",
-                        "DAdaptSGD",
-                        "Lion",
-                        "Lion8bit",
-                        "Prodigy",
-                        "RMSprop",
-                        "RMSprop8bit",
-                        "SGD",
-                        "SGD8bit"
-                    ]
-                },
-                {
-                    "name": "optimizer_args",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_optimizer_args",
-                    "cli_arg": "--optimizer_args"
-                },
-                {
-                    "name": "lr_scheduler",
-                    "type": "dropdown",
-                    "default": "constant_with_warmup",
-                    "label": "lbl_lr_scheduler",
-                    "cli_arg": "--lr_scheduler",
-                    "choices": [
-                        "linear",
-                        "cosine",
-                        "cosine_with_restarts",
-                        "polynomial",
-                        "constant",
-                        "constant_with_warmup"
-                    ]
-                },
-                {
-                    "name": "lr_warmup_steps",
-                    "type": "number",
-                    "default": 0,
-                    "label": "lbl_lr_warmup",
-                    "cli_arg": "--lr_warmup_steps"
-                },
-                {
-                    "name": "lr_decay_steps",
-                    "type": "number",
-                    "default": 0,
-                    "label": "lbl_lr_decay",
-                    "cli_arg": "--lr_decay_steps",
-                    "skip_if_default": true
-                },
-                {
-                    "name": "lr_scheduler_num_cycles",
-                    "type": "number",
-                    "default": 1,
-                    "label": "lbl_lr_num_cycles",
-                    "cli_arg": "--lr_scheduler_num_cycles"
-                },
-                {
-                    "name": "lr_scheduler_power",
-                    "type": "number",
-                    "default": 1.0,
-                    "label": "lbl_lr_power",
-                    "cli_arg": "--lr_scheduler_power"
-                },
-                {
-                    "name": "lr_scheduler_min_lr_ratio",
-                    "type": "number",
-                    "default": 0.0,
-                    "label": "lbl_lr_min_ratio",
-                    "cli_arg": "--lr_scheduler_min_lr_ratio",
-                    "skip_if_default": true
-                }
+                { "name": "optimizer_type", "type": "dropdown", "default": "AdamW8bit", "choices": ["AdamW", "AdamW64bit", "AdamW8bit", "Adafactor", "DAdaptAdam", "DAdaptAdaGrad", "DAdaptAdan", "DAdaptLion", "DAdaptSGD", "Lion", "Lion8bit", "Prodigy", "RMSprop", "RMSprop8bit", "SGD", "SGD8bit"] },
+                { "name": "optimizer_args", "type": "text", "default": "" },
+                { "name": "lr_scheduler", "type": "dropdown", "default": "constant_with_warmup", "choices": ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"] },
+                { "name": "lr_warmup_steps", "type": "number", "default": 0 },
+                { "name": "lr_decay_steps", "type": "number", "default": 0, "skip_if_default": true },
+                { "name": "lr_scheduler_num_cycles", "type": "number", "default": 1 },
+                { "name": "lr_scheduler_power", "type": "number", "default": 1.0 },
+                { "name": "lr_scheduler_min_lr_ratio", "type": "number", "default": 0.0, "skip_if_default": true }
             ],
             "flow_timestep": [
-                {
-                    "name": "weighting_scheme",
-                    "type": "dropdown",
-                    "default": "none",
-                    "label": "lbl_weighting_scheme",
-                    "cli_arg": "--weighting_scheme",
-                    "skip_if_default": true,
-                    "choices": [
-                        "none",
-                        "sigma_sqrt",
-                        "logit_normal",
-                        "mode"
-                    ]
-                },
-                {
-                    "name": "logit_mean",
-                    "type": "number",
-                    "default": 0.0,
-                    "label": "lbl_logit_mean",
-                    "cli_arg": "--logit_mean",
-                    "skip_if_default": true
-                },
-                {
-                    "name": "logit_std",
-                    "type": "number",
-                    "default": 1.0,
-                    "label": "lbl_logit_std",
-                    "cli_arg": "--logit_std",
-                    "skip_if_default": true
-                },
-                {
-                    "name": "mode_scale",
-                    "type": "number",
-                    "default": 1.29,
-                    "label": "lbl_mode_scale",
-                    "cli_arg": "--mode_scale"
-                },
-                {
-                    "name": "min_timestep",
-                    "type": "number",
-                    "default": 0,
-                    "label": "lbl_min_timestep",
-                    "cli_arg": "--min_timestep",
-                    "skip_if_default": true
-                },
-                {
-                    "name": "max_timestep",
-                    "type": "number",
-                    "default": 1000,
-                    "label": "lbl_max_timestep",
-                    "cli_arg": "--max_timestep",
-                    "skip_if_default": true
-                },
-                {
-                    "name": "preserve_distribution_shape",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "lbl_preserve_dist",
-                    "cli_arg": "--preserve_distribution_shape"
-                },
-                {
-                    "name": "num_timestep_buckets",
-                    "type": "number",
-                    "default": 0,
-                    "label": "lbl_ts_buckets",
-                    "cli_arg": "--num_timestep_buckets",
-                    "skip_if_default": true
-                }
+                { "name": "weighting_scheme", "type": "dropdown", "default": "none", "skip_if_default": true, "choices": ["none", "sigma_sqrt", "logit_normal", "mode"] },
+                { "name": "logit_mean", "type": "number", "default": 0.0, "skip_if_default": true },
+                { "name": "logit_std", "type": "number", "default": 1.0, "skip_if_default": true },
+                { "name": "mode_scale", "type": "number", "default": 1.29 },
+                { "name": "min_timestep", "type": "number", "default": 0, "skip_if_default": true },
+                { "name": "max_timestep", "type": "number", "default": 1000, "skip_if_default": true },
+                { "name": "preserve_distribution_shape", "type": "checkbox", "default": false },
+                { "name": "num_timestep_buckets", "type": "number", "default": 0, "skip_if_default": true }
             ],
             "network_lora": [
-                {
-                    "name": "network_alpha",
-                    "type": "number",
-                    "default": 16,
-                    "label": "lbl_network_alpha",
-                    "cli_arg": "--network_alpha"
-                },
-                {
-                    "name": "network_dropout",
-                    "type": "number",
-                    "default": 0.0,
-                    "label": "lbl_network_dropout",
-                    "cli_arg": "--network_dropout",
-                    "skip_if_default": true
-                },
-                {
-                    "name": "network_args",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_network_args",
-                    "cli_arg": "--network_args"
-                },
-                {
-                    "name": "dim_from_weights",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "lbl_dim_from_weights",
-                    "cli_arg": "--dim_from_weights"
-                }
+                { "name": "network_alpha", "type": "number", "default": 16 },
+                { "name": "network_dropout", "type": "number", "default": 0.0, "skip_if_default": true },
+                { "name": "network_args", "type": "text", "default": "" },
+                { "name": "dim_from_weights", "type": "checkbox", "default": false }
             ],
             "training_flow": [
-                {
-                    "name": "seed",
-                    "type": "number",
-                    "default": 42,
-                    "label": "lbl_seed",
-                    "cli_arg": "--seed"
-                },
-                {
-                    "name": "max_grad_norm",
-                    "type": "number",
-                    "default": 1.0,
-                    "label": "lbl_max_grad_norm",
-                    "cli_arg": "--max_grad_norm"
-                },
-                {
-                    "name": "gradient_accumulation_steps",
-                    "type": "number",
-                    "default": 1,
-                    "label": "lbl_grad_acc",
-                    "cli_arg": "--gradient_accumulation_steps"
-                },
-                {
-                    "name": "resume",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_resume",
-                    "cli_arg": "--resume"
-                },
-                {
-                    "name": "save_state",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "save_state",
-                    "cli_arg": "--save_state"
-                },
-                {
-                    "name": "save_last_n_epochs",
-                    "type": "number",
-                    "default": null,
-                    "label": "save_last_n_epochs",
-                    "cli_arg": "--save_last_n_epochs"
-                },
-                {
-                    "name": "gradient_checkpointing_cpu_offload",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "lbl_grad_cp_cpu",
-                    "cli_arg": "--gradient_checkpointing_cpu_offload"
-                },
-                {
-                    "name": "disable_numpy_memmap",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "lbl_numpy_memmap",
-                    "cli_arg": "--disable_numpy_memmap"
-                },
-                {
-                    "name": "offload_txt_in",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "lbl_offload_inputs",
-                    "cli_arg": "--offload_txt_in"
-                },
-                {
-                    "name": "attn_mode",
-                    "type": "dropdown",
-                    "default": "sdpa",
-                    "label": "lbl_attn_mode",
-                    "choices": [
-                        "sdpa",
-                        "flash_attn",
-                        "sage_attn",
-                        "xformers",
-                        "split_attn"
-                    ]
-                }
+                { "name": "seed", "type": "number", "default": 42 },
+                { "name": "max_grad_norm", "type": "number", "default": 1.0 },
+                { "name": "gradient_accumulation_steps", "type": "number", "default": 1 },
+                { "name": "resume", "type": "text", "default": "" },
+                { "name": "save_state", "type": "checkbox", "default": false },
+                { "name": "save_last_n_epochs", "type": "number", "default": null },
+                { "name": "gradient_checkpointing_cpu_offload", "type": "checkbox", "default": false },
+                { "name": "disable_numpy_memmap", "type": "checkbox", "default": false },
+                { "name": "offload_txt_in", "type": "checkbox", "default": false },
+                { "name": "attn_mode", "type": "dropdown", "default": "sdpa", "choices": ["sdpa", "flash_attn", "sage_attn", "xformers", "split_attn"] }
             ],
             "metadata": [
-                {
-                    "name": "metadata_title",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_meta_title",
-                    "cli_arg": "--metadata_title"
-                },
-                {
-                    "name": "metadata_author",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_meta_author",
-                    "cli_arg": "--metadata_author"
-                },
-                {
-                    "name": "metadata_description",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_meta_desc",
-                    "cli_arg": "--metadata_description"
-                },
-                {
-                    "name": "metadata_license",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_meta_license",
-                    "cli_arg": "--metadata_license"
-                },
-                {
-                    "name": "metadata_tags",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_meta_tags",
-                    "cli_arg": "--metadata_tags"
-                }
+                { "name": "metadata_title", "type": "text", "default": "" },
+                { "name": "metadata_author", "type": "text", "default": "" },
+                { "name": "metadata_description", "type": "text", "default": "" },
+                { "name": "metadata_license", "type": "text", "default": "" },
+                { "name": "metadata_tags", "type": "text", "default": "" }
             ],
             "huggingface": [
-                {
-                    "name": "huggingface_repo_id",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_hf_repo_id",
-                    "cli_arg": "--huggingface_repo_id"
-                },
-                {
-                    "name": "huggingface_repo_type",
-                    "type": "dropdown",
-                    "default": "model",
-                    "label": "lbl_hf_repo_type",
-                    "cli_arg": "--huggingface_repo_type",
-                    "choices": [
-                        "model",
-                        "dataset"
-                    ]
-                },
-                {
-                    "name": "huggingface_path_in_repo",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_hf_path",
-                    "cli_arg": "--huggingface_path_in_repo"
-                },
-                {
-                    "name": "huggingface_token",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_hf_token",
-                    "cli_arg": "--huggingface_token"
-                },
-                {
-                    "name": "async_upload",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "lbl_hf_async",
-                    "cli_arg": "--async_upload"
-                }
+                { "name": "huggingface_repo_id", "type": "text", "default": "" },
+                { "name": "huggingface_repo_type", "type": "dropdown", "default": "model", "choices": ["model", "dataset"] },
+                { "name": "huggingface_path_in_repo", "type": "text", "default": "" },
+                { "name": "huggingface_token", "type": "text", "default": "" },
+                { "name": "async_upload", "type": "checkbox", "default": false }
             ],
             "sample_images": [
-                {
-                    "name": "sample_images",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "lbl_enable_sample"
-                },
-                {
-                    "name": "sample_prompt",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_sample_prompt"
-                },
-                {
-                    "name": "sample_negative_prompt",
-                    "type": "text",
-                    "default": "",
-                    "label": "lbl_sample_negative_prompt"
-                },
-                {
-                    "name": "sample_w",
-                    "type": "number",
-                    "default": 1024,
-                    "label": "lbl_sample_w"
-                },
-                {
-                    "name": "sample_h",
-                    "type": "number",
-                    "default": 1024,
-                    "label": "lbl_sample_h"
-                },
-                {
-                    "name": "sample_every_n",
-                    "type": "number",
-                    "default": 1,
-                    "label": "lbl_sample_every_n"
-                }
+                { "name": "sample_images", "type": "checkbox", "default": false },
+                { "name": "sample_prompt", "type": "text", "default": "" },
+                { "name": "sample_negative_prompt", "type": "text", "default": "" },
+                { "name": "sample_w", "type": "number", "default": 1024 },
+                { "name": "sample_h", "type": "number", "default": 1024 },
+                { "name": "sample_every_n_epochs", "type": "number", "default": 1 }
             ]
         }
     },
     "performance_args": {
         "essential": [
-            {
-                "name": "mixed_precision",
-                "type": "dropdown",
-                "default": "bf16",
-                "label": "lbl_mixed_precision",
-                "cli_arg": "--mixed_precision",
-                "choices": [
-                    "bf16",
-                    "fp16",
-                    "no"
-                ]
-            },
-            {
-                "name": "gradient_checkpointing",
-                "type": "checkbox",
-                "default": true,
-                "label": "lbl_grad_cp",
-                "cli_arg": "--gradient_checkpointing"
-            },
-            {
-                "name": "block_swap",
-                "type": "slider",
-                "default": 0,
-                "min": 0,
-                "max": 60,
-                "label": "lbl_block_swap",
-                "cli_arg": "--blocks_to_swap",
-                "skip_if_default": true
-            }
+            { "name": "mixed_precision", "type": "dropdown", "default": "bf16", "choices": ["bf16", "fp16", "no"] },
+            { "name": "gradient_checkpointing", "type": "checkbox", "default": true },
+            { "name": "blocks_to_swap", "type": "slider", "default": 0, "min": 0, "max": 60, "skip_if_default": true }
         ],
         "advanced": [
-            {
-                "name": "fp8_scaled",
-                "type": "checkbox",
-                "default": true,
-                "label": "lbl_fp8_scaled"
-            },
-            {
-                "name": "fp8_llm",
-                "type": "checkbox",
-                "default": true,
-                "label": "lbl_fp8_llm"
-            },
-            {
-                "name": "use_pinned_memory_for_block_swap",
-                "type": "checkbox",
-                "default": false,
-                "label": "lbl_pinned_mem",
-                "cli_arg": "--use_pinned_memory_for_block_swap"
-            },
-            {
-                "name": "compile_flag",
-                "type": "checkbox",
-                "default": false,
-                "label": "lbl_compile"
-            }
+            { "name": "fp8_scaled", "type": "checkbox", "default": true },
+            { "name": "fp8_llm", "type": "checkbox", "default": true },
+            { "name": "use_pinned_memory_for_block_swap", "type": "checkbox", "default": false },
+            { "name": "compile_flag", "type": "checkbox", "default": false }
         ]
     },
     "dataset_options": {
         "essential": [
-            {
-                "name": "image_directory",
-                "type": "text",
-                "label": "Image Directory"
-            },
-            {
-                "name": "video_directory",
-                "type": "text",
-                "label": "Video Directory"
-            },
-            {
-                "name": "cache_directory",
-                "type": "text",
-                "label": "Cache Directory"
-            },
-            {
-                "name": "num_repeats",
-                "type": "number",
-                "default": 1,
-                "label": "Num Repeats"
-            },
-            {
-                "name": "batch_size",
-                "type": "number",
-                "default": 1,
-                "label": "Batch Size"
-            },
-            {
-                "name": "caption_extension",
-                "type": "text",
-                "default": ".txt",
-                "label": "Caption Extension"
-            }
+            { "name": "image_directory", "type": "text" },
+            { "name": "video_directory", "type": "text" },
+            { "name": "cache_directory", "type": "text" },
+            { "name": "num_repeats", "type": "number", "default": 1 },
+            { "name": "batch_size", "type": "number", "default": 1 },
+            { "name": "caption_extension", "type": "text", "default": ".txt" }
         ],
         "advanced": [
-            {
-                "name": "image_jsonl_file",
-                "type": "text",
-                "label": "JSONL File"
-            },
-            {
-                "name": "video_jsonl_file",
-                "type": "text",
-                "label": "Video JSONL File"
-            },
-            {
-                "name": "control_directory",
-                "type": "text",
-                "label": "Control Directory"
-            },
-            {
-                "name": "resolution",
-                "type": "text",
-                "label": "Resolution Override (W,H)"
-            },
-            {
-                "name": "target_frames",
-                "type": "text",
-                "label": "Target Frames (comma-separated)",
-                "video_only": true
-            },
-            {
-                "name": "frame_extraction",
-                "type": "dropdown",
-                "default": "head",
-                "label": "Frame Extraction",
-                "choices": [
-                    "head",
-                    "chunk",
-                    "slide",
-                    "uniform",
-                    "full"
-                ],
-                "video_only": true
-            },
-            {
-                "name": "frame_stride",
-                "type": "number",
-                "default": 1,
-                "label": "Frame Stride",
-                "video_only": true
-            },
-            {
-                "name": "frame_sample",
-                "type": "number",
-                "default": 1,
-                "label": "Frame Sample",
-                "video_only": true
-            },
-            {
-                "name": "max_frames",
-                "type": "number",
-                "default": 129,
-                "label": "Max Frames",
-                "video_only": true
-            },
-            {
-                "name": "source_fps",
-                "type": "number",
-                "default": null,
-                "label": "Source FPS",
-                "video_only": true
-            }
+            { "name": "image_jsonl_file", "type": "text" },
+            { "name": "video_jsonl_file", "type": "text" },
+            { "name": "control_directory", "type": "text" },
+            { "name": "resolution", "type": "text" },
+            { "name": "target_frames", "type": "text", "video_only": true },
+            { "name": "frame_extraction", "type": "dropdown", "default": "head", "choices": ["head", "chunk", "slide", "uniform", "full"], "video_only": true },
+            { "name": "frame_stride", "type": "number", "default": 1, "video_only": true },
+            { "name": "frame_sample", "type": "number", "default": 1, "video_only": true },
+            { "name": "max_frames", "type": "number", "default": 129, "video_only": true },
+            { "name": "source_fps", "type": "number", "default": null, "video_only": true }
         ]
     },
     "model_specific_args": {
         "Wan": {
             "group_name": "Wan Settings",
             "args": [
-                {
-                    "name": "wan_t5",
-                    "type": "text",
-                    "label": "T5 Model Path",
-                    "cli_arg": "--t5",
-                    "essential": true
-                },
-                {
-                    "name": "wan_clip",
-                    "type": "text",
-                    "label": "CLIP Model Path",
-                    "cli_arg": "--clip",
-                    "essential": false
-                },
-                {
-                    "name": "wan_fp8_scaled",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 Scaled",
-                    "cli_arg": "--fp8_scaled",
-                    "essential": false
-                },
-                {
-                    "name": "wan_fp8_t5",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 T5",
-                    "cli_arg": "--fp8_t5",
-                    "essential": false
-                },
-                {
-                    "name": "wan_vae_cache_cpu",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "VAE Cache on CPU",
-                    "cli_arg": "--vae_cache_cpu",
-                    "essential": false
-                },
-                {
-                    "name": "wan_one_frame",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "One Frame Mode",
-                    "cli_arg": "--one_frame",
-                    "essential": false
-                },
-                {
-                    "name": "wan_offload_inactive",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "Offload Inactive DiT",
-                    "cli_arg": "--offload_inactive_dit",
-                    "essential": false
-                },
-                {
-                    "name": "wan_force_v2_1",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "Force V2.1 Time Embedding",
-                    "cli_arg": "--force_v2_1_time_embedding",
-                    "essential": false
-                }
+                { "name": "wan_t5", "type": "text", "essential": true },
+                { "name": "wan_clip", "type": "text", "essential": false },
+                { "name": "wan_fp8_scaled", "type": "checkbox", "default": true, "essential": false },
+                { "name": "wan_fp8_t5", "type": "checkbox", "default": true, "essential": false },
+                { "name": "wan_vae_cache_cpu", "type": "checkbox", "default": false, "essential": false },
+                { "name": "wan_one_frame", "type": "checkbox", "default": false, "essential": false },
+                { "name": "wan_offload_inactive_dit", "type": "checkbox", "default": false, "essential": false },
+                { "name": "wan_force_v2_1_time_embedding", "type": "checkbox", "default": false, "essential": false }
             ]
         },
         "Wan 2.2": {
             "group_name": "Wan 2.2 Settings",
             "args": [
-                {
-                    "name": "wan_dit_high_noise",
-                    "type": "text",
-                    "label": "DiT High Noise Model",
-                    "cli_arg": "--dit_high_noise",
-                    "essential": false
-                },
-                {
-                    "name": "wan_timestep_boundary",
-                    "type": "number",
-                    "default": null,
-                    "label": "Timestep Boundary",
-                    "cli_arg": "--timestep_boundary",
-                    "essential": false
-                }
+                { "name": "wan_dit_high_noise", "type": "text", "essential": false },
+                { "name": "wan_timestep_boundary", "type": "number", "default": null, "essential": false }
             ]
         },
         "HunyuanVideo": {
             "group_name": "HunyuanVideo Settings",
             "args": [
-                {
-                    "name": "hv_dit",
-                    "type": "text",
-                    "label": "HunyuanVideo DiT",
-                    "essential": true
-                },
-                {
-                    "name": "hv_vae",
-                    "type": "text",
-                    "label": "HunyuanVideo VAE",
-                    "essential": true
-                },
-                {
-                    "name": "hv_te1",
-                    "type": "text",
-                    "label": "TE1 (LLM/T5)",
-                    "essential": true
-                },
-                {
-                    "name": "hv_te2",
-                    "type": "text",
-                    "label": "TE2 (CLIP)",
-                    "essential": true
-                },
-                {
-                    "name": "hv_fp8_llm",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 LLM",
-                    "cli_arg": "--fp8_llm",
-                    "essential": false
-                },
-                {
-                    "name": "hv_fp8_scaled",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 Scaled",
-                    "cli_arg": "--fp8_scaled",
-                    "essential": false
-                },
-                {
-                    "name": "hv_vae_tiling",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "VAE Tiling",
-                    "cli_arg": "--vae_tiling",
-                    "essential": false
-                },
-                {
-                    "name": "hv_vae_chunk",
-                    "type": "number",
-                    "default": null,
-                    "label": "VAE Chunk Size",
-                    "cli_arg": "--vae_chunk_size",
-                    "essential": false
-                }
+                { "name": "hv_dit", "type": "text", "essential": true },
+                { "name": "hv_vae", "type": "text", "essential": true },
+                { "name": "hv_te1", "type": "text", "essential": true },
+                { "name": "hv_te2", "type": "text", "essential": true },
+                { "name": "hv_fp8_llm", "type": "checkbox", "default": true, "essential": false },
+                { "name": "hv_fp8_scaled", "type": "checkbox", "default": true, "essential": false },
+                { "name": "hv_vae_tiling", "type": "checkbox", "default": false, "essential": false },
+                { "name": "hv_vae_chunk_size", "type": "number", "default": null, "essential": false }
             ]
         },
         "Hunyuan 1.5": {
             "group_name": "Hunyuan 1.5 Settings",
             "args": [
-                {
-                    "name": "hv15_task",
-                    "type": "dropdown",
-                    "default": "t2v",
-                    "label": "Task",
-                    "choices": [
-                        "t2v",
-                        "i2v"
-                    ],
-                    "essential": true
-                },
-                {
-                    "name": "hv15_dit",
-                    "type": "text",
-                    "label": "Hunyuan 1.5 DiT",
-                    "essential": true
-                },
-                {
-                    "name": "hv15_master_te",
-                    "type": "text",
-                    "label": "Master TE (Qwen)",
-                    "essential": true
-                },
-                {
-                    "name": "hv15_byt5",
-                    "type": "text",
-                    "label": "BYT5",
-                    "essential": true
-                },
-                {
-                    "name": "hv15_img_enc",
-                    "type": "text",
-                    "label": "Image Encoder",
-                    "essential": false
-                },
-                {
-                    "name": "hv15_fp8_vl",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 VL",
-                    "cli_arg": "--fp8_vl",
-                    "essential": false
-                },
-                {
-                    "name": "hv15_fp8_scaled",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 Scaled",
-                    "cli_arg": "--fp8_scaled",
-                    "essential": false
-                },
-                {
-                    "name": "hv15_vae_sample",
-                    "type": "number",
-                    "default": null,
-                    "label": "VAE Sample Size",
-                    "cli_arg": "--vae_sample_size",
-                    "essential": false
-                }
+                { "name": "hv15_task", "type": "dropdown", "default": "t2v", "choices": ["t2v", "i2v"], "essential": true },
+                { "name": "hv15_dit", "type": "text", "essential": true },
+                { "name": "hv15_master_te", "type": "text", "essential": true },
+                { "name": "hv15_byt5", "type": "text", "essential": true },
+                { "name": "hv15_img_enc", "type": "text", "essential": false },
+                { "name": "hv15_fp8_vl", "type": "checkbox", "default": true, "essential": false },
+                { "name": "hv15_fp8_scaled", "type": "checkbox", "default": true, "essential": false },
+                { "name": "hv15_vae_sample_size", "type": "number", "default": null, "essential": false }
             ]
         },
         "FramePack": {
             "group_name": "FramePack Settings",
             "args": [
-                {
-                    "name": "fpack_te1",
-                    "type": "text",
-                    "label": "TE1 (LLaMA)",
-                    "essential": true
-                },
-                {
-                    "name": "fpack_te2",
-                    "type": "text",
-                    "label": "TE2 (CLIP)",
-                    "essential": true
-                },
-                {
-                    "name": "fpack_img_enc",
-                    "type": "text",
-                    "label": "Image Encoder",
-                    "essential": true
-                },
-                {
-                    "name": "fpack_latent_window",
-                    "type": "number",
-                    "default": 9,
-                    "label": "Latent Window Size",
-                    "cli_arg": "--latent_window_size",
-                    "essential": false
-                },
-                {
-                    "name": "fpack_bulk_decode",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "Bulk Decode",
-                    "cli_arg": "--bulk_decode",
-                    "essential": false
-                },
-                {
-                    "name": "fpack_f1",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "FramePack-F1",
-                    "cli_arg": "--f1",
-                    "essential": false
-                },
-                {
-                    "name": "fpack_one_frame",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "One Frame Mode",
-                    "cli_arg": "--one_frame",
-                    "essential": false
-                }
+                { "name": "fpack_te1", "type": "text", "essential": true },
+                { "name": "fpack_te2", "type": "text", "essential": true },
+                { "name": "fpack_img_enc", "type": "text", "essential": true },
+                { "name": "fpack_latent_window_size", "type": "number", "default": 9, "essential": false },
+                { "name": "fpack_bulk_decode", "type": "checkbox", "default": false, "essential": false },
+                { "name": "fpack_f1", "type": "checkbox", "default": false, "essential": false },
+                { "name": "fpack_one_frame", "type": "checkbox", "default": false, "essential": false }
             ]
         },
         "Flux": {
             "group_name": "Flux Kontext Settings",
             "args": [
-                {
-                    "name": "flux_te1",
-                    "type": "text",
-                    "label": "TE1 (T5)",
-                    "essential": true
-                },
-                {
-                    "name": "flux_te2",
-                    "type": "text",
-                    "label": "TE2 (CLIP)",
-                    "essential": true
-                },
-                {
-                    "name": "flux_fp8_t5",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 T5",
-                    "cli_arg": "--fp8_t5",
-                    "essential": false
-                },
-                {
-                    "name": "flux_fp8_scaled",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 Scaled",
-                    "cli_arg": "--fp8_scaled",
-                    "essential": false
-                }
+                { "name": "flux_te1", "type": "text", "essential": true },
+                { "name": "flux_te2", "type": "text", "essential": true },
+                { "name": "flux_fp8_t5", "type": "checkbox", "default": true, "essential": false },
+                { "name": "flux_fp8_scaled", "type": "checkbox", "default": true, "essential": false }
             ]
         },
         "Kandinsky 5": {
             "group_name": "Kandinsky 5 Settings",
             "args": [
-                {
-                    "name": "k5_task",
-                    "type": "text",
-                    "label": "K5 Task Config",
-                    "essential": true
-                },
-                {
-                    "name": "k5_sched_scale",
-                    "type": "number",
-                    "default": 1.0,
-                    "label": "Scheduler Scale",
-                    "cli_arg": "--scheduler_scale",
-                    "essential": false
-                },
-                {
-                    "name": "k5_force_nabla",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "Force NABLA Attention",
-                    "cli_arg": "--force_nabla_attention",
-                    "essential": false
-                }
+                { "name": "k5_task", "type": "text", "essential": true },
+                { "name": "k5_scheduler_scale", "type": "number", "default": 1.0, "essential": false },
+                { "name": "k5_force_nabla_attention", "type": "checkbox", "default": false, "essential": false }
             ]
         },
         "Qwen-Image": {
             "group_name": "Qwen-Image Settings",
             "args": [
-                {
-                    "name": "qwen_te",
-                    "type": "text",
-                    "label": "Qwen TE Path",
-                    "essential": true
-                },
-                {
-                    "name": "qwen_fp8_vl",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 VL",
-                    "cli_arg": "--fp8_vl",
-                    "essential": false
-                },
-                {
-                    "name": "qwen_fp8_scaled",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 Scaled",
-                    "cli_arg": "--fp8_scaled",
-                    "essential": false
-                }
+                { "name": "qwen_te", "type": "text", "essential": true },
+                { "name": "qwen_fp8_vl", "type": "checkbox", "default": true, "essential": false },
+                { "name": "qwen_fp8_scaled", "type": "checkbox", "default": true, "essential": false }
             ]
         },
         "Z-Image-Turbo": {
             "group_name": "Z-Image-Turbo Settings",
             "args": [
-                {
-                    "name": "zimage_te",
-                    "type": "text",
-                    "label": "Z-Image TE Path",
-                    "essential": true
-                },
-                {
-                    "name": "zimage_fp8_llm",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 LLM",
-                    "cli_arg": "--fp8_llm",
-                    "essential": false
-                },
-                {
-                    "name": "zimage_fp8_scaled",
-                    "type": "checkbox",
-                    "default": true,
-                    "label": "FP8 Scaled",
-                    "cli_arg": "--fp8_scaled",
-                    "essential": false
-                },
-                {
-                    "name": "zimage_32bit_attn",
-                    "type": "checkbox",
-                    "default": false,
-                    "label": "Use 32bit Attention",
-                    "cli_arg": "--use_32bit_attention",
-                    "essential": false
-                }
+                { "name": "zimage_te", "type": "text", "essential": true },
+                { "name": "zimage_fp8_llm", "type": "checkbox", "default": true, "essential": false },
+                { "name": "zimage_fp8_scaled", "type": "checkbox", "default": true, "essential": false },
+                { "name": "zimage_use_32bit_attention", "type": "checkbox", "default": false, "essential": false }
             ]
         }
     }
