@@ -90,7 +90,7 @@ def construct_ui():
 
 
                 # --- Performance & Attention Flags ---
-                with gr.Accordion("⚙️ Performance & Memory", open=False):
+                with gr.Accordion("Performance & Memory", open=False):
                     with gr.Row():
                         mixed_precision = gr.Dropdown(label=i18n("lbl_mixed_precision"), choices=["bf16", "fp16", "no"], value="bf16")
                         gradient_checkpointing = gr.Checkbox(label=i18n("lbl_grad_cp"), value=True)
