@@ -7,22 +7,29 @@ import toml
 from musubi_tuner.gui.config_manager import ConfigManager
 from musubi_tuner.gui.i18n_data import I18N_DATA
 from musubi_tuner.gui.dataset_utils import DatasetStateManager
+from musubi_tuner.gui import arg_loader
 
 config_manager = ConfigManager()
 
+# Load custom CSS
+def load_custom_css():
+    css_path = os.path.join(os.path.dirname(__file__), "styles.css")
+    try:
+        with open(css_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
 
 i18n = gr.I18n(en=I18N_DATA["en"], ja=I18N_DATA["ja"])
 
 
 def construct_ui():
-    # I18N doesn't work for gr.Blocks title
-    # with gr.Blocks(title=i18n("app_title")) as demo:
-    with gr.Group() as demo:
+    # Load custom CSS for improved styling
+    custom_css = load_custom_css()
+    
+    with gr.Group(elem_classes=["main-container"]) as demo:
         gr.Markdown(i18n("app_header"))
         gr.Markdown(i18n("app_desc"))
-
-
-
 
         with gr.Tabs() as tabs:
             # Tab 1: Initialization
@@ -30,7 +37,6 @@ def construct_ui():
                 gr.Markdown(i18n("desc_project"))
                 with gr.Row():
                     project_dir = gr.Textbox(label=i18n("lbl_proj_dir"), placeholder=i18n("ph_proj_dir"), max_lines=1)
-                    vram_size = gr.Dropdown(label=i18n("lbl_vram"), choices=["12", "16", "24", "32", ">32"], value="24", interactive=True)
                 
                 init_btn = gr.Button(i18n("btn_init_project"), variant="primary")
                 project_status = gr.Markdown("")
@@ -49,6 +55,7 @@ def construct_ui():
                         value="Wan 2.2 (T2V-14B)",
                         interactive=True,
                     )
+                    vram_size = gr.Dropdown(label=i18n("lbl_vram"), choices=["12", "16", "24", "32", ">32"], value="24", interactive=True)
                 
                 # --- Models & Paths ---
                 with gr.Group():
@@ -64,6 +71,15 @@ def construct_ui():
                     with gr.Row():
                         text_encoder1_path = gr.Textbox(label=i18n("lbl_te1"), max_lines=1, interactive=True)
                         text_encoder2_path = gr.Textbox(label=i18n("lbl_te2"), max_lines=1, interactive=True)
+                    
+                    # Wan-specific paths (visible only for Wan models)
+                    with gr.Row(visible=False) as row_wan_paths:
+                        wan_t5_min = gr.Textbox(label="T5 Model Path", placeholder="Path to T5-XXL", max_lines=1, interactive=True)
+                        wan_clip = gr.Textbox(label="CLIP Model Path", placeholder="Path to CLIP-L", max_lines=1, interactive=True)
+                    with gr.Row(visible=False) as row_wan_2_2_paths:
+                        wan_dit_high_noise = gr.Textbox(label="DiT High Noise Model", placeholder="Path to High Noise DiT", max_lines=1, interactive=True)
+                        wan_timestep_boundary = gr.Number(label="Timestep Boundary", value=None, interactive=True)
+                    
                     with gr.Row(visible=False) as row_extra_models:
                         img_enc_path = gr.Textbox(label=i18n("lbl_img_enc"), max_lines=1)
                         byt5_path = gr.Textbox(label=i18n("lbl_byt5"), max_lines=1)
@@ -72,9 +88,9 @@ def construct_ui():
                         set_paths_btn = gr.Button(i18n("btn_set_paths"))
                         rec_params_btn = gr.Button(i18n("btn_rec_params"))
 
+
                 # --- Performance & Attention Flags ---
-                with gr.Group():
-                    gr.Markdown("### Performance & Memory")
+                with gr.Accordion("⚙️ Performance & Memory", open=False):
                     with gr.Row():
                         mixed_precision = gr.Dropdown(label=i18n("lbl_mixed_precision"), choices=["bf16", "fp16", "no"], value="bf16")
                         gradient_checkpointing = gr.Checkbox(label=i18n("lbl_grad_cp"), value=True)
@@ -96,9 +112,6 @@ def construct_ui():
                 with gr.Accordion("Advanced Model Settings", open=False):
                     with gr.Group(visible=False) as arg_group_wan:
                         with gr.Row():
-                            wan_t5_min = gr.Textbox(label="T5 Min Model Path", placeholder="Path to T5-XXL", max_lines=1, interactive=True)
-                            wan_clip = gr.Textbox(label="CLIP Model Path", placeholder="Path to CLIP-L", max_lines=1, interactive=True)
-                        with gr.Row():
                             wan_fp8_scaled = gr.Checkbox(label="FP8 Scaled", value=True, interactive=True)
                             wan_fp8_t5 = gr.Checkbox(label="FP8 T5", value=True, interactive=True)
                             wan_vae_cache_cpu = gr.Checkbox(label="VAE Cache on CPU", value=False, interactive=True)
@@ -108,9 +121,7 @@ def construct_ui():
                             wan_force_v2_1 = gr.Checkbox(label="Force V2.1 Time Embedding", value=False, interactive=True)
 
                     with gr.Group(visible=False) as arg_group_wan_2_2:
-                        with gr.Row():
-                            wan_dit_high_noise = gr.Textbox(label="DiT High Noise Model", placeholder="Path to High Noise DiT", max_lines=1, interactive=True)
-                            wan_timestep_boundary = gr.Number(label="Timestep Boundary", value=None, interactive=True)
+                        gr.Markdown("*Wan 2.2 specific settings")
 
                     with gr.Group(visible=False) as arg_group_hv:
                         with gr.Row():
@@ -190,6 +201,8 @@ def construct_ui():
                     is_zimage = "Z-Image" in arch
 
                     return [
+                        gr.update(visible=is_wan),                # row_wan_paths
+                        gr.update(visible=is_wan_2_2),            # row_wan_2_2_paths
                         gr.update(visible=is_wan or is_hv15 or is_fpack), # row_extra_models
                         gr.update(visible=is_wan),                # arg_group_wan
                         gr.update(visible=is_wan_2_2),            # arg_group_wan_2_2
@@ -206,7 +219,8 @@ def construct_ui():
                     fn=update_model_ui,
                     inputs=[model_arch],
                     outputs=[
-                        row_extra_models, arg_group_wan, arg_group_wan_2_2, 
+                        row_wan_paths, row_wan_2_2_paths, row_extra_models,
+                        arg_group_wan, arg_group_wan_2_2, 
                         arg_group_hv, arg_group_hv15, arg_group_fpack, 
                         arg_group_flux, arg_group_k5, arg_group_qwen, arg_group_zimage
                     ]
@@ -240,7 +254,7 @@ def construct_ui():
                 def render_datasets(state):
                      from dataclasses import asdict
                      if not state: 
-                         gr.Markdown("No datasets added yet. Click 'Add Image Dataset' or 'Add Video Dataset' above.")
+                         gr.Markdown("📁 No datasets added yet. Click **'Add Image Dataset'** or **'Add Video Dataset'** above to get started.")
                          return
                      
                      for i, ds in enumerate(state):
@@ -250,69 +264,81 @@ def construct_ui():
                              data = ds
                          
                          is_video = "video_directory" in data
-                         type_str = "Video" if is_video else "Image"
+                         type_str = "🎬 Video" if is_video else "🖼️ Image"
+                         type_icon = "video" if is_video else "image"
                          
-                         with gr.Accordion(f"{type_str} Dataset {i+1}", open=True):
+                         # Use Group for card-like styling
+                         with gr.Group(elem_classes=["dataset-card"]):
+                             # Header
+                             gr.Markdown(f"### {type_str} Dataset {i+1}", elem_classes=["dataset-card-header"])
+                             
+                             # Essential fields row - Directory
                              with gr.Row():
                                  if not is_video:
-                                     img_dir = gr.Textbox(label="Image Directory", value=data.get("image_directory", ""), interactive=True)
+                                     img_dir = gr.Textbox(label="📂 Image Directory", value=data.get("image_directory", ""), interactive=True, scale=2)
                                      img_dir.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="image_directory"), inputs=[dataset_state, img_dir], outputs=[dataset_state])
                                  else:
-                                     vid_dir = gr.Textbox(label="Video Directory", value=data.get("video_directory", ""), interactive=True)
+                                     vid_dir = gr.Textbox(label="📂 Video Directory", value=data.get("video_directory", ""), interactive=True, scale=2)
                                      vid_dir.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="video_directory"), inputs=[dataset_state, vid_dir], outputs=[dataset_state])
                                  
-                                 cache_dir_ds = gr.Textbox(label="Cache Directory (Optional)", value=data.get("cache_directory", ""), interactive=True)
+                                 cache_dir_ds = gr.Textbox(label="📦 Cache Directory", value=data.get("cache_directory", ""), interactive=True, scale=1)
                                  cache_dir_ds.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="cache_directory"), inputs=[dataset_state, cache_dir_ds], outputs=[dataset_state])
 
+                             # Core settings row
                              with gr.Row():
-                                 jsonl = gr.Textbox(label="JSONL File (Optional)", value=data.get("video_jsonl_file" if is_video else "image_jsonl_file", ""), interactive=True)
-                                 jsonl.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="jsonl_file"), inputs=[dataset_state, jsonl], outputs=[dataset_state])
-                                 
-                                 ctrl_dir = gr.Textbox(label="Control Directory (Optional)", value=data.get("control_directory", ""), interactive=True)
-                                 ctrl_dir.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="control_directory"), inputs=[dataset_state, ctrl_dir], outputs=[dataset_state])
-
-                             with gr.Row():
-                                 num_rep = gr.Number(label="Num Repeats", value=data.get("num_repeats", 1), precision=0, interactive=True)
+                                 num_rep = gr.Number(label="🔁 Repeats", value=data.get("num_repeats", 1), precision=0, interactive=True, minimum=1)
                                  num_rep.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="num_repeats"), inputs=[dataset_state, num_rep], outputs=[dataset_state])
                                  
-                                 batch_sz = gr.Number(label="Batch Size", value=data.get("batch_size", 1), precision=0, interactive=True)
+                                 batch_sz = gr.Number(label="📊 Batch Size", value=data.get("batch_size", 1), precision=0, interactive=True, minimum=1)
                                  batch_sz.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="batch_size"), inputs=[dataset_state, batch_sz], outputs=[dataset_state])
                                  
-                                 cap_ext_ds = gr.Textbox(label="Caption Extension", value=data.get("caption_extension", ".txt"), interactive=True)
+                                 cap_ext_ds = gr.Textbox(label="📝 Caption Ext", value=data.get("caption_extension", ".txt"), interactive=True)
                                  cap_ext_ds.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="caption_extension"), inputs=[dataset_state, cap_ext_ds], outputs=[dataset_state])
-
-                             if is_video:
-                                 with gr.Row():
-                                     target_f = gr.Textbox(label="Target Frames (N*4+1, comma-separated)", value=", ".join(map(str, data.get("target_frames", [1]))), interactive=True)
-                                     target_f.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="target_frames"), inputs=[dataset_state, target_f], outputs=[dataset_state])
-                                     
-                                     extract = gr.Dropdown(label="Frame Extraction", choices=["head", "chunk", "slide", "uniform", "full"], value=data.get("frame_extraction", "head"), interactive=True)
-                                     extract.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="frame_extraction"), inputs=[dataset_state, extract], outputs=[dataset_state])
                                  
-                                 with gr.Row():
-                                     stride = gr.Number(label="Frame Stride (for slide)", value=data.get("frame_stride", 1), precision=0, interactive=True)
-                                     stride.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="frame_stride"), inputs=[dataset_state, stride], outputs=[dataset_state])
-                                     
-                                     sample = gr.Number(label="Frame Sample (for uniform)", value=data.get("frame_sample", 1), precision=0, interactive=True)
-                                     sample.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="frame_sample"), inputs=[dataset_state, sample], outputs=[dataset_state])
-                                 
-                                 with gr.Row():
-                                     max_f = gr.Number(label="Max Frames (for full)", value=data.get("max_frames", 129), precision=0, interactive=True)
-                                     max_f.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="max_frames"), inputs=[dataset_state, max_f], outputs=[dataset_state])
-                                     
-                                     src_fps = gr.Number(label="Source FPS (optional, e.g. 30.0)", value=data.get("source_fps", None), interactive=True)
-                                     src_fps.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="source_fps"), inputs=[dataset_state, src_fps], outputs=[dataset_state])
-
-                             with gr.Row():
-                                 res = gr.Textbox(label="Resolution Override (W,H)", value=f"{data.get('resolution', [1024, 1024])[0]}, {data.get('resolution', [1024, 1024])[1]}", interactive=True)
+                                 res = gr.Textbox(label="📐 Resolution (W,H)", value=f"{data.get('resolution', [1024, 1024])[0]}, {data.get('resolution', [1024, 1024])[1]}", interactive=True)
                                  res.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="resolution"), inputs=[dataset_state, res], outputs=[dataset_state])
-                                 
-                                 rm_btn = gr.Button("🗑️ Remove Dataset", variant="stop")
+
+                             # Advanced options in accordion
+                             with gr.Accordion("⚙️ Advanced Options", open=False, elem_classes=["dataset-advanced-accordion"]):
+                                 with gr.Row():
+                                     jsonl = gr.Textbox(label="JSONL File", value=data.get("video_jsonl_file" if is_video else "image_jsonl_file", ""), interactive=True)
+                                     jsonl.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="jsonl_file"), inputs=[dataset_state, jsonl], outputs=[dataset_state])
+                                     
+                                     ctrl_dir = gr.Textbox(label="Control Directory", value=data.get("control_directory", ""), interactive=True)
+                                     ctrl_dir.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="control_directory"), inputs=[dataset_state, ctrl_dir], outputs=[dataset_state])
+
+                                 if is_video:
+                                     with gr.Row():
+                                         target_f = gr.Textbox(label="Target Frames (N*4+1)", value=", ".join(map(str, data.get("target_frames", [1]))), interactive=True)
+                                         target_f.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="target_frames"), inputs=[dataset_state, target_f], outputs=[dataset_state])
+                                         
+                                         extract = gr.Dropdown(label="Frame Extraction", choices=["head", "chunk", "slide", "uniform", "full"], value=data.get("frame_extraction", "head"), interactive=True)
+                                         extract.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="frame_extraction"), inputs=[dataset_state, extract], outputs=[dataset_state])
+                                     
+                                     with gr.Row():
+                                         stride = gr.Number(label="Frame Stride", value=data.get("frame_stride", 1), precision=0, interactive=True)
+                                         stride.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="frame_stride"), inputs=[dataset_state, stride], outputs=[dataset_state])
+                                         
+                                         sample = gr.Number(label="Frame Sample", value=data.get("frame_sample", 1), precision=0, interactive=True)
+                                         sample.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="frame_sample"), inputs=[dataset_state, sample], outputs=[dataset_state])
+                                         
+                                         max_f = gr.Number(label="Max Frames", value=data.get("max_frames", 129), precision=0, interactive=True)
+                                         max_f.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="max_frames"), inputs=[dataset_state, max_f], outputs=[dataset_state])
+                                         
+                                         src_fps = gr.Number(label="Source FPS", value=data.get("source_fps", None), interactive=True)
+                                         src_fps.change(fn=functools.partial(save_dataset_field_dynamic, index=i, field="source_fps"), inputs=[dataset_state, src_fps], outputs=[dataset_state])
+
+                             # Footer with remove button - properly positioned at bottom
+                             with gr.Row(elem_classes=["dataset-card-footer"]):
+                                 rm_btn = gr.Button("🗑️ Remove Dataset", variant="stop", elem_classes=["remove-dataset-btn"])
                                  rm_btn.click(fn=functools.partial(remove_dataset_dynamic, index=i), inputs=[dataset_state], outputs=[dataset_state])
+
+
 
                 gen_toml_btn = gr.Button(i18n("btn_gen_config"), variant="primary")
                 dataset_status = gr.Markdown("")
-                toml_preview = gr.Code(label=i18n("lbl_toml_preview"), interactive=False)
+                toml_preview = gr.Code(label=i18n("lbl_toml_preview"), interactive=False, visible=False)
+
 
             # Tab 4: Training & Caching
             with gr.TabItem(i18n("tab_training"), id="training"):
@@ -832,16 +858,21 @@ def construct_ui():
                     "bucket_no_upscale": buck_no_up,
                 })
 
-                toml_content = manager.to_toml_string(architecture=model_val)
-
+                # Generate TOML
+                toml_str = manager.to_toml_string(architecture=model_val) # Added architecture=model_val back
+                
+                # Save TOML
+                config_path = os.path.join(project_path, "dataset_config.toml")
                 try:
-                    config_path = os.path.join(project_path, "dataset_config.toml")
                     with open(config_path, "w", encoding="utf-8") as f:
-                        f.write(toml_content)
-                    return f"Successfully generated config at / 設定ファイルが作成されました: {config_path}", toml_content
+                        f.write(toml_str)
+                    status_msg = f"✅ Dataset config saved to: {config_path}"
                 except Exception as e:
-                    return f"Error generating config / 設定ファイルの生成に失敗しました: {str(e)}", ""
-
+                    status_msg = f"❌ Error saving config: {str(e)}"
+                    toml_str = f"# Error: {str(e)}"
+                
+                # Return status, TOML preview content, and make it visible
+                return status_msg, gr.update(value=toml_str, visible=True)
 
         def convert_lora_to_comfy(project_path, input_path, output_path, model, comfy, w, h, batch, vae, te1, te2):
             if not project_path:
@@ -1525,6 +1556,9 @@ def construct_ui():
 
 
 if __name__ == "__main__":
-    with gr.Blocks(title="Musubi Tuner GUI") as demo:
+    # Load custom CSS for styling
+    custom_css = load_custom_css()
+    with gr.Blocks(title="Musubi Tuner GUI", css=custom_css) as demo:
         construct_ui()
     demo.launch(i18n=i18n)
+

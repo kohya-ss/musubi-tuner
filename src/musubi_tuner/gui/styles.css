@@ -1,0 +1,237 @@
+/* Musubi Tuner GUI Custom Styles */
+
+/* ========== Root Variables ========== */
+:root {
+    --primary-color: #4a90d9;
+    --primary-hover: #3a7bc8;
+    --border-color: #d0d7de;
+    --border-dark: #8b949e;
+    --bg-light: #f6f8fa;
+    --bg-card: #ffffff;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.12);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+}
+
+/* ========== Accordion Styling ========== */
+/* Ensure accordions are visible on white backgrounds */
+.gradio-accordion {
+    border: 1px solid var(--border-color) !important;
+    border-radius: var(--radius-md) !important;
+    margin-bottom: 12px !important;
+    background-color: var(--bg-light) !important;
+}
+
+.gradio-accordion>.label-wrap {
+    background-color: var(--bg-light) !important;
+    padding: 10px 16px !important;
+    border-radius: var(--radius-md) var(--radius-md) 0 0 !important;
+}
+
+.gradio-accordion>.label-wrap:hover {
+    background-color: #eaecef !important;
+}
+
+.gradio-accordion.open>.label-wrap {
+    border-bottom: 1px solid var(--border-color) !important;
+}
+
+/* ========== Component Width Constraints ========== */
+/* Prevent components from stretching full width */
+.gradio-textbox,
+.gradio-number,
+.gradio-dropdown {
+    max-width: 400px !important;
+}
+
+/* Larger width for path inputs */
+.path-input,
+.gradio-textbox[label*="Path"],
+.gradio-textbox[label*="Directory"] {
+    max-width: 600px !important;
+}
+
+/* ========== Button Styling ========== */
+.gradio-button {
+    max-width: 250px !important;
+    min-width: 120px !important;
+    border-radius: var(--radius-sm) !important;
+}
+
+.gradio-button.primary {
+    background-color: var(--primary-color) !important;
+    border-color: var(--primary-color) !important;
+}
+
+.gradio-button.primary:hover {
+    background-color: var(--primary-hover) !important;
+    border-color: var(--primary-hover) !important;
+}
+
+/* Remove button specific styling */
+.remove-dataset-btn {
+    max-width: 180px !important;
+    min-width: 140px !important;
+    background-color: #dc3545 !important;
+    border-color: #dc3545 !important;
+    color: white !important;
+    margin-top: 8px !important;
+}
+
+.remove-dataset-btn:hover {
+    background-color: #c82333 !important;
+    border-color: #bd2130 !important;
+}
+
+/* ========== Dataset Card Styling ========== */
+.dataset-card {
+    border: 2px solid var(--primary-color) !important;
+    border-radius: var(--radius-lg) !important;
+    padding: 16px !important;
+    margin-bottom: 16px !important;
+    background-color: var(--bg-card) !important;
+    box-shadow: var(--shadow-sm) !important;
+}
+
+.dataset-card:hover {
+    box-shadow: var(--shadow-md) !important;
+}
+
+.dataset-card-header {
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+}
+
+.dataset-card-footer {
+    display: flex !important;
+    justify-content: flex-end !important;
+    padding-top: 12px !important;
+    margin-top: 12px !important;
+    border-top: 1px solid var(--border-color) !important;
+    gap: 8px !important;
+}
+
+/* ========== Group Styling ========== */
+.gradio-group {
+    border: 1px solid var(--border-color) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 16px !important;
+    margin-bottom: 16px !important;
+    background-color: var(--bg-card) !important;
+}
+
+/* ========== Mode Toggle ========== */
+.mode-toggle-container {
+    background-color: var(--bg-light);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.mode-toggle-label {
+    font-weight: 600;
+    color: #24292f;
+}
+
+/* ========== Tab Styling ========== */
+.gradio-tabs>.tab-nav {
+    border-bottom: 2px solid var(--border-color) !important;
+}
+
+.gradio-tabs>.tab-nav>button {
+    padding: 10px 20px !important;
+    font-weight: 500 !important;
+}
+
+.gradio-tabs>.tab-nav>button.selected {
+    border-bottom: 2px solid var(--primary-color) !important;
+    color: var(--primary-color) !important;
+}
+
+/* ========== Row Layouts ========== */
+.gradio-row {
+    gap: 16px !important;
+    align-items: flex-start !important;
+}
+
+/* Compact rows for buttons */
+.button-row {
+    gap: 8px !important;
+}
+
+/* ========== Slider Styling ========== */
+.gradio-slider {
+    max-width: 400px !important;
+}
+
+/* ========== Checkbox Styling ========== */
+.gradio-checkbox {
+    max-width: 300px !important;
+}
+
+/* ========== Code Block Styling ========== */
+.gradio-code {
+    border-radius: var(--radius-md) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+/* ========== Markdown Headers in Groups ========== */
+.gradio-group>.gradio-markdown h3 {
+    margin-top: 0 !important;
+    margin-bottom: 12px !important;
+    padding-bottom: 8px !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    color: #24292f !important;
+}
+
+/* ========== Status Messages ========== */
+.status-success {
+    color: #28a745;
+    font-weight: 500;
+}
+
+.status-error {
+    color: #dc3545;
+    font-weight: 500;
+}
+
+.status-warning {
+    color: #ffc107;
+    font-weight: 500;
+}
+
+/* ========== Advanced Section Indicator ========== */
+.advanced-indicator {
+    font-size: 0.85em;
+    color: #6c757d;
+    margin-left: 8px;
+    padding: 2px 8px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+}
+
+/* ========== Responsive Adjustments ========== */
+@media (max-width: 768px) {
+
+    .gradio-textbox,
+    .gradio-number,
+    .gradio-dropdown,
+    .gradio-slider {
+        max-width: 100% !important;
+    }
+
+    .gradio-button {
+        max-width: 100% !important;
+    }
+
+    .dataset-card {
+        padding: 12px !important;
+    }
+}
