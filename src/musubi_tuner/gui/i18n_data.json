@@ -77,7 +77,7 @@
         "lbl_fp8_scaled": "FP8 Scaled (DiT)",
         "lbl_fp8_llm": "FP8 LLM/VLM",
         "lbl_use_pinned_memory_for_block_swap": "Use Pinned Memory for Swap",
-        "lbl_compile": "Enable torch.compile",
+        "lbl_compile_flag": "Enable torch.compile",
         "lbl_attn_mode": "Attention Mode",
         "lbl_offload_txt_in": "Offload Inputs to CPU",
 
@@ -116,6 +116,7 @@
         "lbl_save_last_n_epochs": "Save Last N Epochs",
         "lbl_gradient_checkpointing_cpu_offload": "Grad Checkpoint CPU Offload",
         "lbl_disable_numpy_memmap": "Disable Numpy Memmap",
+        "lbl_offload_txt_in": "Offload Inputs to CPU",
 
         "header_metadata": "SAI Model Metadata",
         "lbl_metadata_title": "Metadata Title",
@@ -280,7 +281,7 @@
         "lbl_fp8_scaled": "FP8 Scaled (DiT)",
         "lbl_fp8_llm": "FP8 LLM/VLM",
         "lbl_use_pinned_memory_for_block_swap": "Block Swapに共有メモリを使う",
-        "lbl_compile": "torch.compileを有効化",
+        "lbl_compile_flag": "torch.compileを有効化",
         "lbl_attn_mode": "アテンションモード",
         "lbl_offload_txt_in": "入力をCPUにオフロード",
 
@@ -319,6 +320,7 @@
         "lbl_save_last_n_epochs": "最後のNエポックのみ保存",
         "lbl_gradient_checkpointing_cpu_offload": "Gradient CP をCPUオフロード",
         "lbl_disable_numpy_memmap": "Numpy Memmap を無効化",
+        "lbl_offload_txt_in": "入力をCPUにオフロード",
 
         "header_metadata": "SAI モデルメタデータ",
         "lbl_metadata_title": "タイトル",
