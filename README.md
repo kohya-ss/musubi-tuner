@@ -63,6 +63,11 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- December 27, 2025
+    - Added support for Qwen-Image-Edit-2511. See [PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808).
+        - Please refer to the [documentation](./docs/qwen_image.md) for details such as checkpoints and options.
+        - In the caching, training, and inference scripts, specify `--model_version` option as `edit-2511`.
+
 - December 25, 2025
     - Added support for LoRA training of Kandinsky 5. See [PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774). Many thanks to AkaneTendo25 for this contribution.
         - Please refer to the [documentation](./docs/kandinsky5.md) for details.
