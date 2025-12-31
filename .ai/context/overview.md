@@ -11,7 +11,7 @@ Musubi Tuner is a Python-based training framework for LoRA (Low-Rank Adaptation)
 The project uses `pyproject.toml` for dependency management with both pip and uv (experimental) installation methods:
 
 - **pip installation**: `pip install -e .` after installing PyTorch with CUDA support
-- **uv installation**: `uv run --extra cu124` or `uv run --extra cu128` (experimental)
+- **uv installation**: `uv run --extra cu124` (or `cu128`, `cu130`) (uv installation is experimental)
 - **Python requirement**: 3.10 or later (verified with 3.10)
 - **PyTorch requirement**: 2.5.1 or later
 

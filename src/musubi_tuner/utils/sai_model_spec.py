@@ -74,7 +74,9 @@ ARCH_FLUX_KONTEXT = "Flux.1-dev"
 ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
+ARCH_QWEN_IMAGE_EDIT_2511 = "Qwen-Image-Edit-2511"
 CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
+CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511 = "@@Qwen-Image-Edit-2511@@"  # special custom architecture name for Qwen-Image-Edit-2511
 ARCH_KANDINSKY5 = "Kandinsky-5"
 ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
 ARCH_Z_IMAGE = "Z-Image"
@@ -171,6 +173,9 @@ def build_metadata(
             arch = ARCH_QWEN_IMAGE_EDIT
         elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS:
             arch = ARCH_QWEN_IMAGE_EDIT_PLUS
+            custom_arch = None  # clear custom_arch to avoid override later
+        elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511:
+            arch = ARCH_QWEN_IMAGE_EDIT_2511
             custom_arch = None  # clear custom_arch to avoid override later
         else:
             arch = ARCH_QWEN_IMAGE_EDIT  # override with custom_arch later
