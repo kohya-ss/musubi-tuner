@@ -1366,7 +1366,7 @@ def process_interactive(args: argparse.Namespace) -> None:
 
                 # Save latent and video
                 # returned_vae from generate will be used for decoding here.
-                save_output(prompt_args, returned_vae, latent[0], device)
+                save_output(prompt_args, returned_vae, latent, device)
 
                 if args.bell:
                     print("\a")  # Bell sound
