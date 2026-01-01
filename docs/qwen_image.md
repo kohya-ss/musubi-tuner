@@ -187,6 +187,40 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --output_dir path/to/output_dir --output_name name-of-lora
 ```
 
+### ProdigyPlusScheduleFree (LR-free + Schedule-Free) for LoRA
+
+If you want to use **Prodigy + refined Schedule-Free** (no LR schedule, Prodigy learns the step size), install the optimizer package and switch `--optimizer_type`:
+
+```bash
+# One-time install (local editable):
+pip install -e /root/CODEBASES/prodigy-plus-schedule-free
+```
+
+Then use (example “Goldilocks” settings for diffusion LoRA):
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/qwen_image_train_network.py \
+    ... \
+    --optimizer_type prodigyplus.ProdigyPlusScheduleFree \
+    --learning_rate 1.0 \
+    --optimizer_args "betas=(0.95,0.99)" \
+    --optimizer_args "d_coef=1.0" \
+    --optimizer_args "d0=1e-6" \
+    --optimizer_args "d_limiter=True" \
+    --optimizer_args "weight_decay=0.01" \
+    --optimizer_args "use_bias_correction=False" \
+    --optimizer_args "use_orthograd=True" \
+    --optimizer_args "schedulefree_c=12" \
+    --lr_scheduler constant \
+    --lr_warmup_steps 0 \
+    --max_grad_norm 0
+```
+
+Notes:
+- For this trainer, `optimizer.train()` / `optimizer.eval()` is already called when needed (sampling/checkpointing), which is required for Schedule-Free optimizers.
+- `schedulefree_c=0` is vanilla Schedule-Free; with `betas=(0.95,0.99)`, `schedulefree_c=12` adds extra smoothing (often helpful for small/noisy LoRA runs).
+- Avoid long LR warmups with Prodigy-based optimizers unless you know what you’re doing (this optimizer does not implement Prodigy’s `safeguard_warmup` knob).
+
 **Qwen-Image-Edit Training:**
 
 For training the image editing model, add the `--model_version` option for Qwen-Image-Edit, Edit-2509, or Edit-2511.

@@ -33,8 +33,18 @@ def create_arch_network(
     else:
         exclude_patterns = ast.literal_eval(exclude_patterns)
 
-    # exclude if '_mod_' in the name of the module (modulation)
-    exclude_patterns.append(r".*(_mod_).*")
+    # Exclude modulation layers by default.
+    #
+    # Qwen-Image blocks contain `img_mod` / `txt_mod` linears that strongly affect conditioning.
+    # Excluding them is often fine for style LoRAs, but for persona LoRAs it can make identity
+    # adaptation much weaker.
+    #
+    # Override with `exclude_mod=False` in `network_args` to include mod layers.
+    exclude_mod = kwargs.get("exclude_mod", True)
+    if isinstance(exclude_mod, str):
+        exclude_mod = ast.literal_eval(exclude_mod)
+    if exclude_mod:
+        exclude_patterns.append(r".*(_mod_).*")
 
     kwargs["exclude_patterns"] = exclude_patterns
 
