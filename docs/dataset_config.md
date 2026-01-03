@@ -34,12 +34,12 @@ caption_extension = ".txt"
 batch_size = 1
 enable_bucket = true
 bucket_no_upscale = false
-# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training.
 
 [[datasets]]
 image_directory = "/path/to/image_dir"
 cache_directory = "/path/to/cache_directory"
 num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset. Useful to balance the multiple datasets with different sizes.
+# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training.
 
 # other datasets can be added here. each dataset can have different configurations
 ```
@@ -98,12 +98,12 @@ resolution = [960, 544]
 batch_size = 1
 enable_bucket = true
 bucket_no_upscale = false
-# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training. 
 
 [[datasets]]
 image_jsonl_file = "/path/to/metadata.jsonl"
 cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
 num_repeats = 1 # optional, default is 1. Same as above.
+# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training. 
 
 # other datasets can be added here. each dataset can have different configurations
 ```
