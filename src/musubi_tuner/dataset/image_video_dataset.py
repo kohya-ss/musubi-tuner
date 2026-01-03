@@ -1234,14 +1234,15 @@ class ImageJsonlDatasource(ImageDatasource):
         image_paths = [image_path]
         if self.multiple_target:
             # load multiple-target images
-            image_base, image_ext = os.path.splitext(image_path)
             while True:
                 next_index = len(image_paths)  # start from 1
-                next_image_path = f"{image_base}_{next_index}{image_ext}"
-                if os.path.exists(next_image_path):
-                    image_paths.append(next_image_path)
-                else:
+                next_image_path = data.get("image_path_" + str(next_index), None)
+                if next_image_path is None:
                     break
+                if not os.path.exists(next_image_path):
+                    raise ValueError(f"multiple-target image not found: {next_image_path}")
+
+                image_paths.append(next_image_path)
 
         images = []
         for path in image_paths:
@@ -1268,7 +1269,7 @@ class ImageJsonlDatasource(ImageDatasource):
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]
-        image_path = data["image_path"]
+        image_path = data.get("image_path", data.get("image_path_0"))
         caption = data["caption"]
         return image_path, caption
 
