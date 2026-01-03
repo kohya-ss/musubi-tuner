@@ -377,6 +377,7 @@ class NetworkTrainer:
         self.blocks_to_swap = None
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
+        self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1145,7 +1146,8 @@ class NetworkTrainer:
         width = (width // 8) * 8
         height = (height // 8) * 8
 
-        frame_count = (frame_count - 1) // 4 * 4 + 1  # 1, 5, 9, 13, ... For HunyuanVideo and Wan2.1
+        # 1, 5, 9, 13, ... For HunyuanVideo and Wan2.1
+        frame_count = (frame_count - 1) // self.vae_frame_stride * self.vae_frame_stride + 1
 
         if self.i2v_training:
             image_path = sample_parameter.get("image_path", None)
@@ -1252,7 +1254,8 @@ class NetworkTrainer:
             wandb = None
 
         if video.shape[2] == 1:
-            image_paths = save_images_grid(video, save_dir, save_path, create_subdir=False)
+            # In Qwen-Image-Layered, video is (N, C, 1, H, W) where N=Layers, otherwise (1, C, 1, H, W)
+            image_paths = save_images_grid(video, save_dir, save_path, n_rows=video.shape[0], create_subdir=False)
             if wandb_tracker is not None and wandb is not None:
                 for image_path in image_paths:
                     wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)

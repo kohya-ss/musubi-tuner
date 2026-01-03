@@ -2,9 +2,9 @@
 
 ## Overview / 概要
 
-This document describes the usage of the Qwen-Image and Qwen-Image-Edit/Edit-2509/Edit-2511 architecture within the Musubi Tuner framework. Qwen-Image is a text-to-image generation model that supports standard text-to-image generation, and Qwen-Image-Edit is a model that supports image editing with control images.
+This document describes the usage of the Qwen-Image and Qwen-Image-Edit/Edit-2509/Edit-2511/Layered architecture within the Musubi Tuner framework. Qwen-Image is a text-to-image generation model that supports standard text-to-image generation, and Qwen-Image-Edit is a model that supports image editing with control images, Layered is a model that supports image layer segmentation.
 
-Qwen-Image-Edit-2509 can use multiple control images simultaneously. While the official version supports up to 3 images, Musubi Tuner allows specifying any number of images (though correct operation is confirmed only up to 3). Additionally, the sizes of the control images can differ (both during training and inference).
+Qwen-Image-Edit-2509/2511 can use multiple control images simultaneously. While the official version supports up to 3 images, Musubi Tuner allows specifying any number of images (though correct operation is confirmed only up to 3). Additionally, the sizes of the control images can differ (both during training and inference).
 
 This feature is experimental.
 
@@ -13,9 +13,9 @@ Latent pre-caching, training, and inference options can be found in the `--help`
 <details>
 <summary>日本語</summary>
 
-このドキュメントは、Musubi Tunerフレームワーク内でのQwen-Image、Qwen-Image-Edit/Edit-2509/Edit-2511アーキテクチャの使用法について説明しています。Qwen-Imageは標準的なテキストから画像生成モデルで、Qwen-Image-Editは制御画像を使った画像編集をサポートするモデルです。
+このドキュメントは、Musubi Tunerフレームワーク内でのQwen-Image、Qwen-Image-Edit/Edit-2509/Edit-2511/Layeredアーキテクチャの使用法について説明しています。Qwen-Imageは標準的なテキストから画像生成モデルで、Qwen-Image-Editは制御画像を使った画像編集をサポートするモデル、Layeredは画像のレイヤー分割をサポートするモデルです。
 
-Qwen-Image-Edit-2509は、複数枚の制御画像を同時に使用できます。公式では3枚までですが、Musubi Tunerでは任意の枚数を指定できます（正しく動作するのは3枚までです）。またそれぞれの制御画像のサイズは異なっていても問題ありません（学習時、推論時とも）。
+Qwen-Image-Edit-2509/2511は、複数枚の制御画像を同時に使用できます。公式では3枚までですが、Musubi Tunerでは任意の枚数を指定できます（正しく動作するのは3枚までです）。またそれぞれの制御画像のサイズは異なっていても問題ありません（学習時、推論時とも）。
 
 この機能は実験的なものです。
 
@@ -33,7 +33,11 @@ Official weights from [Qwen's official weights](https://huggingface.co/Qwen) can
 
 - **VAE**: For VAE, download `split_files/vae/qwen_image_vae.safetensors` similarly from https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI. ComfyUI's VAE weights are also now usable.
 
-- **Qwen-Image-Edit DiT**: For Qwen-Image-Edit DiT, download `split_files/diffusion_models/qwen_image_edit_bf16.safetensors`, or for Edit-2509, download `split_files/diffusion_models/qwen_image_edit_2509_bf16.safetensors` from https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI. **fp8_e4m3fn cannot be used.** Text Encoder and VAE are same as Qwen-Image.
+- **Qwen-Image-Edit DiT**: For Qwen-Image-Edit DiT, download `split_files/diffusion_models/qwen_image_edit_bf16.safetensors`, or for Edit-2509, download `split_files/diffusion_models/qwen_image_edit_2509_bf16.safetensors`, and for Edit-2511, download similar from https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI. **fp8_e4m3fn cannot be used.** Text Encoder and VAE are same as Qwen-Image.
+
+- **Qwen-Image-Layered VAE**: For Qwen-Image-Layered VAE, download `split_files/vae/qwen_image_layered_vae.safetensors` from https://huggingface.co/Comfy-Org/Qwen-Image-Layered_ComfyUI.
+
+- **Qwen-Image-Layered DiT**: For Qwen-Image-Layered DiT, download `split_files/diffusion_models/qwen_image_layered_bf16.safetensors` from https://huggingface.co/Comfy-Org/Qwen-Image-Layered_ComfyUI. **fp8mixed cannot be used.** Text Encoder is same as Qwen-Image.
 
 Thanks to Comfy-Org for releasing these weights.
 
@@ -57,19 +61,26 @@ DiT、Text Encoder、VAEのそれぞれに、[Qwenの公式の重み](https://hu
 
 **fp8_scaled and fp8_e4m3fn versions cannot be used.**
 
-**Download from https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI:**
+**Download from https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI :**
 |type|model|file|
 |----|--------|--------------|
 |DiT|Qwen-Image (no edit)|`split_files/diffusion_models/qwen_image_bf16.safetensors`|
 |Text Encoder|Qwen2.5-VL|`split_files/text_encoders/qwen_2.5_vl_7b.safetensors`|
 |VAE|Qwen-Image VAE|`split_files/vae/qwen_image_vae.safetensors`|
 
-**Download from https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI:**
+**Download from https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI :**
 |type|model|file|
 |----|--------|--------------|
 |DiT|Qwen-Image-Edit|`split_files/diffusion_models/qwen_image_edit_bf16.safetensors`|
 |DiT|Qwen-Image-Edit-2509|`split_files/diffusion_models/qwen_image_edit_2509_bf16.safetensors`|
 |DiT|Qwen-Image-Edit-2511|`split_files/diffusion_models/qwen_image_edit_2511_bf16.safetensors`|
+
+**Download from https://huggingface.co/Comfy-Org/Qwen-Image-Layered_ComfyUI :**
+|type|model|file|
+|----|--------|--------------|
+|VAE|Qwen-Image-Layered VAE|`split_files/vae/qwen_image_layered_vae.safetensors`|
+|DiT|Qwen-Image-Layered|`split_files/diffusion_models/qwen_image_layered_bf16.safetensors`|
+
 
 ## Specifying Model Version / モデルバージョンの指定
 
@@ -80,6 +91,7 @@ When specifying the model version in various scripts, use the following options:
 |Qwen-Image-Edit|`--model_version edit`| |
 |Qwen-Image-Edit-2509|`--model_version edit-2509`| |
 |Qwen-Image-Edit-2511|`--model_version edit-2511`| |
+|Qwen-Image-Layered|`--model_version layered`| |
 
 Note that the `--edit` (for Qwen-Image-Edit) and `--edit_plus` (for Qwen-Image-Edit-2509) flags are also available for backward compatibility.
 
@@ -96,6 +108,9 @@ Note that the `--edit` (for Qwen-Image-Edit) and `--edit_plus` (for Qwen-Image-E
 
 If you are using Qwen-Image-Edit or Edit-2509/2511, please also refer to the [Qwen-Image-Edit section](./dataset_config.md#qwen-image-edit-and-qwen-image-edit-2509) of the dataset config documentation.
 
+If you are using Qwen-Image-Layered, note the following: Since the Qwen-Image-Layered dataset contains multiple target images, please specify `multiple_target=true` in the dataset config. For details, refer to the [dataset config document](./dataset_config.md#sample-for-image-dataset-with-caption-text-files).
+
+
 ### Latent Pre-caching / latentの事前キャッシング
 
 Latent pre-caching uses a dedicated script for Qwen-Image.
@@ -109,20 +124,24 @@ python src/musubi_tuner/qwen_image_cache_latents.py \
 
 - Uses `qwen_image_cache_latents.py`.
 - The `--vae` argument is required.
-- Use the `--model_version` option for Qwen-Image-Edit training.
+- Use the `--model_version` option for Qwen-Image-Edit/Layered training.
 - For Qwen-Image-Edit training, control images specified in the dataset config will also be cached as latents.
+- For Qwen-Image-Layered training, multiple target images will be cached as latents
 
 <details>
 <summary>日本語</summary>
 
 Qwen-Image-EditまたはEdit-2509/2511を使用する場合は、事前にデータセット設定のドキュメントの[Qwen-Image-Editのセクション](./dataset_config.md#qwen-image-edit-and-qwen-image-edit-2509) も参照してください。
 
+Qwen-Image-Layeredを使用する場合は、以下に注意してください。Qwen-Image-Layeredのデータセットには複数枚のターゲット画像が含まれるため、データセット設定で`multiple_target=true`を指定してください。詳細は[データセット設定ドキュメント](./dataset_config.md#sample-for-image-dataset-with-caption-text-files)を参照してください。
+
 latentの事前キャッシングはQwen-Image専用のスクリプトを使用します。
 
 - `qwen_image_cache_latents.py`を使用します。
 - `--vae`引数を指定してください。
 - Qwen-Image-Editの学習には`--model_version`オプションを適切に指定してください。
-- Qwen-Image-Editの学習では、データセット設定で指定されたコントロール画像もlatentsとしてキャッシュされます。
+- Qwen-Image-Editの学習では、データセット設定で指定されたコントロール画像もlatentsとしてキャッシュされます
+- Layeredの学習では、複数のターゲット画像がlatentsとしてキャッシュされます。
 
 </details>
 
@@ -201,10 +220,18 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     ...
 ```
 
+**Qwen-Image-Layered Training:**
+
+For training Qwen-Image-Layered models with layered control images, add the `--model_version layered` option. 
+
+---
+
+Common notes for Qwen-Image/Qwen-Image-Edit/Layered training:
+
 - Uses `qwen_image_train_network.py`.
 - **Requires** specifying `--dit`, `--vae`, and `--text_encoder`.
 - `--mixed_precision bf16` is recommended for Qwen-Image training.
-- Use the `--model_version` option for Qwen-Image-Edit, Edit-2509, or Edit-2511 training with control images.
+- Use the `--model_version` option for Qwen-Image-Edit, Edit-2509, or Edit-2511 training with control images, or for Qwen-Image-Layered training with multiple target images.
 - Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT), and `--fp8_vl` (for Text Encoder) are available. 
 -  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 - `--disable_numpy_memmap`: Disables numpy memory mapping for model loading, loading with standard file read. Increases RAM usage but significantly speeds up model loading in some cases.
@@ -222,6 +249,12 @@ If you specify `--split_attn`, the attention computation will be split, slightly
 Don't forget to specify `--network_module networks.lora_qwen_image`.
 
 The appropriate settings for each parameter are unknown. Feedback is welcome.
+
+**About Qwen-Image-Layered Training**
+
+Note that VAE is different for this architecture. Please use the VAE model for Qwen-Image-Layered.
+
+For sample image generation during Qwen-Image-Layered training, please refer to [this document](./sampling_during_training.md#sample-image-generation-during-qwen-image-layered-training--qwen-image-layeredの学習中のサンプルイメージ生成).
 
 ### VRAM Usage Estimates with Memory Saving Options
 
@@ -245,12 +278,14 @@ Qwen-Image-Edit training requires additional memory for the control images.
 <details>
 <summary>日本語</summary>
 
-Qwen-Imageの学習は専用のスクリプト`qwen_image_train_network.py`を使用します。
+Qwen-Imageの学習は専用のスクリプト`qwen_image_train_network.py`を使用します。コマンドライン例は英語版を参照してください。
+
+Qwen-Image/Edit/Layered学習に共通の注意点:
 
 - `qwen_image_train_network.py`を使用します。
 - `--dit`、`--vae`、`--text_encoder`を指定する必要があります。
 - Qwen-Imageの学習には`--mixed_precision bf16`を推奨します。
-- コントロール画像を使ったQwen-Image-Edit/Edit-2509/Edit-2511の学習には、`--model_version`オプションを適切に指定してください。
+- コントロール画像を使ったQwen-Image-Edit/Edit-2509/Edit-2511の学習、複数ターゲット画像を使ったQwen-Image-Layeredの学習には、`--model_version`オプションを適切に指定してください。
 - `--fp8_base`や`--fp8_scaled`（DiT用）、`--fp8_vl`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
 - `--disable_numpy_memmap`: モデル読み込み時のnumpyメモリマッピングを無効化し、標準のファイル読み込みで読み込みを行います。RAM使用量は増加しますが、場合によってはモデルの読み込みが大幅に高速化されます。もしモデルの重みの読み込み時間が遅い場合は、このオプションが役立つかもしれません。
@@ -268,6 +303,12 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 `--network_module networks.lora_qwen_image`を指定することを忘れないでください。
 
 それぞれのパラメータの適切な設定は不明です。フィードバックをお待ちしています。
+
+**Qwen-Image-Layeredの学習について**
+
+このアーキテクチャではVAEが異なることに注意してください。Qwen-Image-Layered用のVAEモデルを使用してください。
+
+Qwen-Image-Layeredにおける学習中のサンプル画像生成については、[こちらのドキュメント](./sampling_during_training.md#sample-image-generation-during-qwen-image-layered-training--qwen-image-layeredの学習中のサンプルイメージ生成)を参照してください。
 
 ### メモリ節約オプションを使用した場合のVRAM使用量の目安
 
@@ -396,8 +437,6 @@ python src/musubi_tuner/qwen_image_generate_image.py \
 
 **Qwen-Image-Edit Inference:**
 
-
-
 ```bash
 python src/musubi_tuner/qwen_image_generate_image.py \
     --dit path/to/edit_dit_model \
@@ -410,18 +449,28 @@ python src/musubi_tuner/qwen_image_generate_image.py \
     ...
 ```
 
+**Qwen-Image-Layered Inference:**
+
+Please specify `--model_version layered` for Qwen-Image-Layered inference. Note that VAE is different for this architecture. Please use the VAE model for Qwen-Image-Layered.
+
+---
+
 - Uses `qwen_image_generate_image.py`.
 - **Requires** specifying `--dit`, `--vae`, and `--text_encoder`.
 - `--image_size` is the size of the generated image, height and width are specified in that order.
 - `--prompt`: Prompt for generation.
 - `--guidance_scale` controls the classifier-free guidance scale.
 - For Qwen-Image-Edit:
-  - Use the `--model_version` option to specify the version for image editing mode. For example, `--model_version edit-2511`.
-  - `--control_image_path`: Path to the control (reference) image for editing. Edit-2509 also supports multiple arguments (e.g., `--control_image_path img1.png img2.png img3.png`).
-  - `--resize_control_to_image_size`: Resize control image to match the specified image size.
-  - `--resize_control_to_official_size`: Resize control image to official size (1M pixels keeping aspect ratio). **Recommended for better results.** (Mandatory for 2511)
-  - Above two options are mutually exclusive. If both are not specified, the control image will be used at its original resolution.
-  - `--append_original_name`: When saving edited images, appends the original base name of the control image to the output file name.
+    - Use the `--model_version` option to specify the version for image editing mode. For example, `--model_version edit-2511` or `--model_version layered`.
+    - `--control_image_path`: Path to the control (reference) image for editing. Edit-2509 also supports multiple arguments (e.g., `--control_image_path img1.png img2.png img3.png`).
+    - `--resize_control_to_image_size`: Resize control image to match the specified image size. 
+    - `--resize_control_to_official_size`: Resize control image to official size (1M pixels keeping aspect ratio). **Recommended for better results with Edit models.** (Mandatory for 2511)
+    - Above two options are mutually exclusive. If both are not specified, the control image will be used at its original resolution.
+    - `--append_original_name`: When saving edited images, appends the original base name of the control image to the output file name.
+- For Qwen-Image-Layered:
+    - Specify the image to be layered in `--control_image_path`.
+    - Specify the number of layers to output in `--output_layers`. (Since Qwen-Image-Layered also generates the original image, the specified number + 1 will be generated.)
+    - `--resize_control_to_image_size`: Resize control image to match the specified image size. **Recommended for better results with Layered models.**
 - Memory saving options like `--fp8_scaled` (for DiT) are available.
 - `--text_encoder_cpu` enables CPU inference for the text encoder. Recommended for systems with limited GPU resources (less than 16GB VRAM).
 - LoRA loading options (`--lora_weight`, `--lora_multiplier`) are available.
@@ -441,11 +490,16 @@ Qwen-Imageの推論は専用のスクリプト`qwen_image_generate_image.py`を�
 - `--prompt`: 生成用のプロンプトです。
 - `--guidance_scale`は、classifier-freeガイダンスのスケールを制御します。
 - Qwen-Image-Editの場合：
-  - 画像編集モードを有効にするために`--model_version`オプションを適切に指定してください。
-  - `--control_image_path`: 編集用のコントロール（参照）画像へのパスです。 Edit-2509では複数の引数もサポートしています（例: `--control_image_path img1.png img2.png img3.png`）。
-  - `--resize_control_to_image_size`: コントロール画像を指定した画像サイズに合わせてリサイズします。
-  - `--resize_control_to_official_size`: コントロール画像を公式サイズ（アスペクト比を保ちながら100万ピクセル）にリサイズします。指定を推奨します（特に2511では必須）。
-  - 上記2つのオプションは同時に指定できません。両方とも指定しない場合、制御画像はそのままの解像度で使用されます。
+    - 画像編集モードを有効にするために`--model_version`オプションを適切に指定してください。
+    - `--control_image_path`: 編集用のコントロール（参照）画像へのパスです。 Edit-2509では複数の引数もサポートしています（例: `--control_image_path img1.png img2.png img3.png`）。
+    - `--resize_control_to_image_size`: コントロール画像を指定した画像サイズに合わせてリサイズします。
+    - `--resize_control_to_official_size`: コントロール画像を公式サイズ（アスペクト比を保ちながら100万ピクセル）にリサイズします。指定を推奨します（特に2511では必須）。
+    - 上記2つのオプションは同時に指定できません。両方とも指定しない場合、制御画像はそのままの解像度で使用されます。
+    - `--append_original_name`: 編集された画像を保存する際に、コントロール画像の元の基本名を出力ファイル名に追加します。
+- Qwen-Image-Layeredの場合：
+    - `--control_image_path`に、分割対象の画像を指定してください。
+    - `--output_layers`に出力するレイヤー数を指定してください。（Qwen-Image-Layeredは元画像も生成するため、指定した数＋1が生成されます。）
+    - `--resize_control_to_image_size`: コントロール画像を指定した画像サイズに合わせてリサイズします。Layeredモデルでより良い結果を得るために推奨されます。
 - DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。
 - `--text_encoder_cpu`を指定するとテキストエンコーダーをCPUで推論します。GPUのVRAMが16GB未満のシステムでは、CPU推論を推奨します。
 - LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`）が利用可能です。

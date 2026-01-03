@@ -92,7 +92,13 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # create model
         model = qwen_image_model.create_model(
-            attn_mode, split_attn, args.model_version == "edit-2511", dit_weight_dtype, num_layers=total_num_blocks
+            attn_mode,
+            split_attn,
+            args.model_version == "edit-2511",
+            args.is_layered,
+            args.is_layered,
+            dit_weight_dtype,
+            num_layers=total_num_blocks,
         )
 
         # load weights from disk

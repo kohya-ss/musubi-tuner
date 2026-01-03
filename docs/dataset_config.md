@@ -39,16 +39,31 @@ bucket_no_upscale = false
 image_directory = "/path/to/image_dir"
 cache_directory = "/path/to/cache_directory"
 num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset. Useful to balance the multiple datasets with different sizes.
+# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training.
 
 # other datasets can be added here. each dataset can have different configurations
 ```
+
+`image_directory` is the directory containing images. The captions are stored in text files with the same filename as the image, but with the extension specified by `caption_extension` (for example, `image1.jpg` and `image1.txt`).
 
 `cache_directory` is optional, default is None to use the same directory as the image directory. However, we recommend to set the cache directory to avoid accidental sharing of the cache files between different datasets.
 
 `num_repeats` is also available. It is optional, default is 1 (no repeat). It repeats the images (or videos) that many times to expand the dataset. For example, if `num_repeats = 2` and there are 20 images in the dataset, each image will be duplicated twice (with the same caption) to have a total of 40 images. It is useful to balance the multiple datasets with different sizes.
 
+For Qwen-Image-Layered training, set `multiple_target = true`. Also, in the `image_directory`, for each "image to be trained + segmentation (layer) results" combination, store the following (if `caption_extension` is `.txt`):
+
+|Item|Example|Note|
+|---|---|---|
+|Caption file|`image1.txt`| |
+|Image to be trained (image to be layered)|`image1.png`| |
+|Segmentation (layer) result images|`image1_1.png`, `image1_2.png`, ...|Alpha channel required|
+
+The next combination would be stored as `/path/to/layer_images/image2.txt` for caption, and `/path/to/layer_images/image2.png`, `/path/to/layer_images/image2_0.png`, `/path/to/layer_images/image2_1.png` for images.
+
 <details>
 <summary>日本語</summary>
+
+`image_directory`は画像を含むディレクトリのパスです。キャプションは、画像と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`image1.jpg`と`image1.txt`）。
 
 `cache_directory` はオプションです。デフォルトは画像ディレクトリと同じディレクトリに設定されます。ただし、異なるデータセット間でキャッシュファイルが共有されるのを防ぐために、明示的に別のキャッシュディレクトリを設定することをお勧めします。
 
@@ -57,6 +72,17 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale は general または datasets のどちらかに設定してください。省略時は各項目のデフォルト値が使用されます。
 
 `[[datasets]]`以下を追加することで、他のデータセットを追加できます。各データセットには異なる設定を持てます。
+
+Qwen-Image-Layeredの学習の場合、`multiple_target = true`を設定してください。また、`image_directory`内に、それぞれの「学習する画像＋分割結果」組み合わせごとに、以下を格納してください（`caption_extension`が`.txt`の場合）。
+
+|項目|例|備考|
+|---|---|---|
+|キャプションファイル|`image1.txt`| |
+|学習する画像（分割対象の画像）|`image1.png`| |
+|分割結果のレイヤー画像群|`image1_1.png`, `image1_2.png`, ...|アルファチャンネル必須|
+
+次の組み合わせは、`/path/to/layer_images/image2.txt`に対して、`/path/to/layer_images/image2.png`, `/path/to/layer_images/image2_0.png`, `/path/to/layer_images/image2_1.png`のように格納します。
+
 </details>
 
 ### Sample for Image Dataset with Metadata JSONL File
@@ -77,6 +103,7 @@ bucket_no_upscale = false
 image_jsonl_file = "/path/to/metadata.jsonl"
 cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
 num_repeats = 1 # optional, default is 1. Same as above.
+# multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training. 
 
 # other datasets can be added here. each dataset can have different configurations
 ```
@@ -88,6 +115,13 @@ JSONL file format for metadata:
 {"image_path": "/path/to/image2.jpg", "caption": "A caption for image2"}
 ```
 
+For Qwen-Image-Layered training, set `multiple_target = true`. Also, in the metadata JSONL file, for each "image to be trained + segmentation (layer) results" combination, specify the image paths with numbered attributes like `image_path_0`, `image_path_1`, etc.
+
+```json
+{"image_path_0": "/path/to/image1_base.png", "image_path_1": "/path/to/image1_layer1.png", "image_path_2": "/path/to/image1_layer2.png", "caption": "A caption for image1"}
+{"image_path_0": "/path/to/image2_base.png", "image_path_1": "/path/to/image2_layer1.png", "image_path_2": "/path/to/image2_layer2.png", "caption": "A caption for image2"}
+```
+
 <details>
 <summary>日本語</summary>
 
@@ -96,6 +130,9 @@ resolution, batch_size, num_repeats, enable_bucket, bucket_no_upscale は genera
 metadata jsonl ファイルを使用する場合、caption_extension は必要ありません。また、cache_directory は必須です。
 
 キャプションによるデータセットと同様に、複数のデータセットを追加できます。各データセットには異なる設定を持てます。
+
+Qwen-Image-Layeredの学習の場合、`multiple_target = true`を設定してください。また、metadata jsonl ファイル内で、各画像に対して複数のターゲット画像を指定する場合は、`image_path_0`, `image_path_1`のように数字を付与してください。
+
 </details>
 
 
@@ -131,6 +168,8 @@ max_frames = 45
 # other datasets can be added here. each dataset can have different configurations
 ```
 
+`video_directory` is the directory containing videos. The captions are stored in text files with the same filename as the video, but with the extension specified by `caption_extension` (for example, `video1.mp4` and `video1.txt`).
+
 __In HunyuanVideo and Wan2.1, the number of `target_frames` must be "N\*4+1" (N=0,1,2,...).__ Otherwise, it will be truncated to the nearest "N*4+1".
 
 In FramePack, it is recommended to set `frame_extraction` to `full` and `max_frames` to a sufficiently large value, as it can handle longer videos. However, if the video is too long, an Out of Memory error may occur during VAE encoding. The videos in FramePack are trimmed to "N * latent_window_size * 4 + 1" frames (for example, 37, 73, 109... if `latent_window_size` is 9).
@@ -144,6 +183,8 @@ If `source_fps` is not specified (default), all frames of the video will be used
 
 共通パラメータ（resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale）は、generalまたはdatasetsのいずれかに設定できます。
 動画固有のパラメータ（target_frames, frame_extraction, frame_stride, frame_sample, max_frames, source_fps）は、各datasetsセクションに設定する必要があります。
+
+`video_directory`は動画を含むディレクトリのパスです。キャプションは、動画と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`video1.mp4`と`video1.txt`）。
 
 __HunyuanVideoおよびWan2.1では、target_framesの数値は「N\*4+1」である必要があります。__ これ以外の値の場合は、最も近いN\*4+1の値に切り捨てられます。
 
