@@ -496,9 +496,9 @@ FLUX.1 Kontextのデータセット設定は、制御画像を持つ画像デー
 
 </details>
 
-### Qwen-Image-Edit and Qwen-Image-Edit-2509
+### Qwen-Image-Edit and Qwen-Image-Edit-2509/2511
 
-The Qwen-Image-Edit dataset configuration uses an image dataset with control images. However, only one control image can be used for the standard model (not `2509`).
+The Qwen-Image-Edit dataset configuration uses an image dataset with control images. However, only one control image can be used for the standard model (not `2509` or `2511`).
 
 By default, the control image is resized to the same resolution (and aspect ratio) as the image.
 
@@ -527,7 +527,7 @@ When this option is specified, the control image is resized to a resolution to h
 <details>
 <summary>日本語</summary>
 
-Qwen-Image-Editのデータセット設定は、制御画像を持つ画像データセットを使用します。複数枚の制御画像も使用可能ですが、無印（`2509`でない）モデルでは1枚のみ使用可能です。
+Qwen-Image-Editのデータセット設定は、制御画像を持つ画像データセットを使用します。複数枚の制御画像も使用可能ですが、無印（`2509`または`2511`でない）モデルでは1枚のみ使用可能です。
 
 デフォルトでは、制御画像は画像と同じ解像度（およびアスペクト比）にリサイズされます。
 

@@ -13,11 +13,11 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from safetensors.torch import save_file
 
-from musubi_tuner import qwen_image_train_network
+from musubi_tuner import zimage_train_network
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
-from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
+from musubi_tuner.zimage import zimage_model
 from musubi_tuner.hv_train_network import (
     SS_METADATA_KEY_BASE_MODEL_VERSION,
     SS_METADATA_MINIMUM_KEYS,
@@ -32,16 +32,15 @@ from musubi_tuner.hv_train_network import (
 )
 import logging
 
-from musubi_tuner.qwen_image_train_network import QwenImageNetworkTrainer
+from musubi_tuner.zimage_train_network import ZImageNetworkTrainer
 from musubi_tuner.utils import huggingface_utils, model_utils, sai_model_spec, train_utils
-from musubi_tuner.utils.device_utils import synchronize_device
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors, mem_eff_save_file
+from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-class QwenImageTrainer(QwenImageNetworkTrainer):
+class ZImageTrainer(ZImageNetworkTrainer):
     def __init__(self):
         super().__init__()
 
@@ -60,76 +59,19 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        if "-00001-of-00" in dit_path:
-            logger.info("Pruned model detection is disabled because the weights are split into multiple files.")
-            model = qwen_image_model.load_qwen_image_model(
-                accelerator.device,
-                dit_path,
-                attn_mode,
-                split_attn,
-                args.model_version == "edit-2511",
-                loading_device,
-                dit_weight_dtype,
-                args.fp8_scaled,
-                disable_numpy_memmap=args.disable_numpy_memmap,
-            )
-            return model
-
-        # Pruned model with sparse index support
-        block_indices = set()
-        with MemoryEfficientSafeOpen(dit_path) as f:
-            for key in f.keys():
-                if key.startswith("transformer_blocks."):
-                    block_indices.add(int(key.split(".")[1]))
-
-        total_num_blocks = len(block_indices)
-        block_indices = sorted(list(block_indices))
-        block_index_map = None
-        if total_num_blocks != 60:
-            logger.info(f"Detected pruned DiT model with {total_num_blocks} blocks")
-            block_index_map = {block_indices[i]: i for i in range(total_num_blocks)}
-            logger.info(f"Block index map: {block_index_map}")
-
-        # create model
-        model = qwen_image_model.create_model(
-            attn_mode, split_attn, args.model_version == "edit-2511", dit_weight_dtype, num_layers=total_num_blocks
+        # Z-Image uses standard loading via load_zimage_model
+        # Pruned model support is not available for Z-Image currently
+        model = zimage_model.load_zimage_model(
+            device=loading_device,
+            dit_path=dit_path,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
+            loading_device=loading_device,
+            dit_weight_dtype=dit_weight_dtype,
+            fp8_scaled=args.fp8_scaled,
+            disable_numpy_memmap=args.disable_numpy_memmap,
+            use_16bit_for_attention=not args.use_32bit_attention,
         )
-
-        # load weights from disk
-        logger.info(f"Loading weights from {dit_path}")
-        if block_index_map is None:
-            # uses official safetensors loader
-            state_dict = load_safetensors(
-                dit_path,
-                device=loading_device,
-                disable_mmap=True,
-                dtype=dit_weight_dtype,
-                disable_numpy_memmap=args.disable_numpy_memmap,
-            )
-        else:
-            loading_device = torch.device(loading_device) if loading_device is not None else None
-            state_dict = {}
-            with MemoryEfficientSafeOpen(dit_path, disable_numpy_memmap=args.disable_numpy_memmap) as f:
-                for key in f.keys():
-                    state_dict_key = key
-                    if key.startswith("transformer_blocks."):
-                        block_index = int(key.split(".")[1])
-                        new_block_index = block_index_map[block_index]
-                        state_dict_key = key.replace(f"transformer_blocks.{block_index}.", f"transformer_blocks.{new_block_index}.")
-
-                    state_dict[state_dict_key] = f.get_tensor(key, device=loading_device, dtype=dit_weight_dtype)
-            synchronize_device(loading_device)
-
-        # Add after line 121 (after synchronize_device)
-        if "__index_timestep_zero__" in state_dict:  # ComfyUI flag for edit-2511
-            assert args.model_version == "edit-2511", (
-                "Found __index_timestep_zero__ in state_dict, the model must be '2511' variant. Use --model_version edit-2511"
-            )
-            state_dict.pop("__index_timestep_zero__")
-
-        info = model.load_state_dict(state_dict, strict=True, assign=True)
-        logger.info(f"Loaded DiT model from {dit_path}, info={info}")
-
         return model
 
     # endregion model specific
@@ -160,7 +102,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         # check model specific arguments
         self.handle_model_specific_args(args)
 
-        # QwenImageNetworkTrainer forces dit_dtype to bfloat16, so we set it here
+        # ZImageNetrworkTrainer set args.dit_dtype as mixed precision, override it here to support float32/bfloat16 (full_bf16)
         args.dit_dtype = "bfloat16" if args.full_bf16 else "float32"
 
         # show timesteps for debugging
@@ -170,7 +112,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
-        # setup_logging(args, reset=True)
 
         if args.seed is None:
             args.seed = random.randint(0, 2**32)
@@ -209,11 +150,11 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         is_main_process = accelerator.is_main_process
 
         # prepare dtype
-        dit_dtype = model_utils.str_to_dtype(args.dit_dtype)  # bfloat16 (mixed precision) or float32
+        dit_dtype = model_utils.str_to_dtype(args.dit_dtype)
         logger.info(f"DiT precision: {dit_dtype}")
 
         # get embedding for sampling images
-        vae_dtype = torch.float16 if args.vae_dtype is None else model_utils.str_to_dtype(args.vae_dtype)
+        vae_dtype = torch.float32  # Z-Image VAE is always float32
         sample_parameters = None
         vae = None
         if args.sample_prompts:
@@ -273,7 +214,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         accelerator.print(f"number of trainable parameters: {n_params}")
 
-        # trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, params_to_optimize
         )
@@ -311,13 +251,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # experimental feature: train the model with parameters in fp16/bf16
         args.full_fp16 = False
-        # if args.full_fp16:
-        #     assert (
-        #         args.mixed_precision == "fp16"
-        #     ), "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
-        #     accelerator.print("enable full fp16 training.")
-        #     network_dtype = weight_dtype
-        #     network.to(network_dtype)
         if args.full_bf16:
             assert args.mixed_precision == "bf16", (
                 "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
@@ -340,7 +273,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         if args.full_fp16:
             # patch accelerator for fp16 training
-            # def patch_accelerator_for_fp16_training(accelerator):
             org_unscale_grads = accelerator.scaler._unscale_grads_
 
             def _unscale_grads_replacer(optimizer, inv_scale, found_inf, allow_fp16):
@@ -377,9 +309,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-        # 学習する
-        # total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
         accelerator.print("running training / 学習開始")
         accelerator.print(f"  num train items / 学習画像、動画数: {train_dataset_group.num_train_items}")
         accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
@@ -387,7 +316,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         accelerator.print(
             f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
         )
-        # accelerator.print(f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}")
         accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
         accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
 
@@ -407,15 +335,12 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             "ss_lr_warmup_steps": args.lr_warmup_steps,
             "ss_lr_scheduler": args.lr_scheduler,
             SS_METADATA_KEY_BASE_MODEL_VERSION: self.architecture_full_name,
-            # "ss_network_dropout": args.network_dropout,  # some networks may not have dropout
             "ss_mixed_precision": args.mixed_precision,
             "ss_seed": args.seed,
             "ss_training_comment": args.training_comment,  # will not be updated after training
-            # "ss_sd_scripts_commit_hash": train_util.get_git_revision_hash(),
             "ss_optimizer": optimizer_name + (f"({optimizer_args})" if len(optimizer_args) > 0 else ""),
             "ss_max_grad_norm": args.max_grad_norm,
             "ss_fp8_base": bool(args.fp8_base),
-            # "ss_fp8_llm": bool(args.fp8_llm), # remove this because this is only for HuanyuanVideo TODO set architecure dependent metadata
             "ss_full_fp16": bool(args.full_fp16),
             "ss_full_bf16": bool(args.full_bf16),
             "ss_weighting_scheme": args.weighting_scheme,
@@ -429,7 +354,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         }
 
         datasets_metadata = []
-        # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
         for dataset in train_dataset_group.datasets:
             dataset_metadata = dataset.get_metadata()
             datasets_metadata.append(dataset_metadata)
@@ -437,24 +361,17 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         metadata["ss_datasets"] = json.dumps(datasets_metadata)
 
         # model name and hash
-        # calculate hash takes time, so we omit it for now
         if args.dit is not None:
-            # logger.info(f"calculate hash for DiT model: {args.dit}")
             logger.info(f"set DiT model name for metadata: {args.dit}")
             sd_model_name = args.dit
             if os.path.exists(sd_model_name):
-                # metadata["ss_sd_model_hash"] = model_utils.model_hash(sd_model_name)
-                # metadata["ss_new_sd_model_hash"] = model_utils.calculate_sha256(sd_model_name)
                 sd_model_name = os.path.basename(sd_model_name)
             metadata["ss_sd_model_name"] = sd_model_name
 
         if args.vae is not None:
-            # logger.info(f"calculate hash for VAE model: {args.vae}")
             logger.info(f"set VAE model name for metadata: {args.vae}")
             vae_name = args.vae
             if os.path.exists(vae_name):
-                # metadata["ss_vae_hash"] = model_utils.model_hash(vae_name)
-                # metadata["ss_new_vae_hash"] = model_utils.calculate_sha256(vae_name)
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
 
@@ -546,7 +463,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                     unwrapped_model._modules["_orig_mod"] = unwrapped_model
 
             # if model is compiled, get original model state dict
-            if "transformer_blocks.0._orig_mod.attn.add_k_proj.bias" in state_dict:
+            if any("_orig_mod." in k for k in state_dict.keys()):
                 logger.info("detected compiled model, getting original model state dict for saving")
                 state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
@@ -613,7 +530,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                     model_pred, target = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
                     )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target, reduction="none")
+                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
 
                     if weighting is not None:
                         loss = loss * weighting
@@ -634,12 +551,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                         # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook
                         lr_scheduler.step()
 
-                # if args.scale_weight_norms:
-                #     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(transformer).apply_max_norm_regularization(
-                #         args.scale_weight_norms, accelerator.device
-                #     )
-                #     max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
-                # else:
                 keys_scaled, mean_norm, maximum_norm = None, None, None
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
@@ -682,7 +593,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 current_loss = loss.detach().item()
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
-                logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                logs = {"avr_loss": avr_loss}
                 progress_bar.set_postfix(**logs)
 
                 if len(accelerator.trackers) > 0:
@@ -727,7 +638,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
             # end of epoch
 
-        # metadata["ss_epoch"] = str(num_train_epochs)
         metadata["ss_training_finished_at"] = str(time.time())
 
         if is_main_process:
@@ -753,9 +663,9 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             logger.info("model saved.")
 
 
-def qwen_image_finetune_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Qwen-Image fine-tuning specific parser setup"""
-    parser.add_argument("--full_bf16", action="store_true", help="Enable full bfloat16 training for Qwen-Image")
+def zimage_finetune_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Z-Image fine-tuning specific parser setup"""
+    parser.add_argument("--full_bf16", action="store_true", help="Enable full bfloat16 training for Z-Image")
     parser.add_argument("--fused_backward_pass", action="store_true", help="Use fused backward pass for Adafactor optimizer")
     parser.add_argument(
         "--mem_eff_save",
@@ -767,23 +677,21 @@ def qwen_image_finetune_setup_parser(parser: argparse.ArgumentParser) -> argpars
 
 def main():
     parser = setup_parser_common()
-    parser = qwen_image_train_network.qwen_image_setup_parser(parser)
-    parser = qwen_image_finetune_setup_parser(parser)
+    parser = zimage_train_network.zimage_setup_parser(parser)
+    parser = zimage_finetune_setup_parser(parser)
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    if args.vae_dtype is None:
-        args.vae_dtype = "bfloat16"  # make bfloat16 as default for VAE, this should be checked
+    if args.vae_dtype is not None:
+        logger.warning("vae_dtype is not used in Z-Image architecture (always float32)")
 
     if args.fp8_base or args.fp8_scaled:
         logger.warning("FP8 training is not supported for fine-tuning. Set --fp8-base or --fp8-scaled to False.")
         args.fp8_base = False
         args.fp8_scaled = False
 
-    qwen_image_utils.resolve_model_version_args(args)
-
-    trainer = QwenImageTrainer()
+    trainer = ZImageTrainer()
     trainer.train(args)
 
 

@@ -23,7 +23,7 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
 )
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS
+from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS, CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511
 
 import logging
 
@@ -53,10 +53,12 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         self._i2v_training = False
         self._control_training = False
         self.default_guidance_scale = 1.0  # not used
-        self.is_edit = args.edit or args.edit_plus
+        self.is_edit = args.is_edit
 
-        if args.metadata_arch is None and args.edit_plus:
+        if args.metadata_arch is None and args.model_version == "edit-2509":
             args.metadata_arch = CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS  # to notify Edit-Plus mode for sai_model_spec
+        elif args.metadata_arch is None and args.model_version == "edit-2511":
+            args.metadata_arch = CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511  # to notify Edit-2511 mode for sai_model_spec
 
     def process_sample_prompts(
         self,
@@ -73,7 +75,6 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
         tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(args.text_encoder, vl_dtype, device, disable_mmap=True)
         is_edit = self.is_edit
-        mode = None if not is_edit else ("edit" if args.edit else "edit-plus")
         vl_processor = qwen_image_utils.load_vl_processor() if is_edit else None
 
         # Encode with VLM
@@ -125,7 +126,11 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                         embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
                     else:
                         embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                            vl_processor, text_encoder, p, [control_image_nps[c] for c in control_image_paths], mode=mode
+                            vl_processor,
+                            text_encoder,
+                            p,
+                            [control_image_nps[c] for c in control_image_paths],
+                            model_version=args.model_version,
                         )
                     txt_len = mask.to(dtype=torch.bool).sum().item()  # length of the text in the batch
                     embed = embed[:, :txt_len]
@@ -333,16 +338,16 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        is_edit = self.is_edit
-        if is_edit and "edit" not in dit_path or not is_edit and "edit" in dit_path:
+        if self.is_edit and "edit" not in dit_path or not self.is_edit and "edit" in dit_path:
             logger.warning(
-                f"The provided DiT model {dit_path} may not match the training mode {'edit' if is_edit else 'text-to-image'}"
+                f"The provided DiT model {dit_path} may not match the training mode {'edit' if self.is_edit else 'text-to-image'}"
             )
         model = qwen_image_model.load_qwen_image_model(
             accelerator.device,
             dit_path,
             attn_mode,
             split_attn,
+            args.model_version == "edit-2511",
             loading_device,
             dit_weight_dtype,
             args.fp8_scaled,
@@ -488,8 +493,7 @@ def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder model")
     parser.add_argument("--num_layers", type=int, default=None, help="Number of layers in the DiT model, default is None (60)")
-    parser.add_argument("--edit", action="store_true", help="training for Qwen-Image-Edit")
-    parser.add_argument("--edit_plus", action="store_true", help="training for Qwen-Image-Edit-2509 (with multiple control images)")
+    qwen_image_utils.add_model_version_args(parser)
     return parser
 
 
@@ -503,6 +507,8 @@ def main():
     args.dit_dtype = "bfloat16"  # DiT dtype is bfloat16
     if args.vae_dtype is None:
         args.vae_dtype = "bfloat16"  # make bfloat16 as default for VAE, this should be checked
+
+    qwen_image_utils.resolve_model_version_args(args)
 
     trainer = QwenImageNetworkTrainer()
     trainer.train(args)

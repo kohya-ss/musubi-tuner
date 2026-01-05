@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import math
@@ -382,7 +383,7 @@ def get_qwen_prompt_embeds_with_image(
     vlm: Qwen2_5_VLForConditionalGeneration,
     prompt: Union[str, List[str]],
     image: Union[List[ImageInput], ImageInput] = None,
-    mode: str = "edit",
+    model_version: str = "edit",
 ):
     r"""
     Args:
@@ -390,12 +391,12 @@ def get_qwen_prompt_embeds_with_image(
             prompt to be encoded
         image (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`):
             image to be encoded
-        mode (`str`, *optional*, defaults to "edit"):
-            mode of the prompt, can be "edit" or "edit-plus"
+        model_version (`str`, *optional*, defaults to "edit"):
+            version of the prompt, can be "edit", "edit-2509" or "edit-2511"
     """
-    if mode == "edit":
+    if model_version == "edit":
         prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
-    elif mode == "edit-plus":
+    elif model_version == "edit-2509" or model_version == "edit-2511":
         prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
     prompt_template_encode_start_idx = 64
     # default_sample_size = 128
@@ -425,14 +426,14 @@ def get_qwen_prompt_embeds_with_image(
     base_img_prompts = [""] * len(prompt)
     if image is not None:
         vl_image_inputs = []  # flat list of images
-        if mode == "edit":
+        if model_version == "edit":
             for i, img in enumerate(image):
                 if img is None or len(img) == 0:
-                    logger.warning(f"No image provided for prompt {i}, but mode is {mode}, this may cause issues.")
+                    logger.warning(f"No image provided for prompt {i}, but version is {model_version}, this may cause issues.")
                     continue
                 if len(img) > 1:
                     logger.warning(
-                        f"Multiple images {len(img)} provided for prompt {i}, but mode is {mode}, 2nd and later images will be ignored."
+                        f"Multiple images {len(img)} provided for prompt {i}, but version is {model_version}, 2nd and later images will be ignored."
                     )
                 vl_image_inputs.append(img[0])
         else:
@@ -1460,3 +1461,42 @@ def get_scheduler(shift: Optional[float] = None) -> FlowMatchEulerDiscreteSchedu
 
 
 # endregion scheduler
+
+# region model utils
+
+
+def add_model_version_args(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--edit", action="store_true", help="Enable Qwen-Image-Edit original, recommend `--model_version edit` instead"
+    )
+    parser.add_argument(
+        "--edit_plus", action="store_true", help="Enable Qwen-Image-Edit-2509 (plus), recommend `--model_version edit-2509` instead"
+    )
+    parser.add_argument(
+        "--model_version",
+        type=str,
+        default=None,
+        help="training for Qwen-Image model version, e.g., 'original', 'edit', 'edit-2509', 'edit-2511' etc.",
+    )
+
+
+def resolve_model_version_args(args: argparse.Namespace) -> str:
+    if args.model_version is not None:
+        args.model_version = args.model_version.lower()
+    elif getattr(args, "edit_plus", False):
+        args.model_version = "edit-2509"
+    elif getattr(args, "edit", False):
+        args.model_version = "edit"
+    else:
+        args.model_version = "original"  # Not specified, use original (non-edit) model
+
+    valid_model_versions = {"original", "edit", "edit-2509", "edit-2511"}
+    if args.model_version not in valid_model_versions:
+        valid_str = "', '".join(sorted(valid_model_versions))
+        raise ValueError(f"Invalid model_version '{args.model_version}'. Valid options are: '{valid_str}'.")
+
+    args.is_edit = args.model_version in {"edit", "edit-2509", "edit-2511"}
+    return args.model_version
+
+
+# endregion model utils

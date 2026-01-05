@@ -247,6 +247,84 @@ A beautiful landscape painting of mountains during sunset.  --n bad quality --w 
 
  </details>
 
+## Finetuning
+
+Finetuning uses a dedicated script `zimage_train.py`. This script performs full finetuning of the model, not LoRA. Sample usage is as follows:
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/zimage_train.py \
+    --dit path/to/dit_model \
+    --vae path/to/vae_model \
+    --text_encoder path/to/text_encoder \
+    --dataset_config path/to/toml \
+    --sdpa --mixed_precision bf16 --gradient_checkpointing \
+    --optimizer_type adafactor --learning_rate 1e-6 --fused_backward_pass \
+    --optimizer_args "relative_step=False" "scale_parameter=False" "warmup_init=False" \
+    --max_grad_norm 0 --lr_scheduler constant_with_warmup --lr_warmup_steps 10 \
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers \
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
+    --output_dir path/to/output_dir --output_name name-of-model
+```
+
+- Uses `zimage_train.py`.
+- Finetuning requires a large amount of VRAM. The use of memory saving options is strongly recommended.
+- `--full_bf16`: Loads the model weights in bfloat16 format to significantly reduce VRAM usage. 
+- `--optimizer_type adafactor`: Using Adafactor is recommended for finetuning.
+- `--fused_backward_pass`: Reduces VRAM usage during the backward pass when using Adafactor.
+- `--mem_eff_save`: Reduces main memory (RAM) usage when saving checkpoints.
+- `--blocks_to_swap`: Swaps model blocks between VRAM and main memory to reduce VRAM usage. This is effective when VRAM is limited.
+- `--disable_numpy_memmap`: Disables numpy memory mapping for model loading, loading with standard file read. Increases RAM usage but may speed up model loading in some cases.
+
+`--full_bf16` reduces VRAM usage by about 30GB but may impact model accuracy as the weights are kept in bfloat16. Note that the optimizer state is still kept in float32. In addition, it is recommended to use this with an optimizer that supports stochastic rounding. In this repository, Adafactor optimizer with `--fused_backward_pass` option supports stochastic rounding.
+
+When using `--mem_eff_save`, please note that traditional saving methods are still used when saving the optimizer state in `--save_state`, requiring about 20GB of main memory.
+
+### Recommended Settings
+
+We are still exploring the optimal settings. The configurations above are just examples, so please adjust them as needed. We welcome your feedback.
+
+If you have ample VRAM, you can use any optimizer of your choice. `--full_bf16` is not recommended.
+
+For limited VRAM environments (e.g., 48GB or less), you may need to use `--full_bf16`, the Adafactor optimizer, and `--fused_backward_pass`. Settings above are the recommended options for that case. Please adjust `--lr_warmup_steps` to a value between approximately 10 and 100.
+
+`--fused_backward_pass` is not currently compatible with gradient accumulation, and max grad norm may not function as expected, so it is recommended to specify `--max_grad_norm 0`.
+
+If your VRAM is even more constrained, you can enable block swapping by specifying a value for `--blocks_to_swap`.
+
+Experience with other models suggests that the learning rate may need to be reduced significantly; something in the range of 1e-6 to 1e-5 might be a good place to start.
+
+<details>
+<summary>日本語</summary>
+
+Finetuningは専用のスクリプト`zimage_train.py`を使用します。このスクリプトはLoRAではなく、モデル全体のfinetuningを行います。
+
+- `zimage_train.py`を使用します。
+- Finetuningは大量のVRAMを必要とします。メモリ節約オプションの使用を強く推奨します。
+- `--full_bf16`: モデルの重みをbfloat16形式で読み込み、VRAM使用量を大幅に削減します。
+- `--optimizer_type adafactor`: FinetuningではAdafactorの使用が推奨されます。
+- `--fused_backward_pass`: Adafactor使用時に、backward pass中のVRAM使用量を削減します。
+- `--mem_eff_save`: チェックポイント保存時のメインメモリ（RAM）使用量を削減します。
+- `--blocks_to_swap`: モデルのブロックをVRAMとメインメモリ間でスワップし、VRAM使用量を削減します。VRAMが少ない場合に有効です。
+- `--disable_numpy_memmap`: モデル読み込み時のnumpyメモリマッピングを無効化し、標準のファイル読み込みで読み込みを行います。RAM使用量は増加しますが、場合によってはモデルの読み込みが高速化されます。
+
+`--full_bf16`はVRAM使用量を約30GB削減しますが、重みがbfloat16で保持されるため、モデルの精度に影響を与える可能性があります。オプティマイザの状態はfloat32で保持されます。また、効率的な学習のために、stochastic roundingをサポートするオプティマイザとの併用が推奨されます。このリポジトリでは、`adafactor`オプティマイザに`--fused_backward_pass`オプションの組み合わせでstochastic roundingをサポートしています。
+
+`--mem_eff_save`を使用する場合でも、`--save_state`においてはオプティマイザの状態を保存する際に従来の保存方法が依然として使用されるため、約20GBのメインメモリが必要であることに注意してください。
+
+### 推奨設定
+
+最適な設定はまだ調査中です。上記の構成はあくまで一例ですので、必要に応じて調整してください。フィードバックをお待ちしております。
+
+十分なVRAMがある場合は、お好みのオプティマイザを使用できます。`--full_bf16`は推奨されません。
+
+VRAMが限られている環境（例：48GB以下）の場合は、`--full_bf16`、Adafactorオプティマイザ、および`--fused_backward_pass`を使用する必要があるかもしれません。上記の設定はその場合の推奨オプションです。`--lr_warmup_steps`は約10から100の間の値に調整してください。
+
+現時点では`--fused_backward_pass`はgradient accumulationに対応していません。またmax grad normも想定通りに動作しない可能性があるため、`--max_grad_norm 0`を指定することを推奨します。
+
+さらにVRAMが制約されている場合は、`--blocks_to_swap`に値を指定してブロックスワッピングを有効にできます。
+
+</details>
+
 ## Inference / 推論
 
 Inference uses a dedicated script `zimage_generate_image.py`.

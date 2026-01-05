@@ -24,4 +24,4 @@ This file provides guidance to Codex CLI when working with code in this reposito
 ### Security & Configuration Tips
 - Large files: Do not commit datasets, model weights, or logs (`logs/` is ignored). Use external storage.
 - Credentials: Keep any tokens/keys out of the repo and environment‑specific.
-- CUDA: Choose the matching extra (`cu124` or `cu128`) for your driver; verify with `torch.cuda.is_available()`.
+- CUDA: Choose the matching extra (`cu124`, `cu128` or `cu130`) for your driver; verify with `torch.cuda.is_available()`.

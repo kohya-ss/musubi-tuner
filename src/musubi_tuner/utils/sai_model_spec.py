@@ -16,6 +16,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_FLUX_KONTEXT,
     ARCHITECTURE_QWEN_IMAGE,
     ARCHITECTURE_LONGCAT,
+    ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_Z_IMAGE,
 )
 
@@ -74,9 +75,11 @@ ARCH_FLUX_KONTEXT = "Flux.1-dev"
 ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
+ARCH_QWEN_IMAGE_EDIT_2511 = "Qwen-Image-Edit-2511"
 CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
 CUSTOM_ARCH_LONGCAT = "LongCat-Video"
-ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
+CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511 = "@@Qwen-Image-Edit-2511@@"  # special custom architecture name for Qwen-Image-Edit-2511
+ARCH_KANDINSKY5 = "Kandinsky-5"ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
 ARCH_Z_IMAGE = "Z-Image"
 
 ADAPTER_LORA = "lora"
@@ -88,6 +91,7 @@ IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
 IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
 IMPL_QWEN_IMAGE_EDIT = IMPL_QWEN_IMAGE
 IMPL_LONGCAT = "https://github.com/meituan-longcat/LongCat-Video"
+IMPL_KANDINSKY5 = "https://github.com/kandinskylab/kandinsky-5"
 IMPL_HUNYUAN_VIDEO_1_5 = "https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5"
 IMPL_Z_IMAGE = "https://github.com/Tongyi-MAI/Z-Image"
 
@@ -172,12 +176,16 @@ def build_metadata(
         elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS:
             arch = ARCH_QWEN_IMAGE_EDIT_PLUS
             custom_arch = None  # clear custom_arch to avoid override later
+        elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511:
+            arch = ARCH_QWEN_IMAGE_EDIT_2511
+            custom_arch = None  # clear custom_arch to avoid override later
         else:
             arch = ARCH_QWEN_IMAGE_EDIT  # override with custom_arch later
-    elif architecture == ARCHITECTURE_LONGCAT:
+    elif architecture == ARCHITECTURE_KANDINSKY5:
+        arch = ARCH_KANDINSKY5
+        impl = IMPL_KANDINSKY5    elif architecture == ARCHITECTURE_LONGCAT:
         arch = CUSTOM_ARCH_LONGCAT
-        impl = IMPL_LONGCAT
-    elif architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
+        impl = IMPL_LONGCAT    elif architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
         arch = ARCH_HUNYUAN_VIDEO_1_5
         impl = IMPL_HUNYUAN_VIDEO_1_5
     elif architecture == ARCHITECTURE_Z_IMAGE:

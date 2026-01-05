@@ -103,9 +103,7 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
 
 def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--edit", action="store_true", help="cache Text Encoder outputs for Qwen-Image-Edit")
-    parser.add_argument("--edit_plus", action="store_true", help="cache for Qwen-Image-Edit-2509 (with multiple control images)")
-
+    qwen_image_utils.add_model_version_args(parser)
     return parser
 
 
@@ -115,7 +113,7 @@ def main():
     parser = qwen_image_setup_parser(parser)
 
     args = parser.parse_args()
-    is_edit = args.edit or args.edit_plus
+    qwen_image_utils.resolve_model_version_args(args)
 
     if args.disable_cudnn_backend:
         logger.info("Disabling cuDNN PyTorch backend.")
@@ -131,7 +129,7 @@ def main():
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
-    architecture = ARCHITECTURE_QWEN_IMAGE_EDIT if is_edit else ARCHITECTURE_QWEN_IMAGE
+    architecture = ARCHITECTURE_QWEN_IMAGE_EDIT if args.is_edit else ARCHITECTURE_QWEN_IMAGE
     blueprint = blueprint_generator.generate(user_config, args, architecture=architecture)
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 

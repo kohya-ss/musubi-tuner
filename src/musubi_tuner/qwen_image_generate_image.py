@@ -57,8 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
     )
-    parser.add_argument("--edit", action="store_true", help="Enable Qwen-Image-Edit")
-    parser.add_argument("--edit_plus", action="store_true", help="Enable Qwen-Image-Edit-2509 (plus)")
+    qwen_image_utils.add_model_version_args(parser)
     parser.add_argument("--vae", type=str, default=None, help="VAE directory or path")
     parser.add_argument("--vae_enable_tiling", action="store_true", help="Enable tiling for VAE decoding. Default is False.")
     parser.add_argument("--text_encoder", type=str, required=True, help="Text Encoder 1 (Qwen2.5-VL) directory or path")
@@ -186,6 +185,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
+    qwen_image_utils.resolve_model_version_args(args)
 
     # Validate arguments
     if args.from_file and args.interactive:
@@ -345,6 +345,7 @@ def load_dit_model(
         args.dit,
         args.attn_mode,
         False,
+        args.model_version == "edit-2511",
         loading_device,
         loading_weight_dtype,
         args.fp8_scaled and not args.lycoris,
@@ -515,7 +516,7 @@ def prepare_text_inputs(
         tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(
             args.text_encoder, dtype=vl_dtype, device=vl_device, disable_mmap=True
         )
-        if args.edit or args.edit_plus:
+        if args.is_edit:
             vl_processor = qwen_image_utils.load_vl_processor()
         else:
             vl_processor = None
@@ -550,15 +551,13 @@ def prepare_text_inputs(
 
         text_encoder.to(vl_device)  # If text_encoder_cpu is True, this will be CPU
 
-    is_edit = args.edit or args.edit_plus  # Qwen-Image-Edit or Qwen-Image
-    mode = None if not is_edit else ("edit" if args.edit else "edit-plus")
-
     def get_embeds(p: str, ims: Optional[List[np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
-        nonlocal tokenizer, text_encoder, vl_processor, is_edit, mode
-        if not is_edit:
+        if not args.is_edit:
             return qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
         else:
-            return qwen_image_utils.get_qwen_prompt_embeds_with_image(vl_processor, text_encoder, p, ims, mode=mode)
+            return qwen_image_utils.get_qwen_prompt_embeds_with_image(
+                vl_processor, text_encoder, p, ims, model_version=args.model_version
+            )
 
     logger.info(f"Encoding prompt with Text Encoder. Control images: {len(images) if images is not None else None}")
 
@@ -625,8 +624,7 @@ def generate(
     Returns:
         tuple: (flux_models.AutoEncoder model (vae) or None, torch.Tensor generated latent)
     """
-    is_edit = args.edit or args.edit_plus  # Qwen-Image-Edit/Edit-2509 or Qwen-Image
-    assert is_edit and args.control_image_path is not None or not is_edit, "Qwen-Image-Edit requires control_image_path"
+    assert args.is_edit and args.control_image_path is not None or not args.is_edit, "Qwen-Image-Edit requires control_image_path"
 
     device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
     vae_instance_for_return = None
@@ -703,7 +701,7 @@ def generate(
     # 4. Prepare latent variables
     num_channels_latents = model.in_channels // 4
     latents = qwen_image_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, seed_g)
-    if not is_edit:
+    if not args.is_edit:
         img_shapes = [(1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2)]
     else:
         img_shapes = [
@@ -736,9 +734,9 @@ def generate(
     guidance = None  # guidance_embeds is false for Qwen-Image
 
     # inpainting mask and RCM
-    has_same_size_control = is_edit and len(img_shapes[0]) > 1 and img_shapes[0][1] == img_shapes[0][0]
+    has_same_size_control = args.is_edit and len(img_shapes[0]) > 1 and img_shapes[0][1] == img_shapes[0][0]
     if args.mask_path is not None and os.path.isfile(args.mask_path):
-        if not is_edit or not has_same_size_control:
+        if not args.is_edit or not has_same_size_control:
             logger.error("Mask image is only supported for Qwen-Image-Edit with control image of the same size as output.")
             inpainting_mask = None
         else:
@@ -762,7 +760,7 @@ def generate(
     else:
         inpainting_mask = None
 
-    rcm_enabled = args.rcm_threshold is not None and is_edit  # Reference Consistency Mask (RCM) is only for Qwen-Image-Edit
+    rcm_enabled = args.rcm_threshold is not None and args.is_edit  # Reference Consistency Mask (RCM) is only for Qwen-Image-Edit
     if rcm_enabled or inpainting_mask is not None:
         if rcm_enabled:
             if inpainting_mask is not None:
@@ -795,7 +793,7 @@ def generate(
             timestep = t.expand(latents.shape[0])  # keep dtype as float32 for better precision; avoid bfloat16 precision issues
 
             latent_model_input = latents
-            if is_edit:
+            if args.is_edit:
                 latent_model_input = torch.cat([latents, control_latent], dim=1)
 
             with torch.no_grad():
@@ -808,7 +806,7 @@ def generate(
                     img_shapes=img_shapes,
                     txt_seq_lens=txt_seq_lens,
                 )
-                if is_edit:
+                if args.is_edit:
                     noise_pred = noise_pred[:, : latents.shape[1], :]  # trim to latents shape
 
             if do_cfg:
@@ -822,7 +820,7 @@ def generate(
                         img_shapes=img_shapes,
                         txt_seq_lens=negative_txt_seq_lens,
                     )
-                if is_edit:
+                if args.is_edit:
                     neg_noise_pred = neg_noise_pred[:, : latents.shape[1], :]  # trim to latents shape
 
                 comb_pred = neg_noise_pred + args.guidance_scale * (noise_pred - neg_noise_pred)
@@ -931,12 +929,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
 
     seed = args.seed
 
-    if (
-        args.append_original_name
-        and (args.edit or args.edit_plus)
-        and args.control_image_path is not None
-        and len(args.control_image_path) > 0
-    ):
+    if args.append_original_name and args.is_edit and args.control_image_path is not None and len(args.control_image_path) > 0:
         original_base_name = os.path.basename(args.control_image_path[0])
         original_base_name = os.path.splitext(original_base_name)[0]
         original_name = f"_{original_base_name}"
@@ -1034,7 +1027,7 @@ def save_output(
         if original_base_names is None or len(original_base_names) == 0:
             if (
                 args.append_original_name
-                and (args.edit or args.edit_plus)
+                and args.is_edit
                 and args.control_image_path is not None
                 and len(args.control_image_path) > 0
             ):
@@ -1091,7 +1084,7 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True)
     shared_models["tokenizer"] = tokenizer
     shared_models["text_encoder"] = text_encoder
-    if args.edit or args.edit_plus:
+    if args.is_edit:
         vl_processor = qwen_image_utils.load_vl_processor()
         shared_models["vl_processor"] = vl_processor
     return shared_models
@@ -1130,8 +1123,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     tokenizer_batch, text_encoder_batch = qwen_image_utils.load_qwen2_5_vl(
         args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True
     )
-    is_edit = args.edit or args.edit_plus  # Indicates edit modes (Qwen-Image-Edit or Edit-plus), not plain Qwen-Image
-    vl_processor_batch = qwen_image_utils.load_vl_processor() if is_edit else None
+    vl_processor_batch = qwen_image_utils.load_vl_processor() if args.is_edit else None
 
     # Text Encoder to device for this phase
     vl_device = torch.device("cpu") if args.text_encoder_cpu else device
@@ -1149,7 +1141,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         "conds_cache": conds_cache_batch,
     }
 
-    if is_edit:
+    if args.is_edit:
         vae_for_batch.to(device)  # Move VAE to device for control image encoding
 
         for i, prompt_args_item in enumerate(all_prompt_args_list):
@@ -1357,7 +1349,7 @@ def main():
     logger.info(f"Using device: {device}")
     args.device = device
 
-    if args.edit or args.edit_plus:
+    if args.is_edit:
         logger.info("Running in Qwen-Image-Edit mode")
 
     if latents_mode:
