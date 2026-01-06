@@ -1,6 +1,7 @@
 import argparse
 from typing import List
 import torch
+import torch.nn.functional as Fnn  # NOT F - conflicts with frame count variable in cache keys!
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import (
@@ -89,15 +90,40 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
     # save cache for each item in the batch
     for b, item in enumerate(batch):
-        target_latent = latents[b]  # 1, C, H, W. Target latents for this image (ground truth)
-        control_latent = control_latents[b] if control_latents is not None else None  # list of (1, C, H, W) or None
+        target_latent = latents[b]  # (C, F, H, W) for Qwen-Image
+        control_latent = control_latents[b] if control_latents is not None else None  # list of (C, F, H, W) or None
+
+        # Process mask if available (for mask-weighted loss training)
+        mask_weights_i = None
+        if item.mask_content is not None:
+            # mask_content is (H, W) grayscale numpy array with values 0-255
+            mask = torch.from_numpy(item.mask_content).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+            mask = mask.float() / 255.0  # Normalize to [0, 1]
+
+            # Get latent dimensions from target_latent: (C, F, H, W)
+            _, lat_f, lat_h, lat_w = target_latent.shape
+
+            # Downsample mask to latent space dimensions using area interpolation
+            mask = Fnn.interpolate(mask, size=(lat_h, lat_w), mode="area")  # (1, 1, lat_h, lat_w)
+
+            # Reshape to (1, F, lat_h, lat_w) to match WAN convention
+            # mask is (1, 1, lat_h, lat_w), need (1, F, lat_h, lat_w)
+            mask = mask.squeeze(1).unsqueeze(1).expand(-1, lat_f, -1, -1)  # (1, F, lat_h, lat_w)
+            mask_weights_i = mask  # Keep as (1, F, H, W)
 
         print(
-            f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}, "
-            f"control latents shape: {[cl.shape for cl in control_latent] if control_latent is not None else None}"
+            f"Saving cache for item {item.item_key} at {item.latent_cache_path}, "
+            f"target latents shape: {target_latent.shape}, "
+            f"control latents shape: {[cl.shape for cl in control_latent] if control_latent is not None else None}, "
+            f"mask weights shape: {mask_weights_i.shape if mask_weights_i is not None else None}"
         )
 
-        save_latent_cache_qwen_image(item_info=item, latent=target_latent, control_latent=control_latent)
+        save_latent_cache_qwen_image(
+            item_info=item,
+            latent=target_latent,
+            control_latent=control_latent,
+            mask_weights=mask_weights_i,
+        )
 
 
 def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

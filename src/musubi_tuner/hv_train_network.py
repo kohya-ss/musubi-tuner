@@ -2182,11 +2182,18 @@ class NetworkTrainer:
             f"DiT dtype: {first_param.dtype if first_param is not None else None}, device: {first_param.device if first_param is not None else accelerator.device}"
         )
 
-        # log mask loss settings
+        # Log mask loss settings if enabled - prominent banner to avoid accidental unmasked runs
         if args.use_mask_loss:
-            logger.info("Mask-weighted loss training enabled")
+            logger.info("=" * 60)
+            logger.info("MASK-WEIGHTED LOSS TRAINING ENABLED")
+            logger.info("=" * 60)
             logger.info(f"  mask_loss_scale: {args.mask_loss_scale}")
             logger.info(f"  mask_min_weight: {args.mask_min_weight}")
+            logger.info(f"  mask_gamma: {args.mask_gamma}")
+            logger.info("-" * 60)
+            logger.info("IMPORTANT: Masks must be baked into latent cache!")
+            logger.info("If you see 'no mask_weights' error, recache with mask_directory set.")
+            logger.info("=" * 60)
 
         clean_memory_on_device(accelerator.device)
 
@@ -2202,6 +2209,19 @@ class NetworkTrainer:
 
             for step, batch in enumerate(train_dataloader):
                 # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
+
+                # Fail-fast validation: ERROR if mask loss enabled but no masks in batch
+                if step == 0 and args.use_mask_loss:
+                    if batch.get("mask_weights", None) is None:
+                        raise ValueError(
+                            "FATAL: --use_mask_loss is enabled but batch has no mask_weights!\n"
+                            "This means masks were NOT baked into your latent cache.\n"
+                            "To fix:\n"
+                            "  1. Add 'mask_directory = \"/path/to/masks\"' under [[datasets]] in your dataset TOML\n"
+                            "  2. Use a FRESH cache_directory (masks are stored in cache)\n"
+                            "  3. Recache latents with the appropriate cache script\n"
+                            "  4. Then re-run training"
+                        )
 
                 latents = batch["latents"]
 
@@ -2240,11 +2260,22 @@ class NetworkTrainer:
                         mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
                         mask_weights = mask_weights.expand_as(loss)
 
+                        # Apply gamma correction for mask contrast control
+                        # gamma < 1.0: softer mask (more midtones, gradual falloff)
+                        # gamma > 1.0: sharper mask (more binary, stronger face focus)
+                        if hasattr(args, "mask_gamma"):
+                            if args.mask_gamma <= 0:
+                                raise ValueError("--mask_gamma must be > 0")
+                            # Ensure numeric stability before pow (masks should be [0,1], but interpolation/IO can introduce tiny drift)
+                            mask_weights = mask_weights.clamp(0.0, 1.0)
+                            if args.mask_gamma != 1.0:
+                                mask_weights = mask_weights ** args.mask_gamma
+
                         # Apply optional minimum weight (so masked regions still get some training signal)
                         if hasattr(args, "mask_min_weight") and args.mask_min_weight > 0:
                             mask_weights = mask_weights * (1.0 - args.mask_min_weight) + args.mask_min_weight
 
-                        # Apply optional scale factor
+                        # Apply optional scale factor (NOTE: effectively a no-op with weighted mean normalization)
                         if hasattr(args, "mask_loss_scale") and args.mask_loss_scale != 1.0:
                             mask_weights = mask_weights * args.mask_loss_scale
 
@@ -2872,6 +2903,14 @@ def setup_parser_common() -> argparse.ArgumentParser:
         default=0.0,
         help="Minimum weight for masked-out regions (default: 0.0). Set to 0.1-0.2 to give some training signal to background regions. "
         "/ マスク外領域の最小重み（デフォルト：0.0）。0.1-0.2に設定すると背景領域にもある程度の学習シグナルを与える。",
+    )
+    parser.add_argument(
+        "--mask_gamma",
+        type=float,
+        default=1.0,
+        help="Gamma correction for mask weights (default: 1.0). Values < 1.0 soften the mask (more midtones, gradual falloff). "
+        "Values > 1.0 sharpen the mask (more binary, stronger face focus). Try 0.5-0.7 for softer or 1.5-2.0 for sharper. "
+        "/ マスク重みのガンマ補正（デフォルト：1.0）。1.0未満はマスクを柔らかくし、1.0超はマスクを鋭くして顔への集中を強める。",
     )
 
     # network settings

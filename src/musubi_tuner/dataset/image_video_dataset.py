@@ -308,8 +308,13 @@ def save_latent_cache_flux_kontext(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
-    """Qwen-Image architecture"""
+def save_latent_cache_qwen_image(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    control_latent: Optional[list[torch.Tensor]],
+    mask_weights: Optional[torch.Tensor] = None,
+):
+    """Qwen-Image architecture with optional mask weights for mask-weighted loss training."""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
     assert control_latent is None or all(cl.dim() == 4 for cl in control_latent), (
         "control_latent should be 4D tensor (frame, channel, height, width) or None"
@@ -323,6 +328,13 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
         for i, cl in enumerate(control_latent):
             _, F, H, W = cl.shape
             sd[f"latents_control_{i}_{F}x{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
+
+    if mask_weights is not None:
+        # Save mask weights in latent space dimensions (1, F, H, W) as float32 for precision
+        # Uses same F, H, W from latent shape above
+        _, F, H, W = latent.shape
+        mask_dtype_str = dtype_to_str(torch.float32)
+        sd[f"mask_weights_{F}x{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().cpu().float()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 

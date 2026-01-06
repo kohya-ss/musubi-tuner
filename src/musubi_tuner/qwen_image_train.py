@@ -584,6 +584,19 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         clean_memory_on_device(accelerator.device)
 
+        # Log mask loss settings if enabled - prominent banner to avoid accidental unmasked runs
+        if args.use_mask_loss:
+            logger.info("=" * 60)
+            logger.info("MASK-WEIGHTED LOSS TRAINING ENABLED")
+            logger.info("=" * 60)
+            logger.info(f"  mask_loss_scale: {args.mask_loss_scale}")
+            logger.info(f"  mask_min_weight: {args.mask_min_weight}")
+            logger.info(f"  mask_gamma: {args.mask_gamma}")
+            logger.info("-" * 60)
+            logger.info("IMPORTANT: Masks must be baked into latent cache!")
+            logger.info("If you see 'no mask_weights' error, recache with mask_directory set.")
+            logger.info("=" * 60)
+
         optimizer_train_fn()
 
         for epoch in range(epoch_to_start, num_train_epochs):
@@ -593,6 +606,19 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             metadata["ss_epoch"] = str(epoch + 1)
 
             for step, batch in enumerate(train_dataloader):
+                # Fail-fast validation: ERROR if mask loss enabled but no masks in batch
+                if step == 0 and args.use_mask_loss:
+                    if batch.get("mask_weights", None) is None:
+                        raise ValueError(
+                            "FATAL: --use_mask_loss is enabled but batch has no mask_weights!\n"
+                            "This means masks were NOT baked into your latent cache.\n"
+                            "To fix:\n"
+                            "  1. Add 'mask_directory = \"/path/to/masks\"' under [[datasets]] in your dataset TOML\n"
+                            "  2. Use a FRESH cache_directory (masks are stored in cache)\n"
+                            "  3. Recache: python qwen_image_cache_latents.py --dataset_config ... --vae ...\n"
+                            "  4. Then re-run training"
+                        )
+
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):
@@ -618,7 +644,38 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                     if weighting is not None:
                         loss = loss * weighting
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                    # Apply mask-weighted loss if mask weights are present in the batch
+                    mask_weights = batch.get("mask_weights", None)
+                    if mask_weights is not None and args.use_mask_loss:
+                        # mask_weights shape: (B, 1, F, H, W) - expand to match loss shape (B, C, F, H, W)
+                        # For Qwen-Image images, F=1 but we keep full 5D for consistency with WAN/video
+                        mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
+                        mask_weights = mask_weights.expand_as(loss)
+
+                        # Apply optional gamma correction (gamma > 1.0 = sharper/stronger face focus)
+                        if hasattr(args, "mask_gamma"):
+                            if args.mask_gamma <= 0:
+                                raise ValueError("--mask_gamma must be > 0")
+                            # Ensure numeric stability before pow (masks should be [0,1], but interpolation/IO can introduce tiny drift)
+                            mask_weights = mask_weights.clamp(0.0, 1.0)
+                            if args.mask_gamma != 1.0:
+                                mask_weights = mask_weights ** args.mask_gamma
+
+                        # Apply optional minimum weight (so masked regions still get some training signal)
+                        if hasattr(args, "mask_min_weight") and args.mask_min_weight > 0:
+                            mask_weights = mask_weights * (1.0 - args.mask_min_weight) + args.mask_min_weight
+
+                        # Apply optional scale factor (NOTE: effectively a no-op with weighted mean!)
+                        if hasattr(args, "mask_loss_scale") and args.mask_loss_scale != 1.0:
+                            mask_weights = mask_weights * args.mask_loss_scale
+
+                        # Apply mask weighting to loss
+                        loss = loss * mask_weights
+
+                        # Use weighted mean: sum(loss) / sum(weights) to avoid bias toward larger mask areas
+                        loss = loss.sum() / (mask_weights.sum() + 1e-8)
+                    else:
+                        loss = loss.mean()  # mean loss over all elements in batch
 
                     accelerator.backward(loss)
 
@@ -762,6 +819,8 @@ def qwen_image_finetune_setup_parser(parser: argparse.ArgumentParser) -> argpars
         action="store_true",
         help="Enable memory efficient saving (saving states requires use normal saving, so it takes same amount of memory even with this option enabled)",
     )
+    # Note: Mask loss args (--use_mask_loss, --mask_loss_scale, --mask_min_weight, --mask_gamma) are already
+    # defined in setup_parser_common() from hv_train_network.py, so they're available here.
     return parser
 
 
