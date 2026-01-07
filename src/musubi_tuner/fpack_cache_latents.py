@@ -446,8 +446,9 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
 
             # make sure content has 3 channels
             for item in batch:
-                if isinstance(item.content, np.ndarray) and item.content.shape[-1] == 4:
-                    item.content = item.content[..., :3]
+                if isinstance(item.content, np.ndarray):
+                    if item.content.shape[-1] == 4:
+                        item.content = item.content[..., :3]
                 else:
                     item.content = [img[..., :3] if img.shape[-1] == 4 else img for img in item.content]
 
