@@ -21,26 +21,39 @@ def is_save_requested():
         except Exception:
             pass
     else:
-        # Linux/macOS support
         try:
-            import select
+            import fcntl
             import termios
             import tty
 
-            if not sys.stdin.isatty():
+            fd = sys.stdin.fileno()
+            if not os.isatty(fd):
                 return False
 
-            old_settings = termios.tcgetattr(sys.stdin)
+            old_settings = termios.tcgetattr(fd)
+            old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+
             try:
-                tty.setcbreak(sys.stdin.fileno())
-                # Check if data is available to read
-                if select.select([sys.stdin], [], [], 0)[0]:
+                fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+                tty.setcbreak(fd)
+                try:
                     key = sys.stdin.read(1)
-                    if key.lower() == 's':
+                    if key and key.lower() == 's':
                         logger.info("Save requested by user (keyboard interrupt 's')")
+                        try:
+                            while sys.stdin.read(1):
+                                pass
+                        except IOError:
+                            pass
+                            
                         return True
+                except IOError:
+                    pass
+
             finally:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
+
         except Exception:
             pass
 
