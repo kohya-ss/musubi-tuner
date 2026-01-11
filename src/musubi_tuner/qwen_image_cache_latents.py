@@ -120,8 +120,8 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
     # save cache for each item in the batch
     for b, item in enumerate(batch):
-        target_latent = latents[b]  # L, C, H, W. Target latents for this image (ground truth)
-        control_latent = control_latents[b] if control_latents is not None else None  # list of (1, C, H, W) or None
+        target_latent = latents[b]  # C, L, H, W. Target latents for this image (ground truth)
+        control_latent = control_latents[b] if control_latents is not None else None  # list of (C, 1, H, W) or None
         print(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}, "
             f"control latents shape: {[cl.shape for cl in control_latent] if control_latent is not None else None}"
