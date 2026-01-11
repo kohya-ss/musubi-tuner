@@ -419,6 +419,20 @@ def get_qwen_prompt_embeds_with_image(
     elif image is not None:
         image = [[image]]  # wrap to list of list, not necessary, but for consistency
 
+    # RGB conversion
+    if image is not None:
+        for i in range(len(image)):
+            for j in range(len(image[i])):
+                img = image[i][j]
+                if isinstance(img, np.ndarray):
+                    if img.shape[2] == 4:
+                        img = img[:, :, :3]
+                    image[i][j] = img
+                elif isinstance(img, Image.Image):
+                    if img.mode == "RGBA":
+                        img = img.convert("RGB")
+                    image[i][j] = img
+
     assert image is None or len(image) == len(prompt), (
         f"Number of images {len(image) if image is not None else 0} must match number of prompts {len(prompt)} for batch processing"
     )

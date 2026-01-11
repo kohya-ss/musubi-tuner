@@ -126,6 +126,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                         control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
                             control_image_path, resize_to_official, resize_size=resize_size
                         )
+                        if not self.is_layered:
+                            control_image_tensor = control_image_tensor[:, :3, :, :]  # only use 3 channels for Edit
+                            control_image_np = control_image_np[:, :, :3]
                         control_image_tensors.append(control_image_tensor)
                         control_image_nps[control_image_path] = control_image_np
 
