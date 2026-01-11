@@ -697,7 +697,7 @@ def generate(
         control_latents, control_image_nps = prepare_image_inputs(args, device, vae_instance_for_return)
         context, context_null = prepare_text_inputs(args, control_image_nps, device, shared_models)
 
-    assert not args.is_layered or len(control_latents) == 1, "Qwen-Image-Layered supports only one control image."
+    assert (not args.is_layered) or (control_latents is not None and len(control_latents) == 1), "Qwen-Image-Layered supports only one control image."
 
     if shared_models is None or "model" not in shared_models:
         # load DiT model
