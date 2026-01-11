@@ -339,7 +339,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
                     pbar.update()
 
-        # BC1HW for non-layered (backward compatibility) or layered with num_layers=1, BLCHW for layered
+        # BLCHW for layered with num_layers > 0, or BC1HW for non-layered (backward compatibility) or layered with num_layers=0
         latents = qwen_image_utils.unpack_latents(latents, height, width)
 
         # Move VAE to the appropriate device for sampling
