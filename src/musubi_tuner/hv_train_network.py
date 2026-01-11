@@ -399,6 +399,7 @@ class NetworkTrainer:
             logs["max_norm/max_key_norm"] = maximum_norm
 
         lrs = lr_scheduler.get_last_lr()
+        opt_type = args.optimizer_type.lower()
         for i, lr in enumerate(lrs):
             if lr_descriptions is not None:
                 lr_desc = lr_descriptions[i]
@@ -414,17 +415,22 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower().endswith("Prodigy".lower()):
+            if opt_type.startswith("dadapt") or opt_type.endswith("prodigy"):
                 # tracking d*lr value
                 logs[f"lr/d*lr/{lr_desc}"] = (
                     lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
                 )
 
-            if args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower()) and optimizer is not None:
-                # tracking d*lr value of unet.
-                logs[f"lr/d*lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
-                if "effective_lr" in optimizer.param_groups[i]:
-                    logs[f"lr/d*eff_lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["effective_lr"]
+            if opt_type.endswith("prodigyplusschedulefree") and optimizer is not None:
+                param_group = optimizer.param_groups[i]
+                d = param_group.get("d")
+                eff_lr = param_group.get("effective_lr")
+                if d is not None:
+                    logs[f"lr/d/{lr_desc}"] = d  # Prodigy adaptive coefficient (watch for convergence)
+                    logs[f"lr/d*lr/{lr_desc}"] = d * param_group["lr"]
+                    if eff_lr is not None:
+                        logs[f"lr/effective_lr/{lr_desc}"] = eff_lr  # Schedule-free LR (without d)
+                        logs[f"lr/d*eff_lr/{lr_desc}"] = d * eff_lr  # Full effective LR
 
         return logs
 
