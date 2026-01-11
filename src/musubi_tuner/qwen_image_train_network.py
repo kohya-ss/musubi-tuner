@@ -359,7 +359,6 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 del latents_i, pixels_i
         latents = None
         pixels = torch.cat(pixels_list, dim=0)  # L C H W
-        del latents
 
         logger.info("Decoding complete")
         pixels = pixels.to(torch.float32).cpu()
