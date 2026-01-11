@@ -522,7 +522,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         if args.is_layered:
             img_shapes = img_shapes * (num_layers + 1)
         if is_edit or args.is_layered:
-            img_shapes = [img_shapes + [(1, sh[-2] // 2, sh[-1] // 2) for sh in latents_control_shapes]]
+            img_shapes = img_shapes + [(1, sh[-2] // 2, sh[-1] // 2) for sh in latents_control_shapes]
 
         # print(
         #     f"noisy_model_input: {noisy_model_input.shape}, vl_embed: {vl_embed.shape}, vl_mask: {vl_mask.shape if vl_mask is not None else None}, img_shapes: {img_shapes}, txt_seq_lens: {txt_seq_lens}"
