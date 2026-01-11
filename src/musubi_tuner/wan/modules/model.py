@@ -851,14 +851,14 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # head
         self.head = Head(dim, out_dim, patch_size, eps, model_version=self.model_version, lower_precision_attention=self.lower_precision_attention, simple_modulation=self.simple_modulation)  # New!
 
-        # buffers - register freqs as a non-persistent buffer so it moves with the model
-        # but is not saved to state_dict (recomputed on init for backward compatibility)
+        # freqs: Store as plain attribute, NOT a buffer, to avoid dtype corruption
+        # when model.to(dtype) is called. Complex128 freqs would be cast to real bf16,
+        # discarding imaginary parts and breaking RoPE. Device movement handled manually.
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
-        freqs_tensor = torch.cat(
+        self.freqs = torch.cat(
             [rope_params(1024, d - 4 * (d // 6)), rope_params(1024, 2 * (d // 6)), rope_params(1024, 2 * (d // 6))], dim=1
         )
-        self.register_buffer("freqs", freqs_tensor, persistent=False)
         self.freqs_fhw = {}
 
         if self.model_version == "2.1" and (model_type == "i2v" or model_type == "flf2v"):
@@ -1076,7 +1076,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             self.blissful_optimize()
         apply_nag = nag_context is not None
         device = self.patch_embedding.weight.device
-        # freqs is now a buffer and moves with the model, no need for device check
+        # Move freqs to correct device if needed (stored as attribute, not buffer, to preserve complex128 dtype)
+        if self.freqs.device != device:
+            self.freqs = self.freqs.to(device)
+            self.freqs_fhw.clear()  # Clear cached freqs to avoid stale tensors on wrong device
 
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
