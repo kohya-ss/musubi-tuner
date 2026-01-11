@@ -435,6 +435,11 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         bsize = latents.shape[0]
         latents = batch["latents"]  # B, C, 1, H, W for non-layered, B, C, L, H, W for layered
         if args.is_layered:
+            if latents.shape[2] < 2:
+                raise ValueError(
+                    f"Expected latents shape B, C, L, H, W with L >= 2 for layered model, "
+                    f"but got shape {latents.shape} (L={latents.shape[2]!r})."
+                )
             num_layers = latents.shape[2] - 1  # 1st latent is base, rest are layers
             latents = latents.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
             noise = noise.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
