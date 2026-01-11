@@ -1,7 +1,7 @@
---extra-index-url https://download.pytorch.org/whl/nightly/cu130
---extra-index-url https://pypi.nvidia.com
---extra-index-url https://pypi.org/simple
---extra-index-url https://download.pytorch.org/whl/cu130
+--extra-index-url https://download.pytorch.org/whl/nightly/cu130 
+--extra-index-url https://pypi.nvidia.com 
+--extra-index-url https://pypi.org/simple 
+--extra-index-url https://download.pytorch.org/whl/cu130 
 
 git+https://github.com/huggingface/accelerate.git@main
 av
