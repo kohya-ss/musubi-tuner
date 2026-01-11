@@ -698,7 +698,7 @@ def generate(
         context, context_null = prepare_text_inputs(args, control_image_nps, device, shared_models)
 
     assert (not args.is_layered) or (control_latents is not None and len(control_latents) == 1), (
-        "Qwen-Image-Layered supports only one control image."
+        f"Qwen-Image-Layered supports only one control image: got {len(control_latents) if control_latents is not None else 0}"
     )
 
     if shared_models is None or "model" not in shared_models:
@@ -1202,7 +1202,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         "conds_cache": conds_cache_batch,
     }
 
-    if args.is_edit:
+    if args.is_edit or args.is_layered:
         vae_for_batch.to(device)  # Move VAE to device for control image encoding
 
         for i, prompt_args_item in enumerate(all_prompt_args_list):
