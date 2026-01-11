@@ -873,7 +873,7 @@ def prepare_latents(batch_size, num_layers, num_channels_latents, height, width,
     height = 2 * (int(height) // (vae_scale_factor * 2))
     width = 2 * (int(width) // (vae_scale_factor * 2))
 
-    shape = (batch_size, num_layers, num_channels_latents, 1, height, width)
+    shape = (batch_size, num_layers, num_channels_latents, height, width)
 
     if isinstance(generator, list) and len(generator) != batch_size:
         raise ValueError(
