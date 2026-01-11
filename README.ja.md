@@ -116,6 +116,11 @@ Musubi Tunerの開発に尽力いただいたkohya-ssさん、重要なコード
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/01/11
+    - Qwen-Image-LayeredのLoRA学習に対応しました。[PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816)
+        - 詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
+        - キャッシュ作成、学習、推論の各スクリプトで、`--model_version` オプションに `layered` を指定してください。
+
 - 2025/12/27
     - Qwen-Image-Edit-2511に対応しました。[PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808)
         - チェックポイントやオプションの詳細など、詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
@@ -131,20 +136,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
         - 詳細は[ドキュメント](./docs/zimage.md#finetuning)を参照してください。
     - ごくシンプルなGUIツールを追加しました。[PR #779](https://github.com/kohya-ss/musubi-tuner/pull/779)
         - 現在はZ-Image-TurboとQwen-ImageのLoRA学習に対応しています。詳細は[ドキュメント](./src/musubi_tuner/gui/gui.ja.md)を参照してください。
-
-- 2025/12/09
-    - Diffusers形式のLoRA重みを学習スクリプトの `--base_weights` オプションで読み込めるようになりました。[PR #772](https://github.com/kohya-ss/musubi-tuner/pull/772) これによりZ-Image-TurboのTraining Adapter等を使用して学習できます。
-    - De-TurboモデルおよびTraining Adapterを使用してZ-Image-TurboのLoRA学習を行う方法について、[ドキュメント](./docs/zimage.md)を更新しました。
-    - これらを提供してくださった ostris 氏に深く感謝します。
-
-- 2025/12/07
-    - Z-Image Turboに対応しました。[PR #757](https://github.com/kohya-ss/musubi-tuner/pull/757)
-        - Turboモデル（蒸留モデル）のため学習が不安定かもしれません。フィードバックを歓迎します。
-        - 詳細は[ドキュメント](./docs/zimage.md)を参照してください。
-
-- 2025/12/05
-    - HunyuanVideo 1.5に対応しました。[PR #748](https://github.com/kohya-ss/musubi-tuner/pull/748)
-        - T2V、I2VのLoRA学習が可能です。詳細は[ドキュメント](./docs/hunyuan_video_1_5.md)を参照してください。
 
 ### リリースについて
 

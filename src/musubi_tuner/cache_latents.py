@@ -262,12 +262,23 @@ def encode_and_save_batch(vae: AutoencoderKLCausal3D, batch: list[ItemInfo]):
         save_latent_cache(item, l)
 
 
-def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argparse.Namespace):
+def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argparse.Namespace, supports_alpha: bool = False):
+    """Common function to encode datasets. This function is called from multiple architecture scripts."""
     num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
     for i, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_latent_cache_paths = []
         for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
+            batch: list[ItemInfo] = batch
+            if not supports_alpha:
+                # make sure content has 3 channels
+                for item in batch:
+                    if isinstance(item.content, np.ndarray):
+                        if item.content.shape[-1] == 4:
+                            item.content = item.content[..., :3]
+                    else:
+                        item.content = [img[..., :3] if img.shape[-1] == 4 else img for img in item.content]
+
             all_latent_cache_paths.extend([item.latent_cache_path for item in batch])
 
             if args.skip_existing:
