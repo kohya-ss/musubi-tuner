@@ -792,7 +792,7 @@ def generate(
         mu = qwen_image_utils.calculate_shift_qwen_image(image_seq_len)
     else:
         base_seqlen = 256 * 256 / 16 / 16
-        mu = (image_seq_len / base_seqlen) ** 0.5
+        mu = (control_latent.shape[1] / base_seqlen) ** 0.5
 
     logger.info(f"Using mu={mu} for FlowMatchEulerDiscreteScheduler")
     scheduler = qwen_image_utils.get_scheduler(args.flow_shift)
