@@ -2087,8 +2087,8 @@ class VideoDataset(BaseDataset):
 
             # round each value to N*4+1
             rounded_target_frames = [(f - 1) // self.vae_frame_stride * self.vae_frame_stride + 1 for f in target_frames]
-            rouneded_target_frames = list(set(rounded_target_frames))
-            rouneded_target_frames.sort()
+            rounded_target_frames = list(set(rounded_target_frames))
+            rounded_target_frames.sort()
 
             # if value is changed, warn
             if target_frames != rounded_target_frames:
