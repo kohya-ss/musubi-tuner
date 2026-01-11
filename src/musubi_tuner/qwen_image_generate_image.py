@@ -744,7 +744,8 @@ def generate(
     num_channels_latents = model.in_channels // 4
     num_layers = args.output_layers if args.is_layered else 0  # output layers for layered model, 0 for original or edit
 
-    ### the generated first image is combined image
+    # For layered models, the first latent corresponds to the base/composite image before layer separation;
+    # subsequent latents correspond to the individual layers.
     latents = qwen_image_utils.prepare_latents(
         1, num_layers + 1, num_channels_latents, height, width, torch.bfloat16, device, seed_g
     )
