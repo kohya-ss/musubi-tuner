@@ -38,6 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+lycoris = [
+    "lycoris-lora @ git+https://github.com/KohakuBlueleaf/LyCORIS@732fb45448a02038bd388c1f9e7e15220f851d4d",
+]
 cu124 = [
     "torch",
     "torchvision",
@@ -86,6 +89,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 packages = ["src/musubi_tuner", "src/blissful_tuner"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.uv.sources]
 torch = [

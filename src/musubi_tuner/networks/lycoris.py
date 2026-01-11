@@ -83,8 +83,11 @@ def create_network(
             from lycoris.kohya import LycorisNetwork as LycorisNetworkKohya  # type: ignore
     except ImportError as e:
         raise ImportError(
-            "LyCORIS is not installed. Please install it with 'pip install lycoris-lora' "
-            "to use LyCORIS network modules.\n"
+            "LyCORIS is not installed. Install it to use LyCORIS network modules.\n"
+            "Options:\n"
+            "  - pip: pip install lycoris-lora\n"
+            "  - uv (pinned to upstream main): uv sync --extra lycoris\n"
+            "  - editable (local clone): pip install -e /path/to/LyCORIS\n"
             f"Original error: {e}"
         )
 
