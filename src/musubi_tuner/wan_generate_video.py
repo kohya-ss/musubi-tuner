@@ -1282,7 +1282,7 @@ def prepare_i2v_inputs(
         img_resized = img_resized.unsqueeze(1)  # CFHW
 
         if has_end_image:
-            interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
+            interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[0] else cv2.INTER_CUBIC
             end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
             end_img_resized = TF.to_tensor(end_img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
             end_img_resized = end_img_resized.unsqueeze(1)  # CFHW
