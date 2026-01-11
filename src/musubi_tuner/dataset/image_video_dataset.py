@@ -1003,7 +1003,10 @@ class ImageDirectoryDatasource(ImageDatasource):
                             path_no_ext = os.path.splitext(path)[0]
                             digits_suffix = path_no_ext.rsplit("_", 1)[-1]
                             if not digits_suffix.isdigit():
-                                raise ValueError(f"Invalid digits suffix in {path_no_ext}")
+                                raise ValueError(
+                                    f"Invalid digits suffix in '{path_no_ext}'. Expected a numeric suffix after '_' "
+                                    f"(e.g., '_0', '_1', '_2') for proper sorting of multiple target images."
+                                )
                             return int(digits_suffix)
 
                         potential_paths.sort(key=sort_key)
