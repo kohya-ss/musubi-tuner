@@ -18,7 +18,7 @@ Latent pre-caching, training, and inference options can be found in the `--help`
 You need to download the DiT, AE, Text Encoder models.
 
 - **DiT, AE**: Download from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `flux2-dev.safetensors` and `ae.safetensors`. The weights in the subfolder are in Diffusers format and cannot be used.
-- **Text Encoder (Mistral 3)**: Download from the 
+- **Text Encoder (Mistral 3)**: Download all the split files from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository and specify the first file (e.g., `00001-of-00010.safetensors`) in the arguments.
 
 <details>
 <summary>日本語</summary>
@@ -26,7 +26,7 @@ You need to download the DiT, AE, Text Encoder models.
 DiT, AE, Text Encoder のモデルをダウンロードする必要があります。
 
 - **DiT, AE**: [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) リポジトリからダウンロードしてください。`flux2-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusers形式なので使用できません。
-- **Text Encoder (Mistral 3)**: 
+- **Text Encoder (Mistral 3)**: Download all the split files from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository and specify the first file (e.g., `00001-of-00010.safetensors`) in the arguments.
 </details>
 
 ## Pre-caching / 事前キャッシング
