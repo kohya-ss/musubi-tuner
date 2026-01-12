@@ -18,7 +18,7 @@ from .flux2_models import Flux2
 
 from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.utils import image_utils
-from musubi_tuner.utils.safetensors_utils import load_safetensors
+from musubi_tuner.utils.safetensors_utils import load_split_weights
 from musubi_tuner.utils.train_utils import get_lin_function
 
 import logging
@@ -396,7 +396,7 @@ def load_flow_model(
 
     # load_sft doesn't support torch.device
     logger.info(f"Loading state dict from {ckpt_path} to {flux_2_loading_device}")
-    sd = load_safetensors(ckpt_path, device=flux_2_loading_device, disable_mmap=disable_mmap, dtype=dtype)
+    sd = load_split_weights(ckpt_path, device=flux_2_loading_device, disable_mmap=disable_mmap, dtype=dtype)
 
     # # if the key has annoying prefix, remove it
     # for key in list(sd.keys()):
@@ -431,7 +431,7 @@ def load_ae(
         ae = flux2_models.AutoEncoder(flux2_models.configs_flux_2_dev.ae_params).to(dtype)
 
     logger.info(f"Loading state dict from {ckpt_path}")
-    sd = load_safetensors(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+    sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
     info = ae.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded AE: {info}")
     return ae
@@ -503,9 +503,7 @@ def load_mistral3(
         sd = state_dict
     else:
         logger.info(f"Loading state dict from {ckpt_path}")
-        sd = {}
-        for i in range(10):
-            sd.update(load_safetensors(ckpt_path + f"model-{i+1:05d}-of-00010.safetensors", device=str(device), disable_mmap=disable_mmap, dtype=dtype))
+        sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
 
     # if the key has annoying prefix, remove it
     for key in list(sd.keys()):
