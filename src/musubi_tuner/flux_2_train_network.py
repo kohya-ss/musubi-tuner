@@ -291,10 +291,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # ensure the hidden state will require grad
         if args.gradient_checkpointing:
             noisy_model_input.requires_grad_(True)
-            m3_vec.requires_grad_(True)
+            ctx.requires_grad_(True)
             if num_control_images:
-                for c in  encoded_refs:
-                    c.requires_grad_(True)
+                ref_tokens.requires_grad_(True)
 
         # call DiT
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
@@ -302,6 +301,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         ref_tokens = ref_tokens.to(device=accelerator.device, dtype=network_dtype)
         ref_ids = ref_ids.to(device=accelerator.device)
         ctx = ctx.to(device=accelerator.device, dtype=network_dtype)
+        ctx_ids = ctx_ids.to(device=accelerator.device)
 
         # use 1.0 as guidance scale for FLUX.2 training
         guidance_vec = torch.full((bsize,), 1.0, device=accelerator.device, dtype=network_dtype)
@@ -323,14 +323,13 @@ class Flux2NetworkTrainer(NetworkTrainer):
         )  # [1, 8192, 128]
         model_pred = model_pred[:, : noisy_model_input.shape[1]]  # [1, 4096, 128]
 
-        # unpack latents
+        # unpack height/width latents
         model_pred = rearrange(
             model_pred, "b (h w) c -> b c h w", h=packed_latent_height, w=packed_latent_width
-            # model_pred, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2
         )
 
         # flow matching loss
-        target = noise - latents  # TODO check if it's ok or not to let it packed
+        target = noise - latents
 
         return model_pred, target
 
