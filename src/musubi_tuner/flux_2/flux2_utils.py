@@ -12,7 +12,7 @@ from PIL import Image
 from typing import Optional, Union
 from torch import Tensor
 from transformers import Mistral3ForConditionalGeneration, Mistral3Config, AutoProcessor
-
+from tqdm import tqdm
 
 from .flux2_models import Flux2
 
@@ -311,7 +311,7 @@ def denoise(
     img_cond_seq_ids: Tensor | None = None,
 ):
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
-    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+    for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         img_input = img
         img_input_ids = img_ids
