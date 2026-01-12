@@ -17,16 +17,16 @@ Latent pre-caching, training, and inference options can be found in the `--help`
 
 You need to download the DiT, AE, Text Encoder models.
 
-- **DiT, AE**: Download from the [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) repository. Use `flux1-kontext-dev.safetensors` and `ae.safetensors`. The weights in the subfolder are in Diffusers format and cannot be used.
-- **Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L)**: Download from the [ComfyUI FLUX Text Encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) repository. Please use `t5xxl_fp16.safetensors` for T5-XXL. Thanks to ComfyUI for providing these models.
+- **DiT, AE**: Download from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `flux2-dev.safetensors` and `ae.safetensors`. The weights in the subfolder are in Diffusers format and cannot be used.
+- **Text Encoder (Mistral 3)**: Download from the 
 
 <details>
 <summary>日本語</summary>
 
 DiT, AE, Text Encoder のモデルをダウンロードする必要があります。
 
-- **DiT, AE**: [black-forest-labs/FLUX.1-kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) リポジトリからダウンロードしてください。`flux1-kontext-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusers形式なので使用できません。
-- **Text Encoder 1 (T5-XXL), Text Encoder 2 (CLIP-L)**: [ComfyUIのFLUX Text Encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) リポジトリからダウンロードしてください。T5-XXLには`t5xxl_fp16.safetensors`を使用してください。これらのモデルをご提供いただいたComfyUIに感謝します。
+- **DiT, AE**: [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) リポジトリからダウンロードしてください。`flux2-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusers形式なので使用できません。
+- **Text Encoder (Mistral 3)**: 
 </details>
 
 ## Pre-caching / 事前キャッシング
