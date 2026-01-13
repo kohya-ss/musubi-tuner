@@ -170,6 +170,49 @@ def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: t
     return image
 
 
+def resize_mask_to_bucket(mask: Union[Image.Image, np.ndarray], bucket_reso: tuple[int, int]) -> np.ndarray:
+    """
+    Resize a grayscale mask to the bucket resolution.
+
+    For weighted masks, we want:
+    - Downscaling: use area averaging (preserves area/weights in expectation)
+    - Upscaling: use nearest-neighbor (avoids ringing/halos and preserves discrete levels)
+
+    bucket_reso: **(width, height)**
+    """
+    is_pil_image = isinstance(mask, Image.Image)
+    if is_pil_image:
+        mask_width, mask_height = mask.size
+    else:
+        mask_height, mask_width = mask.shape[:2]
+
+    if bucket_reso == (mask_width, mask_height):
+        return np.array(mask) if is_pil_image else mask
+
+    bucket_width, bucket_height = bucket_reso
+
+    scale_width = bucket_width / mask_width
+    scale_height = bucket_height / mask_height
+    scale = max(scale_width, scale_height)
+    scaled_width = int(mask_width * scale + 0.5)
+    scaled_height = int(mask_height * scale + 0.5)
+
+    if scale > 1:
+        # Upscaling: preserve discrete levels
+        mask = Image.fromarray(mask) if not is_pil_image else mask
+        mask = mask.resize((scaled_width, scaled_height), Image.NEAREST)
+        mask = np.array(mask)
+    else:
+        # Downscaling: preserve average weight
+        mask = np.array(mask) if is_pil_image else mask
+        mask = cv2.resize(mask, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+
+    crop_left = (scaled_width - bucket_width) // 2
+    crop_top = (scaled_height - bucket_height) // 2
+    mask = mask[crop_top : crop_top + bucket_height, crop_left : crop_left + bucket_width]
+    return mask
+
+
 class ItemInfo:
     def __init__(
         self,
@@ -2029,7 +2072,7 @@ class ImageDataset(BaseDataset):
                 if self.mask_paths is not None and image_key in self.mask_paths:
                     mask_path = self.mask_paths[image_key]
                     mask = Image.open(mask_path).convert("L")  # Convert to grayscale
-                    resized_mask = resize_image_to_bucket(mask, bucket_reso)  # returns np.ndarray
+                    resized_mask = resize_mask_to_bucket(mask, bucket_reso)  # returns np.ndarray
 
                 return image_size, image_key, images, caption, resized_controls, resized_mask
 
@@ -2420,7 +2463,7 @@ class VideoDataset(BaseDataset):
                 if self.mask_paths is not None and video_key in self.mask_paths:
                     mask_path = self.mask_paths[video_key]
                     mask_image = Image.open(mask_path).convert("L")  # grayscale
-                    resized_mask = resize_image_to_bucket(mask_image, bucket_reso)  # returns np.ndarray
+                    resized_mask = resize_mask_to_bucket(mask_image, bucket_reso)  # returns np.ndarray
 
                 return frame_size, video_key, video, caption, control, resized_mask
 
