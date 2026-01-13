@@ -345,16 +345,48 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, noise_scheduler, times
 
     SD3 paper reference: https://arxiv.org/abs/2403.03206v1.
     """
-    if weighting_scheme == "sigma_sqrt" or weighting_scheme == "cosmap":
+    if weighting_scheme == "sigma_sqrt" or weighting_scheme == "cosmap" or weighting_scheme == "structure_bell":
         sigmas = get_sigmas(noise_scheduler, timesteps, device, n_dim=5, dtype=dtype)
         if weighting_scheme == "sigma_sqrt":
             weighting = (sigmas**-2.0).float()
-        else:
+        elif weighting_scheme == "cosmap":
             bot = 1 - 2 * sigmas + 2 * sigmas**2
             weighting = 2 / (math.pi * bot)
+        else:  # structure_bell
+            # Quadratic curve emphasizing mid-noise timesteps for composition learning.
+            # Peak ~1.2 at t=0.625, ~0.42 at t=0, ~0.92 at t=1 (after scaling).
+            # Trade-off: More structure/composition emphasis, less fine-detail at extremes.
+            # Note: Effective average depends on actual sigma distribution from scheduler + sampling.
+            t = sigmas.to(torch.float32).clamp(0.0, 1.0)  # float32 for precision, safety clamp
+            raw_weights = -2.4 * (t**2) + 3.0 * t + 0.5
+            weighting = raw_weights * (5.0 / 6.0)  # scale for avg ~1.0 under uniform t
     else:
         weighting = None  # torch.ones_like(sigmas)
     return weighting
+
+
+def validate_mask_loss_args(args: argparse.Namespace) -> None:
+    if not getattr(args, "use_mask_loss", False):
+        return
+
+    mask_gamma = float(getattr(args, "mask_gamma", 1.0))
+    if mask_gamma <= 0:
+        raise ValueError("--mask_gamma must be > 0")
+
+    mask_min_weight = float(getattr(args, "mask_min_weight", 0.0))
+    if mask_min_weight < 0 or mask_min_weight >= 1.0:
+        raise ValueError("--mask_min_weight must be in range [0, 1)")
+
+    mask_loss_scale = float(getattr(args, "mask_loss_scale", 1.0))
+    if mask_loss_scale <= 0:
+        raise ValueError("--mask_loss_scale must be > 0")
+
+    if mask_loss_scale != 1.0:
+        logger.warning(
+            "--mask_loss_scale has no effect with the current weighted-mean normalization (it cancels out). "
+            "Use --mask_gamma and/or --mask_min_weight to change the effective masking behavior instead. "
+            "This option may be removed or repurposed in the future."
+        )
 
 
 def should_sample_images(args, steps, epoch=None):
@@ -1690,6 +1722,7 @@ class NetworkTrainer:
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        validate_mask_loss_args(args)
 
         # show timesteps for debugging
         if args.show_timesteps:
@@ -1877,9 +1910,7 @@ class NetworkTrainer:
 
         # LyCORIS 3.x requires both text_encoder_lr and unet_lr
         # Use 0 for text_encoder_lr since we're not training text encoders for DiT models
-        trainable_params, lr_descriptions = network.prepare_optimizer_params(
-            text_encoder_lr=0, unet_lr=args.learning_rate
-        )
+        trainable_params, lr_descriptions = network.prepare_optimizer_params(text_encoder_lr=0, unet_lr=args.learning_rate)
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
@@ -2278,7 +2309,7 @@ class NetworkTrainer:
                             # Ensure numeric stability before pow (masks should be [0,1], but interpolation/IO can introduce tiny drift)
                             mask_weights = mask_weights.clamp(0.0, 1.0)
                             if args.mask_gamma != 1.0:
-                                mask_weights = mask_weights ** args.mask_gamma
+                                mask_weights = mask_weights**args.mask_gamma
 
                         # Apply optional minimum weight (so masked regions still get some training signal)
                         if hasattr(args, "mask_min_weight") and args.mask_min_weight > 0:
@@ -2826,7 +2857,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--weighting_scheme",
         type=str,
         default="none",
-        choices=["logit_normal", "mode", "cosmap", "sigma_sqrt", "none"],
+        choices=["logit_normal", "mode", "cosmap", "sigma_sqrt", "structure_bell", "none"],
         help="weighting scheme for timestep distribution. Default is none / タイムステップ分布の重み付けスキーム、デフォルトはnone",
     )
     parser.add_argument(

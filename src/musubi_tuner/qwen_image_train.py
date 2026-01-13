@@ -23,6 +23,7 @@ from musubi_tuner.hv_train_network import (
     SS_METADATA_MINIMUM_KEYS,
     collator_class,
     compute_loss_weighting_for_sd3,
+    validate_mask_loss_args,
     clean_memory_on_device,
     prepare_accelerator,
     setup_parser_common,
@@ -165,6 +166,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        validate_mask_loss_args(args)
 
         # QwenImageNetworkTrainer forces dit_dtype to bfloat16, so we set it here
         args.dit_dtype = "bfloat16" if args.full_bf16 else "float32"
@@ -665,7 +667,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                             # Ensure numeric stability before pow (masks should be [0,1], but interpolation/IO can introduce tiny drift)
                             mask_weights = mask_weights.clamp(0.0, 1.0)
                             if args.mask_gamma != 1.0:
-                                mask_weights = mask_weights ** args.mask_gamma
+                                mask_weights = mask_weights**args.mask_gamma
 
                         # Apply optional minimum weight (so masked regions still get some training signal)
                         if hasattr(args, "mask_min_weight") and args.mask_min_weight > 0:

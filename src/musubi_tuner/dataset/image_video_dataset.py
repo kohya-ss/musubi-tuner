@@ -1866,9 +1866,9 @@ class ImageDataset(BaseDataset):
 
         # Match mask paths to image paths if mask_directory is specified
         if mask_directory is not None and self.mask_paths is not None:
-            image_paths = self.datasource.image_paths if hasattr(self.datasource, 'image_paths') else []
-            if hasattr(self.datasource, 'data'):  # JSONL datasource
-                image_paths = [item['image_path'] for item in self.datasource.data]
+            image_paths = self.datasource.image_paths if hasattr(self.datasource, "image_paths") else []
+            if hasattr(self.datasource, "data"):  # JSONL datasource
+                image_paths = [item["image_path"] for item in self.datasource.data]
 
             for image_path in image_paths:
                 image_basename = os.path.basename(image_path)
@@ -1990,7 +1990,9 @@ class ImageDataset(BaseDataset):
 
         for fetch_op in self.datasource:
             # fetch and resize image in a separate thread
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, list[np.ndarray], str, Optional[list[np.ndarray]], Optional[np.ndarray]]:
+            def fetch_and_resize(
+                op: callable,
+            ) -> tuple[tuple[int, int], str, list[np.ndarray], str, Optional[list[np.ndarray]], Optional[np.ndarray]]:
                 image_key, images, caption, controls = op()
                 images: list[Image.Image]
                 image: Image.Image = images[0]  # use the first image as the main content
@@ -2213,6 +2215,35 @@ class VideoDataset(BaseDataset):
         elif video_jsonl_file is not None:
             self.datasource = VideoJsonlDatasource(video_jsonl_file)
 
+        # Set up mask paths if mask_directory is specified (one mask image per video, matched by basename)
+        self.mask_paths: Optional[dict[str, str]] = None
+        if mask_directory is not None:
+            self.mask_paths = {}
+            logger.info(f"glob mask images in {mask_directory}")
+            all_mask_paths = set(glob_images(mask_directory))
+            logger.info(f"found {len(all_mask_paths)} mask images")
+
+            mask_by_basename_no_ext: dict[str, str] = {}
+            for mask_path in all_mask_paths:
+                mask_basename_no_ext = os.path.splitext(os.path.basename(mask_path))[0]
+                mask_by_basename_no_ext[mask_basename_no_ext] = mask_path
+
+            if hasattr(self.datasource, "video_paths"):
+                video_paths = self.datasource.video_paths
+            else:
+                video_paths = [item["video_path"] for item in getattr(self.datasource, "data", []) if "video_path" in item]
+
+            for video_path in video_paths:
+                video_basename_no_ext = os.path.splitext(os.path.basename(video_path))[0]
+                mask_path = mask_by_basename_no_ext.get(video_basename_no_ext)
+                if mask_path is not None:
+                    self.mask_paths[video_path] = mask_path
+
+            logger.info(f"matched {len(self.mask_paths)} mask images to videos")
+            if len(self.mask_paths) != len(video_paths):
+                missing_masks = len(video_paths) - len(self.mask_paths)
+                logger.warning(f"{missing_masks} videos do not have matching mask images")
+
         if self.frame_extraction == "uniform" and self.frame_sample == 1:
             self.frame_extraction = "head"
             logger.warning("frame_sample is set to 1 for frame_extraction=uniform. frame_extraction is changed to head.")
@@ -2269,7 +2300,7 @@ class VideoDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_frame_size, video_key, video, caption, control = future.result()
+                    original_frame_size, video_key, video, caption, control, mask = future.result()
 
                     frame_count = len(video)
                     video = np.stack(video, axis=0)
@@ -2341,6 +2372,8 @@ class VideoDataset(BaseDataset):
                         item_info.latent_cache_path = self.get_latent_cache_path(item_info)
                         item_info.control_content = cropped_control  # None is allowed
                         item_info.fp_latent_window_size = self.fp_latent_window_size
+                        if mask is not None:
+                            item_info.mask_content = mask
 
                         batch = batches.get(batch_key, [])
                         batch.append(item_info)
@@ -2361,7 +2394,9 @@ class VideoDataset(BaseDataset):
 
         for operator in self.datasource:
 
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, list[np.ndarray], str, Optional[list[np.ndarray]]]:
+            def fetch_and_resize(
+                op: callable,
+            ) -> tuple[tuple[int, int], str, list[np.ndarray], str, Optional[list[np.ndarray]], Optional[np.ndarray]]:
                 result = op()
 
                 if len(result) == 3:  # for backward compatibility TODO remove this in the future
@@ -2381,7 +2416,13 @@ class VideoDataset(BaseDataset):
                 if control is not None:
                     control = [resize_image_to_bucket(frame, bucket_reso) for frame in control]
 
-                return frame_size, video_key, video, caption, control
+                resized_mask = None
+                if self.mask_paths is not None and video_key in self.mask_paths:
+                    mask_path = self.mask_paths[video_key]
+                    mask_image = Image.open(mask_path).convert("L")  # grayscale
+                    resized_mask = resize_image_to_bucket(mask_image, bucket_reso)  # returns np.ndarray
+
+                return frame_size, video_key, video, caption, control, resized_mask
 
             future = executor.submit(fetch_and_resize, operator)
             futures.append(future)

@@ -1,7 +1,6 @@
 import argparse
 from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -221,11 +220,13 @@ def encode_and_save_batch_one_frame(vae: WanVAE, clip: Optional[CLIPModel], batc
         f_indices = sorted(target_and_control_latent_indices)
 
         ci = 0
+        target_j = None
         for j, index in enumerate(f_indices):
             if index == item.fp_1f_target_index:
                 # print(f"Set target latent. latent shape: {latent.shape}, black_image_latent shape: {black_image_latent.shape}")
                 y[4:, j : j + 1, :, :] = black_image_latent
                 l[:, j : j + 1, :, :] = latent  # set target latent
+                target_j = j
             else:
                 # print(f"Set control latent. control_latent shape: {control_latent[i, :, ci, :, :].shape}")
                 y[:4, j, :, :] = 1.0  # set mask to 1.0 for the clean latent frames
@@ -235,12 +236,20 @@ def encode_and_save_batch_one_frame(vae: WanVAE, clip: Optional[CLIPModel], batc
 
         cctx = clip_context[i]
 
+        mask_weights_i = None
+        if item.mask_content is not None and target_j is not None:
+            mask = torch.from_numpy(item.mask_content).unsqueeze(0).unsqueeze(0).float() / 255.0  # 1, 1, H, W
+            mask = F.interpolate(mask, size=(lat_h, lat_w), mode="area")  # 1, 1, lat_h, lat_w
+
+            mask_weights_i = torch.ones(1, num_frames, lat_h, lat_w, dtype=torch.float32)
+            mask_weights_i[:, target_j, :, :] = mask[0, 0]
+
         logger.info(f"Saving cache for item: {item.item_key} at {item.latent_cache_path}")
         logger.info(f"  control_latent_indices: {control_latent_indices}, fp_1f_target_index: {item.fp_1f_target_index}")
         logger.info(f"  y shape: {y.shape}, mask: {y[0, :, 0, 0]}, l shape: {l.shape}, clip_context shape: {cctx.shape}")
         logger.info(f"  f_indices: {f_indices}")
 
-        save_latent_cache_wan(item, l, cctx, y, None, f_indices=f_indices)
+        save_latent_cache_wan(item, l, cctx, y, None, f_indices=f_indices, mask_weights=mask_weights_i)
 
 
 def main():
