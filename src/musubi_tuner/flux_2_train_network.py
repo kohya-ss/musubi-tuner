@@ -298,8 +298,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # call DiT
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
         img_ids = img_ids.to(device=accelerator.device)
-        ref_tokens = ref_tokens.to(device=accelerator.device, dtype=network_dtype)
-        ref_ids = ref_ids.to(device=accelerator.device)
+        if ref_tokens:
+            ref_tokens = ref_tokens.to(device=accelerator.device, dtype=network_dtype)
+            ref_ids = ref_ids.to(device=accelerator.device)
         ctx = ctx.to(device=accelerator.device, dtype=network_dtype)
         ctx_ids = ctx_ids.to(device=accelerator.device)
 
