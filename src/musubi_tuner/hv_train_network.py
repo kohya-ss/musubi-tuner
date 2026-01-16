@@ -1808,9 +1808,11 @@ class NetworkTrainer:
             attn_mode = "xformers"
         elif args.flash3:
             attn_mode = "flash3"
+        elif args.cute:
+            attn_mode = "cute"
         else:
             raise ValueError(
-                "either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
+                "either --sdpa, --flash-attn, --flash3, --sage-attn, --xformers or --cute must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformers, --cuteのいずれかを指定してください"
             )
 
         transformer = self.load_transformer(
@@ -2248,7 +2250,15 @@ class NetworkTrainer:
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
             for step, batch in enumerate(train_dataloader):
-                # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
+                # Help TorchInductor CUDAGraph trees reliably reuse graphs in training loops.
+                # Without this, Inductor may warn:
+                #   "Unable to hit fast path of CUDAGraphs because of pending, uninvoked backwards"
+                # This is a performance hint (training is still correct), but marking step boundaries
+                # usually improves CUDAGraph reuse when using torch.compile modes that enable graphs.
+                if args.compile and args.compile_mode != "max-autotune-no-cudagraphs":
+                    mark_step_begin = getattr(getattr(torch, "compiler", None), "cudagraph_mark_step_begin", None)
+                    if mark_step_begin is not None:
+                        mark_step_begin()
 
                 # Fail-fast validation: ERROR if mask loss enabled but no masks in batch
                 if step == 0 and args.use_mask_loss:
@@ -2513,6 +2523,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
         action="store_true",
         help="use FlashAttention 3 for CrossAttention, requires FlashAttention 3, HunyuanVideo does not support this yet"
         " / CrossAttentionにFlashAttention 3を使う、FlashAttention 3が必要。HunyuanVideoは未対応。",
+    )
+    parser.add_argument(
+        "--cute",
+        action="store_true",
+        help="use CuTE (CUDA Templates) for attention, optimized for Blackwell/Hopper GPUs, requires flash_attn.cute"
+        " / CuTE（CUDA Templates）をattentionに使う、Blackwell/Hopper GPUに最適化、flash_attn.cuteが必要",
     )
     parser.add_argument(
         "--split_attn",

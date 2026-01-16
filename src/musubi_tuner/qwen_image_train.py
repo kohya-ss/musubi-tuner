@@ -248,9 +248,11 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             attn_mode = "xformers"
         elif args.flash3:
             attn_mode = "flash3"
+        elif args.cute:
+            attn_mode = "cute"
         else:
             raise ValueError(
-                "either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
+                "either --sdpa, --flash-attn, --flash3, --sage-attn, --xformers or --cute must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformers, --cuteのいずれかを指定してください"
             )
         transformer = self.load_transformer(accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_dtype)
 

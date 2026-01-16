@@ -1,0 +1,126 @@
+# =============================================================================
+# DLAY Persona LoRA (Qwen-Image-2512) - AdamW + LoRA+ + CuTE Attention (B300)
+# =============================================================================
+# Purpose: Test CuTE (CUDA Templates) attention backend on B300/Blackwell GPU.
+# CuTE provides ~30-70% faster attention vs FA2 at SeqLen >= 1024.
+#
+# Requirements:
+#   - NVIDIA B300/Blackwell (SM 10.3) or Hopper (SM 9.0+)
+#   - flash-attention 2.8.3+varlen.sm103 with CuTE support
+#   - quack-kernels==0.2.4 (CuTE runtime)
+#
+# Run:
+#   source configs/DLAY/QWEN-IMAGE/env_qwen2512.sh
+#   ./configs/DLAY/QWEN-IMAGE/train_dlay_qwen2512.sh cute
+# =============================================================================
+
+# =============================================================================
+# MODEL PATHS - Qwen-Image-2512
+# =============================================================================
+[model]
+dit = "/root/models/Qwen_Image_2512_BF16.safetensors"
+text_encoder = "/root/models/qwen_2.5_vl_7b_bf16.safetensors"
+vae = "/root/models/qwen_train_vae.safetensors"
+model_version = "original"
+
+# =============================================================================
+# DATASET
+# =============================================================================
+[dataset]
+dataset_config = "/root/blissful-tuner/configs/DLAY/QWEN-IMAGE/dlay_qwen2512_dataset.toml"
+
+# =============================================================================
+# NETWORK (LoRA for Qwen-Image)
+# =============================================================================
+[network]
+network_module = "networks.lora_qwen_image"
+network_dim = 64
+network_alpha = 32
+network_args = [
+  # LoRA+ boosts LoRA-B learning rate for faster convergence
+  "loraplus_lr_ratio=8",
+  # For persona/identity LoRAs, include Qwen-Image modulation layers (img_mod/txt_mod)
+  "exclude_mod=False",
+]
+
+# =============================================================================
+# OPTIMIZER (AdamW - Stable Baseline)
+# =============================================================================
+[optimizer]
+optimizer_type = "adamw"
+learning_rate = 1e-4           # Conservative LR for 20B model LoRA
+optimizer_args = [
+  "betas=(0.9, 0.99)",
+  "weight_decay=0.01",
+  "eps=1e-8",
+]
+lr_scheduler = "cosine_with_min_lr"
+lr_warmup_steps = 100
+lr_decay_steps = 0
+lr_scheduler_num_cycles = 1
+lr_scheduler_power = 1
+lr_scheduler_min_lr_ratio = 0.1
+lr_scheduler_timescale = 0
+lr_scheduler_type = ""
+lr_scheduler_args = []
+
+# =============================================================================
+# TRAINING CONFIGURATION
+# =============================================================================
+[training]
+mixed_precision = "bf16"
+gradient_accumulation_steps = 1
+seed = 42
+
+# Shorter training for initial CuTE validation
+max_train_steps = 2000
+save_every_n_steps = 500
+
+# Qwen-specific timestep sampling
+timestep_sampling = "qwen_shift"
+sigmoid_scale = 1.0
+discrete_flow_shift = 2.2
+
+gradient_checkpointing = false
+scale_weight_norms = 2.0  # Prevents LoRA weight drift during training
+
+# CuTE attention (Blackwell/Hopper optimized)
+# - Routes to cute_varlen when cu_seqlens provided (preserves padding mask)
+# - ~30-70% faster than FA2 at SeqLen >= 1024 on B300
+cute = true
+
+# Mask-weighted loss (softer settings for persona/character training)
+# gamma=0.7 preserves body/clothing learning; min_weight=0.05 for edge artifacts
+use_mask_loss = true
+mask_gamma = 0.7
+mask_min_weight = 0.05
+
+# =============================================================================
+# SAMPLING
+# =============================================================================
+[sampling]
+sample_prompts = "/root/blissful-tuner/configs/DLAY/QWEN-IMAGE/sample_prompts_dlay_qwen2512.txt"
+sample_every_n_steps = 500
+sample_at_first = true  # Generate sample at step 0 to verify pipeline works
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+[output]
+output_dir = "/root/output/dlay_qwen2512_lora_adamw_loraplus_cute-v1"
+output_name = "dlay_qwen2512_persona_lora_adamw_lp_cute-v1"
+logging_dir = "/root/output/dlay_qwen2512_lora_adamw_loraplus_cute-v1/logs"
+log_prefix = "dlay_qwen2512_lora_adamw_lp_cute_v1_"
+
+# =============================================================================
+# ADVANCED OPTIMIZATIONS
+# =============================================================================
+[advanced]
+# torch.compile with CuTE
+# Note: CuTE kernels are JIT-compiled via CUTLASS DSL; set CUTE_DSL_CACHE_DIR
+# in env_qwen2512.sh to persist the kernel cache across runs.
+compile = true
+compile_mode = "max-autotune-no-cudagraphs"
+compile_cache_size_limit = 64
+cuda_allow_tf32 = true
+cuda_cudnn_benchmark = true

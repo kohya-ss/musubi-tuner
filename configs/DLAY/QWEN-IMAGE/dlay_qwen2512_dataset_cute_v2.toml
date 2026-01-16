@@ -1,0 +1,24 @@
+# =============================================================================
+# DLAY Persona Dataset Configuration for Qwen-Image-2512 - CuTE v2
+# =============================================================================
+# Experiment-specific cache directory to ensure mask integrity with --skip_existing.
+# Single resolution (1328x1328) with buckets disabled to reduce compile churn.
+#
+# Changes from base dataset config:
+#   - cache_directory: experiment-specific path
+#   - enable_bucket: false (single resolution training)
+# =============================================================================
+
+[general]
+caption_extension = ".txt"
+batch_size = 4
+enable_bucket = false          # Disabled: single 1328x1328 resolution, reduces compile churn
+bucket_no_upscale = false
+
+# Primary: 1328x1328 (Qwen-Image 1:1 recommended)
+[[datasets]]
+image_directory = "/root/DATASETS-1328/DLAY-1328/subject"
+cache_directory = "/root/DATASETS-1328/DLAY-1328/qwen2512_cache_1328_cute_v2"
+mask_directory = "/root/DATASETS-1328/DLAY-1328/weighted_masks"
+resolution = [1328, 1328]
+num_repeats = 1

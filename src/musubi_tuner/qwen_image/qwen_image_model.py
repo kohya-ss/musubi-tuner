@@ -804,25 +804,56 @@ class Attention(nn.Module):
         joint_value = torch.cat([img_value, txt_value], dim=1)
         del img_value, txt_value
 
-        # Compute joint attention
+        attention_mask = None
+        cu_seqlens_q = cu_seqlens_kv = None
+        max_seqlen_q = max_seqlen_kv = None
         if not self.split_attn:
-            # create attention mask for joint attention
-            if encoder_hidden_states_mask is not None:
-                # encoder_hidden_states_mask: [B, S_txt]
-                attention_mask = torch.cat(
-                    [
-                        torch.ones(
-                            (encoder_hidden_states_mask.shape[0], seq_img),
-                            device=encoder_hidden_states_mask.device,
-                            dtype=torch.bool,
-                        ),
-                        encoder_hidden_states_mask.to(torch.bool),
-                    ],
-                    dim=1,
-                )  # [B, S_img + S_txt]
-                attention_mask = attention_mask[:, None, None, :]  # [B, 1, 1, S] for scaled_dot_product_attention
+            # If we have variable text lengths and we're using an attention backend that doesn't
+            # consume a padding mask (flash/cute/sageattn), pass cu_seqlens to preserve masking.
+            #
+            # Trick: represent each batch item as two "sequences":
+            #   1) real tokens: [image tokens + actual text tokens]
+            #   2) padding tokens: [image+text padding tail]
+            # This prevents attention across the real/pad boundary without allocating an explicit mask.
+            varlen_modes = {"flash", "sageattn", "cute", "cute_varlen", "flash_varlen", "sageattn_varlen"}
+            if txt_seq_lens is not None and self.attn_mode in varlen_modes and encoder_hidden_states is not None:
+                # `encoder_hidden_states` is padded to [B, max_txt_len, D] for batching.
+                # Use `txt_seq_lens` to build a varlen cu_seqlens schedule that isolates padding.
+                if isinstance(txt_seq_lens, torch.Tensor):
+                    txt_lens = txt_seq_lens.to(device=encoder_hidden_states.device, dtype=torch.int32)
+                else:
+                    txt_lens = torch.tensor(txt_seq_lens, device=encoder_hidden_states.device, dtype=torch.int32)
+
+                batch = int(txt_lens.shape[0])
+                max_seqlen = int(seq_img + encoder_hidden_states.shape[1])
+
+                # Shape is (2B + 1): [0, end_real0, end_pad0, end_real1, end_pad1, ...]
+                i = torch.arange(batch, device=txt_lens.device, dtype=torch.int32)
+                cu = torch.empty((2 * batch + 1,), device=txt_lens.device, dtype=torch.int32)
+                cu[0] = 0
+                cu[1::2] = i * max_seqlen + (seq_img + txt_lens)
+                cu[2::2] = (i + 1) * max_seqlen
+
+                cu_seqlens_q = cu
+                cu_seqlens_kv = cu
+                max_seqlen_q = max_seqlen
+                max_seqlen_kv = max_seqlen
+                attention_mask = None  # backend ignores attn_mask; varlen handles masking
             else:
-                attention_mask = None
+                # Only compute attention_mask when actually needed (e.g., SDPA/vanilla path).
+                if encoder_hidden_states_mask is not None:
+                    attention_mask = torch.cat(
+                        [
+                            torch.ones(
+                                (encoder_hidden_states_mask.shape[0], seq_img),
+                                device=encoder_hidden_states_mask.device,
+                                dtype=torch.bool,
+                            ),
+                            encoder_hidden_states_mask.to(torch.bool),
+                        ],
+                        dim=1,
+                    )  # [B, S_img + S_txt]
+                    attention_mask = attention_mask[:, None, None, :]  # [B, 1, 1, S] for scaled_dot_product_attention
 
         # joint_query: [B, S, H, D], joint_key: [B, S, H, D], joint_value: [B, S, H, D]
         total_len = seq_img + txt_seq_lens
@@ -830,7 +861,15 @@ class Attention(nn.Module):
         org_dtype = joint_query.dtype
         del joint_query, joint_key, joint_value
         joint_hidden_states = hunyuan_attention(
-            qkv, mode=self.attn_mode, attn_mask=attention_mask, total_len=total_len if self.split_attn else None
+            qkv,
+            mode=self.attn_mode,
+            attn_mask=attention_mask,
+            total_len=total_len if self.split_attn else None,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            batch_size=encoder_hidden_states.shape[0] if encoder_hidden_states is not None else 1,
         )
         # joint_hidden_states: [B, S, H*D]
 

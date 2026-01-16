@@ -1,0 +1,47 @@
+# =============================================================================
+# Sample prompts for DLAY persona training on Qwen-Image-2512 (v2)
+# =============================================================================
+# Lines starting with # are ignored
+# Qwen-Image-2512 optimal resolutions:
+#   1:1  -> 1328x1328 (portraits)
+#   16:9 -> 1664x928  (landscape)
+#   9:16 -> 928x1664  (vertical)
+#
+# Parameters:
+#   --w/--h: width/height
+#   --s: inference steps (default 50 for Qwen)
+#   --g: guidance scale (CFG, typically 4.0 for Qwen)
+#   --fs: discrete flow shift (typically 2.2 for Qwen)
+#
+# v2 additions: minimal prompts to test trigger word learning vs scenario memorization
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# MINIMAL PROMPTS - Test trigger word learning (no scenario details)
+# -----------------------------------------------------------------------------
+# These detect whether the LoRA learned "DLAY" as an identity vs. memorizing scenes
+
+# Minimal 1: Just trigger + basic descriptor
+DLAY, a man, portrait photo. --w 1328 --h 1328 --s 50 --g 4.0 --fs 2.2 --d 10000
+
+# Minimal 2: Trigger + slightly more context
+DLAY, a young man with short dark hair, looking at the camera. High quality photo. --w 1328 --h 1328 --s 50 --g 4.0 --fs 2.2 --d 10001
+
+# -----------------------------------------------------------------------------
+# DETAILED PROMPTS - Standard evaluation scenarios
+# -----------------------------------------------------------------------------
+
+# Portrait 1:1 - Formal Event
+DLAY, a man with short dark brown hair and a slim build, wearing a navy blue blazer over a light gray checkered button-down shirt, seated at a formal event. He looks directly at the camera with a warm smile. Professional indoor lighting creates soft shadows, with elegant venue decor visible in the blurred background. High quality, photorealistic, detailed facial features. --w 1328 --h 1328 --s 50 --g 4.0 --fs 2.2 --d 10002
+
+# Portrait 1:1 - Casual Outdoor
+DLAY, a man in a fitted black t-shirt, standing in a sun-dappled park during golden hour. His short dark hair catches the warm light as he gazes thoughtfully off-camera. Shallow depth of field blurs the green foliage behind him. Natural lighting, photorealistic skin texture, individual hair strands visible. --w 1328 --h 1328 --s 50 --g 4.0 --fs 2.2 --d 10003
+
+# Portrait 1:1 - Urban Night
+DLAY, a man wearing an open leather jacket over a white henley, leaning against a brick wall in a city alley at night. Neon signs cast colorful reflections on his face. Cinematic lighting, moody atmosphere, detailed fabric textures, sharp focus on facial features. --w 1328 --h 1328 --s 50 --g 4.0 --fs 2.2 --d 10004
+
+# Landscape 16:9 - Beach Scene
+DLAY, a man in a light linen shirt with rolled sleeves, walking along a tropical beach at sunset. Ocean waves gently lap at the shore behind him. Warm golden light illuminates his profile, wind gently moving his hair. Wide shot showing expansive sky with pastel clouds. --w 1664 --h 928 --s 50 --g 4.0 --fs 2.2 --d 10005
+
+# Portrait 9:16 - Studio Shot
+DLAY, a man in a tailored charcoal suit and burgundy tie, standing in a professional photography studio. Clean white backdrop with subtle gradient. Studio lighting creates perfect highlights on his face. Three-quarter view, confident posture, detailed suit fabric texture. --w 928 --h 1664 --s 50 --g 4.0 --fs 2.2 --d 10006
