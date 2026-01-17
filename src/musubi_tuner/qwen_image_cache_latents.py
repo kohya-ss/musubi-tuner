@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def preprocess_contents_qwen_image(batch: List[ItemInfo], is_layered: bool) -> tuple[torch.Tensor]:
+def preprocess_contents_qwen_image(
+    batch: List[ItemInfo], is_layered: bool, remove_first_image_from_target: bool
+) -> tuple[torch.Tensor]:
     # item.content: target image (H, W, C)
     # item.control_content: list of images (H, W, C), optional
 
@@ -51,6 +53,10 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo], is_layered: bool) -> t
                 first_image = np.concatenate([first_image, 255 * np.ones_like(first_image[..., :1])], axis=-1)
                 item.content[0] = first_image
 
+            if remove_first_image_from_target:
+                item.content = item.content[1:]  # remove the first image
+                assert len(item.content) > 0, "After removing the first image, no target images remain."
+
             content_tensors = [torch.from_numpy(c) for c in item.content]  # list of (H, W, C)
             contents.append(torch.stack(content_tensors, dim=0))  # (num_layers, H, W, C)
         contents = torch.stack(contents, dim=0)  # (B, num_layers, H, W, C)
@@ -72,9 +78,16 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo], is_layered: bool) -> t
     return contents, controls
 
 
-def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage, batch: List[ItemInfo], is_layered: bool):
+def encode_and_save_batch(
+    vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
+    batch: List[ItemInfo],
+    is_layered: bool,
+    remove_first_image_from_target: bool,
+):
     # item.content: target image (H, W, C)
-    contents, controls = preprocess_contents_qwen_image(batch, is_layered)  # B, C, L, H, W and list of (C, F, H, W)
+    contents, controls = preprocess_contents_qwen_image(
+        batch, is_layered, remove_first_image_from_target
+    )  # B, C, L, H, W and list of (C, F, H, W)
 
     with torch.no_grad():
         latents = []
@@ -132,6 +145,12 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
 def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     qwen_image_utils.add_model_version_args(parser)
+    parser.add_argument(
+        "--remove_first_image_from_target",
+        action="store_true",
+        help="Remove the first image from the target images for layered model. This trains the model to not output the first image."
+        + " / レイヤードモデルでターゲット画像から最初の画像を削除する。最初の画像を出力しないよう、モデルを学習します。",
+    )
     return parser
 
 
@@ -149,6 +168,11 @@ def main():
 
     if args.vae_dtype is not None:
         raise ValueError("VAE dtype is not supported in Qwen-Image.")
+
+    assert args.is_layered or args.remove_first_image_from_target is False, (
+        "--remove_first_image_from_target can only be used with --is_layered / "
+        "--remove_first_image_from_targetは--is_layeredとともにのみ使用できます"
+    )
 
     device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)
@@ -184,7 +208,7 @@ def main():
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, batch, args.is_layered)
+        encode_and_save_batch(vae, batch, args.is_layered, args.remove_first_image_from_target)
 
     # reuse core loop from cache_latents with no change
     cache_latents.encode_datasets(datasets, encode, args, supports_alpha=args.is_layered)
