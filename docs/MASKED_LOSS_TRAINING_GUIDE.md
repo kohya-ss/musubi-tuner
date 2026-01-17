@@ -243,13 +243,13 @@ keep_tokens = 1
 
 [[datasets]]
 # Image source
-image_directory = "/Users/dustin/DATASETS/Consolidated/KYLA/subject"
+image_directory = "/path/to/images"
 
 # Weighted masks directory - MUST match image filenames!
-mask_directory = "/Users/dustin/DATASETS/Consolidated/KYLA/weighted_masks"
+mask_directory = "/path/to/weighted_masks"
 
 # Cache directory - masks are baked into cache
-cache_directory = "/Users/dustin/DATASETS/Consolidated/KYLA/cache"
+cache_directory = "/path/to/cache"
 
 # Standard settings
 caption_extension = ".txt"
