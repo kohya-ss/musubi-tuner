@@ -73,6 +73,10 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         elif args.metadata_arch is None and args.model_version == "edit-2511":
             args.metadata_arch = CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511  # to notify Edit-2511 mode for sai_model_spec
 
+        assert self.is_layered or not args.remove_first_image_from_target, (
+            "--remove_first_image_from_target can only be used with layered model."
+        )
+
     def process_sample_prompts(
         self,
         args: argparse.Namespace,
@@ -447,6 +451,11 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             latents = latents.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
             noise = noise.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
             noisy_model_input = noisy_model_input.permute(0, 2, 1, 3, 4)  # B, L, C, H, W
+
+            # remove 1st target image from noisy_model_input
+            if args.remove_first_image_from_target:
+                num_layers -= 1  # remove 1 layer
+                noisy_model_input = noisy_model_input[:, 1:, :, :, :]  # B, L-1, C, H, W
         else:
             assert latents.shape[2] == 1, "Expected latents shape B, C, 1, H, W for non-layered model"
             num_layers = 0
@@ -488,8 +497,13 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             latents_control = latents_control.transpose(1, 2)  # B, C, 1, H, W, to match with Edit model
             latents_control_shapes = [latents_control.shape]
             latents_control = qwen_image_utils.pack_latents(latents_control)  # B, H*W, C
-
             noisy_model_input = torch.cat([noisy_model_input, latents_control], dim=1)  # B, L+Lc, C
+
+            # remove 1st target image from latents and noise
+            if args.remove_first_image_from_target:
+                latents = latents[:, 1:, :, :, :]  # B, L-1, C, H, W
+                noise = noise[:, 1:, :, :, :]  # B, L-1, C, H, W
+
         else:
             latents_control, latents_control_shapes = None, None
 
@@ -576,6 +590,11 @@ def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder model")
     parser.add_argument("--num_layers", type=int, default=None, help="Number of layers in the DiT model, default is None (60)")
+    parser.add_argument(
+        "--remove_first_image_from_target",
+        action="store_true",
+        help="Remove the first image from the target images for layered model. / レイヤードモデルでターゲット画像から最初の画像を削除する。",
+    )
     qwen_image_utils.add_model_version_args(parser)
     return parser
 
