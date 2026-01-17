@@ -38,6 +38,18 @@ except ImportError:
     logger.info("Xformers is not installed!")
     xops = None
 
+try:
+    from flash_attn.cute.interface import flash_attn_func as cute_flash_attn_func
+    from flash_attn.cute.interface import flash_attn_varlen_func as cute_flash_attn_varlen_func
+
+    CUTE_AVAILABLE = True
+    logger.info("CuTE (CUDA Templates) is installed!")
+except ImportError:
+    CUTE_AVAILABLE = False
+    cute_flash_attn_func = None
+    cute_flash_attn_varlen_func = None
+    logger.info("CuTE (CUDA Templates) is not installed!")
+
 MEMORY_LAYOUT = {
     "flash": (
         lambda x: x.view(x.shape[0] * x.shape[1], *x.shape[2:]),
@@ -67,7 +79,49 @@ MEMORY_LAYOUT = {
         lambda x: x.transpose(1, 2),
         lambda x: x.transpose(1, 2),
     ),
+    "cute": (
+        lambda x: x.view(x.shape[0] * x.shape[1], *x.shape[2:]),
+        lambda x: x,
+    ),
+    "cute_fixlen": (
+        lambda x: x,
+        lambda x: x,
+    ),
 }
+
+
+# CuTE helper functions wrapped with @torch.compiler.disable to prevent TorchDynamo
+# from tracing into CuTE internals. CuTE's cuda_stream attribute access fails under
+# Dynamo tracing because it receives a proxy Stream object.
+@torch.compiler.disable
+def _cute_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: bool):
+    """CuTE fixed-length attention (graph-break wrapper for torch.compile)."""
+    return cute_flash_attn_func(q, k, v, causal=causal)
+
+
+@torch.compiler.disable
+def _cute_attention_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    causal: bool,
+):
+    """CuTE variable-length attention (graph-break wrapper for torch.compile)."""
+    return cute_flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        causal=causal,
+    )
 
 
 def get_cu_seqlens(text_mask, img_len):
@@ -141,6 +195,8 @@ def attention(
         mode = "sageattn_fixlen"
     elif (split_attn or cu_seqlens_q is None) and mode == "flash":
         mode = "flash_fixlen"
+    elif (split_attn or cu_seqlens_q is None) and mode == "cute":
+        mode = "cute_fixlen"
     # print(f"Attention mode: {mode}, split_attn: {split_attn}")
     pre_attn_layout, post_attn_layout = MEMORY_LAYOUT[mode]
 
@@ -228,6 +284,46 @@ def attention(
         else:
             x = sageattn(q, k, v)
             del q, k, v
+
+    elif mode == "cute":
+        # CuTE varlen attention (variable sequence lengths via cu_seqlens)
+        # CuTE doesn't support dropout
+        if not CUTE_AVAILABLE:
+            raise ImportError(
+                "CuTE not available. Requires flash-attention built with CuTE support "
+                "(flash_attn.cute.interface). See docs/cute_attention.md for requirements."
+            )
+        out, _ = _cute_attention_varlen(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_kv,
+            causal=causal,
+        )
+        del q, k, v
+        x = out.view(batch_size, max_seqlen_q, out.shape[-2], out.shape[-1])
+
+    elif mode == "cute_fixlen":
+        # CuTE fixed-length attention (no cu_seqlens)
+        if not CUTE_AVAILABLE:
+            raise ImportError(
+                "CuTE not available. Requires flash-attention built with CuTE support "
+                "(flash_attn.cute.interface). See docs/cute_attention.md for requirements."
+            )
+        if split_attn:
+            x = []
+            for i in range(len(q)):
+                out, _ = _cute_attention(q[i], k[i], v[i], causal=causal)
+                q[i], k[i], v[i] = None, None, None
+                x.append(out)
+            del q, k, v
+        else:
+            out, _ = _cute_attention(q, k, v, causal=causal)
+            del q, k, v
+            x = out
 
     elif mode == "vanilla":
         assert not split_attn, "Vanilla attention does not support trimming"

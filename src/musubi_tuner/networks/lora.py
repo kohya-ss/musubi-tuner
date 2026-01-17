@@ -256,6 +256,11 @@ class LoRAModule(torch.nn.Module):
         B = self.lora_up.weight
         s = scale * self.multiplier
 
+        # Project convention: multiplier=0 should be a true no-op.
+        # DoRA can otherwise rescale the base output even when s==0.
+        if s == 0:
+            return torch.zeros_like(base_result)
+
         # Weight norm using efficient computation (no_grad to avoid building compute graph)
         # Detached per DoRA paper section 4.3 - gradients don't flow through the norm
         with torch.no_grad():
@@ -285,10 +290,17 @@ class LoRAModule(torch.nn.Module):
         # DoRA delta formula
         # delta = (m/norm - 1) * base_wo_bias + (m/norm) * lora_out * s
         delta = (mag_norm_scale - 1) * base_wo_bias + mag_norm_scale * lora_result * s
-        return delta
+        # Preserve the module output dtype - DoRA magnitude may be float32,
+        # which would otherwise promote Linear outputs and break attention backends
+        # (e.g., CuTE FlashAttention requires q.dtype == k.dtype == v.dtype).
+        return delta.to(dtype=base_result.dtype)
 
     def forward(self, x):
         org_forwarded = self.org_forward(x)
+
+        # Project convention: multiplier=0 should be a true no-op.
+        if self.multiplier == 0:
+            return org_forwarded
 
         # module dropout
         if self.module_dropout is not None and self.training:
@@ -320,6 +332,8 @@ class LoRAModule(torch.nn.Module):
 
             if self.use_dora and self.dora_layer is not None:
                 # DoRA: compute delta and add to base
+                if scale * self.multiplier == 0:
+                    return org_forwarded
                 dora_delta = self._dora_delta(org_forwarded, lx, scale)
                 return org_forwarded + dora_delta
             else:
@@ -388,6 +402,10 @@ class LoRAInfModule(LoRAModule):
     #         self._merge_to(sd, dtype, device, non_blocking)
 
     def merge_to(self, sd, dtype, device, non_blocking=False):
+        # Project convention: multiplier=0 should be a true no-op.
+        if self.multiplier == 0:
+            return
+
         # extract weight from org_module
         org_sd = self.org_module.state_dict()
         weight = org_sd["weight"]
@@ -417,9 +435,9 @@ class LoRAInfModule(LoRAModule):
                     weight = dora_factor.view(-1, 1) * (weight + delta_weight)
                 else:
                     if self.use_dora and "dora_layer.weight" not in sd:
-                        logger.warning(
-                            f"DoRA enabled for {self.lora_name} but dora_layer.weight missing from weights. "
-                            f"Falling back to standard LoRA merge. This may indicate a partial/corrupted checkpoint."
+                        raise ValueError(
+                            f"DoRA enabled for {self.lora_name} but dora_layer.weight is missing from weights. "
+                            f"This would silently produce incorrect results (uninitialized magnitudes)."
                         )
                     weight = weight + self.multiplier * (up_weight @ down_weight) * self.scale
             elif down_weight.size()[2:4] == (1, 1):
@@ -463,6 +481,10 @@ class LoRAInfModule(LoRAModule):
         if multiplier is None:
             multiplier = self.multiplier
 
+        # Project convention: multiplier=0 should be a true no-op.
+        if multiplier == 0:
+            return torch.zeros_like(self.org_module_ref[0].weight, dtype=torch.float)
+
         # get up/down weight from module
         up_weight = self.lora_up.weight.to(torch.float)
         down_weight = self.lora_down.weight.to(torch.float)
@@ -486,29 +508,32 @@ class LoRAInfModule(LoRAModule):
                             self._warned_uninit_dora_mag = True
                 # Include DoRA scaling in pre-calculated weight (materialization OK here)
                 base_weight = self.org_module_ref[0].weight.data.to(torch.float)
-                lora_weight = self.multiplier * (up_weight @ down_weight) * self.scale
+                lora_weight = multiplier * (up_weight @ down_weight) * self.scale
                 weight_norm = self.dora_layer.get_weight_norm_materialized(base_weight, lora_weight, 1.0)
                 dora_factor = mag.to(torch.float) / weight_norm
                 merged = dora_factor.view(-1, 1) * (base_weight + lora_weight)
                 return merged - base_weight  # Return delta only
             else:
-                weight = self.multiplier * (up_weight @ down_weight) * self.scale
+                weight = multiplier * (up_weight @ down_weight) * self.scale
         elif down_weight.size()[2:4] == (1, 1):
             # conv2d 1x1
             weight = (
-                self.multiplier
+                multiplier
                 * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
                 * self.scale
             )
         else:
             # conv2d 3x3
             conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
-            weight = self.multiplier * conved * self.scale
+            weight = multiplier * conved * self.scale
 
         return weight
 
     def default_forward(self, x):
         # logger.info(f"default_forward {self.lora_name} {x.size()}")
+        # Project convention: multiplier=0 should be a true no-op.
+        if self.multiplier == 0:
+            return self.org_forward(x)
         if self.split_dims is None:
             lx = self.lora_down(x)
             lx = self.lora_up(lx)
@@ -516,6 +541,8 @@ class LoRAInfModule(LoRAModule):
             # DoRA path for inference
             if self.use_dora and self.dora_layer is not None:
                 org_forwarded = self.org_forward(x)
+                if self.multiplier * self.scale == 0:
+                    return org_forwarded
                 dora_delta = self._dora_delta(org_forwarded, lx, self.scale)
                 return org_forwarded + dora_delta
             else:
@@ -962,16 +989,46 @@ class LoRANetwork(torch.nn.Module):
         # - use_dora=False but weights have DoRA: warn (intentionally ignoring DoRA is reasonable)
         if self.use_dora and not loaded_dora:
             raise ValueError(
-                f"DoRA flag mismatch: network expects DoRA (use_dora=True), but weights have no DoRA magnitude vectors. "
-                f"This will produce incorrect results with uninitialized magnitudes. "
-                f"Either recreate the network with use_dora=False, or use DoRA-trained weights."
+                "DoRA flag mismatch: network expects DoRA (use_dora=True), but weights have no DoRA magnitude vectors. "
+                "This will produce incorrect results with uninitialized magnitudes. "
+                "Either recreate the network with use_dora=False, or use DoRA-trained weights."
             )
         elif not self.use_dora and loaded_dora:
             logger.warning(
-                f"DoRA flag mismatch: weights contain DoRA magnitude vectors, but network was created with use_dora=False. "
-                f"DoRA magnitudes will be ignored and weights will be treated as standard LoRA. "
-                f"If this is unintentional, recreate the network with use_dora=True."
+                "DoRA flag mismatch: weights contain DoRA magnitude vectors, but network was created with use_dora=False. "
+                "DoRA magnitudes will be ignored and weights will be treated as standard LoRA. "
+                "If this is unintentional, recreate the network with use_dora=True."
             )
+
+        # Sanitize state dict to avoid propagating contradictory metadata buffers.
+        # If we intentionally ignore DoRA, do not allow `use_dora_flag=True` to flip our buffer.
+        if not self.use_dora:
+            weights_sd.pop("use_dora_flag", None)
+            weights_sd["use_dora_flag"] = torch.tensor(False, dtype=torch.bool)
+
+        # Fail fast on partial DoRA checkpoints: if a module has LoRA weights, it must have a DoRA magnitude too.
+        if self.use_dora and loaded_dora:
+            # Prefer the in-memory LoRA module objects (works even before apply_to()).
+            name_to_lora = {m.lora_name: m for m in (self.text_encoder_loras + self.unet_loras)}
+            prefixes: set[str] = set()
+            for k in weights_sd.keys():
+                if k.endswith(".lora_down.weight") or k.endswith(".lora_up.weight"):
+                    prefixes.add(k.rsplit(".", 2)[0])
+            missing_mag = []
+            for p in sorted(prefixes):
+                mod = getattr(self, p, None) or name_to_lora.get(p)
+                if mod is None or not getattr(mod, "use_dora", False):
+                    continue
+                mag_key = f"{p}.dora_layer.weight"
+                if mag_key not in weights_sd:
+                    missing_mag.append(mag_key)
+            if missing_mag:
+                preview = ", ".join(missing_mag[:5])
+                raise ValueError(
+                    f"DoRA checkpoint appears partial: missing {len(missing_mag)} dora_layer.weight tensors "
+                    f"for modules that have LoRA weights. Example(s): {preview}. "
+                    f"This would silently use uninitialized magnitudes (all-ones) and produce incorrect results."
+                )
 
         info = self.load_state_dict(weights_sd, False)
         return info
