@@ -1,23 +1,22 @@
 import argparse
-from typing import Optional
+import logging
 import math
+from typing import Optional
 
 import torch
-from tqdm import tqdm
 from accelerate import Accelerator
+from tqdm import tqdm
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_Z_IMAGE, ARCHITECTURE_Z_IMAGE_FULL
-from musubi_tuner.zimage import zimage_model, zimage_utils, zimage_autoencoder, zimage_config
 from musubi_tuner.hv_train_network import (
     NetworkTrainer,
-    load_prompts,
     clean_memory_on_device,
-    setup_parser_common,
+    load_prompts,
     read_config_from_file,
+    setup_parser_common,
 )
 from musubi_tuner.utils import model_utils
-
-import logging
+from musubi_tuner.zimage import zimage_autoencoder, zimage_config, zimage_model, zimage_utils
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -274,47 +273,123 @@ class ZImageNetworkTrainer(NetworkTrainer):
         # noisy_model_input: [B, C, H, W]
         image_sequence_length = (latents.shape[2] // model.all_patch_size[0]) * (latents.shape[3] // model.all_patch_size[0])
 
-        # Add frame dimension F=1
-        noisy_model_input = noisy_model_input.unsqueeze(2)  # [B, C, 1, H, W]
-
-        # Caption inputs and masks
-        llm_embed = batch["llm_embed"]  # list[torch.Tensor]
-
-        txt_seq_lens = [x.shape[0] for x in llm_embed]
-
-        max_len = max(txt_seq_lens)
-        # if not split_attn, we need to make attention mask
-        if not args.split_attn and bsize > 1:
-            padded_len = math.ceil((max_len + image_sequence_length) / zimage_config.SEQ_MULTI_OF) * zimage_config.SEQ_MULTI_OF
-            max_len = int(padded_len) - image_sequence_length
-            llm_mask = torch.zeros(bsize, max_len, dtype=torch.bool, device=llm_embed[0].device)
-            for i, x in enumerate(txt_seq_lens):
-                llm_mask[i, :x] = True
-        else:
-            llm_mask = None  # if split_attn, vl_mask is not used
-
-        llm_embed = [torch.nn.functional.pad(x, (0, 0, 0, max_len - x.shape[0])) for x in llm_embed]
-        llm_embed = torch.stack(llm_embed, dim=0)  # B, L, D
-
-        # print(f"llm_embed shape: {llm_embed.shape}, vl_mask shape: {vl_mask.shape if vl_mask is not None else None}")
-
         # Timesteps
         t_input = (1000.0 - timesteps) / 1000.0
 
-        # Prepare inputs on device
-        noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
-        llm_embed = llm_embed.to(device=accelerator.device, dtype=network_dtype)
-        llm_mask = llm_mask.to(device=accelerator.device) if llm_mask is not None else None
-        t_input = t_input.to(device=accelerator.device, dtype=network_dtype)
+        # Add frame dimension F=1
+        noisy_model_input = noisy_model_input.unsqueeze(2)  # [B, C, 1, H, W]
 
-        # Enable grad
-        if args.gradient_checkpointing:
-            noisy_model_input.requires_grad_(True)
-            llm_embed.requires_grad_(True)
+        # Detect OmniBase/edit mode by presence of cached control latents
+        has_control_latent = any(k.startswith("latents_control_") for k in batch.keys())
 
-        # Call model
-        with accelerator.autocast():
-            model_pred = transformer(x=noisy_model_input, t=t_input, cap_feats=llm_embed, cap_mask=llm_mask)
+        if has_control_latent:
+            # Prepare latents (target is noisy, controls are clean)
+            noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
+
+            # Caption features are variable-length per sample
+            llm_embed_list = batch["llm_embed"]  # list[torch.Tensor]
+            llm_embed_list = [x.to(device=accelerator.device, dtype=network_dtype) for x in llm_embed_list]
+
+            # Collect control latents and optional siglip features per control index
+            control_indices = []
+            for k in batch.keys():
+                if k.startswith("latents_control_"):
+                    try:
+                        control_indices.append(int(k.split("_")[-1]))
+                    except Exception:
+                        continue
+            control_indices = sorted(set(control_indices))
+
+            control_latents_by_index: dict[int, torch.Tensor] = {}
+            for ci in control_indices:
+                cl = batch.get(f"latents_control_{ci}")
+                if cl is None:
+                    continue
+                control_latents_by_index[ci] = cl.to(device=accelerator.device, dtype=network_dtype).unsqueeze(2)  # [B,C,1,H,W]
+
+            siglip_by_index: dict[int, Optional[torch.Tensor]] = {}
+            for ci in control_indices:
+                sf = batch.get(f"siglip_{ci}")
+                siglip_by_index[ci] = sf.to(device=accelerator.device, dtype=network_dtype) if sf is not None else None
+
+            # Build omni-mode inputs
+            all_x = []
+            all_cap_feats = []
+            all_siglip_feats = []
+            all_noise_masks = []
+
+            for b in range(bsize):
+                x_items = []
+                sig_items = []
+                noise_items = []
+
+                for ci in control_indices:
+                    if ci not in control_latents_by_index:
+                        continue
+                    x_items.append(control_latents_by_index[ci][b])
+                    sig_items.append(siglip_by_index[ci][b] if siglip_by_index[ci] is not None else None)
+                    noise_items.append(0)
+
+                # target (noisy) is always last
+                x_items.append(noisy_model_input[b])
+                sig_items.append(None)
+                noise_items.append(1)
+
+                all_x.append(x_items)
+                all_cap_feats.append([llm_embed_list[b]] * len(x_items))
+                all_siglip_feats.append(sig_items)
+                all_noise_masks.append(noise_items)
+
+            # Enable grad
+            if args.gradient_checkpointing:
+                for b in range(bsize):
+                    all_x[b][-1].requires_grad_(True)
+
+            t_input = t_input.to(device=accelerator.device, dtype=network_dtype)
+
+            with accelerator.autocast():
+                model_pred = transformer(
+                    x=all_x,
+                    t=t_input,
+                    cap_feats=all_cap_feats,
+                    cap_mask=None,
+                    siglip_feats=all_siglip_feats,
+                    image_noise_mask=all_noise_masks,
+                )
+        else:
+            # Caption inputs and masks
+            llm_embed = batch["llm_embed"]  # list[torch.Tensor]
+
+            txt_seq_lens = [x.shape[0] for x in llm_embed]
+
+            max_len = max(txt_seq_lens)
+            # if not split_attn, we need to make attention mask
+            if not args.split_attn and bsize > 1:
+                padded_len = math.ceil((max_len + image_sequence_length) / zimage_config.SEQ_MULTI_OF) * zimage_config.SEQ_MULTI_OF
+                max_len = int(padded_len) - image_sequence_length
+                llm_mask = torch.zeros(bsize, max_len, dtype=torch.bool, device=llm_embed[0].device)
+                for i, x in enumerate(txt_seq_lens):
+                    llm_mask[i, :x] = True
+            else:
+                llm_mask = None  # if split_attn, vl_mask is not used
+
+            llm_embed = [torch.nn.functional.pad(x, (0, 0, 0, max_len - x.shape[0])) for x in llm_embed]
+            llm_embed = torch.stack(llm_embed, dim=0)  # B, L, D
+
+            # Prepare inputs on device
+            noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
+            llm_embed = llm_embed.to(device=accelerator.device, dtype=network_dtype)
+            llm_mask = llm_mask.to(device=accelerator.device) if llm_mask is not None else None
+            t_input = t_input.to(device=accelerator.device, dtype=network_dtype)
+
+            # Enable grad
+            if args.gradient_checkpointing:
+                noisy_model_input.requires_grad_(True)
+                llm_embed.requires_grad_(True)
+
+            # Call model
+            with accelerator.autocast():
+                model_pred = transformer(x=noisy_model_input, t=t_input, cap_feats=llm_embed, cap_mask=llm_mask)
 
         # model_pred: [B, C, F, H, W]
         model_pred = model_pred.squeeze(2)  # [B, C, H, W]

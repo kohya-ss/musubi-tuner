@@ -1,15 +1,30 @@
 import json
-import math
-from typing import Optional, Union
 import logging
+import math
+import os
+from typing import Optional, Union
 
 import numpy as np
 import torch
-from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen2Tokenizer
 from accelerate import init_empty_weights
+from safetensors.torch import load_file
+from transformers import Qwen2Tokenizer, Qwen3Config, Qwen3ForCausalLM
 
 from musubi_tuner.utils.safetensors_utils import load_split_weights
 from musubi_tuner.zimage import zimage_config
+
+try:
+    from transformers import (
+        Siglip2ImageProcessorFast,
+        Siglip2Processor,
+        Siglip2VisionConfig,
+        Siglip2VisionModel,
+    )  # type: ignore
+except Exception:
+    Siglip2VisionModel = None
+    Siglip2Processor = None
+    Siglip2ImageProcessorFast = None
+    Siglip2VisionConfig = None
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -18,10 +33,103 @@ logging.basicConfig(level=logging.INFO)
 ZIMAGE_ID = "Tongyi-MAI/Z-Image-Turbo"
 
 
+SIGLIP2_IMAGE_PROCESSOR_CONFIG = {
+    "data_format": "channels_first",
+    "default_to_square": True,
+    "device": None,
+    "disable_grouping": None,
+    "do_convert_rgb": None,
+    "do_normalize": True,
+    "do_pad": None,
+    "do_rescale": True,
+    "do_resize": True,
+    "image_mean": [0.5, 0.5, 0.5],
+    "image_processor_type": "Siglip2ImageProcessorFast",
+    "image_std": [0.5, 0.5, 0.5],
+    "input_data_format": None,
+    "max_num_patches": 256,
+    "pad_size": None,
+    "patch_size": 16,
+    "processor_class": "Siglip2Processor",
+    "resample": 2,
+    "rescale_factor": 0.00392156862745098,
+    "return_tensors": None,
+}
+
+
+SIGLIP2_VISION_CONFIG = {
+    "architectures": ["Siglip2VisionModel"],
+    "hidden_size": 1152,
+    "intermediate_size": 4608,
+    "num_hidden_layers": 27,
+    "num_attention_heads": 18,
+    "image_size": 256,
+    "patch_size": 16,
+    "num_channels": 3,
+    "attention_dropout": 0.0,
+    "layer_norm_eps": 1e-6,
+    "hidden_act": "gelu_pytorch_tanh",
+}
+
+
 def shift_scale_latents_for_decode(latents: torch.Tensor) -> torch.Tensor:
     """Shift and scale latents before decoding with the VAE. latents should be casted to float32 before calling this function."""
     latents = (latents / zimage_config.ZIMAGE_VAE_SCALING_FACTOR) + zimage_config.ZIMAGE_VAE_SHIFT_FACTOR
     return latents
+
+
+def load_image_encoders(args):
+    if args.image_encoder is None:
+        raise ValueError("--image_encoder is required")
+
+    logger.info("Loading image encoder feature extractor")
+    if Siglip2Processor is None and Siglip2ImageProcessorFast is None:
+        raise RuntimeError(
+            "SigLIP2 processor classes are not available in this transformers version. "
+            "Please upgrade transformers to a version that provides Siglip2Processor/Siglip2ImageProcessorFast."
+        )
+
+    if Siglip2VisionModel is None:
+        raise RuntimeError(
+            "Siglip2VisionModel is not available in this transformers version. "
+            "Please upgrade transformers to a version that provides Siglip2VisionModel."
+        )
+
+    if os.path.isdir(args.image_encoder):
+        # directory checkpoint
+        if Siglip2Processor is not None:
+            feature_extractor = Siglip2Processor.from_pretrained(args.image_encoder, subfolder="image_encoder")
+        else:
+            assert Siglip2ImageProcessorFast is not None
+            feature_extractor = Siglip2ImageProcessorFast.from_pretrained(args.image_encoder, subfolder="image_encoder")
+
+        logger.info(f"Loading image encoder from {args.image_encoder}")
+        image_encoder = Siglip2VisionModel.from_pretrained(args.image_encoder, subfolder="image_encoder", torch_dtype=torch.float16)
+        image_encoder.eval()
+        return feature_extractor, image_encoder
+
+    # single-file checkpoint
+    if Siglip2ImageProcessorFast is None:
+        raise RuntimeError(
+            "Siglip2ImageProcessorFast is not available in this transformers version. "
+            "Single-file --image_encoder requires Siglip2ImageProcessorFast."
+        )
+    if Siglip2VisionConfig is None:
+        raise RuntimeError(
+            "Siglip2VisionConfig is not available in this transformers version. "
+            "Single-file --image_encoder requires Siglip2VisionConfig."
+        )
+
+    feature_extractor = Siglip2ImageProcessorFast(**SIGLIP2_IMAGE_PROCESSOR_CONFIG)
+
+    cfg = Siglip2VisionConfig(**SIGLIP2_VISION_CONFIG)
+    with init_empty_weights():
+        image_encoder = Siglip2VisionModel._from_config(cfg, torch_dtype=torch.float16)
+
+    sd = load_file(args.image_encoder)
+    image_encoder.load_state_dict(sd, strict=True, assign=True)
+    image_encoder.eval()
+    return feature_extractor, image_encoder
 
 
 def load_qwen3(
