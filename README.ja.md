@@ -63,7 +63,9 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
         - 以前の `convert_z_image_lora_to_comfy.py` も引き続き使用可能ですが、nunchakuで正しく動作しない可能性があります。
         - 詳細は[ドキュメント](./docs/zimage.md#converting-lora-weights-to-diffusers-format-for-comfyui--lora重みをcomfyuiで使用可能なdiffusers形式に変換する)を参照してください。
         - [Issue #847](https://github.com/kohya-ss/musubi-tuner/issues/847) で解決策を提供してくださったfai-9氏に感謝します。
-        
+    - Qwen-Image-LayeredのLoRA学習で、元画像を学習対象から除外するオプション `--remove_first_image_from_target` を追加しました。[PR #852](https://github.com/kohya-ss/musubi-tuner/pull/852)
+        - 詳細は[ドキュメント](./docs/qwen_image.md#lora-training--lora学習)を参照してください。
+
 - 2026/01/11
     - Qwen-Image-LayeredのLoRA学習に対応しました。[PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816)
         - 詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。

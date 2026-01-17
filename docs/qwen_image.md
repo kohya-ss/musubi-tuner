@@ -492,7 +492,13 @@ You can specify the discrete flow shift using `--flow_shift`. If omitted, the de
 <details>
 <summary>日本語</summary>
 
-Qwen-Imageの推論は専用のスクリプト`qwen_image_generate_image.py`を使用します。
+Qwen-Imageの推論は専用のスクリプト`qwen_image_generate_image.py`を使用します。コマンド例は英語版のドキュメントを参照してください。
+
+**Qwen-Image-Layeredの推論について**
+
+Qwen-Image-Layeredの推論には`--model_version layered`を指定してください。このアーキテクチャではVAEが異なることに注意してください。Qwen-Image-Layered用のVAEモデルを使用してください。
+
+---
 
 - `qwen_image_generate_image.py`を使用します。
 - `--dit`、`--vae`、`--text_encoder`を指定する必要があります。

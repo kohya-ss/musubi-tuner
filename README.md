@@ -68,6 +68,8 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
         - The previous `convert_z_image_lora_to_comfy.py` can still be used, but the converted weights may not work correctly with nunchaku.
         - Please refer to the [documentation](./docs/zimage.md#converting-lora-weights-to-diffusers-format-for-comfyui--lora重みをcomfyuiで使用可能なdiffusers形式に変換する) for details.
         - Many thanks to fai-9 for providing the solution in [Issue #847](https://github.com/kohya-ss/musubi-tuner/issues/847).
+    - Added `--remove_first_image_from_target` option for LoRA training of Qwen-Image-Layered. See [PR #852](https://github.com/kohya-ss/musubi-tuner/pull/852).
+        - Please refer to the [documentation](./docs/qwen_image.md#lora-training--lora学習) for details.
 
 - January 11, 2026
     - Added support for LoRA training of Qwen-Image-Layered. See [PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816).
