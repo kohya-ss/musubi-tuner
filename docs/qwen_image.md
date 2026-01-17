@@ -479,7 +479,7 @@ Please specify `--model_version layered` for Qwen-Image-Layered inference. Note 
     - `--append_original_name`: When saving edited images, appends the original base name of the control image to the output file name.
 - For Qwen-Image-Layered:
     - Specify the image to be layered in `--control_image_path`.
-    - Specify the number of layers to output in `--output_layers`. (Since Qwen-Image-Layered also generates the original image, the specified number + 1 will be generated. If `--remove_first_image_from_target` was used during training, specify the number of layers + 1 here.)
+    - Specify the number of layers to output in `--output_layers`. (Since Qwen-Image-Layered also generates the original image, it generates one more than the specified number. If `--remove_first_image_from_target` was used during training, specify "the number of layers - 1" here to match the number of generated images.)
     - `--resize_control_to_image_size`: Resize control image to match the specified image size. **Recommended for better results with Layered models.**
 - Memory saving options like `--fp8_scaled` (for DiT) are available.
 - `--text_encoder_cpu` enables CPU inference for the text encoder. Recommended for systems with limited GPU resources (less than 16GB VRAM).
@@ -514,7 +514,7 @@ Qwen-Image-Layeredの推論には`--model_version layered`を指定してくだ�
     - `--append_original_name`: 編集された画像を保存する際に、コントロール画像の元の基本名を出力ファイル名に追加します。
 - Qwen-Image-Layeredの場合：
     - `--control_image_path`に、分割対象の画像を指定してください。
-    - `--output_layers`に出力するレイヤー数を指定してください。（Qwen-Image-Layeredは元画像も生成するため、指定した数＋1が生成されます。もし学習時に`--remove_first_image_from_target`を使用していた場合は、ここにはレイヤー数＋1を指定してください。）
+    - `--output_layers`に出力するレイヤー数を指定してください。（Qwen-Image-Layeredは元画像も生成するため、指定した数より1枚多く生成されます。もし学習時に`--remove_first_image_from_target`を使用していた場合は、ここには「レイヤー数－1」を指定してください。）
     - `--resize_control_to_image_size`: コントロール画像を指定した画像サイズに合わせてリサイズします。Layeredモデルでより良い結果を得るために推奨されます。
 - DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。
 - `--text_encoder_cpu`を指定するとテキストエンコーダーをCPUで推論します。GPUのVRAMが16GB未満のシステムでは、CPU推論を推奨します。
