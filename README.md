@@ -63,6 +63,12 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- January 17, 2026
+    - Changed to use `convert_lora.py` for converting Z-Image LoRA for ComfyUI to improve compatibility. See [PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851).
+        - The previous `convert_z_image_lora_to_comfy.py` can still be used, but the converted weights may not work correctly with nunchaku.
+        - Please refer to the [documentation](./docs/zimage.md#converting-lora-weights-to-diffusers-format-for-comfyui--lora重みをcomfyuiで使用可能なdiffusers形式に変換する) for details.
+        - Many thanks to fai-9 for providing the solution in [Issue #847](https://github.com/kohya-ss/musubi-tuner/issues/847).
+
 - January 11, 2026
     - Added support for LoRA training of Qwen-Image-Layered. See [PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816).
         - Please refer to the [documentation](./docs/qwen_image.md) for details.

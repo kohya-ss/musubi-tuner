@@ -167,28 +167,35 @@ Z-Imageの学習は専用のスクリプト`zimage_train_network.py`を使用し
 
 </details>
 
-### Converting LoRA weights to ComfyUI format / LoRA重みをComfyUI形式に変換する
+### Converting LoRA weights to Diffusers format for ComfyUI / LoRA重みをComfyUIで使用可能なDiffusers形式に変換する
 
-A script is provided to convert Z-Image LoRA weights to ComfyUI format.
+A script is provided to convert Z-Image LoRA weights to Diffusers format for ComfyUI.
 
 ```bash
-python src/musubi_tuner/networks/convert_z_image_lora_to_comfy.py \
-    path/to/zimage_lora.safetensors \
-    path/to/output_comfy_lora.safetensors
+python src/musubi_tuner/networks/convert_lora.py \
+    --input path/to/zimage_lora.safetensors \
+    --output path/to/output_diffusers_lora.safetensors \
+    --target other
 ```
 
-- The script is `convert_z_image_lora_to_comfy.py`.
-- The first argument is the input Z-Image LoRA weights file.
-- The second argument is the output ComfyUI-format LoRA weights file.
+- The script is `convert_lora.py`.
+- `--input` argument is the input Z-Image LoRA weights file.
+- `--output` argument is the output Diffusers format LoRA weights file.
+- `--target other` means Diffusers format can be used in ComfyUI.
+
+`networks\convert_z_image_lora_to_comfy.py` can also be used for this purpose, but the converted weights may not work correctly with nunchaku.
 
 <details>
 <summary>日本語</summary>
 
-Z-ImageのLoRA重みをComfyUI形式に変換するスクリプトが提供されています。
+Z-ImageのLoRA重みをComfyUIで使用できるDiffusers形式に変換するスクリプトが提供されています。
 
-- スクリプトは`convert_z_image_lora_to_comfy.py`です。
-- 最初の引数は入力のZ-Image LoRA重みファイルです。
-- 2番目の引数は出力のComfyUI形式のLoRA重みファイルです。
+- スクリプトは`convert_lora.py`です。
+- `--input`引数は入力のZ-Image LoRA重みファイルです。
+- `--output`引数は出力のDiffusers形式のLoRA重みファイルです。
+- `--target other`はComfyUIで使用できるDiffusers形式を意味します。
+
+`networks\convert_z_image_lora_to_comfy.py`もこの目的で使用できますが、変換された重みがnunchakuで正しく動作しない可能性があります。
 
 </details>
 

@@ -58,6 +58,12 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/01/17
+    - Z-ImageのComfyUI向けのLoRA変換について、互換性向上のため `convert_lora.py` を使用するように変更しました。[PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851)
+        - 以前の `convert_z_image_lora_to_comfy.py` も引き続き使用可能ですが、nunchakuで正しく動作しない可能性があります。
+        - 詳細は[ドキュメント](./docs/zimage.md#converting-lora-weights-to-diffusers-format-for-comfyui--lora重みをcomfyuiで使用可能なdiffusers形式に変換する)を参照してください。
+        - [Issue #847](https://github.com/kohya-ss/musubi-tuner/issues/847) で解決策を提供してくださったfai-9氏に感謝します。
+        
 - 2026/01/11
     - Qwen-Image-LayeredのLoRA学習に対応しました。[PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816)
         - 詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
