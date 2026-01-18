@@ -1843,6 +1843,8 @@ class ImageDataset(BaseDataset):
         image_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
         mask_directory: Optional[str] = None,
+        alpha_mask: bool = False,
+        require_mask: bool = False,
         cache_directory: Optional[str] = None,
         multiple_target: bool = False,
         fp_latent_window_size: Optional[int] = 9,
@@ -1870,6 +1872,8 @@ class ImageDataset(BaseDataset):
         self.image_jsonl_file = image_jsonl_file
         self.control_directory = control_directory
         self.mask_directory = mask_directory
+        self.alpha_mask = alpha_mask
+        self.require_mask = require_mask
         self.multiple_target = multiple_target
         self.fp_latent_window_size = fp_latent_window_size
         self.fp_1f_clean_indices = fp_1f_clean_indices
@@ -1879,13 +1883,22 @@ class ImageDataset(BaseDataset):
         self.qwen_image_edit_no_resize_control = qwen_image_edit_no_resize_control
         self.qwen_image_edit_control_resolution = qwen_image_edit_control_resolution
 
-        # Set up mask paths if mask_directory is specified
+        # Set up mask paths if mask_directory is specified (build O(1) lookup dict)
         self.mask_paths: Optional[dict[str, str]] = None
+        mask_by_basename: Optional[dict[str, str]] = None
         if mask_directory is not None:
-            self.mask_paths = {}
             logger.info(f"glob mask images in {mask_directory}")
-            all_mask_paths = set(glob_images(mask_directory))
+            all_mask_paths = glob_images(mask_directory)
             logger.info(f"found {len(all_mask_paths)} mask images")
+
+            # Build O(1) lookup dict: basename_no_ext -> full_path
+            mask_by_basename = {}
+            for mask_path in all_mask_paths:
+                basename_no_ext = os.path.splitext(os.path.basename(mask_path))[0]
+                if basename_no_ext in mask_by_basename:
+                    logger.warning(f"Duplicate mask basename '{basename_no_ext}', keeping first")
+                else:
+                    mask_by_basename[basename_no_ext] = mask_path
 
         control_count_per_image: Optional[int] = 1
         if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
@@ -1907,28 +1920,34 @@ class ImageDataset(BaseDataset):
         else:
             raise ValueError("image_directory or image_jsonl_file must be specified")
 
-        # Match mask paths to image paths if mask_directory is specified
-        if mask_directory is not None and self.mask_paths is not None:
+        # Match mask paths to image paths if mask_directory is specified (O(1) lookup)
+        if mask_by_basename is not None:
+            self.mask_paths = {}
             image_paths = self.datasource.image_paths if hasattr(self.datasource, "image_paths") else []
-            if hasattr(self.datasource, "data"):  # JSONL datasource
-                image_paths = [item["image_path"] for item in self.datasource.data]
+            if hasattr(self.datasource, "data"):  # JSONL datasource - mirror get_image_data() fallback
+                image_paths = [item.get("image_path", item.get("image_path_0")) for item in self.datasource.data]
 
+            missing_masks = []
             for image_path in image_paths:
-                image_basename = os.path.basename(image_path)
-                image_basename_no_ext = os.path.splitext(image_basename)[0]
+                image_basename_no_ext = os.path.splitext(os.path.basename(image_path))[0]
+                if image_basename_no_ext in mask_by_basename:
+                    self.mask_paths[image_path] = mask_by_basename[image_basename_no_ext]
+                else:
+                    missing_masks.append(image_basename_no_ext)
 
-                # Find matching mask image
-                for mask_path in all_mask_paths:
-                    mask_basename = os.path.basename(mask_path)
-                    mask_basename_no_ext = os.path.splitext(mask_basename)[0]
-                    if mask_basename_no_ext == image_basename_no_ext:
-                        self.mask_paths[image_path] = mask_path
-                        break
+            logger.info(f"matched {len(self.mask_paths)} masks to images")
+            if missing_masks and not self.alpha_mask:
+                logger.warning(f"{len(missing_masks)} images have no matching mask file")
 
-            logger.info(f"matched {len(self.mask_paths)} mask images to training images")
-            if len(self.mask_paths) != len(image_paths):
-                missing_masks = len(image_paths) - len(self.mask_paths)
-                logger.warning(f"{missing_masks} training images do not have matching mask images")
+        if self.alpha_mask:
+            logger.info("Alpha channel mask extraction enabled (alpha_mask=true)")
+
+        # Early validation: require_mask without any mask source is a config error
+        if self.require_mask and not self.alpha_mask and self.mask_paths is None:
+            raise ValueError(
+                "require_mask=true but no mask source configured. "
+                "Set alpha_mask=true and/or mask_directory in your dataset config."
+            )
 
         if self.cache_directory is None:
             self.cache_directory = self.image_directory
@@ -1958,6 +1977,9 @@ class ImageDataset(BaseDataset):
         batches: dict[tuple[int, int], list[ItemInfo]] = {}  # (width, height) -> [ItemInfo]
         futures = []
 
+        # Thread-safe counting: workers return mask_source, main thread counts here
+        mask_source_counts = {"alpha": 0, "file": 0, "none": 0}
+
         # aggregate futures and sort by bucket resolution
         def aggregate_future(consume_all: bool = False):
             while len(futures) >= num_workers or (consume_all and len(futures) > 0):
@@ -1970,7 +1992,11 @@ class ImageDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_size, item_key, images, caption, controls, mask = future.result()
+                    original_size, item_key, images, caption, controls, mask, mask_source = future.result()
+
+                    # Count mask sources in MAIN THREAD (thread-safe)
+                    if mask_source is not None:
+                        mask_source_counts[mask_source] += 1
                     image = images[0]  # use the first image as the main content
                     bucket_height, bucket_width = image.shape[:2]
                     bucket_reso = (bucket_width, bucket_height)
@@ -2035,14 +2061,30 @@ class ImageDataset(BaseDataset):
             # fetch and resize image in a separate thread
             def fetch_and_resize(
                 op: callable,
-            ) -> tuple[tuple[int, int], str, list[np.ndarray], str, Optional[list[np.ndarray]], Optional[np.ndarray]]:
+            ) -> tuple[
+                tuple[int, int], str, list[np.ndarray], str, Optional[list[np.ndarray]], Optional[np.ndarray], Optional[str]
+            ]:
                 image_key, images, caption, controls = op()
                 images: list[Image.Image]
-                image: Image.Image = images[0]  # use the first image as the main content
-                image_size = image.size
-
+                target_pil: Image.Image = images[0]  # use the first image as the main content
+                image_size = target_pil.size
                 bucket_reso = buckset_selector.get_bucket_resolution(image_size)
-                images = [resize_image_to_bucket(img, bucket_reso) for img in images]  # list of np.ndarray
+
+                # 1) Extract alpha BEFORE resize (for parity with mask_directory behavior)
+                # Note: Current loaders convert LA→RGB, so only RGBA reaches here.
+                # Using getbands() for future-proofing if loaders change.
+                alpha_pil = None
+                if self.alpha_mask and ("A" in target_pil.getbands()):
+                    alpha_pil = target_pil.getchannel("A")  # PIL Image in "L" mode
+
+                # 2) Resize images + drop alpha by slicing (NEVER use convert("RGB") - it composites against black)
+                resized_images = []
+                for img in images:
+                    arr = resize_image_to_bucket(img, bucket_reso)  # HWC
+                    if arr.ndim == 3 and arr.shape[-1] == 4:
+                        arr = arr[..., :3]  # Drop alpha by slicing, preserves exact RGB values
+                    resized_images.append(arr)
+                images = resized_images
 
                 resized_controls = None
                 if controls is not None:
@@ -2067,14 +2109,32 @@ class ImageDataset(BaseDataset):
                             resized_control = resize_image_to_bucket(control, bucket_reso)
                             resized_controls.append(resized_control)
 
-                # Load and resize mask if available
-                resized_mask = None
-                if self.mask_paths is not None and image_key in self.mask_paths:
-                    mask_path = self.mask_paths[image_key]
-                    mask = Image.open(mask_path).convert("L")  # Convert to grayscale
-                    resized_mask = resize_mask_to_bucket(mask, bucket_reso)  # returns np.ndarray
+                # 3) Resolve mask with fallback chain + fill missing with 255 (full weight)
+                resized_mask: Optional[np.ndarray] = None
+                mask_source: Optional[str] = None
 
-                return image_size, image_key, images, caption, resized_controls, resized_mask
+                if alpha_pil is not None:
+                    # Priority 1: alpha channel from RGBA image
+                    resized_mask = resize_mask_to_bucket(alpha_pil, bucket_reso)
+                    mask_source = "alpha"
+                elif self.mask_paths is not None and image_key in self.mask_paths:
+                    # Priority 2: mask file from mask_directory
+                    mask = Image.open(self.mask_paths[image_key]).convert("L")
+                    resized_mask = resize_mask_to_bucket(mask, bucket_reso)
+                    mask_source = "file"
+                elif self.alpha_mask or (self.mask_paths is not None):
+                    # Masking is "enabled" but this item has no mask
+                    mask_source = "none"
+                    if self.require_mask:
+                        raise ValueError(
+                            f"require_mask=true but no mask found for {image_key} "
+                            f"(no alpha channel + no matching file in mask_directory)"
+                        )
+                    # Fill with full-weight (255) so cache has mask_weights=1.0
+                    w, h = bucket_reso
+                    resized_mask = np.full((h, w), 255, dtype=np.uint8)
+
+                return image_size, image_key, images, caption, resized_controls, resized_mask, mask_source
 
             future = executor.submit(fetch_and_resize, fetch_op)
             futures.append(future)
@@ -2093,6 +2153,16 @@ class ImageDataset(BaseDataset):
             yield key, batch
 
         executor.shutdown()
+
+        # Log mask source summary if masking is enabled
+        if self.alpha_mask or (self.mask_paths is not None):
+            logger.info(
+                f"Mask sources: alpha={mask_source_counts['alpha']}, file={mask_source_counts['file']}, none={mask_source_counts['none']}"
+            )
+            if mask_source_counts["none"] > 0 and not self.require_mask:
+                logger.warning(
+                    f"{mask_source_counts['none']} items had no mask (no alpha + no file). Filled with full-weight (255)."
+                )
 
     def retrieve_text_encoder_output_cache_batches(self, num_workers: int):
         return self._default_retrieve_text_encoder_output_cache_batches(self.datasource, self.batch_size, num_workers)

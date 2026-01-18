@@ -2234,7 +2234,7 @@ class NetworkTrainer:
             logger.info(f"  mask_gamma: {args.mask_gamma}")
             logger.info("-" * 60)
             logger.info("IMPORTANT: Masks must be baked into latent cache!")
-            logger.info("If you see 'no mask_weights' error, recache with mask_directory set.")
+            logger.info("If you see 'no mask_weights' error, recache with alpha_mask or mask_directory.")
             logger.info("=" * 60)
 
         clean_memory_on_device(accelerator.device)
@@ -2267,7 +2267,7 @@ class NetworkTrainer:
                             "FATAL: --use_mask_loss is enabled but batch has no mask_weights!\n"
                             "This means masks were NOT baked into your latent cache.\n"
                             "To fix:\n"
-                            "  1. Add 'mask_directory = \"/path/to/masks\"' under [[datasets]] in your dataset TOML\n"
+                            "  1. Add 'alpha_mask = true' and/or 'mask_directory = \"/path/to/masks\"' in dataset TOML\n"
                             "  2. Use a FRESH cache_directory (masks are stored in cache)\n"
                             "  3. Recache latents with the appropriate cache script\n"
                             "  4. Then re-run training"
@@ -2306,7 +2306,14 @@ class NetworkTrainer:
                     # Apply mask-weighted loss if mask weights are present in the batch
                     mask_weights = batch.get("mask_weights", None)
                     if mask_weights is not None and args.use_mask_loss:
-                        # mask_weights shape: (B, 1, F, H, W) - expand to match loss shape (B, C, F, H, W)
+                        # mask_weights from batch:
+                        # - Usually: (B, 1, F, H, W) from cached mask weights (1, F, H, W) stacked across batch
+                        # - Possible: (B, F, H, W) if any upstream/script variant squeezes the singleton dim
+                        # Loss shape: (B, C, F, H, W). We want (B, 1, F, H, W) so 1 broadcasts to C.
+                        if mask_weights.ndim == 4:
+                            mask_weights = mask_weights.unsqueeze(1)  # (B, F, H, W) -> (B, 1, F, H, W)
+                        elif mask_weights.ndim != 5:
+                            raise ValueError(f"Unexpected mask_weights shape: {tuple(mask_weights.shape)}")
                         mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
                         mask_weights = mask_weights.expand_as(loss)
 

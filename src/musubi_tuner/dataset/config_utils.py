@@ -47,6 +47,8 @@ class ImageDatasetParams(BaseDatasetParams):
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
     mask_directory: Optional[str] = None  # Directory containing mask images for mask-weighted loss training
+    alpha_mask: bool = False  # Try to read mask from target image alpha channel (RGBA PNGs)
+    require_mask: bool = False  # If true, error during caching when item has no mask
     multiple_target: Optional[bool] = False  # For Qwen-Image-Layered: use multiple target images
 
     # FramePack dependent parameters
@@ -125,6 +127,8 @@ class ConfigSanitizer:
         "cache_directory": str,
         "control_directory": str,
         "mask_directory": str,
+        "alpha_mask": bool,
+        "require_mask": bool,
         "multiple_target": bool,
         "fp_latent_window_size": int,
         "fp_1f_clean_indices": [int],
@@ -322,6 +326,9 @@ def generate_dataset_group_by_blueprint(
         image_directory: "{dataset.image_directory}"
         image_jsonl_file: "{dataset.image_jsonl_file}"
         control_directory: "{dataset.control_directory}"
+        mask_directory: "{dataset.mask_directory}"
+        alpha_mask: {dataset.alpha_mask}
+        require_mask: {dataset.require_mask}
         multiple_target: {dataset.multiple_target}
         fp_latent_window_size: {dataset.fp_latent_window_size}
         fp_1f_clean_indices: {dataset.fp_1f_clean_indices}

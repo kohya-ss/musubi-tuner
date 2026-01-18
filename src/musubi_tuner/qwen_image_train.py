@@ -604,7 +604,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             logger.info(f"  mask_gamma: {args.mask_gamma}")
             logger.info("-" * 60)
             logger.info("IMPORTANT: Masks must be baked into latent cache!")
-            logger.info("If you see 'no mask_weights' error, recache with mask_directory set.")
+            logger.info("If you see 'no mask_weights' error, recache with alpha_mask or mask_directory.")
             logger.info("=" * 60)
 
         optimizer_train_fn()
@@ -623,7 +623,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                             "FATAL: --use_mask_loss is enabled but batch has no mask_weights!\n"
                             "This means masks were NOT baked into your latent cache.\n"
                             "To fix:\n"
-                            "  1. Add 'mask_directory = \"/path/to/masks\"' under [[datasets]] in your dataset TOML\n"
+                            "  1. Add 'alpha_mask = true' and/or 'mask_directory = \"/path/to/masks\"' in dataset TOML\n"
                             "  2. Use a FRESH cache_directory (masks are stored in cache)\n"
                             "  3. Recache: python qwen_image_cache_latents.py --dataset_config ... --vae ...\n"
                             "  4. Then re-run training"
@@ -657,9 +657,33 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                     # Apply mask-weighted loss if mask weights are present in the batch
                     mask_weights = batch.get("mask_weights", None)
                     if mask_weights is not None and args.use_mask_loss:
-                        # mask_weights shape: (B, 1, F, H, W) - expand to match loss shape (B, C, F, H, W)
-                        # For Qwen-Image images, F=1 but we keep full 5D for consistency with WAN/video
+                        # mask_weights from batch:
+                        # - Usually: (B, 1, F, H, W) from cached mask weights (1, F, H, W) stacked across batch
+                        # - Possible: (B, F, H, W) if any upstream/script variant squeezes the singleton dim
+                        #
+                        # Loss shapes:
+                        # - non-layered: (B, C, F, H, W)
+                        # - layered: (B, L, C, H, W)  (note different dim order)
+                        #
+                        # Normalize mask_weights to match loss dim order, then broadcast.
+                        if mask_weights.ndim == 4:
+                            # (B, F, H, W) -> (B, 1, F, H, W)
+                            mask_weights = mask_weights.unsqueeze(1)
+                        elif mask_weights.ndim != 5:
+                            raise ValueError(f"Unexpected mask_weights shape: {tuple(mask_weights.shape)}")
+
                         mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
+
+                        if getattr(args, "is_layered", False):
+                            # loss: (B, L, C, H, W)
+                            # mask_weights: (B, 1, F, H, W) with F == (base + layers)
+                            if getattr(args, "remove_first_image_from_target", False):
+                                # Drop the base image mask (targets start from layer 1 when base is conditioning-only)
+                                mask_weights = mask_weights[:, :, 1:, :, :]
+
+                            # Reorder to match (B, L, C, H, W): put F/L in dim=1, singleton in dim=2
+                            mask_weights = mask_weights.permute(0, 2, 1, 3, 4)  # (B, F/L, 1, H, W)
+
                         mask_weights = mask_weights.expand_as(loss)
 
                         # Apply optional gamma correction (gamma > 1.0 = sharper/stronger face focus)

@@ -2,7 +2,7 @@
 
 A comprehensive reference for understanding and using weighted mask loss training in blissful-tuner for WAN2.2 and Qwen Image LoRA training.
 
-**Last Updated:** 2026-01-14
+**Last Updated:** 2026-01-17
 
 ---
 
@@ -233,7 +233,9 @@ All mask-related arguments are validated early in training. Invalid values will 
 
 ## Dataset Configuration
 
-### TOML Configuration Example
+### Method 1: Separate Mask Files
+
+The traditional approach using a separate `mask_directory`:
 
 ```toml
 # Dataset configuration for weighted mask training
@@ -261,7 +263,7 @@ bucket_reso_steps = 64
 batch_size = 1
 ```
 
-### File Naming Convention
+**File Naming Convention:**
 
 Mask files **must match** the image filename (extension can differ):
 
@@ -276,6 +278,56 @@ weighted_masks/
 ├── kyla002.png  # Matches kyla002.png
 └── kyla003.png  # Matches kyla003.png
 ```
+
+### Method 2: Alpha Channel Masks (Recommended)
+
+Embed masks directly in RGBA PNG images to **eliminate filename mismatch bugs**:
+
+```toml
+[[datasets]]
+image_directory = "/path/to/rgba_images"  # RGBA PNGs with embedded masks
+cache_directory = "/path/to/cache_alpha"  # Always use fresh cache!
+alpha_mask = true
+mask_directory = "/path/to/masks"         # Optional fallback for non-RGBA images
+require_mask = false                      # Set true to error if any image lacks mask
+resolution = [1024, 1024]
+caption_extension = ".txt"
+```
+
+**Configuration Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `alpha_mask` | bool | false | Extract mask from image alpha channel |
+| `require_mask` | bool | false | Error during caching if any item has no mask |
+| `mask_directory` | string | none | Optional fallback for non-RGBA images |
+
+**Fallback Chain:**
+1. `alpha_mask=true` + RGBA image → use alpha channel
+2. Else if `mask_directory` has matching file → use mask file
+3. Else → full-weight mask (or error if `require_mask=true`)
+
+### Converting Existing Datasets to RGBA
+
+Use the conversion utility to merge existing image+mask pairs into RGBA PNGs:
+
+```bash
+python convert_masks_to_alpha.py \
+    --image_directory /path/to/images \
+    --mask_directory /path/to/masks \
+    --output_directory /path/to/rgba_output \
+    --caption_directory /path/to/captions  # Optional: copy captions
+```
+
+**Options:**
+- `--dry_run`: Preview without writing files
+- `--skip_existing`: Skip files already in output directory
+- `--caption_extension`: Default `.txt`
+
+**Important Notes:**
+- The conversion preserves exact RGB values (never composites against black)
+- Aspect ratio mismatches > 1% will error (prevents distortion)
+- Always use a fresh `cache_directory` after conversion!
 
 ---
 
@@ -446,17 +498,35 @@ If you don't see this banner, `--use_mask_loss` is not enabled.
 **Cause:** Masks were not baked into the latent cache.
 
 **Solution:**
-1. Add `mask_directory` to your dataset TOML config
+1. Add `alpha_mask = true` and/or `mask_directory` to your dataset TOML config
 2. Use a **fresh** `cache_directory` (or delete existing cache)
 3. Re-run the cache latents script
 
-### Warning: "X training images do not have matching mask images"
+### Warning: "X images have no matching mask file"
 
 **Cause:** Some images in `image_directory` don't have corresponding masks in `mask_directory`.
 
 **Solution:**
 - Ensure mask filenames match image filenames exactly (minus extension)
 - Generate missing masks
+- Or use `alpha_mask = true` with RGBA images instead
+
+### Warning: "X items had no mask (no alpha + no file). Filled with full-weight (255)."
+
+**Cause:** Masking is enabled but some items have neither alpha channel nor matching mask file.
+
+**Solution:**
+- Convert images to RGBA using `convert_masks_to_alpha.py`
+- Or ensure all images have matching files in `mask_directory`
+- Or set `require_mask = true` to catch these during caching
+
+### Error: "require_mask=true but no mask found for ..."
+
+**Cause:** `require_mask = true` is set and an item has no mask source.
+
+**Solution:**
+- Ensure the image has an alpha channel, or
+- Ensure a matching mask file exists in `mask_directory`
 
 ### Masks not being applied
 
@@ -476,7 +546,7 @@ If you don't see this banner, `--use_mask_loss` is not enabled.
 
 ## Quick Reference
 
-### Minimum Required Setup
+### Minimum Required Setup (Method 1: Separate Files)
 
 ```toml
 # In dataset config TOML
@@ -491,7 +561,34 @@ python wan_cache_latents.py --dataset_config config.toml --vae /path/to/vae
 python wan_train_network.py --dataset_config config.toml --use_mask_loss
 ```
 
-### All Mask-Related Arguments
+### Minimum Required Setup (Method 2: Alpha Channel)
+
+```toml
+# In dataset config TOML
+alpha_mask = true
+cache_directory = "/path/to/fresh_cache"  # Use fresh cache!
+```
+
+```bash
+# Convert existing images + masks to RGBA
+python convert_masks_to_alpha.py --image_directory ... --mask_directory ... --output_directory ...
+
+# Cache with alpha masks
+python wan_cache_latents.py --dataset_config config.toml --vae /path/to/vae
+
+# Train with masks
+python wan_train_network.py --dataset_config config.toml --use_mask_loss
+```
+
+### All Dataset Config Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mask_directory` | string | none | Directory with grayscale mask PNGs |
+| `alpha_mask` | bool | false | Extract mask from RGBA alpha channel |
+| `require_mask` | bool | false | Error if any item lacks mask |
+
+### All Training Arguments
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -513,6 +610,15 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 
 ## Changelog
 
+### 2026-01-17
+- **NEW:** Alpha channel mask support (`alpha_mask = true`)
+- **NEW:** `require_mask` option for strict mask enforcement at caching time
+- **NEW:** `convert_masks_to_alpha.py` utility for converting existing datasets
+- **NEW:** Fallback chain: alpha → mask_directory → full-weight
+- **NEW:** Thread-safe mask source counting with summary logging
+- **NEW:** O(1) mask path matching (performance improvement for large datasets)
+- Updated error messages to include alpha_mask option
+
 ### 2026-01-14
 - Added mask resizing fix: NEAREST interpolation for upscaling (preserves discrete values)
 - Added argument validation with clear error messages
@@ -529,4 +635,5 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 ---
 
 *Document created: 2026-01-13*
+*Last updated: 2026-01-17*
 *Based on blissful-tuner codebase analysis*
