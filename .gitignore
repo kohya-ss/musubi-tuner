@@ -18,4 +18,7 @@ AGENTS.md
 .mcp.json
 # START blissful-tuner
 .pylintrc
+nvidia-python-packages.txt
+docs/fork_analysis.md
+docs/archive/
 
