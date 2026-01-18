@@ -756,8 +756,8 @@ class Attention(nn.Module):
         image_rotary_emb: Optional[torch.Tensor] = None,
         txt_seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
-        if encoder_hidden_states is None and txt_seq_lens is None:
-            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream) or txt_seq_lens.")
+        if encoder_hidden_states is None:
+            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream).")
 
         # Compute QKV for image stream (sample projections)
         img_query = self.to_q(hidden_states)
@@ -769,6 +769,10 @@ class Attention(nn.Module):
         txt_query = self.add_q_proj(encoder_hidden_states)
         txt_key = self.add_k_proj(encoder_hidden_states)
         txt_value = self.add_v_proj(encoder_hidden_states)
+        # Save metadata needed for varlen attention before deleting
+        txt_device = encoder_hidden_states.device
+        txt_batch_size = encoder_hidden_states.shape[0]
+        txt_max_len = encoder_hidden_states.shape[1]
         del encoder_hidden_states
 
         # Reshape for multi-head attention
@@ -816,16 +820,16 @@ class Attention(nn.Module):
             #   2) padding tokens: [image+text padding tail]
             # This prevents attention across the real/pad boundary without allocating an explicit mask.
             varlen_modes = {"flash", "sageattn", "cute", "cute_varlen", "flash_varlen", "sageattn_varlen"}
-            if txt_seq_lens is not None and self.attn_mode in varlen_modes and encoder_hidden_states is not None:
-                # `encoder_hidden_states` is padded to [B, max_txt_len, D] for batching.
+            if txt_seq_lens is not None and self.attn_mode in varlen_modes:
+                # Text stream is padded to [B, max_txt_len, D] for batching.
                 # Use `txt_seq_lens` to build a varlen cu_seqlens schedule that isolates padding.
                 if isinstance(txt_seq_lens, torch.Tensor):
-                    txt_lens = txt_seq_lens.to(device=encoder_hidden_states.device, dtype=torch.int32)
+                    txt_lens = txt_seq_lens.to(device=txt_device, dtype=torch.int32)
                 else:
-                    txt_lens = torch.tensor(txt_seq_lens, device=encoder_hidden_states.device, dtype=torch.int32)
+                    txt_lens = torch.tensor(txt_seq_lens, device=txt_device, dtype=torch.int32)
 
                 batch = int(txt_lens.shape[0])
-                max_seqlen = int(seq_img + encoder_hidden_states.shape[1])
+                max_seqlen = int(seq_img + txt_max_len)
 
                 # Shape is (2B + 1): [0, end_real0, end_pad0, end_real1, end_pad1, ...]
                 i = torch.arange(batch, device=txt_lens.device, dtype=torch.int32)
@@ -869,7 +873,7 @@ class Attention(nn.Module):
             cu_seqlens_kv=cu_seqlens_kv,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
-            batch_size=encoder_hidden_states.shape[0] if encoder_hidden_states is not None else 1,
+            batch_size=txt_batch_size,
         )
         # joint_hidden_states: [B, S, H*D]
 
