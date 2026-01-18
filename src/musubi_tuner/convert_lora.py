@@ -120,6 +120,13 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
                     module_name = module_name.replace("self.attn", "self_attn")  # fix self attn
                     module_name = module_name.replace("k.img", "k_img")  # fix k img
                     module_name = module_name.replace("v.img", "v_img")  # fix v img
+                elif ".attention.to." in module_name or ".feed.forward." in module_name:
+                    # Z-Image lora name to module name: ugly but works
+                    module_name = module_name.replace("to.q", "to_q")  # fix to q
+                    module_name = module_name.replace("to.k", "to_k")  # fix to k
+                    module_name = module_name.replace("to.v", "to_v")  # fix to v
+                    module_name = module_name.replace("to.out", "to_out")  # fix to out
+                    module_name = module_name.replace("feed.forward", "feed_forward")  # fix feed forward
                 else:
                     # HunyuanVideo lora name to module name: ugly but works
                     module_name = module_name.replace("double.blocks.", "double_blocks.")  # fix double blocks
