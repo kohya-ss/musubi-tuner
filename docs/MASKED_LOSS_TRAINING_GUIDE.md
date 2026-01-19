@@ -105,6 +105,40 @@ Weighted masks are created using semantic segmentation (Meta Sapiens model) that
 
 Each region is assigned a specific grayscale value.
 
+#### Group Photos / Multiple People in One Image
+
+If an image contains multiple people, **semantic segmentation alone** (e.g., Sapiens) will usually label *everyone* as “person parts”.
+That’s fine for general segmentation, but for **LoRA likeness training** you typically want the loss to focus on **only your subject**.
+
+The recommended workflow is:
+
+1. Generate normal weighted masks for the full image (Sapiens, etc.)
+2. Generate a **binary instance mask** for *only the target person* (FaceID + instance segmentation)
+3. Multiply the weighted mask by the instance mask so **all non-subject people become weight 0**
+
+This avoids using Photoshop / generative fill and prevents “bystander” faces from leaking into training.
+
+Tools included in this repo:
+
+```bash
+# 1) Create binary instance masks for the subject in group photos
+python tools/create_instance_masks.py \
+  --input /path/to/images \
+  --output /path/to/instance_masks \
+  --reference /path/to/reference_face.jpg \
+  --backend yolo
+
+# 2) Apply instance masks to your existing weighted masks
+python tools/apply_instance_mask_to_weighted_mask.py \
+  --weighted-masks /path/to/weighted_masks \
+  --instance-masks /path/to/instance_masks \
+  --output /path/to/weighted_masks_subject_only
+```
+
+Notes:
+- Set `require_mask = true` in your dataset config to fail fast if any mask is missing.
+- Use `--backend sam3` in `create_instance_masks.py` only if you have a working SAM 3 environment + checkpoints (see SAM 3 README).
+
 ### Step 2: Dataset Configuration
 
 Add `mask_directory` to your dataset TOML config:
