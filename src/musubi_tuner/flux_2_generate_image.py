@@ -8,6 +8,7 @@ from typing import Tuple, Optional, List, Any, Dict
 
 from einops import rearrange
 import torch
+from PIL import Image
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from tqdm import tqdm
