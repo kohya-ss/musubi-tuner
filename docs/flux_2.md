@@ -29,6 +29,18 @@ DiT, AE, Text Encoder のモデルをダウンロードする必要がありま�
 - **Text Encoder (Mistral 3)**: Download all the split files from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository and specify the first file (e.g., `00001-of-00010.safetensors`) in the arguments.
 </details>
 
+
+## Specifying Model Version / モデルバージョンの指定
+
+When specifying the model version in various scripts, use the following options:
+|type|version|sampling guidance scale|num sampling steps|
+|----|--------|----|----|
+|flux.2-dev|`--model_version flux.2-dev`|1.0|4|
+|flux.2-klein-4b|`--model_version flux.2-klein-4b`|4.0|50|
+|flux.2-klein-base-4b|`--model_version flux.2-klein-base-4b`|1.0|4|
+|flux.2-klein-9b|`--model_version flux.2-klein-9b`|4.0|50|
+|flux.2-klein-base-9b|`--model_version flux.2-klein-base-9b`|4.0|50|
+
 ## Pre-caching / 事前キャッシング
 
 ### Latent Pre-caching / latentの事前キャッシング
