@@ -65,7 +65,13 @@ def parse_args() -> argparse.Namespace:
     # inference
     parser.add_argument("--prompt", type=str, default=None, help="prompt for generation")
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size, height and width")
-    parser.add_argument("--control_image_path", type=str, default=None, help="path to control (reference) image for Kontext.")  # TODO
+    parser.add_argument(
+        "--control_image_path",
+        nargs="*",
+        type=str,
+        default=None,
+        help="path to control (reference) image(s) for Flux 2 image edit",
+    )
     parser.add_argument("--no_resize_control", action="store_true", help="do not resize control image")
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps, default is 25")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
@@ -74,8 +80,8 @@ def parse_args() -> argparse.Namespace:
     #     "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
     # )
     parser.add_argument(
-        "--embedded_cfg_scale", type=float, default=2.5, help="Embeded CFG scale (distilled CFG Scale), default is 2.5"
-    )  # TODO
+        "--embedded_cfg_scale", type=float, default=4.0, help="Embeded CFG scale (distilled CFG Scale), default is 4.0"
+    )
     # parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
     # parser.add_argument(
     #     "--image_path",
@@ -162,6 +168,7 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
 
     # Create dictionary of overrides
     overrides = {"prompt": prompt}
+    overrides["control_image_path"] = []
 
     for part in parts[1:]:
         if not part.strip():
@@ -192,7 +199,11 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         # elif option == "n":
         #     overrides["negative_prompt"] = value
         elif option == "ci":  # control_image_path
-            overrides["control_image_path"] = value
+            overrides["control_image_path"].append(value)
+
+    # If no control_image_path was provided, remove the empty list
+    if not overrides["control_image_path"]:
+        del overrides["control_image_path"]
 
     return overrides
 
@@ -348,22 +359,34 @@ def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flu
     """Prepare image-related inputs for Kontext: AE encoding."""
     height, width = check_inputs(args)
 
-    if args.control_image_path is not None:
-        control_image_tensor, _, _ = flux_utils.preprocess_control_image(args.control_image_path, not args.no_resize_control)
+    if args.control_image_path is not None and len(args.control_image_path):
+        img_ctx = [Image.open(input_image) for input_image in args.control_image_path]
+        # ref_tokens, ref_ids = encode_image_refs(ae, img_ctx)
+        if len(img_ctx) > 1:
+            limit_pixels = 1024 ** 2
+        elif len(img_ctx) == 1:
+            limit_pixels = 2024 ** 2
+        else:
+            limit_pixels = None
+
+        img_ctx_prep = flux2_utils.default_prep(img=img_ctx, limit_pixels=limit_pixels)
+        if not isinstance(img_ctx_prep, list):
+            img_ctx_prep = [img_ctx_prep]
 
         # AE encoding
         logger.info("Encoding control image to latent space with AE")
         ae_original_device = ae.device
         ae.to(device)
 
+        control_latent = []
         with torch.no_grad():
-            control_latent = ae.encode(control_image_tensor.to(device, dtype=ae.dtype))
-        control_latent = control_latent.to(torch.bfloat16).to("cpu")
+            # Encode each reference image
+            for img in img_ctx_prep:
+                encoded = ae.encode(img[None].to(device, dtype=ae.dtype))[0]
+                control_latent.append(encoded.to(torch.bfloat16).to("cpu"))
 
         ae.to(ae_original_device)  # Move VAE back to its original device
         clean_memory_on_device(device)
-
-        control_latent = control_latent.cpu()
     else:
         control_latent = None
 
@@ -582,28 +605,28 @@ def generate(
         device="cpu",
     ).to(device, dtype=torch.bfloat16)
     x, x_ids = flux2_utils.batched_prc_img(noise)
+    # TODO upsampling here
 
     if control_latent is not None:
         # pack control_latent
-        # TODO
-        img_ctx = [Image.open(input_image) for input_image in cfg.input_images]
-        with torch.no_grad():
-            ref_tokens, ref_ids = encode_image_refs(ae, img_ctx)
-            # TODO upsampling here
-
-    #     ctrl_packed_height = control_latent.shape[2] // 2
-    #     ctrl_packed_width = control_latent.shape[3] // 2
-    #     control_latent = rearrange(control_latent, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
-    #     control_latent_ids = flux_utils.prepare_img_ids(1, ctrl_packed_height, ctrl_packed_width, is_ctrl=True).to(device)
-    #
-    #     control_latent = control_latent.to(device, dtype=torch.bfloat16)
-
+        scale = 10
+        # Create time offsets for each reference
+        t_off = [scale + scale * t for t in torch.arange(0, len(control_latent))]
+        t_off = [t.view(-1) for t in t_off]
+        # Process with position IDs
+        ref_tokens, ref_ids = flux2_utils.listed_prc_img(control_latent, t_coord=t_off)  # list[(HW, C)], list[(HW, 4)]
+        # Concatenate all references along sequence dimension
+        ref_tokens = torch.cat(ref_tokens, dim=0)  # (total_ref_tokens, C)
+        ref_ids = torch.cat(ref_ids, dim=0)  # (total_ref_tokens, 4)
+        # Add batch dimension
+        ref_tokens = ref_tokens.unsqueeze(0).to(torch.bfloat16)  # (1, total_ref_tokens, C)
+        ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
     else:
         ref_tokens = None
         ref_ids = None
 
     # denoise
-    timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1]) # TODO shift_value=args.flow_shift
+    timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1])  # TODO shift_value=args.flow_shift
     x = flux2_utils.denoise(
         model,
         x,
@@ -791,7 +814,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # 1. Precompute Image Data (AE and Image Encoders)
     logger.info("Loading AE and Image Encoders for batch image preprocessing...")
-    ae_for_batch = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
+    ae_for_batch = flux2_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
 
     all_precomputed_image_data = []
     all_prompt_args_list = [apply_overrides(args, pd) for pd in prompts_data]  # Create all arg instances first
@@ -1073,7 +1096,7 @@ def main():
             logger.info(f"Loaded latent from {latent_path}. Shape: {latents.shape}")
 
             if latents.ndim == 5:  # [BCTHW]
-                latents = latents.squeeze(0)  # [CTHW]  # TODO : to check
+                latents = latents.squeeze(0)  # [CTHW]
 
             latents_list.append(latents)
 
@@ -1082,7 +1105,7 @@ def main():
         for i, latent in enumerate(latents_list):
             args.seed = seeds[i]
 
-            ae = flux_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
+            ae = flux2_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
             save_output(args, ae, latent, device, original_base_names)
 
     elif args.from_file:
