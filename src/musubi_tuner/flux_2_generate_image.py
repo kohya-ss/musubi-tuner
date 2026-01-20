@@ -449,10 +449,12 @@ def prepare_text_inputs(
     else:
         move_models_to_device_if_needed()
 
-        with torch.autocast(device_type=device.type, dtype=text_encoder.dtype), torch.no_grad():
-            m3_vec = text_encoder([prompt]).to(torch.bfloat16)
-            m3_vec = m3_vec.cpu()
-
+        m3_vec = flux2_utils.encode_prompts(
+            [prompt],
+            tokenizer,
+            text_encoder,
+        )  # [1, 512, 15360]
+        m3_vec = m3_vec.cpu() 
         conds_cache[prompt] = m3_vec
 
     if not (shared_models and "text_encoder" in shared_models):  # if loaded locally
