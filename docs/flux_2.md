@@ -139,7 +139,7 @@ python src/musubi_tuner/flux_2_generate_image.py \
     --control_image_path path/to/control_image.jpg \
     --prompt "A cat" \
     --image_size 1024 1024 --infer_steps 25 \
-    --attn_mode sdpa --fp8_scaled \
+    --fp8_scaled \
     --save_path path/to/save/dir --output_type images \
     --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
 ```
