@@ -221,14 +221,19 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         Dict[str, Any]: Dictionary of argument overrides
     """
     # TODO common function with hv_train_network.line_to_prompt_dict
-    parts = line.split(" --")
-    prompt = parts[0].strip()
+    if line.strip().startswith("--"):  # No prompt
+        parts = (" " + line.strip()).split(" --")
+        prompt = None
+    else:
+        parts = line.split(" --")
+        prompt = parts[0].strip()
+        parts = parts[1:]
 
     # Create dictionary of overrides
-    overrides = {"prompt": prompt}
+    overrides = {} if prompt is None else {"prompt": prompt}
     overrides["control_image_path"] = []
 
-    for part in parts[1:]:
+    for part in parts:
         if not part.strip():
             continue
         option_parts = part.split(" ", 1)
@@ -1145,7 +1150,7 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     tokenizer, text_encoder = qwen_image_utils.load_qwen2_5_vl(args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True)
     shared_models["tokenizer"] = tokenizer
     shared_models["text_encoder"] = text_encoder
-    if args.is_edit:
+    if args.is_edit or (args.is_layered and args.automatic_prompt_lang_for_layered is not None):
         vl_processor = qwen_image_utils.load_vl_processor()
         shared_models["vl_processor"] = vl_processor
     return shared_models
@@ -1184,7 +1189,11 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     tokenizer_batch, text_encoder_batch = qwen_image_utils.load_qwen2_5_vl(
         args.text_encoder, dtype=vl_dtype, device="cpu", disable_mmap=True
     )
-    vl_processor_batch = qwen_image_utils.load_vl_processor() if args.is_edit else None
+    vl_processor_batch = (
+        qwen_image_utils.load_vl_processor()
+        if args.is_edit or (args.is_layered and args.automatic_prompt_lang_for_layered is not None)
+        else None
+    )
 
     # Text Encoder to device for this phase
     vl_device = torch.device("cpu") if args.text_encoder_cpu else device
@@ -1301,10 +1310,9 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             if current_args.output_type == "latent_images":
                 current_args.output_type = "images"
 
-            # save_output expects latent to be [BCTHW] or [CTHW]. generate returns [BCTHW] (batch size 1).
-            # latent[0] is correct if generate returns it with batch dim.
-            # The latent from generate is (1, C, T, H, W)
-            save_output(current_args, vae_for_batch, latent[0], device)  # Pass vae_for_batch
+            # save_output expects latent to be [BCTHW] or [CTHW].
+            # generate returns BC1HW for non-layered (backward compatibility) or layered with num_layers=1, BLCHW for layered
+            save_output(current_args, vae_for_batch, latent, device)  # Pass vae_for_batch
 
         vae_for_batch.to("cpu")  # Move VAE back to CPU
 
