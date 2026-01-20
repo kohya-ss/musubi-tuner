@@ -252,7 +252,7 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int]:
 # region DiT model
 
 
-def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux_models.Flux:
+def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux2_models.Flux2:
     """load DiT model
 
     Args:
@@ -262,7 +262,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux_model
         dit_weight_dtype: data type for the model weights. None for as-is
 
     Returns:
-        flux_models.Flux: DiT model
+        flux2_models.Flux2: DiT model
     """
     loading_device = "cpu"
     if args.blocks_to_swap == 0 and not args.fp8_scaled and args.lora_weight is None:
@@ -281,7 +281,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux_model
     return model
 
 
-def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: torch.device) -> None:
+def optimize_model(model: flux2_models.Flux2, args: argparse.Namespace, device: torch.device) -> None:
     """optimize the model (FP8 conversion, device move etc.)
 
     Args:
@@ -340,7 +340,7 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
 # endregion
 
 
-def decode_latent(ae: flux_models.AutoEncoder, latent: torch.Tensor, device: torch.device) -> torch.Tensor:
+def decode_latent(ae: flux2_models.AutoEncoder, latent: torch.Tensor, device: torch.device) -> torch.Tensor:
     logger.info("Decoding image...")
     if latent.ndim == 3:
         latent = latent.unsqueeze(0)  # add batch dimension
@@ -355,7 +355,7 @@ def decode_latent(ae: flux_models.AutoEncoder, latent: torch.Tensor, device: tor
     return pixels[0]  # remove batch dimension
 
 
-def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flux_models.AutoEncoder) -> Dict[str, Any]:
+def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flux2_models.AutoEncoder) -> Dict[str, Any]:
     """Prepare image-related inputs for Kontext: AE encoding."""
     height, width = check_inputs(args)
 
@@ -471,7 +471,7 @@ def prepare_text_inputs(
 def prepare_i2v_inputs(
     args: argparse.Namespace,
     device: torch.device,
-    ae: flux_models.AutoEncoder,
+    ae: flux2_models.AutoEncoder,
     shared_models: Optional[Dict] = None,
 ) -> Tuple[int, int, Dict[str, Any], Optional[torch.Tensor]]:
     """Prepare inputs for image2video generation: image encoding, text encoding, and AE encoding.
@@ -501,7 +501,7 @@ def generate(
     shared_models: Optional[Dict] = None,
     precomputed_image_data: Optional[Dict] = None,
     precomputed_text_data: Optional[Dict] = None,
-) -> tuple[Optional[flux_models.AutoEncoder], torch.Tensor]:  # AE can be Optional
+) -> tuple[Optional[flux2_models.AutoEncoder], torch.Tensor]:  # AE can be Optional
     """main function for generation
 
     Args:
@@ -511,7 +511,7 @@ def generate(
         precomputed_text_data: Optional dictionary with precomputed text data
 
     Returns:
-        tuple: (flux_models.AutoEncoder model (vae) or None, torch.Tensor generated latent)
+        tuple: (flux2_models.AutoEncoder model (vae) or None, torch.Tensor generated latent)
     """
     device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
     vae_instance_for_return = None
@@ -715,7 +715,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
 
 def save_output(
     args: argparse.Namespace,
-    ae: flux_models.AutoEncoder,  # Expect a VAE instance for decoding
+    ae: flux2_models.AutoEncoder,  # Expect a VAE instance for decoding
     latent: torch.Tensor,
     device: torch.device,
     original_base_names: Optional[List[str]] = None,
