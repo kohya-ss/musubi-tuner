@@ -56,6 +56,7 @@ python src/musubi_tuner/flux_2_cache_latents.py \
 - Note that the `--vae` argument is required, not `--ae`.
 - Uses `flux_2_cache_latents.py`.
 - The dataset must be an image dataset.
+- Use the `--model_version` option for Flux.2 Klein training.
 - The `control_images` in the dataset config is used as the reference image. See [Dataset Config](./dataset_config.md#flux1-kontext-dev) for details.
 
 <details>
@@ -83,6 +84,7 @@ python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
 
 - Uses `flux_2_cache_text_encoder_outputs.py`.
 - Requires `--text_encoder` argument
+- Use the `--model_version` option for Flux.2 Klein training.
 - Use `--fp8_t5` option to run the T5 Text Encoder in fp8 mode for VRAM savings.
 - The larger the batch size, the more VRAM is required. Adjust `--batch_size` according to your VRAM capacity.
 
@@ -121,6 +123,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - **Requires** specifying `--network_module networks.lora_flux_2`.
 - `--mixed_precision bf16` is recommended for FLUX.2 training.
 - `--timestep_sampling flux2_shift` is recommended for FLUX.2.
+- Use the `--model_version` option for Flux.2 Klein training.
 - Memory saving options like `--fp8` (for DiT) and `--fp8_t5` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
 -  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
