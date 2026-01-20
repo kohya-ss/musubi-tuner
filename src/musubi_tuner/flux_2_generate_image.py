@@ -550,6 +550,8 @@ def generate(
             args, device, vae_instance_for_return, shared_models,
         )
 
+        vae_instance_for_return.to("cpu")
+        
     if shared_models is None or "model" not in shared_models:
         # load DiT model
         model = load_dit_model(args, device)
@@ -622,8 +624,8 @@ def generate(
         ref_tokens = torch.cat(ref_tokens, dim=0)  # (total_ref_tokens, C)
         ref_ids = torch.cat(ref_ids, dim=0)  # (total_ref_tokens, 4)
         # Add batch dimension
-        ref_tokens = ref_tokens.unsqueeze(0).to(torch.bfloat16)  # (1, total_ref_tokens, C)
-        ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
+        ref_tokens = ref_tokens.unsqueeze(0).to(device, dtype=torch.bfloat16)  # (1, total_ref_tokens, C)
+        ref_ids = ref_ids.unsqueeze(0).to(device, dtype=torch.bfloat16)  # (1, total_ref_tokens, 4)
     else:
         ref_tokens = None
         ref_ids = None
