@@ -98,6 +98,7 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
 def main():
     parser = cache_latents.setup_parser_common()
     parser = cache_latents.hv_setup_parser(parser)  # VAE
+    flux2_utils.add_model_version_args(parser)
 
     args = parser.parse_args()
 

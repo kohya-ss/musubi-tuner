@@ -1,3 +1,4 @@
+import argparse
 import json
 import einops
 import torch
@@ -11,10 +12,19 @@ from einops import rearrange
 from PIL import Image
 from typing import Optional, Union
 from torch import Tensor
-from transformers import Mistral3ForConditionalGeneration, Mistral3Config, AutoProcessor
+from torch import nn
+from transformers import (
+    AutoModelForCausalLM,
+    AutoProcessor,
+    AutoTokenizer,
+    Mistral3ForConditionalGeneration,
+    pipeline,
+    Mistral3Config,
+    AutoProcessor
+)
 from tqdm import tqdm
 
-from .flux2_models import Flux2
+from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
 
 from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.utils import image_utils
@@ -27,11 +37,57 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 M3_TOKENIZER_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
-OUTPUT_LAYERS = [10, 20, 30]
+OUTPUT_LAYERS_MISTRAL = [10, 20, 30]
+OUTPUT_LAYERS_QWEN3 = [9, 18, 27]
 MAX_LENGTH = 512
 UPSAMPLING_MAX_IMAGE_SIZE = 768**2
 SYSTEM_MESSAGE = """You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object
 attribution and actions without speculation."""
+
+
+FLUX2_MODEL_INFO = {
+    "flux.2-klein-4b": {
+        "params": Klein4BParams(),
+        "qwen_variant": "4B",
+        "defaults": {"guidance": 1.0, "num_steps": 4},
+        "fixed_params": {"guidance", "num_steps"},
+        "guidance_distilled": True,
+    },
+    "flux.2-klein-base-4b": {
+        "params": Klein4BParams(),
+        "qwen_variant": "4B",
+        "defaults": {"guidance": 4.0, "num_steps": 50},
+        "fixed_params": {},
+        "guidance_distilled": False,
+    },
+    "flux.2-klein-9b": {
+        "params": Klein9BParams(),
+        "qwen_variant": "8B",
+        "defaults": {"guidance": 1.0, "num_steps": 4},
+        "fixed_params": {"guidance", "num_steps"},
+        "guidance_distilled": True,
+    },
+    "flux.2-klein-base-9b": {
+        "params": Klein9BParams(),
+        "qwen_variant": "8B",
+        "defaults": {"guidance": 4.0, "num_steps": 50},
+        "fixed_params": {},
+        "guidance_distilled": False,
+    },
+    "flux.2-dev": {
+        "params": Flux2Params(),
+        "defaults": {"guidance": 4.0, "num_steps": 50},
+        "fixed_params": {},
+        "guidance_distilled": True,
+    },
+}
+
+def add_model_version_args(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--model_version", type=str, default="flux.2-dev",
+        choices=list(FLUX2_MODEL_INFO.keys()), help="model version",
+    )
+
 
 
 def is_fp8(dt):
@@ -337,6 +393,61 @@ def denoise(
     return img
 
 
+def vanilla_guidance(x: torch.Tensor, cfg_val: float) -> torch.Tensor:
+    x_u, x_c = x.chunk(2)
+    x = x_u + cfg_val * (x_c - x_u)
+    return x
+
+
+def denoise_cfg(
+    model: Flux2,
+    img: Tensor,
+    img_ids: Tensor,
+    txt: Tensor,  # Already cat([txt_empty, txt_prompt])
+    txt_ids: Tensor,
+    timesteps: list[float],
+    guidance: float,
+    img_cond_seq: Tensor | None = None,
+    img_cond_seq_ids: Tensor | None = None,
+):
+    img = torch.cat([img, img], dim=0)
+    img_ids = torch.cat([img_ids, img_ids], dim=0)
+
+    if img_cond_seq is not None:
+        assert img_cond_seq_ids is not None
+        img_cond_seq = torch.cat([img_cond_seq, img_cond_seq], dim=0)
+        img_cond_seq_ids = torch.cat([img_cond_seq_ids, img_cond_seq_ids], dim=0)
+
+    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+        t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+
+        img_input = img
+        img_input_ids = img_ids
+        if img_cond_seq is not None:
+            img_input = torch.cat((img_input, img_cond_seq), dim=1)
+            img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
+
+        pred = model(
+            x=img_input,
+            x_ids=img_input_ids,
+            timesteps=t_vec,
+            ctx=txt,
+            ctx_ids=txt_ids,
+            guidance=None,
+        )
+
+        if img_cond_seq is not None:
+            pred = pred[:, : img.shape[1]]
+
+        pred_uncond, pred_cond = pred.chunk(2)
+        pred = pred_uncond + guidance * (pred_cond - pred_uncond)
+        pred = torch.cat([pred, pred], dim=0)
+
+        img = img + (t_prev - t_curr) * pred
+
+    return img.chunk(2)[0]
+
+
 def concatenate_images(
     images: list[Image.Image],
 ) -> Image.Image:
@@ -437,14 +548,17 @@ def load_ae(
     return ae
 
 
-def load_mistral3(
-    ckpt_path: str,
-    dtype: Optional[torch.dtype],
-    device: Union[str, torch.device],
-    disable_mmap: bool = False,
-    state_dict: Optional[dict] = None,
-) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
-    M3_CONFIG_JSON = """
+class Mistral3Embedder(nn.Module):
+
+    def __init__(
+        self,
+        ckpt_path: str,
+        dtype: Optional[torch.dtype],
+        device: Union[str, torch.device],
+        disable_mmap: bool = False,
+        state_dict: Optional[dict] = None,
+    ) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
+        M3_CONFIG_JSON = """
 {
   "architectures": [
     "Mistral3ForConditionalGeneration"
@@ -494,165 +608,284 @@ def load_mistral3(
   "vision_feature_layer": -1
 }
 """
-    config = json.loads(M3_CONFIG_JSON)
-    config = Mistral3Config(**config)
-    with init_empty_weights():
-        mistral3 = Mistral3ForConditionalGeneration._from_config(config)
+        config = json.loads(M3_CONFIG_JSON)
+        config = Mistral3Config(**config)
+        with init_empty_weights():
+            self.mistral3 = Mistral3ForConditionalGeneration._from_config(config)
 
-    if state_dict is not None:
-        sd = state_dict
-    else:
-        logger.info(f"Loading state dict from {ckpt_path}")
-        sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
-
-    # if the key has annoying prefix, remove it
-    for key in list(sd.keys()):
-        new_key = key.replace("language_model.lm_", "lm_")
-        new_key = new_key.replace("language_model.model.", "model.language_model.")
-        new_key = new_key.replace("multi_modal_projector.", "model.multi_modal_projector.")
-        new_key = new_key.replace("vision_tower.", "model.vision_tower.")
-        sd[new_key] = sd.pop(key)
-
-    info = mistral3.load_state_dict(sd, strict=True, assign=True)
-    logger.info(f"Loaded Mistral 3: {info}")
-    mistral3.to(device)
-
-    if dtype is not None:
-        if is_fp8(dtype):
-            logger.info(f"prepare Mistral 3 for fp8: set to {dtype}")
-            raise NotImplemented(f"Mistral 3 {dtype}")  # TODO
+        if state_dict is not None:
+            sd = state_dict
         else:
-            logger.info(f"Setting Mistral 3 to dtype: {dtype}")
-            mistral3.to(dtype)
+            logger.info(f"Loading state dict from {ckpt_path}")
+            sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
 
-    # Load tokenizer
-    tokenizer = AutoProcessor.from_pretrained(M3_TOKENIZER_ID, use_fast=False)
-    return tokenizer, mistral3
+        # if the key has annoying prefix, remove it
+        for key in list(sd.keys()):
+            new_key = key.replace("language_model.lm_", "lm_")
+            new_key = new_key.replace("language_model.model.", "model.language_model.")
+            new_key = new_key.replace("multi_modal_projector.", "model.multi_modal_projector.")
+            new_key = new_key.replace("vision_tower.", "model.vision_tower.")
+            sd[new_key] = sd.pop(key)
 
+        info = self.mistral3.load_state_dict(sd, strict=True, assign=True)
+        logger.info(f"Loaded Mistral 3: {info}")
+        self.mistral3.to(device)
 
-def _validate_and_process_images(
-    img: list[list[Image.Image]] | list[Image.Image]
-) -> list[list[Image.Image]]:
-    # Simple validation: ensure it's a list of PIL images or list of lists of PIL images
-    if not img:
-        return []
+        if dtype is not None:
+            if is_fp8(dtype):
+                logger.info(f"prepare Mistral 3 for fp8: set to {dtype}")
+                raise NotImplemented(f"Mistral 3 {dtype}")  # TODO
+            else:
+                logger.info(f"Setting Mistral 3 to dtype: {dtype}")
+                self.mistral3.to(dtype)
 
-    # Check if it's a list of lists or a list of images
-    if isinstance(img[0], Image.Image):
-        # It's a list of images, convert to list of lists
-        img = [[im] for im in img]
+        # Load tokenizer
+        self.tokenizer = AutoProcessor.from_pretrained(M3_TOKENIZER_ID, use_fast=False)
 
-    # potentially concatenate multiple images to reduce the size
-    img = [[concatenate_images(img_i)] if len(img_i) > 1 else img_i for img_i in img]
+    def dtype(self):
+        return self.mistral3.dtype
 
-    # cap the pixels
-    img = [[cap_pixels(img_i, UPSAMPLING_MAX_IMAGE_SIZE) for img_i in img_i] for img_i in img]
-    return img
+    def device(self):
+        return self.mistral3.device
 
+    def to(self, *args, **kwargs):
+        return self.mistral3.to(*args, **kwargs)
 
-def format_input(
-    txt: list[str],
-    system_message: str = SYSTEM_MESSAGE,
-    img: list[Image.Image] | list[list[Image.Image]] | None = None,
-) -> list[list[dict]]:
-    """
-    Format a batch of text prompts into the conversation format expected by apply_chat_template.
-    Optionally, add images to the input.
+    def forward(self, txt: list[str]):
+        if not isinstance(txt, list):
+            txt = [txt]
 
-    Args:
-        txt: List of text prompts
-        system_message: System message to use (default: CREATIVE_SYSTEM_MESSAGE)
-        img: List of images to add to the input.
+        # Format input messages
+        messages_batch = self.format_input(txt=txt)
 
-    Returns:
-        List of conversations, where each conversation is a list of message dicts
-    """
-    # Remove [IMG] tokens from prompts to avoid Pixtral validation issues
-    # when truncation is enabled. The processor counts [IMG] tokens and fails
-    # if the count changes after truncation.
-    cleaned_txt = [prompt.replace("[IMG]", "") for prompt in txt]
+        # Process all messages at once
+        # with image processing a too short max length can throw an error in here.
+        inputs = self.tokenizer.apply_chat_template(
+            messages_batch,
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=MAX_LENGTH,
+        )
 
-    if img is None or len(img) == 0:
-        return [
-            [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": system_message}],
-                },
-                {"role": "user", "content": [{"type": "text", "text": prompt}]},
+        # Move to device
+        input_ids = inputs["input_ids"].to(self.mistral3.device)
+        attention_mask = inputs["attention_mask"].to(self.mistral3.device)
+
+        # Forward pass through the model
+        output = self.mistral3(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
+
+        out = torch.stack([output.hidden_states[k] for k in OUTPUT_LAYERS_MISTRAL], dim=1)
+        return rearrange(out, "b c l d -> b l (c d)")
+
+    @staticmethod
+    def _validate_and_process_images(
+        img: list[list[Image.Image]] | list[Image.Image]
+    ) -> list[list[Image.Image]]:
+        # Simple validation: ensure it's a list of PIL images or list of lists of PIL images
+        if not img:
+            return []
+
+        # Check if it's a list of lists or a list of images
+        if isinstance(img[0], Image.Image):
+            # It's a list of images, convert to list of lists
+            img = [[im] for im in img]
+
+        # potentially concatenate multiple images to reduce the size
+        img = [[concatenate_images(img_i)] if len(img_i) > 1 else img_i for img_i in img]
+
+        # cap the pixels
+        img = [[cap_pixels(img_i, UPSAMPLING_MAX_IMAGE_SIZE) for img_i in img_i] for img_i in img]
+        return img
+
+    def format_input(
+        self,
+        txt: list[str],
+        system_message: str = SYSTEM_MESSAGE,
+        img: list[Image.Image] | list[list[Image.Image]] | None = None,
+    ) -> list[list[dict]]:
+        """
+        Format a batch of text prompts into the conversation format expected by apply_chat_template.
+        Optionally, add images to the input.
+
+        Args:
+            txt: List of text prompts
+            system_message: System message to use (default: CREATIVE_SYSTEM_MESSAGE)
+            img: List of images to add to the input.
+
+        Returns:
+            List of conversations, where each conversation is a list of message dicts
+        """
+        # Remove [IMG] tokens from prompts to avoid Pixtral validation issues
+        # when truncation is enabled. The processor counts [IMG] tokens and fails
+        # if the count changes after truncation.
+        cleaned_txt = [prompt.replace("[IMG]", "") for prompt in txt]
+
+        if img is None or len(img) == 0:
+            return [
+                [
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": system_message}],
+                    },
+                    {"role": "user", "content": [{"type": "text", "text": prompt}]},
+                ]
+                for prompt in cleaned_txt
             ]
-            for prompt in cleaned_txt
-        ]
-    else:
-        assert len(img) == len(txt), "Number of images must match number of prompts"
-        img = _validate_and_process_images(img)
+        else:
+            assert len(img) == len(txt), "Number of images must match number of prompts"
+            img = self._validate_and_process_images(img)
 
-        messages = [
-            [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": system_message}],
-                },
+            messages = [
+                [
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": system_message}],
+                    },
+                ]
+                for _ in cleaned_txt
             ]
-            for _ in cleaned_txt
-        ]
 
-        for i, (el, images) in enumerate(zip(messages, img)):
-            # optionally add the images per batch element.
-            if images is not None:
+            for i, (el, images) in enumerate(zip(messages, img)):
+                # optionally add the images per batch element.
+                if images is not None:
+                    el.append(
+                        {
+                            "role": "user",
+                            "content": [{"type": "image", "image": image_obj} for image_obj in images],
+                        }
+                    )
+                # add the text.
                 el.append(
                     {
                         "role": "user",
-                        "content": [{"type": "image", "image": image_obj} for image_obj in images],
+                        "content": [{"type": "text", "text": cleaned_txt[i]}],
                     }
                 )
-            # add the text.
-            el.append(
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": cleaned_txt[i]}],
-                }
+
+            return messages
+
+class Qwen3Embedder(nn.Module):
+    def __init__(
+        self,
+        model_spec: str,
+        ckpt_path: str,
+        dtype: Optional[torch.dtype],
+        device: Union[str, torch.device],
+        disable_mmap: bool = False,
+        state_dict: Optional[dict] = None,
+    ):
+        super().__init__()
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_spec,
+            torch_dtype=None,
+            device_map=str(device),
+        )
+
+        # config = json.loads(M3_CONFIG_JSON)
+        # config = Mistral3Config(**config)
+        # with init_empty_weights():
+        #     self.mistral3 = Mistral3ForConditionalGeneration._from_config(config)
+        #
+        # if state_dict is not None:
+        #     sd = state_dict
+        # else:
+        #     logger.info(f"Loading state dict from {ckpt_path}")
+        #     sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+        #
+        #
+        # info = self.mistral3.load_state_dict(sd, strict=True, assign=True)
+        # logger.info(f"Loaded Mistral 3: {info}")
+        # self.mistral3.to(device)
+        #
+        # if dtype is not None:
+        #     if is_fp8(dtype):
+        #         logger.info(f"prepare Mistral 3 for fp8: set to {dtype}")
+        #         raise NotImplemented(f"Mistral 3 {dtype}")  # TODO
+        #     else:
+        #         logger.info(f"Setting Mistral 3 to dtype: {dtype}")
+        #         self.mistral3.to(dtype)
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_spec)
+        self.max_length = MAX_LENGTH
+
+    def dtype(self):
+        return self.model.dtype
+
+    def device(self):
+        return self.model.device
+
+    def to(self, *args, **kwargs):
+        return self.model.to(*args, **kwargs)
+
+    def forward(self, txt: list[str]):
+        all_input_ids = []
+        all_attention_masks = []
+
+        for prompt in txt:
+            messages = [{"role": "user", "content": prompt}]
+            text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
             )
 
-        return messages
+            model_inputs = self.tokenizer(
+                text,
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=self.max_length,
+            )
+
+            all_input_ids.append(model_inputs["input_ids"])
+            all_attention_masks.append(model_inputs["attention_mask"])
+
+        input_ids = torch.cat(all_input_ids, dim=0).to(self.model.device)
+        attention_mask = torch.cat(all_attention_masks, dim=0).to(self.model.device)
+
+        output = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
+
+        out = torch.stack([output.hidden_states[k] for k in OUTPUT_LAYERS_QWEN3], dim=1)
+        return rearrange(out, "b c l d -> b l (c d)")
+
+    def test_txt(self, txt: str) -> bool:
+        raise NotImplementedError("Qwen3Embedder does not support text testing")
+
+    def test_image(self, image) -> bool:
+        raise NotImplementedError("Qwen3Embedder does not support image testing")
+
+    def upsample_prompt(self, txt: list[str], img=None, **kwargs) -> list[str]:
+        raise NotImplementedError("Qwen3Embedder does not support upsampling")
 
 
-@torch.no_grad()
-def encode_prompts(
-    txt: list[str],
-    tokenizer: AutoProcessor,
-    text_encoder: Mistral3ForConditionalGeneration,
-):
-    if not isinstance(txt, list):
-        txt = [txt]
-
-    # Format input messages
-    messages_batch = format_input(txt=txt)
-
-    # Process all messages at once
-    # with image processing a too short max length can throw an error in here.
-    inputs = tokenizer.apply_chat_template(
-        messages_batch,
-        add_generation_prompt=False,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=MAX_LENGTH,
-    )
-
-    # Move to device
-    input_ids = inputs["input_ids"].to(text_encoder.device)
-    attention_mask = inputs["attention_mask"].to(text_encoder.device)
-
-    # Forward pass through the model
-    output = text_encoder(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        output_hidden_states=True,
-        use_cache=False,
-    )
-
-    out = torch.stack([output.hidden_states[k] for k in OUTPUT_LAYERS], dim=1)
-    return rearrange(out, "b c l d -> b l (c d)")
+def load_textembedder(
+    model_version: str,
+    ckpt_path: str,
+    dtype: Optional[torch.dtype],
+    device: Union[str, torch.device],
+    disable_mmap: bool = False,
+    state_dict: Optional[dict] = None,
+) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
+    if model_version == "flux.2-dev":
+        return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict)
+    else:
+        variant = FLUX2_MODEL_INFO[model_version]["qwen_variant"]
+        return Qwen3Embedder(
+            f"Qwen/Qwen3-{variant}-FP8", ckpt_path, dtype, device, disable_mmap, state_dict,
+        )

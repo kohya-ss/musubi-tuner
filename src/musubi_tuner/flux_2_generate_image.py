@@ -138,6 +138,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
     parser.add_argument("--interactive", action="store_true", help="Interactive mode: read prompts from console")
 
+    flux2_utils.add_model_version_args(parser)
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -404,22 +406,24 @@ def prepare_text_inputs(
     # load text encoder: conds_cache holds cached encodings for prompts without padding
     conds_cache = {}
     if shared_models is not None:
-        tokenizer, text_encoder = shared_models.get("tokenizer"), shared_models.get("text_encoder")
+        text_embedder = shared_models.get("text_embedder")
         if "conds_cache" in shared_models:  # Use shared cache if available
             conds_cache = shared_models["conds_cache"]
         # text_encoder is on device (batched inference) or CPU (interactive inference)
     else:  # Load if not in shared_models
         m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-        tokenizer, text_encoder = flux2_utils.load_mistral3(args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True)
+        text_embedder = flux2_utils.load_textembedder(
+            args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+        )
 
     # Store original devices to move back later if they were shared. This does nothing if shared_models is None
-    text_encoder_original_device = text_encoder.device if text_encoder else None
+    text_encoder_original_device = text_embedder.device if text_embedder else None
 
     logger.info("Encoding prompt with Text Encoders")
 
     # Ensure text_encoder is not None before proceeding
-    if not text_encoder or not tokenizer:
-        raise ValueError("Text encoder or tokenizer is not loaded properly.")
+    if not text_embedder:
+        raise ValueError("Text embedder is not loaded properly.")
 
     # Define a function to move models to device if needed
     # This is to avoid moving models if not needed, especially in interactive mode
@@ -442,31 +446,33 @@ def prepare_text_inputs(
             model.to("cpu")
             clean_memory_on_device(device)  # clean memory on device before moving models
 
-        text_encoder.to(device)
+        text_embedder.to(device)
 
     prompt = args.prompt
     if prompt in conds_cache:
-        m3_vec = conds_cache[prompt]
+        ctx_vec = conds_cache[prompt]
     else:
         move_models_to_device_if_needed()
 
-        m3_vec = flux2_utils.encode_prompts(
-            [prompt],
-            tokenizer,
-            text_encoder,
-        )  # [1, 512, 15360]
-        m3_vec = m3_vec.cpu() 
-        conds_cache[prompt] = m3_vec
+        with torch.no_grad():
+            if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+                ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
+            else:
+                ctx_empty = text_embedder([""]).to(torch.bfloat16)
+                ctx_prompt = text_embedder([prompt]).to(torch.bfloat16)
+                ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
+        ctx_vec = ctx_vec.cpu()
+        conds_cache[prompt] = ctx_vec
 
-    if not (shared_models and "text_encoder" in shared_models):  # if loaded locally
-        del tokenizer, text_encoder
+    if not (shared_models and "text_embedder" in shared_models):  # if loaded locally
+        del text_embedder
     else:  # if shared, move back to original device (likely CPU)
-        if text_encoder:
-            text_encoder.to(text_encoder_original_device)
+        if text_embedder:
+            text_embedder.to(text_encoder_original_device)
 
     clean_memory_on_device(device)
 
-    arg_c = {"m3_vec": m3_vec, "prompt": prompt}
+    arg_c = {"ctx_vec": ctx_vec, "prompt": prompt}
 
     return arg_c
 
@@ -593,8 +599,8 @@ def generate(
 
     # image generation ######
     logger.info(f"Prompt: {context['prompt']}")
-    m3_vec = context["m3_vec"].to(device, dtype=torch.bfloat16)
-    ctx, ctx_ids = flux2_utils.batched_prc_txt(m3_vec)
+    ctx_vec = context["ctx_vec"].to(device, dtype=torch.bfloat16)
+    ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx_vec)
 
     # make first noise with packed shape
     # original: b,16,2*h//16,2*w//16, packed: b,h//16*w//16,16*2*2
@@ -632,17 +638,30 @@ def generate(
 
     # denoise
     timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1])  # TODO shift_value=args.flow_shift
-    x = flux2_utils.denoise(
-        model,
-        x,
-        x_ids,
-        ctx,
-        ctx_ids,
-        timesteps=timesteps,
-        guidance=args.embedded_cfg_scale,
-        img_cond_seq=ref_tokens,
-        img_cond_seq_ids=ref_ids,
-    )
+    if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+        x = flux2_utils.denoise(
+            model,
+            x,
+            x_ids,
+            ctx,
+            ctx_ids,
+            timesteps=timesteps,
+            guidance=args.embedded_cfg_scale,
+            img_cond_seq=ref_tokens,
+            img_cond_seq_ids=ref_ids,
+        )
+    else:
+        x = flux2_utils.denoise_cfg(
+            model,
+            x,
+            x_ids,
+            ctx,
+            ctx_ids,
+            timesteps=timesteps,
+            guidance=args.embedded_cfg_scale,
+            img_cond_seq=ref_tokens,
+            img_cond_seq_ids=ref_ids,
+        )
     x = torch.cat(flux2_utils.scatter_ids(x, x_ids)).squeeze(2)
 
     model.to("cpu")
@@ -794,10 +813,11 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     shared_models = {}
     # Load text encoders to CPU
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-    tokenizer, text_encoder = flux2_utils.load_mistral3(args.text_encoder, dtype=m3_dtype, device="cpu", disable_mmap=True)
+    text_embedder = flux2_utils.load_textembedder(
+        args.model_version, args.text_encoder, dtype=m3_dtype, device="cpu", disable_mmap=True,
+    )
 
-    shared_models["tokenizer"] = tokenizer
-    shared_models["text_encoder"] = text_encoder
+    shared_models["text_embedder"] = text_embedder
 
     return shared_models
 
@@ -843,20 +863,19 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # Text Encoders loaded to CPU by load_text_encoder
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-    tokenizer_batch, text_encoder_batch = flux2_utils.load_mistral3(
-        args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+    text_embedder_batch = flux2_utils.load_textembedder(
+        args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
     )
 
     # Text Encoders to device for this phase
-    text_encoder_batch.to(device)  # Moved into prepare_text_inputs logic
+    text_embedder_batch.to(device)  # Moved into prepare_text_inputs logic
 
     all_precomputed_text_data = []
     conds_cache_batch = {}
 
     logger.info("Preprocessing text and LLM/TextEncoder encoding for all prompts...")
     temp_shared_models_txt = {
-        "tokenizer": tokenizer_batch,
-        "text_encoder": text_encoder_batch,  # on GPU
+        "text_embedder": text_embedder_batch, # on GPU
         "conds_cache": conds_cache_batch,
     }
 
@@ -867,7 +886,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         all_precomputed_text_data.append(text_data)
 
     # Models should be removed from device after prepare_text_inputs
-    del tokenizer_batch, text_encoder_batch, temp_shared_models_txt, conds_cache_batch
+    del text_embedder_batch, temp_shared_models_txt, conds_cache_batch
     clean_memory_on_device(device)
 
     # 3. Load DiT Model once

@@ -23,23 +23,28 @@ logging.basicConfig(level=logging.INFO)
 
 
 def encode_and_save_batch(
-    tokenizer: AutoProcessor,
-    text_encoder: Mistral3ForConditionalGeneration,
+    text_embedder: torch.nn.Module,
+    guidance_distilled: bool,
     batch: list[ItemInfo],
     device: torch.device,
 ):
     prompts = [item.caption for item in batch]
-    with torch.autocast(device_type=device.type, dtype=text_encoder.dtype), torch.no_grad():
-        m3_vec = flux2_utils.encode_prompts(
-            prompts,
-            tokenizer,
-            text_encoder,
-        )
-        m3_vec = m3_vec.cpu()  # [1, 512, 15360]
+    with torch.autocast(device_type=device.type, dtype=text_embedder.dtype), torch.no_grad():
+        ctx_vec = text_embedder(prompts)
+        ## TODO train with guidance ?
+        # if guidance_distilled:
+        #     ctx_vec = text_embedder(prompts)
+        # else:
+        #     if len(prompts) > 1:
+        #         raise NotImplementedError("Only works with batch size 1")
+        #     ctx_empty = text_embedder([""]).to(torch.bfloat16)
+        #     ctx_prompt = text_embedder(prompts).to(torch.bfloat16)
+        #     ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
+        ctx_vec = ctx_vec.cpu()  # [1, 512, 15360]
 
     # save prompt cache
-    for item, _m3_vec in zip(batch, m3_vec):
-        save_text_encoder_output_cache_flux_2(item, _m3_vec)
+    for item, _ctx_vec in zip(batch, ctx_vec):
+        save_text_encoder_output_cache_flux_2(item, _ctx_vec)
 
 
 def main():
@@ -65,14 +70,21 @@ def main():
 
     # Load Mistral 3 text encoder
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-    tokenizer, text_encoder = flux2_utils.load_mistral3(args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True)
+    text_embedder = flux2_utils.load_textembedder(
+        args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True,
+    )
 
     # Encode with Mistral 3 text encoder
     logger.info("Encoding with Mistral 3 text encoder")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
-        nonlocal tokenizer, text_encoder
-        encode_and_save_batch(tokenizer, text_encoder, batch, device)
+        nonlocal text_embedder
+        encode_and_save_batch(
+            text_embedder,
+            flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"],
+            batch,
+            device,
+        )
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -83,7 +95,7 @@ def main():
         all_cache_paths_for_dataset,
         encode_for_text_encoder,
     )
-    del text_encoder
+    del text_embedder
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(
@@ -94,6 +106,7 @@ def main():
 def flux_2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder", type=str, default=None, required=True, help="text encoder (mistral 3) checkpoint path")
     parser.add_argument("--fp8_m3", action="store_true", help="use fp8 for Text Encoder model")
+    flux2_utils.add_model_version_args(parser)
     return parser
 
 

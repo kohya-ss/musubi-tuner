@@ -64,8 +64,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         # Load Mistral 3
         m3_dtype = torch.float8e4m3fn if args.fp8_te else torch.bfloat16
-        tokenizer, text_encoder = flux2_utils.load_mistral3(
-            args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+        text_embedder = flux2_utils.load_textembedder(
+            args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
         )
 
         # Encode with Mistral 3 text encoders
@@ -80,17 +80,19 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
                 # encode prompt
                 logger.info(f"cache Text Encoder outputs for prompt: {prompt}")
-                m3_vec = flux2_utils.encode_prompts(
-                    [prompt],
-                    tokenizer,
-                    text_encoder,
-                )  # [1, 512, 15360]
-                m3_vec = m3_vec.cpu()
+                if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+                    ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
+                else:
+                    ctx_empty = text_embedder([""]).to(torch.bfloat16)
+                    ctx_prompt = text_embedder([prompt]).to(torch.bfloat16)
+                    ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
+
+                ctx_vec = ctx_vec.cpu()
 
                 # save prompt cache
-                sample_prompts_te_outputs[prompt] = (m3_vec,)
+                sample_prompts_te_outputs[prompt] = (ctx_vec,)
 
-        del tokenizer, text_encoder
+        del text_embedder
         clean_memory_on_device(device)
 
         # prepare sample parameters
@@ -99,7 +101,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             prompt_dict_copy = prompt_dict.copy()
 
             prompt = prompt_dict.get("prompt", "")
-            prompt_dict_copy["m3_vec"] = sample_prompts_te_outputs[prompt][0]
+            prompt_dict_copy["ctx_vec"] = sample_prompts_te_outputs[prompt][0]
 
             sample_parameters.append(prompt_dict_copy)
 
@@ -132,7 +134,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         device = accelerator.device
 
         # Get embeddings
-        ctx = sample_parameter["m3_vec"].to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
+        ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
         ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
 
         # Initialize latents
@@ -158,17 +160,30 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         # denoise
         timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1])
-        x = flux2_utils.denoise(
-            model,
-            x,
-            x_ids,
-            ctx,
-            ctx_ids,
-            timesteps=timesteps,
-            guidance=guidance_scale,
-            img_cond_seq=ref_tokens,
-            img_cond_seq_ids=ref_ids,
-        )
+        if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+            x = flux2_utils.denoise(
+                model,
+                x,
+                x_ids,
+                ctx,
+                ctx_ids,
+                timesteps=timesteps,
+                guidance=guidance_scale,
+                img_cond_seq=ref_tokens,
+                img_cond_seq_ids=ref_ids,
+            )
+        else:
+            x = flux2_utils.denoise_cfg(
+                model,
+                x,
+                x_ids,
+                ctx,
+                ctx_ids,
+                timesteps=timesteps,
+                guidance=guidance_scale,
+                img_cond_seq=ref_tokens,
+                img_cond_seq_ids=ref_ids,
+            )
         x = torch.cat(flux2_utils.scatter_ids(x, x_ids)).squeeze(2)
         latent = x.to(vae.dtype)
         del x
@@ -285,8 +300,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
             ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
 
         # context
-        m3_vec = batch["m3_vec"]  # B, T, D  # [1, 512, 15360]
-        ctx, ctx_ids = flux2_utils.batched_prc_txt(m3_vec)  # [1, 512, 15360], [1, 512, 4]
+        ctx_vec = batch["ctx_vec"]  # B, T, D  # [1, 512, 15360]
+        ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx_vec)  # [1, 512, 15360], [1, 512, 4]
 
         # ensure the hidden state will require grad
         if args.gradient_checkpointing:
@@ -342,6 +357,7 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
     parser.add_argument("--fp8_te", action="store_true", help="use fp8 for Text Encoder model")
+    flux2_utils.add_model_version_args(parser)
     return parser
 
 
