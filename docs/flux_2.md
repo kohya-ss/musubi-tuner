@@ -162,13 +162,14 @@ python src/musubi_tuner/flux_2_generate_image.py \
 - Uses `flux_2_generate_image.py`.
 - **Requires** specifying `--vae`, `--text_encoder`
 - **Requires** specifying `--control_image_path` for the reference image.
+- Use the `--model_version` option for Flux.2 Klein inference. 
 - `--no_resize_control`: By default, the control image is resized to the recommended resolution for FLUX.2. If you specify this option, this resizing is skipped, and the image is used as-is.
     
     This feature is not officially supported by FLUX.2, but it is available for experimental use.
 
 - `--image_size` is the size of the generated image, height and width are specified in that order.
 - `--prompt`: Prompt for generation.
-- `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_t5` option is available to reduce memory usage of Text Encoder 1. `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
+- `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_t5` option is available to reduce memory usage of Text Encoder. `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
 - LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--lycoris` is also supported.
 - `--embedded_cfg_scale` (default 2.5) controls the distilled guidance scale.
 - `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
