@@ -642,9 +642,8 @@ def generate(
     )
     x = torch.cat(flux2_utils.scatter_ids(x, x_ids)).squeeze(2)
 
-    # # unpack
-    # x = x.float()
-    # x = rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
+    model.to("cpu")
+    clean_memory_on_device(device)
 
     return vae_instance_for_return, x
 
