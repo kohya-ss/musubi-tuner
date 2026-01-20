@@ -871,15 +871,6 @@ class Qwen3Embedder(nn.Module):
         out = torch.stack([output.hidden_states[k] for k in OUTPUT_LAYERS_QWEN3], dim=1)
         return rearrange(out, "b c l d -> b l (c d)")
 
-    def test_txt(self, txt: str) -> bool:
-        raise NotImplementedError("Qwen3Embedder does not support text testing")
-
-    def test_image(self, image) -> bool:
-        raise NotImplementedError("Qwen3Embedder does not support image testing")
-
-    def upsample_prompt(self, txt: list[str], img=None, **kwargs) -> list[str]:
-        raise NotImplementedError("Qwen3Embedder does not support upsampling")
-
 
 def load_textembedder(
     model_version: str,
