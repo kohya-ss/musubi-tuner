@@ -500,12 +500,12 @@ def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: tor
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, m3_vec: torch.Tensor):
+def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor):
     """Flux 2 architecture."""
 
     sd = {}
-    dtype_str = dtype_to_str(m3_vec.dtype)
-    sd[f"m3_vec_{dtype_str}"] = m3_vec.detach().cpu()
+    dtype_str = dtype_to_str(ctx_vec.dtype)
+    sd[f"ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
 

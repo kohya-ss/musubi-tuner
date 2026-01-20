@@ -558,6 +558,9 @@ class Mistral3Embedder(nn.Module):
         disable_mmap: bool = False,
         state_dict: Optional[dict] = None,
     ) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
+
+        super().__init__()
+
         M3_CONFIG_JSON = """
 {
   "architectures": [
@@ -642,9 +645,11 @@ class Mistral3Embedder(nn.Module):
         # Load tokenizer
         self.tokenizer = AutoProcessor.from_pretrained(M3_TOKENIZER_ID, use_fast=False)
 
+    @property
     def dtype(self):
         return self.mistral3.dtype
 
+    @property
     def device(self):
         return self.mistral3.device
 
@@ -818,9 +823,11 @@ class Qwen3Embedder(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(model_spec)
         self.max_length = MAX_LENGTH
 
+    @property
     def dtype(self):
         return self.model.dtype
 
+    @property
     def device(self):
         return self.model.device
 
