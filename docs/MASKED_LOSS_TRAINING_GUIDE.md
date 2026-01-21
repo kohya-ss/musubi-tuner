@@ -10,14 +10,15 @@ A comprehensive reference for understanding and using weighted mask loss trainin
 
 1. [Overview](#overview)
 2. [How Weighted Masks Work](#how-weighted-masks-work)
-3. [Weighted Mask Pipeline](#weighted-mask-pipeline)
-4. [Training Arguments](#training-arguments)
-5. [Dataset Configuration](#dataset-configuration)
-6. [Mask Value Transformations](#mask-value-transformations)
-7. [Recommended Settings](#recommended-settings)
-8. [Technical Implementation Details](#technical-implementation-details)
-9. [Troubleshooting](#troubleshooting)
-10. [Changelog](#changelog)
+3. [⚠️ Critical: Understanding What Masked Training Actually Does](#️-critical-understanding-what-masked-training-actually-does)
+4. [Weighted Mask Pipeline](#weighted-mask-pipeline)
+5. [Training Arguments](#training-arguments)
+6. [Dataset Configuration](#dataset-configuration)
+7. [Mask Value Transformations](#mask-value-transformations)
+8. [Recommended Settings](#recommended-settings)
+9. [Technical Implementation Details](#technical-implementation-details)
+10. [Troubleshooting](#troubleshooting)
+11. [Changelog](#changelog)
 
 ---
 
@@ -90,6 +91,89 @@ We use grayscale masks with specific values for different body parts:
 | Body | 128 | 0.502 | Moderate learning - clothing/body proportions |
 | Hair | 80 | 0.314 | Reduced learning - hair varies by style |
 | Background | 0 | 0.000 | No learning - avoid environment overfitting |
+
+---
+
+## ⚠️ Critical: Understanding What Masked Training Actually Does
+
+> **This section explains a common and important misconception about masked training. Please read carefully before using this feature.**
+
+### The Misconception vs Reality
+
+| What Users Often Think | What Actually Happens |
+|------------------------|----------------------|
+| "Mask = crop; only train on the masked region" | Mask = loss weight; model still predicts the entire image |
+| "Background weight 0 = model ignores the background" | Background weight 0 = model can predict **anything** there without penalty |
+| "Masking isolates my subject from context" | Masking **de-emphasizes** context, but doesn't remove it |
+
+### Why This Matters: The "Phantom Limb" Problem
+
+When you set `mask_weight = 0` for a region, you're telling the model:
+
+> *"I don't care what you predict in this region—don't penalize wrong predictions here."*
+
+This is **very different** from saying "this region doesn't exist." The model still makes predictions for the entire latent tensor. With zero loss weight outside the mask:
+
+- The model has **no incentive** to predict correctly outside the mask
+- If it learned from other images that people/objects might be there, it may hallucinate them
+- You may see "phantom limbs," random body parts, or duplicated subjects bleeding outside the mask
+- The model might settle on generating cluttered backgrounds because there's no penalty for doing so
+
+**Real-world example:** Training a person LoRA with group photos where only your subject is masked. Even though bystanders have `weight = 0`, the model learned "people exist in images" from your dataset. With no loss penalty outside the mask, it may generate extra people, floating limbs, or duplicate faces in the unmasked regions.
+
+### Why `--mask_min_weight` Is Critical
+
+The `--mask_min_weight` parameter exists specifically to address this problem:
+
+```bash
+--mask_min_weight 0.05  # Background gets 5% training signal
+```
+
+With a small non-zero weight:
+- The model still **prioritizes** the masked subject (95% vs 5% effective weight)
+- But it receives **some gradient signal** for background regions
+- This prevents unconstrained hallucination outside the mask
+- Edge artifacts and phantom limbs are significantly reduced
+
+**This is why the recommended settings use `--mask_min_weight 0.05`, not `0.0`.**
+
+### When to Use Cropping Instead
+
+If you truly want to train **only** on a subject with no context whatsoever, **cropping is the only solution**:
+
+| Approach | Effect |
+|----------|--------|
+| Masking with `weight=0` | Model can hallucinate freely outside mask |
+| Masking with `min_weight=0.05` | Model is lightly constrained outside mask (recommended) |
+| Cropping to subject | Context is **physically removed**—model never sees it |
+
+**Use cropping when:**
+- You want zero influence from backgrounds/other people
+- Your subject fills most of the frame anyway
+- You're willing to lose spatial context (pose relative to environment)
+
+**Use masking when:**
+- You want to **emphasize** certain regions while **de-emphasizing** others
+- You need to preserve spatial relationships and context
+- You're training on group shots but want to focus on one person
+
+### Practical Recommendations
+
+1. **Never use `--mask_min_weight 0.0`** unless you have a specific reason and understand the consequences.
+
+2. **For character LoRA training**, use:
+   ```bash
+   --mask_min_weight 0.05  # Prevents phantom limbs
+   --mask_gamma 0.7        # Balanced emphasis
+   ```
+
+3. **If you see hallucinations outside the mask**, increase `--mask_min_weight` to 0.1 or higher.
+
+4. **For group photos**, consider combining masking with cropping:
+   - Crop to include only your subject + reasonable padding
+   - Then apply masks within the cropped region for face/body emphasis
+
+5. **Alpha channel masks don't provide "true transparency"**—they're still converted to loss weights. The same trade-offs apply.
 
 ---
 
@@ -389,7 +473,9 @@ Raw Mask Value (0-255)
 
 ## Recommended Settings
 
-### For Person/Character LoRA Training
+> **Important:** Always use `--mask_min_weight > 0` to prevent the ["phantom limb" problem](#why-this-matters-the-phantom-limb-problem). See the [critical section above](#️-critical-understanding-what-masked-training-actually-does) for details.
+
+### For Person/Character LoRA Training (Recommended)
 
 ```bash
 --use_mask_loss \
@@ -399,19 +485,21 @@ Raw Mask Value (0-255)
 
 **Rationale:**
 - `gamma=0.7`: Slightly softer masks to ensure good body/clothing learning
-- `min_weight=0.05`: Tiny amount of background learning to avoid artifacts at edges
+- `min_weight=0.05`: **Critical**—prevents phantom limbs and hallucinations outside the mask while still heavily prioritizing the subject
 
 ### For Face-Focused Training
 
 ```bash
 --use_mask_loss \
 --mask_gamma 1.5 \
---mask_min_weight 0.0
+--mask_min_weight 0.02
 ```
 
 **Rationale:**
 - `gamma=1.5`: Sharper masks to heavily prioritize face learning
-- `min_weight=0.0`: Completely ignore background
+- `min_weight=0.02`: Minimal but non-zero—prevents unconstrained hallucination in background
+
+> ⚠️ **Warning:** Using `--mask_min_weight 0.0` is **not recommended**. While it maximizes focus on the masked region, it allows the model to hallucinate freely outside the mask, potentially causing phantom limbs, duplicate subjects, or cluttered backgrounds. If you must use `0.0`, ensure your images are tightly cropped to the subject.
 
 ### For Style/Clothing Training
 
@@ -423,7 +511,7 @@ Raw Mask Value (0-255)
 
 **Rationale:**
 - `gamma=0.5`: Very soft masks to include body/clothing equally
-- `min_weight=0.1`: Some background learning for context
+- `min_weight=0.1`: Higher floor since style/clothing benefits from environmental context
 
 ---
 
@@ -629,6 +717,11 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 ## Changelog
 
 ### 2026-01-21
+- **NEW:** Added "Critical: Understanding What Masked Training Actually Does" section
+  - Explains the common misconception (masks as crops vs loss weights)
+  - Documents the "phantom limb" problem when using `mask_min_weight=0.0`
+  - Provides guidance on when to use cropping vs masking
+- **CHANGED:** Updated recommended settings to always use `--mask_min_weight > 0`
 - Refactor: mask loss moved to `src/musubi_tuner/modules/mask_loss.py`
 - Removed `--mask_loss_scale` (it had no effect with weighted-mean normalization)
 
