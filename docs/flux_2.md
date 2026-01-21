@@ -56,6 +56,11 @@ When specifying the model version in various scripts, use the following options:
 |flux.2-klein-9b|`--model_version flux.2-klein-9b`|4.0|50|
 |flux.2-klein-base-9b|`--model_version flux.2-klein-base-9b`|4.0|50|
 
+For Flux2.Klein, the VAE is the same as Flux2.dev. 
+
+For DIT, use `flux-2-klein-4b.safetensors`, `flux-2-klein-9b.safetensors`, `flux-2-klein-base-4b.safetensors` and `flux-2-klein-base-9b.safetensors` from the Huggingface repositories `black-forest-labs/FLUX.2-klein-4B`, `black-forest-labs/FLUX.2-klein-9B`, `black-forest-labs/FLUX.2-klein-base-4B`, and `black-forest-labs/FLUX.2-klein-base-9B` and the corresponding text encoders.
+
+
 ## Pre-caching / 事前キャッシング
 
 ### Latent Pre-caching / latentの事前キャッシング
