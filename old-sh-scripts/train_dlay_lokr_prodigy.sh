@@ -50,7 +50,6 @@ MAX_EPOCHS=24
 SAVE_EVERY_N_EPOCHS=4
 
 # Mask-weighted loss settings
-MASK_LOSS_SCALE=1.5
 MASK_MIN_WEIGHT=0.1
 
 # Misc
@@ -245,7 +244,6 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
     --discrete_flow_shift 3.0 \
     --num_timestep_buckets ${NUM_TIMESTEP_BUCKETS} \
     --use_mask_loss \
-    --mask_loss_scale ${MASK_LOSS_SCALE} \
     --mask_min_weight ${MASK_MIN_WEIGHT} \
     --rope_func comfy \
     --seed ${SEED} \

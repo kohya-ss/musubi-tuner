@@ -41,6 +41,13 @@ import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
 from musubi_tuner.hunyuan_model.vae import load_vae, VAE_VER
 import musubi_tuner.hunyuan_model.vae as vae_module
 from musubi_tuner.modules.lr_schedulers import RexLR
+from musubi_tuner.modules.mask_loss import (
+    add_mask_loss_args,
+    apply_masked_loss,
+    log_mask_loss_banner,
+    require_mask_weights_if_enabled,
+    validate_mask_loss_args as validate_mask_loss_args_impl,
+)
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -366,27 +373,7 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, noise_scheduler, times
 
 
 def validate_mask_loss_args(args: argparse.Namespace) -> None:
-    if not getattr(args, "use_mask_loss", False):
-        return
-
-    mask_gamma = float(getattr(args, "mask_gamma", 1.0))
-    if mask_gamma <= 0:
-        raise ValueError("--mask_gamma must be > 0")
-
-    mask_min_weight = float(getattr(args, "mask_min_weight", 0.0))
-    if mask_min_weight < 0 or mask_min_weight >= 1.0:
-        raise ValueError("--mask_min_weight must be in range [0, 1)")
-
-    mask_loss_scale = float(getattr(args, "mask_loss_scale", 1.0))
-    if mask_loss_scale <= 0:
-        raise ValueError("--mask_loss_scale must be > 0")
-
-    if mask_loss_scale != 1.0:
-        logger.warning(
-            "--mask_loss_scale has no effect with the current weighted-mean normalization (it cancels out). "
-            "Use --mask_gamma and/or --mask_min_weight to change the effective masking behavior instead. "
-            "This option may be removed or repurposed in the future."
-        )
+    validate_mask_loss_args_impl(args)
 
 
 def should_sample_images(args, steps, epoch=None):
@@ -1848,7 +1835,7 @@ class NetworkTrainer:
                 weights_sd = load_file(weight_path)
                 weights_sd = self.convert_weight_keys(weights_sd, args.network_module)
                 module = network_module.create_arch_network_from_weights(
-                    multiplier, weights_sd, unet=transformer, for_inference=True
+                    multiplier, weights_sd, unet=transformer, for_inference=True, architecture=self.architecture
                 )
                 module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
 
@@ -1864,7 +1851,9 @@ class NetworkTrainer:
         if args.dim_from_weights:
             logger.info(f"Loading network from weights: {args.dim_from_weights}")
             weights_sd = load_file(args.dim_from_weights)
-            network, _ = network_module.create_arch_network_from_weights(1, weights_sd, unet=transformer)
+            network, _ = network_module.create_arch_network_from_weights(
+                1, weights_sd, unet=transformer, architecture=self.architecture
+            )
         else:
             # We use the name create_arch_network for compatibility with LyCORIS
             if hasattr(network_module, "create_arch_network"):
@@ -1876,6 +1865,7 @@ class NetworkTrainer:
                     None,
                     transformer,
                     neuron_dropout=args.network_dropout,
+                    architecture=self.architecture,
                     **net_kwargs,
                 )
             else:
@@ -2224,18 +2214,11 @@ class NetworkTrainer:
             f"DiT dtype: {first_param.dtype if first_param is not None else None}, device: {first_param.device if first_param is not None else accelerator.device}"
         )
 
-        # Log mask loss settings if enabled - prominent banner to avoid accidental unmasked runs
-        if args.use_mask_loss:
-            logger.info("=" * 60)
-            logger.info("MASK-WEIGHTED LOSS TRAINING ENABLED")
-            logger.info("=" * 60)
-            logger.info(f"  mask_loss_scale: {args.mask_loss_scale}")
-            logger.info(f"  mask_min_weight: {args.mask_min_weight}")
-            logger.info(f"  mask_gamma: {args.mask_gamma}")
-            logger.info("-" * 60)
-            logger.info("IMPORTANT: Masks must be baked into latent cache!")
-            logger.info("If you see 'no mask_weights' error, recache with alpha_mask or mask_directory.")
-            logger.info("=" * 60)
+        log_mask_loss_banner(
+            logger,
+            args,
+            cache_hint="If you see 'no mask_weights' error, recache with alpha_mask or mask_directory.",
+        )
 
         clean_memory_on_device(accelerator.device)
 
@@ -2261,17 +2244,15 @@ class NetworkTrainer:
                         mark_step_begin()
 
                 # Fail-fast validation: ERROR if mask loss enabled but no masks in batch
-                if step == 0 and args.use_mask_loss:
-                    if batch.get("mask_weights", None) is None:
-                        raise ValueError(
-                            "FATAL: --use_mask_loss is enabled but batch has no mask_weights!\n"
-                            "This means masks were NOT baked into your latent cache.\n"
-                            "To fix:\n"
-                            "  1. Add 'alpha_mask = true' and/or 'mask_directory = \"/path/to/masks\"' in dataset TOML\n"
-                            "  2. Use a FRESH cache_directory (masks are stored in cache)\n"
-                            "  3. Recache latents with the appropriate cache script\n"
-                            "  4. Then re-run training"
-                        )
+                if step == 0:
+                    require_mask_weights_if_enabled(
+                        batch,
+                        args,
+                        cache_hint=(
+                            "Recache with your architecture's cache script (WAN: wan_cache_latents.py). "
+                            "Note: HunyuanVideo cache_latents.py does not currently store masks."
+                        ),
+                    )
 
                 latents = batch["latents"]
 
@@ -2303,46 +2284,7 @@ class NetworkTrainer:
                     # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                     # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                    # Apply mask-weighted loss if mask weights are present in the batch
-                    mask_weights = batch.get("mask_weights", None)
-                    if mask_weights is not None and args.use_mask_loss:
-                        # mask_weights from batch:
-                        # - Usually: (B, 1, F, H, W) from cached mask weights (1, F, H, W) stacked across batch
-                        # - Possible: (B, F, H, W) if any upstream/script variant squeezes the singleton dim
-                        # Loss shape: (B, C, F, H, W). We want (B, 1, F, H, W) so 1 broadcasts to C.
-                        if mask_weights.ndim == 4:
-                            mask_weights = mask_weights.unsqueeze(1)  # (B, F, H, W) -> (B, 1, F, H, W)
-                        elif mask_weights.ndim != 5:
-                            raise ValueError(f"Unexpected mask_weights shape: {tuple(mask_weights.shape)}")
-                        mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
-                        mask_weights = mask_weights.expand_as(loss)
-
-                        # Apply gamma correction for mask contrast control
-                        # gamma < 1.0: softer mask (more midtones, gradual falloff)
-                        # gamma > 1.0: sharper mask (more binary, stronger face focus)
-                        if hasattr(args, "mask_gamma"):
-                            if args.mask_gamma <= 0:
-                                raise ValueError("--mask_gamma must be > 0")
-                            # Ensure numeric stability before pow (masks should be [0,1], but interpolation/IO can introduce tiny drift)
-                            mask_weights = mask_weights.clamp(0.0, 1.0)
-                            if args.mask_gamma != 1.0:
-                                mask_weights = mask_weights**args.mask_gamma
-
-                        # Apply optional minimum weight (so masked regions still get some training signal)
-                        if hasattr(args, "mask_min_weight") and args.mask_min_weight > 0:
-                            mask_weights = mask_weights * (1.0 - args.mask_min_weight) + args.mask_min_weight
-
-                        # Apply optional scale factor (NOTE: effectively a no-op with weighted mean normalization)
-                        if hasattr(args, "mask_loss_scale") and args.mask_loss_scale != 1.0:
-                            mask_weights = mask_weights * args.mask_loss_scale
-
-                        # Apply mask weighting to loss
-                        loss = loss * mask_weights
-
-                        # Use weighted mean: sum(loss) / sum(weights) to avoid bias toward larger mask areas
-                        loss = loss.sum() / (mask_weights.sum() + 1e-8)
-                    else:
-                        loss = loss.mean()  # mean loss over all elements in batch
+                    loss = apply_masked_loss(loss, batch.get("mask_weights", None), args=args, layout="video")
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
@@ -2945,36 +2887,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
 
     # mask loss settings
-    parser.add_argument(
-        "--use_mask_loss",
-        action="store_true",
-        help="Enable mask-weighted loss training. Requires mask_directory in dataset config. "
-        "White regions (255) get full training weight, black regions (0) are ignored. "
-        "/ マスク重み付き損失学習を有効にする。データセット設定でmask_directoryが必要。"
-        "白い領域(255)は完全な学習重みを取得し、黒い領域(0)は無視される。",
-    )
-    parser.add_argument(
-        "--mask_loss_scale",
-        type=float,
-        default=1.0,
-        help="Scale factor for mask weights (default: 1.0). Higher values increase contrast between masked and unmasked regions. "
-        "/ マスク重みのスケール係数（デフォルト：1.0）。値を大きくするとマスク領域とマスク外領域のコントラストが増加。",
-    )
-    parser.add_argument(
-        "--mask_min_weight",
-        type=float,
-        default=0.0,
-        help="Minimum weight for masked-out regions (default: 0.0). Set to 0.1-0.2 to give some training signal to background regions. "
-        "/ マスク外領域の最小重み（デフォルト：0.0）。0.1-0.2に設定すると背景領域にもある程度の学習シグナルを与える。",
-    )
-    parser.add_argument(
-        "--mask_gamma",
-        type=float,
-        default=1.0,
-        help="Gamma correction for mask weights (default: 1.0). Values < 1.0 soften the mask (more midtones, gradual falloff). "
-        "Values > 1.0 sharpen the mask (more binary, stronger face focus). Try 0.5-0.7 for softer or 1.5-2.0 for sharper. "
-        "/ マスク重みのガンマ補正（デフォルト：1.0）。1.0未満はマスクを柔らかくし、1.0超はマスクを鋭くして顔への集中を強める。",
-    )
+    add_mask_loss_args(parser)
 
     # network settings
     parser.add_argument(

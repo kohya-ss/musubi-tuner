@@ -134,7 +134,6 @@ gradient_checkpointing = false
 
 # Mask-weighted loss
 use_mask_loss = true
-mask_loss_scale = 1.5
 mask_min_weight = 0.1
 
 # Regularization
