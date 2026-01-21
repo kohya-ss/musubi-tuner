@@ -5,7 +5,6 @@ from typing import Optional
 
 from accelerate import Accelerator
 from einops import rearrange
-from tqdm import tqdm
 from PIL import Image
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_2, ARCHITECTURE_FLUX_2_FULL

@@ -1,11 +1,9 @@
 import argparse
 import json
-import einops
 import torch
 import torchvision
 import math
 
-import numpy as np
 
 from accelerate import init_empty_weights
 from einops import rearrange
@@ -15,10 +13,8 @@ from torch import Tensor
 from torch import nn
 from transformers import (
     AutoModelForCausalLM,
-    AutoProcessor,
     AutoTokenizer,
     Mistral3ForConditionalGeneration,
-    pipeline,
     Mistral3Config,
     AutoProcessor,
 )
@@ -27,9 +23,7 @@ from tqdm import tqdm
 from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
 
 from musubi_tuner.flux_2 import flux2_models
-from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.safetensors_utils import load_split_weights
-from musubi_tuner.utils.train_utils import get_lin_function
 
 import logging
 
@@ -631,7 +625,7 @@ class Mistral3Embedder(nn.Module):
         if dtype is not None:
             if is_fp8(dtype):
                 logger.info(f"prepare Mistral 3 for fp8: set to {dtype}")
-                raise NotImplemented(f"Mistral 3 {dtype}")  # TODO
+                raise NotImplementedError(f"Mistral 3 {dtype}")  # TODO
             else:
                 logger.info(f"Setting Mistral 3 to dtype: {dtype}")
                 self.mistral3.to(dtype)

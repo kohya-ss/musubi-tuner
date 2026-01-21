@@ -6,12 +6,10 @@ import time
 import copy
 from typing import Tuple, Optional, List, Any, Dict
 
-from einops import rearrange
 import torch
 from PIL import Image
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
-from tqdm import tqdm
 
 from musubi_tuner.flux_2 import flux2_utils
 from musubi_tuner.flux_2.flux2_utils import load_flow_model
@@ -908,7 +906,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     if first_prompt_args.lora_weight is not None and len(first_prompt_args.lora_weight) > 0:
         logger.info("Merging LoRA weights into DiT model...")
         merge_lora_weights(
-            lora_flux,
+            lora_flux_2,
             dit_model,
             first_prompt_args.lora_weight,
             first_prompt_args.lora_multiplier,
