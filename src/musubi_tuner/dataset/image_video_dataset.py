@@ -306,8 +306,9 @@ def save_latent_cache_wan(
 
     if mask_weights is not None:
         # Save mask weights in latent space dimensions (F, H, W) as float32 for precision
+        # Single transfer: detach → device/dtype conversion (avoids redundant copies)
         mask_dtype_str = dtype_to_str(torch.float32)
-        sd[f"mask_weights_{F}x{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().cpu().float()
+        sd[f"mask_weights_{F}x{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().to(device="cpu", dtype=torch.float32)
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_WAN_FULL)
 
@@ -413,10 +414,10 @@ def save_latent_cache_qwen_image(
 
     if mask_weights is not None:
         # Save mask weights in latent space dimensions (1, F, H, W) as float32 for precision
-        # Uses same F, H, W from latent shape above
+        # Single transfer: detach → device/dtype conversion (avoids redundant copies)
         _, F, H, W = latent.shape
         mask_dtype_str = dtype_to_str(torch.float32)
-        sd[f"mask_weights_{F}x{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().cpu().float()
+        sd[f"mask_weights_{F}x{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().to(device="cpu", dtype=torch.float32)
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
@@ -499,10 +500,16 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
         metadata["frame_count"] = f"{item_info.frame_count}"
 
     for key, value in sd.items():
-        # NaN check and show warning, replace NaN with 0
-        if torch.isnan(value).any():
-            logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
-            value[torch.isnan(value)] = 0
+        # 1) Ensure contiguous FIRST to avoid overlapping memory issues on expanded views
+        if not value.is_contiguous():
+            value = value.contiguous()
+            sd[key] = value
+
+        # 2) NaN check (float/complex only - torch.isnan on int tensors varies by torch version)
+        if value.dtype.is_floating_point or value.dtype.is_complex:
+            if torch.isnan(value).any():
+                logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replacing NaN with 0")
+                value[torch.isnan(value)] = 0
 
     latent_dir = os.path.dirname(item_info.latent_cache_path)
     os.makedirs(latent_dir, exist_ok=True)
@@ -618,10 +625,16 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
 
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     for key, value in sd.items():
-        # NaN check and show warning, replace NaN with 0
-        if torch.isnan(value).any():
-            logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
-            value[torch.isnan(value)] = 0
+        # 1) Ensure contiguous FIRST to avoid overlapping memory issues on expanded views
+        if not value.is_contiguous():
+            value = value.contiguous()
+            sd[key] = value
+
+        # 2) NaN check (float/complex only - torch.isnan on int tensors varies by torch version)
+        if value.dtype.is_floating_point or value.dtype.is_complex:
+            if torch.isnan(value).any():
+                logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replacing NaN with 0")
+                value[torch.isnan(value)] = 0
 
     metadata = {
         "architecture": arch_fullname,
@@ -2112,12 +2125,11 @@ class ImageDataset(BaseDataset):
                 if self.alpha_mask and ("A" in target_pil.getbands()):
                     alpha_pil = target_pil.getchannel("A")  # PIL Image in "L" mode
 
-                # 2) Resize images + drop alpha by slicing (NEVER use convert("RGB") - it composites against black)
+                # 2) Resize images (alpha stripping deferred to cache_latents.encode_datasets via supports_alpha)
+                # Note: cache_latents uses slicing [..,:3], NOT convert("RGB"), to avoid compositing against black
                 resized_images = []
                 for img in images:
-                    arr = resize_image_to_bucket(img, bucket_reso)  # HWC
-                    if arr.ndim == 3 and arr.shape[-1] == 4:
-                        arr = arr[..., :3]  # Drop alpha by slicing, preserves exact RGB values
+                    arr = resize_image_to_bucket(img, bucket_reso)  # HWC, may be 3 or 4 channels
                     resized_images.append(arr)
                 images = resized_images
 

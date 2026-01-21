@@ -113,7 +113,8 @@ def apply_masked_loss(
     del accelerator  # reserved for future global reduction support
 
     if mask_weights is None or not getattr(args, "use_mask_loss", False):
-        return loss.mean()
+        # Return fp32 for consistency with masked path (avoids dtype depending on --use_mask_loss)
+        return loss.float().mean()
 
     if loss.ndim != 5:
         raise ValueError(f"Expected loss to be 5D, got {loss.ndim}D: {tuple(loss.shape)}")
@@ -166,4 +167,9 @@ def apply_masked_loss(
         mask_weights = mask_weights * (1.0 - mask_min_weight) + mask_min_weight
 
     weighted_loss = loss * mask_weights
-    return weighted_loss.sum() / (mask_weights.sum() + 1e-8)
+
+    # Compute sums in float32 for numerical stability (1e-8 rounds to 0 in fp16)
+    # Return float32 loss to avoid precision loss in the scalar result
+    loss_sum = weighted_loss.sum(dtype=torch.float32)
+    weight_sum = mask_weights.sum(dtype=torch.float32).clamp_min(1e-8)
+    return loss_sum / weight_sum

@@ -689,11 +689,13 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 
 ### All Dataset Config Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `mask_directory` | string | none | Directory with grayscale mask PNGs |
-| `alpha_mask` | bool | false | Extract mask from RGBA alpha channel |
-| `require_mask` | bool | false | Error if any item lacks mask |
+| Option | Type | Default | Applies To | Description |
+|--------|------|---------|------------|-------------|
+| `mask_directory` | string | none | Image & Video | Directory with grayscale mask PNGs |
+| `alpha_mask` | bool | false | **Image only** | Extract mask from RGBA alpha channel |
+| `require_mask` | bool | false | **Image only** | Error if any item lacks mask |
+
+> **Note:** `alpha_mask` and `require_mask` are only available for image datasets (`[[datasets]]` with `image_directory` / `image_jsonl_file`). VideoDataset (`video_directory` / `video_jsonl_file`) config validation will **reject** these options—use `mask_directory` only for video datasets.
 
 ### All Training Arguments
 

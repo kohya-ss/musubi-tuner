@@ -45,13 +45,31 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo], is_layered: bool) -> t
             assert isinstance(item.content, list), (
                 f"For layered model, target image must be multiple / レイヤードモデルではターゲット画像は複数である必要があります: {item.item_key}"
             )
-            first_image = item.content[0]
-            if first_image.shape[-1] == 3:
-                # add alpha channel with full opacity
-                first_image = np.concatenate([first_image, 255 * np.ones_like(first_image[..., :1])], axis=-1)
-                item.content[0] = first_image
 
-            content_tensors = [torch.from_numpy(c) for c in item.content]  # list of (H, W, C)
+            # Ensure all layer images are 4-channel (RGBA) for consistent stacking
+            # Base layer (i=0): auto-add opaque alpha if RGB (base is always fully visible)
+            # Non-base layers: MUST be RGBA (alpha defines layer visibility/masking)
+            normalized_layers = []
+            for i, layer_img in enumerate(item.content):
+                if layer_img.shape[-1] == 3:
+                    if i == 0:
+                        # Base layer: auto-add opaque alpha (base is always fully visible)
+                        layer_img = np.concatenate([layer_img, 255 * np.ones_like(layer_img[..., :1])], axis=-1)
+                    else:
+                        # Non-base layers MUST have alpha channel for layer masking
+                        raise ValueError(
+                            f"Layer {i} of {item.item_key} is 3-channel (RGB), but non-base layers require "
+                            f"4-channel (RGBA) images with alpha defining layer visibility. "
+                            f"Opaque alpha would disable layer masking, defeating the purpose of layered mode."
+                        )
+                elif layer_img.shape[-1] != 4:
+                    raise ValueError(
+                        f"Layer {i} of {item.item_key} has unexpected channel count: {layer_img.shape[-1]}. "
+                        f"Expected 3 (RGB, base only) or 4 (RGBA) channels."
+                    )
+                normalized_layers.append(layer_img)
+
+            content_tensors = [torch.from_numpy(c) for c in normalized_layers]  # list of (H, W, C)
             contents.append(torch.stack(content_tensors, dim=0))  # (num_layers, H, W, C)
         contents = torch.stack(contents, dim=0)  # (B, num_layers, H, W, C)
         contents = contents.permute(0, 4, 1, 2, 3)  # (B, C, num_layers, H, W)
