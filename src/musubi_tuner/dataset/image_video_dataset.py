@@ -372,8 +372,13 @@ def save_latent_cache_flux_kontext(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_latent_cache_flux_2(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
-    """Flux 2 architecture"""
+def save_latent_cache_flux_2(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    control_latent: Optional[list[torch.Tensor]],
+    mask_weights: Optional[torch.Tensor] = None,
+):
+    """Flux 2 architecture with optional mask weights for mask-weighted loss training."""
     assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
     assert control_latent is None or all(cl.dim() == 3 for cl in control_latent), (
         "control_latent should be 3D tensor (channel, height, width) or None"
@@ -387,6 +392,13 @@ def save_latent_cache_flux_2(item_info: ItemInfo, latent: torch.Tensor, control_
         for i, cl in enumerate(control_latent):
             _, H, W = cl.shape
             sd[f"latents_control_{i}_{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
+
+    if mask_weights is not None:
+        # Save mask weights in latent space dimensions (1, 1, H, W) as float32 for precision
+        # Shape matches layout="video" with F=1: (B, 1, F, H, W) -> per-item (1, 1, H, W)
+        _, H, W = latent.shape
+        mask_dtype_str = dtype_to_str(torch.float32)
+        sd[f"mask_weights_{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().to(device="cpu", dtype=torch.float32)
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
 

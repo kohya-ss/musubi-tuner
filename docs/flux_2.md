@@ -74,6 +74,8 @@ python src/musubi_tuner/flux_2_cache_latents.py \
 - Use the `--model_version` option for Flux.2 Klein training.
 - The `control_images` in the dataset config is used as the reference image. See [Dataset Config](./dataset_config.md#flux1-kontext-dev) for details.
 
+**Masked Loss Training:** To enable mask-weighted loss training (e.g., face-focused LoRA), add `mask_directory` or `alpha_mask = true` to your dataset config. The caching script will bake `mask_weights` into the latent cache files. At training time, pass `--use_mask_loss` to apply the cached weights. **Important:** Always use a fresh `cache_directory` when adding or changing mask sources. See the [Masked Loss Training Guide](./MASKED_LOSS_TRAINING_GUIDE.md) for details.
+
 <details>
 <summary>日本語</summary>
 

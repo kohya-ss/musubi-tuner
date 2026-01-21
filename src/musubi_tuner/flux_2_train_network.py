@@ -277,8 +277,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
             else:
                 break
 
-        # pack latents
-        latents = batch["latents"]  # B, C, H, W  # same for noisy_model_input (C = 128, H = height//16, ...)
+        # pack latents - use passed-in latents (which went through scale_shift_latents) for consistency
+        # with noisy_model_input computation; shape is (B, C, H, W) where C=128, H=height//16, W=width//16
         packed_latent_height = latents.shape[2]
         packed_latent_width = latents.shape[3]
         noisy_model_input, img_ids = flux2_utils.batched_prc_img(noisy_model_input)  # (B, HW, C), (B, HW, 4)
@@ -315,7 +315,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # call DiT
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
         img_ids = img_ids.to(device=accelerator.device)
-        if ref_tokens:
+        if ref_tokens is not None:
             ref_tokens = ref_tokens.to(device=accelerator.device, dtype=network_dtype)
             ref_ids = ref_ids.to(device=accelerator.device)
         ctx = ctx.to(device=accelerator.device, dtype=network_dtype)
@@ -346,6 +346,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         # flow matching loss
         target = noise - latents
+
+        # Expand to 5D (B, C, 1, H, W) for apply_masked_loss() compatibility (layout="video" with F=1)
+        model_pred = model_pred.unsqueeze(2)
+        target = target.unsqueeze(2)
 
         return model_pred, target
 

@@ -4,6 +4,7 @@ from PIL import Image
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -73,9 +74,25 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
         target_latent = latents[b]  # C, H, W. Target latents for this image (ground truth)
         control_latent = control_latents[b] if control_latents is not None else None  # C, H, W
 
+        # Process mask for this item if it has one
+        mask_weights_i = None
+        if item.mask_content is not None:
+            # mask_content is (H, W) grayscale numpy array with values 0-255
+            mask = torch.from_numpy(item.mask_content).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+
+            # Normalize mask from 0-255 to 0-1
+            mask = mask.float() / 255.0
+
+            # Downsample mask to latent space dimensions using area interpolation
+            lat_h, lat_w = target_latent.shape[-2:]
+            mask = F.interpolate(mask, size=(lat_h, lat_w), mode="area")  # (1, 1, lat_h, lat_w)
+
+            mask_weights_i = mask  # Keep as (1, 1, H, W) for layout="video" with F=1
+
         print(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}, "
             f"control latents shape: {[cl.shape for cl in control_latent] if control_latent is not None else None}"
+            f"{f', mask shape: {mask_weights_i.shape}' if mask_weights_i is not None else ''}"
         )
 
         # save cache (file path is inside item.latent_cache_path pattern), remove batch dim
@@ -83,6 +100,7 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
             item_info=item,
             latent=target_latent,  # Ground truth for this image
             control_latent=control_latent,  # Control latent for this image
+            mask_weights=mask_weights_i,  # Mask weights for mask-weighted loss training
         )
 
 
