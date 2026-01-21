@@ -17,18 +17,33 @@ Latent pre-caching, training, and inference options can be found in the `--help`
 
 You need to download the DiT, AE, Text Encoder models.
 
-- **DiT, AE**: Download from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `flux2-dev.safetensors` and `ae.safetensors`. The weights in the subfolder are in Diffusers format and cannot be used.
-- **Text Encoder (Mistral 3)**: Download all the split files from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository and specify the first file (e.g., `00001-of-00010.safetensors`) in the arguments.
+### FLUX.2 [dev]
+
+- **DiT, AE**: Download from the [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `flux2-dev.safetensors` and `ae.safetensors`. The weights in the subfolder are in Diffusers format and cannot be used.
+- **Text Encoder (Mistral 3)**: Download all the split files from the [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository and specify the first file (e.g., `00001-of-00010.safetensors`) in the arguments.
 
 <details>
 <summary>日本語</summary>
 
 DiT, AE, Text Encoder のモデルをダウンロードする必要があります。
 
-- **DiT, AE**: [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) リポジトリからダウンロードしてください。`flux2-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusers形式なので使用できません。
-- **Text Encoder (Mistral 3)**: Download all the split files from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository and specify the first file (e.g., `00001-of-00010.safetensors`) in the arguments.
+- **DiT, AE**: [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) リポジトリからダウンロードしてください。`flux2-dev.safetensors` および `ae.safetensors` を使用してください。サブフォルダ内の重みはDiffusers形式なので使用できません。
+- **Text Encoder (Mistral 3)**: Download all the split files from the [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository and specify the first file (e.g., `00001-of-00010.safetensors`) in the arguments.
 </details>
 
+### FLUX.2 [klein] 4B / base 4B
+
+- **DiT 4B**: Download from the [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) repository. Use `flux2-klein-4b.safetensors`.
+- **DiT base 4B**: Download from the [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B) repository. Use `flux2-klein-base-4b.safetensors`.
+- **AE**: Download from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `ae.safetensors`. `vae/diffusion_pytorch_model.safetensors` in the subfolder is in Diffusers format and cannot be used.
+- **Qwen3 4B Text Encoder**: Download all the split files from the [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) repository and specify the first file (e.g., `00001-of-00002.safetensors`) in the arguments.
+
+### FLUX.2 [klein] 9B / base 9B
+
+- **DiT 9B**: Download from the [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) repository. Use `flux2-klein-9b.safetensors`.
+- **DiT base 9B**: Download from the [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) repository. Use `flux2-klein-base-9b.safetensors`.
+- **AE**: Download from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `ae.safetensors`. `vae/diffusion_pytorch_model.safetensors` in the subfolder is in Diffusers format and cannot be used.
+- **Qwen3 8B Text Encoder**: Download all the split files from the [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) repository and specify the first file (e.g., `00001-of-00004.safetensors`) in the arguments.
 
 ## Specifying Model Version / モデルバージョンの指定
 

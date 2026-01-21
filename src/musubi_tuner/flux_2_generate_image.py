@@ -271,6 +271,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux2_mode
 
     # do not fp8 optimize because we will merge LoRA weights
     model = load_flow_model(
+        model_version=args.model_version,
         ckpt_path=args.dit,
         dtype=None,
         device=loading_device,

@@ -30,8 +30,11 @@ def load_qwen3(
     device: Union[str, torch.device],
     disable_mmap: bool = False,
     state_dict: Optional[dict] = None,
+    is_8b: bool = False,
+    tokenizer_id: Optional[str] = None,
 ) -> tuple[Qwen2Tokenizer, Qwen3ForCausalLM]:
-    QWEN3_CONFIG_JSON = """
+    """Load Qwen3-4B/8B model and tokenizer from checkpoint."""
+    QWEN3_4B_CONFIG_JSON = """
 {
   "architectures": [
     "Qwen3ForCausalLM"
@@ -63,7 +66,41 @@ def load_qwen3(
   "vocab_size": 151936
 }
 """
-    config = json.loads(QWEN3_CONFIG_JSON)
+
+    QWEN3_8B_CONFIG_JSON = """
+{
+  "architectures": [
+    "Qwen3ForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 151643,
+  "eos_token_id": 151645,
+  "head_dim": 128,
+  "hidden_act": "silu",
+  "hidden_size": 4096,
+  "initializer_range": 0.02,
+  "intermediate_size": 12288,
+  "max_position_embeddings": 40960,
+  "max_window_layers": 36,
+  "model_type": "qwen3",
+  "num_attention_heads": 32,
+  "num_hidden_layers": 36,
+  "num_key_value_heads": 8,
+  "rms_norm_eps": 1e-06,
+  "rope_scaling": null,
+  "rope_theta": 1000000,
+  "sliding_window": null,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.51.0",
+  "use_cache": true,
+  "use_sliding_window": false,
+  "vocab_size": 151936
+}
+"""
+
+    config = json.loads(QWEN3_8B_CONFIG_JSON if is_8b else QWEN3_4B_CONFIG_JSON)
     config = Qwen3Config(**config)
     with init_empty_weights():
         qwen3 = Qwen3ForCausalLM._from_config(config)
@@ -115,8 +152,12 @@ def load_qwen3(
             qwen3.to(dtype)
     # Load tokenizer
     # TODO change to specific tokenizer class
-    logger.info(f"Loading tokenizer from {ZIMAGE_ID}")
-    tokenizer = Qwen2Tokenizer.from_pretrained(ZIMAGE_ID, subfolder="tokenizer")
+    subfolder = None
+    if tokenizer_id is None:
+        tokenizer_id = ZIMAGE_ID
+        subfolder = "tokenizer"
+    logger.info(f"Loading tokenizer from {tokenizer_id}")
+    tokenizer = Qwen2Tokenizer.from_pretrained(tokenizer_id, subfolder=subfolder)
     return tokenizer, qwen3
 
 

@@ -17,8 +17,13 @@ from transformers import (
     Mistral3ForConditionalGeneration,
     Mistral3Config,
     AutoProcessor,
+    Qwen2Tokenizer,
+    Qwen3Config,
+    Qwen3ForCausalLM,
 )
 from tqdm import tqdm
+
+from musubi_tuner.zimage.zimage_utils import load_qwen3
 
 from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
 
@@ -408,7 +413,7 @@ def denoise_cfg(
         img_cond_seq = torch.cat([img_cond_seq, img_cond_seq], dim=0)
         img_cond_seq_ids = torch.cat([img_cond_seq_ids, img_cond_seq_ids], dim=0)
 
-    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+    for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
 
         img_input = img
@@ -471,6 +476,7 @@ def concatenate_images(
 
 
 def load_flow_model(
+    model_version: str,
     ckpt_path: str,
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
@@ -489,7 +495,8 @@ def load_flow_model(
 
     # build model
     with init_empty_weights():
-        params = flux2_models.configs_flux_2_dev.params
+        # params = flux2_models.configs_flux_2_dev.params
+        params = FLUX2_MODEL_INFO[model_version]["params"]
 
         model = flux2_models.Flux2(params, attn_mode, split_attn)
         if dtype is not None:
@@ -768,46 +775,13 @@ class Mistral3Embedder(nn.Module):
 class Qwen3Embedder(nn.Module):
     def __init__(
         self,
-        model_spec: str,
-        ckpt_path: str,
-        dtype: Optional[torch.dtype],
-        device: Union[str, torch.device],
-        disable_mmap: bool = False,
-        state_dict: Optional[dict] = None,
+        tokenizer: Qwen2Tokenizer,
+        model: Qwen3ForCausalLM,
     ):
         super().__init__()
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_spec,
-            torch_dtype=None,
-            device_map=str(device),
-        )
-
-        # config = json.loads(M3_CONFIG_JSON)
-        # config = Mistral3Config(**config)
-        # with init_empty_weights():
-        #     self.mistral3 = Mistral3ForConditionalGeneration._from_config(config)
-        #
-        # if state_dict is not None:
-        #     sd = state_dict
-        # else:
-        #     logger.info(f"Loading state dict from {ckpt_path}")
-        #     sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
-        #
-        #
-        # info = self.mistral3.load_state_dict(sd, strict=True, assign=True)
-        # logger.info(f"Loaded Mistral 3: {info}")
-        # self.mistral3.to(device)
-        #
-        # if dtype is not None:
-        #     if is_fp8(dtype):
-        #         logger.info(f"prepare Mistral 3 for fp8: set to {dtype}")
-        #         raise NotImplemented(f"Mistral 3 {dtype}")  # TODO
-        #     else:
-        #         logger.info(f"Setting Mistral 3 to dtype: {dtype}")
-        #         self.mistral3.to(dtype)
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_spec)
+        self.model = model
+        self.tokenizer = tokenizer
         self.max_length = MAX_LENGTH
 
     @property
@@ -819,6 +793,7 @@ class Qwen3Embedder(nn.Module):
         return self.model.device
 
     def to(self, *args, **kwargs):
+        # FIXME: chainging dtype not supported yet
         return self.model.to(*args, **kwargs)
 
     def forward(self, txt: list[str]):
@@ -869,13 +844,9 @@ def load_textembedder(
 ) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
     if model_version == "flux.2-dev":
         return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict)
-    else:
-        variant = FLUX2_MODEL_INFO[model_version]["qwen_variant"]
-        return Qwen3Embedder(
-            f"Qwen/Qwen3-{variant}-FP8",
-            ckpt_path,
-            dtype,
-            device,
-            disable_mmap,
-            state_dict,
-        )
+
+    variant = FLUX2_MODEL_INFO[model_version]["qwen_variant"]
+    is_8b = variant == "8B"
+    tokenizer_id = "Qwen/Qwen3-8B" if is_8b else "Qwen/Qwen3-4B"
+    tokenizer, qwen3 = load_qwen3(ckpt_path, dtype, device, disable_mmap, state_dict, is_8b=is_8b, tokenizer_id=tokenizer_id)
+    return Qwen3Embedder(tokenizer, qwen3)
