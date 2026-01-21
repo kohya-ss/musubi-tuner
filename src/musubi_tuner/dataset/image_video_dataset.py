@@ -74,6 +74,8 @@ ARCHITECTURE_FRAMEPACK = "fp"
 ARCHITECTURE_FRAMEPACK_FULL = "framepack"
 ARCHITECTURE_FLUX_KONTEXT = "fk"
 ARCHITECTURE_FLUX_KONTEXT_FULL = "flux_kontext"
+ARCHITECTURE_FLUX_2 = "f2"
+ARCHITECTURE_FLUX_2_FULL = "flux_2"
 ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
@@ -369,6 +371,25 @@ def save_latent_cache_flux_kontext(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
+def save_latent_cache_flux_2(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
+    """Flux 2 architecture"""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+    assert control_latent is None or all(cl.dim() == 3 for cl in control_latent), (
+        "control_latent should be 3D tensor (channel, height, width) or None"
+    )
+
+    _, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    if control_latent is not None:
+        for i, cl in enumerate(control_latent):
+            _, H, W = cl.shape
+            sd[f"latents_control_{i}_{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
+
+
 def save_latent_cache_qwen_image(
     item_info: ItemInfo,
     latent: torch.Tensor,
@@ -543,6 +564,16 @@ def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: tor
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
+def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor):
+    """Flux 2 architecture."""
+
+    sd = {}
+    dtype_str = dtype_to_str(ctx_vec.dtype)
+    sd[f"ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
+
+
 def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.Tensor):
     """Qwen-Image architecture."""
     sd = {}
@@ -626,6 +657,7 @@ class BucketSelector:
     RESOLUTION_STEPS_WAN = 16
     RESOLUTION_STEPS_FRAMEPACK = 16
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
+    RESOLUTION_STEPS_FLUX_2 = 16
     RESOLUTION_STEPS_QWEN_IMAGE = 16
     RESOLUTION_STEPS_QWEN_IMAGE_EDIT = 16
     RESOLUTION_STEPS_KANDINSKY5 = 16
@@ -637,6 +669,7 @@ class BucketSelector:
         ARCHITECTURE_WAN: RESOLUTION_STEPS_WAN,
         ARCHITECTURE_FRAMEPACK: RESOLUTION_STEPS_FRAMEPACK,
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
+        ARCHITECTURE_FLUX_2: RESOLUTION_STEPS_FLUX_2,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
         ARCHITECTURE_QWEN_IMAGE_LAYERED: RESOLUTION_STEPS_QWEN_IMAGE,  # use same steps as Qwen-Image
@@ -1908,6 +1941,8 @@ class ImageDataset(BaseDataset):
                 control_count_per_image = 1
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             control_count_per_image = 1
+        elif self.architecture == ARCHITECTURE_FLUX_2:
+            control_count_per_image = None  # can be multiple control/ref images
         elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
             control_count_per_image = None  # can be multiple control images
 

@@ -16,6 +16,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_WAN,
     ARCHITECTURE_FRAMEPACK,
     ARCHITECTURE_FLUX_KONTEXT,
+    ARCHITECTURE_FLUX_2,
     ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_Z_IMAGE,
 )
@@ -71,6 +72,7 @@ ARCH_WAN = "wan2.1"
 
 ARCH_FRAMEPACK = "framepack"
 ARCH_FLUX_KONTEXT = "Flux.1-dev"
+ARCH_FLUX_2 = "Flux.2-dev"
 ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
@@ -88,6 +90,7 @@ IMPL_HUNYUAN_VIDEO = "https://github.com/Tencent/HunyuanVideo"
 IMPL_WAN = "https://github.com/Wan-Video/Wan2.1"
 IMPL_FRAMEPACK = "https://github.com/lllyasviel/FramePack"
 IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
+IMPL_FLUX_2 = "https://github.com/black-forest-labs/flux2"
 IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
 IMPL_QWEN_IMAGE_EDIT = IMPL_QWEN_IMAGE
 IMPL_QWEN_IMAGE_LAYERED = "https://github.com/QwenLM/Qwen-Image-Layered"
@@ -164,6 +167,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_FLUX_KONTEXT:
         arch = ARCH_FLUX_KONTEXT
         impl = IMPL_FLUX_KONTEXT
+    elif architecture == ARCHITECTURE_FLUX_2:
+        arch = ARCH_FLUX_2
+        impl = IMPL_FLUX_2
     elif architecture == ARCHITECTURE_QWEN_IMAGE:
         arch = ARCH_QWEN_IMAGE
         impl = IMPL_QWEN_IMAGE

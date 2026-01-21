@@ -1,8 +1,8 @@
 # Upstream Musubi-Tuner Integration Design (v3 - Final)
 
 **Date**: 2026-01-21
-**Version**: 3.1 (Final with all corrections)
-**Status**: Ready for Implementation
+**Version**: 3.2 (Phase 3 source updated to feat-flux-2-polish)
+**Status**: Phase 1 ✅ | Phase 2 ✅ | Phase 3 🚧 In Progress
 **Author**: Claude (with Dustin)
 
 ---
@@ -15,6 +15,7 @@
 | 2.0 | 2026-01-21 | Major corrections: fixed Phase 1 scope, updated estimates, added missing components |
 | 3.0 | 2026-01-21 | Final corrections: wildcards in batch, argparse accuracy, LoHa limitations, logging strategy, docs, torch compat |
 | 3.1 | 2026-01-21 | Item count consistency, wildcard syntax fix, flux2_shift inline approach, test fixes, control_count_per_image, fp8_m3 guard, float8 import safety |
+| 3.2 | 2026-01-21 | **Phase 3 source changed**: Use `feat-flux-2-polish` branch (2922222) instead of main. Removes §3.8/§3.9/§3.21 (fixed upstream). Marks Phase 1+2 complete. |
 
 ---
 
@@ -22,9 +23,9 @@
 
 This document outlines the integration plan for upstream musubi-tuner changes into blissful-tuner:
 
-1. **Phase 1**: Qwen-Image Bug Fixes (4 items from commit 045eed5 + 1 wildcard propagation fix = **5 items**)
-2. **Phase 2**: LoHa Network Module (with documented inference limitations)
-3. **Phase 3**: FLUX.2 Architecture Support (~3,900 LOC)
+1. **Phase 1**: Qwen-Image Bug Fixes (5 items) — ✅ **COMPLETED** (commit `5b8cf1f`)
+2. **Phase 2**: LoHa Network Module — ✅ **COMPLETED** (commit `aec7f64`)
+3. **Phase 3**: FLUX.2 Architecture Support (~3,900 LOC) — 🚧 **IN PROGRESS**
 
 **Total Scope**: ~20 files modified/added, **~4,200 lines of code**
 
@@ -41,14 +42,33 @@ This document outlines the integration plan for upstream musubi-tuner changes in
 | `d50909f` | z-image key mapping | `convert_lora.py` |
 | `ab32f89` | Mu calculation fix | `qwen_image_generate_image.py:795` |
 | `6bcf3e5` | Layered control load | `qwen_image_generate_image.py:1223` |
+| `045eed5` | Batch generation fixes (Phase 1) | `qwen_image_generate_image.py` ✅ |
+| `92ef4ee` | LoHa network module (Phase 2) | `networks/loha.py` ✅ |
 
 ### Pending
 
 | Commit | Description | Priority |
 |--------|-------------|----------|
-| `045eed5` | Batch generation fixes | Critical |
-| `92ef4ee` | LoHa network module | Medium |
-| `737f5a8` + `d5f1ca7` | FLUX.2 support | High |
+| `737f5a8` + `d5f1ca7` | FLUX.2 base support | High |
+| `418a108` | Klein generation fixes | High |
+| `5a62697` | Function name fix + model_version | High |
+| `78a14b3` | fp8 Qwen3 support | Medium |
+| `2922222` | guidance_scale argument | Medium |
+
+**Phase 3 Source**: `origin/feat-flux-2-polish` (commit `2922222`) from `~/musubi-tuner`
+
+### Why feat-flux-2-polish Instead of main?
+
+The polish branch includes 4 additional commits that improve upon the base FLUX.2 implementation:
+
+| Commit | Benefit | Original Plan Impact |
+|--------|---------|---------------------|
+| `418a108` | Klein variant support, tqdm progress, Qwen3 refactoring | New feature |
+| `5a62697` | `load_text_embedder()` naming consistency | Cleaner API |
+| `78a14b3` | `--fp8_text_encoder` (was `--fp8_m3`), float8 normalization | **Removes §3.8 + §3.9** |
+| `2922222` | `--guidance_scale` CLI, prompt `--only` line fix | Better UX, matches Phase 1 |
+
+**Cross-dependency**: The `load_qwen3()` signature in `zimage_utils.py` adds optional params (`is_8b`, `tokenizer_id`) — backward compatible with existing Z-Image code.
 
 ---
 
@@ -596,31 +616,35 @@ python flux_2_cache_text_encoder_outputs.py ...
 
 ## Implementation Checklist
 
-### Phase 1: Qwen-Image (5 items + testing)
+### Phase 1: Qwen-Image (5 items + testing) — ✅ COMPLETED
 
-- [ ] **1.1** Fix `parse_prompt_line()` for `--only` lines (:217)
-- [ ] **1.2** Pass `prompt_wildcards` in `preprocess_prompts_for_batch()` (:1141)
-- [ ] **1.3** Fix VL processor in `load_shared_models()` (:1166)
-- [ ] **1.4** Fix VL processor in `process_batch_prompts()` (:1205)
-- [ ] **1.5** Fix `latent[0]` → `latent` in save_output (:1325)
-- [ ] **1.6** Test: batch with `__wildcard__` syntax and `--only` lines
-- [ ] **1.7** Test: layered with `automatic_prompt_lang_for_layered`
+- [x] **1.1** Fix `parse_prompt_line()` for `--only` lines (:217)
+- [x] **1.2** Pass `prompt_wildcards` in `preprocess_prompts_for_batch()` (:1141)
+- [x] **1.3** Fix VL processor in `load_shared_models()` (:1166)
+- [x] **1.4** Fix VL processor in `process_batch_prompts()` (:1205)
+- [x] **1.5** Fix `latent[0]` → `latent` in save_output (:1325)
+- [x] **1.6** Polish: validation for `--only` lines, wildcard in negative_prompt, interactive parity
+- [x] **1.7** Committed: `5b8cf1f` (merged to main)
 
-### Phase 2: LoHa (6 items)
+### Phase 2: LoHa (6 items) — ✅ COMPLETED
 
-- [ ] **2.1** Copy `networks/loha.py` from upstream
-- [ ] **2.2** Apply logging strategy (Option A or B)
-- [ ] **2.3** Add `architecture` param to `hv_train_network.py` (3 locations)
-- [ ] **2.4** Document inference/merge limitation
-- [ ] **2.5** (Optional) Add LoHa detection to merge_lora.py
-- [ ] **2.6** Test LoHa training
+- [x] **2.1** Copy `networks/loha.py` from upstream (commit `92ef4ee`)
+- [x] **2.2** Applied logging fix (removed `logging.basicConfig()` from library)
+- [x] **2.3** Add `architecture` param to `hv_train_network.py` (3 locations)
+- [x] **2.4** Architecture validation with clear error messages
+- [x] **2.5** Aligned `DEFAULT_EXCLUDE_PATTERNS` with per-arch LoRA defaults
+- [x] **2.6** Fixed `--dim_from_weights` argparse bug
+- [x] **2.7** Documented in `LORA_TRAINING_REFERENCE.md`
+- [x] **2.8** Committed: `aec7f64` feat(loha): add LoHa network module
 
-### Phase 3: FLUX.2 (29 items)
+### Phase 3: FLUX.2 (26 items) — 🚧 IN PROGRESS
+
+**Source**: `~/musubi-tuner` branch `origin/feat-flux-2-polish` (commit `2922222`)
 
 #### Core Files
 - [ ] **3.1** Create `flux_2/` directory
 - [ ] **3.2** Copy `flux2_models.py` (strip/handle basicConfig)
-- [ ] **3.3** Copy `flux2_utils.py` (normalize float8 aliases)
+- [ ] **3.3** Copy `flux2_utils.py` (float8 already normalized in polish branch)
 - [ ] **3.4** Copy `lora_flux_2.py`
 
 #### Scripts
@@ -641,26 +665,28 @@ python flux_2_cache_text_encoder_outputs.py ...
 - [ ] **3.15** Add `flux2_shift` to argparse choices (:2862)
 - [ ] **3.16** Add `flux2_shift` case: `mu = train_utils.get_lin_function(y1=0.5, y2=1.15)(h * w)` (:861)
 - [ ] **3.17** Update `pyproject.toml`: `transformers>=4.56.1`
-- [ ] **3.18** Normalize `float8e4m3fn` → `float8_e4m3fn` (avoid import-time refs)
+- [ ] **3.18** Update `zimage_utils.py`: Add `is_8b` and `tokenizer_id` params to `load_qwen3()`
 
 #### Documentation
-- [ ] **3.19** Copy `docs/flux_2.md` from upstream
+- [ ] **3.19** Copy `docs/flux_2.md` from upstream (polish branch has Klein docs)
 - [ ] **3.20** Document batch=1 limitation in flux_2.md
-- [ ] **3.21** Document `--fp8_m3` NotImplementedError in flux_2.md
-- [ ] **3.22** Update README with FLUX.2 mention
-- [ ] **3.23** Update CLAUDE.md
+- [ ] **3.21** Update README with FLUX.2 mention
+- [ ] **3.22** Update CLAUDE.md
 
 #### Testing
-- [ ] **3.24** Test argparse with flux2_shift (use CLI, not internal function)
-- [ ] **3.25** Test float8 compatibility (runtime check)
-- [ ] **3.26** Test latent caching
-- [ ] **3.27** Test text encoder caching (verify ctx_vec keys)
-- [ ] **3.28** Test training
-- [ ] **3.29** Test generation
+- [ ] **3.23** Test argparse with flux2_shift (use CLI, not internal function)
+- [ ] **3.24** Test latent caching
+- [ ] **3.25** Test text encoder caching (verify ctx_vec keys)
+- [ ] **3.26** Test generation (verify tqdm progress bar works)
+
+#### Items Removed (fixed in feat-flux-2-polish)
+- ~~§3.8 fp8_m3 NotImplementedError guard~~ → Renamed to `--fp8_text_encoder` with implementation
+- ~~§3.9 Normalize float8 aliases~~ → Already `torch.float8_e4m3fn` in polish branch
+- ~~§3.21 Document fp8_m3 limitation~~ → No longer a limitation
 
 ### Post-Integration (4 items)
 
-- [ ] **4.1** Smoke test existing architectures
+- [ ] **4.1** Smoke test existing architectures (especially Z-Image with updated `load_qwen3()`)
 - [ ] **4.2** Verify wildcards work in batch mode
 - [ ] **4.3** Document LoHa limitation in user docs
 - [ ] **4.4** Consider regression test for batch latent shapes
@@ -681,4 +707,4 @@ python flux_2_cache_text_encoder_outputs.py ...
 
 ---
 
-*v3 Final - All review feedback incorporated. Ready for implementation.*
+*v3.2 - Phase 1+2 complete. Phase 3 source updated to feat-flux-2-polish branch for improved Klein support and fp8 fixes.*

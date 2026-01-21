@@ -96,9 +96,9 @@ My general code and Musubi Tuner code is licensed Apache 2.0. Other projects inc
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, and Qwen-Image architectures. 
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, FLUX.2, and Qwen-Image architectures.
 
-This repository is unofficial and not affiliated with the official HunyuanVideo/Wan2.1/2.2/FramePack/FLUX.1 Kontext/Qwen-Image repositories.
+This repository is unofficial and not affiliated with the official HunyuanVideo/Wan2.1/2.2/FramePack/FLUX.1 Kontext/FLUX.2/Qwen-Image repositories.
 
 *This repository is under development.*
 
@@ -212,6 +212,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [FramePack](./docs/framepack.md)
 - [FramePack (Single Frame)](./docs/framepack_1f.md)
 - [FLUX.1 Kontext](./docs/flux_kontext.md)
+- [FLUX.2](./docs/flux_2.md)
 - [Qwen-Image](./docs/qwen_image.md)
 
 **Common Configuration & Usage:**
