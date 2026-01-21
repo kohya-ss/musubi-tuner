@@ -62,6 +62,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     # inference
+    parser.add_argument(
+        "--guidance_scale", type=float, default=4.0, help="Guidance scale for classifier free guidance. Default is 4.0."
+    )
     parser.add_argument("--prompt", type=str, default=None, help="prompt for generation")
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size, height and width")
     parser.add_argument(
@@ -163,14 +166,19 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         Dict[str, Any]: Dictionary of argument overrides
     """
     # TODO common function with hv_train_network.line_to_prompt_dict
-    parts = line.split(" --")
-    prompt = parts[0].strip()
+    if line.strip().startswith("--"):  # No prompt
+        parts = (" " + line.strip()).split(" --")
+        prompt = None
+    else:
+        parts = line.split(" --")
+        prompt = parts[0].strip()
+        parts = parts[1:]
 
     # Create dictionary of overrides
-    overrides = {"prompt": prompt}
+    overrides = {} if prompt is None else {"prompt": prompt}
     overrides["control_image_path"] = []
 
-    for part in parts[1:]:
+    for part in parts:
         if not part.strip():
             continue
         option_parts = part.split(" ", 1)
@@ -186,8 +194,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
             overrides["seed"] = int(value)
         elif option == "s":
             overrides["infer_steps"] = int(value)
-        # elif option == "g" or option == "l":
-        #     overrides["guidance_scale"] = float(value)
+        elif option == "g" or option == "l":
+            overrides["guidance_scale"] = float(value)
         elif option == "fs":
             overrides["flow_shift"] = float(value)
         elif option == "i":
@@ -662,7 +670,7 @@ def generate(
             ctx,
             ctx_ids,
             timesteps=timesteps,
-            guidance=args.embedded_cfg_scale,
+            guidance=args.guidance_scale,
             img_cond_seq=ref_tokens,
             img_cond_seq_ids=ref_ids,
         )
@@ -704,6 +712,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
             "width": f"{width}",
             "infer_steps": f"{args.infer_steps}",
             "embedded_cfg_scale": f"{args.embedded_cfg_scale}",
+            "guidance_scale": f"{args.guidance_scale}",
         }
         # if args.negative_prompt is not None:
         #     metadata["negative_prompt"] = f"{args.negative_prompt}"
