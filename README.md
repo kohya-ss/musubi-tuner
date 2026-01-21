@@ -63,6 +63,11 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- January 21, 2026
+    - Added support for LoRA training of FLUX.2 [dev]/[kontext]. See [PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841). Many thanks to christopher5106 for this contribution.
+        - Please refer to the [documentation](./docs/flux_2.md) for details.
+        - Note that some features like fp8 optimization are not yet implemented. Also, only [dev] models have been tested. We plan to address this soon.
+
 - January 17, 2026
     - Changed to use `convert_lora.py` for converting Z-Image LoRA for ComfyUI to improve compatibility. See [PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851).
         - The previous `convert_z_image_lora_to_comfy.py` can still be used, but the converted weights may not work correctly with nunchaku.

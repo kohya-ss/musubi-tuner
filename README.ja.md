@@ -58,6 +58,11 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/01/21
+    - FLUX.2 [dev]/[kontext]のLoRA学習に対応しました。[PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841) christopher5106氏に深く感謝します。
+        - 詳細は[ドキュメント](./docs/flux_2.md)を参照してください。
+        -  fp8最適化など一部機能は未実装です。また[dev]以外のモデルは動作テストされていません。早急に対応予定です。
+
 - 2026/01/17
     - Z-ImageのComfyUI向けのLoRA変換について、互換性向上のため `convert_lora.py` を使用するように変更しました。[PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851)
         - 以前の `convert_z_image_lora_to_comfy.py` も引き続き使用可能ですが、nunchakuで正しく動作しない可能性があります。
