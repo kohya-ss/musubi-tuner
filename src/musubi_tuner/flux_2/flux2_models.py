@@ -66,6 +66,7 @@ class Klein4BParams:
 # # region autoencoder
 #
 
+
 @dataclass
 class AutoEncoderParams:
     resolution: int = 256
@@ -75,6 +76,7 @@ class AutoEncoderParams:
     ch_mult: list[int] = field(default_factory=lambda: [1, 2, 4, 4])
     num_res_blocks: int = 2
     z_channels: int = 32
+
 
 def swish(x: Tensor) -> Tensor:
     return x * torch.sigmoid(x)
@@ -402,10 +404,12 @@ class AutoEncoder(nn.Module):
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
 
+
 # # endregion
 
 
 # # region config
+
 
 @dataclass
 class ModelSpec:
@@ -432,16 +436,13 @@ configs_flux_2_dev = ModelSpec(
 
 
 class Flux2(nn.Module):
-
     def __init__(self, params: Flux2Params, attn_mode: str = "flash", split_attn: bool = False) -> None:
         super().__init__()
 
         self.in_channels = params.in_channels
         self.out_channels = params.in_channels
         if params.hidden_size % params.num_heads != 0:
-            raise ValueError(
-                f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}"
-            )
+            raise ValueError(f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}")
         pe_dim = params.hidden_size // params.num_heads
         if sum(params.axes_dim) != pe_dim:
             raise ValueError(f"Got {params.axes_dim} but expected positional dim {pe_dim}")
@@ -589,10 +590,22 @@ class Flux2(nn.Module):
         )
 
         self.offloader_double = ModelOffloader(
-            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
+            "double",
+            self.double_blocks,
+            self.num_double_blocks,
+            double_blocks_to_swap,
+            supports_backward,
+            device,
+            use_pinned_memory,  # , debug=True
         )
         self.offloader_single = ModelOffloader(
-            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
+            "single",
+            self.single_blocks,
+            self.num_single_blocks,
+            single_blocks_to_swap,
+            supports_backward,
+            device,
+            use_pinned_memory,  # , debug=True
         )
         print(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
@@ -698,6 +711,7 @@ class SelfAttention(nn.Module):
 
         self.norm = QKNorm(head_dim)
         self.proj = nn.Linear(dim, dim, bias=False)
+
 
 class SiLUActivation(nn.Module):
     def __init__(self):
@@ -937,15 +951,11 @@ class DoubleStreamBlock(nn.Module):
 
         # calculate the img blocks
         img = img + img_mod1_gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2_gate * self.img_mlp(
-            (1 + img_mod2_scale) * (self.img_norm2(img)) + img_mod2_shift
-        )
+        img = img + img_mod2_gate * self.img_mlp((1 + img_mod2_scale) * (self.img_norm2(img)) + img_mod2_shift)
 
         # calculate the txt blocks
         txt = txt + txt_mod1_gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2_gate * self.txt_mlp(
-            (1 + txt_mod2_scale) * (self.txt_norm2(txt)) + txt_mod2_shift
-        )
+        txt = txt + txt_mod2_gate * self.txt_mlp((1 + txt_mod2_scale) * (self.txt_norm2(txt)) + txt_mod2_shift)
         return img, txt
 
     def forward(
@@ -1015,6 +1025,7 @@ class EmbedND(nn.Module):
 
         return emb.unsqueeze(1)
 
+
 def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 1000.0):
     """
     Create sinusoidal timestep embeddings.
@@ -1026,9 +1037,7 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
     """
     t = time_factor * t
     half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period) * torch.arange(start=0, end=half, device=t.device, dtype=torch.float32) / half
-    )
+    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, device=t.device, dtype=torch.float32) / half)
 
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -1064,14 +1073,14 @@ class QKNorm(torch.nn.Module):
 
 
 def attention(
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        pe: Tensor,
-        attn_mask: Optional[Tensor] = None,
-        attn_mode: str = "torch",
-        split_attn: bool = False,
-        control_lengths: Optional[list[int]] = None,
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    pe: Tensor,
+    attn_mask: Optional[Tensor] = None,
+    attn_mode: str = "torch",
+    split_attn: bool = False,
+    control_lengths: Optional[list[int]] = None,
 ) -> Tensor:
     assert attn_mask is None, "attn_mask is not supported in flux attention"
     assert attn_mode == "torch", f"{attn_mode} not implemented"
@@ -1083,6 +1092,7 @@ def attention(
     x = rearrange(x, "B H L D -> B L (H D)")
 
     return x
+
 
 # def attention(
 #     q: Tensor,

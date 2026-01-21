@@ -366,9 +366,9 @@ def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flu
         img_ctx = [Image.open(input_image) for input_image in args.control_image_path]
         # ref_tokens, ref_ids = encode_image_refs(ae, img_ctx)
         if len(img_ctx) > 1:
-            limit_pixels = 1024 ** 2
+            limit_pixels = 1024**2
         elif len(img_ctx) == 1:
-            limit_pixels = 2024 ** 2
+            limit_pixels = 2024**2
         else:
             limit_pixels = None
 
@@ -549,15 +549,21 @@ def generate(
         else:
             # the dtype of VAE weights is float32, but we can load it as bfloat16 for better performance in future
             vae_instance_for_return = flux2_utils.load_ae(
-                args.vae, dtype=torch.float32, device=device, disable_mmap=True,
+                args.vae,
+                dtype=torch.float32,
+                device=device,
+                disable_mmap=True,
             )
 
         height, width, context, control_latent = prepare_i2v_inputs(
-            args, device, vae_instance_for_return, shared_models,
+            args,
+            device,
+            vae_instance_for_return,
+            shared_models,
         )
 
         vae_instance_for_return.to("cpu")
-        
+
     if shared_models is None or "model" not in shared_models:
         # load DiT model
         model = load_dit_model(args, device)
@@ -814,7 +820,11 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     # Load text encoders to CPU
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
     text_embedder = flux2_utils.load_textembedder(
-        args.model_version, args.text_encoder, dtype=m3_dtype, device="cpu", disable_mmap=True,
+        args.model_version,
+        args.text_encoder,
+        dtype=m3_dtype,
+        device="cpu",
+        disable_mmap=True,
     )
 
     shared_models["text_embedder"] = text_embedder
@@ -875,7 +885,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     logger.info("Preprocessing text and LLM/TextEncoder encoding for all prompts...")
     temp_shared_models_txt = {
-        "text_embedder": text_embedder_batch, # on GPU
+        "text_embedder": text_embedder_batch,  # on GPU
         "conds_cache": conds_cache_batch,
     }
 

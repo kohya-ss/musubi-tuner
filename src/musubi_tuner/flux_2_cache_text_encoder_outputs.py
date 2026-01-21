@@ -71,7 +71,11 @@ def main():
     # Load Mistral 3 text encoder
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
     text_embedder = flux2_utils.load_textembedder(
-        args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True,
+        args.model_version,
+        args.text_encoder,
+        dtype=m3_dtype,
+        device=device,
+        disable_mmap=True,
     )
 
     # Encode with Mistral 3 text encoder

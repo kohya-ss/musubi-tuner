@@ -32,15 +32,12 @@ def preprocess_contents_flux_2(batch: List[ItemInfo]) -> tuple[torch.Tensor, Lis
 
         if item.control_content is not None and len(item.control_content) > 0:
             if len(item.control_content) > 1:
-                limit_pixels = 1024 ** 2
+                limit_pixels = 1024**2
             elif len(item.control_content) == 1:
-                limit_pixels = 2024 ** 2
+                limit_pixels = 2024**2
             else:
                 limit_pixels = None
-            img_ctx = [
-                (Image.fromarray(cc) if isinstance(cc, np.ndarray) else cc).convert("RGB")
-                for cc in item.control_content
-            ]
+            img_ctx = [(Image.fromarray(cc) if isinstance(cc, np.ndarray) else cc).convert("RGB") for cc in item.control_content]
 
             img_ctx_prep = flux2_utils.default_prep(
                 img=img_ctx,
@@ -67,13 +64,7 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
     with torch.no_grad():
         latents = ae.encode(contents.to(ae.device, dtype=ae.dtype))  # B, C, H, W
         if controls is not None:
-            control_latents = [
-                [
-                    ae.encode(c.to(ae.device, dtype=ae.dtype).unsqueeze(0))[0]
-                    for c in cl
-                ]
-                for cl in controls
-            ]
+            control_latents = [[ae.encode(c.to(ae.device, dtype=ae.dtype).unsqueeze(0))[0] for c in cl] for cl in controls]
         else:
             control_latents = None
 
