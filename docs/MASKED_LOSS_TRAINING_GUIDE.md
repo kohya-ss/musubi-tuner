@@ -2,7 +2,7 @@
 
 A comprehensive reference for understanding and using weighted mask loss training in blissful-tuner for WAN2.2 and Qwen Image LoRA training.
 
-**Last Updated:** 2026-01-17
+**Last Updated:** 2026-01-21
 
 ---
 
@@ -244,15 +244,6 @@ mask_weight = mask_weight * (1.0 - mask_min_weight) + mask_min_weight
 - Hair: 0.31 → 0.28 + 0.1 = 0.38
 - Background: 0.0 → 0.0 + 0.1 = 0.1
 
-### `--mask_loss_scale`
-
-**Type:** Float
-**Default:** 1.0
-
-Scales all mask weights by a constant factor.
-
-> ⚠️ **Warning:** This parameter has **no effect** with the current weighted-mean normalization (it cancels out mathematically). A warning will be logged if you set this to anything other than 1.0. Use `--mask_gamma` or `--mask_min_weight` instead.
-
 ### Argument Validation
 
 All mask-related arguments are validated early in training. Invalid values will raise clear errors:
@@ -261,7 +252,6 @@ All mask-related arguments are validated early in training. Invalid values will 
 |----------|-------------|------------------|
 | `--mask_gamma` | > 0 | `--mask_gamma must be > 0` |
 | `--mask_min_weight` | [0, 1) | `--mask_min_weight must be in range [0, 1)` |
-| `--mask_loss_scale` | > 0 | `--mask_loss_scale must be > 0` |
 
 ---
 
@@ -380,8 +370,6 @@ Raw Mask Value (0-255)
         ↓
     Min Weight Floor (* (1-min) + min)
         ↓
-    Scale Factor (* scale)
-        ↓
     Final Loss Weight
 ```
 
@@ -441,39 +429,36 @@ Raw Mask Value (0-255)
 
 ## Technical Implementation Details
 
-### Loss Calculation Code
+### Loss Calculation
 
-From `hv_train_network.py` (lines 2273-2303), inherited by WAN and used natively by Qwen Image:
+The mask-weighted loss reducer lives in `apply_masked_loss()` in `src/musubi_tuner/modules/mask_loss.py` and is called from the training loops.
+
+Example (video/non-layered loss layout):
 
 ```python
-# Apply mask-weighted loss if mask weights are present in the batch
-mask_weights = batch.get("mask_weights", None)
-if mask_weights is not None and args.use_mask_loss:
-    # mask_weights shape: (B, 1, F, H, W) - expand to match loss shape (B, C, F, H, W)
-    mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
-    mask_weights = mask_weights.expand_as(loss)
+from musubi_tuner.modules.mask_loss import apply_masked_loss
 
-    # Apply gamma correction
-    if args.mask_gamma != 1.0:
-        mask_weights = mask_weights.clamp(0.0, 1.0)
-        mask_weights = mask_weights ** args.mask_gamma
-
-    # Apply minimum weight floor
-    if args.mask_min_weight > 0:
-        mask_weights = mask_weights * (1.0 - args.mask_min_weight) + args.mask_min_weight
-
-    # Apply scale factor
-    if args.mask_loss_scale != 1.0:
-        mask_weights = mask_weights * args.mask_loss_scale
-
-    # Apply mask weighting to loss
-    loss = loss * mask_weights
-
-    # Use weighted mean: sum(loss) / sum(weights)
-    loss = loss.sum() / (mask_weights.sum() + 1e-8)
-else:
-    loss = loss.mean()
+loss = apply_masked_loss(loss, batch.get("mask_weights"), args=args, layout="video")
 ```
+
+Example (Qwen Image layered loss layout):
+
+```python
+loss = apply_masked_loss(
+    loss,
+    batch.get("mask_weights"),
+    args=args,
+    layout="layered",
+    drop_base_frame=args.remove_first_image_from_target,
+)
+```
+
+High-level steps performed:
+1. Normalize mask shape to `(B, 1, F, H, W)` (accepts `(B, F, H, W)` too).
+2. If `layout="layered"`, optionally drop base-frame weights, then permute to match `(B, L, C, H, W)`.
+3. Apply gamma correction: `mask = mask ** mask_gamma`.
+4. Apply min-weight floor: `mask = mask * (1 - mask_min_weight) + mask_min_weight`.
+5. Compute weighted mean: `sum(loss * mask) / sum(mask)`.
 
 ### Key Implementation Notes
 
@@ -499,13 +484,12 @@ When mask loss is enabled, you'll see a prominent banner in the training logs:
 ============================================================
 MASK-WEIGHTED LOSS TRAINING ENABLED
 ============================================================
-  mask_loss_scale: 1.0
   mask_min_weight: 0.05
   mask_gamma: 0.7
 ------------------------------------------------------------
 IMPORTANT: Masks must be baked into latent cache!
 If you see 'batch has no mask_weights' errors, re-run
-the cache script with mask_directory in your dataset config.
+the cache script with alpha_mask and/or mask_directory enabled.
 ============================================================
 ```
 
@@ -515,9 +499,10 @@ If you don't see this banner, `--use_mask_loss` is not enabled.
 
 | File | Purpose |
 |------|---------|
-| `src/musubi_tuner/hv_train_network.py` | Base NetworkTrainer with mask loss implementation |
-| `src/musubi_tuner/wan_train_network.py` | WAN trainer (inherits mask loss from NetworkTrainer) |
-| `src/musubi_tuner/qwen_image_train.py` | Qwen Image trainer (native mask loss) |
+| `src/musubi_tuner/modules/mask_loss.py` | Shared mask loss reducer + validation helpers |
+| `src/musubi_tuner/hv_train_network.py` | Base NetworkTrainer (uses shared mask loss reducer) |
+| `src/musubi_tuner/wan_train_network.py` | WAN trainer (inherits NetworkTrainer; uses shared mask loss reducer) |
+| `src/musubi_tuner/qwen_image_train.py` | Qwen Image trainer (uses shared reducer; handles layered layout) |
 | `src/musubi_tuner/wan_cache_latents.py` | WAN latent caching with mask processing |
 | `src/musubi_tuner/qwen_image_cache_latents.py` | Qwen Image latent caching with mask processing |
 | `src/musubi_tuner/dataset/image_video_dataset.py` | Dataset handling and mask storage |
@@ -629,7 +614,6 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 | `--use_mask_loss` | flag | disabled | Enable mask-weighted loss |
 | `--mask_gamma` | float | 1.0 | Gamma correction (< 1 softer, > 1 sharper) |
 | `--mask_min_weight` | float | 0.0 | Minimum weight for all regions |
-| `--mask_loss_scale` | float | 1.0 | ⚠️ No effect (deprecated) |
 
 ### Our Weighted Mask Values
 
@@ -644,6 +628,10 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 
 ## Changelog
 
+### 2026-01-21
+- Refactor: mask loss moved to `src/musubi_tuner/modules/mask_loss.py`
+- Removed `--mask_loss_scale` (it had no effect with weighted-mean normalization)
+
 ### 2026-01-17
 - **NEW:** Alpha channel mask support (`alpha_mask = true`)
 - **NEW:** `require_mask` option for strict mask enforcement at caching time
@@ -656,7 +644,6 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 ### 2026-01-14
 - Added mask resizing fix: NEAREST interpolation for upscaling (preserves discrete values)
 - Added argument validation with clear error messages
-- Added `--mask_loss_scale` deprecation warning
 - Added VideoDataset mask matching documentation
 - Added one-frame mode mask behavior documentation
 - Added "Verifying Mask Loss is Active" section with logging banner
@@ -669,5 +656,5 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 ---
 
 *Document created: 2026-01-13*
-*Last updated: 2026-01-17*
+*Last updated: 2026-01-21*
 *Based on blissful-tuner codebase analysis*

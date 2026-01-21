@@ -16,6 +16,7 @@ from safetensors.torch import save_file
 from musubi_tuner import qwen_image_train_network
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.modules.mask_loss import apply_masked_loss, log_mask_loss_banner, require_mask_weights_if_enabled, validate_mask_loss_args
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.hv_train_network import (
@@ -23,7 +24,6 @@ from musubi_tuner.hv_train_network import (
     SS_METADATA_MINIMUM_KEYS,
     collator_class,
     compute_loss_weighting_for_sd3,
-    validate_mask_loss_args,
     clean_memory_on_device,
     prepare_accelerator,
     setup_parser_common,
@@ -594,18 +594,11 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         clean_memory_on_device(accelerator.device)
 
-        # Log mask loss settings if enabled - prominent banner to avoid accidental unmasked runs
-        if args.use_mask_loss:
-            logger.info("=" * 60)
-            logger.info("MASK-WEIGHTED LOSS TRAINING ENABLED")
-            logger.info("=" * 60)
-            logger.info(f"  mask_loss_scale: {args.mask_loss_scale}")
-            logger.info(f"  mask_min_weight: {args.mask_min_weight}")
-            logger.info(f"  mask_gamma: {args.mask_gamma}")
-            logger.info("-" * 60)
-            logger.info("IMPORTANT: Masks must be baked into latent cache!")
-            logger.info("If you see 'no mask_weights' error, recache with alpha_mask or mask_directory.")
-            logger.info("=" * 60)
+        log_mask_loss_banner(
+            logger,
+            args,
+            cache_hint="If you see 'no mask_weights' error, recache with alpha_mask or mask_directory.",
+        )
 
         optimizer_train_fn()
 
@@ -617,17 +610,12 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
             for step, batch in enumerate(train_dataloader):
                 # Fail-fast validation: ERROR if mask loss enabled but no masks in batch
-                if step == 0 and args.use_mask_loss:
-                    if batch.get("mask_weights", None) is None:
-                        raise ValueError(
-                            "FATAL: --use_mask_loss is enabled but batch has no mask_weights!\n"
-                            "This means masks were NOT baked into your latent cache.\n"
-                            "To fix:\n"
-                            "  1. Add 'alpha_mask = true' and/or 'mask_directory = \"/path/to/masks\"' in dataset TOML\n"
-                            "  2. Use a FRESH cache_directory (masks are stored in cache)\n"
-                            "  3. Recache: python qwen_image_cache_latents.py --dataset_config ... --vae ...\n"
-                            "  4. Then re-run training"
-                        )
+                if step == 0:
+                    require_mask_weights_if_enabled(
+                        batch,
+                        args,
+                        cache_hint="Recache: python qwen_image_cache_latents.py --dataset_config ... --vae ...",
+                    )
 
                 latents = batch["latents"]
 
@@ -654,62 +642,15 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                     if weighting is not None:
                         loss = loss * weighting
 
-                    # Apply mask-weighted loss if mask weights are present in the batch
-                    mask_weights = batch.get("mask_weights", None)
-                    if mask_weights is not None and args.use_mask_loss:
-                        # mask_weights from batch:
-                        # - Usually: (B, 1, F, H, W) from cached mask weights (1, F, H, W) stacked across batch
-                        # - Possible: (B, F, H, W) if any upstream/script variant squeezes the singleton dim
-                        #
-                        # Loss shapes:
-                        # - non-layered: (B, C, F, H, W)
-                        # - layered: (B, L, C, H, W)  (note different dim order)
-                        #
-                        # Normalize mask_weights to match loss dim order, then broadcast.
-                        if mask_weights.ndim == 4:
-                            # (B, F, H, W) -> (B, 1, F, H, W)
-                            mask_weights = mask_weights.unsqueeze(1)
-                        elif mask_weights.ndim != 5:
-                            raise ValueError(f"Unexpected mask_weights shape: {tuple(mask_weights.shape)}")
-
-                        mask_weights = mask_weights.to(loss.device, dtype=loss.dtype)
-
-                        if getattr(args, "is_layered", False):
-                            # loss: (B, L, C, H, W)
-                            # mask_weights: (B, 1, F, H, W) with F == (base + layers)
-                            if getattr(args, "remove_first_image_from_target", False):
-                                # Drop the base image mask (targets start from layer 1 when base is conditioning-only)
-                                mask_weights = mask_weights[:, :, 1:, :, :]
-
-                            # Reorder to match (B, L, C, H, W): put F/L in dim=1, singleton in dim=2
-                            mask_weights = mask_weights.permute(0, 2, 1, 3, 4)  # (B, F/L, 1, H, W)
-
-                        mask_weights = mask_weights.expand_as(loss)
-
-                        # Apply optional gamma correction (gamma > 1.0 = sharper/stronger face focus)
-                        if hasattr(args, "mask_gamma"):
-                            if args.mask_gamma <= 0:
-                                raise ValueError("--mask_gamma must be > 0")
-                            # Ensure numeric stability before pow (masks should be [0,1], but interpolation/IO can introduce tiny drift)
-                            mask_weights = mask_weights.clamp(0.0, 1.0)
-                            if args.mask_gamma != 1.0:
-                                mask_weights = mask_weights**args.mask_gamma
-
-                        # Apply optional minimum weight (so masked regions still get some training signal)
-                        if hasattr(args, "mask_min_weight") and args.mask_min_weight > 0:
-                            mask_weights = mask_weights * (1.0 - args.mask_min_weight) + args.mask_min_weight
-
-                        # Apply optional scale factor (NOTE: effectively a no-op with weighted mean!)
-                        if hasattr(args, "mask_loss_scale") and args.mask_loss_scale != 1.0:
-                            mask_weights = mask_weights * args.mask_loss_scale
-
-                        # Apply mask weighting to loss
-                        loss = loss * mask_weights
-
-                        # Use weighted mean: sum(loss) / sum(weights) to avoid bias toward larger mask areas
-                        loss = loss.sum() / (mask_weights.sum() + 1e-8)
-                    else:
-                        loss = loss.mean()  # mean loss over all elements in batch
+                    layout = "layered" if getattr(args, "is_layered", False) else "video"
+                    drop_base_frame = bool(getattr(args, "remove_first_image_from_target", False)) if layout == "layered" else False
+                    loss = apply_masked_loss(
+                        loss,
+                        batch.get("mask_weights", None),
+                        args=args,
+                        layout=layout,
+                        drop_base_frame=drop_base_frame,
+                    )
 
                     accelerator.backward(loss)
 
@@ -853,7 +794,7 @@ def qwen_image_finetune_setup_parser(parser: argparse.ArgumentParser) -> argpars
         action="store_true",
         help="Enable memory efficient saving (saving states requires use normal saving, so it takes same amount of memory even with this option enabled)",
     )
-    # Note: Mask loss args (--use_mask_loss, --mask_loss_scale, --mask_min_weight, --mask_gamma) are already
+    # Note: Mask loss args (--use_mask_loss, --mask_min_weight, --mask_gamma) are already
     # defined in setup_parser_common() from hv_train_network.py, so they're available here.
     return parser
 
