@@ -1849,9 +1849,12 @@ class NetworkTrainer:
                 net_kwargs[key] = value
 
         if args.dim_from_weights:
-            logger.info(f"Loading network from weights: {args.dim_from_weights}")
-            weights_sd = load_file(args.dim_from_weights)
-            network, _ = network_module.create_arch_network_from_weights(
+            # --dim_from_weights requires --network_weights to specify the weights file
+            if args.network_weights is None:
+                raise ValueError("--dim_from_weights requires --network_weights to be specified")
+            logger.info(f"Loading network structure from weights: {args.network_weights}")
+            weights_sd = load_file(args.network_weights)
+            network = network_module.create_arch_network_from_weights(
                 1, weights_sd, unet=transformer, architecture=self.architecture
             )
         else:

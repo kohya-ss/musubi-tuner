@@ -146,6 +146,64 @@ network_alpha = 32    # scale = 32/64 = 0.5 for standard LoRA
 
 ---
 
+### LoHa (Low-rank Hadamard Product)
+
+LoHa is an alternative PEFT method that uses Hadamard (element-wise) products instead of standard matrix multiplication. The weight delta is computed as:
+
+```
+ΔW = (W1_a @ W1_b) ⊙ (W2_a @ W2_b)
+```
+
+where `⊙` is element-wise multiplication. This provides different expressivity than standard LoRA.
+
+**Supported Architectures:**
+- HunyuanVideo (`hv`)
+- HunyuanVideo 1.5 (`hv15`)
+- WAN (`wan`)
+- FramePack (`fp`)
+- FLUX Kontext (`fk`)
+- Qwen-Image / Qwen-Image-Edit / Qwen-Image-Layered (`qi`, `qie`, `qil`)
+- Kandinsky5 (`k5`)
+- Z-Image (`zi`)
+
+**When to use:**
+- Experimenting with alternative PEFT methods
+- When standard LoRA doesn't capture desired adaptations
+- Research into different low-rank parameterizations
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `network_module` | string | `networks.loha` | Use LoHa module |
+| `network_dim` | int | 8 | Rank of LoHa matrices |
+| `network_alpha` | float | 1 | Scaling factor |
+
+**Example:**
+```toml
+[network]
+network_module = "networks.loha"
+network_dim = 8
+network_alpha = 1
+```
+
+**⚠️ Important: Inference/Merge Scripts Assume LoRA**
+
+The current `merge_lora.py` and generation scripts (`hv_generate_video.py`, `wan_generate_video.py`, etc.) have hardcoded LoRA module imports. They will not correctly load or merge LoHa weights.
+
+| Script | Issue |
+|--------|-------|
+| `merge_lora.py` | Hardcoded `from networks import lora` |
+| `hv_generate_video.py` | Hardcoded LoRA import |
+| `wan_generate_video.py` | Architecture-specific LoRA import |
+
+**Workarounds:**
+1. **Merge during training**: Save checkpoints with weights merged into the base model
+2. **Manual script modification**: Update the import in your local copy to use `networks.loha`
+3. **Future update**: Automatic network type detection may be added (based on weight key patterns like `hada_w1_a`)
+
+> **Note**: LyCORIS also supports LoHa, but weight key compatibility between this implementation and LyCORIS has not been verified. Use with caution if attempting cross-tool workflows.
+
+---
+
 ### RS-LoRA (Rank-Stabilized LoRA)
 
 RS-LoRA changes the scaling formula from `alpha/r` to `alpha/sqrt(r)` for more stable gradients across different ranks.
