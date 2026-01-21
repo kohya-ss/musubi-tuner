@@ -13,33 +13,56 @@ from torch.nn.attention.flex_attention import flex_attention
 from .utils import get_freqs, nablaT_v2
 from .attention import SelfAttentionEngine
 
-# torch.compile toggle is set via set_compile_enabled (default: disabled)
-_ENABLE_COMPILE = False
+_GLOBAL_DTYPE = torch.bfloat16
 
 
-def set_compile_enabled(enabled: bool):
-    global _ENABLE_COMPILE
-    _ENABLE_COMPILE = bool(enabled)
+def set_global_dtype_nn(dtype: torch.dtype):
+    global _GLOBAL_DTYPE
+    _GLOBAL_DTYPE = dtype
 
 
-def _maybe_compile(fn=None, **kwargs):
+def _maybe_compile(fn=None, **compile_kwargs):
+    if not hasattr(_maybe_compile, "compile_targets"):
+        _maybe_compile.compile_targets = []
+
     if fn is None:
-        return lambda f: _maybe_compile(f, **kwargs)
-    if _ENABLE_COMPILE:
-        return torch.compile(fn, **kwargs)
-    return fn
+        return lambda f: _maybe_compile(f, **compile_kwargs)
+
+    # Create a wrapper so we can replace it later
+    def wrapper(*args, **kwargs):
+        return wrapper._fn(*args, **kwargs)
+
+    wrapper._fn = fn
+    wrapper._orig_fn = fn
+    wrapper._compile_kwargs = compile_kwargs
+
+    _maybe_compile.compile_targets.append(wrapper)
+
+    return wrapper
+
+
+def activate_compile(backend="inductor", mode="default", fullgraph=False, dynamic=None):
+    if not hasattr(_maybe_compile, "compile_targets"):
+        return
+
+    for wrapper in _maybe_compile.compile_targets:
+        if not hasattr(wrapper, "_compiled"):
+            if wrapper._compile_kwargs == {}:  # empty dict so use our passed in ones
+                wrapper._compile_kwargs = {"backend": backend, "fullgraph": fullgraph, "mode": mode, "dynamic": dynamic}
+            wrapper._fn = torch.compile(wrapper._fn, **wrapper._compile_kwargs)
+            wrapper._compiled = True
 
 
 @_maybe_compile()
 @torch.autocast(device_type="cuda", dtype=torch.float32)
 def apply_scale_shift_norm(norm, x, scale, shift):
-    return (norm(x) * (scale + 1.0) + shift).to(torch.bfloat16)
+    return (norm(x) * (scale + 1.0) + shift).to(_GLOBAL_DTYPE)
 
 
 @_maybe_compile()
 @torch.autocast(device_type="cuda", dtype=torch.float32)
 def apply_gate_sum(x, out, gate):
-    return (x + gate * out).to(torch.bfloat16)
+    return (x + gate * out).to(_GLOBAL_DTYPE)
 
 
 @_maybe_compile()
@@ -47,7 +70,7 @@ def apply_gate_sum(x, out, gate):
 def apply_rotary(x, rope):
     x_ = x.reshape(*x.shape[:-1], -1, 1, 2).to(torch.float32)
     x_out = (rope * x_).sum(dim=-1)
-    return x_out.reshape(*x.shape).to(torch.bfloat16)
+    return x_out.reshape(*x.shape).to(_GLOBAL_DTYPE)
 
 
 class TimeEmbeddings(nn.Module):

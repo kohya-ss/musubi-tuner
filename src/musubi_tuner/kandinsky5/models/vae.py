@@ -21,6 +21,9 @@ from diffusers.models.autoencoders.vae import (
     DecoderOutput,
     DiagonalGaussianDistribution,
 )
+from blissful_tuner.blissful_logger import BlissfulLogger
+
+logger = BlissfulLogger(__name__, "green")
 
 
 def prepare_causal_attention_mask(f: int, s: int, dtype: torch.dtype, device: torch.device, b: int) -> torch.Tensor:
@@ -1055,7 +1058,7 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         return self.get_enc_optimal_tiling(enc_inp_shape)
 
 
-def build_vae(conf, vae_dtype=torch.float16):
+def build_vae(conf, vae_dtype=torch.float16, enable_safety=True):
     if conf.name == "hunyuan":
         # Check if checkpoint_path is a direct file (safetensors or pt)
         if os.path.isfile(conf.checkpoint_path):
@@ -1066,40 +1069,45 @@ def build_vae(conf, vae_dtype=torch.float16):
         else:
             # Load from directory with subfolder
             vae = AutoencoderKLHunyuanVideo.from_pretrained(conf.checkpoint_path, subfolder="vae", torch_dtype=vae_dtype)
-        # Kandinsky-specific safety: patch causal attention mask to avoid huge (F*HW)^2 allocations at runtime.
-        try:
-            import musubi_tuner.modules.unet_causal_3d_blocks as _ucb
 
-            if not hasattr(_ucb, "_orig_prepare_causal_attention_mask"):
-                _ucb._orig_prepare_causal_attention_mask = _ucb.prepare_causal_attention_mask
+        logger.info(f"Building Hunyuan 3D VAE. Memory alloc safety: {enable_safety}")
+        if enable_safety:
+            # Kandinsky-specific safety: patch causal attention mask to avoid huge (F*HW)^2 allocations at runtime.
+            try:
+                import musubi_tuner.modules.unet_causal_3d_blocks as _ucb
 
-            def _safe_causal_mask(n_frame, n_hw, dtype, device, batch_size=None):
-                seq_len = n_frame * n_hw
-                max_tokens = 4096
-                if seq_len > max_tokens:
-                    base = torch.ones((n_frame, n_frame), dtype=dtype, device=device).tril_().log_()
-                    if batch_size is not None:
-                        base = base.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
-                    return base
-                return _ucb._orig_prepare_causal_attention_mask(n_frame, n_hw, dtype, device, batch_size)
+                if not hasattr(_ucb, "_orig_prepare_causal_attention_mask"):
+                    _ucb._orig_prepare_causal_attention_mask = _ucb.prepare_causal_attention_mask
 
-            _ucb.prepare_causal_attention_mask = _safe_causal_mask
-        except Exception:
-            pass
-        # Kandinsky-specific safety: force tiling to trigger earlier for large videos/images without touching core modules.
+                def _safe_causal_mask(n_frame, n_hw, dtype, device, batch_size=None):
+                    seq_len = n_frame * n_hw
+                    max_tokens = 4096
+                    if seq_len > max_tokens:
+                        base = torch.ones((n_frame, n_frame), dtype=dtype, device=device).tril_().log_()
+                        if batch_size is not None:
+                            base = base.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+                        return base
+                    return _ucb._orig_prepare_causal_attention_mask(n_frame, n_hw, dtype, device, batch_size)
+
+                _ucb.prepare_causal_attention_mask = _safe_causal_mask
+
+            except Exception:
+                pass
+
         try:
             if hasattr(vae, "enable_tiling"):
                 vae.enable_tiling(True)
             if hasattr(vae, "tile_sample_min_size"):
-                vae.tile_sample_min_size = min(getattr(vae, "tile_sample_min_size", 256), 192)
+                vae.tile_sample_min_size = min(getattr(vae, "tile_sample_min_size", 256), 192 if enable_safety else 256)
             if hasattr(vae, "tile_latent_min_size"):
-                vae.tile_latent_min_size = min(getattr(vae, "tile_latent_min_size", 32), 24)
+                vae.tile_latent_min_size = min(getattr(vae, "tile_latent_min_size", 32), 24 if enable_safety else 32)
             if hasattr(vae, "tile_sample_min_tsize"):
-                vae.tile_sample_min_tsize = min(getattr(vae, "tile_sample_min_tsize", 64), 24)
+                vae.tile_sample_min_tsize = min(getattr(vae, "tile_sample_min_tsize", 64), 16 if enable_safety else 64)
             if hasattr(vae, "tile_latent_min_tsize"):
-                vae.tile_latent_min_tsize = min(getattr(vae, "tile_latent_min_tsize", 16), 6)
+                vae.tile_latent_min_tsize = min(getattr(vae, "tile_latent_min_tsize", 16), 4 if enable_safety else 16)
         except Exception:
             pass
+
         return vae
     elif conf.name == "flux":
         from diffusers.models import AutoencoderKL

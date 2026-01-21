@@ -54,6 +54,8 @@ elif "flux_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "flux"
 elif "qwen_" in ROOT_SCRIPT:
     DIFFUSION_MODEL = "qwen"
+elif "kandinsky_" in ROOT_SCRIPT:
+    DIFFUSION_MODEL = "k5"
 
 MODE = None
 if "generate" in ROOT_SCRIPT:
@@ -450,4 +452,96 @@ def add_blissful_qwen_args(parser: argparse.ArgumentParser) -> argparse.Argument
         help="Path to a directory of wildcard.txt files to enable wildcards in prompts and negative prompts. For instance __color__ will look for wildcards in color.txt in that directory. "
         "Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.",
     )
+    return parser
+
+
+# ====================================================Region Kandinsky=========================================================================
+def add_blissful_k5_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--decode_from_latent",
+        type=str,
+        default=None,
+        help="Decode a video from latent instead of generating it. Provide path as argument.",
+    )
+
+    parser.add_argument(
+        "--codec",
+        choices=["h264", "h265", "prores"],
+        default="h264",
+        help="Codec to use when saving videos, choose from 'prores', 'h264', or 'h265'. Default is 'h264'",
+    )
+    parser.add_argument(
+        "--container",
+        choices=["mkv", "mp4"],
+        default="mp4",
+        help="Container format to use for output, choose from 'mkv' or 'mp4'. Default is 'mp4' and note that 'prores' can only go in 'mkv'! Ignored for images.",
+    )
+    parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
+    parser.add_argument("--cfg_schedule", type=str, default=None, help=CFG_SCHEDULE_HELP)
+    parser.add_argument("--text_encoder_cpu", action="store_true", help="Run Qwen on CPU(e.g. if VRAM insufficient)")
+    parser.add_argument("--quantized_qwen", action="store_true", help="Quantize Qwen TE to NF4 with BitsAndBytes to save VRAM")
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile optimization")
+    parser.add_argument(
+        "--output_type", type=str, default="video", choices=["video", "latent", "both"], help="Type of output to produce."
+    )
+    parser.add_argument(
+        "--fp16_accumulation",
+        action="store_true",
+        help="Enable full FP16 Accmumulation in FP16 GEMMs and set autocast to FP16 for much better speed at small cost to quality, requires Pytorch 2.7.0 or higher",
+    )
+    parser.add_argument(
+        "--preview_latent_every",
+        type=int,
+        default=None,
+        help="Enable latent preview every N steps. If --preview_vae is not specified it will use latent2rgb",
+    )
+    parser.add_argument(
+        "--cfgzerostar_scaling", action="store_true", help="Enables CFG-Zero* scaling - https://github.com/WeichenFan/CFG-Zero-star"
+    )
+    parser.add_argument(
+        "--cfgzerostar_multiplier",
+        type=float,
+        default=0,
+        help="Multiplier used for cfgzerostar_init. Default is 0 which zeroes the step. 1 would be like not using zero init.",
+    )
+    parser.add_argument(
+        "--cfgzerostar_init_steps",
+        type=int,
+        default=-1,
+        help="Enables CFGZero* zeroing out the first N steps. Recommend 1 at most for K5",
+    )
+    parser.add_argument("--tf32_mode", action="store_true", help="Enable TF32 (19-bit) multiply add for fp32 operations.")
+    parser.add_argument(
+        "--save_last_frame", action="store_true", help="Save last frame of video as PNG (useful for continuing a generation)"
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default="default",
+        choices=["default", "dpm++"],
+        help="Scheduler to use for inference, default is probably best right now",
+    )
+    parser.add_argument(
+        "--force_traditional_attn", action="store_true", help="Force Flash/Sage/etc attention even when task requests NABLA"
+    )
+    parser.add_argument("--force_nabla_attn", action="store_true", help="Force NABLA attention even when task requests traditional")
+    parser.add_argument(
+        "--nabla_p",
+        type=float,
+        default=0.9,
+        help="NABLA P value for when using forced NABLA(ignored if task conf specifies a P value).",
+    )
+    parser.add_argument(
+        "--disable_vae_workaround",
+        action="store_true",
+        help="Disables patching the VAE to fix massive OOM on latest PyTorch/CUDA versions. This patch seems not necessary on at least some earlier versions and quality is potentially improved without it.",
+    )
+    parser.add_argument(
+        "--prompt_wildcards",
+        type=str,
+        default=None,
+        help="Path to a directory of wildcard.txt files to enable wildcards in prompts and negative prompts. For instance __color__ will look for wildcards in color.txt in that directory. "
+        "Wildcard files should have one possible replacement per line, optionally with a relative weight attached like red:2.0 or yellow:0.5, and wildcards can be nested.",
+    )
+    parser.add_argument("--no_metadata", action="store_true", help="Disable saving generation params in latent/mkv")
     return parser

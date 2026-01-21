@@ -12,6 +12,26 @@ from .models.utils import fast_sta_nabla
 import torchvision.transforms.functional as F
 from math import sqrt
 from typing import Sequence, Union
+from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler
+from blissful_tuner.latent_preview import LatentPreviewer
+from blissful_tuner.guidance import apply_zerostar_scaling
+from blissful_tuner.blissful_logger import BlissfulLogger
+
+logger = BlissfulLogger(__name__, "green")
+
+_GLOBAL_DTYPE = torch.bfloat16
+
+
+def set_global_dtype(dtype: torch.dtype):
+    global _GLOBAL_DTYPE
+    if isinstance(dtype, torch.dtype):
+        from musubi_tuner.kandinsky5.models.nn import set_global_dtype_nn
+
+        _GLOBAL_DTYPE = dtype
+        set_global_dtype_nn(dtype)
+        logger.info(f"Global dtype updated to {_GLOBAL_DTYPE}!")
+    else:
+        raise ValueError("Global dtype must be a torch.dtype!")
 
 
 def resize_image(image, max_area, divisibility=16):
@@ -147,8 +167,8 @@ def normalize_first_frame(latents, reference_frames=5, clump_values=False):
     first_frames = samples[:nFr]
     reference_frames_data = samples[nFr : nFr + min(reference_frames, samples.shape[0] - 1)]
 
-    # print("First frame stats - Mean:", first_frames.mean(dim=(1,2,3)), "Std: ", first_frames.std(dim=(1,2,3)))
-    # print(f"Reference frames stats - Mean: {reference_frames_data.mean().item():.4f}, Std: {reference_frames_data.std().item():.4f}")
+    # logger.info("First frame stats - Mean:", first_frames.mean(dim=(1,2,3)), "Std: ", first_frames.std(dim=(1,2,3)))
+    # logger.info(f"Reference frames stats - Mean: {reference_frames_data.mean().item():.4f}, Std: {reference_frames_data.std().item():.4f}")
 
     normalized_first = adaptive_mean_std_normalization(first_frames, reference_frames_data)
     if clump_values:
@@ -176,7 +196,26 @@ def get_velocity(
     sparse_params=None,
     attention_mask=None,
     null_attention_mask=None,
+    blissful_args=None,
 ):
+    do_cfg_for_step = True  # Default true so behavior only altered if blissful args present
+    do_zero_init = False
+    do_zero_scale = False
+    if (
+        blissful_args is not None and blissful_args["args"] is not None
+    ):  # if args is None we were called from other than generation so skip blissful
+        scale_per_step = blissful_args["scale_per_step"]
+        args = blissful_args["args"]
+        cur_step = blissful_args["cur_step"]
+        if args.cfgzerostar_scaling:
+            do_zero_scale = True
+        if args.cfgzerostar_init_steps != -1:
+            do_zero_init = True
+        if args.cfg_schedule is not None and scale_per_step is not None and cur_step is not None:  # Shield
+            do_cfg_for_step = (cur_step + 1) in scale_per_step
+            if do_cfg_for_step:
+                guidance_weight = scale_per_step[cur_step + 1]
+
     with torch._dynamo.utils.disable_cache_limit():
         pred_velocity = dit(
             x,
@@ -189,7 +228,7 @@ def get_velocity(
             sparse_params=sparse_params,
             attention_mask=attention_mask,
         )
-        if abs(guidance_weight - 1.0) > 1e-6:
+        if abs(guidance_weight - 1.0) > 1e-6 and do_cfg_for_step:
             uncond_pred_velocity = dit(
                 x,
                 null_text_embeds["text_embeds"],
@@ -201,7 +240,13 @@ def get_velocity(
                 sparse_params=sparse_params,
                 attention_mask=null_attention_mask,
             )
-            pred_velocity = uncond_pred_velocity + guidance_weight * (pred_velocity - uncond_pred_velocity)
+            if do_zero_scale:
+                pred_out = apply_zerostar_scaling(pred_velocity, uncond_pred_velocity, guidance_weight)
+            else:
+                pred_out = uncond_pred_velocity + guidance_weight * (pred_velocity - uncond_pred_velocity)
+            if do_zero_init and cur_step <= args.cfgzerostar_init_steps - 1:
+                pred_out *= args.cfgzerostar_multiplier
+            pred_velocity = pred_out
     return pred_velocity
 
 
@@ -241,13 +286,14 @@ def generate_sample_latents_only(
     conf=None,
     progress=False,
     i2v_mode=None,  # unused; kept for call-site compatibility
+    blissful_args=None,
 ):
     """Minimal sampler that returns latents only (no VAE decode)."""
     bs, duration, height, width, dim = shape
 
     g = torch.Generator(device=device)
     g.manual_seed(seed)
-    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=_GLOBAL_DTYPE)
 
     # Normalize text shapes; squeeze singleton batch to packed (S, D) when present, reshape/trim masks accordingly.
     if text_embeds.dim() == 3 and text_embeds.shape[0] == 1:
@@ -329,6 +375,7 @@ def generate_sample_latents_only(
         tp_mesh=None,
         attention_mask=attention_mask,
         null_attention_mask=null_attention_mask,
+        blissful_args=blissful_args,
     )
     return latents
 
@@ -354,15 +401,48 @@ def generate(
     attention_mask=None,
     null_attention_mask=None,
     first_frame_indices=None,
+    blissful_args=None,
 ):
+    if blissful_args is None:
+        blissful_args = {"cur_step": 0, "scale_per_step": None, "args": None}
+        args = None
+    else:
+        args = blissful_args["args"]
+
     sparse_params = get_sparse_params(conf, {"visual": img}, device)
-    timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
-    timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
+
+    # Setup scheduler
+    if args is None or args.scheduler == "default":
+        logger.info(f"Using default Euler scheduler with shift {scheduler_scale}")
+        timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
+        timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
+        scheduler = None
+    else:
+        logger.info(f"Using DPM++ scheduler with shift {scheduler_scale}!")
+        scheduler = FlowDPMSolverMultistepScheduler(
+            shift=scheduler_scale,
+            use_dynamic_shifting=False,
+            algorithm_type="dpmsolver++",
+        )
+        scheduler.set_timesteps(args.steps, device=device)
+        timesteps = scheduler.sigmas.to(device)
+
+    # Setup previewer
+    previewer = None
+    if args is not None and args.preview_latent_every:
+        previewer = LatentPreviewer(
+            args, original_latents=img, scheduler=scheduler, device=device, dtype=_GLOBAL_DTYPE, model_type="k5"
+        )
+        previewer.noise_remain = 1.0000
+        if scheduler is None:
+            previewer.sigmas = timesteps
 
     if tp_mesh:
         tp_rank = tp_mesh["tensor_parallel"].get_local_rank()
         tp_world_size = tp_mesh["tensor_parallel"].size()
         img = torch.chunk(img, tp_world_size, dim=1)[tp_rank]
+
+    blissful_args["cur_step"] = 0
 
     for timestep, timestep_diff in tqdm(list(zip(timesteps[:-1], torch.diff(timesteps)))):
         time = timestep.unsqueeze(0)
@@ -386,6 +466,7 @@ def generate(
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
             model_input = img
+
         pred_velocity = get_velocity(
             model,
             model_input,
@@ -400,10 +481,24 @@ def generate(
             sparse_params=sparse_params,
             attention_mask=attention_mask,
             null_attention_mask=null_attention_mask,
+            blissful_args=blissful_args,
         )
-        img[..., : pred_velocity.shape[-1]] += timestep_diff * pred_velocity
-        # NOTE: remove extra channels that can be added in Image Editing (I2I)
-    return img[..., : pred_velocity.shape[-1]]
+        if args is None or args.scheduler == "default":
+            img[..., : pred_velocity.shape[-1]] += timestep_diff * pred_velocity
+        else:
+            real_timestep = scheduler.timesteps[blissful_args["cur_step"]]
+            img[..., : pred_velocity.shape[-1]] = scheduler.step(
+                pred_velocity, real_timestep, img[..., : pred_velocity.shape[-1]], return_dict=False
+            )[0]
+
+        if previewer is not None:
+            previewer.noise_remain += timestep_diff  # Diff is negative so add it to decrease noise_remain
+            if args.preview_latent_every is not None and (blissful_args["cur_step"] + 1) % args.preview_latent_every == 0:
+                if blissful_args["cur_step"] < args.steps:
+                    previewer.preview(img[..., : pred_velocity.shape[-1]])
+
+        blissful_args["cur_step"] += 1
+    return img[..., : pred_velocity.shape[-1]]  # NOTE: Slice is to remove extra channels that can be added in Image Editing (I2I)
 
 
 def resize_video(video, visual_size):
@@ -457,7 +552,7 @@ def generate_sample(
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
-    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=_GLOBAL_DTYPE)
 
     # Use the dedicated image-to-video prompt template for both text and negative text.
     type_of_content = "image2video"
@@ -489,7 +584,7 @@ def generate_sample(
         dit.to(device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=_GLOBAL_DTYPE):
             latent_visual = generate(
                 dit,
                 device,
@@ -526,7 +621,7 @@ def generate_sample(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=_GLOBAL_DTYPE):
             images = latent_visual.reshape(
                 bs,
                 -1,
@@ -570,7 +665,7 @@ def generate_sample_ti2i(
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
-    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=_GLOBAL_DTYPE)
 
     if duration == 1:
         if image is None:
@@ -587,7 +682,7 @@ def generate_sample_ti2i(
         if image is not None:
             if offload:
                 vae.to(vae_device)
-            edit_latent = [(i.to(device=vae_device, dtype=torch.bfloat16) / 127.5 - 1.0) for i in image]
+            edit_latent = [(i.to(device=vae_device, dtype=_GLOBAL_DTYPE) / 127.5 - 1.0) for i in image]
             edit_latent = torch.cat([encode_video(i[:, :, None], vae, image_vae).squeeze(0) for i in edit_latent], 0)
             edit_latent = torch.cat([edit_latent, torch.ones_like(img[..., :1])], -1)
             if offload:
@@ -608,8 +703,8 @@ def generate_sample_ti2i(
         text_embedder = text_embedder.to("cpu")
 
     for key in bs_text_embed:
-        bs_text_embed[key] = bs_text_embed[key].to(device=device, dtype=torch.bfloat16)
-        bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device, dtype=torch.bfloat16)
+        bs_text_embed[key] = bs_text_embed[key].to(device=device, dtype=_GLOBAL_DTYPE)
+        bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device, dtype=_GLOBAL_DTYPE)
     text_cu_seqlens = text_cu_seqlens.to(device=device)[-1].item()
     null_text_cu_seqlens = null_text_cu_seqlens.to(device=device)[-1].item()
 
@@ -625,7 +720,7 @@ def generate_sample_ti2i(
         dit.to(device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=_GLOBAL_DTYPE):
             latent_visual = generate(
                 dit,
                 device,
@@ -654,7 +749,7 @@ def generate_sample_ti2i(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=_GLOBAL_DTYPE):
             images = latent_visual.reshape(
                 bs,
                 -1,
@@ -701,7 +796,7 @@ def generate_sample_i2v(
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
-    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=_GLOBAL_DTYPE)
 
     if duration == 1:
         type_of_content = "image"
@@ -752,7 +847,7 @@ def generate_sample_i2v(
         first_frames = torch.chunk(first_frames, tp_world_size, dim=0)[tp_rank]
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=_GLOBAL_DTYPE):
             latent_visual = generate(
                 dit,
                 device,
@@ -798,7 +893,7 @@ def generate_sample_i2v(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=_GLOBAL_DTYPE):
             images = latent_visual.reshape(
                 bs,
                 -1,
