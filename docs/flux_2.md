@@ -100,7 +100,7 @@ python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
 - Uses `flux_2_cache_text_encoder_outputs.py`.
 - Requires `--text_encoder` argument
 - Use the `--model_version` option for Flux.2 Klein training.
-- Use `--fp8_t5` option to run the T5 Text Encoder in fp8 mode for VRAM savings.
+- Use `--fp8_text_encoder` option to run the Text Encoder in fp8 mode for VRAM savings.
 - The larger the batch size, the more VRAM is required. Adjust `--batch_size` according to your VRAM capacity.
 
 <details>
@@ -109,7 +109,7 @@ python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
 テキストエンコーダー出力の事前キャッシングも専用のスクリプトを使用します。
 
 - `flux_2_cache_text_encoder_outputs.py`を使用します。
-- T5テキストエンコーダーをfp8モードで実行するための`--fp8_t5`オプションを使用します。
+- テキストエンコーダーをfp8モードで実行するための`--fp8_text_encoder`オプションを使用します。
 - バッチサイズが大きいほど、より多くのVRAMが必要です。VRAM容量に応じて`--batch_size`を調整してください。
 
 </details>

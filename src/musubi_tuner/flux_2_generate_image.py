@@ -37,7 +37,7 @@ class GenerationSettings:
 
 def parse_args() -> argparse.Namespace:
     """parse command line arguments"""
-    parser = argparse.ArgumentParser(description="FLUX.2 dev inference script")
+    parser = argparse.ArgumentParser(description="FLUX.2 inference script")
 
     # WAN arguments
     # parser.add_argument("--ckpt_dir", type=str, default=None, help="The path to the checkpoint directory (Wan 2.1 official).")
@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
     parser.add_argument("--vae", type=str, default=None, help="AE directory or path")
-    parser.add_argument("--text_encoder", type=str, required=True, help="Text Encoder Mistral 3 directory or path")
+    parser.add_argument("--text_encoder", type=str, required=True, help="Text Encoder Mistral 3/Qwen 3 directory or path")
 
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
@@ -99,9 +99,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
-    # parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled")
 
-    parser.add_argument("--fp8_m3", action="store_true", help="use fp8 for Text Encoder (Mistral 3)")
+    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder (Mistral 3)")
     parser.add_argument(
         "--device", type=str, default=None, help="device to use for inference. If None, use CUDA if available, otherwise use CPU"
     )
@@ -410,9 +409,9 @@ def prepare_text_inputs(
             conds_cache = shared_models["conds_cache"]
         # text_encoder is on device (batched inference) or CPU (interactive inference)
     else:  # Load if not in shared_models
-        m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
+        te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
-            args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+            args.model_version, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
 
     # Store original devices to move back later if they were shared. This does nothing if shared_models is None
@@ -453,7 +452,7 @@ def prepare_text_inputs(
     else:
         move_models_to_device_if_needed()
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
                 ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
             else:
