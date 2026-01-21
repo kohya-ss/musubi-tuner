@@ -411,7 +411,7 @@ def prepare_text_inputs(
         # text_encoder is on device (batched inference) or CPU (interactive inference)
     else:  # Load if not in shared_models
         m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-        text_embedder = flux2_utils.load_textembedder(
+        text_embedder = flux2_utils.load_text_embedder(
             args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
         )
 
@@ -818,7 +818,7 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     shared_models = {}
     # Load text encoders to CPU
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-    text_embedder = flux2_utils.load_textembedder(
+    text_embedder = flux2_utils.load_text_embedder(
         args.model_version,
         args.text_encoder,
         dtype=m3_dtype,
@@ -872,7 +872,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # Text Encoders loaded to CPU by load_text_encoder
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-    text_embedder_batch = flux2_utils.load_textembedder(
+    text_embedder_batch = flux2_utils.load_text_embedder(
         args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
     )
 

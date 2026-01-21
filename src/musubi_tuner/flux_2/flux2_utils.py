@@ -834,7 +834,7 @@ class Qwen3Embedder(nn.Module):
         return rearrange(out, "b c l d -> b l (c d)")
 
 
-def load_textembedder(
+def load_text_embedder(
     model_version: str,
     ckpt_path: str,
     dtype: Optional[torch.dtype],

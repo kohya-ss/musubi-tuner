@@ -68,7 +68,7 @@ def main():
 
     # Load Mistral 3 text encoder
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
-    text_embedder = flux2_utils.load_textembedder(
+    text_embedder = flux2_utils.load_text_embedder(
         args.model_version,
         args.text_encoder,
         dtype=m3_dtype,

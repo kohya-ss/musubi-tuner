@@ -63,7 +63,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         # Load Mistral 3
         m3_dtype = torch.float8e4m3fn if args.fp8_te else torch.bfloat16
-        text_embedder = flux2_utils.load_textembedder(
+        text_embedder = flux2_utils.load_text_embedder(
             args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
         )
 
@@ -228,6 +228,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         model = flux2_utils.load_flow_model(
+            model_version=args.model_version,
             ckpt_path=args.dit,
             dtype=None,
             device=loading_device,
