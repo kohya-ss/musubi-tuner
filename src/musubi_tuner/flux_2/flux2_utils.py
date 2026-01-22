@@ -533,7 +533,7 @@ def load_ae(
     logger.info("Building AutoEncoder")
     with init_empty_weights():
         # dev and schnell have the same AE params
-        ae = flux2_models.AutoEncoder(flux2_models.configs_flux_2_dev.ae_params).to(dtype)
+        ae = flux2_models.AutoEncoder(flux2_models.AutoEncoderParams()).to(dtype)
 
     logger.info(f"Loading state dict from {ckpt_path}")
     sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)

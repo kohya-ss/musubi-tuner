@@ -825,7 +825,7 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     """
     shared_models = {}
     # Load text encoders to CPU
-    m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
+    m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
         args.model_version,
         args.text_encoder,
@@ -879,7 +879,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     logger.info("Loading Text Encoder for batch text preprocessing...")
 
     # Text Encoders loaded to CPU by load_text_encoder
-    m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
+    m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder_batch = flux2_utils.load_text_embedder(
         args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
     )
