@@ -7,7 +7,6 @@ import copy
 from typing import Tuple, Optional, List, Any, Dict
 
 import torch
-from PIL import Image
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 
