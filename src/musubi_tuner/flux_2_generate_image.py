@@ -277,6 +277,8 @@ def load_dit_model(
     Returns:
         flux2_models.Flux2: DiT model
     """
+    # If LyCORIS is enabled, we will load the model to CPU and then merge LoRA weights (static method)
+
     loading_device = "cpu"
     if args.blocks_to_swap == 0 and not args.lycoris:
         loading_device = device
@@ -389,65 +391,6 @@ def load_dit_model(
     return model
 
 
-def optimize_model(model: flux2_models.Flux2, args: argparse.Namespace, device: torch.device) -> None:
-    """optimize the model (FP8 conversion, device move etc.)
-
-    Args:
-        model: dit model
-        args: command line arguments
-        device: device to use
-    """
-    if args.fp8_scaled:
-        # load state dict as-is and optimize to fp8
-        state_dict = model.state_dict()
-
-        # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
-        move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=False)  # args.fp8_fast)
-
-        info = model.load_state_dict(state_dict, strict=True, assign=True)
-        logger.info(f"Loaded FP8 optimized weights: {info}")
-
-        if args.blocks_to_swap == 0:
-            model.to(device)  # make sure all parameters are on the right device (e.g. RoPE etc.)
-    else:
-        # simple cast to dit_dtype
-        target_dtype = None  # load as-is (dit_weight_dtype == dtype of the weights in state_dict)
-        target_device = None
-
-        if args.fp8:
-            target_dtype = torch.float8e4m3fn
-
-        if args.blocks_to_swap == 0:
-            logger.info(f"Move model to device: {device}")
-            target_device = device
-
-        if target_device is not None and target_dtype is not None:
-            model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
-
-    if args.blocks_to_swap > 0:
-        logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
-        model.enable_block_swap(
-            args.blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
-        )
-        model.move_to_device_except_swap_blocks(device)
-        model.prepare_block_swap_before_forward()
-    else:
-        # make sure the model is on the right device
-        model.to(device)
-
-    if args.compile:
-        model = model_utils.compile_transformer(
-            args, model, [model.double_blocks, model.single_blocks], disable_linear=args.blocks_to_swap > 0
-        )
-
-    model.eval().requires_grad_(False)
-    clean_memory_on_device(device)
-
-
-# endregion
-
-
 def decode_latent(ae: flux2_models.AutoEncoder, latent: torch.Tensor, device: torch.device) -> torch.Tensor:
     logger.info("Decoding image...")
     if latent.ndim == 3:
@@ -463,23 +406,21 @@ def decode_latent(ae: flux2_models.AutoEncoder, latent: torch.Tensor, device: to
     return pixels[0]  # remove batch dimension
 
 
-def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flux2_models.AutoEncoder) -> Dict[str, Any]:
-    """Prepare image-related inputs for Kontext: AE encoding."""
+def prepare_image_inputs(
+    args: argparse.Namespace, device: torch.device, ae: flux2_models.AutoEncoder
+) -> Tuple[int, int, Optional[List[torch.Tensor]]]:
+    """Prepare image-related inputs for FLUX.2: AE encoding."""
     height, width = check_inputs(args)
 
     if args.control_image_path is not None and len(args.control_image_path):
-        img_ctx = [Image.open(input_image) for input_image in args.control_image_path]
-        # ref_tokens, ref_ids = encode_image_refs(ae, img_ctx)
-        if len(img_ctx) > 1:
-            limit_pixels = 1024**2
-        elif len(img_ctx) == 1:
-            limit_pixels = 2024**2
-        else:
-            limit_pixels = None
+        limit_size = (1024, 1024) if len(args.control_image_path) > 1 else (2024, 2024)
+        if args.no_resize_control:
+            limit_size = None
 
-        img_ctx_prep = flux2_utils.default_prep(img=img_ctx, limit_pixels=limit_pixels)
-        if not isinstance(img_ctx_prep, list):
-            img_ctx_prep = [img_ctx_prep]
+        img_ctx_prep = []
+        for image_path in args.control_image_path:
+            image_tensor, _, _ = flux2_utils.preprocess_control_image(image_path, limit_size)
+            img_ctx_prep.append(image_tensor)
 
         # AE encoding
         logger.info("Encoding control image to latent space with AE")
@@ -490,7 +431,7 @@ def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flu
         with torch.no_grad():
             # Encode each reference image
             for img in img_ctx_prep:
-                encoded = ae.encode(img[None].to(device, dtype=ae.dtype))[0]
+                encoded = ae.encode(img.to(device, dtype=ae.dtype))[0]  # C, H, W
                 control_latent.append(encoded.to(torch.bfloat16).to("cpu"))
 
         ae.to(ae_original_device)  # Move VAE back to its original device
@@ -498,14 +439,10 @@ def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flu
     else:
         control_latent = None
 
-    return {"height": height, "width": width, "control_latent": control_latent}
+    return height, width, control_latent
 
 
-def prepare_text_inputs(
-    args: argparse.Namespace,
-    device: torch.device,
-    shared_models: Optional[Dict] = None,
-) -> Dict[str, Any]:
+def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_models: Optional[Dict] = None) -> Dict[str, Any]:
     """Prepare text-related inputs for I2V: LLM and TextEncoder encoding."""
 
     # load text encoder: conds_cache holds cached encodings for prompts without padding
@@ -583,10 +520,7 @@ def prepare_text_inputs(
 
 
 def prepare_i2v_inputs(
-    args: argparse.Namespace,
-    device: torch.device,
-    ae: flux2_models.AutoEncoder,
-    shared_models: Optional[Dict] = None,
+    args: argparse.Namespace, device: torch.device, ae: flux2_models.AutoEncoder, shared_models: Optional[Dict] = None
 ) -> Tuple[int, int, Dict[str, Any], Optional[torch.Tensor]]:
     """Prepare inputs for image2video generation: image encoding, text encoding, and AE encoding.
 
@@ -600,13 +534,12 @@ def prepare_i2v_inputs(
         Tuple[int, int, Dict[str, Any], Optional[torch.Tensor]]: (height, width, context, end_latent)
     """
     # prepare image inputs
-    image_inputs = prepare_image_inputs(args, device, ae)
-    control_latent = image_inputs["control_latent"]
+    height, width, control_latent = prepare_image_inputs(args, device, ae)
 
     # prepare text inputs
     context = prepare_text_inputs(args, device, shared_models)
 
-    return image_inputs["height"], image_inputs["width"], context, control_latent
+    return height, width, context, control_latent
 
 
 def generate(
@@ -653,19 +586,9 @@ def generate(
             vae_instance_for_return = shared_models["ae"]
         else:
             # the dtype of VAE weights is float32, but we can load it as bfloat16 for better performance in future
-            vae_instance_for_return = flux2_utils.load_ae(
-                args.vae,
-                dtype=torch.float32,
-                device=device,
-                disable_mmap=True,
-            )
+            vae_instance_for_return = flux2_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
 
-        height, width, context, control_latent = prepare_i2v_inputs(
-            args,
-            device,
-            vae_instance_for_return,
-            shared_models,
-        )
+        height, width, context, control_latent = prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)
 
         vae_instance_for_return.to("cpu")
 
@@ -690,9 +613,6 @@ def generate(
             # if we only want to save the model, we can skip the rest
             if args.save_merged_model:
                 return None, None
-
-        # # optimize model: fp8 conversion, block swap etc.
-        # optimize_model(model, args, device)
 
         if shared_models is not None:
             shared_models["model"] = model
@@ -1030,9 +950,6 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             del dit_model
             clean_memory_on_device(device)
             return
-
-    logger.info("Optimizing DiT model...")
-    optimize_model(dit_model, first_prompt_args, device)  # Handles device placement, fp8 etc.
 
     shared_models_for_generate = {"model": dit_model}  # Pass DiT via shared_models
 

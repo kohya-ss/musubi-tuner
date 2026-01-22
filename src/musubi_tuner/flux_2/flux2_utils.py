@@ -1,5 +1,6 @@
 import argparse
 import json
+import numpy as np
 import torch
 import torchvision
 import math
@@ -8,7 +9,7 @@ import math
 from accelerate import init_empty_weights
 from einops import rearrange
 from PIL import Image
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 from torch import Tensor
 from torch import nn
 from transformers import (
@@ -20,7 +21,9 @@ from transformers import (
 )
 from tqdm import tqdm
 
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_2, BucketSelector
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.zimage.zimage_utils import load_qwen3
 
@@ -317,6 +320,36 @@ def default_prep(
     img_crop = center_crop_to_multiple_of_x(img_cap, ensure_multiple)  # type: ignore
     img_tensor = default_images_prep(img_crop)
     return img_tensor
+
+
+def preprocess_control_image(
+    control_image_path: str, limit_size: Optional[Tuple[int, int]] = None
+) -> tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
+    """
+    Preprocess the control image for the model. See `preprocess_image` for details.
+
+    Args:
+        control_image_path (str): Path to the control image.
+        limit_size (Optional[Tuple[int, int]]): Limit the size for resizing with (width, height).
+            If None or larger than the control image size, only center cropping to multiple of 16 is applied.
+
+    Returns:
+        Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]: A tuple containing:
+            - control_image_tensor (torch.Tensor): The preprocessed control image tensor for the model. NCHW format.
+            - control_image_np (np.ndarray): The preprocessed control image as a NumPy array for conditioning. HWC format.
+            - None: Placeholder for compatibility (no additional data returned).
+    """
+    control_image = Image.open(control_image_path)
+
+    if limit_size is None or limit_size[0] * limit_size[1] >= control_image.size[0] * control_image.size[1]:  # No resizing needed
+        resize_size = BucketSelector.calculate_bucket_resolution(
+            control_image.size, control_image.size, architecture=ARCHITECTURE_FLUX_2
+        )
+    else:
+        resize_size = limit_size
+
+    control_image_tensor, control_image_np, _ = image_utils.preprocess_image(control_image, *resize_size, handle_alpha=False)
+    return control_image_tensor, control_image_np, None
 
 
 def generalized_time_snr_shift(t: Tensor, mu: float, sigma: float) -> Tensor:
