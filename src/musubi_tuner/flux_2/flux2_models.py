@@ -573,8 +573,24 @@ class Flux2(nn.Module):
 
     def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
-        double_blocks_to_swap = num_blocks // 2
-        single_blocks_to_swap = (num_blocks - double_blocks_to_swap) * 2 + 1
+        if num_blocks <= 0:
+            double_blocks_to_swap = 0
+            single_blocks_to_swap = 0
+        elif self.num_double_blocks == 0:
+            double_blocks_to_swap = 0
+            single_blocks_to_swap = num_blocks
+        elif self.num_single_blocks == 0:
+            double_blocks_to_swap = num_blocks
+            single_blocks_to_swap = 0
+        else:
+            swap_ratio = self.num_single_blocks / self.num_double_blocks
+            double_blocks_to_swap = int(round(num_blocks / (1.0 + swap_ratio / 2.0)))
+            single_blocks_to_swap = int(round(double_blocks_to_swap * swap_ratio))
+            if double_blocks_to_swap == 0 and single_blocks_to_swap == 0:
+                if self.num_single_blocks >= self.num_double_blocks:
+                    single_blocks_to_swap = 1
+                else:
+                    double_blocks_to_swap = 1
 
         assert double_blocks_to_swap <= self.num_double_blocks - 2 and single_blocks_to_swap <= self.num_single_blocks - 2, (
             f"Cannot swap more than {self.num_double_blocks - 2} double blocks and {self.num_single_blocks - 2} single blocks. "
