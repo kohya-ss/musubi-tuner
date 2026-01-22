@@ -6,6 +6,7 @@ import torchvision
 import math
 
 
+from dataclasses import dataclass
 from accelerate import init_empty_weights
 from einops import rearrange
 from PIL import Image
@@ -21,7 +22,15 @@ from transformers import (
 )
 from tqdm import tqdm
 
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_2, BucketSelector
+from musubi_tuner.dataset.image_video_dataset import (
+    ARCHITECTURE_FLUX_2_DEV,
+    ARCHITECTURE_FLUX_2_DEV_FULL,
+    ARCHITECTURE_FLUX_2_KLEIN_4B,
+    ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
+    ARCHITECTURE_FLUX_2_KLEIN_9B,
+    ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
+    BucketSelector,
+)
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
@@ -46,41 +55,62 @@ SYSTEM_MESSAGE = """You are an AI that reasons about image descriptions. You giv
 attribution and actions without speculation."""
 
 
+@dataclass(frozen=True)
+class Flux2ModelInfo:
+    params: Flux2Params
+    defaults: dict[str, float | int]
+    fixed_params: set[str]
+    guidance_distilled: bool
+    qwen_variant: Optional[str] = None
+    architecture: str
+    architecture_full: str
+
+
 FLUX2_MODEL_INFO = {
-    "flux.2-klein-4b": {
-        "params": Klein4BParams(),
-        "qwen_variant": "4B",
-        "defaults": {"guidance": 1.0, "num_steps": 4},
-        "fixed_params": {"guidance", "num_steps"},
-        "guidance_distilled": True,
-    },
-    "flux.2-klein-base-4b": {
-        "params": Klein4BParams(),
-        "qwen_variant": "4B",
-        "defaults": {"guidance": 4.0, "num_steps": 50},
-        "fixed_params": {},
-        "guidance_distilled": False,
-    },
-    "flux.2-klein-9b": {
-        "params": Klein9BParams(),
-        "qwen_variant": "8B",
-        "defaults": {"guidance": 1.0, "num_steps": 4},
-        "fixed_params": {"guidance", "num_steps"},
-        "guidance_distilled": True,
-    },
-    "flux.2-klein-base-9b": {
-        "params": Klein9BParams(),
-        "qwen_variant": "8B",
-        "defaults": {"guidance": 4.0, "num_steps": 50},
-        "fixed_params": {},
-        "guidance_distilled": False,
-    },
-    "flux.2-dev": {
-        "params": Flux2Params(),
-        "defaults": {"guidance": 4.0, "num_steps": 50},
-        "fixed_params": {},
-        "guidance_distilled": True,
-    },
+    "flux.2-klein-4b": Flux2ModelInfo(
+        params=Klein4BParams(),
+        qwen_variant="4B",
+        defaults={"guidance": 1.0, "num_steps": 4},
+        fixed_params={"guidance", "num_steps"},
+        guidance_distilled=True,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_4B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
+    ),
+    "flux.2-klein-base-4b": Flux2ModelInfo(
+        params=Klein4BParams(),
+        qwen_variant="4B",
+        defaults={"guidance": 4.0, "num_steps": 50},
+        fixed_params=set(),
+        guidance_distilled=False,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_4B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
+    ),
+    "flux.2-klein-9b": Flux2ModelInfo(
+        params=Klein9BParams(),
+        qwen_variant="8B",
+        defaults={"guidance": 1.0, "num_steps": 4},
+        fixed_params={"guidance", "num_steps"},
+        guidance_distilled=True,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_9B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
+    ),
+    "flux.2-klein-base-9b": Flux2ModelInfo(
+        params=Klein9BParams(),
+        qwen_variant="8B",
+        defaults={"guidance": 4.0, "num_steps": 50},
+        fixed_params=set(),
+        guidance_distilled=False,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_9B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
+    ),
+    "flux.2-dev": Flux2ModelInfo(
+        params=Flux2Params(),
+        defaults={"guidance": 4.0, "num_steps": 50},
+        fixed_params=set(),
+        guidance_distilled=True,
+        architecture=ARCHITECTURE_FLUX_2_DEV,
+        architecture_full=ARCHITECTURE_FLUX_2_DEV_FULL,
+    ),
 }
 
 
@@ -342,8 +372,9 @@ def preprocess_control_image(
     control_image = Image.open(control_image_path)
 
     if limit_size is None or limit_size[0] * limit_size[1] >= control_image.size[0] * control_image.size[1]:  # No resizing needed
+        # All FLUX 2 architectures require dimensions to be multiples of 16
         resize_size = BucketSelector.calculate_bucket_resolution(
-            control_image.size, control_image.size, architecture=ARCHITECTURE_FLUX_2
+            control_image.size, control_image.size, architecture=ARCHITECTURE_FLUX_2_DEV
         )
     else:
         resize_size = limit_size
@@ -532,7 +563,7 @@ def load_flow_model(
 
     # build model
     with init_empty_weights():
-        params = FLUX2_MODEL_INFO[model_version]["params"]
+        params = FLUX2_MODEL_INFO[model_version].params
         model = flux2_models.Flux2(params, attn_mode, split_attn)
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
@@ -882,7 +913,7 @@ def load_text_embedder(
     if model_version == "flux.2-dev":
         return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict)
 
-    variant = FLUX2_MODEL_INFO[model_version]["qwen_variant"]
+    variant = FLUX2_MODEL_INFO[model_version].qwen_variant
     is_8b = variant == "8B"
     tokenizer_id = "Qwen/Qwen3-8B" if is_8b else "Qwen/Qwen3-4B"
     tokenizer, qwen3 = load_qwen3(ckpt_path, dtype, device, disable_mmap, state_dict, is_8b=is_8b, tokenizer_id=tokenizer_id)

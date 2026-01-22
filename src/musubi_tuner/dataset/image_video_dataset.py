@@ -75,8 +75,12 @@ ARCHITECTURE_FRAMEPACK = "fp"
 ARCHITECTURE_FRAMEPACK_FULL = "framepack"
 ARCHITECTURE_FLUX_KONTEXT = "fk"
 ARCHITECTURE_FLUX_KONTEXT_FULL = "flux_kontext"
-ARCHITECTURE_FLUX_2 = "f2"
-ARCHITECTURE_FLUX_2_FULL = "flux_2"
+ARCHITECTURE_FLUX_2_DEV = "f2d"
+ARCHITECTURE_FLUX_2_DEV_FULL = "flux_2_dev"
+ARCHITECTURE_FLUX_2_KLEIN_4B = "f2k4b"
+ARCHITECTURE_FLUX_2_KLEIN_4B_FULL = "flux_2_klein_4b"
+ARCHITECTURE_FLUX_2_KLEIN_9B = "f2k9b"
+ARCHITECTURE_FLUX_2_KLEIN_9B_FULL = "flux_2_klein_9b"
 ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
@@ -319,7 +323,9 @@ def save_latent_cache_flux_kontext(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_latent_cache_flux_2(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
+def save_latent_cache_flux_2(
+    item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]], arch_full: str
+):
     """Flux 2 architecture"""
     assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
     assert control_latent is None or all(cl.dim() == 3 for cl in control_latent), (
@@ -335,7 +341,7 @@ def save_latent_cache_flux_2(item_info: ItemInfo, latent: torch.Tensor, control_
             _, H, W = cl.shape
             sd[f"latents_control_{i}_{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
 
-    save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
+    save_latent_cache_common(item_info, sd, arch_full)
 
 
 def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
@@ -500,14 +506,14 @@ def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: tor
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor):
+def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor, arch_full: str):
     """Flux 2 architecture."""
 
     sd = {}
     dtype_str = dtype_to_str(ctx_vec.dtype)
     sd[f"ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
 
-    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
+    save_text_encoder_output_cache_common(item_info, sd, arch_full)
 
 
 def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.Tensor):
@@ -605,7 +611,9 @@ class BucketSelector:
         ARCHITECTURE_WAN: RESOLUTION_STEPS_WAN,
         ARCHITECTURE_FRAMEPACK: RESOLUTION_STEPS_FRAMEPACK,
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
-        ARCHITECTURE_FLUX_2: RESOLUTION_STEPS_FLUX_2,
+        ARCHITECTURE_FLUX_2_DEV: RESOLUTION_STEPS_FLUX_2,
+        ARCHITECTURE_FLUX_2_KLEIN_4B: RESOLUTION_STEPS_FLUX_2,
+        ARCHITECTURE_FLUX_2_KLEIN_9B: RESOLUTION_STEPS_FLUX_2,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
         ARCHITECTURE_QWEN_IMAGE_LAYERED: RESOLUTION_STEPS_QWEN_IMAGE,  # use same steps as Qwen-Image
@@ -1814,8 +1822,12 @@ class ImageDataset(BaseDataset):
                 control_count_per_image = 1
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             control_count_per_image = 1
-        elif self.architecture == ARCHITECTURE_FLUX_2:
-            control_count_per_image = None
+        elif (
+            self.architecture == ARCHITECTURE_FLUX_2_DEV
+            or self.architecture == ARCHITECTURE_FLUX_2_KLEIN_4B
+            or self.architecture == ARCHITECTURE_FLUX_2_KLEIN_9B
+        ):
+            control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
             control_count_per_image = None  # can be multiple control images
 

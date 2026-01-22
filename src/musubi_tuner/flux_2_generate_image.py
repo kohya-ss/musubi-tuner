@@ -496,7 +496,7 @@ def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_m
         move_models_to_device_if_needed()
 
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+            if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
                 ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
             else:
                 ctx_empty = text_embedder([""]).to(torch.bfloat16)
@@ -668,7 +668,7 @@ def generate(
 
     # denoise
     timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1])  # TODO shift_value=args.flow_shift
-    if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+    if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
         x = flux2_utils.denoise(
             model,
             x,

@@ -55,7 +55,7 @@ def preprocess_contents_flux_2(batch: List[ItemInfo]) -> tuple[torch.Tensor, Lis
     return contents, controls
 
 
-def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
+def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo], arch_full: str):
     # item.content: target image (H, W, C)
     # item.control_content: list of images (H, W, C)
 
@@ -83,6 +83,7 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
             item_info=item,
             latent=target_latent,  # Ground truth for this image
             control_latent=control_latent,  # Control latent for this image
+            arch_full=arch_full,
         )
 
 
@@ -92,6 +93,7 @@ def main():
     flux2_utils.add_model_version_args(parser)
 
     args = parser.parse_args()
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
     if args.disable_cudnn_backend:
         logger.info("Disabling cuDNN PyTorch backend.")
@@ -107,7 +109,7 @@ def main():
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
-    blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_FLUX_2)
+    blueprint = blueprint_generator.generate(user_config, args, architecture=model_version_info.architecture)
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
@@ -126,7 +128,7 @@ def main():
 
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(ae, batch)
+        encode_and_save_batch(ae, batch, model_version_info.architecture_full)
 
     # reuse core loop from cache_latents with no change
     cache_latents.encode_datasets(datasets, encode, args)

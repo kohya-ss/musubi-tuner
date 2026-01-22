@@ -33,13 +33,14 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
     @property
     def architecture(self) -> str:
-        return ARCHITECTURE_FLUX_2
+        return self.model_version_info.architecture
 
     @property
     def architecture_full_name(self) -> str:
-        return ARCHITECTURE_FLUX_2_FULL
+        return self.model_version_info.architecture_full
 
     def handle_model_specific_args(self, args):
+        self.model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
         if not args.split_attn:
             logger.info(
@@ -79,7 +80,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
                 # encode prompt
                 logger.info(f"cache Text Encoder outputs for prompt: {prompt}")
-                if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+                if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
                     ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
                 else:
                     ctx_empty = text_embedder([""]).to(torch.bfloat16)
@@ -161,7 +162,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         # denoise
         timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1])
-        if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+        if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
             x = flux2_utils.denoise(
                 model,
                 x,
