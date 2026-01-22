@@ -12,13 +12,10 @@ from typing import Optional, Union
 from torch import Tensor
 from torch import nn
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
     Mistral3ForConditionalGeneration,
     Mistral3Config,
     AutoProcessor,
     Qwen2Tokenizer,
-    Qwen3Config,
     Qwen3ForCausalLM,
 )
 from tqdm import tqdm
