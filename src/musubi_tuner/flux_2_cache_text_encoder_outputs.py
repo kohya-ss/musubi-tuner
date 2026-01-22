@@ -67,7 +67,7 @@ def main():
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
 
     # Load Mistral 3 text encoder
-    m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
+    m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
         args.model_version,
         args.text_encoder,
@@ -107,7 +107,7 @@ def main():
 
 def flux_2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder", type=str, default=None, required=True, help="text encoder (mistral 3) checkpoint path")
-    parser.add_argument("--fp8_m3", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
     flux2_utils.add_model_version_args(parser)
     return parser
 
