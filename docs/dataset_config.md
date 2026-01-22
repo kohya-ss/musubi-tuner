@@ -332,7 +332,7 @@ video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 
 ### Sample for Image Dataset with Control Images
 
-The dataset with control images. This is used for training the one frame training for FramePack, FLUX.1 Kontext training, and Qwen-Image-Edit training.
+The dataset with control images. This is used for the one frame training for FramePack, or for FLUX.1 Kontext, FLUX.2 and Qwen-Image-Edit training.
 
 The dataset configuration with caption text files is similar to the image dataset, but with an additional `control_directory` parameter.
 
@@ -358,7 +358,7 @@ The control images can also have an alpha channel. In this case, the alpha chann
 <details>
 <summary>日本語</summary>
 
-制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習、FLUX.1 Kontext学習、Qwen-Image-Edit学習に使用します。
+制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習、FLUX.1 Kontext、FLUX.2、Qwen-Image-Editの学習に使用します。
 
 キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションは`image_directory`へ格納してください。
 
@@ -367,6 +367,40 @@ The control images can also have an alpha channel. In this case, the alpha chann
 メタデータJSONLファイルを使用する場合は、`control_path`を追加してください。複数枚の制御画像を指定する場合は、`control_path_0`, `control_path_1`のように数字を付与してください。
 
 FramePackの単一フレーム学習では、制御画像はアルファチャンネルを持つこともできます。この場合、画像のアルファチャンネルはlatentへのマスクとして使用されます。
+
+</details>
+
+### Resizing Control Images for Image Dataset / 画像データセットでの制御画像のリサイズ
+
+By default, the control images are resized to the same size as the target images. You can change the resizing method with the following options:
+
+- `no_resize_control`: Do not resize the control images. They will be cropped to match the rounding unit of each architecture (for example, 16 pixels).
+- `control_resolution`: Resize the control images to the specified resolution. For example, specify `control_resolution = [1024, 1024]`. Aspect Ratio Bucketing will be applied.
+
+```toml
+[[datasets]]
+# Image directory or metadata jsonl file as above
+image_directory = "/path/to/image_dir"
+control_directory = "/path/to/control_dir"
+control_resolution = [1024, 1024]
+no_resize_control = false
+```
+
+If both are specified, `control_resolution` is treated as the maximum resolution. That is, if the total number of pixels of the control image exceeds that of `control_resolution`, it will be resized to `control_resolution`.
+
+The recommended resizing method for control images may vary depending on the architecture. Please refer to the section for each architecture.
+
+<details>
+<summary>日本語</summary>
+
+デフォルトでは、制御画像はターゲット画像と同じサイズにリサイズされます。以下のオプションで、リサイズ方式を変更できます。
+
+- `no_resize_control`: 制御画像をリサイズしません。アーキテクチャごとの丸め単位（16ピクセルなど）に合わせてトリミングされます。
+- `control_resolution`: 制御画像を指定した解像度にリサイズします。例えば、`control_resolution = [1024, 1024]`と指定します。Aspect Ratio Bucketingが適用されます。
+
+両方が同時に指定されると、`control_resolution`は最大解像度として扱われます。つまり、制御画像の総ピクセル数が`control_resolution`の総ピクセル数を超える場合、`control_resolution`にリサイズされます。
+
+アーキテクチャにより、推奨の制御画像のリサイズ方法は異なります。各アーキテクチャの節を参照してください。
 
 </details>
 

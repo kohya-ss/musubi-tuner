@@ -55,9 +55,8 @@ class ImageDatasetParams(BaseDatasetParams):
     fp_1f_target_index: Optional[int] = None
     fp_1f_no_post: Optional[bool] = False
 
-    flux_kontext_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
-    qwen_image_edit_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
-    qwen_image_edit_control_resolution: Optional[Tuple[int, int]] = None  # if set, control images are resized to this resolution
+    no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
+    control_resolution: Optional[Tuple[int, int]] = None  # if set, control images are resized to this resolution
 
 
 @dataclass
@@ -128,9 +127,8 @@ class ConfigSanitizer:
         "fp_1f_clean_indices": [int],
         "fp_1f_target_index": int,
         "fp_1f_no_post": bool,
-        "flux_kontext_no_resize_control": bool,
-        "qwen_image_edit_no_resize_control": bool,
-        "qwen_image_edit_control_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
+        "no_resize_control": bool,
+        "control_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -324,9 +322,8 @@ def generate_dataset_group_by_blueprint(
         fp_1f_clean_indices: {dataset.fp_1f_clean_indices}
         fp_1f_target_index: {dataset.fp_1f_target_index}
         fp_1f_no_post: {dataset.fp_1f_no_post}
-        flux_kontext_no_resize_control: {dataset.flux_kontext_no_resize_control}
-        qwen_image_edit_no_resize_control: {dataset.qwen_image_edit_no_resize_control}
-        qwen_image_edit_control_resolution: {dataset.qwen_image_edit_control_resolution}
+        no_resize_control: {dataset.no_resize_control}
+        control_resolution: {dataset.control_resolution}
     \n"""
                 ),
                 "    ",
@@ -387,6 +384,35 @@ def load_user_config(file: str) -> dict:
             raise
     else:
         raise ValueError(f"not supported config file format / 対応していない設定ファイルの形式です: {file}")
+
+    deprecated_key_map = {
+        "flux_kontext_no_resize_control": "no_resize_control",
+        "qwen_image_edit_no_resize_control": "no_resize_control",
+        "qwen_image_edit_control_resolution": "control_resolution",
+    }
+
+    def normalize_deprecated_keys(section: dict, section_name: str) -> None:
+        for old_key, new_key in deprecated_key_map.items():
+            if old_key not in section:
+                continue
+            if new_key in section:
+                logger.warning(
+                    f"Deprecated config key '{old_key}' is ignored because '{new_key}' is already set in {section_name}."
+                )
+            else:
+                section[new_key] = section[old_key]
+                logger.warning(f"Deprecated config key '{old_key}' found in {section_name}; use '{new_key}' instead.")
+            del section[old_key]
+
+    general_config = config.get("general")
+    if isinstance(general_config, dict):
+        normalize_deprecated_keys(general_config, "general")
+
+    datasets_config = config.get("datasets", [])
+    if isinstance(datasets_config, list):
+        for idx, dataset_config in enumerate(datasets_config):
+            if isinstance(dataset_config, dict):
+                normalize_deprecated_keys(dataset_config, f"datasets[{idx}]")
 
     return config
 
