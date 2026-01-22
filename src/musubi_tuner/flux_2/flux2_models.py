@@ -421,15 +421,6 @@ class ModelSpec:
     # repo_flow: str | None
     # repo_ae: str | None
 
-
-configs_flux_2_dev = ModelSpec(
-    # repo_id="black-forest-labs/FLUX.2-dev",
-    # repo_flow="flux2-dev.safetensors",
-    # repo_ae="ae.safetensors",
-    params=Flux2Params(),
-    ae_params=AutoEncoderParams(),
-)
-
 # # endregion
 
 # # region layers
@@ -672,7 +663,10 @@ class Flux2(nn.Module):
         pe_x = self.pe_embedder(x_ids)
         pe_ctx = self.pe_embedder(ctx_ids)
 
-        for block in self.double_blocks:
+        for block_idx, block in enumerate(self.double_blocks):
+            if self.blocks_to_swap:
+                self.offloader_double.wait_for_block(block_idx)
+
             img, txt = block(
                 img,
                 txt,
@@ -682,15 +676,24 @@ class Flux2(nn.Module):
                 double_block_mod_txt,
             )
 
+            if self.blocks_to_swap:
+                self.offloader_double.submit_move_blocks_forward(self.double_blocks, block_idx)
+
         img = torch.cat((txt, img), dim=1)
         pe = torch.cat((pe_ctx, pe_x), dim=2)
 
-        for i, block in enumerate(self.single_blocks):
+        for block_idx, block in enumerate(self.single_blocks):
+            if self.blocks_to_swap:
+                self.offloader_single.wait_for_block(block_idx)
+
             img = block(
                 img,
                 pe,
                 single_block_mod,
             )
+
+            if self.blocks_to_swap:
+                self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
 
         img = img[:, num_txt_tokens:, ...]
 
