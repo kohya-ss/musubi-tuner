@@ -1455,7 +1455,7 @@ def load_qwen_image_model(
     disable_numpy_memmap: bool = False,
 ) -> QwenImageTransformer2DModel:
     """
-    Load a WAN model from the specified checkpoint.
+    Load a Qwen-Image model from the specified checkpoint.
 
     Args:
         device (Union[str, torch.device]): Device for optimization or merging

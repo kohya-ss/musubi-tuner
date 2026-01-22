@@ -23,6 +23,8 @@ from transformers import (
 )
 from tqdm import tqdm
 
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.zimage.zimage_utils import load_qwen3
 
 from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
@@ -475,47 +477,53 @@ def concatenate_images(
     return new_img
 
 
+FP8_OPTIMIZATION_TARGET_KEYS = ["double_blocks", "single_blocks"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pe_embedder", "time_in"]
+
+
 def load_flow_model(
-    model_version: str,
-    ckpt_path: str,
-    dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
-    disable_mmap: bool = False,
-    attn_mode: str = "torch",
-    split_attn: bool = False,
-    loading_device: Optional[Union[str, torch.device]] = None,
+    model_version: str,
+    dit_path: str,
+    attn_mode: str,
+    split_attn: bool,
+    loading_device: Union[str, torch.device],
+    dit_weight_dtype: Optional[torch.dtype] = None,
     fp8_scaled: bool = False,
+    lora_weights_list: Optional[dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[list[float]] = None,
+    disable_numpy_memmap: bool = False,
 ) -> flux2_models.Flux2:
-    if loading_device is None:
-        loading_device = device
+    # dit_weight_dtype is None for fp8_scaled
+    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
     device = torch.device(device)
-    loading_device = torch.device(loading_device) if loading_device is not None else device
-    flux_2_loading_device = loading_device if not fp8_scaled else torch.device("cpu")
+    loading_device = torch.device(loading_device)
 
     # build model
     with init_empty_weights():
         params = FLUX2_MODEL_INFO[model_version]["params"]
         model = flux2_models.Flux2(params, attn_mode, split_attn)
-        if dtype is not None:
-            model = model.to(dtype)
+        if dit_weight_dtype is not None:
+            model.to(dit_weight_dtype)
 
-    # load_sft doesn't support torch.device
-    logger.info(f"Loading state dict from {ckpt_path} to {flux_2_loading_device}")
-    sd = load_split_weights(ckpt_path, device=flux_2_loading_device, disable_mmap=disable_mmap, dtype=dtype)
+    # load model weights with dynamic fp8 optimization and LoRA merging if needed
+    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+    sd = load_safetensors_with_lora_and_fp8(
+        model_files=dit_path,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=fp8_scaled,
+        calc_device=device,
+        move_to_device=(loading_device == device),
+        dit_weight_dtype=dit_weight_dtype,
+        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        disable_numpy_memmap=disable_numpy_memmap,
+    )
 
-    # # if the key has annoying prefix, remove it
-    # for key in list(sd.keys()):
-    #     new_key = key.replace("model.diffusion_model.", "")
-    #     if new_key == key:
-    #         break  # the model doesn't have annoying prefix
-    #     sd[new_key] = sd.pop(key)
-
-    # if fp8_scaled is True, convert the model to fp8
     if fp8_scaled:
-        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
-        logger.info("Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
 
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device
@@ -525,6 +533,7 @@ def load_flow_model(
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Flux 2: {info}")
+
     return model
 
 

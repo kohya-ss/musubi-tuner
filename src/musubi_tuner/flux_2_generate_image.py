@@ -12,9 +12,9 @@ from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 
 from musubi_tuner.flux_2 import flux2_utils
-from musubi_tuner.flux_2.flux2_utils import load_flow_model
 from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 lycoris_available = find_spec("lycoris") is not None
 
@@ -46,6 +46,9 @@ def parse_args() -> argparse.Namespace:
     # )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
+    parser.add_argument(
+        "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
+    )
     parser.add_argument("--vae", type=str, default=None, help="AE directory or path")
     parser.add_argument("--text_encoder", type=str, required=True, help="Text Encoder Mistral 3/Qwen 3 directory or path")
 
@@ -260,7 +263,9 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int]:
 # region DiT model
 
 
-def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux2_models.Flux2:
+def load_dit_model(
+    args: argparse.Namespace, device: torch.device, dit_weight_dtype: Optional[torch.dtype] = None
+) -> flux2_models.Flux2:
     """load DiT model
 
     Args:
@@ -273,19 +278,113 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux2_mode
         flux2_models.Flux2: DiT model
     """
     loading_device = "cpu"
-    if args.blocks_to_swap == 0 and not args.fp8_scaled and args.lora_weight is None:
+    if args.blocks_to_swap == 0 and not args.lycoris:
         loading_device = device
 
-    # do not fp8 optimize because we will merge LoRA weights
-    model = load_flow_model(
+    # load LoRA weights
+    if not args.lycoris and args.lora_weight is not None and len(args.lora_weight) > 0:
+        lora_weights_list = []
+        for lora_weight in args.lora_weight:
+            logger.info(f"Loading LoRA weight from: {lora_weight}")
+            lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
+            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            lora_weights_list.append(lora_sd)
+    else:
+        lora_weights_list = None
+
+    loading_weight_dtype = dit_weight_dtype
+    if args.fp8_scaled and not args.lycoris:
+        loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
+    elif args.lycoris:
+        loading_weight_dtype = torch.bfloat16  # lycoris requires bfloat16 or float16, because it merges weights
+
+    model = flux2_utils.load_flow_model(
+        device=device,
         model_version=args.model_version,
-        ckpt_path=args.dit,
-        dtype=None,
-        device=loading_device,
-        disable_mmap=True,
+        dit_path=args.dit,
         attn_mode=args.attn_mode,
         split_attn=False,
+        loading_device=loading_device,
+        dit_weight_dtype=loading_weight_dtype,
+        fp8_scaled=args.fp8_scaled and not args.lycoris,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=args.lora_multiplier,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
+
+    # merge LoRA weights
+    if args.lycoris:
+        if args.lora_weight is not None and len(args.lora_weight) > 0:
+            merge_lora_weights(
+                lora_flux_2,
+                model,
+                args.lora_weight,
+                args.lora_multiplier,
+                args.include_patterns,
+                args.exclude_patterns,
+                device,
+                lycoris=True,
+                save_merged_model=args.save_merged_model,
+            )
+
+        if args.fp8_scaled:
+            # load state dict as-is and optimize to fp8
+            state_dict = model.state_dict()
+
+            # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
+            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+            # state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+
+            from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+
+            # inplace optimization
+            state_dict = optimize_state_dict_with_fp8(
+                state_dict,
+                device,
+                flux2_models.FP8_OPTIMIZATION_TARGET_KEYS,
+                flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS,
+                move_to_device=move_to_device,
+            )
+            apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)  # args.scaled_mm)
+
+            info = model.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded FP8 optimized weights: {info}")
+
+    # if we only want to save the model, we can skip the rest
+    if args.save_merged_model:
+        return None
+
+    if not args.fp8_scaled:
+        # simple cast to dit_weight_dtype
+        target_dtype = None  # load as-is (dit_weight_dtype == dtype of the weights in state_dict)
+        target_device = None
+
+        if dit_weight_dtype is not None:  # in case of args.fp8 and not args.fp8_scaled
+            logger.info(f"Convert model to {dit_weight_dtype}")
+            target_dtype = dit_weight_dtype
+
+        if args.blocks_to_swap == 0:
+            logger.info(f"Move model to device: {device}")
+            target_device = device
+
+        model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
+
+    if args.blocks_to_swap > 0:
+        logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
+        model.enable_block_swap(
+            args.blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
+        )
+        model.move_to_device_except_swap_blocks(device)
+        model.prepare_block_swap_before_forward()
+    else:
+        # make sure the model is on the right device
+        model.to(device)
+
+    if args.compile:
+        model = model_utils.compile_transformer(args, model, [model.transformer_blocks], disable_linear=args.blocks_to_swap > 0)
+
+    model.eval().requires_grad_(False)
+    clean_memory_on_device(device)
 
     return model
 
@@ -572,7 +671,7 @@ def generate(
 
     if shared_models is None or "model" not in shared_models:
         # load DiT model
-        model = load_dit_model(args, device)
+        model = load_dit_model(args, device, dit_weight_dtype)
 
         # merge LoRA weights
         if args.lora_weight is not None and len(args.lora_weight) > 0:
@@ -592,8 +691,8 @@ def generate(
             if args.save_merged_model:
                 return None, None
 
-        # optimize model: fp8 conversion, block swap etc.
-        optimize_model(model, args, device)
+        # # optimize model: fp8 conversion, block swap etc.
+        # optimize_model(model, args, device)
 
         if shared_models is not None:
             shared_models["model"] = model
@@ -851,6 +950,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         return
 
     gen_settings = get_generation_settings(args)
+    dit_weight_dtype = gen_settings.dit_weight_dtype
     device = gen_settings.device
 
     # 1. Precompute Image Data (AE and Image Encoders)
@@ -910,7 +1010,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     logger.info("Loading DiT model for batch generation...")
     # Use args from the first prompt for DiT loading (LoRA etc. should be consistent for a batch)
     first_prompt_args = all_prompt_args_list[0]
-    dit_model = load_dit_model(first_prompt_args, device)  # Load directly to target device if possible
+    dit_model = load_dit_model(first_prompt_args, device, dit_weight_dtype)  # Load directly to target device if possible
 
     if first_prompt_args.lora_weight is not None and len(first_prompt_args.lora_weight) > 0:
         logger.info("Merging LoRA weights into DiT model...")
@@ -1078,7 +1178,7 @@ def process_interactive(args: argparse.Namespace) -> None:
 def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
     device = torch.device(args.device)
 
-    dit_weight_dtype = None  # default
+    dit_weight_dtype = torch.bfloat16  # default
     if args.fp8_scaled:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
     elif args.fp8:

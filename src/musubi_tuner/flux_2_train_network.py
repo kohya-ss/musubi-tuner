@@ -228,15 +228,15 @@ class Flux2NetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         model = flux2_utils.load_flow_model(
+            accelerator.device,
             model_version=args.model_version,
-            ckpt_path=args.dit,
-            dtype=None,
-            device=loading_device,
-            disable_mmap=True,
+            dit_path=dit_path,
             attn_mode=attn_mode,
             split_attn=split_attn,
             loading_device=loading_device,
+            dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
         return model
 
