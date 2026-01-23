@@ -6,11 +6,11 @@ from dataclasses import dataclass, field
 import torch
 from einops import rearrange
 from torch import Tensor, nn
-from typing import Optional
 from torch.utils.checkpoint import checkpoint
 
+from musubi_tuner.modules.attention import AttentionParams
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
-# from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
+from musubi_tuner.modules.attention import attention as unified_attention
 
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
@@ -19,6 +19,9 @@ from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 # logging.basicConfig(level=logging.INFO)
 
 # USE_REENTRANT = True
+
+FP8_OPTIMIZATION_TARGET_KEYS = ["double_blocks", "single_blocks"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pe_embedder", "time_in", "_modulation"]
 
 
 @dataclass
@@ -63,8 +66,7 @@ class Klein4BParams:
     use_guidance_embed: bool = False
 
 
-# # region autoencoder
-#
+# region autoencoder
 
 
 @dataclass
@@ -405,10 +407,10 @@ class AutoEncoder(nn.Module):
         return next(self.parameters()).dtype
 
 
-# # endregion
+# endregion
 
 
-# # region config
+# region config
 
 
 @dataclass
@@ -422,9 +424,9 @@ class ModelSpec:
     # repo_ae: str | None
 
 
-# # endregion
+# endregion
 
-# # region layers
+# region model
 
 
 class Flux2(nn.Module):
@@ -454,47 +456,20 @@ class Flux2(nn.Module):
         self.split_attn = split_attn
 
         self.double_blocks = nn.ModuleList(
-            [
-                DoubleStreamBlock(
-                    self.hidden_size,
-                    self.num_heads,
-                    mlp_ratio=params.mlp_ratio,
-                    attn_mode=self.attn_mode,
-                    split_attn=self.split_attn,
-                )
-                for _ in range(params.depth)
-            ]
+            [DoubleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio) for _ in range(params.depth)]
         )
-
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(
-                    self.hidden_size,
-                    self.num_heads,
-                    mlp_ratio=params.mlp_ratio,
-                    attn_mode=self.attn_mode,
-                    split_attn=self.split_attn,
-                )
+                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
                 for _ in range(params.depth_single_blocks)
             ]
         )
 
-        self.double_stream_modulation_img = Modulation(
-            self.hidden_size,
-            double=True,
-            disable_bias=True,
-        )
-        self.double_stream_modulation_txt = Modulation(
-            self.hidden_size,
-            double=True,
-            disable_bias=True,
-        )
+        self.double_stream_modulation_img = Modulation(self.hidden_size, double=True, disable_bias=True)
+        self.double_stream_modulation_txt = Modulation(self.hidden_size, double=True, disable_bias=True)
         self.single_stream_modulation = Modulation(self.hidden_size, double=False, disable_bias=True)
 
-        self.final_layer = LastLayer(
-            self.hidden_size,
-            self.out_channels,
-        )
+        self.final_layer = LastLayer(self.hidden_size, self.out_channels)
 
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
@@ -515,36 +490,6 @@ class Flux2(nn.Module):
     @property
     def dtype(self):
         return next(self.parameters()).dtype
-
-    def fp8_optimization(
-        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
-    ) -> int:
-        """
-        Optimize the model state_dict with fp8.
-
-        Args:
-            state_dict (dict[str, torch.Tensor]):
-                The state_dict of the model.
-            device (torch.device):
-                The device to calculate the weight.
-            move_to_device (bool):
-                Whether to move the weight to the device after optimization.
-        """
-        TARGET_KEYS = ["single_blocks", "double_blocks"]
-        EXCLUDE_KEYS = [
-            "norm",
-            "mod",
-        ]
-
-        from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-
-        # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
-
-        # apply monkey patching
-        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
-
-        return state_dict
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
@@ -604,7 +549,8 @@ class Flux2(nn.Module):
             double_blocks_to_swap,
             supports_backward,
             device,
-            use_pinned_memory,  # , debug=True
+            use_pinned_memory,
+            # , debug=True
         )
         self.offloader_single = ModelOffloader(
             "single",
@@ -613,7 +559,8 @@ class Flux2(nn.Module):
             single_blocks_to_swap,
             supports_backward,
             device,
-            use_pinned_memory,  # , debug=True
+            use_pinned_memory,
+            # , debug=True
         )
         print(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
@@ -638,8 +585,8 @@ class Flux2(nn.Module):
         if self.blocks_to_swap:
             save_double_blocks = self.double_blocks
             save_single_blocks = self.single_blocks
-            self.double_blocks = None
-            self.single_blocks = None
+            self.double_blocks = nn.ModuleList()
+            self.single_blocks = nn.ModuleList()
 
         self.to(device)
 
@@ -653,15 +600,7 @@ class Flux2(nn.Module):
         self.offloader_double.prepare_block_devices_before_forward(self.double_blocks)
         self.offloader_single.prepare_block_devices_before_forward(self.single_blocks)
 
-    def forward(
-        self,
-        x: Tensor,
-        x_ids: Tensor,
-        timesteps: Tensor,
-        ctx: Tensor,
-        ctx_ids: Tensor,
-        guidance: Tensor | None,
-    ):
+    def forward(self, x: Tensor, x_ids: Tensor, timesteps: Tensor, ctx: Tensor, ctx_ids: Tensor, guidance: Tensor | None) -> Tensor:
         num_txt_tokens = ctx.shape[1]
 
         timestep_emb = timestep_embedding(timesteps, 256)
@@ -680,18 +619,13 @@ class Flux2(nn.Module):
         pe_x = self.pe_embedder(x_ids)
         pe_ctx = self.pe_embedder(ctx_ids)
 
+        attn_params = AttentionParams.create_attention_params(self.attn_mode, self.split_attn)  # No attention mask
+
         for block_idx, block in enumerate(self.double_blocks):
             if self.blocks_to_swap:
                 self.offloader_double.wait_for_block(block_idx)
 
-            img, txt = block(
-                img,
-                txt,
-                pe_x,
-                pe_ctx,
-                double_block_mod_img,
-                double_block_mod_txt,
-            )
+            img, txt = block(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt, attn_params)
 
             if self.blocks_to_swap:
                 self.offloader_double.submit_move_blocks_forward(self.double_blocks, block_idx)
@@ -703,11 +637,7 @@ class Flux2(nn.Module):
             if self.blocks_to_swap:
                 self.offloader_single.wait_for_block(block_idx)
 
-            img = block(
-                img,
-                pe,
-                single_block_mod,
-            )
+            img = block(img, pe, single_block_mod, attn_params)
 
             if self.blocks_to_swap:
                 self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
@@ -751,9 +681,12 @@ class Modulation(nn.Module):
         self.lin = nn.Linear(dim, self.multiplier * dim, bias=not disable_bias)
 
     def forward(self, vec: torch.Tensor):
+        org_dtype = vec.dtype
+        vec = vec.to(torch.float32)  # for numerical stability
         out = self.lin(nn.functional.silu(vec))
         if out.ndim == 2:
             out = out[:, None, :]
+        out = out.to(org_dtype)
         out = out.chunk(self.multiplier, dim=-1)
         return out[:3], out[3:] if self.is_double else None
 
@@ -770,26 +703,21 @@ class LastLayer(nn.Module):
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=False))
 
     def forward(self, x: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+        org_dtype = x.dtype
+        vec = vec.to(torch.float32)  # for numerical stability
         mod = self.adaLN_modulation(vec)
         shift, scale = mod.chunk(2, dim=-1)
         if shift.ndim == 2:
             shift = shift[:, None, :]
             scale = scale[:, None, :]
+        x = x.to(torch.float32)  # for numerical stability
         x = (1 + scale) * self.norm_final(x) + shift
         x = self.linear(x)
-        return x
+        return x.to(org_dtype)
 
 
 class SingleStreamBlock(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        mlp_ratio: float = 4.0,
-        #         qk_scale: float | None = None,
-        attn_mode: str = "torch",
-        split_attn: bool = False,
-    ):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0):
         super().__init__()
 
         self.hidden_dim = hidden_size
@@ -799,22 +727,12 @@ class SingleStreamBlock(nn.Module):
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp_mult_factor = 2
 
-        self.attn_mode = attn_mode
-        self.split_attn = split_attn
-
-        self.linear1 = nn.Linear(
-            hidden_size,
-            hidden_size * 3 + self.mlp_hidden_dim * self.mlp_mult_factor,
-            bias=False,
-        )
-
+        self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim * self.mlp_mult_factor, bias=False)
         self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size, bias=False)
 
         self.norm = QKNorm(head_dim)
-
         self.hidden_size = hidden_size
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-
         self.mlp_act = SiLUActivation()
 
         self.gradient_checkpointing = False
@@ -828,12 +746,7 @@ class SingleStreamBlock(nn.Module):
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
 
-    def _forward(
-        self,
-        x: Tensor,
-        pe: Tensor,
-        mod: tuple[Tensor, Tensor],
-    ) -> Tensor:
+    def _forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor], attn_params: AttentionParams) -> Tensor:
         mod_shift, mod_scale, mod_gate = mod
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
 
@@ -846,25 +759,20 @@ class SingleStreamBlock(nn.Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
 
-        attn = attention(q, k, v, pe, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        attn = attention(q, k, v, pe, attn_params)
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + mod_gate * output
 
-    def forward(
-        self,
-        x: Tensor,
-        pe: Tensor,
-        mod: tuple[Tensor, Tensor],
-    ) -> Tensor:
+    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor], attn_params: AttentionParams) -> Tensor:
         if self.training and self.gradient_checkpointing:
             forward_fn = self._forward
             if self.activation_cpu_offloading:
                 forward_fn = create_cpu_offloading_wrapper(forward_fn, self.linear1.weight.device)
-            return checkpoint(forward_fn, x, pe, mod, use_reentrant=False)
+            return checkpoint(forward_fn, x, pe, mod, attn_params, use_reentrant=False)
         else:
-            return self._forward(x, pe, mod)
+            return self._forward(x, pe, mod, attn_params)
 
 
 class DoubleStreamBlock(nn.Module):
@@ -936,6 +844,7 @@ class DoubleStreamBlock(nn.Module):
         pe_ctx: Tensor,
         mod_img: tuple[Tensor, Tensor],
         mod_txt: tuple[Tensor, Tensor],
+        attn_params: AttentionParams,
     ) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = mod_img
         txt_mod1, txt_mod2 = mod_txt
@@ -966,7 +875,7 @@ class DoubleStreamBlock(nn.Module):
         v = torch.cat((txt_v, img_v), dim=2)
 
         pe = torch.cat((pe_ctx, pe), dim=2)
-        attn = attention(q, k, v, pe, attn_mode=self.attn_mode, split_attn=self.split_attn)
+        attn = attention(q, k, v, pe, attn_params)
         txt_attn, img_attn = attn[:, : txt_q.shape[2]], attn[:, txt_q.shape[2] :]
 
         # calculate the img blocks
@@ -986,14 +895,15 @@ class DoubleStreamBlock(nn.Module):
         pe_ctx: Tensor,
         mod_img: tuple[Tensor, Tensor],
         mod_txt: tuple[Tensor, Tensor],
+        attn_params: AttentionParams,
     ) -> tuple[Tensor, Tensor]:
         if self.training and self.gradient_checkpointing:
             forward_fn = self._forward
             if self.activation_cpu_offloading:
                 forward_fn = create_cpu_offloading_wrapper(forward_fn, self.img_mlp[0].weight.device)
-            return checkpoint(forward_fn, img, txt, pe, pe_ctx, mod_img, mod_txt, use_reentrant=False)
+            return checkpoint(forward_fn, img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params, use_reentrant=False)
         else:
-            return self._forward(img, txt, pe, pe_ctx, mod_img, mod_txt)
+            return self._forward(img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params)
 
 
 class MLPEmbedder(nn.Module):
@@ -1092,71 +1002,14 @@ class QKNorm(torch.nn.Module):
         return q.to(v), k.to(v)
 
 
-def attention(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    pe: Tensor,
-    attn_mask: Optional[Tensor] = None,
-    attn_mode: str = "torch",
-    split_attn: bool = False,
-    control_lengths: Optional[list[int]] = None,
-) -> Tensor:
-    assert attn_mask is None, "attn_mask is not supported in flux attention"
-    assert attn_mode == "torch", f"{attn_mode} not implemented"
-    assert split_attn is False, "split_attn not implemented"
-
+def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, attn_params: AttentionParams) -> Tensor:
     q, k = apply_rope(q, k, pe)
 
-    x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-    x = rearrange(x, "B H L D -> B L (H D)")
-
+    q = q.transpose(1, 2)  # B, H, L, D -> B, L, H, D
+    k = k.transpose(1, 2)  # B, H, L, D -> B, L, H, D
+    v = v.transpose(1, 2)  # B, H, L, D -> B, L, H, D
+    x = unified_attention(q, k, v, attn_params=attn_params)
     return x
-
-
-# def attention(
-#     q: Tensor,
-#     k: Tensor,
-#     v: Tensor,
-#     pe: Tensor,
-#     attn_mask: Optional[Tensor] = None,
-#     attn_mode: str = "torch",
-#     split_attn: bool = False,
-#     control_lengths: Optional[list[int]] = None,
-# ) -> Tensor:
-#     assert attn_mask is None, "attn_mask is not supported in flux attention"
-#
-#     q, k = apply_rope(q, k, pe)
-#
-#     # x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-#     # x = rearrange(x, "B H L D -> B L (H D)")
-#
-#     if control_lengths is not None:
-#         max_control_length = max(control_lengths)
-#         min_control_length = min(control_lengths)
-#     else:
-#         max_control_length = 0
-#         min_control_length = 0
-#
-#     if split_attn or max_control_length != min_control_length:
-#         if control_lengths is None or max_control_length == min_control_length:
-#             # normal split attention, no trimming
-#             total_len = torch.tensor([q.shape[-2]] * q.shape[0], dtype=torch.long)  # (sequence length, sequence length ...)
-#         else:
-#             # split attention with different control lengths, trim to each control length
-#             max_control_length = max(control_lengths)
-#             total_len = torch.tensor([q.shape[-2] - max_control_length + cl for cl in control_lengths], dtype=torch.long)
-#         # print(f"Max control length: {max_control_length}, control lengths: {control_lengths}, total_len: {total_len}")
-#     else:
-#         # inference time or same length for all controls
-#         total_len = None
-#
-#     q = q.transpose(1, 2)  # B, H, L, D -> B, L, H, D
-#     k = k.transpose(1, 2)  # B, H, L, D -> B, L, H, D
-#     v = v.transpose(1, 2)  # B, H, L, D -> B, L, H, D
-#     x = hunyuan_attention([q, k, v], mode=attn_mode, total_len=total_len)  # B, L, D
-#
-#     return x
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -1175,3 +1028,6 @@ def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tenso
     xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
     xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
     return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
+
+
+# endregion

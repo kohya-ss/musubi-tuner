@@ -2,7 +2,6 @@ import argparse
 import json
 import numpy as np
 import torch
-import torchvision
 import math
 
 
@@ -444,10 +443,6 @@ def concatenate_images(
     return new_img
 
 
-FP8_OPTIMIZATION_TARGET_KEYS = ["double_blocks", "single_blocks"]
-FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pe_embedder", "time_in"]
-
-
 def load_flow_model(
     device: Union[str, torch.device],
     model_version_info: Flux2ModelInfo,
@@ -484,8 +479,8 @@ def load_flow_model(
         calc_device=device,
         move_to_device=(loading_device == device),
         dit_weight_dtype=dit_weight_dtype,
-        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
-        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        target_keys=flux2_models.FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS,
         disable_numpy_memmap=disable_numpy_memmap,
     )
 
