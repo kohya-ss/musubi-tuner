@@ -166,30 +166,6 @@ def scatter_ids(x: Tensor, x_ids: Tensor) -> list[Tensor]:
     return x_list
 
 
-def encode_image_refs(ae, img_ctx: list[Image.Image]):
-    if len(img_ctx) > 1:
-        limit_pixels = 1024**2
-    elif len(img_ctx) == 1:
-        limit_pixels = 2024**2
-    else:
-        limit_pixels = None
-
-    if not img_ctx:
-        return None, None
-
-    img_ctx_prep = default_prep(img=img_ctx, limit_pixels=limit_pixels)
-    if not isinstance(img_ctx_prep, list):
-        img_ctx_prep = [img_ctx_prep]
-
-    # Encode each reference image
-    encoded_refs = []
-    for img in img_ctx_prep:
-        encoded = ae.encode(img[None].cuda())[0]
-        encoded_refs.append(encoded)
-
-    return pack_control_latent(encoded_refs)
-
-
 def pack_control_latent(control_latent: list[Tensor] | None) -> tuple[Optional[Tensor], Optional[Tensor]]:
     if control_latent is None:
         return None, None
@@ -269,23 +245,7 @@ batched_prc_img = batched_wrapper(prc_img)
 batched_prc_txt = batched_wrapper(prc_txt)
 
 
-def center_crop_to_multiple_of_x(img: Image.Image | list[Image.Image], x: int) -> Image.Image | list[Image.Image]:
-    if isinstance(img, list):
-        return [center_crop_to_multiple_of_x(_img, x) for _img in img]  # type: ignore
-
-    w, h = img.size
-    new_w = (w // x) * x
-    new_h = (h // x) * x
-
-    left = (w - new_w) // 2
-    top = (h - new_h) // 2
-    right = left + new_w
-    bottom = top + new_h
-
-    resized = img.crop((left, top, right, bottom))
-    return resized
-
-
+# This function is used from Mistral3Embedder
 def cap_pixels(img: Image.Image | list[Image.Image], k):
     if isinstance(img, list):
         return [cap_pixels(_img, k) for _img in img]
@@ -301,51 +261,6 @@ def cap_pixels(img: Image.Image | list[Image.Image], k):
     new_h = int(h * scale)
 
     return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-
-def cap_min_pixels(img: Image.Image | list[Image.Image], max_ar=8, min_sidelength=64):
-    if isinstance(img, list):
-        return [cap_min_pixels(_img, max_ar=max_ar, min_sidelength=min_sidelength) for _img in img]
-    w, h = img.size
-    if w < min_sidelength or h < min_sidelength:
-        raise ValueError(f"Skipping due to minimal sidelength underschritten h {h} w {w}")
-    if w / h > max_ar or h / w > max_ar:
-        raise ValueError(f"Skipping due to maximal ar overschritten h {h} w {w}")
-    return img
-
-
-def to_rgb(img: Image.Image | list[Image.Image]):
-    if isinstance(img, list):
-        return [
-            to_rgb(
-                _img,
-            )
-            for _img in img
-        ]
-    return img.convert("RGB")
-
-
-def default_images_prep(
-    x: Image.Image | list[Image.Image],
-) -> torch.Tensor | list[torch.Tensor]:
-    if isinstance(x, list):
-        return [default_images_prep(e) for e in x]  # type: ignore
-    x_tensor = torchvision.transforms.ToTensor()(x)
-    return 2 * x_tensor - 1
-
-
-def default_prep(
-    img: Image.Image | list[Image.Image], limit_pixels: int | None, ensure_multiple: int = 16
-) -> torch.Tensor | list[torch.Tensor]:
-    img_rgb = to_rgb(img)
-    img_min = cap_min_pixels(img_rgb)  # type: ignore
-    if limit_pixels is not None:
-        img_cap = cap_pixels(img_min, limit_pixels)  # type: ignore
-    else:
-        img_cap = img_min
-    img_crop = center_crop_to_multiple_of_x(img_cap, ensure_multiple)  # type: ignore
-    img_tensor = default_images_prep(img_crop)
-    return img_tensor
 
 
 def preprocess_control_image(
