@@ -185,6 +185,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
                 x_ids,
                 ctx,
                 ctx_ids,
+                negative_ctx,
+                negative_ctx_ids,
                 timesteps=timesteps,
                 guidance=guidance_scale,
                 img_cond_seq=ref_tokens,

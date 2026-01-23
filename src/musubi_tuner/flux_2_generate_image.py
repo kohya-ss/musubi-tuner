@@ -68,6 +68,13 @@ def parse_args() -> argparse.Namespace:
         "--guidance_scale", type=float, default=4.0, help="Guidance scale for classifier free guidance. Default is 4.0."
     )
     parser.add_argument("--prompt", type=str, default=None, help="prompt for generation")
+    parser.add_argument(
+        "--negative_prompt",
+        type=str,
+        default=None,
+        help="negative prompt for generation, default is None (` ` for non-distilled model)",
+    )
+
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size, height and width")
     parser.add_argument(
         "--control_image_path",
@@ -101,8 +108,8 @@ def parse_args() -> argparse.Namespace:
         "--flow_shift",
         type=float,
         default=None,
-        help="Shift factor for flow matching schedulers. Default is None (FLUX.1 default).",
-    )  # TODO
+        help="Shift factor for flow matching schedulers. Default is None (FLUX.2 default).",
+    )
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -208,8 +215,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         #     overrides["image_mask_path"] = value
         # elif option == "cn":
         #     overrides["control_path"] = value
-        # elif option == "n":
-        #     overrides["negative_prompt"] = value
+        elif option == "n":
+            overrides["negative_prompt"] = value
         elif option == "ci":  # control_image_path
             overrides["control_image_path"].append(value)
 
@@ -303,17 +310,17 @@ def load_dit_model(
 
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     model = flux2_utils.load_flow_model(
-        device=device,
-        model_version_info=model_version_info,
-        dit_path=args.dit,
-        attn_mode=args.attn_mode,
-        split_attn=False,
-        loading_device=loading_device,
-        dit_weight_dtype=loading_weight_dtype,
-        fp8_scaled=args.fp8_scaled and not args.lycoris,
-        lora_weights_list=lora_weights_list,
-        lora_multipliers=args.lora_multiplier,
-        disable_numpy_memmap=args.disable_numpy_memmap,
+        device,
+        model_version_info,
+        args.dit,
+        args.attn_mode,
+        False,
+        loading_device,
+        loading_weight_dtype,
+        args.fp8_scaled and not args.lycoris,
+        lora_weights_list,
+        args.lora_multiplier,
+        args.disable_numpy_memmap,
     )
 
     # merge LoRA weights
@@ -444,7 +451,9 @@ def prepare_image_inputs(
     return height, width, control_latent
 
 
-def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_models: Optional[Dict] = None) -> Dict[str, Any]:
+def prepare_text_inputs(
+    args: argparse.Namespace, device: torch.device, shared_models: Optional[Dict] = None
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Prepare text-related inputs for I2V: LLM and TextEncoder encoding."""
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
@@ -500,14 +509,24 @@ def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_m
         move_models_to_device_if_needed()
 
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            if model_version_info.guidance_distilled:
-                ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
-            else:
-                ctx_empty = text_embedder([""]).to(torch.bfloat16)
-                ctx_prompt = text_embedder([prompt]).to(torch.bfloat16)
-                ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
+            ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
         ctx_vec = ctx_vec.cpu()
         conds_cache[prompt] = ctx_vec
+
+    negative_prompt = args.negative_prompt
+    negative_ctx_vec = None
+    if not model_version_info.guidance_distilled:
+        if negative_prompt is None:
+            negative_prompt = " "  # for non-distilled model, use empty string as negative prompt
+        if negative_prompt in conds_cache:
+            negative_ctx_vec = conds_cache[negative_prompt]
+        else:
+            move_models_to_device_if_needed()
+
+            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                negative_ctx_vec = text_embedder([negative_prompt])  # [1, 512, 15360]
+            negative_ctx_vec = negative_ctx_vec.cpu()
+            conds_cache[negative_prompt] = negative_ctx_vec
 
     if not (shared_models and "text_embedder" in shared_models):  # if loaded locally
         del text_embedder
@@ -518,8 +537,12 @@ def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_m
     clean_memory_on_device(device)
 
     arg_c = {"ctx_vec": ctx_vec, "prompt": prompt}
+    if negative_ctx_vec is None:
+        arg_null = None
+    else:
+        arg_null = {"ctx_vec": negative_ctx_vec, "prompt": negative_prompt}
 
-    return arg_c
+    return arg_c, arg_null
 
 
 def prepare_i2v_inputs(
@@ -540,9 +563,9 @@ def prepare_i2v_inputs(
     height, width, control_latent = prepare_image_inputs(args, device, ae)
 
     # prepare text inputs
-    context = prepare_text_inputs(args, device, shared_models)
+    ctx_nctx = prepare_text_inputs(args, device, shared_models)
 
-    return height, width, context, control_latent
+    return height, width, ctx_nctx, control_latent
 
 
 def generate(
@@ -577,7 +600,7 @@ def generate(
         width = precomputed_image_data["width"]
         control_latent = precomputed_image_data["control_latent"]
 
-        context = precomputed_text_data
+        ctx_nctx = precomputed_text_data
 
         # VAE is not loaded here if data is precomputed; decoding VAE is handled by caller (e.g., process_batch_prompts)
         # vae_instance_for_return remains None
@@ -592,10 +615,11 @@ def generate(
             # the dtype of VAE weights is float32, but we can load it as bfloat16 for better performance in future
             vae_instance_for_return = flux2_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
 
-        height, width, context, control_latent = prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)
+        height, width, ctx_nctx, control_latent = prepare_i2v_inputs(args, device, vae_instance_for_return, shared_models)
 
         vae_instance_for_return.to("cpu")
 
+    context, context_null = ctx_nctx  # unpack
     if shared_models is None or "model" not in shared_models:
         # load DiT model
         model = load_dit_model(args, device, dit_weight_dtype)
@@ -633,46 +657,34 @@ def generate(
     logger.info(f"Image size: {height}x{width} (HxW), infer_steps: {args.infer_steps}")
 
     # image generation ######
-    logger.info(f"Prompt: {context['prompt']}")
+    logger.info(f"Prompt: {context['prompt']}, Negative Prompt: {context_null['prompt'] if context_null is not None else 'N/A'}")
     ctx_vec = context["ctx_vec"].to(device, dtype=torch.bfloat16)
     ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx_vec)
+    if context_null is None:
+        negative_ctx_vec = None
+        ctx_null, ctx_null_ids = None, None
+    else:
+        negative_ctx_vec = context_null["ctx_vec"].to(device, dtype=torch.bfloat16)
+        ctx_null, ctx_null_ids = flux2_utils.batched_prc_txt(negative_ctx_vec)
 
     # make first noise with packed shape
     # original: b,16,2*h//16,2*w//16, packed: b,h//16*w//16,16*2*2
     packed_latent_height, packed_latent_width = height // 16, width // 16
     noise_dtype = torch.float32
-    noise = torch.randn(
-        1,
-        128,
-        packed_latent_height,
-        packed_latent_width,
-        dtype=noise_dtype,
-        generator=seed_g,
-        device="cpu",
-    ).to(device, dtype=torch.bfloat16)
+    noise = torch.randn(1, 128, packed_latent_height, packed_latent_width, dtype=noise_dtype, generator=seed_g, device="cpu").to(
+        device, dtype=torch.bfloat16
+    )
     x, x_ids = flux2_utils.batched_prc_img(noise)
     # TODO upsampling here
 
     if control_latent is not None:
-        # pack control_latent
-        scale = 10
-        # Create time offsets for each reference
-        t_off = [scale + scale * t for t in torch.arange(0, len(control_latent))]
-        t_off = [t.view(-1) for t in t_off]
-        # Process with position IDs
-        ref_tokens, ref_ids = flux2_utils.listed_prc_img(control_latent, t_coord=t_off)  # list[(HW, C)], list[(HW, 4)]
-        # Concatenate all references along sequence dimension
-        ref_tokens = torch.cat(ref_tokens, dim=0)  # (total_ref_tokens, C)
-        ref_ids = torch.cat(ref_ids, dim=0)  # (total_ref_tokens, 4)
-        # Add batch dimension
-        ref_tokens = ref_tokens.unsqueeze(0).to(device, dtype=torch.bfloat16)  # (1, total_ref_tokens, C)
-        ref_ids = ref_ids.unsqueeze(0).to(device, dtype=torch.bfloat16)  # (1, total_ref_tokens, 4)
+        ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent)
     else:
         ref_tokens = None
         ref_ids = None
 
     # denoise
-    timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1])  # TODO shift_value=args.flow_shift
+    timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1], args.flow_shift)
     if model_version_info.guidance_distilled:
         x = flux2_utils.denoise(
             model,
@@ -692,6 +704,8 @@ def generate(
             x_ids,
             ctx,
             ctx_ids,
+            ctx_null,
+            ctx_null_ids,
             timesteps=timesteps,
             guidance=args.guidance_scale,
             img_cond_seq=ref_tokens,
@@ -921,8 +935,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     for i, prompt_args_item in enumerate(all_prompt_args_list):
         logger.info(f"Text preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
         # prepare_text_inputs will move text_encoders to device temporarily
-        text_data = prepare_text_inputs(prompt_args_item, device, temp_shared_models_txt)
-        all_precomputed_text_data.append(text_data)
+        ctx_nctx = prepare_text_inputs(prompt_args_item, device, temp_shared_models_txt)
+        all_precomputed_text_data.append(ctx_nctx)
 
     # Models should be removed from device after prepare_text_inputs
     del text_embedder_batch, temp_shared_models_txt, conds_cache_batch

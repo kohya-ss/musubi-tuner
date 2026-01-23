@@ -434,14 +434,10 @@ def denoise(
             assert img_cond_seq_ids is not None, "You need to provide either both or neither of the sequence conditioning"
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
-        pred = model(
-            x=img_input,
-            x_ids=img_input_ids,
-            timesteps=t_vec,
-            ctx=txt,
-            ctx_ids=txt_ids,
-            guidance=guidance_vec,
-        )
+
+        with torch.no_grad():
+            pred = model(x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=txt, ctx_ids=txt_ids, guidance=guidance_vec)
+
         if img_input_ids is not None:
             pred = pred[:, : img.shape[1]]
 
@@ -460,16 +456,15 @@ def denoise_cfg(
     model: Flux2,
     img: Tensor,
     img_ids: Tensor,
-    txt: Tensor,  # Already cat([txt_empty, txt_prompt])
+    txt: Tensor,
     txt_ids: Tensor,
+    uncond_txt: Tensor,
+    uncond_txt_ids: Tensor,
     timesteps: list[float],
     guidance: float,
     img_cond_seq: Tensor | None = None,
     img_cond_seq_ids: Tensor | None = None,
 ):
-    img = torch.cat([img, img], dim=0)
-    img_ids = torch.cat([img_ids, img_ids], dim=0)
-
     if img_cond_seq is not None:
         assert img_cond_seq_ids is not None
         img_cond_seq = torch.cat([img_cond_seq, img_cond_seq], dim=0)
@@ -484,25 +479,22 @@ def denoise_cfg(
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
 
-        pred = model(
-            x=img_input,
-            x_ids=img_input_ids,
-            timesteps=t_vec,
-            ctx=txt,
-            ctx_ids=txt_ids,
-            guidance=None,
-        )
+        with torch.no_grad():
+            pred_cond = model(x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=txt, ctx_ids=txt_ids, guidance=None)
+            pred_uncond = model(
+                x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=uncond_txt, ctx_ids=uncond_txt_ids, guidance=None
+            )
 
         if img_cond_seq is not None:
-            pred = pred[:, : img.shape[1]]
+            pred_cond = pred_cond[:, : img.shape[1]]
+            pred_uncond = pred_uncond[:, : img.shape[1]]
 
-        pred_uncond, pred_cond = pred.chunk(2)
         pred = pred_uncond + guidance * (pred_cond - pred_uncond)
         pred = torch.cat([pred, pred], dim=0)
 
         img = img + (t_prev - t_curr) * pred
 
-    return img.chunk(2)[0]
+    return img
 
 
 def concatenate_images(
