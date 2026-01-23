@@ -61,7 +61,7 @@ class Flux2ModelInfo:
     defaults: dict[str, float | int]
     fixed_params: set[str]
     guidance_distilled: bool
-    qwen_variant: Optional[str] = None
+    qwen_variant: Optional[str] = None  # None for Mistral
     architecture: str
     architecture_full: str
 
@@ -167,8 +167,6 @@ def scatter_ids(x: Tensor, x_ids: Tensor) -> list[Tensor]:
 
 
 def encode_image_refs(ae, img_ctx: list[Image.Image]):
-    scale = 10
-
     if len(img_ctx) > 1:
         limit_pixels = 1024**2
     elif len(img_ctx) == 1:
@@ -189,12 +187,21 @@ def encode_image_refs(ae, img_ctx: list[Image.Image]):
         encoded = ae.encode(img[None].cuda())[0]
         encoded_refs.append(encoded)
 
+    return pack_control_latent(encoded_refs)
+
+
+def pack_control_latent(control_latent: list[Tensor] | None) -> tuple[Optional[Tensor], Optional[Tensor]]:
+    if control_latent is None:
+        return None, None
+
+    scale = 10
+
     # Create time offsets for each reference
-    t_off = [scale + scale * t for t in torch.arange(0, len(encoded_refs))]
+    t_off = [scale + scale * t for t in torch.arange(0, len(control_latent))]
     t_off = [t.view(-1) for t in t_off]
 
     # Process with position IDs
-    ref_tokens, ref_ids = listed_prc_img(encoded_refs, t_coord=t_off)
+    ref_tokens, ref_ids = listed_prc_img(control_latent, t_coord=t_off)  # list[(HW, C)], list[(HW, 4)]
 
     # Concatenate all references along sequence dimension
     ref_tokens = torch.cat(ref_tokens, dim=0)  # (total_ref_tokens, C)
@@ -203,8 +210,7 @@ def encode_image_refs(ae, img_ctx: list[Image.Image]):
     # Add batch dimension
     ref_tokens = ref_tokens.unsqueeze(0)  # (1, total_ref_tokens, C)
     ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
-
-    return ref_tokens.to(torch.bfloat16), ref_ids
+    return ref_tokens, ref_ids
 
 
 def prc_txt(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
@@ -224,12 +230,7 @@ def batched_wrapper(fn):
     def batched_prc(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
         results = []
         for i in range(len(x)):
-            results.append(
-                fn(
-                    x[i],
-                    t_coord[i] if t_coord is not None else None,
-                )
-            )
+            results.append(fn(x[i], t_coord[i] if t_coord is not None else None))
         x, x_ids = zip(*results)
         return torch.stack(x), torch.stack(x_ids)
 
@@ -243,12 +244,7 @@ def listed_wrapper(fn):
     ) -> tuple[list[Tensor], list[Tensor]]:
         results = []
         for i in range(len(x)):
-            results.append(
-                fn(
-                    x[i],
-                    t_coord[i] if t_coord is not None else None,
-                )
-            )
+            results.append(fn(x[i], t_coord[i] if t_coord is not None else None))
         x, x_ids = zip(*results)
         return list(x), list(x_ids)
 
@@ -387,10 +383,13 @@ def generalized_time_snr_shift(t: Tensor, mu: float, sigma: float) -> Tensor:
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
-def get_schedule(num_steps: int, image_seq_len: int) -> list[float]:
+def get_schedule(num_steps: int, image_seq_len: int, flow_shift: Optional[float] = None) -> list[float]:
     mu = compute_empirical_mu(image_seq_len, num_steps)
     timesteps = torch.linspace(1, 0, num_steps + 1)
-    timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
+    if flow_shift is not None:
+        timesteps = (timesteps * flow_shift) / (1 + (flow_shift - 1) * timesteps)
+    else:
+        timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
     return timesteps.tolist()
 
 
@@ -544,7 +543,7 @@ FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pe_embedder", "time_in"]
 
 def load_flow_model(
     device: Union[str, torch.device],
-    model_version: str,
+    model_version_info: Flux2ModelInfo,
     dit_path: str,
     attn_mode: str,
     split_attn: bool,
@@ -563,7 +562,7 @@ def load_flow_model(
 
     # build model
     with init_empty_weights():
-        params = FLUX2_MODEL_INFO[model_version].params
+        params = model_version_info.params
         model = flux2_models.Flux2(params, attn_mode, split_attn)
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
@@ -903,17 +902,17 @@ class Qwen3Embedder(nn.Module):
 
 
 def load_text_embedder(
-    model_version: str,
+    model_version_info: Flux2ModelInfo,
     ckpt_path: str,
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
     disable_mmap: bool = False,
     state_dict: Optional[dict] = None,
-) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
-    if model_version == "flux.2-dev":
+) -> Union[Mistral3Embedder, Qwen3Embedder]:
+    if model_version_info.qwen_variant is None:
         return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict)
 
-    variant = FLUX2_MODEL_INFO[model_version].qwen_variant
+    variant = model_version_info.qwen_variant
     is_8b = variant == "8B"
     tokenizer_id = "Qwen/Qwen3-8B" if is_8b else "Qwen/Qwen3-4B"
     tokenizer, qwen3 = load_qwen3(ckpt_path, dtype, device, disable_mmap, state_dict, is_8b=is_8b, tokenizer_id=tokenizer_id)

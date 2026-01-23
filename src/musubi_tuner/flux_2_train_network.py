@@ -1,11 +1,11 @@
 import argparse
+from typing import Optional
 import torch
 
-from typing import Optional
 
 from accelerate import Accelerator
 from einops import rearrange
-from PIL import Image
+from diffusers.utils.torch_utils import randn_tensor
 
 from musubi_tuner.flux_2 import flux2_models, flux2_utils
 from musubi_tuner.hv_train_network import (
@@ -48,48 +48,41 @@ class Flux2NetworkTrainer(NetworkTrainer):
             )
         self._i2v_training = False
         self._control_training = False  # this means video training, not control image training
-        self.default_guidance_scale = 2.5  # embeded guidance scale for inference
+        self.default_guidance_scale = 4.0  # CFG scale for inference for base models
 
-    @staticmethod
-    def process_sample_prompts(
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        sample_prompts: str,
-    ):
+    def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         device = accelerator.device
 
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
         prompts = load_prompts(sample_prompts)
 
-        # Load Mistral 3
-        m3_dtype = torch.float8e4m3fn if args.fp8_te else torch.bfloat16
+        # Load Text Encoder (Mistral 3 or Qwen-3)
+        te_dtype = torch.float8e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
-            args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+            args.model_version, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
 
-        # Encode with Mistral 3 text encoders
-        logger.info("Encoding with Mistral 3 text encoders")
+        # Encode with Text Encoder (Mistral 3 or Qwen-3)
+        logger.info("Encoding with Text Encoder (Mistral 3 or Qwen-3)...")
 
-        sample_prompts_te_outputs = {}  # (prompt) -> (t5, clip)
-        with torch.amp.autocast(device_type=device.type, dtype=m3_dtype), torch.no_grad():
+        sample_prompts_te_outputs = {}  # prompt -> encoded tensor
+        with torch.amp.autocast(device_type=device.type, dtype=te_dtype), torch.no_grad():
             for prompt_dict in prompts:
-                prompt = prompt_dict.get("prompt", "")
-                if prompt is None or prompt in sample_prompts_te_outputs:
-                    continue
+                # add negative prompt if not present even if the model is guidance distilled for simplicity
+                if "negative_prompt" not in prompt_dict:
+                    prompt_dict["negative_prompt"] = " "
 
-                # encode prompt
-                logger.info(f"cache Text Encoder outputs for prompt: {prompt}")
-                if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
-                    ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
-                else:
-                    ctx_empty = text_embedder([""]).to(torch.bfloat16)
-                    ctx_prompt = text_embedder([prompt]).to(torch.bfloat16)
-                    ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
+                for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", " ")]:
+                    if p is None or p in sample_prompts_te_outputs:
+                        continue
 
-                ctx_vec = ctx_vec.cpu()
+                    # encode prompt
+                    logger.info(f"cache Text Encoder outputs for prompt: {p}")
+                    ctx_vec = text_embedder([p])  # [1, 512, 15360]
+                    ctx_vec = ctx_vec.cpu()
 
-                # save prompt cache
-                sample_prompts_te_outputs[prompt] = (ctx_vec,)
+                    # save prompt cache
+                    sample_prompts_te_outputs[p] = ctx_vec
 
         del text_embedder
         clean_memory_on_device(device)
@@ -99,8 +92,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
         for prompt_dict in prompts:
             prompt_dict_copy = prompt_dict.copy()
 
-            prompt = prompt_dict.get("prompt", "")
-            prompt_dict_copy["ctx_vec"] = sample_prompts_te_outputs[prompt][0]
+            p = prompt_dict.get("prompt", "")
+            prompt_dict_copy["ctx_vec"] = sample_prompts_te_outputs[p]
+            p = prompt_dict.get("negative_prompt", " ")
+            prompt_dict_copy["negative_ctx_vec"] = sample_prompts_te_outputs[p]
 
             sample_parameters.append(prompt_dict_copy)
 
@@ -108,8 +103,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         return sample_parameters
 
-    @staticmethod
     def do_inference(
+        self,
         accelerator,
         args,
         sample_parameter,
@@ -135,33 +130,43 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # Get embeddings
         ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
         ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
+        negative_ctx = sample_parameter.get("negative_ctx_vec").to(device=device, dtype=torch.bfloat16)
+        negative_ctx, negative_ctx_ids = flux2_utils.batched_prc_txt(negative_ctx)
 
         # Initialize latents
         packed_latent_height, packed_latent_width = height // 16, width // 16
-        randn = torch.randn(
+        latents = randn_tensor(
             (1, 128, packed_latent_height, packed_latent_width),  # [1, 128, 52, 78]
             generator=generator,
+            device=device,
             dtype=torch.bfloat16,
-            device="cuda",
         )
-        x, x_ids = flux2_utils.batched_prc_img(randn)  # [1, 4056, 128], [1, 4056, 4]
-
-        vae.to(device)
-        vae.eval()
+        x, x_ids = flux2_utils.batched_prc_img(latents)  # [1, 4056, 128], [1, 4056, 4]
 
         # prepare control latent
         ref_tokens = None
         ref_ids = None
         if "control_image_path" in sample_parameter:
-            img_ctx = [Image.open(input_image) for input_image in sample_parameter["control_image_path"]]
-            ref_tokens, ref_ids = flux2_utils.encode_image_refs(vae, img_ctx)
+            vae.to(device)
+            vae.eval()
 
-        vae.to("cpu")
-        clean_memory_on_device(device)
+            control_image_paths = sample_parameter["control_image_path"]
+            limit_size = (2024, 2024) if len(control_image_paths) == 1 else (1024, 1024)
+            control_latent_list = []
+            with torch.no_grad():
+                for image_path in control_image_paths:
+                    control_image_tensor, _, _ = flux2_utils.preprocess_control_image(image_path, limit_size)
+                    control_latent = vae.encode(control_image_tensor.to(vae.dtype, device=device))
+                    control_latent_list.append(control_latent.squeeze(0))
+
+            ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent_list)
+
+            vae.to("cpu")
+            clean_memory_on_device(device)
 
         # denoise
         timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1])
-        if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
+        if self.model_version_info.guidance_distilled:
             x = flux2_utils.denoise(
                 model,
                 x,
@@ -209,16 +214,15 @@ class Flux2NetworkTrainer(NetworkTrainer):
         pixels = pixels.unsqueeze(2)  # add a dummy dimension for video frames, B C H W -> B C 1 H W
         return pixels
 
-    @staticmethod
-    def load_vae(args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
+    def load_vae(self, args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
         vae_path = args.vae
 
         logger.info(f"Loading AE model from {vae_path}")
         ae = flux2_utils.load_ae(vae_path, dtype=torch.float32, device="cpu", disable_mmap=True)
         return ae
 
-    @staticmethod
     def load_transformer(
+        self,
         accelerator: Accelerator,
         args: argparse.Namespace,
         dit_path: str,
@@ -229,7 +233,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
     ):
         model = flux2_utils.load_flow_model(
             accelerator.device,
-            model_version=args.model_version,
+            model_version_info=self.model_version_info,
             dit_path=dit_path,
             attn_mode=attn_mode,
             split_attn=split_attn,
@@ -246,12 +250,11 @@ class Flux2NetworkTrainer(NetworkTrainer):
             args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=self.blocks_to_swap > 0
         )
 
-    @staticmethod
-    def scale_shift_latents(latents):
+    def scale_shift_latents(self, latents):
         return latents
 
-    @staticmethod
     def call_dit(
+        self,
         args: argparse.Namespace,
         accelerator: Accelerator,
         transformer,
@@ -265,41 +268,25 @@ class Flux2NetworkTrainer(NetworkTrainer):
         model: flux2_models.Flux2 = transformer
 
         bsize = latents.shape[0]
-
-        # control
-        num_control_images = 0
-        control_keys = []
-        while True:
-            key = f"latents_control_{num_control_images}"
-            if key in batch:
-                control_keys.append(key)
-                num_control_images += 1
-            else:
-                break
-
         # pack latents
-        latents = batch["latents"]  # B, C, H, W  # same for noisy_model_input (C = 128, H = height//16, ...)
         packed_latent_height = latents.shape[2]
         packed_latent_width = latents.shape[3]
         noisy_model_input, img_ids = flux2_utils.batched_prc_img(noisy_model_input)  # (B, HW, C), (B, HW, 4)
 
+        # control
+        num_control_images = 0
         ref_tokens, ref_ids = None, None
-        if num_control_images:
-            assert bsize == 1, "Flux 2 can't be trained with higher batch size since ref images may different size and number"
-            encoded_refs = [batch[k][0] for k in control_keys]  # list[(C, H, W)]
+        if "latents_control_0" in batch:
+            encoded_refs = []
+            while True:
+                key = f"latents_control_{num_control_images}"
+                if key in batch:
+                    encoded_refs.append(batch[key])  # list[(C, H, W)]
+                    num_control_images += 1
+                else:
+                    break
 
-            scale = 10
-            # Create time offsets for each reference
-            t_off = [scale + scale * t for t in torch.arange(0, len(encoded_refs))]
-            t_off = [t.view(-1) for t in t_off]
-            # Process with position IDs
-            ref_tokens, ref_ids = flux2_utils.listed_prc_img(encoded_refs, t_coord=t_off)  # list[(HW, C)], list[(HW, 4)]
-            # Concatenate all references along sequence dimension
-            ref_tokens = torch.cat(ref_tokens, dim=0)  # (total_ref_tokens, C)
-            ref_ids = torch.cat(ref_ids, dim=0)  # (total_ref_tokens, 4)
-            # Add batch dimension
-            ref_tokens = ref_tokens.unsqueeze(0).to(torch.bfloat16)  # (1, total_ref_tokens, C)
-            ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
+            ref_tokens, ref_ids = flux2_utils.pack_control_latent(encoded_refs)
 
         # context
         ctx_vec = batch["ctx_vec"]  # B, T, D  # [1, 512, 15360]
@@ -309,37 +296,30 @@ class Flux2NetworkTrainer(NetworkTrainer):
         if args.gradient_checkpointing:
             noisy_model_input.requires_grad_(True)
             ctx.requires_grad_(True)
-            if num_control_images:
+            if ref_tokens is not None:
                 ref_tokens.requires_grad_(True)
 
         # call DiT
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
         img_ids = img_ids.to(device=accelerator.device)
-        if ref_tokens:
+        if ref_tokens is not None:
             ref_tokens = ref_tokens.to(device=accelerator.device, dtype=network_dtype)
             ref_ids = ref_ids.to(device=accelerator.device)
         ctx = ctx.to(device=accelerator.device, dtype=network_dtype)
         ctx_ids = ctx_ids.to(device=accelerator.device)
 
-        # use 1.0 as guidance scale for FLUX.2 training
+        # use 1.0 as guidance scale for FLUX.2 non-base training
         guidance_vec = torch.full((bsize,), 1.0, device=accelerator.device, dtype=network_dtype)
 
-        img_input = noisy_model_input
-        img_input_ids = img_ids
+        img_input = noisy_model_input  # [B, HW, C]
+        img_input_ids = img_ids  # [B, HW, 4]
         if ref_tokens is not None:
             img_input = torch.cat((img_input, ref_tokens), dim=1)
             img_input_ids = torch.cat((img_input_ids, ref_ids), dim=1)
 
         timesteps = timesteps / 1000.0
-        model_pred = model(
-            x=img_input,  # [1, 8192, 128]
-            x_ids=img_input_ids,
-            timesteps=timesteps,
-            ctx=ctx,
-            ctx_ids=ctx_ids,
-            guidance=guidance_vec,
-        )  # [1, 8192, 128]
-        model_pred = model_pred[:, : noisy_model_input.shape[1]]  # [1, 4096, 128]
+        model_pred = model(x=img_input, x_ids=img_input_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+        model_pred = model_pred[:, : noisy_model_input.shape[1]]  # [B, 4096, 128]
 
         # unpack height/width latents
         model_pred = rearrange(model_pred, "b (h w) c -> b c h w", h=packed_latent_height, w=packed_latent_width)
@@ -356,7 +336,7 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     """Flux.2-dev specific parser setup"""
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
-    parser.add_argument("--fp8_te", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
     flux2_utils.add_model_version_args(parser)
     return parser
 

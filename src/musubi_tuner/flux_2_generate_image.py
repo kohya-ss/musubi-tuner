@@ -76,7 +76,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to control (reference) image(s) for Flux 2 image edit",
     )
-    parser.add_argument("--no_resize_control", action="store_true", help="do not resize control image")
+    parser.add_argument(
+        "--no_resize_control", action="store_true", help="Do not resize control image (default is to resize if too large)"
+    )
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps, default is 25")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
@@ -299,9 +301,10 @@ def load_dit_model(
     elif args.lycoris:
         loading_weight_dtype = torch.bfloat16  # lycoris requires bfloat16 or float16, because it merges weights
 
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     model = flux2_utils.load_flow_model(
         device=device,
-        model_version=args.model_version,
+        model_version_info=model_version_info,
         dit_path=args.dit,
         attn_mode=args.attn_mode,
         split_attn=False,
@@ -443,6 +446,7 @@ def prepare_image_inputs(
 
 def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_models: Optional[Dict] = None) -> Dict[str, Any]:
     """Prepare text-related inputs for I2V: LLM and TextEncoder encoding."""
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
     # load text encoder: conds_cache holds cached encodings for prompts without padding
     conds_cache = {}
@@ -454,7 +458,7 @@ def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_m
     else:  # Load if not in shared_models
         te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
-            args.model_version, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
+            model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
 
     # Store original devices to move back later if they were shared. This does nothing if shared_models is None
@@ -496,7 +500,7 @@ def prepare_text_inputs(args: argparse.Namespace, device: torch.device, shared_m
         move_models_to_device_if_needed()
 
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
+            if model_version_info.guidance_distilled:
                 ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
             else:
                 ctx_empty = text_embedder([""]).to(torch.bfloat16)
@@ -559,6 +563,7 @@ def generate(
     Returns:
         tuple: (flux2_models.AutoEncoder model (vae) or None, torch.Tensor generated latent)
     """
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     device, dit_weight_dtype = (gen_settings.device, gen_settings.dit_weight_dtype)
     vae_instance_for_return = None
 
@@ -668,7 +673,7 @@ def generate(
 
     # denoise
     timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1])  # TODO shift_value=args.flow_shift
-    if flux2_utils.FLUX2_MODEL_INFO[args.model_version].guidance_distilled:
+    if model_version_info.guidance_distilled:
         x = flux2_utils.denoise(
             model,
             x,
@@ -842,16 +847,13 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
         Dict: Dictionary of shared models (text/image encoders)
     """
     shared_models = {}
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+
     # Load text encoders to CPU
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
-        args.model_version,
-        args.text_encoder,
-        dtype=m3_dtype,
-        device="cpu",
-        disable_mmap=True,
+        model_version_info, args.text_encoder, dtype=m3_dtype, device="cpu", disable_mmap=True
     )
-
     shared_models["text_embedder"] = text_embedder
 
     return shared_models
@@ -868,6 +870,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         logger.warning("No valid prompts found")
         return
 
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     gen_settings = get_generation_settings(args)
     dit_weight_dtype = gen_settings.dit_weight_dtype
     device = gen_settings.device
@@ -900,7 +903,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     # Text Encoders loaded to CPU by load_text_encoder
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
     text_embedder_batch = flux2_utils.load_text_embedder(
-        args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+        model_version_info, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
     )
 
     # Text Encoders to device for this phase
