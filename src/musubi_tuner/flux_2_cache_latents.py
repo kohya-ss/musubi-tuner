@@ -7,11 +7,7 @@ import torch
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import (
-    ItemInfo,
-    ARCHITECTURE_FLUX_2,
-    save_latent_cache_flux_2,
-)
+from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_latent_cache_flux_2
 from musubi_tuner.flux_2 import flux2_utils
 from musubi_tuner.flux_2 import flux2_models
 import musubi_tuner.cache_latents as cache_latents
@@ -26,30 +22,26 @@ def preprocess_contents_flux_2(batch: List[ItemInfo]) -> tuple[torch.Tensor, Lis
 
     # Stack batch into target tensor (B,H,W,C) in RGB order and control images list of tensors (H, W, C)
     contents = []
-    controls = []
     for item in batch:
-        contents.append(torch.from_numpy(item.content))  # target image
+        content = item.content
+        content = content[0] if isinstance(content, list) else content  # (H, W, C)
+        contents.append(torch.from_numpy(content))  # target image
 
-        if item.control_content is not None and len(item.control_content) > 0:
-            if len(item.control_content) > 1:
-                limit_pixels = 1024**2
-            elif len(item.control_content) == 1:
-                limit_pixels = 2024**2
-            else:
-                limit_pixels = None
-            img_ctx = [(Image.fromarray(cc) if isinstance(cc, np.ndarray) else cc).convert("RGB") for cc in item.control_content]
-
-            img_ctx_prep = flux2_utils.default_prep(
-                img=img_ctx,
-                limit_pixels=limit_pixels,
-            )
-            controls.append(img_ctx_prep)
+    contents = torch.stack(contents, dim=0)  # B, H, W, C
 
     contents = torch.stack(contents, dim=0)  # B, H, W, C
     contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 
-    if not controls:
+    controls = []
+    for item in batch:
+        if item.control_content is not None and len(item.control_content) > 0:
+            controls.append([torch.from_numpy(cc[..., :3]) for cc in item.control_content])  # ensure RGB, remove alpha if present
+
+    if len(controls) > 0:  # controls is list of list of (H, W, C), where H, W can vary
+        controls = [[c.permute(2, 0, 1) for c in cl] for cl in controls]  # list of list of (H, W, C) -> list of list of (C, H, W)
+        controls = [[c / 127.5 - 1.0 for c in cl] for cl in controls]  # normalize to [-1, 1]
+    else:
         controls = None
 
     return contents, controls
@@ -65,20 +57,21 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo], a
         latents = ae.encode(contents.to(ae.device, dtype=ae.dtype))  # B, C, H, W
         if controls is not None:
             control_latents = [[ae.encode(c.to(ae.device, dtype=ae.dtype).unsqueeze(0))[0] for c in cl] for cl in controls]
+            # now control_latents is list of list of (C, H, W) tensors
         else:
             control_latents = None
 
     # save cache for each item in the batch
     for b, item in enumerate(batch):
         target_latent = latents[b]  # C, H, W. Target latents for this image (ground truth)
-        control_latent = control_latents[b] if control_latents is not None else None  # C, H, W
+        control_latent = control_latents[b] if control_latents is not None else None  # list of (C, H, W) tensors or None
 
         print(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {target_latent.shape}, "
             f"control latents shape: {[cl.shape for cl in control_latent] if control_latent is not None else None}"
         )
 
-        # save cache (file path is inside item.latent_cache_path pattern), remove batch dim
+        # save cache (file path is inside item.latent_cache_path pattern)
         save_latent_cache_flux_2(
             item_info=item,
             latent=target_latent,  # Ground truth for this image

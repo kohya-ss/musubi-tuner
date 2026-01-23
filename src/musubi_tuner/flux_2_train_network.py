@@ -7,7 +7,6 @@ from accelerate import Accelerator
 from einops import rearrange
 from PIL import Image
 
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_2, ARCHITECTURE_FLUX_2_FULL
 from musubi_tuner.flux_2 import flux2_models, flux2_utils
 from musubi_tuner.hv_train_network import (
     NetworkTrainer,
