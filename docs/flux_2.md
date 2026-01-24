@@ -98,6 +98,7 @@ python src/musubi_tuner/flux_2_cache_latents.py \
 - The dataset must be an image dataset.
 - Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
 - The `control_images` in the dataset config is used as the reference image. See [Dataset Config](./dataset_config.md#flux1-kontext-dev) for details.
+- `--vae_dtype` option is available to specify the VAE weight data type. Default is `float32`, `bfloat16` can also be specified. Specifying `bfloat16` reduces VRAM usage.
 
 <details>
 <summary>日本語</summary>
@@ -108,6 +109,7 @@ latentの事前キャッシングはFLUX.2専用のスクリプトを使用し�
 - `--ae`ではなく、`--vae`引数を指定してください。
 - データセットは画像データセットである必要があります。
 - データセット設定の`control_images`が参照画像として使用されます。詳細は[データセット設定](./dataset_config.md#flux1-kontext-dev)を参照してください。
+- `--vae_dtype`オプションは、VAEの重みデータ型を指定するためのオプションです。デフォルトは`float32`で、`bfloat16`も指定可能です。`bfloat16`を指定するとVRAM使用量が削減されます。
 
 </details>
 

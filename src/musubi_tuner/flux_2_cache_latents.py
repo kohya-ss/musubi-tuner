@@ -10,6 +10,7 @@ from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_latent_cache
 from musubi_tuner.flux_2 import flux2_utils
 from musubi_tuner.flux_2 import flux2_models
 import musubi_tuner.cache_latents as cache_latents
+from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -79,7 +80,6 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo], a
 
 def main():
     parser = cache_latents.setup_parser_common()
-    parser = cache_latents.hv_setup_parser(parser)  # VAE
     flux2_utils.add_model_version_args(parser)
 
     args = parser.parse_args()
@@ -88,9 +88,6 @@ def main():
     if args.disable_cudnn_backend:
         logger.info("Disabling cuDNN PyTorch backend.")
         torch.backends.cudnn.enabled = False
-
-    if args.vae_dtype is not None:
-        raise ValueError("VAE dtype is not supported in FLUX.2.")
 
     device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)
@@ -113,7 +110,8 @@ def main():
     assert args.vae is not None, "ae checkpoint is required"
 
     logger.info(f"Loading AE model from {args.vae}")
-    ae = flux2_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
+    vae_dtype = torch.float32 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
+    ae = flux2_utils.load_ae(args.vae, dtype=vae_dtype, device=device, disable_mmap=True)
     ae.to(device)
 
     # encoding closure
