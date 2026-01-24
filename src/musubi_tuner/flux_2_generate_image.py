@@ -1,4 +1,5 @@
 import argparse
+import gc
 from importlib.util import find_spec
 import random
 import os
@@ -407,7 +408,7 @@ def decode_latent(ae: flux2_models.AutoEncoder, latent: torch.Tensor, device: to
 
     ae.to(device)
     with torch.no_grad():
-        pixels = ae.decode(latent.to(device))  # decode to pixels
+        pixels = ae.decode(latent.to(device, ae.dtype))  # decode to pixels
     pixels = pixels.to("cpu")
     ae.to("cpu")
 
@@ -534,6 +535,7 @@ def prepare_text_inputs(
         if text_embedder:
             text_embedder.to(text_encoder_original_device)
 
+    gc.collect()  # Force cleanup of Text Encoder from GPU memory
     clean_memory_on_device(device)
 
     arg_c = {"ctx_vec": ctx_vec, "prompt": prompt}
@@ -680,6 +682,9 @@ def generate(
 
     if control_latent is not None:
         ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent)
+        control_latent = None  # free memory
+        ref_tokens = ref_tokens.to(device, dtype=torch.bfloat16)
+        ref_ids = ref_ids.to(device)
     else:
         ref_tokens = None
         ref_ids = None
@@ -713,10 +718,6 @@ def generate(
             img_cond_seq_ids=ref_ids,
         )
     x = torch.cat(flux2_utils.scatter_ids(x, x_ids)).squeeze(2)
-
-    model.to("cpu")
-    clean_memory_on_device(device)
-
     return vae_instance_for_return, x
 
 
@@ -781,6 +782,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     image_name = f"{time_flag}_{seed}{original_name}"
     sample = sample.unsqueeze(0).unsqueeze(2)  # C,HW -> BCTHW, where B=1, C=3, T=1
+    sample = sample.to(torch.float32)  # convert to float32 for numpy conversion
     save_images_grid(sample, save_path, image_name, rescale=True, create_subdir=False)
     logger.info(f"Sample images saved to: {save_path}/{image_name}")
 
@@ -941,6 +943,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # Models should be removed from device after prepare_text_inputs
     del text_embedder_batch, temp_shared_models_txt, conds_cache_batch
+    gc.collect()  # Force cleanup of Text Encoder from GPU memory
     clean_memory_on_device(device)
 
     # 3. Load DiT Model once
@@ -965,6 +968,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         if first_prompt_args.save_merged_model:
             logger.info("Merged DiT model saved. Skipping generation.")
             del dit_model
+            gc.collect()  # Force cleanup of DiT from GPU memory
             clean_memory_on_device(device)
             return
 
@@ -1010,6 +1014,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     del shared_models_for_generate["model"]
     del dit_model
+    gc.collect()  # Force cleanup of DiT from GPU memory
     clean_memory_on_device(device)
     synchronize_device(device)  # Ensure memory is freed before loading VAE for decoding
 
@@ -1205,9 +1210,12 @@ def main():
         # For single mode, precomputed data is None, shared_models is None.
         # generate will load all necessary models (VAE, Text/Image Encoders, DiT).
         returned_vae, latent = generate(args, gen_settings)
-        # print(f"Generated latent shape: {latent.shape}")
-        # if args.save_merged_model:
-        #     return
+
+        if args.blocks_to_swap > 0:
+            logger.info("Waiting for 5 seconds to finish block swap")
+            time.sleep(5)
+        gc.collect()  # Force cleanup of DiT from GPU memory
+        clean_memory_on_device(device)  # clean memory on device before moving models
 
         # Save latent and video
         # returned_vae from generate will be used for decoding here.
