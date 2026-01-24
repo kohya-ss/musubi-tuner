@@ -407,23 +407,6 @@ class AutoEncoder(nn.Module):
 
 # endregion
 
-
-# region config
-
-
-@dataclass
-class ModelSpec:
-    params: Flux2Params
-    ae_params: AutoEncoderParams
-    # ckpt_path: str | None
-    # ae_path: str | None
-    # repo_id: str | None
-    # repo_flow: str | None
-    # repo_ae: str | None
-
-
-# endregion
-
 # region model
 
 
@@ -602,20 +585,26 @@ class Flux2(nn.Module):
         num_txt_tokens = ctx.shape[1]
 
         timestep_emb = timestep_embedding(timesteps, 256)
+        del timesteps
         vec = self.time_in(timestep_emb)
+        del timestep_emb
         if self.use_guidance_embed:
             guidance_emb = timestep_embedding(guidance, 256)
             vec = vec + self.guidance_in(guidance_emb)
+            del guidance_emb
 
         double_block_mod_img = self.double_stream_modulation_img(vec)
         double_block_mod_txt = self.double_stream_modulation_txt(vec)
         single_block_mod, _ = self.single_stream_modulation(vec)
 
         img = self.img_in(x)
+        del x
         txt = self.txt_in(ctx)
-
+        del ctx
         pe_x = self.pe_embedder(x_ids)
+        del x_ids
         pe_ctx = self.pe_embedder(ctx_ids)
+        del ctx_ids
 
         attn_params = AttentionParams.create_attention_params(self.attn_mode, self.split_attn)  # No attention mask
 
@@ -628,8 +617,12 @@ class Flux2(nn.Module):
             if self.blocks_to_swap:
                 self.offloader_double.submit_move_blocks_forward(self.double_blocks, block_idx)
 
+        del double_block_mod_img, double_block_mod_txt
+
         img = torch.cat((txt, img), dim=1)
+        del txt
         pe = torch.cat((pe_ctx, pe_x), dim=2)
+        del pe_ctx, pe_x
 
         for block_idx, block in enumerate(self.single_blocks):
             if self.blocks_to_swap:
@@ -640,6 +633,8 @@ class Flux2(nn.Module):
             if self.blocks_to_swap:
                 self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
 
+        del single_block_mod, pe
+
         img = img[:, num_txt_tokens:, ...]
 
         img = self.final_layer(img, vec)
@@ -647,11 +642,7 @@ class Flux2(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-    ):
+    def __init__(self, dim: int, num_heads: int = 8):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -690,11 +681,7 @@ class Modulation(nn.Module):
 
 
 class LastLayer(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        out_channels: int,
-    ):
+    def __init__(self, hidden_size: int, out_channels: int):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, out_channels, bias=False)
@@ -746,18 +733,19 @@ class SingleStreamBlock(nn.Module):
 
     def _forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor], attn_params: AttentionParams) -> Tensor:
         mod_shift, mod_scale, mod_gate = mod
+        del mod
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
+        del mod_scale, mod_shift
 
-        qkv, mlp = torch.split(
-            self.linear1(x_mod),
-            [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor],
-            dim=-1,
-        )
+        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1)
 
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
 
-        attn = attention(q, k, v, pe, attn_params)
+        qkv_list = [q, k, v]
+        del q, k, v
+        attn = attention(qkv_list, pe, attn_params)
+        del qkv_list, pe
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
@@ -795,10 +783,7 @@ class DoubleStreamBlock(nn.Module):
         self.attn_mode = attn_mode
         self.split_attn = split_attn
 
-        self.img_attn = SelfAttention(
-            dim=hidden_size,
-            num_heads=num_heads,
-        )
+        self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads)
 
         self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_mlp = nn.Sequential(
@@ -808,18 +793,11 @@ class DoubleStreamBlock(nn.Module):
         )
 
         self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_attn = SelfAttention(
-            dim=hidden_size,
-            num_heads=num_heads,
-        )
+        self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads)
 
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_mlp = nn.Sequential(
-            nn.Linear(
-                hidden_size,
-                mlp_hidden_dim * self.mlp_mult_factor,
-                bias=False,
-            ),
+            nn.Linear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
             SiLUActivation(),
             nn.Linear(mlp_hidden_dim, hidden_size, bias=False),
         )
@@ -846,43 +824,61 @@ class DoubleStreamBlock(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = mod_img
         txt_mod1, txt_mod2 = mod_txt
+        del mod_img, mod_txt
 
         img_mod1_shift, img_mod1_scale, img_mod1_gate = img_mod1
         img_mod2_shift, img_mod2_scale, img_mod2_gate = img_mod2
         txt_mod1_shift, txt_mod1_scale, txt_mod1_gate = txt_mod1
         txt_mod2_shift, txt_mod2_scale, txt_mod2_gate = txt_mod2
+        del img_mod1, img_mod2, txt_mod1, txt_mod2
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
         img_modulated = (1 + img_mod1_scale) * img_modulated + img_mod1_shift
+        del img_mod1_scale, img_mod1_shift
 
         img_qkv = self.img_attn.qkv(img_modulated)
+        del img_modulated
         img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1_scale) * txt_modulated + txt_mod1_shift
-
+        del txt_mod1_scale, txt_mod1_shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
+        del txt_modulated
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
+        txt_len = txt_q.shape[2]
         q = torch.cat((txt_q, img_q), dim=2)
+        del txt_q, img_q
         k = torch.cat((txt_k, img_k), dim=2)
+        del txt_k, img_k
         v = torch.cat((txt_v, img_v), dim=2)
+        del txt_v, img_v
 
         pe = torch.cat((pe_ctx, pe), dim=2)
-        attn = attention(q, k, v, pe, attn_params)
-        txt_attn, img_attn = attn[:, : txt_q.shape[2]], attn[:, txt_q.shape[2] :]
+        del pe_ctx
+        qkv_list = [q, k, v]
+        del q, k, v
+        attn = attention(qkv_list, pe, attn_params)
+        del qkv_list, pe
+        txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
+        del attn
 
         # calculate the img blocks
         img = img + img_mod1_gate * self.img_attn.proj(img_attn)
+        del img_mod1_gate, img_attn
         img = img + img_mod2_gate * self.img_mlp((1 + img_mod2_scale) * (self.img_norm2(img)) + img_mod2_shift)
+        del img_mod2_gate, img_mod2_scale, img_mod2_shift
 
         # calculate the txt blocks
         txt = txt + txt_mod1_gate * self.txt_attn.proj(txt_attn)
+        del txt_mod1_gate, txt_attn
         txt = txt + txt_mod2_gate * self.txt_mlp((1 + txt_mod2_scale) * (self.txt_norm2(txt)) + txt_mod2_shift)
+        del txt_mod2_gate, txt_mod2_scale, txt_mod2_shift
         return img, txt
 
     def forward(
@@ -926,16 +922,6 @@ class MLPEmbedder(nn.Module):
             return checkpoint(self._forward, *args, use_reentrant=False, **kwargs)
         else:
             return self._forward(*args, **kwargs)
-
-    # def forward(self, x):
-    #     if self.training and self.gradient_checkpointing:
-    #         def create_custom_forward(func):
-    #             def custom_forward(*inputs):
-    #                 return func(*inputs)
-    #             return custom_forward
-    #         return torch.utils.checkpoint.checkpoint(create_custom_forward(self._forward), x, use_reentrant=USE_REENTRANT)
-    #     else:
-    #         return self._forward(x)
 
 
 class EmbedND(nn.Module):
@@ -996,13 +982,17 @@ class QKNorm(torch.nn.Module):
         return q.to(v), k.to(v)
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, attn_params: AttentionParams) -> Tensor:
+def attention(qkv_list: list[Tensor], pe: Tensor, attn_params: AttentionParams) -> Tensor:
+    q, k, v = qkv_list
+    del qkv_list
     q, k = apply_rope(q, k, pe)
 
     q = q.transpose(1, 2)  # B, H, L, D -> B, L, H, D
     k = k.transpose(1, 2)  # B, H, L, D -> B, L, H, D
     v = v.transpose(1, 2)  # B, H, L, D -> B, L, H, D
-    x = unified_attention(q, k, v, attn_params=attn_params)
+    qkv_list = [q, k, v]
+    del q, k, v
+    x = unified_attention(qkv_list, attn_params=attn_params)
     return x
 
 
