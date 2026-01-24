@@ -60,9 +60,9 @@ class Flux2ModelInfo:
     defaults: dict[str, float | int]
     fixed_params: set[str]
     guidance_distilled: bool
-    qwen_variant: Optional[str] = None  # None for Mistral
     architecture: str
     architecture_full: str
+    qwen_variant: Optional[str] = None  # None for Mistral
 
 
 FLUX2_MODEL_INFO = {
