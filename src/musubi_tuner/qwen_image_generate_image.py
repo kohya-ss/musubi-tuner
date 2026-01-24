@@ -664,7 +664,6 @@ def generate(
     Args:
         args: command line arguments
         shared_models: dictionary containing pre-loaded models (mainly for DiT)
-        precomputed_image_data: Optional dictionary with precomputed image data
         precomputed_text_data: Optional dictionary with precomputed text data
 
     Returns:
