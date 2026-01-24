@@ -171,6 +171,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - Memory saving options like `--fp8` (for DiT) and `--fp8_text_encoder` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
 -  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 - `--vae_dtype` option is available to specify the VAE weight data type. Default is `float32`, `bfloat16` can also be specified.
+- Instead of `--sdpa`, `--xformers` and `--flash_attn` can also be used. Make sure the related libraries are installed.
 
 <details>
 <summary>日本語</summary>
@@ -185,6 +186,7 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 - `--fp8`（DiT用）や`--fp8_text_encoder`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
 - `--vae_dtype`オプションは、VAEの重みデータ型を指定するためのオプションです。デフォルトは`float32`で、`bfloat16`も指定可能です。
+- `--sdpa`の代わりに`--xformers`および`--flash_attn`を使用することも可能です。関連するライブラリがインストールされていることを確認してください。
 
 </details>
 
