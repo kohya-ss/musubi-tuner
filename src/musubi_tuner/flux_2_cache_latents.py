@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Optional
 from PIL import Image
 
 import numpy as np
@@ -8,17 +8,17 @@ import torch.nn.functional as F
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import (
-    ItemInfo,
-    ARCHITECTURE_FLUX_2,
-    save_latent_cache_flux_2,
-)
+from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_latent_cache_flux_2
 from musubi_tuner.flux_2 import flux2_utils
 from musubi_tuner.flux_2 import flux2_models
+from musubi_tuner.flux_2.flux2_utils import Flux2ModelInfo
 import musubi_tuner.cache_latents as cache_latents
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# Module-level variable to hold model_version_info for encode_and_save_batch
+_model_version_info: Optional[Flux2ModelInfo] = None
 
 
 def preprocess_contents_flux_2(batch: List[ItemInfo]) -> tuple[torch.Tensor, List[List[np.ndarray]]]:
@@ -100,11 +100,14 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
             item_info=item,
             latent=target_latent,  # Ground truth for this image
             control_latent=control_latent,  # Control latent for this image
+            arch_full=_model_version_info.architecture_full,  # e.g., "flux_2_dev", "flux_2_klein_4b"
             mask_weights=mask_weights_i,  # Mask weights for mask-weighted loss training
         )
 
 
 def main():
+    global _model_version_info
+
     parser = cache_latents.setup_parser_common()
     parser = cache_latents.hv_setup_parser(parser)  # VAE
     flux2_utils.add_model_version_args(parser)
@@ -115,8 +118,18 @@ def main():
         logger.info("Disabling cuDNN PyTorch backend.")
         torch.backends.cudnn.enabled = False
 
+    # Get model version info (dataclass with architecture info)
+    _model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+    logger.info(f"Model version: {args.model_version}, architecture: {_model_version_info.architecture}")
+
+    # VAE dtype (defaults to float32)
+    vae_dtype = torch.float32
     if args.vae_dtype is not None:
-        raise ValueError("VAE dtype is not supported in FLUX.2.")
+        if args.vae_dtype == "fp16":
+            vae_dtype = torch.float16
+        elif args.vae_dtype == "bf16":
+            vae_dtype = torch.bfloat16
+        logger.info(f"Using VAE dtype: {vae_dtype}")
 
     device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)
@@ -125,7 +138,7 @@ def main():
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
-    blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_FLUX_2)
+    blueprint = blueprint_generator.generate(user_config, args, architecture=_model_version_info.architecture)
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
@@ -139,7 +152,7 @@ def main():
     assert args.vae is not None, "ae checkpoint is required"
 
     logger.info(f"Loading AE model from {args.vae}")
-    ae = flux2_utils.load_ae(args.vae, dtype=torch.float32, device=device, disable_mmap=True)
+    ae = flux2_utils.load_ae(args.vae, dtype=vae_dtype, device=device, disable_mmap=True)
     ae.to(device)
 
     # encoding closure

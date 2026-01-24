@@ -1,17 +1,15 @@
 import argparse
+from typing import Optional
 
 import torch
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 
-from musubi_tuner.dataset.image_video_dataset import (
-    ARCHITECTURE_FLUX_2,
-    ItemInfo,
-    save_text_encoder_output_cache_flux_2,
-)
+from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_text_encoder_output_cache_flux_2
 
 from musubi_tuner.flux_2 import flux2_utils
+from musubi_tuner.flux_2.flux2_utils import Flux2ModelInfo
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 import logging
 
@@ -19,15 +17,21 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# Module-level variable to hold model_version_info for encode_and_save_batch
+_model_version_info: Optional[Flux2ModelInfo] = None
+
 
 def encode_and_save_batch(
     text_embedder: torch.nn.Module,
     guidance_distilled: bool,
     batch: list[ItemInfo],
     device: torch.device,
+    arch_full: str,
 ):
     prompts = [item.caption for item in batch]
-    with torch.autocast(device_type=device.type, dtype=text_embedder.dtype), torch.no_grad():
+    # Use bfloat16 for autocast when text embedder uses FP8 (itemsize == 1 byte)
+    autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype
+    with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
         ctx_vec = text_embedder(prompts)
         ## TODO train with guidance ?
         # if guidance_distilled:
@@ -42,10 +46,12 @@ def encode_and_save_batch(
 
     # save prompt cache
     for item, _ctx_vec in zip(batch, ctx_vec):
-        save_text_encoder_output_cache_flux_2(item, _ctx_vec)
+        save_text_encoder_output_cache_flux_2(item, _ctx_vec, arch_full=arch_full)
 
 
 def main():
+    global _model_version_info
+
     parser = cache_text_encoder_outputs.setup_parser_common()
     parser = flux_2_setup_parser(parser)
 
@@ -54,11 +60,15 @@ def main():
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
+    # Get model version info (dataclass with architecture info)
+    _model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+    logger.info(f"Model version: {args.model_version}, architecture: {_model_version_info.architecture}")
+
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
-    blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_FLUX_2)
+    blueprint = blueprint_generator.generate(user_config, args, architecture=_model_version_info.architecture)
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
@@ -66,26 +76,28 @@ def main():
     # prepare cache files and paths: all_cache_files_for_dataset = exisiting cache files, all_cache_paths_for_dataset = all cache paths in the dataset
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
 
-    # Load Mistral 3 text encoder
-    m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
+    # Load text encoder (Mistral3 for dev, Qwen3 for Klein)
+    te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
-        args.model_version,
+        _model_version_info,
         args.text_encoder,
-        dtype=m3_dtype,
+        dtype=te_dtype,
         device=device,
         disable_mmap=True,
     )
 
-    # Encode with Mistral 3 text encoder
-    logger.info("Encoding with Mistral 3 text encoder")
+    # Encode with text encoder
+    encoder_name = "Qwen3" if _model_version_info.qwen_variant else "Mistral3"
+    logger.info(f"Encoding with {encoder_name} text encoder")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
         nonlocal text_embedder
         encode_and_save_batch(
             text_embedder,
-            flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"],
+            _model_version_info.guidance_distilled,
             batch,
             device,
+            arch_full=_model_version_info.architecture_full,
         )
 
     cache_text_encoder_outputs.process_text_encoder_batches(

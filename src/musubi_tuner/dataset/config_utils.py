@@ -28,6 +28,59 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
+# Deprecated key mapping for backward compatibility
+DEPRECATED_KEY_MAP = {
+    "flux_kontext_no_resize_control": "no_resize_control",
+    "qwen_image_edit_no_resize_control": "no_resize_control",
+    "qwen_image_edit_control_resolution": "control_resolution",
+}
+
+
+def normalize_deprecated_keys_in_section(section: dict, *, section_name: str) -> None:
+    """Normalize deprecated config keys in a section, with warnings."""
+    for old_key, new_key in DEPRECATED_KEY_MAP.items():
+        if old_key not in section:
+            continue
+
+        if new_key in section:
+            logger.warning(
+                f"Deprecated config key '{old_key}' is ignored because '{new_key}' is already set in {section_name}."
+            )
+            section.pop(old_key, None)
+            continue
+
+        section[new_key] = section.pop(old_key)
+        logger.warning(f"Deprecated config key '{old_key}' found in {section_name}; use '{new_key}' instead.")
+
+
+def normalize_deprecated_keys_in_user_config(config: dict) -> None:
+    """Normalize deprecated keys across all config sections (general, datasets, subsets)."""
+    general = config.get("general")
+    if isinstance(general, dict):
+        normalize_deprecated_keys_in_section(general, section_name="general")
+
+    datasets = config.get("datasets")
+    if not isinstance(datasets, list):
+        return
+
+    for dataset_idx, dataset in enumerate(datasets):
+        if not isinstance(dataset, dict):
+            continue
+
+        normalize_deprecated_keys_in_section(dataset, section_name=f"datasets[{dataset_idx}]")
+
+        subsets = dataset.get("subsets")
+        if not isinstance(subsets, list):
+            continue
+
+        for subset_idx, subset in enumerate(subsets):
+            if isinstance(subset, dict):
+                normalize_deprecated_keys_in_section(
+                    subset,
+                    section_name=f"datasets[{dataset_idx}].subsets[{subset_idx}]",
+                )
+
+
 @dataclass
 class BaseDatasetParams:
     resolution: Tuple[int, int] = (960, 544)
@@ -57,9 +110,9 @@ class ImageDatasetParams(BaseDatasetParams):
     fp_1f_target_index: Optional[int] = None
     fp_1f_no_post: Optional[bool] = False
 
-    flux_kontext_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
-    qwen_image_edit_no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
-    qwen_image_edit_control_resolution: Optional[Tuple[int, int]] = None  # if set, control images are resized to this resolution
+    # Control image handling (renamed from flux_kontext_*/qwen_image_edit_* keys)
+    no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
+    control_resolution: Optional[Tuple[int, int]] = None  # if set, control images are resized to this resolution
 
 
 @dataclass
@@ -134,9 +187,8 @@ class ConfigSanitizer:
         "fp_1f_clean_indices": [int],
         "fp_1f_target_index": int,
         "fp_1f_no_post": bool,
-        "flux_kontext_no_resize_control": bool,
-        "qwen_image_edit_no_resize_control": bool,
-        "qwen_image_edit_control_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
+        "no_resize_control": bool,
+        "control_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -334,9 +386,8 @@ def generate_dataset_group_by_blueprint(
         fp_1f_clean_indices: {dataset.fp_1f_clean_indices}
         fp_1f_target_index: {dataset.fp_1f_target_index}
         fp_1f_no_post: {dataset.fp_1f_no_post}
-        flux_kontext_no_resize_control: {dataset.flux_kontext_no_resize_control}
-        qwen_image_edit_no_resize_control: {dataset.qwen_image_edit_no_resize_control}
-        qwen_image_edit_control_resolution: {dataset.qwen_image_edit_control_resolution}
+        no_resize_control: {dataset.no_resize_control}
+        control_resolution: {dataset.control_resolution}
     \n"""
                 ),
                 "    ",
@@ -397,6 +448,9 @@ def load_user_config(file: str) -> dict:
             raise
     else:
         raise ValueError(f"not supported config file format / 対応していない設定ファイルの形式です: {file}")
+
+    # Normalize deprecated keys (e.g., flux_kontext_no_resize_control -> no_resize_control)
+    normalize_deprecated_keys_in_user_config(config)
 
     return config
 

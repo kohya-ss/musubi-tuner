@@ -116,8 +116,14 @@ def apply_masked_loss(
         # Return fp32 for consistency with masked path (avoids dtype depending on --use_mask_loss)
         return loss.float().mean()
 
-    if loss.ndim != 5:
-        raise ValueError(f"Expected loss to be 5D, got {loss.ndim}D: {tuple(loss.shape)}")
+    # Handle both 4D (FLUX.2 images) and 5D (video) loss tensors
+    if loss.ndim == 4:
+        # FLUX.2 produces per-image loss (B, C, H, W); treat it as F=1 for layout='video'
+        if layout != "video":
+            raise ValueError("4D loss is only supported for layout='video'")
+        loss = loss.unsqueeze(2)  # (B, C, H, W) -> (B, C, 1, H, W)
+    elif loss.ndim != 5:
+        raise ValueError(f"Expected loss to be 4D or 5D, got {loss.ndim}D: {tuple(loss.shape)}")
 
     if drop_base_frame and layout != "layered":
         raise ValueError("drop_base_frame=True is only valid with layout='layered'")

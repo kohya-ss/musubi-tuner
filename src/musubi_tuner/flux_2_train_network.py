@@ -7,8 +7,8 @@ from accelerate import Accelerator
 from einops import rearrange
 from PIL import Image
 
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_2, ARCHITECTURE_FLUX_2_FULL
 from musubi_tuner.flux_2 import flux2_models, flux2_utils
+from musubi_tuner.flux_2.flux2_utils import Flux2ModelInfo
 from musubi_tuner.hv_train_network import (
     NetworkTrainer,
     load_prompts,
@@ -28,19 +28,29 @@ logging.basicConfig(level=logging.INFO)
 class Flux2NetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
+        self.model_version_info: Flux2ModelInfo | None = None
 
     # region model specific
 
     @property
     def architecture(self) -> str:
-        return ARCHITECTURE_FLUX_2
+        if self.model_version_info is None:
+            raise RuntimeError("model_version_info not set - call handle_model_specific_args first")
+        return self.model_version_info.architecture
 
     @property
     def architecture_full_name(self) -> str:
-        return ARCHITECTURE_FLUX_2_FULL
+        if self.model_version_info is None:
+            raise RuntimeError("model_version_info not set - call handle_model_specific_args first")
+        return self.model_version_info.architecture_full
 
     def handle_model_specific_args(self, args):
+        # Get model version info first (dataclass with architecture info)
+        self.model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+        logger.info(f"Model version: {args.model_version}, architecture: {self.model_version_info.architecture}")
+
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
+        self.default_discrete_flow_shift = None  # Use model defaults
         if not args.split_attn:
             logger.info(
                 "Split attention will be automatically enabled if the control images are not resized to the same size as the target image."
@@ -61,17 +71,24 @@ class Flux2NetworkTrainer(NetworkTrainer):
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
         prompts = load_prompts(sample_prompts)
 
-        # Load Mistral 3
-        m3_dtype = torch.float8e4m3fn if args.fp8_te else torch.bfloat16
+        # Get model version info
+        model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+
+        # Load text encoder (Mistral3 for dev, Qwen3 for Klein)
+        te_dtype = torch.float8_e4m3fn if args.fp8_te else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
-            args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+            model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
 
-        # Encode with Mistral 3 text encoders
-        logger.info("Encoding with Mistral 3 text encoders")
+        # Encode with text encoder
+        encoder_name = "Qwen3" if model_version_info.qwen_variant else "Mistral3"
+        logger.info(f"Encoding with {encoder_name} text encoder")
 
-        sample_prompts_te_outputs = {}  # (prompt) -> (t5, clip)
-        with torch.amp.autocast(device_type=device.type, dtype=m3_dtype), torch.no_grad():
+        # Use bfloat16 for autocast when text embedder uses FP8 (itemsize == 1 byte)
+        autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype
+
+        sample_prompts_te_outputs = {}  # (prompt) -> (ctx_vec,)
+        with torch.amp.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
             for prompt_dict in prompts:
                 prompt = prompt_dict.get("prompt", "")
                 if prompt is None or prompt in sample_prompts_te_outputs:
@@ -79,7 +96,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
                 # encode prompt
                 logger.info(f"cache Text Encoder outputs for prompt: {prompt}")
-                if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+                if model_version_info.guidance_distilled:
                     ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
                 else:
                     ctx_empty = text_embedder([""]).to(torch.bfloat16)
@@ -160,8 +177,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         clean_memory_on_device(device)
 
         # denoise
+        model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1])
-        if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+        if model_version_info.guidance_distilled:
             x = flux2_utils.denoise(
                 model,
                 x,
@@ -227,15 +245,15 @@ class Flux2NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
+        model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         model = flux2_utils.load_flow_model(
-            model_version=args.model_version,
-            ckpt_path=args.dit,
-            dtype=None,
             device=loading_device,
-            disable_mmap=True,
+            model_version_info=model_version_info,
+            dit_path=args.dit,
             attn_mode=attn_mode,
             split_attn=split_attn,
             loading_device=loading_device,
+            dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
         )
         return model
@@ -344,12 +362,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # unpack height/width latents
         model_pred = rearrange(model_pred, "b (h w) c -> b c h w", h=packed_latent_height, w=packed_latent_width)
 
-        # flow matching loss
+        # flow matching loss: target = v = (z_1 - z_0) = (noise - latents)
+        # model_pred and target remain 4D (B, C, H, W) - apply_masked_loss() now handles 4D tensors
         target = noise - latents
-
-        # Expand to 5D (B, C, 1, H, W) for apply_masked_loss() compatibility (layout="video" with F=1)
-        model_pred = model_pred.unsqueeze(2)
-        target = target.unsqueeze(2)
 
         return model_pred, target
 

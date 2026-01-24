@@ -1,14 +1,16 @@
 import argparse
 import json
+import numpy as np
 import torch
 import torchvision
 import math
 
 
+from dataclasses import dataclass
 from accelerate import init_empty_weights
 from einops import rearrange
 from PIL import Image
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 from torch import Tensor
 from torch import nn
 from transformers import (
@@ -20,6 +22,18 @@ from transformers import (
 )
 from tqdm import tqdm
 
+from musubi_tuner.dataset.image_video_dataset import (
+    ARCHITECTURE_FLUX_2_DEV,
+    ARCHITECTURE_FLUX_2_DEV_FULL,
+    ARCHITECTURE_FLUX_2_KLEIN_4B,
+    ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
+    ARCHITECTURE_FLUX_2_KLEIN_9B,
+    ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
+    BucketSelector,
+)
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+from musubi_tuner.utils import image_utils
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.zimage.zimage_utils import load_qwen3
 
 from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
@@ -41,51 +55,90 @@ SYSTEM_MESSAGE = """You are an AI that reasons about image descriptions. You giv
 attribution and actions without speculation."""
 
 
+@dataclass(frozen=True)
+class Flux2ModelInfo:
+    """Model information for FLUX.2 variants."""
+    params: Flux2Params
+    defaults: dict[str, float | int]
+    fixed_params: set[str]
+    guidance_distilled: bool
+    architecture: str  # Short code for cache filenames (e.g., 'f2d', 'f2k4b')
+    architecture_full: str  # Full name for metadata (e.g., 'flux_2_dev', 'flux_2_klein_4b')
+    qwen_variant: Optional[str] = None  # None for Mistral3, '4B' or '8B' for Qwen3
+
+
+# Canonical model version names (new upstream format)
 FLUX2_MODEL_INFO = {
-    "flux.2-klein-4b": {
-        "params": Klein4BParams(),
-        "qwen_variant": "4B",
-        "defaults": {"guidance": 1.0, "num_steps": 4},
-        "fixed_params": {"guidance", "num_steps"},
-        "guidance_distilled": True,
-    },
-    "flux.2-klein-base-4b": {
-        "params": Klein4BParams(),
-        "qwen_variant": "4B",
-        "defaults": {"guidance": 4.0, "num_steps": 50},
-        "fixed_params": {},
-        "guidance_distilled": False,
-    },
-    "flux.2-klein-9b": {
-        "params": Klein9BParams(),
-        "qwen_variant": "8B",
-        "defaults": {"guidance": 1.0, "num_steps": 4},
-        "fixed_params": {"guidance", "num_steps"},
-        "guidance_distilled": True,
-    },
-    "flux.2-klein-base-9b": {
-        "params": Klein9BParams(),
-        "qwen_variant": "8B",
-        "defaults": {"guidance": 4.0, "num_steps": 50},
-        "fixed_params": {},
-        "guidance_distilled": False,
-    },
-    "flux.2-dev": {
-        "params": Flux2Params(),
-        "defaults": {"guidance": 4.0, "num_steps": 50},
-        "fixed_params": {},
-        "guidance_distilled": True,
-    },
+    "klein-4b": Flux2ModelInfo(
+        params=Klein4BParams(),
+        qwen_variant="4B",
+        defaults={"guidance": 1.0, "num_steps": 4},
+        fixed_params={"guidance", "num_steps"},
+        guidance_distilled=True,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_4B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
+    ),
+    "klein-base-4b": Flux2ModelInfo(
+        params=Klein4BParams(),
+        qwen_variant="4B",
+        defaults={"guidance": 4.0, "num_steps": 50},
+        fixed_params=set(),
+        guidance_distilled=False,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_4B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
+    ),
+    "klein-9b": Flux2ModelInfo(
+        params=Klein9BParams(),
+        qwen_variant="8B",
+        defaults={"guidance": 1.0, "num_steps": 4},
+        fixed_params={"guidance", "num_steps"},
+        guidance_distilled=True,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_9B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
+    ),
+    "klein-base-9b": Flux2ModelInfo(
+        params=Klein9BParams(),
+        qwen_variant="8B",
+        defaults={"guidance": 4.0, "num_steps": 50},
+        fixed_params=set(),
+        guidance_distilled=False,
+        architecture=ARCHITECTURE_FLUX_2_KLEIN_9B,
+        architecture_full=ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
+    ),
+    "dev": Flux2ModelInfo(
+        params=Flux2Params(),
+        defaults={"guidance": 4.0, "num_steps": 50},
+        fixed_params=set(),
+        guidance_distilled=True,
+        architecture=ARCHITECTURE_FLUX_2_DEV,
+        architecture_full=ARCHITECTURE_FLUX_2_DEV_FULL,
+    ),
 }
 
 
+# Backward-compatibility aliases for old model version names
+MODEL_VERSION_ALIASES = {
+    "flux.2-dev": "dev",
+    "flux.2-klein-4b": "klein-4b",
+    "flux.2-klein-base-4b": "klein-base-4b",
+    "flux.2-klein-9b": "klein-9b",
+    "flux.2-klein-base-9b": "klein-base-9b",
+}
+
+
+def resolve_model_version(v: str) -> str:
+    """Resolve model version aliases to canonical names."""
+    return MODEL_VERSION_ALIASES.get(v, v)
+
+
 def add_model_version_args(parser: argparse.ArgumentParser):
+    """Add --model_version argument with alias support."""
     parser.add_argument(
         "--model_version",
-        type=str,
-        default="flux.2-dev",
+        type=resolve_model_version,  # Accepts aliases, converts to canonical
+        default="dev",
         choices=list(FLUX2_MODEL_INFO.keys()),
-        help="model version",
+        help="model version (e.g., 'dev', 'klein-4b', 'klein-9b')",
     )
 
 
@@ -131,6 +184,71 @@ def scatter_ids(x: Tensor, x_ids: Tensor) -> list[Tensor]:
     return x_list
 
 
+def pack_control_latent(control_latent: list[Tensor] | None) -> tuple[Optional[Tensor], Optional[Tensor]]:
+    """Pack control latents into sequence format for FLUX.2 reference/control conditioning.
+
+    Args:
+        control_latent: List of latent tensors (C, H, W) or (B, C, H, W).
+
+    Returns:
+        Tuple of (ref_tokens, ref_ids) where ref_tokens is (1, total_tokens, C) or (B, total_tokens, C)
+        and ref_ids is (1, total_tokens, 4) or (B, total_tokens, 4).
+    """
+    if control_latent is None:
+        return None, None
+
+    scale = 10
+    ndim = control_latent[0].ndim  # 3 or 4
+
+    # Create time offsets for each reference
+    t_off = [scale + scale * t for t in torch.arange(0, len(control_latent))]
+    t_off = [t.view(-1) for t in t_off]
+
+    # Process with position IDs
+    ref_tokens, ref_ids = listed_prc_img(control_latent, t_coord=t_off)  # list[(HW, C)], list[(HW, 4)]
+
+    # Concatenate all references along sequence dimension
+    cat_dimension = 0 if ndim == 3 else 1
+    ref_tokens = torch.cat(ref_tokens, dim=cat_dimension)  # (total_ref_tokens, C) or (B, total_ref_tokens, C)
+    ref_ids = torch.cat(ref_ids, dim=cat_dimension)  # (total_ref_tokens, 4) or (B, total_ref_tokens, 4)
+
+    # Add batch dimension
+    if ndim == 3:
+        ref_tokens = ref_tokens.unsqueeze(0)  # (1, total_ref_tokens, C)
+        ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
+    return ref_tokens, ref_ids
+
+
+def preprocess_control_image(
+    control_image_path: str, limit_size: Optional[Tuple[int, int]] = None
+) -> tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
+    """Preprocess a control image for the FLUX.2 model.
+
+    Args:
+        control_image_path: Path to the control image.
+        limit_size: Optional (width, height) limit for resizing. If None or larger than
+            the control image, only bucket snapping and cropping is performed.
+
+    Returns:
+        Tuple of (control_image_tensor, control_image_np, None) where:
+            - control_image_tensor: Preprocessed tensor in NCHW format.
+            - control_image_np: Preprocessed numpy array in HWC format.
+            - None: Placeholder for compatibility.
+    """
+    control_image = Image.open(control_image_path)
+
+    if limit_size is None or limit_size[0] * limit_size[1] >= control_image.size[0] * control_image.size[1]:
+        # No resizing needed - snap to bucket resolution (FLUX.2 requires multiples of 16)
+        resize_size = BucketSelector.calculate_bucket_resolution(
+            control_image.size, control_image.size, architecture=ARCHITECTURE_FLUX_2_DEV
+        )
+    else:
+        resize_size = limit_size
+
+    control_image_tensor, control_image_np, _ = image_utils.preprocess_image(control_image, *resize_size, handle_alpha=False)
+    return control_image_tensor, control_image_np, None
+
+
 def encode_image_refs(ae, img_ctx: list[Image.Image]):
     scale = 10
 
@@ -173,7 +291,16 @@ def encode_image_refs(ae, img_ctx: list[Image.Image]):
 
 
 def prc_txt(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
-    _l, _ = x.shape  # noqa: F841
+    """Process text embeddings into sequence format with position IDs.
+
+    Args:
+        x: Text embeddings tensor (L, D) or (B, L, D).
+        t_coord: Optional time coordinate.
+
+    Returns:
+        Tuple of (x, x_ids) where x_ids contains position information.
+    """
+    _l = x.shape[-2]
 
     coords = {
         "t": torch.arange(1) if t_coord is None else t_coord,
@@ -182,6 +309,8 @@ def prc_txt(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
         "l": torch.arange(_l),
     }
     x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
+    if x.ndim == 3:
+        x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)  # (B, L, 4)
     return x, x_ids.to(x.device)
 
 
@@ -221,7 +350,18 @@ def listed_wrapper(fn):
 
 
 def prc_img(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
-    _, h, w = x.shape  # noqa: F841
+    """Process image latents into sequence format with position IDs.
+
+    Args:
+        x: Image latent tensor (C, H, W) or (B, C, H, W).
+        t_coord: Optional time coordinate.
+
+    Returns:
+        Tuple of (x, x_ids) where x is flattened to (HW, C) or (B, HW, C)
+        and x_ids contains position information.
+    """
+    h = x.shape[-2]
+    w = x.shape[-1]
     x_coords = {
         "t": torch.arange(1) if t_coord is None else t_coord,
         "h": torch.arange(h),
@@ -229,7 +369,9 @@ def prc_img(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
         "l": torch.arange(1),
     }
     x_ids = torch.cartesian_prod(x_coords["t"], x_coords["h"], x_coords["w"], x_coords["l"])
-    x = rearrange(x, "c h w -> (h w) c")
+    x = rearrange(x, "c h w -> (h w) c") if x.ndim == 3 else rearrange(x, "b c h w -> b (h w) c")
+    if x.ndim == 3:  # after rearrange
+        x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)  # (B, HW, 4)
     return x, x_ids.to(x.device)
 
 
@@ -321,10 +463,23 @@ def generalized_time_snr_shift(t: Tensor, mu: float, sigma: float) -> Tensor:
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
-def get_schedule(num_steps: int, image_seq_len: int) -> list[float]:
+def get_schedule(num_steps: int, image_seq_len: int, flow_shift: Optional[float] = None) -> list[float]:
+    """Generate a timestep schedule for the diffusion process.
+
+    Args:
+        num_steps: Number of diffusion steps.
+        image_seq_len: Image sequence length (H*W in latent space).
+        flow_shift: Optional flow shift for linear schedule. If None, uses empirical mu.
+
+    Returns:
+        List of timesteps from 1 to 0.
+    """
     mu = compute_empirical_mu(image_seq_len, num_steps)
     timesteps = torch.linspace(1, 0, num_steps + 1)
-    timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
+    if flow_shift is not None:
+        timesteps = (timesteps * flow_shift) / (1 + (flow_shift - 1) * timesteps)
+    else:
+        timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
     return timesteps.tolist()
 
 
@@ -473,48 +628,66 @@ def concatenate_images(
 
 
 def load_flow_model(
-    model_version: str,
-    ckpt_path: str,
-    dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
-    disable_mmap: bool = False,
-    attn_mode: str = "torch",
-    split_attn: bool = False,
-    loading_device: Optional[Union[str, torch.device]] = None,
+    model_version_info: Flux2ModelInfo,
+    dit_path: str,
+    attn_mode: str,
+    split_attn: bool,
+    loading_device: Union[str, torch.device],
+    dit_weight_dtype: Optional[torch.dtype] = None,
     fp8_scaled: bool = False,
+    lora_weights_list: Optional[dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[list[float]] = None,
+    disable_numpy_memmap: bool = False,
 ) -> flux2_models.Flux2:
-    if loading_device is None:
-        loading_device = device
+    """Load a FLUX.2 model with optional LoRA and FP8 optimization.
+
+    Args:
+        device: Target device for computation.
+        model_version_info: Model info from FLUX2_MODEL_INFO.
+        dit_path: Path to DiT checkpoint.
+        attn_mode: Attention mode ('torch', 'flash', etc.).
+        split_attn: Whether to use split attention.
+        loading_device: Device to load model weights to.
+        dit_weight_dtype: Data type for model weights (None for fp8_scaled).
+        fp8_scaled: Whether to use FP8 optimization.
+        lora_weights_list: Optional LoRA weights to merge.
+        lora_multipliers: Optional LoRA multipliers.
+        disable_numpy_memmap: Whether to disable numpy memmap.
+
+    Returns:
+        Loaded Flux2 model.
+    """
+    # dit_weight_dtype is None for fp8_scaled
+    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
     device = torch.device(device)
-    loading_device = torch.device(loading_device) if loading_device is not None else device
-    flux_2_loading_device = loading_device if not fp8_scaled else torch.device("cpu")
+    loading_device = torch.device(loading_device)
 
     # build model
     with init_empty_weights():
-        # params = flux2_models.configs_flux_2_dev.params
-        params = FLUX2_MODEL_INFO[model_version]["params"]
-
+        params = model_version_info.params
         model = flux2_models.Flux2(params, attn_mode, split_attn)
-        if dtype is not None:
-            model = model.to(dtype)
+        if dit_weight_dtype is not None:
+            model.to(dit_weight_dtype)
 
-    # load_sft doesn't support torch.device
-    logger.info(f"Loading state dict from {ckpt_path} to {flux_2_loading_device}")
-    sd = load_split_weights(ckpt_path, device=flux_2_loading_device, disable_mmap=disable_mmap, dtype=dtype)
+    # load model weights with dynamic fp8 optimization and LoRA merging if needed
+    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+    sd = load_safetensors_with_lora_and_fp8(
+        model_files=dit_path,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=fp8_scaled,
+        calc_device=device,
+        move_to_device=(loading_device == device),
+        dit_weight_dtype=dit_weight_dtype,
+        target_keys=flux2_models.FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        disable_numpy_memmap=disable_numpy_memmap,
+    )
 
-    # # if the key has annoying prefix, remove it
-    # for key in list(sd.keys()):
-    #     new_key = key.replace("model.diffusion_model.", "")
-    #     if new_key == key:
-    #         break  # the model doesn't have annoying prefix
-    #     sd[new_key] = sd.pop(key)
-
-    # if fp8_scaled is True, convert the model to fp8
     if fp8_scaled:
-        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
-        logger.info("Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
 
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device
@@ -524,6 +697,7 @@ def load_flow_model(
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Flux 2: {info}")
+
     return model
 
 
@@ -832,17 +1006,30 @@ class Qwen3Embedder(nn.Module):
 
 
 def load_text_embedder(
-    model_version: str,
+    model_version_info: Flux2ModelInfo,
     ckpt_path: str,
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
     disable_mmap: bool = False,
     state_dict: Optional[dict] = None,
-) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
-    if model_version == "flux.2-dev":
+) -> Union[Mistral3Embedder, Qwen3Embedder]:
+    """Load the text embedder for a FLUX.2 model variant.
+
+    Args:
+        model_version_info: Model info from FLUX2_MODEL_INFO.
+        ckpt_path: Path to text encoder checkpoint.
+        dtype: Data type for model weights.
+        device: Target device.
+        disable_mmap: Whether to disable memory mapping.
+        state_dict: Optional pre-loaded state dict.
+
+    Returns:
+        Mistral3Embedder for dev model, Qwen3Embedder for Klein models.
+    """
+    if model_version_info.qwen_variant is None:
         return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict)
 
-    variant = FLUX2_MODEL_INFO[model_version]["qwen_variant"]
+    variant = model_version_info.qwen_variant
     is_8b = variant == "8B"
     tokenizer_id = "Qwen/Qwen3-8B" if is_8b else "Qwen/Qwen3-4B"
     tokenizer, qwen3 = load_qwen3(ckpt_path, dtype, device, disable_mmap, state_dict, is_8b=is_8b, tokenizer_id=tokenizer_id)

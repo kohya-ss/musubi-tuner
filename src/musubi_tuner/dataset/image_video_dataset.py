@@ -74,8 +74,15 @@ ARCHITECTURE_FRAMEPACK = "fp"
 ARCHITECTURE_FRAMEPACK_FULL = "framepack"
 ARCHITECTURE_FLUX_KONTEXT = "fk"
 ARCHITECTURE_FLUX_KONTEXT_FULL = "flux_kontext"
-ARCHITECTURE_FLUX_2 = "f2"
-ARCHITECTURE_FLUX_2_FULL = "flux_2"
+ARCHITECTURE_FLUX_2_DEV = "f2d"
+ARCHITECTURE_FLUX_2_DEV_FULL = "flux_2_dev"
+ARCHITECTURE_FLUX_2_KLEIN_4B = "f2k4b"
+ARCHITECTURE_FLUX_2_KLEIN_4B_FULL = "flux_2_klein_4b"
+ARCHITECTURE_FLUX_2_KLEIN_9B = "f2k9b"
+ARCHITECTURE_FLUX_2_KLEIN_9B_FULL = "flux_2_klein_9b"
+# Backward compatibility aliases (prefer using model-specific constants above)
+ARCHITECTURE_FLUX_2 = ARCHITECTURE_FLUX_2_DEV  # Default to dev for legacy code
+ARCHITECTURE_FLUX_2_FULL = ARCHITECTURE_FLUX_2_DEV_FULL
 ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
@@ -376,9 +383,18 @@ def save_latent_cache_flux_2(
     item_info: ItemInfo,
     latent: torch.Tensor,
     control_latent: Optional[list[torch.Tensor]],
+    arch_full: str,
     mask_weights: Optional[torch.Tensor] = None,
 ):
-    """Flux 2 architecture with optional mask weights for mask-weighted loss training."""
+    """Flux 2 architecture with optional mask weights for mask-weighted loss training.
+
+    Args:
+        item_info: The item info containing cache path and metadata.
+        latent: The latent tensor (C, H, W).
+        control_latent: Optional list of control latent tensors.
+        arch_full: The full architecture name (e.g., 'flux_2_dev', 'flux_2_klein_4b').
+        mask_weights: Optional mask weights for mask-weighted loss training.
+    """
     assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
     assert control_latent is None or all(cl.dim() == 3 for cl in control_latent), (
         "control_latent should be 3D tensor (channel, height, width) or None"
@@ -400,7 +416,7 @@ def save_latent_cache_flux_2(
         mask_dtype_str = dtype_to_str(torch.float32)
         sd[f"mask_weights_{H}x{W}_{mask_dtype_str}"] = mask_weights.detach().to(device="cpu", dtype=torch.float32)
 
-    save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
+    save_latent_cache_common(item_info, sd, arch_full)
 
 
 def save_latent_cache_qwen_image(
@@ -583,14 +599,19 @@ def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: tor
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor):
-    """Flux 2 architecture."""
+def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor, arch_full: str):
+    """Flux 2 architecture.
 
+    Args:
+        item_info: The item info containing cache path and metadata.
+        ctx_vec: The context vector from text encoder.
+        arch_full: The full architecture name (e.g., 'flux_2_dev', 'flux_2_klein_4b').
+    """
     sd = {}
     dtype_str = dtype_to_str(ctx_vec.dtype)
     sd[f"ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
 
-    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_2_FULL)
+    save_text_encoder_output_cache_common(item_info, sd, arch_full)
 
 
 def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.Tensor):
@@ -694,7 +715,9 @@ class BucketSelector:
         ARCHITECTURE_WAN: RESOLUTION_STEPS_WAN,
         ARCHITECTURE_FRAMEPACK: RESOLUTION_STEPS_FRAMEPACK,
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
-        ARCHITECTURE_FLUX_2: RESOLUTION_STEPS_FLUX_2,
+        ARCHITECTURE_FLUX_2_DEV: RESOLUTION_STEPS_FLUX_2,
+        ARCHITECTURE_FLUX_2_KLEIN_4B: RESOLUTION_STEPS_FLUX_2,
+        ARCHITECTURE_FLUX_2_KLEIN_9B: RESOLUTION_STEPS_FLUX_2,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
         ARCHITECTURE_QWEN_IMAGE_LAYERED: RESOLUTION_STEPS_QWEN_IMAGE,  # use same steps as Qwen-Image
@@ -1909,9 +1932,8 @@ class ImageDataset(BaseDataset):
         fp_1f_clean_indices: Optional[list[int]] = None,
         fp_1f_target_index: Optional[int] = None,
         fp_1f_no_post: Optional[bool] = False,
-        flux_kontext_no_resize_control: Optional[bool] = False,
-        qwen_image_edit_no_resize_control: Optional[bool] = False,
-        qwen_image_edit_control_resolution: Optional[Tuple[int, int]] = None,
+        no_resize_control: Optional[bool] = False,
+        control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
     ):
@@ -1937,9 +1959,8 @@ class ImageDataset(BaseDataset):
         self.fp_1f_clean_indices = fp_1f_clean_indices
         self.fp_1f_target_index = fp_1f_target_index
         self.fp_1f_no_post = fp_1f_no_post
-        self.flux_kontext_no_resize_control = flux_kontext_no_resize_control
-        self.qwen_image_edit_no_resize_control = qwen_image_edit_no_resize_control
-        self.qwen_image_edit_control_resolution = qwen_image_edit_control_resolution
+        self.no_resize_control = no_resize_control
+        self.control_resolution = control_resolution
 
         # Set up mask paths if mask_directory is specified (build O(1) lookup dict)
         self.mask_paths: Optional[dict[str, str]] = None
@@ -1966,7 +1987,7 @@ class ImageDataset(BaseDataset):
                 control_count_per_image = 1
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             control_count_per_image = 1
-        elif self.architecture == ARCHITECTURE_FLUX_2:
+        elif self.architecture in (ARCHITECTURE_FLUX_2_DEV, ARCHITECTURE_FLUX_2_KLEIN_4B, ARCHITECTURE_FLUX_2_KLEIN_9B):
             control_count_per_image = None  # can be multiple control/ref images
         elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
             control_count_per_image = None  # can be multiple control images
@@ -2084,11 +2105,7 @@ class ImageDataset(BaseDataset):
 
                     if controls is not None:
                         item_info.control_content = controls
-                        if (
-                            self.flux_kontext_no_resize_control
-                            or self.qwen_image_edit_no_resize_control
-                            or self.qwen_image_edit_control_resolution is not None
-                        ):
+                        if self.no_resize_control or self.control_resolution is not None:
                             # Add control size to bucket_reso to make different control resolutions to different batch
                             bucket_reso = list(bucket_reso)
                             for control in controls:
@@ -2148,18 +2165,27 @@ class ImageDataset(BaseDataset):
                 resized_controls = None
                 if controls is not None:
                     resized_controls = []
-                    if self.flux_kontext_no_resize_control or self.qwen_image_edit_no_resize_control:
+                    if self.no_resize_control:
                         for control in controls:
                             # divisible by bucket reso steps
                             width, height = control.size
-                            width = width - (width % buckset_selector.reso_steps)
-                            height = height - (height % buckset_selector.reso_steps)
+
+                            if self.control_resolution is not None:
+                                # use control resolution as maximum
+                                max_width, max_height = self.control_resolution
+                                if width * height > max_width * max_height:
+                                    width, height = BucketSelector.calculate_bucket_resolution(
+                                        control.size, self.control_resolution, architecture=self.architecture
+                                    )
+                            else:
+                                width = width - (width % buckset_selector.reso_steps)
+                                height = height - (height % buckset_selector.reso_steps)
                             resized_control = resize_image_to_bucket(control, (width, height))  # returns np.ndarray
                             resized_controls.append(resized_control)
-                    elif self.qwen_image_edit_control_resolution is not None:
+                    elif self.control_resolution is not None:
                         for control in controls:
                             control_bucket_reso = BucketSelector.calculate_bucket_resolution(
-                                control.size, self.qwen_image_edit_control_resolution, architecture=self.architecture
+                                control.size, self.control_resolution, architecture=self.architecture
                             )
                             resized_control = resize_image_to_bucket(control, control_bucket_reso)
                             resized_controls.append(resized_control)
@@ -2257,11 +2283,7 @@ class ImageDataset(BaseDataset):
                     bucket_reso.append(len(self.fp_1f_clean_indices))
                     bucket_reso.append(self.fp_1f_no_post)
                 bucket_reso = tuple(bucket_reso)
-            if (
-                self.flux_kontext_no_resize_control
-                or self.qwen_image_edit_no_resize_control
-                or self.qwen_image_edit_control_resolution is not None
-            ):
+            if self.no_resize_control or self.control_resolution is not None:
                 # we also need to split the bucket with control resolutions
                 control_key = safetensors_utils.find_key(cache_file, starts_with="latents_control_")  # latents_control_FxHxW_dtype
                 if control_key is not None:

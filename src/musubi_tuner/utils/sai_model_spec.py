@@ -17,6 +17,9 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_FRAMEPACK,
     ARCHITECTURE_FLUX_KONTEXT,
     ARCHITECTURE_FLUX_2,
+    ARCHITECTURE_FLUX_2_DEV,
+    ARCHITECTURE_FLUX_2_KLEIN_4B,
+    ARCHITECTURE_FLUX_2_KLEIN_9B,
     ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_Z_IMAGE,
 )
@@ -73,6 +76,9 @@ ARCH_WAN = "wan2.1"
 ARCH_FRAMEPACK = "framepack"
 ARCH_FLUX_KONTEXT = "Flux.1-dev"
 ARCH_FLUX_2 = "Flux.2-dev"
+ARCH_FLUX_2_DEV = "Flux.2-dev"
+ARCH_FLUX_2_KLEIN_4B = "Flux.2-klein-4b"
+ARCH_FLUX_2_KLEIN_9B = "Flux.2-klein-9b"
 ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
@@ -167,8 +173,14 @@ def build_metadata(
     elif architecture == ARCHITECTURE_FLUX_KONTEXT:
         arch = ARCH_FLUX_KONTEXT
         impl = IMPL_FLUX_KONTEXT
-    elif architecture == ARCHITECTURE_FLUX_2:
-        arch = ARCH_FLUX_2
+    elif architecture in (ARCHITECTURE_FLUX_2, ARCHITECTURE_FLUX_2_DEV):
+        arch = ARCH_FLUX_2_DEV
+        impl = IMPL_FLUX_2
+    elif architecture == ARCHITECTURE_FLUX_2_KLEIN_4B:
+        arch = ARCH_FLUX_2_KLEIN_4B
+        impl = IMPL_FLUX_2
+    elif architecture == ARCHITECTURE_FLUX_2_KLEIN_9B:
+        arch = ARCH_FLUX_2_KLEIN_9B
         impl = IMPL_FLUX_2
     elif architecture == ARCHITECTURE_QWEN_IMAGE:
         arch = ARCH_QWEN_IMAGE

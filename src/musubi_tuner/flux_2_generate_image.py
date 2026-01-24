@@ -276,15 +276,16 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux2_mode
     if args.blocks_to_swap == 0 and not args.fp8_scaled and args.lora_weight is None:
         loading_device = device
 
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+
     # do not fp8 optimize because we will merge LoRA weights
     model = load_flow_model(
-        model_version=args.model_version,
-        ckpt_path=args.dit,
-        dtype=None,
         device=loading_device,
-        disable_mmap=True,
+        model_version_info=model_version_info,
+        dit_path=args.dit,
         attn_mode=args.attn_mode,
         split_attn=False,
+        loading_device=loading_device,
     )
 
     return model
@@ -411,6 +412,7 @@ def prepare_text_inputs(
 
     # load text encoder: conds_cache holds cached encodings for prompts without padding
     conds_cache = {}
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     if shared_models is not None:
         text_embedder = shared_models.get("text_embedder")
         if "conds_cache" in shared_models:  # Use shared cache if available
@@ -419,7 +421,7 @@ def prepare_text_inputs(
     else:  # Load if not in shared_models
         te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
-            args.model_version, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
+            model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
 
     # Store original devices to move back later if they were shared. This does nothing if shared_models is None
@@ -461,7 +463,7 @@ def prepare_text_inputs(
         move_models_to_device_if_needed()
 
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+            if model_version_info.guidance_distilled:
                 ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
             else:
                 ctx_empty = text_embedder([""]).to(torch.bfloat16)
@@ -649,8 +651,9 @@ def generate(
         ref_ids = None
 
     # denoise
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1])  # TODO shift_value=args.flow_shift
-    if flux2_utils.FLUX2_MODEL_INFO[args.model_version]["guidance_distilled"]:
+    if model_version_info.guidance_distilled:
         x = flux2_utils.denoise(
             model,
             x,
@@ -824,12 +827,14 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
         Dict: Dictionary of shared models (text/image encoders)
     """
     shared_models = {}
-    # Load text encoders to CPU
-    m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+
+    # Load text encoders to CPU (Mistral3 for dev, Qwen3 for Klein)
+    te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
-        args.model_version,
+        model_version_info,
         args.text_encoder,
-        dtype=m3_dtype,
+        dtype=te_dtype,
         device="cpu",
         disable_mmap=True,
     )
@@ -877,11 +882,12 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # 2. Precompute Text Data (Text Encoder)
     logger.info("Loading Text Encoder for batch text preprocessing...")
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
-    # Text Encoders loaded to CPU by load_text_encoder
-    m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
+    # Text Encoders loaded to CPU by load_text_encoder (Mistral3 for dev, Qwen3 for Klein)
+    te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder_batch = flux2_utils.load_text_embedder(
-        args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+        model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
     )
 
     # Text Encoders to device for this phase
