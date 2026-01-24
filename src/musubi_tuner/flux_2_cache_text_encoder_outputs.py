@@ -58,14 +58,14 @@ def main():
     # prepare cache files and paths: all_cache_files_for_dataset = exisiting cache files, all_cache_paths_for_dataset = all cache paths in the dataset
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
 
-    # Load Mistral 3 text encoder
+    # Load Mistral 3 or Qwen-3 text encoder
     m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
         model_version_info, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
     )
 
-    # Encode with Mistral 3 text encoder
-    logger.info("Encoding with Mistral 3 text encoder")
+    # Encode with Mistral 3 or Qwen-3 text encoder
+    logger.info("Encoding with text encoder")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
         nonlocal text_embedder
