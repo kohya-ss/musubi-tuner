@@ -65,13 +65,14 @@ Latent pre-caching uses a dedicated script for FLUX.2.
 ```bash
 python src/musubi_tuner/flux_2_cache_latents.py \
     --dataset_config path/to/toml \
-    --vae path/to/ae_model
+    --vae path/to/ae_model \
+    --model_version dev
 ```
 
 - Note that the `--vae` argument is required, not `--ae`.
 - Uses `flux_2_cache_latents.py`.
 - The dataset must be an image dataset.
-- Use the `--model_version` option for Flux.2 Klein training.
+- Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
 - The `control_images` in the dataset config is used as the reference image. See [Dataset Config](./dataset_config.md#flux1-kontext-dev) for details.
 
 <details>
@@ -94,12 +95,13 @@ Text encoder output pre-caching also uses a dedicated script.
 python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
     --dataset_config path/to/toml \
     --text_encoder path/to/text_encoder \
-    --batch_size 16
+    --batch_size 16 \
+    --model_version dev
 ```
 
 - Uses `flux_2_cache_text_encoder_outputs.py`.
 - Requires `--text_encoder` argument
-- Use the `--model_version` option for Flux.2 Klein training.
+- Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
 - Use `--fp8_text_encoder` option to run the Text Encoder in fp8 mode for VRAM savings.
 - The larger the batch size, the more VRAM is required. Adjust `--batch_size` according to your VRAM capacity.
 
@@ -120,6 +122,7 @@ Training uses a dedicated script `flux_2_train_network.py`.
 
 ```bash
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/flux_2_train_network.py \
+    --model_version dev \
     --dit path/to/dit_model \
     --vae path/to/ae_model \
     --text_encoder path/to/text_encoder \
@@ -138,7 +141,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - **Requires** specifying `--network_module networks.lora_flux_2`.
 - `--mixed_precision bf16` is recommended for FLUX.2 training.
 - `--timestep_sampling flux2_shift` is recommended for FLUX.2.
-- Use the `--model_version` option for Flux.2 Klein training.
+- Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
 - Memory saving options like `--fp8` (for DiT) and `--fp8_t5` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
 -  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
@@ -163,6 +166,7 @@ Inference uses a dedicated script `flux_2_generate_image.py`.
 
 ```bash
 python src/musubi_tuner/flux_2_generate_image.py \
+    --model_version dev \
     --dit path/to/dit_model \
     --vae path/to/ae_model \
     --text_encoder path/to/text_encoder \
@@ -177,7 +181,7 @@ python src/musubi_tuner/flux_2_generate_image.py \
 - Uses `flux_2_generate_image.py`.
 - **Requires** specifying `--vae`, `--text_encoder`
 - **Requires** specifying `--control_image_path` for the reference image.
-- Use the `--model_version` option for Flux.2 Klein inference. 
+- Use the `--model_version` option for Flux.2 Klein inference (if omitted, defaults to `dev`).
 - `--no_resize_control`: By default, the control image is resized to the recommended resolution for FLUX.2. If you specify this option, this resizing is skipped, and the image is used as-is.
     
     This feature is not officially supported by FLUX.2, but it is available for experimental use.
