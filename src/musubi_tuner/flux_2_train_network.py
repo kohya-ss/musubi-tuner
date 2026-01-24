@@ -279,16 +279,16 @@ class Flux2NetworkTrainer(NetworkTrainer):
         num_control_images = 0
         ref_tokens, ref_ids = None, None
         if "latents_control_0" in batch:
-            encoded_refs: list[torch.Tensor] = []
+            control_latents: list[torch.Tensor] = []
             while True:
                 key = f"latents_control_{num_control_images}"
                 if key in batch:
-                    encoded_refs.append(batch[key])  # list of (B, C, H, W)
+                    control_latents.append(batch[key])  # list of (B, C, H, W)
                     num_control_images += 1
                 else:
                     break
 
-            ref_tokens, ref_ids = flux2_utils.pack_control_latent(encoded_refs)
+            ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latents)
 
         # context
         ctx_vec = batch["ctx_vec"]  # B, T, D = B, 512, 15360]
