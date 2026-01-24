@@ -278,14 +278,19 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> flux2_mode
 
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
-    # do not fp8 optimize because we will merge LoRA weights
+    # We merge LoRA weights after loading (see generate/process_batch_prompts), so keep the initial load in bf16
+    # and apply fp8/fp8_scaled in optimize_model afterwards.
+    dit_weight_dtype = torch.bfloat16
+
     model = load_flow_model(
-        device=loading_device,
+        device=device,
         model_version_info=model_version_info,
         dit_path=args.dit,
         attn_mode=args.attn_mode,
         split_attn=False,
         loading_device=loading_device,
+        dit_weight_dtype=dit_weight_dtype,
+        fp8_scaled=False,
     )
 
     return model
@@ -318,7 +323,7 @@ def optimize_model(model: flux2_models.Flux2, args: argparse.Namespace, device: 
         target_device = None
 
         if args.fp8:
-            target_dtype = torch.float8e4m3fn
+            target_dtype = torch.float8_e4m3fn
 
         if args.blocks_to_swap == 0:
             logger.info(f"Move model to device: {device}")
@@ -357,7 +362,7 @@ def decode_latent(ae: flux2_models.AutoEncoder, latent: torch.Tensor, device: to
 
     ae.to(device)
     with torch.no_grad():
-        pixels = ae.decode(latent.to(device))  # decode to pixels
+        pixels = ae.decode(latent.to(device, dtype=ae.dtype))  # decode to pixels
     pixels = pixels.to("cpu")
     ae.to("cpu")
 
@@ -1084,7 +1089,7 @@ def process_interactive(args: argparse.Namespace) -> None:
 def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
     device = torch.device(args.device)
 
-    dit_weight_dtype = None  # default
+    dit_weight_dtype = torch.bfloat16  # default
     if args.fp8_scaled:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
     elif args.fp8:
