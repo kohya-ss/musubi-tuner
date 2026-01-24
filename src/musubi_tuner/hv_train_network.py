@@ -3017,7 +3017,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
 
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
-    parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
+    parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default depends on model")
 
     return parser
 

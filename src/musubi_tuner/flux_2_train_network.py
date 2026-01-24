@@ -215,7 +215,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         vae_path = args.vae
 
         logger.info(f"Loading AE model from {vae_path}")
-        ae = flux2_utils.load_ae(vae_path, dtype=torch.float32, device="cpu", disable_mmap=True)
+        ae = flux2_utils.load_ae(vae_path, dtype=vae_dtype, device="cpu", disable_mmap=True)
         return ae
 
     def load_transformer(
@@ -347,7 +347,7 @@ def main():
 
     args.dit_dtype = None  # set from mixed_precision
     if args.vae_dtype is None:
-        args.vae_dtype = "bfloat16"  # make bfloat16 as default for VAE
+        args.vae_dtype = "float32"  # make float32 as default for VAE
 
     trainer = Flux2NetworkTrainer()
     trainer.train(args)
