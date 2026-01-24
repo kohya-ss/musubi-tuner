@@ -27,8 +27,6 @@ def preprocess_contents_flux_2(batch: List[ItemInfo]) -> tuple[torch.Tensor, Lis
         contents.append(torch.from_numpy(content))  # target image
 
     contents = torch.stack(contents, dim=0)  # B, H, W, C
-
-    contents = torch.stack(contents, dim=0)  # B, H, W, C
     contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 
