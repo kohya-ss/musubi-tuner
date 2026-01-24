@@ -13,6 +13,7 @@ from musubi_tuner.flux_2 import flux2_utils
 from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.flux_2.flux2_utils import Flux2ModelInfo
 import musubi_tuner.cache_latents as cache_latents
+from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -123,13 +124,8 @@ def main():
     logger.info(f"Model version: {args.model_version}, architecture: {_model_version_info.architecture}")
 
     # VAE dtype (defaults to float32)
-    vae_dtype = torch.float32
-    if args.vae_dtype is not None:
-        if args.vae_dtype == "fp16":
-            vae_dtype = torch.float16
-        elif args.vae_dtype == "bf16":
-            vae_dtype = torch.bfloat16
-        logger.info(f"Using VAE dtype: {vae_dtype}")
+    vae_dtype = torch.float32 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
+    logger.info(f"Using VAE dtype: {vae_dtype}")
 
     device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)

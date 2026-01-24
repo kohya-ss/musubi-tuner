@@ -449,7 +449,7 @@ def load_user_config(file: str) -> dict:
     else:
         raise ValueError(f"not supported config file format / 対応していない設定ファイルの形式です: {file}")
 
-    # Normalize deprecated keys (e.g., flux_kontext_no_resize_control -> no_resize_control)
+    # Normalize deprecated keys (see DEPRECATED_KEY_MAP)
     normalize_deprecated_keys_in_user_config(config)
 
     return config
