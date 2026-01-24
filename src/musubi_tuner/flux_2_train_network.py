@@ -323,6 +323,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         model_pred = rearrange(model_pred, "b (h w) c -> b c h w", h=packed_latent_height, w=packed_latent_width)
 
         # flow matching loss
+        latents = latents.to(device=accelerator.device, dtype=network_dtype)
         target = noise - latents
 
         return model_pred, target
