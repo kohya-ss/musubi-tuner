@@ -66,7 +66,7 @@ class Flux2ModelInfo:
 
 
 FLUX2_MODEL_INFO = {
-    "flux.2-klein-4b": Flux2ModelInfo(
+    "klein-4b": Flux2ModelInfo(
         params=Klein4BParams(),
         qwen_variant="4B",
         defaults={"guidance": 1.0, "num_steps": 4},
@@ -75,7 +75,7 @@ FLUX2_MODEL_INFO = {
         architecture=ARCHITECTURE_FLUX_2_KLEIN_4B,
         architecture_full=ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
     ),
-    "flux.2-klein-base-4b": Flux2ModelInfo(
+    "klein-base-4b": Flux2ModelInfo(
         params=Klein4BParams(),
         qwen_variant="4B",
         defaults={"guidance": 4.0, "num_steps": 50},
@@ -84,7 +84,7 @@ FLUX2_MODEL_INFO = {
         architecture=ARCHITECTURE_FLUX_2_KLEIN_4B,
         architecture_full=ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
     ),
-    "flux.2-klein-9b": Flux2ModelInfo(
+    "klein-9b": Flux2ModelInfo(
         params=Klein9BParams(),
         qwen_variant="8B",
         defaults={"guidance": 1.0, "num_steps": 4},
@@ -93,7 +93,7 @@ FLUX2_MODEL_INFO = {
         architecture=ARCHITECTURE_FLUX_2_KLEIN_9B,
         architecture_full=ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
     ),
-    "flux.2-klein-base-9b": Flux2ModelInfo(
+    "klein-base-9b": Flux2ModelInfo(
         params=Klein9BParams(),
         qwen_variant="8B",
         defaults={"guidance": 4.0, "num_steps": 50},
@@ -102,7 +102,7 @@ FLUX2_MODEL_INFO = {
         architecture=ARCHITECTURE_FLUX_2_KLEIN_9B,
         architecture_full=ARCHITECTURE_FLUX_2_KLEIN_9B_FULL,
     ),
-    "flux.2-dev": Flux2ModelInfo(
+    "dev": Flux2ModelInfo(
         params=Flux2Params(),
         defaults={"guidance": 4.0, "num_steps": 50},
         fixed_params=set(),
@@ -114,13 +114,7 @@ FLUX2_MODEL_INFO = {
 
 
 def add_model_version_args(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--model_version",
-        type=str,
-        default="flux.2-dev",
-        choices=list(FLUX2_MODEL_INFO.keys()),
-        help="model version",
-    )
+    parser.add_argument("--model_version", type=str, default="dev", choices=list(FLUX2_MODEL_INFO.keys()), help="model version")
 
 
 def is_fp8(dt):

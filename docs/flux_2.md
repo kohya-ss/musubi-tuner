@@ -50,11 +50,11 @@ DiT, AE, Text Encoder のモデルをダウンロードする必要がありま�
 When specifying the model version in various scripts, use the following options:
 |type|version|sampling guidance scale|num sampling steps|
 |----|--------|----|----|
-|flux.2-dev|`--model_version flux.2-dev`|1.0|4|
-|flux.2-klein-4b|`--model_version flux.2-klein-4b`|4.0|50|
-|flux.2-klein-base-4b|`--model_version flux.2-klein-base-4b`|1.0|4|
-|flux.2-klein-9b|`--model_version flux.2-klein-9b`|4.0|50|
-|flux.2-klein-base-9b|`--model_version flux.2-klein-base-9b`|4.0|50|
+|flux.2-dev|`--model_version dev`|1.0|4|
+|flux.2-klein-4b|`--model_version klein-4b`|1.0|4|
+|flux.2-klein-base-4b|`--model_version klein-base-4b`|4.0|50|
+|flux.2-klein-9b|`--model_version klein-9b`|1.0|4|
+|flux.2-klein-base-9b|`--model_version klein-base-9b`|4.0|50|
 
 ## Pre-caching / 事前キャッシング
 
