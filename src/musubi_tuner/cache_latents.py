@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def show_image(image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]]) -> int:
+def show_image(
+    image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]],
+    control_image: Optional[Union[np.ndarray, list[np.ndarray]]] = None,
+) -> int:
     import cv2
 
     imgs = (
@@ -31,9 +34,17 @@ def show_image(image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Ima
     )
     if len(imgs) > 1:
         print(f"Number of images: {len(image)}")
+
+    if control_image is not None:
+        if isinstance(control_image, np.ndarray):
+            control_image = [control_image]
+        for ci in control_image:
+            imgs.append(ci)
+        print(f"Number of control images: {len(control_image)}")
+
     for i, img in enumerate(imgs):
         if len(imgs) > 1:
-            print(f"{'First' if i == 0 else 'Last'} image: {img.shape}")
+            print(f"Image {i + 1} of {len(imgs)}: {img.shape}")
         else:
             print(f"Image: {img.shape}")
         cv2_img = np.array(img) if isinstance(img, Image.Image) else img
@@ -51,6 +62,7 @@ def show_console(
     width: int,
     back: str,
     interactive: bool = False,
+    control_image: Optional[Union[np.ndarray, list[np.ndarray]]] = None,
 ) -> int:
     from ascii_magic import from_pillow_image, Back
 
@@ -66,9 +78,17 @@ def show_console(
     )
     if len(imgs) > 1:
         print(f"Number of images: {len(image)}")
+
+    if control_image is not None:
+        if isinstance(control_image, np.ndarray):
+            control_image = [control_image]
+        for ci in control_image:
+            imgs.append(ci)
+        print(f"Number of control images: {len(control_image)}")
+
     for i, img in enumerate(imgs):
         if len(imgs) > 1:
-            print(f"{'First' if i == 0 else 'Last'} image: {img.shape}")
+            print(f"Image {i + 1} of {len(imgs)}: {img.shape}")
         else:
             print(f"Image: {img.shape}")
         pil_img = img if isinstance(img, Image.Image) else Image.fromarray(img)
@@ -157,9 +177,11 @@ def show_datasets(
                 item_info: ItemInfo
                 print(f"{batch_index}-{j}: {item_info}")
                 if debug_mode == "image":
-                    k = show_image(item_info.content)
+                    k = show_image(item_info.content, item_info.control_content)
                 elif debug_mode == "console":
-                    k = show_console(item_info.content, console_width, console_back, console_num_images is None)
+                    k = show_console(
+                        item_info.content, console_width, console_back, console_num_images is None, item_info.control_content
+                    )
                     if num_images_to_show is not None:
                         num_images_to_show -= 1
                         if num_images_to_show == 0:

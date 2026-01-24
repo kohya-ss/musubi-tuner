@@ -211,7 +211,8 @@ class ItemInfo:
             f"ItemInfo(item_key={self.item_key}, caption={self.caption}, "
             + f"original_size={self.original_size}, bucket_size={self.bucket_size}, "
             + f"frame_count={self.frame_count}, latent_cache_path={self.latent_cache_path}, "
-            + f"content={[c.shape for c in self.content] if isinstance(self.content, list) else (self.content.shape if self.content is not None else None)})"
+            + f"content={[c.shape for c in self.content] if isinstance(self.content, list) else (self.content.shape if self.content is not None else None)}), "
+            + f"control_content={[cc.shape for cc in self.control_content] if isinstance(self.control_content, list) else (self.control_content.shape if self.control_content is not None else None)})"
         )
 
 
