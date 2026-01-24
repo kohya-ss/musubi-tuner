@@ -447,7 +447,6 @@ class Flux2(nn.Module):
         self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size, bias=False)
 
         self.use_guidance_embed = params.use_guidance_embed
-        print(f"FLUX2: use_guidance_embed = {self.use_guidance_embed}")
         if self.use_guidance_embed:
             self.guidance_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size, disable_bias=True)
 
