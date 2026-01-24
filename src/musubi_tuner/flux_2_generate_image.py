@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
 
-    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder (Mistral 3)")
+    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder (Qwen3 only)")
     parser.add_argument(
         "--device", type=str, default=None, help="device to use for inference. If None, use CUDA if available, otherwise use CPU"
     )
@@ -141,6 +141,10 @@ def parse_args() -> argparse.Namespace:
     flux2_utils.add_model_version_args(parser)
 
     args = parser.parse_args()
+
+    model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+    if args.fp8_text_encoder and model_version_info.qwen_variant is None:
+        raise ValueError("--fp8_text_encoder is not supported for FLUX.2 dev (Mistral3). Remove this flag or use a Klein model.")
 
     # Validate arguments
     if args.from_file and args.interactive:

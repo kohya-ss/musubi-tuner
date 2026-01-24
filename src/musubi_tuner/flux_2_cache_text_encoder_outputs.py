@@ -64,6 +64,9 @@ def main():
     _model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     logger.info(f"Model version: {args.model_version}, architecture: {_model_version_info.architecture}")
 
+    if args.fp8_text_encoder and _model_version_info.qwen_variant is None:
+        raise ValueError("--fp8_text_encoder is not supported for FLUX.2 dev (Mistral3). Remove this flag or use a Klein model.")
+
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
@@ -119,7 +122,7 @@ def main():
 
 def flux_2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder", type=str, default=None, required=True, help="text encoder (mistral 3) checkpoint path")
-    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model (Qwen3 only)")
     flux2_utils.add_model_version_args(parser)
     return parser
 
