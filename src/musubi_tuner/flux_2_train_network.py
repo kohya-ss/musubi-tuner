@@ -55,7 +55,12 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # Load Text Encoder (Mistral 3 or Qwen-3)
         te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
-            self.model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
+            self.model_version_info,
+            args.text_encoder,
+            dtype=te_dtype,
+            device=device,
+            disable_mmap=True,
+            tokenizer_max_length=args.tokenizer_max_length
         )
 
         # Encode with Text Encoder (Mistral 3 or Qwen-3)
@@ -340,6 +345,7 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
     parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--tokenizer_max_length", type=int, default=None, help="maximum length for text embeddings")
     flux2_utils.add_model_version_args(parser)
     return parser
 
