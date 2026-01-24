@@ -447,6 +447,7 @@ class Flux2(nn.Module):
         self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size, bias=False)
 
         self.use_guidance_embed = params.use_guidance_embed
+        print(f"FLUX2: use_guidance_embed = {self.use_guidance_embed}")
         if self.use_guidance_embed:
             self.guidance_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size, disable_bias=True)
 
@@ -946,11 +947,7 @@ class EmbedND(nn.Module):
         self.axes_dim = axes_dim
 
     def forward(self, ids: Tensor) -> Tensor:
-        emb = torch.cat(
-            [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(len(self.axes_dim))],
-            dim=-3,
-        )
-
+        emb = torch.cat([rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(len(self.axes_dim))], dim=-3)
         return emb.unsqueeze(1)
 
 

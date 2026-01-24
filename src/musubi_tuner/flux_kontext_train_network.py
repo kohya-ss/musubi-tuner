@@ -41,11 +41,6 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
 
     def handle_model_specific_args(self, args):
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
-        if not args.split_attn:
-            logger.info(
-                "Split attention will be automatically enabled if the control images are not resized to the same size as the target image."
-                + " / 制御画像がターゲット画像と同じサイズにリサイズされていない場合、分割アテンションが自動的に有効になります。"
-            )
         self._i2v_training = False
         self._control_training = False  # this means video training, not control image training
         self.default_guidance_scale = 2.5  # embeded guidance scale for inference

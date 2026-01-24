@@ -166,6 +166,7 @@ def pack_control_latent(control_latent: list[Tensor] | None) -> tuple[Optional[T
         return None, None
 
     scale = 10
+    ndim = control_latent[0].ndim  # 3 or 4
 
     # Create time offsets for each reference
     t_off = [scale + scale * t for t in torch.arange(0, len(control_latent))]
@@ -175,17 +176,19 @@ def pack_control_latent(control_latent: list[Tensor] | None) -> tuple[Optional[T
     ref_tokens, ref_ids = listed_prc_img(control_latent, t_coord=t_off)  # list[(HW, C)], list[(HW, 4)]
 
     # Concatenate all references along sequence dimension
-    ref_tokens = torch.cat(ref_tokens, dim=0)  # (total_ref_tokens, C)
-    ref_ids = torch.cat(ref_ids, dim=0)  # (total_ref_tokens, 4)
+    cat_dimension = 0 if ndim == 3 else 1
+    ref_tokens = torch.cat(ref_tokens, dim=cat_dimension)  # (total_ref_tokens, C) or (B, total_ref_tokens, C)
+    ref_ids = torch.cat(ref_ids, dim=cat_dimension)  # (total_ref_tokens, 4) or (B, total_ref_tokens, 4)
 
     # Add batch dimension
-    ref_tokens = ref_tokens.unsqueeze(0)  # (1, total_ref_tokens, C)
-    ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
+    if ndim == 3:
+        ref_tokens = ref_tokens.unsqueeze(0)  # (1, total_ref_tokens, C)
+        ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
     return ref_tokens, ref_ids
 
 
 def prc_txt(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
-    _l, _ = x.shape  # noqa: F841
+    _l = x.shape[-2]
 
     coords = {
         "t": torch.arange(1) if t_coord is None else t_coord,
@@ -194,25 +197,25 @@ def prc_txt(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
         "l": torch.arange(_l),
     }
     x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
+    if x.ndim == 3:
+        x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)  # (B, L, 4)
     return x, x_ids.to(x.device)
 
 
-def batched_wrapper(fn):
-    def batched_prc(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
-        results = []
-        for i in range(len(x)):
-            results.append(fn(x[i], t_coord[i] if t_coord is not None else None))
-        x, x_ids = zip(*results)
-        return torch.stack(x), torch.stack(x_ids)
-
-    return batched_prc
+# This function doesn't work properly, because t_coord is per-sample, but we need per-subsequence within sample
+# kept for reference
+# def batched_wrapper(fn):
+#     def batched_prc(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
+#         results = []
+#         for i in range(len(x)):
+#             results.append(fn(x[i], t_coord[i] if t_coord is not None else None))
+#         x, x_ids = zip(*results)
+#         return torch.stack(x), torch.stack(x_ids)
+#     return batched_prc
 
 
 def listed_wrapper(fn):
-    def listed_prc(
-        x: list[Tensor],
-        t_coord: list[Tensor] | None = None,
-    ) -> tuple[list[Tensor], list[Tensor]]:
+    def listed_prc(x: list[Tensor], t_coord: list[Tensor] | None = None) -> tuple[list[Tensor], list[Tensor]]:
         results = []
         for i in range(len(x)):
             results.append(fn(x[i], t_coord[i] if t_coord is not None else None))
@@ -223,7 +226,9 @@ def listed_wrapper(fn):
 
 
 def prc_img(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
-    _, h, w = x.shape  # noqa: F841
+    # x: (C, H, W) or (B, C, H, W)
+    h = x.shape[-2]
+    w = x.shape[-1]
     x_coords = {
         "t": torch.arange(1) if t_coord is None else t_coord,
         "h": torch.arange(h),
@@ -231,13 +236,15 @@ def prc_img(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
         "l": torch.arange(1),
     }
     x_ids = torch.cartesian_prod(x_coords["t"], x_coords["h"], x_coords["w"], x_coords["l"])
-    x = rearrange(x, "c h w -> (h w) c")
+    x = rearrange(x, "c h w -> (h w) c") if x.ndim == 3 else rearrange(x, "b c h w -> b (h w) c")
+    if x.ndim == 3:  # after rearrange
+        x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)  # (B, HW, 4)
     return x, x_ids.to(x.device)
 
 
 listed_prc_img = listed_wrapper(prc_img)
-batched_prc_img = batched_wrapper(prc_img)
-batched_prc_txt = batched_wrapper(prc_txt)
+# batched_prc_img = batched_wrapper(prc_img)
+# batched_prc_txt = batched_wrapper(prc_txt)
 
 
 # This function is used from Mistral3Embedder
@@ -400,8 +407,6 @@ def denoise_cfg(
             pred_uncond = pred_uncond[:, : img.shape[1]]
 
         pred = pred_uncond + guidance * (pred_cond - pred_uncond)
-        pred = torch.cat([pred, pred], dim=0)
-
         img = img + (t_prev - t_curr) * pred
 
     return img

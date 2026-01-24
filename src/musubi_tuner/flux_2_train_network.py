@@ -41,11 +41,6 @@ class Flux2NetworkTrainer(NetworkTrainer):
     def handle_model_specific_args(self, args):
         self.model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
-        if not args.split_attn:
-            logger.info(
-                "Split attention will be automatically enabled if the control images are not resized to the same size as the target image."
-                + " / 制御画像がターゲット画像と同じサイズにリサイズされていない場合、分割アテンションが自動的に有効になります。"
-            )
         self._i2v_training = False
         self._control_training = False  # this means video training, not control image training
         self.default_guidance_scale = 4.0  # CFG scale for inference for base models
@@ -59,7 +54,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # Load Text Encoder (Mistral 3 or Qwen-3)
         te_dtype = torch.float8e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
-            args.model_version, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
+            self.model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
 
         # Encode with Text Encoder (Mistral 3 or Qwen-3)
@@ -129,9 +124,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         # Get embeddings
         ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
-        ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
+        ctx, ctx_ids = flux2_utils.prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
         negative_ctx = sample_parameter.get("negative_ctx_vec").to(device=device, dtype=torch.bfloat16)
-        negative_ctx, negative_ctx_ids = flux2_utils.batched_prc_txt(negative_ctx)
+        negative_ctx, negative_ctx_ids = flux2_utils.prc_txt(negative_ctx)
 
         # Initialize latents
         packed_latent_height, packed_latent_width = height // 16, width // 16
@@ -141,7 +136,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             device=device,
             dtype=torch.bfloat16,
         )
-        x, x_ids = flux2_utils.batched_prc_img(latents)  # [1, 4056, 128], [1, 4056, 4]
+        x, x_ids = flux2_utils.prc_img(latents)  # [1, 4056, 128], [1, 4056, 4]
 
         # prepare control latent
         ref_tokens = None
@@ -273,17 +268,17 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # pack latents
         packed_latent_height = latents.shape[2]
         packed_latent_width = latents.shape[3]
-        noisy_model_input, img_ids = flux2_utils.batched_prc_img(noisy_model_input)  # (B, HW, C), (B, HW, 4)
+        noisy_model_input, img_ids = flux2_utils.prc_img(noisy_model_input)  # (B, HW, C), (B, HW, 4)
 
         # control
         num_control_images = 0
         ref_tokens, ref_ids = None, None
         if "latents_control_0" in batch:
-            encoded_refs = []
+            encoded_refs: list[torch.Tensor] = []
             while True:
                 key = f"latents_control_{num_control_images}"
                 if key in batch:
-                    encoded_refs.append(batch[key])  # list[(C, H, W)]
+                    encoded_refs.append(batch[key])  # list of (B, C, H, W)
                     num_control_images += 1
                 else:
                     break
@@ -291,8 +286,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
             ref_tokens, ref_ids = flux2_utils.pack_control_latent(encoded_refs)
 
         # context
-        ctx_vec = batch["ctx_vec"]  # B, T, D  # [1, 512, 15360]
-        ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx_vec)  # [1, 512, 15360], [1, 512, 4]
+        ctx_vec = batch["ctx_vec"]  # B, T, D = B, 512, 15360]
+        ctx, ctx_ids = flux2_utils.prc_txt(ctx_vec)  # [B, 512, 15360], [B, 512, 4]
 
         # ensure the hidden state will require grad
         if args.gradient_checkpointing:

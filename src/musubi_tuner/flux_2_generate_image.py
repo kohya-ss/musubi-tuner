@@ -659,13 +659,13 @@ def generate(
     # image generation ######
     logger.info(f"Prompt: {context['prompt']}, Negative Prompt: {context_null['prompt'] if context_null is not None else 'N/A'}")
     ctx_vec = context["ctx_vec"].to(device, dtype=torch.bfloat16)
-    ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx_vec)
+    ctx, ctx_ids = flux2_utils.prc_txt(ctx_vec)
     if context_null is None:
         negative_ctx_vec = None
         ctx_null, ctx_null_ids = None, None
     else:
         negative_ctx_vec = context_null["ctx_vec"].to(device, dtype=torch.bfloat16)
-        ctx_null, ctx_null_ids = flux2_utils.batched_prc_txt(negative_ctx_vec)
+        ctx_null, ctx_null_ids = flux2_utils.prc_txt(negative_ctx_vec)
 
     # make first noise with packed shape
     # original: b,16,2*h//16,2*w//16, packed: b,h//16*w//16,16*2*2
@@ -674,8 +674,9 @@ def generate(
     noise = torch.randn(1, 128, packed_latent_height, packed_latent_width, dtype=noise_dtype, generator=seed_g, device="cpu").to(
         device, dtype=torch.bfloat16
     )
-    x, x_ids = flux2_utils.batched_prc_img(noise)
-    # TODO upsampling here
+    x, x_ids = flux2_utils.prc_img(noise)
+
+    # prompt upsampling is not supported
 
     if control_latent is not None:
         ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent)
