@@ -142,8 +142,9 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--mixed_precision bf16` is recommended for FLUX.2 training.
 - `--timestep_sampling flux2_shift` is recommended for FLUX.2.
 - Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
-- Memory saving options like `--fp8` (for DiT) and `--fp8_t5` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
+- Memory saving options like `--fp8` (for DiT) and `--fp8_text_encoder` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
 -  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
+- `--vae_dtype` option is available to specify the VAE weight data type. Default is `float32`, `bfloat16` can also be specified.
 
 <details>
 <summary>日本語</summary>
@@ -155,8 +156,9 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 - `--network_module networks.lora_flux_2`を指定する必要があります。
 - FLUX.2の学習には`--mixed_precision bf16`を推奨します。
 - FLUX.2には`--timestep_sampling flux2_shift`を推奨します。
-- `--fp8`（DiT用）や`--fp8_t5`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
+- `--fp8`（DiT用）や`--fp8_text_encoder`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
+- `--vae_dtype`オプションは、VAEの重みデータ型を指定するためのオプションです。デフォルトは`float32`で、`bfloat16`も指定可能です。
 
 </details>
 
@@ -188,7 +190,7 @@ python src/musubi_tuner/flux_2_generate_image.py \
 
 - `--image_size` is the size of the generated image, height and width are specified in that order.
 - `--prompt`: Prompt for generation.
-- `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_t5` option is available to reduce memory usage of Text Encoder. `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
+- `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_text_encoder` option is available to reduce memory usage of Text Encoder. `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
 - LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--lycoris` is also supported.
 - `--embedded_cfg_scale` (default 2.5) controls the distilled guidance scale.
 - `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
@@ -207,7 +209,7 @@ FLUX.2の推論は専用のスクリプト`flux_2_generate_image.py`を使用し
 
 - `--image_size`は生成する画像のサイズで、高さと幅をその順番で指定します。
 - `--prompt`: 生成用のプロンプトです。
-- DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。品質はやや低下する可能性があります。またText Encoder 1のメモリ使用量を削減するために、`--fp8_t5`オプションを指定可能です。DiT用に`--fp8`単独のオプションも用意されていますが、`--fp8_scaled`の方が品質が良い可能性があります。
+- DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。品質はやや低下する可能性があります。またText Encoder 1のメモリ使用量を削減するために、`--fp8_text_encoder`オプションを指定可能です。DiT用に`--fp8`単独のオプションも用意されていますが、`--fp8_scaled`の方が品質が良い可能性があります。
 - LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。LyCORISもサポートされています。
 - `--embedded_cfg_scale`（デフォルト2.5）は、蒸留されたガイダンススケールを制御します。
 - `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
