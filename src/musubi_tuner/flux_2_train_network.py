@@ -229,9 +229,11 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
     @staticmethod
     def load_vae(args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
-        vae_path = args.vae
+        vae_path = vae_path or args.vae
 
         logger.info(f"Loading AE model from {vae_path}")
+        if vae_dtype != torch.float32:
+            logger.warning(f"FLUX.2 AE is always loaded in float32 for stability; ignoring vae_dtype={vae_dtype}")
         ae = flux2_utils.load_ae(vae_path, dtype=torch.float32, device="cpu", disable_mmap=True)
         return ae
 
