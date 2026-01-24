@@ -62,6 +62,7 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - FLUX.2 [klein]のLoRA学習が動かなかったのを修正しました。またFLUX.2に関する各種の不具合修正、機能追加を行いました。[PR #858](https://github.com/kohya-ss/musubi-tuner/pull/858)
         - `--model_version`の指定は`flux.2-dev`や`flux.2-klein-4b`等から、`dev`や`klein-4b`等に変更されました。
         - fp8最適化なども動作します。詳細は[ドキュメント](./docs/flux_2.md)を参照してください。
+        - klein 9B、devモデル、および複数枚の制御画像を用いた学習は十分にテストされていないため、不具合があればIssueで報告してください。
 
 - 2026/01/21
     - FLUX.2 [dev]/[klein]のLoRA学習に対応しました。[PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841) https://www.scenario.com のchristopher5106氏に深く感謝します。

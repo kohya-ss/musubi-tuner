@@ -67,6 +67,7 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
     - Fixed an issue where LoRA training for FLUX.2 [klein] did not work. Also made various bug fixes and feature additions related to FLUX.2. See [PR #858](https://github.com/kohya-ss/musubi-tuner/pull/858).
         - The `--model_version` specification has changed from `flux.2-dev` or `flux.2-klein-4b` to `dev` or `klein-4b`, etc.
         - fp8 optimization and other features also work. Please refer to the [documentation](./docs/flux_2.md) for details.
+        - Since klein 9B, dev models, and training with multiple control images have not been sufficiently tested, please report any issues via Issue.
 
 - January 21, 2026
     - Added support for LoRA training of FLUX.2 [dev]/[klein]. See [PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841). Many thanks to christopher5106 from https://www.scenario.com for this contribution.
