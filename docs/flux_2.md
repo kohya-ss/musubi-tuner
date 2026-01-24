@@ -72,6 +72,7 @@ Qwen3 4Bの重みは、すでにZ-Imageで用いているものがあればそ�
 ## Specifying Model Version / モデルバージョンの指定
 
 When specifying the model version in various scripts, use the following options:
+
 |type|version|sampling guidance scale|num sampling steps|
 |----|--------|----|----|
 |flux.2-dev|`--model_version dev`|4.0|50|
@@ -79,6 +80,17 @@ When specifying the model version in various scripts, use the following options:
 |flux.2-klein-base-4b|`--model_version klein-base-4b`|4.0|50|
 |flux.2-klein-9b|`--model_version klein-9b`|1.0|4|
 |flux.2-klein-base-9b|`--model_version klein-base-9b`|4.0|50|
+
+For model training, it is recommended to use klein base 4B or 9B. The dev and klein 4B/9B are distilled models primarily intended for inference.
+
+<details>
+<summary>日本語</summary>
+
+それぞれのスクリプトでモデルバージョンを指定する際には、英語版の文章を参考にして`--model_version`オプションを使用してください。
+
+モデルの学習を行う場合は、klein base 4Bまたは9Bを使用することをお勧めします。dev、およびklein 4B/9Bは蒸留モデルであり、主に推論用です。
+
+</details>
 
 ## Pre-caching / 事前キャッシング
 
