@@ -397,10 +397,7 @@ def load_dit_model(
 
     if args.compile:
         model = model_utils.compile_transformer(
-            args,
-            model,
-            [model.double_blocks, model.single_blocks],
-            disable_linear=args.blocks_to_swap > 0,
+            args, model, [model.double_blocks, model.single_blocks], disable_linear=args.blocks_to_swap > 0
         )
 
     model.eval().requires_grad_(False)
@@ -582,16 +579,16 @@ def generate(
     args: argparse.Namespace,
     gen_settings: GenerationSettings,
     shared_models: Optional[Dict] = None,
-    precomputed_image_data: Optional[Dict] = None,
-    precomputed_text_data: Optional[Dict] = None,
+    precomputed_image_data: Optional[tuple[int, int, Optional[torch.Tensor]]] = None,
+    precomputed_text_data: Optional[tuple[Dict, Dict]] = None,
 ) -> tuple[Optional[flux2_models.AutoEncoder], torch.Tensor]:  # AE can be Optional
     """main function for generation
 
     Args:
         args: command line arguments
         shared_models: dictionary containing pre-loaded models (mainly for DiT)
-        precomputed_image_data: Optional dictionary with precomputed image data
-        precomputed_text_data: Optional dictionary with precomputed text data
+        precomputed_image_data: Optional tuple with precomputed image data (height, width, control_latent)
+        precomputed_text_data: Optional tuple with precomputed text data (context, context_null)
 
     Returns:
         tuple: (flux2_models.AutoEncoder model (vae) or None, torch.Tensor generated latent)
@@ -606,10 +603,7 @@ def generate(
 
     if precomputed_image_data is not None and precomputed_text_data is not None:
         logger.info("Using precomputed image and text data.")
-        height = precomputed_image_data["height"]
-        width = precomputed_image_data["width"]
-        control_latent = precomputed_image_data["control_latent"]
-
+        height, width, control_latent = precomputed_image_data
         ctx_nctx = precomputed_text_data
 
         # VAE is not loaded here if data is precomputed; decoding VAE is handled by caller (e.g., process_batch_prompts)
@@ -634,23 +628,8 @@ def generate(
         # load DiT model
         model = load_dit_model(args, device, dit_weight_dtype)
 
-        # merge LoRA weights
-        if args.lora_weight is not None and len(args.lora_weight) > 0:
-            merge_lora_weights(
-                lora_flux_2,
-                model,
-                args.lora_weight,
-                args.lora_multiplier,
-                args.include_patterns,
-                args.exclude_patterns,
-                device,
-                args.lycoris,
-                args.save_merged_model,
-            )
-
-            # if we only want to save the model, we can skip the rest
-            if args.save_merged_model:
-                return None, None
+        if args.save_merged_model:
+            return None, None
 
         if shared_models is not None:
             shared_models["model"] = model
@@ -1004,8 +983,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
                 # Save latent if needed (using data from precomputed_image_data for H/W)
                 if prompt_args_item.output_type in ["latent", "latent_images"]:
-                    height = current_image_data["height"]
-                    width = current_image_data["width"]
+                    height, width, _ = current_image_data
                     save_latent(latent, prompt_args_item, height, width)
 
                 all_latents.append(latent)

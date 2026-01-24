@@ -18,17 +18,9 @@ logging.basicConfig(level=logging.INFO)
 
 def encode_and_save_batch(text_embedder: torch.nn.Module, batch: list[ItemInfo], device: torch.device, arch_full: str):
     prompts = [item.caption for item in batch]
-    with torch.autocast(device_type=device.type, dtype=text_embedder.dtype), torch.no_grad():
+    autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype  # use bfloat16 for fp8 models
+    with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
         ctx_vec = text_embedder(prompts)
-        ## TODO train with guidance ?
-        # if guidance_distilled:
-        #     ctx_vec = text_embedder(prompts)
-        # else:
-        #     if len(prompts) > 1:
-        #         raise NotImplementedError("Only works with batch size 1")
-        #     ctx_empty = text_embedder([""]).to(torch.bfloat16)
-        #     ctx_prompt = text_embedder(prompts).to(torch.bfloat16)
-        #     ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
         ctx_vec = ctx_vec.cpu()  # [1, 512, 15360]
 
     # save prompt cache

@@ -273,7 +273,7 @@ def preprocess_control_image(
     Args:
         control_image_path (str): Path to the control image.
         limit_size (Optional[Tuple[int, int]]): Limit the size for resizing with (width, height).
-            If None or larger than the control image size, only center cropping to multiple of 16 is applied.
+            If None or larger than the control image size, only resizing to the nearest bucket size and cropping is performed.
 
     Returns:
         Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]: A tuple containing:
@@ -351,7 +351,7 @@ def denoise(
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
 
-        with torch.no_grad(), torch.autocast(device_type=img.device.type, dtype=model.dtype):
+        with torch.no_grad(), torch.autocast(device_type=img.device.type, dtype=img.dtype):
             pred = model(x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=txt, ctx_ids=txt_ids, guidance=guidance_vec)
 
         if img_input_ids is not None:
@@ -390,7 +390,7 @@ def denoise_cfg(
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
 
-        with torch.no_grad(), torch.autocast(device_type=img.device.type, dtype=model.dtype):
+        with torch.no_grad(), torch.autocast(device_type=img.device.type, dtype=img.dtype):
             pred_cond = model(x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=txt, ctx_ids=txt_ids, guidance=None)
             pred_uncond = model(
                 x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=uncond_txt, ctx_ids=uncond_txt_ids, guidance=None
