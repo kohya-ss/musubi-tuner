@@ -53,7 +53,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         prompts = load_prompts(sample_prompts)
 
         # Load Text Encoder (Mistral 3 or Qwen-3)
-        te_dtype = torch.float8e4m3fn if args.fp8_text_encoder else torch.bfloat16
+        te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
             self.model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
@@ -62,23 +62,27 @@ class Flux2NetworkTrainer(NetworkTrainer):
         logger.info("Encoding with Text Encoder (Mistral 3 or Qwen-3)...")
 
         sample_prompts_te_outputs = {}  # prompt -> encoded tensor
-        with torch.amp.autocast(device_type=device.type, dtype=te_dtype), torch.no_grad():
-            for prompt_dict in prompts:
-                # add negative prompt if not present even if the model is guidance distilled for simplicity
-                if "negative_prompt" not in prompt_dict:
-                    prompt_dict["negative_prompt"] = " "
+        for prompt_dict in prompts:
+            # add negative prompt if not present even if the model is guidance distilled for simplicity
+            if "negative_prompt" not in prompt_dict:
+                prompt_dict["negative_prompt"] = " "
 
-                for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", " ")]:
-                    if p is None or p in sample_prompts_te_outputs:
-                        continue
+            for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", " ")]:
+                if p is None or p in sample_prompts_te_outputs:
+                    continue
 
-                    # encode prompt
-                    logger.info(f"cache Text Encoder outputs for prompt: {p}")
-                    ctx_vec = text_embedder([p])  # [1, 512, 15360]
-                    ctx_vec = ctx_vec.cpu()
+                # encode prompt
+                logger.info(f"cache Text Encoder outputs for prompt: {p}")
+                with torch.no_grad():
+                    if te_dtype.itemsize == 1:
+                        with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
+                            ctx_vec = text_embedder([p])  # [1, 512, 15360]
+                    else:
+                        ctx_vec = text_embedder([p])  # [1, 512, 15360]
+                ctx_vec = ctx_vec.cpu()
 
-                    # save prompt cache
-                    sample_prompts_te_outputs[p] = ctx_vec
+                # save prompt cache
+                sample_prompts_te_outputs[p] = ctx_vec
 
         del text_embedder
         clean_memory_on_device(device)

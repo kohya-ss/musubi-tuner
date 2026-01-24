@@ -512,6 +512,17 @@ class Flux2(nn.Module):
             swap_ratio = self.num_single_blocks / self.num_double_blocks
             double_blocks_to_swap = int(round(num_blocks / (1.0 + swap_ratio / 2.0)))
             single_blocks_to_swap = int(round(double_blocks_to_swap * swap_ratio))
+
+            # adjust if we exceed available blocks
+            if self.num_double_blocks * 2 < self.num_single_blocks:
+                while double_blocks_to_swap >= 1 and double_blocks_to_swap > self.num_double_blocks - 2:
+                    double_blocks_to_swap -= 1
+                    single_blocks_to_swap += 2
+            else:
+                while single_blocks_to_swap >= 2 and single_blocks_to_swap > self.num_single_blocks - 2:
+                    single_blocks_to_swap -= 2
+                    double_blocks_to_swap += 1
+
             if double_blocks_to_swap == 0 and single_blocks_to_swap == 0:
                 if self.num_single_blocks >= self.num_double_blocks:
                     single_blocks_to_swap = 1
@@ -740,6 +751,7 @@ class SingleStreamBlock(nn.Module):
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1)
 
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        del qkv
         q, k = self.norm(q, k, v)
 
         qkv_list = [q, k, v]
@@ -762,15 +774,7 @@ class SingleStreamBlock(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        mlp_ratio: float,
-        #         qkv_bias: bool = False,
-        attn_mode: str = "torch",
-        split_attn: bool = False,
-    ):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
@@ -780,11 +784,7 @@ class DoubleStreamBlock(nn.Module):
         self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_mult_factor = 2
 
-        self.attn_mode = attn_mode
-        self.split_attn = split_attn
-
         self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads)
-
         self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_mlp = nn.Sequential(
             nn.Linear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
@@ -794,7 +794,6 @@ class DoubleStreamBlock(nn.Module):
 
         self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads)
-
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_mlp = nn.Sequential(
             nn.Linear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
@@ -840,6 +839,7 @@ class DoubleStreamBlock(nn.Module):
         img_qkv = self.img_attn.qkv(img_modulated)
         del img_modulated
         img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        del img_qkv
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
@@ -849,6 +849,7 @@ class DoubleStreamBlock(nn.Module):
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         del txt_modulated
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        del txt_qkv
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         txt_len = txt_q.shape[2]

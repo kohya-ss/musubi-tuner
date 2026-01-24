@@ -168,10 +168,24 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--mixed_precision bf16` is recommended for FLUX.2 training.
 - `--timestep_sampling flux2_shift` is recommended for FLUX.2.
 - Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
-- Memory saving options like `--fp8` (for DiT) and `--fp8_text_encoder` (for Text Encoder 1) are available. `--fp8_scaled` is recommended when using `--fp8` for DiT.
+- Memory saving options like `--fp8_base --fp8_scaled` (for DiT, specify both) and `--fp8_text_encoder` (for Text Encoder) are available. `--fp8_scaled` is recommended when using `--fp8_base` for DiT.
 -  `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 - `--vae_dtype` option is available to specify the VAE weight data type. Default is `float32`, `bfloat16` can also be specified.
 - Instead of `--sdpa`, `--xformers` and `--flash_attn` can also be used. Make sure the related libraries are installed.
+
+`--fp8_text_encoder` option is not available for dev (Mistral 3).
+
+Some blocks can be offloaded to CPU for memory savings using the `--blocks_to_swap` option. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
+
+In FLUX.2, since DoubleStreamBlock uses more memory than SingleStreamBlock and the number of each block varies by model, the actual number of offloaded blocks is automatically adjusted (double block + single block * 2 = number of swap blocks).
+
+The maximum values of `blocks_to_swap` per model when combined with the `--fp8_base --fp8_scaled` options are as follows:
+
+|Model Type|Maximum blocks_to_swap|
+|----|----|
+|flux.2-dev|29|
+|flux.2-klein-4b|13|
+|flux.2-klein-9b|16|
 
 <details>
 <summary>日本語</summary>
@@ -183,10 +197,24 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 - `--network_module networks.lora_flux_2`を指定する必要があります。
 - FLUX.2の学習には`--mixed_precision bf16`を推奨します。
 - FLUX.2には`--timestep_sampling flux2_shift`を推奨します。
-- `--fp8`（DiT用）や`--fp8_text_encoder`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
+- `--fp8_base --fp8_scaled`（DiT用、両方指定してください）や`--fp8_text_encoder`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。`--fp8_base`をDiTに使用する場合は、`--fp8_scaled`を推奨します。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
 - `--vae_dtype`オプションは、VAEの重みデータ型を指定するためのオプションです。デフォルトは`float32`で、`bfloat16`も指定可能です。
 - `--sdpa`の代わりに`--xformers`および`--flash_attn`を使用することも可能です。関連するライブラリがインストールされていることを確認してください。
+
+`--fp8_text_encoder`オプションはdev（Mistral 3）では使用できません。
+
+一部のブロックをメモリ節約のためにCPUにオフロードする`--blocks_to_swap`オプションも利用可能です。詳細は[HunyuanVideoのドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
+
+FLUX.2ではDoubleStreamBlockのメモリ使用量がSingleStreamBlockよりも大きいのと、それぞれのブロック数がモデルごとに異なるため、実際にオフロードされるブロック数は自動調整されます（double block + single block * 2 = swap block数）。
+
+`--fp8_base --fp8_scaled`オプションと組み合わせたときの、モデルごとの`blocks_to_swap`の最大値は以下の通りです。
+
+|モデル種類|blocks_to_swapの最大値|
+|----|----|
+|flux.2-dev|29|
+|flux.2-klein-4b|13|
+|flux.2-klein-9b|16|
 
 </details>
 
