@@ -35,7 +35,7 @@ from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.zimage.zimage_utils import load_qwen3
 
-from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
+from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams, AttnBlock
 
 from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.utils.safetensors_utils import load_split_weights
@@ -116,6 +116,12 @@ FLUX2_MODEL_INFO = {
 def add_model_version_args(parser: argparse.ArgumentParser):
     choices = list(FLUX2_MODEL_INFO.keys())
     parser.add_argument("--model_version", type=str, default="dev", choices=choices, help="model version")
+
+
+def add_vae_slicing_args(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--vae_slice_size", type=int, default=None, help="Use Sliced SDPA to trade lower speed for lower memory usage"
+    )
 
 
 def is_fp8(dt):
@@ -495,12 +501,16 @@ def load_flow_model(
 
 
 def load_ae(
-    ckpt_path: str, dtype: torch.dtype, device: Union[str, torch.device], disable_mmap: bool = False
+    ckpt_path: str, dtype: torch.dtype, device: Union[str, torch.device], disable_mmap: bool = False, slice_size: int = None
 ) -> flux2_models.AutoEncoder:
     logger.info("Building AutoEncoder")
     with init_empty_weights():
         # dev and schnell have the same AE params
         ae = flux2_models.AutoEncoder(flux2_models.AutoEncoderParams()).to(dtype)
+        if slice_size is not None:
+            for module in ae.modules():
+                if isinstance(module, AttnBlock):
+                    module.slice_size = slice_size
 
     logger.info(f"Loading state dict from {ckpt_path}")
     sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)

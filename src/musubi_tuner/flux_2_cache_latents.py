@@ -81,6 +81,7 @@ def encode_and_save_batch(ae: flux2_models.AutoEncoder, batch: List[ItemInfo], a
 def main():
     parser = cache_latents.setup_parser_common()
     flux2_utils.add_model_version_args(parser)
+    flux2_utils.add_vae_slicing_args(parser)
 
     args = parser.parse_args()
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
@@ -111,7 +112,7 @@ def main():
 
     logger.info(f"Loading AE model from {args.vae}")
     vae_dtype = torch.float32 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
-    ae = flux2_utils.load_ae(args.vae, dtype=vae_dtype, device=device, disable_mmap=True)
+    ae = flux2_utils.load_ae(args.vae, dtype=vae_dtype, device=device, disable_mmap=True, slice_size=args.vae_slice_size)
     ae.to(device)
 
     # encoding closure
