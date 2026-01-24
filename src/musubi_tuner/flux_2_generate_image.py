@@ -690,7 +690,7 @@ def generate(
 
     if control_latent is not None:
         ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent)
-        control_latent = None  # free memory
+        del control_latent  # free memory
         ref_tokens = ref_tokens.to(device, dtype=torch.bfloat16)
         ref_ids = ref_ids.to(device)
     else:
