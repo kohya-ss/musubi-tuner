@@ -351,7 +351,7 @@ def denoise(
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(device_type=img.device.type, dtype=model.dtype):
             pred = model(x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=txt, ctx_ids=txt_ids, guidance=guidance_vec)
 
         if img_input_ids is not None:
@@ -381,11 +381,6 @@ def denoise_cfg(
     img_cond_seq: Tensor | None = None,
     img_cond_seq_ids: Tensor | None = None,
 ):
-    if img_cond_seq is not None:
-        assert img_cond_seq_ids is not None
-        img_cond_seq = torch.cat([img_cond_seq, img_cond_seq], dim=0)
-        img_cond_seq_ids = torch.cat([img_cond_seq_ids, img_cond_seq_ids], dim=0)
-
     for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
 
@@ -395,7 +390,7 @@ def denoise_cfg(
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(device_type=img.device.type, dtype=model.dtype):
             pred_cond = model(x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=txt, ctx_ids=txt_ids, guidance=None)
             pred_uncond = model(
                 x=img_input, x_ids=img_input_ids, timesteps=t_vec, ctx=uncond_txt, ctx_ids=uncond_txt_ids, guidance=None
