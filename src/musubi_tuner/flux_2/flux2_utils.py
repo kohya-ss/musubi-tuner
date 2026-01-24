@@ -114,7 +114,9 @@ FLUX2_MODEL_INFO = {
 
 
 def add_model_version_args(parser: argparse.ArgumentParser):
-    parser.add_argument("--model_version", type=str, default="dev", choices=list(FLUX2_MODEL_INFO.keys()), help="model version")
+    choices = list(FLUX2_MODEL_INFO.keys())
+    choices += [f"flux.2-{k}" for k in choices]
+    parser.add_argument("--model_version", type=str, default="dev", choices=choices, help="model version")
 
 
 def is_fp8(dt):
