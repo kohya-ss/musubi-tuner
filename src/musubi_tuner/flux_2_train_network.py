@@ -44,6 +44,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         self._i2v_training = False
         self._control_training = False  # this means video training, not control image training
         self.default_guidance_scale = 4.0  # CFG scale for inference for base models
+        self.default_discrete_flow_shift = None  # Use FLUX.2 shift as default
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         device = accelerator.device
@@ -160,7 +161,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             clean_memory_on_device(device)
 
         # denoise
-        timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1])
+        timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1], discrete_flow_shift)
         if self.model_version_info.guidance_distilled:
             x = flux2_utils.denoise(
                 model,
