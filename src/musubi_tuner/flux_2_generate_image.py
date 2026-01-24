@@ -875,7 +875,7 @@ def load_shared_models(args: argparse.Namespace) -> Dict:
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
     # Load text encoders to CPU
-    m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
+    m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
         model_version_info, args.text_encoder, dtype=m3_dtype, device="cpu", disable_mmap=True
     )
