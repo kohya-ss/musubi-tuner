@@ -26,7 +26,7 @@ FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pe_embedder", "time_in", "_modulation"
 
 @dataclass
 class Flux2Params:
-    in_channels: int = 128
+    in_channels: int = 128  # packed latent channels
     context_in_dim: int = 15360
     hidden_size: int = 6144
     num_heads: int = 48
@@ -39,8 +39,7 @@ class Flux2Params:
 
 
 @dataclass
-class Klein9BParams:
-    in_channels: int = 128
+class Klein9BParams(Flux2Params):
     context_in_dim: int = 12288
     hidden_size: int = 4096
     num_heads: int = 32
@@ -53,8 +52,7 @@ class Klein9BParams:
 
 
 @dataclass
-class Klein4BParams:
-    in_channels: int = 128
+class Klein4BParams(Flux2Params):
     context_in_dim: int = 7680
     hidden_size: int = 3072
     num_heads: int = 24
