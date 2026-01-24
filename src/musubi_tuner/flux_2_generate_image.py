@@ -94,7 +94,10 @@ def parse_args() -> argparse.Namespace:
     #     "--cpu_noise", action="store_true", help="Use CPU to generate noise (compatible with ComfyUI). Default is False."
     # )
     parser.add_argument(
-        "--embedded_cfg_scale", type=float, default=4.0, help="Embeded CFG scale (distilled CFG Scale), default is 4.0"
+        "--embedded_cfg_scale",
+        type=float,
+        default=4.0,
+        help="Embeded CFG scale (distilled CFG Scale), default is 4.0. All klein models ignore this.",
     )
     # parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
     # parser.add_argument(

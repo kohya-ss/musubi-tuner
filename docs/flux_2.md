@@ -74,7 +74,7 @@ Qwen3 4Bの重みは、すでにZ-Imageで用いているものがあればそ�
 When specifying the model version in various scripts, use the following options:
 |type|version|sampling guidance scale|num sampling steps|
 |----|--------|----|----|
-|flux.2-dev|`--model_version dev`|1.0|4|
+|flux.2-dev|`--model_version dev`|4.0|50|
 |flux.2-klein-4b|`--model_version klein-4b`|1.0|4|
 |flux.2-klein-base-4b|`--model_version klein-base-4b`|4.0|50|
 |flux.2-klein-9b|`--model_version klein-9b`|1.0|4|
