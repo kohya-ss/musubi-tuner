@@ -156,6 +156,10 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 - [FramePack (1フレーム推論)](./docs/framepack_1f.md)
 - [FLUX.1 Kontext](./docs/flux_kontext.md)
 - [Qwen-Image](./docs/qwen_image.md)
+- [Z-Image](./docs/zimage.md)
+- [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
+- [Kandinsky 5](./docs/kandinsky5.md)
+- [FLUX.2](./docs/flux_2.md)
 
 **共通設定・その他:**
 - [データセット設定](./docs/dataset_config.md)
