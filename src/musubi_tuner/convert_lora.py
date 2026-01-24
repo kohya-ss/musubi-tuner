@@ -128,8 +128,8 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
                     module_name = module_name.replace("to.v", "to_v")  # fix to v
                     module_name = module_name.replace("to.out", "to_out")  # fix to out
                     module_name = module_name.replace("feed.forward", "feed_forward")  # fix feed forward
-                else:
-                    # HunyuanVideo lora name to module name: ugly but works
+                elif "double.blocks." in module_name or "single.blocks." in module_name:
+                    # HunyuanVideo and FLUX lora name to module name: ugly but works
                     module_name = module_name.replace("double.blocks.", "double_blocks.")  # fix double blocks
                     module_name = module_name.replace("single.blocks.", "single_blocks.")  # fix single blocks
                     module_name = module_name.replace("img.", "img_")  # fix img
