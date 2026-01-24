@@ -247,14 +247,15 @@ class Flux2NetworkTrainer(NetworkTrainer):
     ):
         model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         model = flux2_utils.load_flow_model(
-            device=loading_device,
+            device=accelerator.device,
             model_version_info=model_version_info,
-            dit_path=args.dit,
+            dit_path=dit_path,
             attn_mode=attn_mode,
             split_attn=split_attn,
             loading_device=loading_device,
             dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
         return model
 
