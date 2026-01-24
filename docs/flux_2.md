@@ -38,12 +38,36 @@ DiT, AE, Text Encoder のモデルをダウンロードする必要がありま�
 - **AE**: Download from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `ae.safetensors`. `vae/diffusion_pytorch_model.safetensors` in the subfolder is in Diffusers format and cannot be used.
 - **Qwen3 4B Text Encoder**: Download all the split files from the [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) repository and specify the first file (e.g., `00001-of-00002.safetensors`) in the arguments.
 
+If you already have the weights for Qwen3 4B used in Z-Image, you can use them as is. Refer to the [Z-Image documentation](./zimage.md#download-the-model--モデルのダウンロード) for details.
+
+<details>
+<summary>日本語</summary>
+
+- **DiT 4B**: [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) リポジトリからダウンロードしてください。`flux2-klein-4b.safetensors` を使用してください。
+- **DiT base 4B**: [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B) リポジトリからダウンロードしてください。`flux2-klein-base-4b.safetensors` を使用してください。
+- **AE**: [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) リポジトリからダウンロードしてください。`ae.safetensors` を使用してください。サブフォルダ内の `vae/diffusion_pytorch_model.safetensors` はDiffusers形式なので使用できません。
+- **Qwen3 4B Text Encoder**: [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) リポジトリから分割されたすべてのファイルをダウンロードし、最初のファイル（例：`00001-of-00002.safetensors`）を引数で指定してください。
+
+Qwen3 4Bの重みは、すでにZ-Imageで用いているものがあればそのまま使用可能です。[Z-Imageのドキュメント](./zimage.md#download-the-model--モデルのダウンロード)を参照してください。
+
+</details>
+
 ### FLUX.2 [klein] 9B / base 9B
 
 - **DiT 9B**: Download from the [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) repository. Use `flux2-klein-9b.safetensors`.
 - **DiT base 9B**: Download from the [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) repository. Use `flux2-klein-base-9b.safetensors`.
 - **AE**: Download from the [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) repository. Use `ae.safetensors`. `vae/diffusion_pytorch_model.safetensors` in the subfolder is in Diffusers format and cannot be used.
 - **Qwen3 8B Text Encoder**: Download all the split files from the [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) repository and specify the first file (e.g., `00001-of-00004.safetensors`) in the arguments.
+
+<details>
+<summary>日本語</summary>
+
+- **DiT 9B**: [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) リポジトリからダウンロードしてください。`flux2-klein-9b.safetensors` を使用してください。
+- **DiT base 9B**: [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) リポジトリからダウンロードしてください。`flux2-klein-base-9b.safetensors` を使用してください。
+- **AE**: [black-forest-labs/FLUX.2](https://huggingface.co/black-forest-labs/FLUX.2-dev) リポジトリからダウンロードしてください。`ae.safetensors` を使用してください。サブフォルダ内の `vae/diffusion_pytorch_model.safetensors` はDiffusers形式なので使用できません。
+- **Qwen3 8B Text Encoder**: [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) リポジトリから分割されたすべてのファイルをダウンロードし、最初のファイル（例：`00001-of-00004.safetensors`）を引数で指定してください。
+</details>
+
 
 ## Specifying Model Version / モデルバージョンの指定
 
