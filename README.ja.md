@@ -67,7 +67,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
 - 2026/01/21
     - FLUX.2 [dev]/[klein]のLoRA学習に対応しました。[PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841) https://www.scenario.com のchristopher5106氏に深く感謝します。
         - 詳細は[ドキュメント](./docs/flux_2.md)を参照してください。
-        -  fp8最適化など一部機能は未実装です。また[dev]以外のモデルは動作テストされていません。早急に対応予定です。
 
 - 2026/01/17
     - Z-ImageのComfyUI向けのLoRA変換について、互換性向上のため `convert_lora.py` を使用するように変更しました。[PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851)
@@ -91,12 +90,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - Kandinsky 5のLoRA学習に対応しました。[PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774) AkaneTendo25氏に深く感謝します。
         - 詳細は[ドキュメント](./docs/kandinsky5.md)を参照してください。
         - **重みの指定が一部、Hugging FaceのID形式になっています。近日中に（他のモデルと同様の）*.safetensorsの直接指定方式に変更予定ですのでご注意ください。**
-
-- 2025/12/13
-    - Z-Imageのfinetuningに対応しました。[PR #778](https://github.com/kohya-ss/musubi-tuner/pull/778) sdbds氏に深く感謝します。
-        - 詳細は[ドキュメント](./docs/zimage.md#finetuning)を参照してください。
-    - ごくシンプルなGUIツールを追加しました。[PR #779](https://github.com/kohya-ss/musubi-tuner/pull/779)
-        - 現在はZ-Image-TurboとQwen-ImageのLoRA学習に対応しています。詳細は[ドキュメント](./src/musubi_tuner/gui/gui.ja.md)を参照してください。
 
 ### リリースについて
 
