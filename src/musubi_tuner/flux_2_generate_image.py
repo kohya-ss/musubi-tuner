@@ -365,9 +365,9 @@ def load_dit_model(
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
 
-    # if we only want to save the model, we can skip the rest
+    # if we only want to save the model, we can skip the rest of the setup but still return the model
     if args.save_merged_model:
-        return None
+        return model
 
     if not args.fp8_scaled:
         # simple cast to dit_weight_dtype
