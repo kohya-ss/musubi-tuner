@@ -156,7 +156,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             with torch.no_grad():
                 for image_path in control_image_paths:
                     control_image_tensor, _, _ = flux2_utils.preprocess_control_image(image_path, limit_size)
-                    control_latent = vae.encode(control_image_tensor.to(vae.dtype, device=device))
+                    control_latent = vae.encode(control_image_tensor.to(device, vae.dtype))
                     control_latent_list.append(control_latent.squeeze(0))
 
             ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent_list)
