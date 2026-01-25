@@ -270,21 +270,23 @@ class BlissfulVideoProcessor:
             height: Original height.
         """
         cap = cv2.VideoCapture(self.input_file_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames: List[np.ndarray] = []
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            frames: List[np.ndarray] = []
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if make_rgb:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if make_rgb:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame)
 
-        cap.release()
-        return frames, fps, width, height
+            return frames, fps, width, height
+        finally:
+            cap.release()
 
     def write_np_or_tensor_to_png(self, img: Union[np.ndarray, torch.Tensor]) -> None:
         """
