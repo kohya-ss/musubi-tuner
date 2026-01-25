@@ -46,6 +46,11 @@ import logging
 logger = logging.getLogger(__name__)
 # logging.basicConfig removed - configure at entry points instead
 
+# Attention backend configuration for FLUX.2
+# Note: "sdpa" is normalized to "torch" at the CLI level (treat as alias, not backend)
+FLUX2_SUPPORTED_ATTN_MODES = frozenset({"torch", "flash", "xformers", "sageattn"})
+FLUX2_CUDA_ONLY_ATTN_MODES = frozenset({"flash", "xformers", "sageattn"})
+
 M3_TOKENIZER_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 OUTPUT_LAYERS_MISTRAL = [10, 20, 30]
 OUTPUT_LAYERS_QWEN3 = [9, 18, 27]

@@ -12,7 +12,11 @@ from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 
 from musubi_tuner.flux_2 import flux2_utils
-from musubi_tuner.flux_2.flux2_utils import load_flow_model
+from musubi_tuner.flux_2.flux2_utils import (
+    load_flow_model,
+    FLUX2_SUPPORTED_ATTN_MODES,
+    FLUX2_CUDA_ONLY_ATTN_MODES,
+)
 from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.utils import model_utils
 
@@ -147,15 +151,40 @@ def parse_args() -> argparse.Namespace:
     if args.fp8_text_encoder and model_version_info.qwen_variant is None:
         raise ValueError("--fp8_text_encoder is not supported for FLUX.2 dev (Mistral3). Remove this flag or use a Klein model.")
 
-    # Normalize attention mode: FLUX.2 only supports torch attention currently
+    # Normalize attention mode (sdpa -> torch for consistency)
+    from musubi_tuner.modules import attention as attention_module
+
     if args.attn_mode == "sdpa":
         args.attn_mode = "torch"
-    elif args.attn_mode != "torch":
+
+    if args.attn_mode not in FLUX2_SUPPORTED_ATTN_MODES:
         raise ValueError(
-            f"--attn_mode '{args.attn_mode}' is not supported for FLUX.2. "
-            "Currently only 'torch' (or 'sdpa' which maps to 'torch') is supported. "
-            "Other modes require porting upstream's unified attention module."
+            f"--attn_mode '{args.attn_mode}' is not supported for FLUX.2. Supported: {sorted(FLUX2_SUPPORTED_ATTN_MODES)}."
         )
+
+    # Validate device support for the requested backend (CUDA-only backends)
+    requested_device_str = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        requested_device = torch.device(requested_device_str)
+    except Exception as e:
+        raise ValueError(f"Invalid --device '{requested_device_str}'.") from e
+
+    if requested_device.type == "cuda" and not torch.cuda.is_available():
+        raise ValueError("--device cuda was requested, but CUDA is not available in this environment.")
+
+    if args.attn_mode in FLUX2_CUDA_ONLY_ATTN_MODES and requested_device.type != "cuda":
+        raise ValueError(
+            f"--attn_mode {args.attn_mode} requires a CUDA device, but --device resolved to '{requested_device}'. "
+            "Use --attn_mode torch (or --attn_mode sdpa), or run with --device cuda."
+        )
+
+    # Validate backend availability
+    if args.attn_mode == "flash" and attention_module.flash_attn is None:
+        raise ValueError("--attn_mode flash requires flash-attn. Install with: pip install flash-attn")
+    if args.attn_mode == "xformers" and attention_module.xops is None:
+        raise ValueError("--attn_mode xformers requires xformers. Install with: pip install xformers")
+    if args.attn_mode == "sageattn" and attention_module.sageattn is None:
+        raise ValueError("--attn_mode sageattn requires sageattention. Install with: pip install sageattention")
 
     # Validate arguments
     if args.from_file and args.interactive:

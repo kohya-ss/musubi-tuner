@@ -7,7 +7,11 @@ from accelerate import Accelerator
 from diffusers.utils.torch_utils import randn_tensor
 from einops import rearrange
 from musubi_tuner.flux_2 import flux2_models, flux2_utils
-from musubi_tuner.flux_2.flux2_utils import Flux2ModelInfo
+from musubi_tuner.flux_2.flux2_utils import (
+    Flux2ModelInfo,
+    FLUX2_SUPPORTED_ATTN_MODES,
+    FLUX2_CUDA_ONLY_ATTN_MODES,
+)
 from musubi_tuner.hv_train_network import (
     NetworkTrainer,
     load_prompts,
@@ -269,18 +273,41 @@ class Flux2NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        # FLUX.2 only supports torch attention currently (sdpa maps to torch).
+        from musubi_tuner.modules import attention as attention_module
+
+        # Normalize sdpa -> torch (consistent with other architectures)
         if attn_mode == "sdpa":
             attn_mode = "torch"
 
-        if split_attn:
-            raise ValueError("--split_attn is not supported for FLUX.2 training. Remove this flag.")
-
-        if attn_mode != "torch":
+        if attn_mode not in FLUX2_SUPPORTED_ATTN_MODES:
+            if attn_mode in {"flash3", "cute"}:
+                raise ValueError(
+                    f"Attention mode '{attn_mode}' is not supported for FLUX.2 training. "
+                    "Use --sdpa, --flash_attn, --sage_attn, or --xformers instead."
+                )
             raise ValueError(
-                f"Attention mode '{attn_mode}' (from --sdpa/--flash_attn/etc.) is not supported for FLUX.2 training. "
-                "Use --sdpa (torch SDPA). Other modes require porting upstream's unified attention module."
+                f"Attention mode '{attn_mode}' is not supported for FLUX.2 training. "
+                f"Supported: {sorted(FLUX2_SUPPORTED_ATTN_MODES)}. Use --sdpa, --flash_attn, --sage_attn, or --xformers."
             )
+
+        if attn_mode in FLUX2_CUDA_ONLY_ATTN_MODES and accelerator.device.type != "cuda":
+            flag_map = {
+                "flash": "--flash_attn",
+                "xformers": "--xformers",
+                "sageattn": "--sage_attn",
+            }
+            raise ValueError(
+                f"{flag_map[attn_mode]} requires a CUDA device, but Accelerate is using '{accelerator.device.type}'. "
+                "Use --sdpa instead."
+            )
+
+        # Validate backend availability
+        if attn_mode == "flash" and attention_module.flash_attn is None:
+            raise ValueError("--flash_attn requires flash-attn. Install with: pip install flash-attn")
+        if attn_mode == "xformers" and attention_module.xops is None:
+            raise ValueError("--xformers requires xformers. Install with: pip install xformers")
+        if attn_mode == "sageattn" and attention_module.sageattn is None:
+            raise ValueError("--sage_attn requires sageattention. Install with: pip install sageattention")
 
         model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         model = flux2_utils.load_flow_model(
