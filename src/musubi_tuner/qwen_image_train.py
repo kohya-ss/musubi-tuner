@@ -16,7 +16,12 @@ from safetensors.torch import save_file
 from musubi_tuner import qwen_image_train_network
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.modules.mask_loss import apply_masked_loss, log_mask_loss_banner, require_mask_weights_if_enabled, validate_mask_loss_args
+from musubi_tuner.modules.mask_loss import (
+    apply_masked_loss,
+    log_mask_loss_banner,
+    require_mask_weights_if_enabled,
+    validate_mask_loss_args,
+)
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.hv_train_network import (

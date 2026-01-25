@@ -43,9 +43,7 @@ def normalize_deprecated_keys_in_section(section: dict, *, section_name: str) ->
             continue
 
         if new_key in section:
-            logger.warning(
-                f"Deprecated config key '{old_key}' is ignored because '{new_key}' is already set in {section_name}."
-            )
+            logger.warning(f"Deprecated config key '{old_key}' is ignored because '{new_key}' is already set in {section_name}.")
             section.pop(old_key, None)
             continue
 

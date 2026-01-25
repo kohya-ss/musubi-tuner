@@ -70,7 +70,9 @@ def parse_args() -> argparse.Namespace:
         "--guidance_scale", type=float, default=4.0, help="Guidance scale for classifier free guidance. Default is 4.0."
     )
     parser.add_argument("--prompt", type=str, default=None, help="prompt for generation")
-    parser.add_argument("--negative_prompt", type=str, default=None, help="negative prompt for generation (non-distilled models only)")
+    parser.add_argument(
+        "--negative_prompt", type=str, default=None, help="negative prompt for generation (non-distilled models only)"
+    )
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size, height and width")
     parser.add_argument(
         "--control_image_path",

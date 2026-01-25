@@ -972,7 +972,7 @@ class LoRANetwork(torch.nn.Module):
                         down_key = f"{lora_name}.lora_down.weight"
                         if down_key in weights_sd:
                             dim = weights_sd[down_key].shape[0]
-                            alpha_val = value.item() if hasattr(value, 'item') else float(value)
+                            alpha_val = value.item() if hasattr(value, "item") else float(value)
                             total_count += 1
                             if abs(alpha_val - math.sqrt(dim)) < 0.01:
                                 suspicious_count += 1

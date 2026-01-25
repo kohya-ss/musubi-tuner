@@ -148,7 +148,11 @@ def apply_masked_loss(
         # loss: (B, L, C, H, W), mask: (B, 1, F, H, W) where F == (base + layers) or F == L
         if drop_base_frame:
             mask_weights = mask_weights[:, :, 1:, :, :]
-        if mask_weights.shape[0] != loss.shape[0] or mask_weights.shape[2] != loss.shape[1] or mask_weights.shape[3:] != loss.shape[3:]:
+        if (
+            mask_weights.shape[0] != loss.shape[0]
+            or mask_weights.shape[2] != loss.shape[1]
+            or mask_weights.shape[3:] != loss.shape[3:]
+        ):
             raise ValueError(
                 "mask_weights shape does not match loss shape for layout='layered': "
                 f"mask={tuple(mask_weights.shape)} loss={tuple(loss.shape)} drop_base_frame={drop_base_frame}"

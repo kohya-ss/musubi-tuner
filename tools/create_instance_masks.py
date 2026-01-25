@@ -39,7 +39,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 if sys.version_info < (3, 10):
     raise RuntimeError("Python >= 3.10 is required.")

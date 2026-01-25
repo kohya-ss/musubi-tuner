@@ -8,6 +8,7 @@ import torch.nn as nn
 
 # Import logging for debug messages
 from blissful_tuner.blissful_logger import BlissfulLogger
+
 logger = BlissfulLogger(__name__, "green")
 
 
@@ -20,9 +21,9 @@ def _convert_value(value):
         return value
 
     # Handle boolean strings
-    if value.lower() == 'true':
+    if value.lower() == "true":
         return True
-    if value.lower() == 'false':
+    if value.lower() == "false":
         return False
 
     # Try to convert to int
@@ -76,6 +77,7 @@ def create_network(
     # LyCORIS 3.x renamed LycorisNetworkKohya to LycorisNetwork and added create_network helper
     try:
         from lycoris.kohya import create_network as lycoris_create_network
+
         # Some builds keep LycorisNetworkKohya, others only expose LycorisNetwork
         try:
             from lycoris.kohya import LycorisNetworkKohya  # type: ignore
@@ -101,24 +103,24 @@ def create_network(
         logger.info(f"No network_alpha specified, using default: {network_alpha}")
 
     # Extract algorithm from kwargs, default to 'lora' if not specified
-    algo = kwargs.get('algo', 'lora')
+    algo = kwargs.get("algo", "lora")
 
     # Log the configuration
     logger.info(f"Creating LyCORIS network with algorithm: {algo}")
     logger.info(f"Network config - dim: {network_dim}, alpha: {network_alpha}, multiplier: {multiplier}")
 
     # Handle conv-specific dimensions if provided (convert from string if needed)
-    conv_dim = _convert_value(kwargs.get('conv_dim', None))
-    conv_alpha = _convert_value(kwargs.get('conv_alpha', None))
+    conv_dim = _convert_value(kwargs.get("conv_dim", None))
+    conv_alpha = _convert_value(kwargs.get("conv_alpha", None))
     if conv_dim is not None:
         logger.info(f"Conv layers - dim: {conv_dim}, alpha: {conv_alpha}")
 
     # Log LoKR-specific parameters if using LoKR
-    if algo == 'lokr':
+    if algo == "lokr":
         lokr_params = {
-            'factor': kwargs.get('factor', 'default'),
-            'decompose_both': kwargs.get('decompose_both', 'default'),
-            'use_tucker': kwargs.get('use_tucker', 'default'),
+            "factor": kwargs.get("factor", "default"),
+            "decompose_both": kwargs.get("decompose_both", "default"),
+            "use_tucker": kwargs.get("use_tucker", "default"),
         }
         logger.info(f"LoKR parameters: {lokr_params}")
 
@@ -133,13 +135,12 @@ def create_network(
     if extra_unet_targets:
         try:
             from lycoris.config import PRESET
+
             # Mutate preset in-place so kohya.create_network uses the widened list
             target_preset_name = preset_name or "full"
             if target_preset_name in PRESET:
                 targets = PRESET[target_preset_name].get("unet_target_module", [])
-                PRESET[target_preset_name]["unet_target_module"] = list(
-                    dict.fromkeys(list(targets) + list(extra_unet_targets))
-                )
+                PRESET[target_preset_name]["unet_target_module"] = list(dict.fromkeys(list(targets) + list(extra_unet_targets)))
             else:
                 # custom preset path
                 from lycoris.utils.preset import read_preset
@@ -157,20 +158,20 @@ def create_network(
     # This handles all the algo-to-module mapping internally
     # Build kwargs dict for create_network
     lycoris_kwargs = {
-        'algo': algo,  # Algorithm selection: lora, locon, loha, lokr, etc.
+        "algo": algo,  # Algorithm selection: lora, locon, loha, lokr, etc.
     }
 
     # Only add optional parameters if they're not None
     if neuron_dropout is not None:
-        lycoris_kwargs['dropout'] = neuron_dropout
+        lycoris_kwargs["dropout"] = neuron_dropout
     if conv_dim is not None:
-        lycoris_kwargs['conv_dim'] = conv_dim
+        lycoris_kwargs["conv_dim"] = conv_dim
     if conv_alpha is not None:
-        lycoris_kwargs['conv_alpha'] = conv_alpha
+        lycoris_kwargs["conv_alpha"] = conv_alpha
 
     # Add any remaining kwargs not already handled, converting string values to proper types
     for k, v in kwargs.items():
-        if k not in ['algo', 'conv_dim', 'conv_alpha', 'neuron_dropout', 'extra_unet_targets']:
+        if k not in ["algo", "conv_dim", "conv_alpha", "neuron_dropout", "extra_unet_targets"]:
             lycoris_kwargs[k] = _convert_value(v)
 
     # lycoris.kohya.create_network expects text_encoder as list, not None
@@ -181,7 +182,7 @@ def create_network(
         vae=vae,
         text_encoder=text_encoders if text_encoders is not None else [],
         unet=unet,
-        **lycoris_kwargs
+        **lycoris_kwargs,
     )
 
     # Log success
@@ -225,6 +226,7 @@ def create_network_from_weights(
 
     try:
         from lycoris.kohya import create_network_from_weights as lyco_create
+
         try:
             from lycoris.kohya import LycorisNetworkKohya  # type: ignore
         except ImportError:
@@ -238,11 +240,10 @@ def create_network_from_weights(
         if extra_unet_targets:
             try:
                 from lycoris.config import PRESET
+
                 if preset in PRESET:
                     targets = PRESET[preset].get("unet_target_module", [])
-                    PRESET[preset]["unet_target_module"] = list(
-                        dict.fromkeys(list(targets) + list(extra_unet_targets))
-                    )
+                    PRESET[preset]["unet_target_module"] = list(dict.fromkeys(list(targets) + list(extra_unet_targets)))
                 else:
                     from lycoris.utils.preset import read_preset
 
@@ -277,8 +278,7 @@ def create_network_from_weights(
             from lycoris.kohya import LycorisNetwork as LycoNet  # type: ignore
     except Exception as e:
         raise ImportError(
-            "LyCORIS is not installed or incomplete. Please reinstall with 'pip install lycoris-lora'.\n"
-            f"Original error: {e}"
+            f"LyCORIS is not installed or incomplete. Please reinstall with 'pip install lycoris-lora'.\nOriginal error: {e}"
         )
 
     network_module_map = {
@@ -349,9 +349,7 @@ def create_network_from_weights(
 
     info = network.load_state_dict(weights_sd, strict=False)
     if info.missing_keys or info.unexpected_keys:
-        logger.warning(
-            f"Weight loading info - Missing: {len(info.missing_keys)}, Unexpected: {len(info.unexpected_keys)}"
-        )
+        logger.warning(f"Weight loading info - Missing: {len(info.missing_keys)}, Unexpected: {len(info.unexpected_keys)}")
     else:
         logger.info("Successfully loaded all weights")
 
@@ -361,8 +359,9 @@ def create_network_from_weights(
 # Optional: Export the kohya module directly for advanced users
 try:
     from lycoris import kohya
+
     # Make the kohya module available for direct access if needed
-    __all__ = ['create_network', 'create_network_from_weights', 'kohya']
+    __all__ = ["create_network", "create_network_from_weights", "kohya"]
 except ImportError:
     # If LyCORIS is not installed, just export our functions
-    __all__ = ['create_network', 'create_network_from_weights']
+    __all__ = ["create_network", "create_network_from_weights"]

@@ -2026,8 +2026,7 @@ class ImageDataset(BaseDataset):
         # Early validation: require_mask without any mask source is a config error
         if self.require_mask and not self.alpha_mask and self.mask_paths is None:
             raise ValueError(
-                "require_mask=true but no mask source configured. "
-                "Set alpha_mask=true and/or mask_directory in your dataset config."
+                "require_mask=true but no mask source configured. Set alpha_mask=true and/or mask_directory in your dataset config."
             )
 
         if self.cache_directory is None:

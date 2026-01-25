@@ -63,6 +63,7 @@ attribution and actions without speculation."""
 @dataclass(frozen=True)
 class Flux2ModelInfo:
     """Model information for FLUX.2 variants."""
+
     params: Flux2Params
     defaults: dict[str, float | int]
     fixed_params: set[str]

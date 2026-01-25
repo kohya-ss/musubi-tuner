@@ -53,7 +53,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         logger.info(f"Model version: {args.model_version}, architecture: {self.model_version_info.architecture}")
 
         if args.fp8_text_encoder and self.model_version_info.qwen_variant is None:
-            raise ValueError("--fp8_text_encoder is not supported for FLUX.2 dev (Mistral3). Remove this flag or use a Klein model.")
+            raise ValueError(
+                "--fp8_text_encoder is not supported for FLUX.2 dev (Mistral3). Remove this flag or use a Klein model."
+            )
 
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
         self.default_discrete_flow_shift = None  # Use model defaults
