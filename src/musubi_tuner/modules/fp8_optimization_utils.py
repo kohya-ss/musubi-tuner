@@ -314,6 +314,11 @@ def load_safetensors_with_fp8_optimization(
                     value = value.to(calc_device)
 
                 original_dtype = value.dtype
+                if original_dtype.itemsize == 1:
+                    raise ValueError(
+                        f"Layer {key} is already in {original_dtype} format. `--fp8_scaled` optimization should not be applied. Please use fp16/bf16/float32 model weights."
+                        + f" / レイヤー {key} は既に{original_dtype}形式です。`--fp8_scaled` 最適化は適用できません。FP16/BF16/Float32のモデル重みを使用してください。"
+                    )
                 quantized_weight, scale_tensor = quantize_weight(
                     key, value, fp8_dtype, max_value, min_value, quantization_mode, block_size
                 )
@@ -355,7 +360,9 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
     Returns:
         torch.Tensor: Result of linear transformation
     """
-    if use_scaled_mm:
+    if use_scaled_mm and (
+        self.scale_weight.dtype != torch.float32 or self.bias is None
+    ):  # F32 with bias is a no-no in scaled_mm so divert to normal dequant
         input_dtype = x.dtype
         original_weight_dtype = self.scale_weight.dtype
         out_dtype = (
@@ -388,7 +395,13 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         else:
             o = torch._scaled_mm(x, weight, out_dtype=input_dtype, scale_a=scale_x, scale_b=scale_weight)
 
-        o = o.reshape(original_shape[0], original_shape[1], -1) if len(original_shape) == 3 else o.reshape(original_shape[0], -1)
+        o = (
+            o.reshape(original_shape[0], original_shape[1], -1)
+            if len(original_shape) == 3
+            else o.reshape(original_shape[0], -1)
+            if len(original_shape) == 2
+            else o.reshape(original_shape[0], original_shape[1], original_shape[2], -1)  # Kandinsky sometimes
+        )
         return o.to(out_dtype)
 
     else:

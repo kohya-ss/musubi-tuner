@@ -47,7 +47,7 @@ def filter_lora_state_dict(
 
 def load_safetensors_with_lora_and_fp8(
     model_files: Union[str, List[str]],
-    lora_weights_list: Optional[Dict[str, torch.Tensor]],
+    lora_weights_list: Optional[List[Dict[str, torch.Tensor]]],
     lora_multipliers: Optional[List[float]],
     fp8_optimization: bool,
     calc_device: torch.device,
@@ -64,7 +64,7 @@ def load_safetensors_with_lora_and_fp8(
 
     Args:
         model_files (Union[str, List[str]]): Path to the model file or list of paths. If the path matches a pattern like `00001-of-00004`, it will load all files with the same prefix.
-        lora_weights_list (Optional[Dict[str, torch.Tensor]]): Dictionary of LoRA weight tensors to load.
+        lora_weights_list (Optional[List[Dict[str, torch.Tensor]]]): List of dictionaries of LoRA weight tensors to load.
         lora_multipliers (Optional[List[float]]): List of multipliers for LoRA weights.
         fp8_optimization (bool): Whether to apply FP8 optimization.
         calc_device (torch.device): Device to calculate on.
