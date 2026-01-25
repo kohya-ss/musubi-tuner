@@ -694,6 +694,8 @@ class Flux2(nn.Module):
                 single_block_mod,
             )
 
+        img = img.to(vec.device)  # move to gpu if gradient checkpointing cpu offloading is used
+
         img = img[:, num_txt_tokens:, ...]
 
         img = self.final_layer(img, vec)
