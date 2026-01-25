@@ -583,7 +583,7 @@ class LoHaNetwork(torch.nn.Module):
 
             weights_sd = load_file(file)
         else:
-            weights_sd = torch.load(file, map_location="cpu")
+            weights_sd = torch.load(file, map_location="cpu", weights_only=True)
 
         info = self.load_state_dict(weights_sd, False)
         return info

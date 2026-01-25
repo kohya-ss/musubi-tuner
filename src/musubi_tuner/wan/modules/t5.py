@@ -474,7 +474,7 @@ class T5EncoderModel:
         model = model.eval().requires_grad_(False)
         if checkpoint_path is not None:
             logger.info(f"loading {checkpoint_path}")
-            model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
+            model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
         else:
             logger.info(f"loading weights from {weight_path}")
             if os.path.splitext(weight_path)[1] == ".safetensors":

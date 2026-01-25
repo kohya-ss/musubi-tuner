@@ -349,7 +349,7 @@ class ContentLoss(nn.Module):
         if model_weights_path == "":
             model = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
         elif model_weights_path is not None and os.path.exists(model_weights_path):
-            checkpoint = torch.load(model_weights_path, map_location=lambda storage, loc: storage)
+            checkpoint = torch.load(model_weights_path, map_location=lambda storage, loc: storage, weights_only=True)
             if "state_dict" in checkpoint.keys():
                 model.load_state_dict(checkpoint["state_dict"])
             else:

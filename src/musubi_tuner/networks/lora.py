@@ -935,7 +935,7 @@ class LoRANetwork(torch.nn.Module):
 
             weights_sd = load_file(file)
         else:
-            weights_sd = torch.load(file, map_location="cpu")
+            weights_sd = torch.load(file, map_location="cpu", weights_only=True)
 
         # Check for RS-LoRA/DoRA flag mismatches before loading
         loaded_rslora = weights_sd.get("use_rslora_flag", torch.tensor(False)).item() if "use_rslora_flag" in weights_sd else False

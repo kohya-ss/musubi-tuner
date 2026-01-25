@@ -1314,7 +1314,7 @@ def main():
             seed = 0
 
             if os.path.splitext(latent_path)[1] != ".safetensors":
-                latents = torch.load(latent_path, map_location="cpu")
+                latents = torch.load(latent_path, map_location="cpu", weights_only=True)
             else:
                 latents = load_file(latent_path)["latent"]
                 with safe_open(latent_path, framework="pt") as f:

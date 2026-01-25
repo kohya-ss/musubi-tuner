@@ -61,7 +61,7 @@ def main():
         net = ARCH_REGISTRY.get("CodeFormer")(
             dim_embd=512, codebook_size=1024, n_head=8, n_layers=9, connect_list=["32", "64", "128", "256"]
         ).to(device)
-        checkpoint = torch.load(args.model)["params_ema"]
+        checkpoint = torch.load(args.model, weights_only=True)["params_ema"]
         net.load_state_dict(checkpoint)
         net.eval()
 
