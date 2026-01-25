@@ -4,9 +4,8 @@ import torch
 from typing import Optional
 
 from accelerate import Accelerator
+from diffusers.utils.torch_utils import randn_tensor
 from einops import rearrange
-from PIL import Image
-
 from musubi_tuner.flux_2 import flux2_models, flux2_utils
 from musubi_tuner.flux_2.flux2_utils import Flux2ModelInfo
 from musubi_tuner.hv_train_network import (
@@ -91,26 +90,22 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # Use bfloat16 for autocast when text embedder uses FP8 (itemsize == 1 byte)
         autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype
 
-        sample_prompts_te_outputs = {}  # (prompt) -> (ctx_vec,)
+        sample_prompts_te_outputs = {}  # (prompt) -> ctx_vec
         with torch.amp.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
             for prompt_dict in prompts:
-                prompt = prompt_dict.get("prompt", "")
-                if prompt is None or prompt in sample_prompts_te_outputs:
-                    continue
+                # add negative prompt if not present even if the model is guidance distilled for simplicity
+                if "negative_prompt" not in prompt_dict:
+                    prompt_dict["negative_prompt"] = " "
 
-                # encode prompt
-                logger.info(f"cache Text Encoder outputs for prompt: {prompt}")
-                if model_version_info.guidance_distilled:
-                    ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
-                else:
-                    ctx_empty = text_embedder([""]).to(torch.bfloat16)
-                    ctx_prompt = text_embedder([prompt]).to(torch.bfloat16)
-                    ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
+                for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", " ")]:
+                    if p is None or p in sample_prompts_te_outputs:
+                        continue
 
-                ctx_vec = ctx_vec.cpu()
+                    logger.info(f"cache Text Encoder outputs for prompt: {p}")
+                    ctx_vec = text_embedder([p]).to(torch.bfloat16).cpu()  # [1, 512, 15360]
 
-                # save prompt cache
-                sample_prompts_te_outputs[prompt] = (ctx_vec,)
+                    # save prompt cache
+                    sample_prompts_te_outputs[p] = ctx_vec
 
         del text_embedder
         clean_memory_on_device(device)
@@ -121,7 +116,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
             prompt_dict_copy = prompt_dict.copy()
 
             prompt = prompt_dict.get("prompt", "")
-            prompt_dict_copy["ctx_vec"] = sample_prompts_te_outputs[prompt][0]
+            prompt_dict_copy["ctx_vec"] = sample_prompts_te_outputs[prompt]
+
+            negative_prompt = prompt_dict.get("negative_prompt", " ")
+            prompt_dict_copy["negative_ctx_vec"] = sample_prompts_te_outputs[negative_prompt]
 
             sample_parameters.append(prompt_dict_copy)
 
@@ -155,35 +153,55 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         # Get embeddings
         ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
-        ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
+
+        if self.model_version_info is None:
+            raise RuntimeError("model_version_info not set - call handle_model_specific_args first")
+
+        if self.model_version_info.guidance_distilled:
+            ctx, ctx_ids = flux2_utils.prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
+        else:
+            negative_ctx = sample_parameter.get("negative_ctx_vec")
+            if negative_ctx is None:
+                raise ValueError("negative_ctx_vec is required for non-guidance-distilled models")
+            negative_ctx = negative_ctx.to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
+            ctx = torch.cat([negative_ctx, ctx], dim=0)
+            ctx, ctx_ids = flux2_utils.prc_txt(ctx)  # [2, 512, 15360], [2, 512, 4]
 
         # Initialize latents
         packed_latent_height, packed_latent_width = height // 16, width // 16
-        randn = torch.randn(
+        latents = randn_tensor(
             (1, 128, packed_latent_height, packed_latent_width),  # [1, 128, 52, 78]
             generator=generator,
+            device=device,
             dtype=torch.bfloat16,
-            device="cuda",
         )
-        x, x_ids = flux2_utils.batched_prc_img(randn)  # [1, 4056, 128], [1, 4056, 4]
-
-        vae.to(device)
-        vae.eval()
+        x, x_ids = flux2_utils.prc_img(latents)  # [1, 4056, 128], [1, 4056, 4]
 
         # prepare control latent
         ref_tokens = None
         ref_ids = None
         if "control_image_path" in sample_parameter:
-            img_ctx = [Image.open(input_image) for input_image in sample_parameter["control_image_path"]]
-            ref_tokens, ref_ids = flux2_utils.encode_image_refs(vae, img_ctx)
+            vae.to(device)
+            vae.eval()
 
-        vae.to("cpu")
-        clean_memory_on_device(device)
+            control_image_paths = sample_parameter["control_image_path"]
+            limit_size = (2024, 2024) if len(control_image_paths) == 1 else (1024, 1024)
+            control_latent_list = []
+            with torch.no_grad():
+                for image_path in control_image_paths:
+                    control_image_tensor, _, _ = flux2_utils.preprocess_control_image(image_path, limit_size)
+                    control_latent = vae.encode(control_image_tensor.to(device, vae.dtype)).squeeze(0).to(torch.bfloat16)
+                    control_latent_list.append(control_latent)
+
+            ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent_list)
+
+            vae.to("cpu")
+            clean_memory_on_device(device)
 
         # denoise
-        model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
-        timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1])
-        if model_version_info.guidance_distilled:
+        flow_shift = sample_parameter.get("discrete_flow_shift", None) if "discrete_flow_shift" in sample_parameter else None
+        timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1], flow_shift)
+        if self.model_version_info.guidance_distilled:
             x = flux2_utils.denoise(
                 model,
                 x,
