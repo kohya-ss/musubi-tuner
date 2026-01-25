@@ -49,6 +49,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         self.model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         logger.info(f"Model version: {args.model_version}, architecture: {self.model_version_info.architecture}")
 
+        if args.fp8_text_encoder and self.model_version_info.qwen_variant is None:
+            raise ValueError("--fp8_text_encoder is not supported for FLUX.2 dev (Mistral3). Remove this flag or use a Klein model.")
+
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
         self.default_discrete_flow_shift = None  # Use model defaults
         if not args.split_attn:
@@ -58,10 +61,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
             )
         self._i2v_training = False
         self._control_training = False  # this means video training, not control image training
-        self.default_guidance_scale = 2.5  # embeded guidance scale for inference
+        self.default_guidance_scale = 4.0  # CFG scale for inference for base models
 
-    @staticmethod
     def process_sample_prompts(
+        self,
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
@@ -71,11 +74,12 @@ class Flux2NetworkTrainer(NetworkTrainer):
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
         prompts = load_prompts(sample_prompts)
 
-        # Get model version info
-        model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+        if self.model_version_info is None:
+            raise RuntimeError("model_version_info not set - call handle_model_specific_args first")
+        model_version_info = self.model_version_info
 
         # Load text encoder (Mistral3 for dev, Qwen3 for Klein)
-        te_dtype = torch.float8_e4m3fn if args.fp8_te else torch.bfloat16
+        te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
         text_embedder = flux2_utils.load_text_embedder(
             model_version_info, args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True
         )
@@ -125,8 +129,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         return sample_parameters
 
-    @staticmethod
     def do_inference(
+        self,
         accelerator,
         args,
         sample_parameter,
@@ -378,7 +382,8 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     """Flux.2-dev specific parser setup"""
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
-    parser.add_argument("--fp8_te", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model (Qwen3 only)")
+    parser.add_argument("--fp8_te", action="store_true", help=argparse.SUPPRESS)  # deprecated alias for config/CLI compat
     flux2_utils.add_model_version_args(parser)
     return parser
 
@@ -392,7 +397,10 @@ def main():
 
     args.dit_dtype = None  # set from mixed_precision
     if args.vae_dtype is None:
-        args.vae_dtype = "bfloat16"  # make bfloat16 as default for VAE
+        args.vae_dtype = "float32"  # match upstream / AE float32 default
+    if getattr(args, "fp8_te", False):
+        logger.warning("--fp8_te is deprecated; use --fp8_text_encoder instead")
+        args.fp8_text_encoder = True
 
     trainer = Flux2NetworkTrainer()
     trainer.train(args)
