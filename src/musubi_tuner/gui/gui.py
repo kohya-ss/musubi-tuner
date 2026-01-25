@@ -445,19 +445,22 @@ num_repeats = 1
             import subprocess
             import sys
 
-            def run_command(command):
+            def run_command(cmd):
+                """Run a command as a list with shell=False for security."""
                 try:
                     process = subprocess.Popen(
-                        command,
+                        cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        shell=True,
+                        shell=False,
                         text=True,
                         encoding="utf-8",
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                     )
 
-                    output_log = command + "\n\n"
+                    # Display the command as a string for logging
+                    command_str = subprocess.list2cmdline(cmd)
+                    output_log = command_str + "\n\n"
                     for line in process.stdout:
                         output_log += line
                         yield output_log
@@ -520,10 +523,10 @@ num_repeats = 1
                 elif model == "Qwen-Image":
                     pass
 
-                command_str = " ".join(cmd)
-                yield f"Starting Latent Caching. Please wait for the first log to appear. / Latentのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_str}\n\n"
+                command_display = subprocess.list2cmdline(cmd)
+                yield f"Starting Latent Caching. Please wait for the first log to appear. / Latentのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_display}\n\n"
 
-                yield from run_command(command_str)
+                yield from run_command(cmd)
 
             def cache_text_encoder(project_path, te1_path_val, te2_path_val, vae, model, comfy, w, h, batch, vram_val):
                 if not project_path:
@@ -583,10 +586,10 @@ num_repeats = 1
                     if vram_val in ["12", "16"]:
                         cmd.append("--fp8_vl")
 
-                command_str = " ".join(cmd)
-                yield f"Starting Text Encoder Caching. Please wait for the first log to appear. / Text Encoderのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_str}\n\n"
+                command_display = subprocess.list2cmdline(cmd)
+                yield f"Starting Text Encoder Caching. Please wait for the first log to appear. / Text Encoderのキャッシュを開始します。最初のログが表示されるまでにしばらくかかります。\nCommand: {command_display}\n\n"
 
-                yield from run_command(command_str)
+                yield from run_command(cmd)
 
         with gr.Accordion(i18n("acc_training"), open=False):
             gr.Markdown(i18n("desc_training_basic"))
@@ -697,10 +700,10 @@ num_repeats = 1
 
             cmd = [sys.executable, script_path, input_path, output_path]
 
-            command_str = " ".join(cmd)
-            yield f"Starting Conversion. / 変換を開始します。\nCommand: {command_str}\n\n"
+            command_display = subprocess.list2cmdline(cmd)
+            yield f"Starting Conversion. / 変換を開始します。\nCommand: {command_display}\n\n"
 
-            yield from run_command(command_str)
+            yield from run_command(cmd)
 
         def start_training(
             project_path,
