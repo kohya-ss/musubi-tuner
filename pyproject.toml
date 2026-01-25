@@ -77,7 +77,7 @@ dev = [
 postprocess = [
     "basicsr>=1.4.2",
     "facexlib>=0.3.0",
-    "cupy-cuda13",
+    "cupy-cuda13x",
     "spandrel>=0.4.0",
     "lpips>=0.1.4",
     "ultralytics>=8.3.0",
@@ -106,8 +106,8 @@ torchvision = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [[tool.uv.index]]
