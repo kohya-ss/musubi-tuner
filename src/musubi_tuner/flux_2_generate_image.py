@@ -147,6 +147,16 @@ def parse_args() -> argparse.Namespace:
     if args.fp8_text_encoder and model_version_info.qwen_variant is None:
         raise ValueError("--fp8_text_encoder is not supported for FLUX.2 dev (Mistral3). Remove this flag or use a Klein model.")
 
+    # Normalize attention mode: FLUX.2 only supports torch attention currently
+    if args.attn_mode == "sdpa":
+        args.attn_mode = "torch"
+    elif args.attn_mode != "torch":
+        raise ValueError(
+            f"--attn_mode '{args.attn_mode}' is not supported for FLUX.2. "
+            "Currently only 'torch' (or 'sdpa' which maps to 'torch') is supported. "
+            "Other modes require porting upstream's unified attention module."
+        )
+
     # Validate arguments
     if args.from_file and args.interactive:
         raise ValueError("Cannot use both --from_file and --interactive at the same time")

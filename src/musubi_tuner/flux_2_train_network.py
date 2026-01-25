@@ -269,6 +269,19 @@ class Flux2NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
+        # FLUX.2 only supports torch attention currently (sdpa maps to torch).
+        if attn_mode == "sdpa":
+            attn_mode = "torch"
+
+        if split_attn:
+            raise ValueError("--split_attn is not supported for FLUX.2 training. Remove this flag.")
+
+        if attn_mode != "torch":
+            raise ValueError(
+                f"Attention mode '{attn_mode}' (from --sdpa/--flash_attn/etc.) is not supported for FLUX.2 training. "
+                "Use --sdpa (torch SDPA). Other modes require porting upstream's unified attention module."
+            )
+
         model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
         model = flux2_utils.load_flow_model(
             device=accelerator.device,
