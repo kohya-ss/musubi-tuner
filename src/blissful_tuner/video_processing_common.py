@@ -208,7 +208,8 @@ class BlissfulVideoProcessor:
         """
 
         def _convert(img: np.ndarray) -> torch.Tensor:
-            arr = img.astype(np.float32) / 255.0
+            arr = img.astype(np.float32)
+            arr /= 255.0  # in-place division on freshly allocated array
             tensor = torch.from_numpy(arr.transpose(2, 0, 1))
             return tensor.unsqueeze(0).to(self.device, self.dtype)
 
@@ -231,12 +232,12 @@ class BlissfulVideoProcessor:
         """
 
         def _convert(t: torch.Tensor) -> np.ndarray:
-            # 1) Bring to CPU, float, clamp
+            # 1) Bring to CPU, float (detached copy we can mutate)
             t = t.detach().cpu().float()
-            # 2) Optional range shift from [-1,1] to [0,1]
+            # 2) Optional range shift from [-1,1] to [0,1] (in-place)
             if rescale:
-                t = (t + 1.0) / 2.0
-            t = t.clamp(0.0, 1.0)
+                t.add_(1.0).div_(2.0)
+            t.clamp_(0.0, 1.0)
 
             # 3) Normalize shape to [1,3,H,W]
             if t.ndim == 3:  # [3,H,W]
