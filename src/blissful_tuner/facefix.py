@@ -10,6 +10,7 @@ Created on Wed Apr 23 10:19:19 2025
 
 import sys
 import types
+import warnings
 
 # Patch basicsr expecting torchvision.transforms.functional_tensor
 try:
@@ -22,7 +23,7 @@ try:
     # Insert into sys.modules so basicsr can find it
     sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
 except ImportError:
-    print("Failed to monkeypatch torchvision for basicsr fallback!")
+    warnings.warn("Failed to monkeypatch torchvision for basicsr. Face restoration may fail.", stacklevel=1)
 
 from rich.traceback import install as install_rich_tracebacks
 from tqdm import tqdm
@@ -111,7 +112,7 @@ def main():
                         del output
                         torch.cuda.empty_cache()
                     except Exception as error:
-                        logger.info(f"\tFailed inference for CodeFormer: {error}")
+                        logger.warning(f"CodeFormer inference failed: {error}. Using original face.")
                         restored_face = tensor2img(cropped_face_t, rgb2bgr=True, min_max=(-1, 1))
 
                     restored_face = restored_face.astype("uint8")
