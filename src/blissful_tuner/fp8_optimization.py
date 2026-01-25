@@ -261,7 +261,7 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         x = x.reshape(-1, x.shape[2]).to(target_dtype)
 
         weight = self.weight.t()
-        scale_weight = self.scale_weight.to(torch.float32)
+        scale_weight = self.scale_weight.to(x.device, torch.float32)
 
         if self.bias is not None:
             # out_dtype must match bias.dtype and not be float32 in scaled_mm

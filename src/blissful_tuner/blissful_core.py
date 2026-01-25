@@ -19,7 +19,7 @@ from blissful_tuner.utils import power_seed
 
 logger = BlissfulLogger(__name__, "#8e00ed")
 
-BLISSFUL_VERSION = "0.12.66"
+BLISSFUL_VERSION = "0.12.67"
 
 CFG_SCHEDULE_HELP = """
 Comma-separated list of steps/ranges where CFG should be applied.
@@ -335,10 +335,10 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
             process_wildcards(args.negative_prompt, args.prompt_wildcards) if args.negative_prompt is not None else None
         )
         if hasattr(args, "prompt_2"):
-            args.prompt_2 = process_wildcards(args.prompt_2, args.prompt_wildcards) if args.prompt2 is not None else None
+            args.prompt_2 = process_wildcards(args.prompt_2, args.prompt_wildcards) if args.prompt_2 is not None else None
     if DIFFUSION_MODEL == "wan":
         if args.nag_scale and args.nag_alpha > 1:
-            logger.warning(f"NAG alpha requested is {args.nag_alpha} which is greater than 1. Results will be unpredictablee!")
+            logger.warning(f"NAG alpha requested is {args.nag_alpha} which is greater than 1. Results will be unpredictable!")
         if args.compile and args.optimized_compile:
             error_out(argparse.ArgumentTypeError, "Only one of --compile and --optimized compile may be used.")
         if args.perp_neg is not None and args.slg_mode == "original":

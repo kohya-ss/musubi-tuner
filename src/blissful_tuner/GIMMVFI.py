@@ -139,8 +139,6 @@ def interpolate(
         # Concatenate along a new dimension to create a tensor of shape [batch, 2, C, H, W]
         xs = torch.cat((I0_padded.unsqueeze(2), I2_padded.unsqueeze(2)), dim=2).to(device, dtype, non_blocking=True)
 
-        model.zero_grad()
-
         batch_size = xs.shape[0]
         s_shape = xs.shape[-2:]
 

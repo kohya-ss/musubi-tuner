@@ -138,7 +138,7 @@ def string_to_seed(s: str, bits: int = 63, silent: bool = False) -> int:
         elif i % 3 == 0:
             algo -= char_val
         elif i % 5 == 0:
-            algo /= char_val
+            algo /= char_val if char_val != 0 else 1  # Avoid div by zero for NUL chars
         else:
             char_val_str = str(char_val)
             for digit in char_val_str:

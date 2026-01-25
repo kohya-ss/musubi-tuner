@@ -68,4 +68,4 @@ class BlissfulLogger:
         self.logger.critical(msg, stacklevel=2)
 
     def setLevel(self, level):
-        self.logger.set_level(level)
+        self.logger.setLevel(level)
