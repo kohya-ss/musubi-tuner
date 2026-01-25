@@ -1,6 +1,7 @@
 import threading
 from typing import Union, BinaryIO
 from huggingface_hub import HfApi
+from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError
 from pathlib import Path
 import argparse
 import os
@@ -20,7 +21,7 @@ def exists_repo(repo_id: str, repo_type: str, revision: str = "main", token: str
     try:
         api.repo_info(repo_id=repo_id, revision=revision, repo_type=repo_type)
         return True
-    except:
+    except (RepositoryNotFoundError, RevisionNotFoundError, GatedRepoError):
         return False
 
 
