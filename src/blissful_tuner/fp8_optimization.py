@@ -39,7 +39,10 @@ def fp8_linear_forward(cls, original_dtype, input):
         return cls.original_forward(input)
 
 
-def convert_fp8_linear(module, original_dtype, params_to_keep={}):
+def convert_fp8_linear(module, original_dtype, params_to_keep=None):
+    # Avoid mutable default argument
+    if params_to_keep is None:
+        params_to_keep = {}
     setattr(module, "fp8_matmul_enabled", True)
 
     for name, module in module.named_modules():

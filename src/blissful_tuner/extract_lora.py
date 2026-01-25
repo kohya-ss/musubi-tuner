@@ -47,9 +47,14 @@ def svd(
     no_metadata=False,
     mem_eff_safe_open=False,
     prefix="lora_unet",
-    target_keys=["blocks"],
-    exclude_keys=["bias", "norm", "modulation"],
+    target_keys=None,
+    exclude_keys=None,
 ):
+    # Avoid mutable default arguments
+    if target_keys is None:
+        target_keys = ["blocks"]
+    if exclude_keys is None:
+        exclude_keys = ["bias", "norm", "modulation"]
     calc_dtype = torch.float
     save_dtype = str_to_dtype(save_precision) if save_precision is not None else None
     store_device = "cpu"
