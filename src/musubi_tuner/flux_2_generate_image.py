@@ -66,6 +66,7 @@ def parse_args() -> argparse.Namespace:
         "--guidance_scale", type=float, default=4.0, help="Guidance scale for classifier free guidance. Default is 4.0."
     )
     parser.add_argument("--prompt", type=str, default=None, help="prompt for generation")
+    parser.add_argument("--negative_prompt", type=str, default=None, help="negative prompt for generation (non-distilled models only)")
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size, height and width")
     parser.add_argument(
         "--control_image_path",
@@ -208,8 +209,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
         #     overrides["image_mask_path"] = value
         # elif option == "cn":
         #     overrides["control_path"] = value
-        # elif option == "n":
-        #     overrides["negative_prompt"] = value
+        elif option == "n":
+            overrides["negative_prompt"] = value
         elif option == "ci":  # control_image_path
             overrides["control_image_path"].append(value)
 
@@ -472,14 +473,26 @@ def prepare_text_inputs(
         move_models_to_device_if_needed()
 
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            if model_version_info.guidance_distilled:
-                ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
-            else:
-                ctx_empty = text_embedder([""]).to(torch.bfloat16)
-                ctx_prompt = text_embedder([prompt]).to(torch.bfloat16)
-                ctx_vec = torch.cat([ctx_empty, ctx_prompt], dim=0)
-        ctx_vec = ctx_vec.cpu()
+            ctx_vec = text_embedder([prompt])  # [1, 512, 15360]
+        ctx_vec = ctx_vec.to(torch.bfloat16).cpu()
         conds_cache[prompt] = ctx_vec
+
+    negative_prompt = args.negative_prompt
+    if not model_version_info.guidance_distilled:
+        if negative_prompt is None:
+            negative_prompt = " "  # for non-distilled model, use blank prompt as negative prompt
+        if negative_prompt in conds_cache:
+            negative_ctx_vec = conds_cache[negative_prompt]
+        else:
+            move_models_to_device_if_needed()
+
+            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                negative_ctx_vec = text_embedder([negative_prompt])  # [1, 512, 15360]
+            negative_ctx_vec = negative_ctx_vec.to(torch.bfloat16).cpu()
+            conds_cache[negative_prompt] = negative_ctx_vec
+
+        # denoise_cfg expects unconditional then conditional
+        ctx_vec = torch.cat([negative_ctx_vec, ctx_vec], dim=0)
 
     if not (shared_models and "text_embedder" in shared_models):  # if loaded locally
         del text_embedder
@@ -490,6 +503,8 @@ def prepare_text_inputs(
     clean_memory_on_device(device)
 
     arg_c = {"ctx_vec": ctx_vec, "prompt": prompt}
+    if negative_prompt is not None and not model_version_info.guidance_distilled:
+        arg_c["negative_prompt"] = negative_prompt
 
     return arg_c
 
@@ -621,7 +636,10 @@ def generate(
     logger.info(f"Image size: {height}x{width} (HxW), infer_steps: {args.infer_steps}")
 
     # image generation ######
-    logger.info(f"Prompt: {context['prompt']}")
+    if "negative_prompt" in context:
+        logger.info(f"Prompt: {context['prompt']}, Negative Prompt: {context['negative_prompt']}")
+    else:
+        logger.info(f"Prompt: {context['prompt']}")
     ctx_vec = context["ctx_vec"].to(device, dtype=torch.bfloat16)
     ctx, ctx_ids = flux2_utils.batched_prc_txt(ctx_vec)
 
@@ -642,26 +660,17 @@ def generate(
     # TODO upsampling here
 
     if control_latent is not None:
-        # pack control_latent
-        scale = 10
-        # Create time offsets for each reference
-        t_off = [scale + scale * t for t in torch.arange(0, len(control_latent))]
-        t_off = [t.view(-1) for t in t_off]
-        # Process with position IDs
-        ref_tokens, ref_ids = flux2_utils.listed_prc_img(control_latent, t_coord=t_off)  # list[(HW, C)], list[(HW, 4)]
-        # Concatenate all references along sequence dimension
-        ref_tokens = torch.cat(ref_tokens, dim=0)  # (total_ref_tokens, C)
-        ref_ids = torch.cat(ref_ids, dim=0)  # (total_ref_tokens, 4)
-        # Add batch dimension
-        ref_tokens = ref_tokens.unsqueeze(0).to(device, dtype=torch.bfloat16)  # (1, total_ref_tokens, C)
-        ref_ids = ref_ids.unsqueeze(0).to(device, dtype=torch.bfloat16)  # (1, total_ref_tokens, 4)
+        ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent)
+        del control_latent  # free memory
+        ref_tokens = ref_tokens.to(device, dtype=torch.bfloat16)
+        ref_ids = ref_ids.to(device)
     else:
         ref_tokens = None
         ref_ids = None
 
     # denoise
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
-    timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1])  # TODO shift_value=args.flow_shift
+    timesteps = flux2_utils.get_schedule(args.infer_steps, x.shape[1], args.flow_shift)
     if model_version_info.guidance_distilled:
         x = flux2_utils.denoise(
             model,
