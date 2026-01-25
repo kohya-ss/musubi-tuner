@@ -1,4 +1,3 @@
-import logging
 import os
 from types import SimpleNamespace
 
@@ -15,9 +14,9 @@ from musubi_tuner.dataset.image_video_dataset import (
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 from musubi_tuner.kandinsky5.models.text_embedders import get_text_embedder
 from musubi_tuner.utils import safetensors_utils
+from blissful_tuner.blissful_logger import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def _ensure_cache_architecture(item: ItemInfo):
@@ -78,6 +77,7 @@ def main():
     parser.add_argument("--qwen_max_length", type=int, default=512, help="Max length for Qwen tokenizer")
     parser.add_argument("--clip_max_length", type=int, default=77, help="Max length for CLIP tokenizer")
     parser.add_argument("--quantized_qwen", action="store_true", help="Load Qwen text encoder in 4bit mode")
+    parser.add_argument("--text_encoder_cpu", action="store_true", help="Run Qwen TE on CPU")
 
     args = parser.parse_args()
 
@@ -99,7 +99,7 @@ def main():
     )
     text_embedder = get_text_embedder(
         text_embedder_conf,
-        device=device,
+        device=device if not args.text_encoder_cpu else "cpu",
         quantized_qwen=args.quantized_qwen,
     )
 

@@ -1,4 +1,3 @@
-import logging
 from typing import List
 
 import numpy as np
@@ -13,9 +12,9 @@ from musubi_tuner.dataset.image_video_dataset import (
 )
 import musubi_tuner.cache_latents as cache_latents
 from musubi_tuner.kandinsky5.models.vae import build_vae
+from blissful_tuner.blissful_logger import BlissfulLogger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 def encode_and_save_batch(vae, batch: List[ItemInfo]):
@@ -98,6 +97,11 @@ def main():
         action="store_true",
         help="Resize inputs to the next multiple of 128 for NABLA-compatible latents (H/W divisible by 16 after VAE).",
     )
+    parser.add_argument(
+        "--disable_vae_workaround",
+        action="store_true",
+        help="Disables patching the VAE to fix massive OOM on latest PyTorch/CUDA versions. This patch seems not necessary on at least some earlier versions and quality is potentially improved without it.",
+    )
     args = parser.parse_args()
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
@@ -118,7 +122,7 @@ def main():
 
     # Build VAE (Hunyuan-based 3D VAE) from Kandinsky weights
     vae_conf = type("VAEConf", (), {"name": "hunyuan", "checkpoint_path": args.vae})
-    vae = build_vae(vae_conf)
+    vae = build_vae(vae_conf, enable_safety=not args.disable_vae_workaround)
     if args.nabla_resize:
         # flag to trigger NABLA-friendly resizing in encode_and_save_batch
         vae.config.nabla_force_resize = True
