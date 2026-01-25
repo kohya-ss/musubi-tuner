@@ -135,7 +135,7 @@ def save_media_advanced(
 
 def prepare_i2i_noise(
     base_noise: torch.Tensor, args: argparse.Namespace, config: EasyDict, timesteps: torch.Tensor, device: torch.device, vae: WanVAE
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Prepare (noise, timesteps) for Wan Video-to-Video.
 
