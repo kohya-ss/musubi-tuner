@@ -267,9 +267,11 @@ def encode_image_refs(ae, img_ctx: list[Image.Image]):
         img_ctx_prep = [img_ctx_prep]
 
     # Encode each reference image
+    device = ae.device
+    dtype = ae.dtype
     encoded_refs = []
     for img in img_ctx_prep:
-        encoded = ae.encode(img[None].cuda())[0]
+        encoded = ae.encode(img[None].to(device=device, dtype=dtype))[0]
         encoded_refs.append(encoded)
 
     # Create time offsets for each reference
