@@ -7,6 +7,7 @@ import logging
 
 from tqdm import tqdm
 
+from musubi_tuner.modules.nvfp4_optimization_utils import load_safetensors_with_nvfp4_optimization
 from musubi_tuner.utils.device_utils import synchronize_device
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ def filter_lora_state_dict(
     return weights_sd
 
 
-def load_safetensors_with_lora_and_fp8(
+def load_safetensors_with_lora_and_quant(
     model_files: Union[str, List[str]],
     lora_weights_list: Optional[List[Dict[str, torch.Tensor]]],
     lora_multipliers: Optional[List[float]],
@@ -62,6 +63,7 @@ def load_safetensors_with_lora_and_fp8(
     exclude_keys: Optional[List[str]] = None,
     disable_numpy_memmap: bool = False,
     weight_transform_hooks: Optional[WeightTransformHooks] = None,
+    nvfp4_optimization: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -77,6 +79,9 @@ def load_safetensors_with_lora_and_fp8(
         exclude_keys (Optional[List[str]]): Keys to exclude from optimization.
         disable_numpy_memmap (bool): Whether to disable numpy memmap when loading safetensors.
         weight_transform_hooks (Optional[WeightTransformHooks]): Hooks for transforming weights during loading.
+        nvfp4_optimization: bool: Whether to apply NVFP4 optimization.
+    Returns:
+        dict[str, torch.Tensor]: Merged state dict.
     """
 
     # if the file name ends with 00001-of-00004 etc, we need to load the files with the same prefix
@@ -190,18 +195,30 @@ def load_safetensors_with_lora_and_fp8(
 
         weight_hook = weight_hook_func
 
-    state_dict = load_safetensors_with_fp8_optimization_and_hook(
-        model_files,
-        fp8_optimization,
-        calc_device,
-        move_to_device,
-        dit_weight_dtype,
-        target_keys,
-        exclude_keys,
-        weight_hook=weight_hook,
-        disable_numpy_memmap=disable_numpy_memmap,
-        weight_transform_hooks=weight_transform_hooks,
-    )
+    if not nvfp4_optimization:
+        state_dict = load_safetensors_with_fp8_optimization_and_hook(
+            model_files,
+            fp8_optimization,
+            calc_device,
+            move_to_device,
+            dit_weight_dtype,
+            target_keys,
+            exclude_keys,
+            weight_hook=weight_hook,
+            disable_numpy_memmap=disable_numpy_memmap,
+            weight_transform_hooks=weight_transform_hooks,
+        )
+    else:
+        state_dict = load_safetensors_with_nvfp4_optimization(
+            model_files,
+            calc_device,
+            target_keys,
+            exclude_keys,
+            move_to_device,
+            weight_hook=weight_hook,
+            disable_numpy_memmap=disable_numpy_memmap,
+            weight_transform_hooks=weight_transform_hooks,
+        )
 
     for lora_weight_keys in list_of_lora_weight_keys:
         # check if all LoRA keys are used

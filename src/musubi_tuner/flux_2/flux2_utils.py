@@ -31,8 +31,9 @@ from musubi_tuner.dataset.image_video_dataset import (
     BucketSelector,
 )
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+from musubi_tuner.modules.nvfp4_optimization_utils import apply_nvfp4_monkey_patch, check_nvfp4_support
 from musubi_tuner.utils import image_utils
-from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_quant
 from musubi_tuner.zimage.zimage_utils import load_qwen3
 
 from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
@@ -447,12 +448,25 @@ def load_flow_model(
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype] = None,
     fp8_scaled: bool = False,
+    nvfp4: bool = False,
     lora_weights_list: Optional[dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[list[float]] = None,
     disable_numpy_memmap: bool = False,
+    use_scaled_mm: bool = True,
+    use_torch_compile: bool = False,
 ) -> flux2_models.Flux2:
-    # dit_weight_dtype is None for fp8_scaled
-    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+    # dit_weight_dtype is None for fp8_scaled or nvfp4 loading
+    fp8_or_nvfp4 = fp8_scaled or nvfp4
+    assert (not fp8_or_nvfp4 and dit_weight_dtype is not None) or (fp8_or_nvfp4 and dit_weight_dtype is None)
+
+    if nvfp4:
+        has_dtype, has_mm, msg = check_nvfp4_support()
+        if not has_dtype:
+            raise RuntimeError(f"NVFP4 requires PyTorch 2.6+ with float4_e2m1fn_x2 dtype. {msg}")
+        logger.info(f"NVFP4 support: {msg}")
+        if not has_mm and use_scaled_mm:
+            logger.warning("NVFP4 scaled matrix multiplication is not supported. Falling back to unscaled mm.")
+            use_scaled_mm = False
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
@@ -466,7 +480,14 @@ def load_flow_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
-    sd = load_safetensors_with_lora_and_fp8(
+    if fp8_scaled:
+        target_keys = flux2_models.FP8_OPTIMIZATION_TARGET_KEYS
+        exclude_keys = flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS
+    else:
+        target_keys = flux2_models.NVFP4_OPTIMIZATION_TARGET_KEYS
+        exclude_keys = flux2_models.NVFP4_OPTIMIZATION_EXCLUDE_KEYS
+
+    sd = load_safetensors_with_lora_and_quant(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
@@ -474,14 +495,18 @@ def load_flow_model(
         calc_device=device,
         move_to_device=(loading_device == device),
         dit_weight_dtype=dit_weight_dtype,
-        target_keys=flux2_models.FP8_OPTIMIZATION_TARGET_KEYS,
-        exclude_keys=flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        target_keys=target_keys,
+        exclude_keys=exclude_keys,
         disable_numpy_memmap=disable_numpy_memmap,
+        nvfp4_optimization=nvfp4,
     )
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+    elif nvfp4:
+        apply_nvfp4_monkey_patch(model, sd, use_scaled_mm, use_torch_compile)
 
+    if fp8_or_nvfp4:
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device
             logger.info(f"Moving weights to {loading_device}")

@@ -23,6 +23,9 @@ from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 FP8_OPTIMIZATION_TARGET_KEYS = ["double_blocks", "single_blocks"]
 FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pe_embedder", "time_in", "_modulation"]
 
+NVFP4_OPTIMIZATION_TARGET_KEYS = ["double_blocks", "single_blocks"]
+NVFP4_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pe_embedder", "img_in", "txt_in", "time_in", "guidance_in", "_modulation"]
+
 
 @dataclass
 class Flux2Params:
@@ -750,7 +753,9 @@ class SingleStreamBlock(nn.Module):
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
         del mod_scale, mod_shift
 
-        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1)
+        qkv, mlp = torch.split(
+            self.linear1(x_mod.to(x.dtype)), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1
+        )
 
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         del qkv
@@ -838,6 +843,7 @@ class DoubleStreamBlock(nn.Module):
         img_modulated = (1 + img_mod1_scale) * img_modulated + img_mod1_shift
         del img_mod1_scale, img_mod1_shift
 
+        img_modulated = img_modulated.to(img.dtype)  # cast back to original dtype
         img_qkv = self.img_attn.qkv(img_modulated)
         del img_modulated
         img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
@@ -848,6 +854,8 @@ class DoubleStreamBlock(nn.Module):
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1_scale) * txt_modulated + txt_mod1_shift
         del txt_mod1_scale, txt_mod1_shift
+
+        txt_modulated = txt_modulated.to(txt.dtype)  # cast back to original dtype
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         del txt_modulated
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
@@ -874,13 +882,13 @@ class DoubleStreamBlock(nn.Module):
         # calculate the img blocks
         img = img + img_mod1_gate * self.img_attn.proj(img_attn)
         del img_mod1_gate, img_attn
-        img = img + img_mod2_gate * self.img_mlp((1 + img_mod2_scale) * (self.img_norm2(img)) + img_mod2_shift)
+        img = img + img_mod2_gate * self.img_mlp(((1 + img_mod2_scale) * (self.img_norm2(img)) + img_mod2_shift).to(img.dtype))
         del img_mod2_gate, img_mod2_scale, img_mod2_shift
 
         # calculate the txt blocks
         txt = txt + txt_mod1_gate * self.txt_attn.proj(txt_attn)
         del txt_mod1_gate, txt_attn
-        txt = txt + txt_mod2_gate * self.txt_mlp((1 + txt_mod2_scale) * (self.txt_norm2(txt)) + txt_mod2_shift)
+        txt = txt + txt_mod2_gate * self.txt_mlp(((1 + txt_mod2_scale) * (self.txt_norm2(txt)) + txt_mod2_shift).to(txt.dtype))
         del txt_mod2_gate, txt_mod2_scale, txt_mod2_shift
         return img, txt
 

@@ -33,7 +33,7 @@ from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 
 import logging
 
-from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_quant
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
 logger = logging.getLogger(__name__)
@@ -1486,7 +1486,7 @@ def load_qwen_image_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
-    sd = load_safetensors_with_lora_and_fp8(
+    sd = load_safetensors_with_lora_and_quant(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,

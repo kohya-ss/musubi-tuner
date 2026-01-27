@@ -31,7 +31,7 @@ from accelerate import init_empty_weights
 from musubi_tuner.modules.attention import AttentionParams, attention
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
-from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_quant
 from musubi_tuner.utils.safetensors_utils import WeightTransformHooks
 
 logger = logging.getLogger(__name__)
@@ -824,7 +824,7 @@ def load_zimage_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
-    sd = load_safetensors_with_lora_and_fp8(
+    sd = load_safetensors_with_lora_and_quant(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,

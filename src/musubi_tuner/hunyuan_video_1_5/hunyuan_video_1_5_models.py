@@ -12,7 +12,7 @@ import logging
 from musubi_tuner.modules.attention import AttentionParams
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
-from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_quant
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, WeightTransformHooks
 
 logger = logging.getLogger(__name__)
@@ -469,7 +469,7 @@ def load_hunyuan_video_1_5_model(
 
     hooks = WeightTransformHooks(split_hook=comfyui_hunyuan_video_1_5_weight_split_hook, concat_hook=None)
 
-    sd = load_safetensors_with_lora_and_fp8(
+    sd = load_safetensors_with_lora_and_quant(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,

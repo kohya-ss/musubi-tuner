@@ -118,6 +118,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
 
+    parser.add_argument(
+        "--nvfp4", action="store_true", help="use NVFP4 for DiT model (requires PyTorch 2.6+, Blackwell GPU recommended)"
+    )
+    parser.add_argument("--nvfp4_compile", action="store_true", help="enable torch.compile for NVFP4 input quantization")
+
     parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder (Mistral 3)")
     parser.add_argument(
         "--device", type=str, default=None, help="device to use for inference. If None, use CUDA if available, otherwise use CPU"
@@ -307,7 +312,9 @@ def load_dit_model(
         lora_weights_list = None
 
     loading_weight_dtype = dit_weight_dtype
-    if args.fp8_scaled and not args.lycoris:
+    if args.nvfp4 and not args.lycoris:
+        loading_weight_dtype = None  # we will load weights as-is and then optimize to NVFP4
+    elif args.fp8_scaled and not args.lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
     elif args.lycoris:
         loading_weight_dtype = torch.bfloat16  # lycoris requires bfloat16 or float16, because it merges weights
@@ -322,9 +329,11 @@ def load_dit_model(
         loading_device,
         loading_weight_dtype,
         args.fp8_scaled and not args.lycoris,
+        args.nvfp4 and not args.lycoris,
         lora_weights_list,
         args.lora_multiplier,
         args.disable_numpy_memmap,
+        use_torch_compile=args.nvfp4_compile,
     )
 
     # merge LoRA weights
@@ -369,7 +378,7 @@ def load_dit_model(
     if args.save_merged_model:
         return model
 
-    if not args.fp8_scaled:
+    if not args.fp8_scaled and not args.nvfp4:
         # simple cast to dit_weight_dtype
         target_dtype = None  # load as-is (dit_weight_dtype == dtype of the weights in state_dict)
         target_device = None
@@ -1104,7 +1113,9 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
     device = torch.device(args.device)
 
     dit_weight_dtype = torch.bfloat16  # default
-    if args.fp8_scaled:
+    if args.nvfp4:
+        dit_weight_dtype = None  # various precision weights (NVFP4), so don't cast to specific dtype
+    elif args.fp8_scaled:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
     elif args.fp8:
         dit_weight_dtype = torch.float8_e4m3fn
