@@ -644,7 +644,7 @@ def load_flow_model(
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype] = None,
     fp8_scaled: bool = False,
-    lora_weights_list: Optional[dict[str, torch.Tensor]] = None,
+    lora_weights_list: Optional[list[dict[str, torch.Tensor]]] = None,
     lora_multipliers: Optional[list[float]] = None,
     disable_numpy_memmap: bool = False,
 ) -> flux2_models.Flux2:
@@ -659,7 +659,7 @@ def load_flow_model(
         loading_device: Device to load model weights to.
         dit_weight_dtype: Data type for model weights (None for fp8_scaled).
         fp8_scaled: Whether to use FP8 optimization.
-        lora_weights_list: Optional LoRA weights to merge.
+        lora_weights_list: Optional list of LoRA state dicts to merge.
         lora_multipliers: Optional LoRA multipliers.
         disable_numpy_memmap: Whether to disable numpy memmap.
 
