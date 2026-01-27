@@ -13,8 +13,8 @@ GEMINI.md
 AGENTS.md
 .claude/
 .gemini/
-AGENTS.md
 .vscode/settings.json
+references/
 .mcp.json
 # START blissful-tuner
 .pylintrc
