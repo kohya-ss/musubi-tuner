@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-ZIMAGE_ID = "Tongyi-MAI/Z-Image-Turbo"
+ZIMAGE_ID = "Tongyi-MAI/Z-Image"
 
 
 def shift_scale_latents_for_decode(latents: torch.Tensor) -> torch.Tensor:
