@@ -69,7 +69,7 @@ def mem_eff_save_file(tensors: Dict[str, torch.Tensor], filename: str, metadata:
         for k, v in tensors.items():
             if v.numel() == 0:
                 continue
-            if v.is_cuda:
+            if v.is_cuda and torch.cuda.is_available():
                 # Direct GPU to disk save
                 with torch.cuda.device(v.device):
                     if v.dim() == 0:  # if scalar, need to add a dimension to work with view
