@@ -83,9 +83,10 @@ def swish(x: Tensor) -> Tensor:
 
 
 class AttnBlock(nn.Module):
-    def __init__(self, in_channels: int):
+    def __init__(self, in_channels: int, slice_size: int = None):
         super().__init__()
         self.in_channels = in_channels
+        self.slice_size = slice_size
 
         self.norm = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
 
@@ -104,9 +105,25 @@ class AttnBlock(nn.Module):
         q = rearrange(q, "b c h w -> b 1 (h w) c").contiguous()
         k = rearrange(k, "b c h w -> b 1 (h w) c").contiguous()
         v = rearrange(v, "b c h w -> b 1 (h w) c").contiguous()
-        h_ = nn.functional.scaled_dot_product_attention(q, k, v)
+
+        if self.slice_size is not None:
+            h_ = self.sliced_sdpa(q, k, v)
+        else:
+            h_ = nn.functional.scaled_dot_product_attention(q, k, v)
 
         return rearrange(h_, "b 1 (h w) c -> b c h w", h=h, w=w, c=c, b=b)
+
+    def sliced_sdpa(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+        seq_len = q.shape[2]
+        slice_size = min(self.slice_size, seq_len)
+        output = torch.zeros_like(q)
+        for i in range(0, seq_len, slice_size):
+            end_idx = min(i + slice_size, seq_len)
+            q_slice = q[:, :, i:end_idx, :]
+            attn_slice = nn.functional.scaled_dot_product_attention(q_slice, k, v)
+            output[:, :, i:end_idx, :] = attn_slice
+
+        return output
 
     def forward(self, x: Tensor) -> Tensor:
         return x + self.proj_out(self.attention(x))
