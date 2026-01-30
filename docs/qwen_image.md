@@ -256,7 +256,13 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 
 **Qwen-Image-Layered Training:**
 
-For training Qwen-Image-Layered models with layered control images, add the `--model_version layered` option. 
+For training Qwen-Image-Layered models with layered control images, add the `--model_version layered` option.
+
+`--remove_first_image_from_target` option is also available to exclude the first target image from the model input/target during training. The first image among multiple target images inferred by the official model in Qwen-Image-Layered is the original image, and the rest are layer images. By using this option, you can train only on the layer images without inferring the original image. This improves training and inference speed and reduces memory usage. The impact on quality is unknown.
+
+Note that VAE is different for this architecture. Please use the VAE model for Qwen-Image-Layered.
+
+For sample image generation during Qwen-Image-Layered training, please refer to [this document](./sampling_during_training.md#sample-image-generation-during-qwen-image-layered-training--qwen-image-layeredの学習中のサンプルイメージ生成).
 
 ---
 
@@ -339,6 +345,10 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 それぞれのパラメータの適切な設定は不明です。フィードバックをお待ちしています。
 
 **Qwen-Image-Layeredの学習について**
+
+レイヤード制御画像を使用したQwen-Image-Layeredモデルの学習には、`--model_version layered`オプションを追加してください。
+
+`--remove_first_image_from_target`オプションも利用可能で、学習中に最初のターゲット画像をモデルの入力/ターゲットから除外します。Qwen-Image-Layeredでは公式モデルでは推論される複数枚の画像のうち、最初の画像は元の画像であり、残りがレイヤー画像となっています。このオプションを使用すると、元の画像を推論せずにレイヤー画像のみを学習できます。これにより学習、推論の速度が向上し、メモリ使用量も削減されます。品質への影響は不明です。
 
 このアーキテクチャではVAEが異なることに注意してください。Qwen-Image-Layered用のVAEモデルを使用してください。
 
@@ -503,7 +513,7 @@ Please specify `--model_version layered` for Qwen-Image-Layered inference. Note 
     - `--append_original_name`: When saving edited images, appends the original base name of the control image to the output file name.
 - For Qwen-Image-Layered:
     - Specify the image to be layered in `--control_image_path`.
-    - Specify the number of layers to output in `--output_layers`. (Since Qwen-Image-Layered also generates the original image, the specified number + 1 will be generated.)
+    - Specify the number of layers to output in `--output_layers`. (Since Qwen-Image-Layered also generates the original image, it generates one more than the specified number. If `--remove_first_image_from_target` was used during training, specify "the number of layers - 1" here to match the number of generated images.)
     - `--resize_control_to_image_size`: Resize control image to match the specified image size. **Recommended for better results with Layered models.**
 - Memory saving options like `--fp8_scaled` (for DiT) are available.
 - `--text_encoder_cpu` enables CPU inference for the text encoder. Recommended for systems with limited GPU resources (less than 16GB VRAM).
@@ -532,7 +542,7 @@ Qwen-Imageの推論は専用のスクリプト`qwen_image_generate_image.py`を�
     - `--append_original_name`: 編集された画像を保存する際に、コントロール画像の元の基本名を出力ファイル名に追加します。
 - Qwen-Image-Layeredの場合：
     - `--control_image_path`に、分割対象の画像を指定してください。
-    - `--output_layers`に出力するレイヤー数を指定してください。（Qwen-Image-Layeredは元画像も生成するため、指定した数＋1が生成されます。）
+    - `--output_layers`に出力するレイヤー数を指定してください。（Qwen-Image-Layeredは元画像も生成するため、指定した数より1枚多く生成されます。もし学習時に`--remove_first_image_from_target`を使用していた場合は、ここには「レイヤー数－1」を指定してください。）
     - `--resize_control_to_image_size`: コントロール画像を指定した画像サイズに合わせてリサイズします。Layeredモデルでより良い結果を得るために推奨されます。
 - DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。
 - `--text_encoder_cpu`を指定するとテキストエンコーダーをCPUで推論します。GPUのVRAMが16GB未満のシステムでは、CPU推論を推奨します。

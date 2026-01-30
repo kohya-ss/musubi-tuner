@@ -11,7 +11,7 @@ This feature is experimental.
 <details>
 <summary>日本語</summary>
 
-このドキュメントは、Musubi Tunerフレームワーク内でのZ-Imageアーキテクチャの使用法について説明しています。Z-Imageはテキストから画像を生成することができるモデルアーキテクチャです。Z-Imageは現在蒸留モデルであるTurbo版しかリリースされていないため、学習は不安定です。モデルのダウンロードの項も参照してください。
+このドキュメントは、Musubi Tunerフレームワーク内でのZ-Imageアーキテクチャの使用法について説明しています。Z-Imageはテキストから画像を生成することができるモデルアーキテクチャです。
 
 事前キャッシング、学習、推論のオプションは`--help`で確認してください。HunyuanVideoと共通のオプションが多くありますので、必要に応じて[HunyuanVideoのドキュメント](./hunyuan_video.md)も参照してください。
 
@@ -21,16 +21,16 @@ This feature is experimental.
 
 ## Download the model / モデルのダウンロード
 
-You need to download the DiT, VAE, and Text Encoder (Qwen3) models. 
+You need to download the DiT, VAE, and Text Encoder (Qwen3) models.
 
-Since the base model has not been released, it is recommended to use AI Toolkit/ostris's De-Turbo model. Download `z_image_de_turbo_v1_bf16.safetensors` from [ostris/Z-Image-De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) and use it as the DiT model.
+*As of January 2026, the base model has been released. VAE and Text Encoder are the same as the Turbo model, so if you have already downloaded them, there is no need to download them again.*
 
-The Turbo version DiT, VAE, and Text Encoder can be obtained from Tongyi-MAI's official repository or ComfyUI weights. You can use either of the following:
+The base version DiT, VAE, and Text Encoder can be obtained from Tongyi-MAI's official repository or ComfyUI weights. You can use either of the following:
 
-- **Official Repository**: [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/)
-    - For DiT and Text Encoder, download all the split files and specify the first file (e.g., `00001-of-00004.safetensors`) in the arguments.
+- **Official Repository**: [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image/)
+    - For DiT and Text Encoder, download all the split files and specify the first file (e.g., `00001-of-00002.safetensors`) in the arguments.
     - You do not need to download files other than `*.safetensors`.
-- **ComfyUI Weights**: [Comfy-Org/z_image_turbo](https://huggingface.co/Comfy-Org/z_image_turbo)
+- **ComfyUI Weights**: [Comfy-Org/z_image](https://huggingface.co/Comfy-Org/z_image)
 
 You need to prepare the following models:
 
@@ -38,23 +38,27 @@ You need to prepare the following models:
 - **VAE**: The autoencoder model.
 - **Text Encoder**: Qwen3 model.
 
-As another option, you can also use ostris's [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) to train by combining the Turbo version with an adapter. In this case, download `zimage_turbo_training_adapter_v2.safetensors`, etc., and specify this LoRA weight in the `--base_weights` option during training.
+*The following information is prior to the base model release. Since the base model has been released, it is recommended to use the base model for training.*
 
-We would like to express our deep gratitude to ostris for providing the De-Turbo model and Training Adapter.
+> If you train Turbo model, it is recommended to use AI Toolkit/ostris's De-Turbo model. Download `z_image_de_turbo_v1_bf16.safetensors` from [ostris/Z-Image-De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) and use it as the DiT model.
+>
+> As another option, you can also use ostris's [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) to train by combining the Turbo version with an adapter. In this case, download `zimage_turbo_training_adapter_v2.safetensors`, etc., and specify this LoRA weight in the `--base_weights` option during training.
+>
+> We would like to express our deep gratitude to ostris for providing the De-Turbo model and Training Adapter.
 
 <details>
 <summary>日本語</summary>
 
 DiT, VAE, Text Encoder (Qwen3) のモデルをダウンロードする必要があります。
 
-Baseモデルがリリースされていないため、AI Toolkit/ostris氏のDe-Turboモデルを使用することをお勧めします。[ostris/Z-Image-De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) から `z_image_de_turbo_v1_bf16.safetensors` をダウンロードし、DiTモデルとして使用してください。
+*※2026/1：Baseモデルがリリースされました。VAEとText EncoderはTurboモデルと同じですので、ダウンロード済みの場合は再ダウンロードの必要はありません。*
 
-Turbo版のDiT、VAEとText EncoderはTongyi-MAIの公式リポジトリまたはComfyUI用重みから取得できます。以下のいずれかを使用してください：
+Base版のDiT、VAEとText EncoderはTongyi-MAIの公式リポジトリまたはComfyUI用重みから取得できます。以下のいずれかを使用してください：
 
-- **公式リポジトリ**: [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/)
-    - DiT、Text Encoderは、分割された複数のファイルをすべてダウンロードし、引数には `00001-of-00004.safetensors` のような最初のファイルを指定してください。
+- **公式リポジトリ**: [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image/)
+    - DiT、Text Encoderは、分割された複数のファイルをすべてダウンロードし、引数には `00001-of-00002.safetensors` のような最初のファイルを指定してください。
     - `*.safetensors` ファイル以外はダウンロードする必要はありません。
-- **ComfyUI用重み**: [Comfy-Org/z_image_turbo](https://huggingface.co/Comfy-Org/z_image_turbo)
+- **ComfyUI用重み**: [Comfy-Org/z_image](https://huggingface.co/Comfy-Org/z_image)
 
 以下のモデルを準備してください：
 
@@ -62,9 +66,13 @@ Turbo版のDiT、VAEとText EncoderはTongyi-MAIの公式リポジトリまた�
 - **VAE**: Autoencoderモデル。
 - **Text Encoder**: Qwen3モデル。
 
-別のオプションとして、ostris氏の [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) を使用して、Turbo版とAdapterを組み合わせて学習することもできます。この場合は、`zimage_turbo_training_adapter_v2.safetensors` 等をダウンロードし、学習時に `--base_weights` オプションにこのLoRA重みを指定してください。
+*以下はBaseモデルリリース前の情報です。Baseモデルがリリースされたため、学習にはBaseモデルの使用をお勧めします。*
 
-De-TurboモデルおよびTraining Adapterを提供してくださった ostris 氏に深く感謝します。
+> Turboモデルの学習を行う場合は、AI Toolkit/ostris氏のDe-Turboモデルを使用することをお勧めします。[ostris/Z-Image-De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) から `z_image_de_turbo_v1_bf16.safetensors` をダウンロードし、DiTモデルとして使用してください。
+>
+> 別のオプションとして、ostris氏の [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) を使用して、Turbo版とAdapterを組み合わせて学習することもできます。この場合は、`zimage_turbo_training_adapter_v2.safetensors` 等をダウンロードし、学習時に `--base_weights` オプションにこのLoRA重みを指定してください。
+>
+> De-TurboモデルおよびTraining Adapterを提供してくださった ostris 氏に深く感謝します。
 
 </details>
 
@@ -167,28 +175,35 @@ Z-Imageの学習は専用のスクリプト`zimage_train_network.py`を使用し
 
 </details>
 
-### Converting LoRA weights to ComfyUI format / LoRA重みをComfyUI形式に変換する
+### Converting LoRA weights to Diffusers format for ComfyUI / LoRA重みをComfyUIで使用可能なDiffusers形式に変換する
 
-A script is provided to convert Z-Image LoRA weights to ComfyUI format.
+A script is provided to convert Z-Image LoRA weights to Diffusers format for ComfyUI.
 
 ```bash
-python src/musubi_tuner/networks/convert_z_image_lora_to_comfy.py \
-    path/to/zimage_lora.safetensors \
-    path/to/output_comfy_lora.safetensors
+python src/musubi_tuner/networks/convert_lora.py \
+    --input path/to/zimage_lora.safetensors \
+    --output path/to/output_diffusers_lora.safetensors \
+    --target other
 ```
 
-- The script is `convert_z_image_lora_to_comfy.py`.
-- The first argument is the input Z-Image LoRA weights file.
-- The second argument is the output ComfyUI-format LoRA weights file.
+- The script is `convert_lora.py`.
+- `--input` argument is the input Z-Image LoRA weights file.
+- `--output` argument is the output Diffusers format LoRA weights file.
+- `--target other` means Diffusers format can be used in ComfyUI.
+
+`networks\convert_z_image_lora_to_comfy.py` can also be used for this purpose, but the converted weights may not work correctly with nunchaku.
 
 <details>
 <summary>日本語</summary>
 
-Z-ImageのLoRA重みをComfyUI形式に変換するスクリプトが提供されています。
+Z-ImageのLoRA重みをComfyUIで使用できるDiffusers形式に変換するスクリプトが提供されています。
 
-- スクリプトは`convert_z_image_lora_to_comfy.py`です。
-- 最初の引数は入力のZ-Image LoRA重みファイルです。
-- 2番目の引数は出力のComfyUI形式のLoRA重みファイルです。
+- スクリプトは`convert_lora.py`です。
+- `--input`引数は入力のZ-Image LoRA重みファイルです。
+- `--output`引数は出力のDiffusers形式のLoRA重みファイルです。
+- `--target other`はComfyUIで使用できるDiffusers形式を意味します。
+
+`networks\convert_z_image_lora_to_comfy.py`もこの目的で使用できますが、変換された重みがnunchakuで正しく動作しない可能性があります。
 
 </details>
 
@@ -230,19 +245,19 @@ Z-ImageのLoRA重みをComfyUI形式に変換するスクリプトが提供さ�
 
 ### Sample images during training with De-Turbo model or Training Adapter / De-TurboモデルまたはTraining Adapterで学習中にサンプル画像を生成する
 
-When training with the De-Turbo model or Training Adapter, add negative prompt and CFG scale to the sampling options to generate sample images with CFG. It is also recommended to increase the number of steps. `--l` specifies the CFG scale.
+When training with the De-Turbo model or Training Adapter, add negative prompt and CFG scale to the sampling options to generate sample images with CFG. It is also recommended to increase the number of steps. `--l` specifies the CFG scale (default 4).
 
 ```text
-A beautiful landscape painting of mountains during sunset.  --n bad quality --w 1280 --h 720 --fs 3 --s 20 --d 1234 --l 5
+A beautiful landscape painting of mountains during sunset.  --n bad quality --w 1280 --h 720 --fs 3 --s 20 --d 1234 --l 4
 ```
 
 <details>
 <summary>日本語</summary>
- 
- De-TurboモデルまたはTraining Adapterで学習する場合、サンプリングオプションにネガティブプロンプトとCFGスケールを追加して、CFGありでサンプル画像を生成してください。またステップ数も増やすことをお勧めします。`--l`でCFGスケールを指定します。
- 
+
+ De-TurboモデルまたはTraining Adapterで学習する場合、サンプリングオプションにネガティブプロンプトとCFGスケールを追加して、CFGありでサンプル画像を生成してください。またステップ数も増やすことをお勧めします。`--l`でCFGスケールを指定します（デフォルトは4です）。
+
  ```text
-A beautiful landscape painting of mountains during sunset.  --n bad quality --w 1280 --h 720 --fs 3 --s 20 --d 1234 --l 5
+A beautiful landscape painting of mountains during sunset.  --n bad quality --w 1280 --h 720 --fs 3 --s 20 --d 1234 --l 4
 ```
 
  </details>
@@ -344,7 +359,7 @@ python src/musubi_tuner/zimage_generate_image.py \
 
 - Uses `zimage_generate_image.py`.
 - `--flow_shift` defaults to 3.0.
-- `--guidance_scale` defaults to 0.0 (no classifier-free guidance).
+- `--guidance_scale` defaults to 0.0 (no classifier-free guidance, for Turbo model). Specify a positive value to enable CFG (4.0 is the official default for Base model).
 - `--fp8` and `--fp8_scaled` options are available for DiT.
 - `--fp8_llm` option is available for Text Encoder.
 
@@ -357,7 +372,7 @@ python src/musubi_tuner/zimage_generate_image.py \
 
 - `zimage_generate_image.py`を使用します。
 - `--flow_shift`のデフォルトは3.0です。
-- `--guidance_scale`のデフォルトは0.0（Classifier-Free Guidanceなし）です。
+- `--guidance_scale`のデフォルトは0.0（Classifier-Free Guidanceなし、Turboモデル用）です。正の値を指定するとCFGが有効になります（Baseモデルの公式デフォルトは4.0です）。
 - `--fp8`および`--fp8_scaled`オプションがDiTで利用可能です。
 - `--fp8_llm`オプションがテキストエンコーダーで利用可能です。
 - `--blocks_to_swap`オプションで、一部のブロックをCPUにオフロードできます。オフロード可能な最大ブロック数は28です。
