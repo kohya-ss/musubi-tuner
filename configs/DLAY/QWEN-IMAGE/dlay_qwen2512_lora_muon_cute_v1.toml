@@ -1,0 +1,163 @@
+# =============================================================================
+# DLAY Persona LoRA (Qwen-Image-2512) - Muon + CuTE Attention v1 (EXPERIMENTAL)
+# =============================================================================
+# Purpose: Experimental Muon optimizer for diffusion LoRA training.
+# Based on cute_v2 with Muon optimizer substituted for AdamW.
+#
+# What is Muon?
+#   - MomentUm Orthogonalized by Newton-schulz
+#   - Replaces gradient updates with nearest orthogonal matrix
+#   - Prevents rank collapse in low-rank (LoRA) matrices
+#   - Uses spectral norm LR units (~0.02) NOT Adam units (~3e-4)
+#
+# Key differences from AdamW:
+#   - learning_rate is in SPECTRAL NORM units (~100x higher than Adam)
+#   - Uses muon_adam_lr for non-hidden-layer parameters (biases, etc.)
+#   - Warmup is CRITICAL for stability (100+ steps minimum)
+#   - Memory: 1x params (momentum only) vs AdamW's 2x (m + v)
+#
+# β1 (momentum) tuning - from OneTrainer research:
+#   - Memory length ≈ 1 / (1 - β1) steps
+#   - Target: cover 1-4 epochs for effective smoothing
+#   - This dataset: 269 images / BS=4 = 67 steps/epoch
+#   - β1=0.99 → ~100 step memory (~1.5 epochs) - good balance
+#   - Higher β1 (0.995+) if training is unstable or very long
+#
+# IMPORTANT: This is experimental for diffusion training. Start conservative.
+#
+# Run:
+#   source configs/DLAY/QWEN-IMAGE/env_qwen2512.sh
+#   ./configs/DLAY/QWEN-IMAGE/train_dlay_qwen2512.sh muon_cute_v1
+# =============================================================================
+
+# =============================================================================
+# MODEL PATHS - Qwen-Image-2512
+# =============================================================================
+[model]
+dit = "/root/models/Qwen_Image_2512_BF16.safetensors"
+text_encoder = "/root/models/qwen_2.5_vl_7b_bf16.safetensors"
+vae = "/root/models/qwen_train_vae.safetensors"
+model_version = "original"
+
+# =============================================================================
+# DATASET (use same dataset as cute_v2 for A/B comparison)
+# =============================================================================
+[dataset]
+dataset_config = "/root/blissful-tuner/configs/DLAY/QWEN-IMAGE/dlay_qwen2512_dataset_cute_v2.toml"
+
+# =============================================================================
+# NETWORK (LoRA for Qwen-Image)
+# =============================================================================
+[network]
+network_module = "networks.lora_qwen_image"
+network_dim = 64
+network_alpha = 32
+network_args = [
+  # NOTE: LoRA+ with Muon is experimental. Muon's orthogonalization already
+  # provides balanced updates across singular values, so high loraplus_lr_ratio
+  # may not be necessary. Start with a lower ratio or disable.
+  "loraplus_lr_ratio=4",  # Reduced from 8 (Muon may not need as much boost)
+  "exclude_mod=False",
+]
+
+# =============================================================================
+# OPTIMIZER (MuonWithAdamW - Experimental for Diffusion)
+# =============================================================================
+[optimizer]
+optimizer_type = "MuonWithAdamW"
+
+# CRITICAL: learning_rate is MUON LR (spectral norm units)
+# - Muon default: 0.02
+# - For diffusion: start conservative at 0.015
+# - NOT the same as AdamW's ~1e-4!
+learning_rate = 0.015
+
+# Auxiliary Adam LR for non-hidden-layer params (biases, layer norms)
+# - 3e-4 is OneTrainer's basic default
+# - 1e-6 is their "advanced/conservative" option
+muon_adam_lr = 3e-4
+
+# Model type for automatic layer pattern selection
+# qwen_image uses pattern: ["transformer_blocks"]
+muon_model_type = "qwen_image"
+
+optimizer_args = [
+  # β1=0.99 gives ~100 step memory (~1.5 epochs for this dataset)
+  # Higher than default 0.95 for small-batch smoothing per OneTrainer research
+  # See: https://arxiv.org/abs/2507.01598 (Muon batch size paper)
+  "muon_momentum=0.99",
+  "muon_weight_decay=0.01",   # AdamW-style decoupled decay
+  "adam_betas=(0.9, 0.95)",   # For auxiliary Adam
+  "adam_eps=1e-8",
+]
+
+# CRITICAL: Warmup is essential for Muon stability
+# Muon can explode without warmup - use 100+ steps minimum
+#
+# NOTE on weight_decay: Decoupled WD scales with `learning_rate` (effective shrink is ~lr * wd).
+# If you later switch to RMS-rescaled Adam-like LRs (~1e-4), revisit `muon_weight_decay`—it will
+# usually need to be *higher* (not lower) to have a comparable regularization strength.
+lr_scheduler = "cosine_with_min_lr"
+lr_warmup_steps = 150         # Increased from 100 for Muon safety
+lr_decay_steps = 0
+lr_scheduler_num_cycles = 1
+lr_scheduler_power = 1
+lr_scheduler_min_lr_ratio = 0.1
+lr_scheduler_timescale = 0
+lr_scheduler_type = ""
+lr_scheduler_args = []
+
+# =============================================================================
+# TRAINING CONFIGURATION
+# =============================================================================
+[training]
+mixed_precision = "bf16"      # Muon runs stably in bf16 (uses internal bfloat16)
+gradient_accumulation_steps = 1
+seed = 42
+
+# Same steps as cute_v2 for A/B comparison
+max_train_steps = 4000
+save_every_n_steps = 250
+
+# Qwen-specific timestep sampling
+timestep_sampling = "qwen_shift"
+sigmoid_scale = 1.0
+discrete_flow_shift = 2.2
+
+gradient_checkpointing = false
+scale_weight_norms = 2.0
+
+# CuTE attention
+cute = true
+
+# Mask-weighted loss
+use_mask_loss = true
+mask_gamma = 0.7
+mask_min_weight = 0.05
+
+# =============================================================================
+# SAMPLING
+# =============================================================================
+[sampling]
+sample_prompts = "/root/blissful-tuner/configs/DLAY/QWEN-IMAGE/sample_prompts_dlay_qwen2512_v2.txt"
+sample_every_n_steps = 250
+sample_at_first = true
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+[output]
+output_dir = "/root/output/dlay_qwen2512_lora_muon_cute-v1"
+output_name = "dlay_qwen2512_persona_lora_muon_cute-v1"
+logging_dir = "/root/output/dlay_qwen2512_lora_muon_cute-v1/logs"
+log_prefix = "dlay_qwen2512_lora_muon_cute_v1_"
+
+# =============================================================================
+# ADVANCED OPTIMIZATIONS
+# =============================================================================
+[advanced]
+compile = true
+compile_mode = "max-autotune-no-cudagraphs"
+compile_cache_size_limit = 128
+cuda_allow_tf32 = true
+cuda_cudnn_benchmark = true

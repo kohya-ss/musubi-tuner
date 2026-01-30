@@ -99,9 +99,7 @@ def main():
     args = parse_args()
     args = parse_blissful_args(args)
     if sum([args.text_encoder_cpu, args.quantized_qwen, args.text_encoder_auto]) > 1:
-        raise ValueError(
-            "Only one of '--quantized_qwen', '--text_encoder_cpu', '--text_encoder_auto' may be used at a time!"
-        )
+        raise ValueError("Only one of '--quantized_qwen', '--text_encoder_cpu', '--text_encoder_auto' may be used at a time!")
     if args.frames and args.video_length:
         raise ValueError("Only one of '--frames' and '--video_length' is allowed but received both!")
 

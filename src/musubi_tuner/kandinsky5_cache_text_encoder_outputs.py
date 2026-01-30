@@ -82,9 +82,7 @@ def main():
 
     args = parser.parse_args()
     if sum([args.text_encoder_cpu, args.quantized_qwen, args.text_encoder_auto]) > 1:
-        raise ValueError(
-            "Only one of '--quantized_qwen', '--text_encoder_cpu', '--text_encoder_auto' may be used at a time!"
-        )
+        raise ValueError("Only one of '--quantized_qwen', '--text_encoder_cpu', '--text_encoder_auto' may be used at a time!")
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
