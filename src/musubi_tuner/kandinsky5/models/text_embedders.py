@@ -179,8 +179,8 @@ class Qwen2_5_VLTextEmbedder:
 
 
 class Kandinsky5TextEmbedder:
-    def __init__(self, conf, device="cpu", quantized_qwen=False):
-        self.embedder = Qwen2_5_VLTextEmbedder(conf.qwen, device, quantized_qwen)
+    def __init__(self, conf, device="cpu", quantized_qwen=False, qwen_auto=False):
+        self.embedder = Qwen2_5_VLTextEmbedder(conf.qwen, device if not qwen_auto else "auto", quantized_qwen)
         self.clip_embedder = ClipTextEmbedder(conf.clip, device)
         self.conf = conf
 
@@ -201,5 +201,5 @@ class Kandinsky5TextEmbedder:
         return self
 
 
-def get_text_embedder(conf, device="cpu", quantized_qwen=False):
-    return Kandinsky5TextEmbedder(conf, device, quantized_qwen)
+def get_text_embedder(conf, device="cpu", quantized_qwen=False, qwen_auto=False):
+    return Kandinsky5TextEmbedder(conf, device, quantized_qwen, qwen_auto)

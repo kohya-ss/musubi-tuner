@@ -98,12 +98,12 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     args = parse_blissful_args(args)
-    if args.quantized_qwen and args.text_encoder_cpu:
-        raise argparse.ArgumentError(
-            "Only one of '--quantized_qwen' or '--text_encoder_cpu' may be used at a time but received both!"
+    if sum([args.text_encoder_cpu, args.quantized_qwen, args.text_encoder_auto]) > 1:
+        raise ValueError(
+            "Only one of '--quantized_qwen', '--text_encoder_cpu', '--text_encoder_auto' may be used at a time!"
         )
     if args.frames and args.video_length:
-        raise argparse.ArgumentError("Only one of '--frames' and '--video_length' is allowed but recieved both!")
+        raise ValueError("Only one of '--frames' and '--video_length' is allowed but received both!")
 
     if args.video_length is not None:
         original = args.video_length
@@ -205,8 +205,9 @@ def main():
         )
         text_embedder = get_text_embedder(
             text_embedder_conf,
-            device=device if not args.text_encoder_cpu else "cpu",
+            device="cpu" if args.text_encoder_cpu else device,
             quantized_qwen=args.quantized_qwen if not args.text_encoder_cpu else False,
+            qwen_auto=args.text_encoder_auto,
         )
         neg_text = args.negative_prompt or "low quality, bad quality"
         enc_out, _, attention_mask = text_embedder.encode([args.prompt], type_of_content=("video" if frames > 1 else "image"))

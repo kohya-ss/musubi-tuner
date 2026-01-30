@@ -327,7 +327,7 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
     blissful_prefunc(args)
     if DIFFUSION_MODEL in ["wan", "hunyuan"]:
         if args.cfgzerostar_scaling and args.perp_neg is not None:
-            error_out(argparse.ArgumentTypeError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
+            error_out(ValueError, "Cannot use '--cfgzerostar_scaling' with '--perp_neg'!")
     args.seed = power_seed(args.seed)  # Save it back because it might have been a STR before
     if args.prompt_wildcards is not None:
         args.prompt = process_wildcards(args.prompt, args.prompt_wildcards) if args.prompt is not None else None
@@ -340,16 +340,16 @@ def parse_blissful_args(args: argparse.Namespace) -> argparse.Namespace:
         if args.nag_scale and args.nag_alpha > 1:
             logger.warning(f"NAG alpha requested is {args.nag_alpha} which is greater than 1. Results will be unpredictable!")
         if args.compile and args.optimized_compile:
-            error_out(argparse.ArgumentTypeError, "Only one of --compile and --optimized compile may be used.")
+            error_out(ValueError, "Only one of --compile and --optimized compile may be used.")
         if args.perp_neg is not None and args.slg_mode == "original":
-            error_out(argparse.ArgumentTypeError, "--perp_neg cannot be used with --slg_mode 'original'")
+            error_out(ValueError, "--perp_neg cannot be used with --slg_mode 'original'")
         if args.riflex_index != 0 and args.rope_func.lower() != "comfy":
-            error_out(argparse.ArgumentTypeError, "RIFLEx can only be used with rope_func =='comfy'!")
+            error_out(ValueError, "RIFLEx can only be used with rope_func =='comfy'!")
     if hasattr(args, "preview_latent_every") and args.preview_latent_every:
         scheduler = args.scheduler if hasattr(args, "scheduler") else args.sample_solver if hasattr(args, "sample_solver") else None
         if scheduler and "sde" in scheduler.lower():
             error_out(
-                argparse.ArgumentTypeError,
+                ValueError,
                 "Previewer is not compatible with DPM++SDE currently. Please either disable previews or change scheduler/solver.",
             )
     return args
@@ -479,6 +479,7 @@ def add_blissful_k5_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     parser.add_argument("--preview_vae", type=str, help="Path to TAE vae for taehv previews")
     parser.add_argument("--cfg_schedule", type=str, default=None, help=CFG_SCHEDULE_HELP)
     parser.add_argument("--text_encoder_cpu", action="store_true", help="Run Qwen on CPU(e.g. if VRAM insufficient)")
+    parser.add_argument("--text_encoder_auto", action="store_true", help="Run Qwen with device_map=auto to split between GPU/CPU")
     parser.add_argument("--quantized_qwen", action="store_true", help="Quantize Qwen TE to NF4 with BitsAndBytes to save VRAM")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile optimization")
     parser.add_argument(

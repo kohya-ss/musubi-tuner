@@ -78,8 +78,13 @@ def main():
     parser.add_argument("--clip_max_length", type=int, default=77, help="Max length for CLIP tokenizer")
     parser.add_argument("--quantized_qwen", action="store_true", help="Load Qwen text encoder in 4bit mode")
     parser.add_argument("--text_encoder_cpu", action="store_true", help="Run Qwen TE on CPU")
+    parser.add_argument("--text_encoder_auto", action="store_true", help="Run Qwen with device_map=auto")
 
     args = parser.parse_args()
+    if sum([args.text_encoder_cpu, args.quantized_qwen, args.text_encoder_auto]) > 1:
+        raise ValueError(
+            "Only one of '--quantized_qwen', '--text_encoder_cpu', '--text_encoder_auto' may be used at a time!"
+        )
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
@@ -99,8 +104,9 @@ def main():
     )
     text_embedder = get_text_embedder(
         text_embedder_conf,
-        device=device if not args.text_encoder_cpu else "cpu",
+        device="cpu" if args.text_encoder_cpu else device,
         quantized_qwen=args.quantized_qwen,
+        qwen_auto=args.text_encoder_auto,
     )
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
