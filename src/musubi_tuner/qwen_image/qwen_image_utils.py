@@ -816,10 +816,11 @@ def load_vae(
     return vae
 
 
-def unpack_latents(latents, height, width, vae_scale_factor=VAE_SCALE_FACTOR) -> torch.Tensor:
+def unpack_latents(latents, height, width, vae_scale_factor=VAE_SCALE_FACTOR, is_layered: Optional[bool] = None) -> torch.Tensor:
     """
     Returns layered (B, L, C, H, W) or single frame (B, C, 1, H, W) latents from (B, N, C) packed latents,
     where L is number of layers, N = (H/2)*(W/2)*L.
+    If is_layered is None, it will automatically determine whether to return layered or single frame latents based on N and H, W.
     """
     batch_size, num_patches, channels = latents.shape
 
@@ -832,7 +833,7 @@ def unpack_latents(latents, height, width, vae_scale_factor=VAE_SCALE_FACTOR) ->
     latents = latents.view(batch_size, num_layers, height // 2, width // 2, channels // 4, 2, 2)
     latents = latents.permute(0, 1, 4, 2, 5, 3, 6)
     latents = latents.reshape(batch_size, num_layers, channels // (2 * 2), height, width)
-    if num_layers == 1:
+    if num_layers == 1 and is_layered is not True:
         latents = latents.permute(0, 2, 1, 3, 4)  # (B, C, 1, H, W)
     return latents
 
