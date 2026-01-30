@@ -48,7 +48,7 @@ logging.basicConfig(level=logging.INFO)
 M3_TOKENIZER_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 OUTPUT_LAYERS_MISTRAL = [10, 20, 30]
 OUTPUT_LAYERS_QWEN3 = [9, 18, 27]
-MAX_LENGTH = 512
+DEFAULT_MAX_LENGTH = 512
 UPSAMPLING_MAX_IMAGE_SIZE = 768**2
 SYSTEM_MESSAGE = """You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object
 attribution and actions without speculation."""
@@ -515,6 +515,7 @@ class Mistral3Embedder(nn.Module):
         ckpt_path: str,
         dtype: Optional[torch.dtype],
         device: Union[str, torch.device],
+        max_token_length: int,
         disable_mmap: bool = False,
         state_dict: Optional[dict] = None,
     ) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
@@ -603,6 +604,7 @@ class Mistral3Embedder(nn.Module):
 
         # Load tokenizer
         self.tokenizer = AutoProcessor.from_pretrained(M3_TOKENIZER_ID, use_fast=False)
+        self.max_token_length = max_token_length
 
     @property
     def dtype(self):
@@ -632,7 +634,7 @@ class Mistral3Embedder(nn.Module):
             return_tensors="pt",
             padding="max_length",
             truncation=True,
-            max_length=MAX_LENGTH,
+            max_length=self.max_token_length,
         )
 
         # Move to device
@@ -741,12 +743,13 @@ class Qwen3Embedder(nn.Module):
         self,
         tokenizer: Qwen2Tokenizer,
         model: Qwen3ForCausalLM,
+        max_token_length: int
     ):
         super().__init__()
 
         self.model = model
         self.tokenizer = tokenizer
-        self.max_length = MAX_LENGTH
+        self.max_length = max_token_length
 
     @property
     def dtype(self):
@@ -805,12 +808,17 @@ def load_text_embedder(
     device: Union[str, torch.device],
     disable_mmap: bool = False,
     state_dict: Optional[dict] = None,
+    tokenizer_max_length: Optional[int] = None
 ) -> Union[Mistral3Embedder, Qwen3Embedder]:
+
+    max_len = tokenizer_max_length or DEFAULT_MAX_LENGTH
+
     if model_version_info.qwen_variant is None:
-        return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict)
+        return Mistral3Embedder(ckpt_path, dtype, device, max_len, disable_mmap, state_dict)
 
     variant = model_version_info.qwen_variant
     is_8b = variant == "8B"
     tokenizer_id = "Qwen/Qwen3-8B" if is_8b else "Qwen/Qwen3-4B"
     tokenizer, qwen3 = load_qwen3(ckpt_path, dtype, device, disable_mmap, state_dict, is_8b=is_8b, tokenizer_id=tokenizer_id)
-    return Qwen3Embedder(tokenizer, qwen3)
+
+    return Qwen3Embedder(tokenizer, qwen3, max_len)
