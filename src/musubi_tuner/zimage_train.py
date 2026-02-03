@@ -544,6 +544,14 @@ class ZImageTrainer(ZImageNetworkTrainer):
                             params_to_clip = transformer.parameters()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                        if blocks_to_swap > 0 and args.move_grad_to_param_device:
+                            # Move grad to same device of parameter
+                            unwrapped_optimizer = accelerator.unwrap_model(optimizer)
+                            for group in unwrapped_optimizer.param_groups:
+                                for param in group["params"]:
+                                    if param.grad is not None and param.device != param.grad.device:
+                                        param.grad = param.grad.to(param.device, non_blocking=True)
+
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad(set_to_none=True)
@@ -667,6 +675,11 @@ def zimage_finetune_setup_parser(parser: argparse.ArgumentParser) -> argparse.Ar
     """Z-Image fine-tuning specific parser setup"""
     parser.add_argument("--full_bf16", action="store_true", help="Enable full bfloat16 training for Z-Image")
     parser.add_argument("--fused_backward_pass", action="store_true", help="Use fused backward pass for Adafactor optimizer")
+    parser.add_argument(
+        "--move_grad_to_param_device",
+        action="store_true",
+        help="Move gradient to the same device as parameter when using block swap",
+    )
     parser.add_argument(
         "--mem_eff_save",
         action="store_true",
