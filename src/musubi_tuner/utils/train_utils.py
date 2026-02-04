@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import shutil
+import time
 from typing import Callable
 
 import accelerate
@@ -10,6 +11,42 @@ from musubi_tuner.utils import huggingface_utils
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def build_run_logging_dir(
+    *,
+    logging_dir: str | None,
+    log_prefix: str | None,
+    log_with: str | None,
+    output_dir: str | None,
+    timestamp: str | None = None,
+) -> str | None:
+    """
+    Build a per-run logging directory path.
+
+    Notes:
+    - Treat empty/whitespace logging_dir (and "/" or "\\") as unset to avoid creating paths like "/<timestamp>" on Windows.
+    - When log_with is set but logging_dir is unset, default to "{output_dir}/logs" (or "./logs" if output_dir is unset).
+    - Append "{log_prefix}{timestamp}" to the base directory to keep each run isolated.
+    """
+
+    base_dir = logging_dir
+    if base_dir is not None:
+        base_dir = str(base_dir).strip()
+        if base_dir in ("", "/", "\\"):
+            base_dir = None
+
+    log_with_value = (log_with or "").strip()
+    if base_dir is None and log_with_value:
+        out_dir = (output_dir or "").strip()
+        base_dir = os.path.join(out_dir if out_dir else ".", "logs")
+
+    if base_dir is None:
+        return None
+
+    prefix = "" if log_prefix is None else str(log_prefix)
+    ts = timestamp or time.strftime("%Y%m%d%H%M%S", time.localtime())
+    return os.path.join(base_dir, f"{prefix}{ts}")
 
 
 # checkpointファイル名
