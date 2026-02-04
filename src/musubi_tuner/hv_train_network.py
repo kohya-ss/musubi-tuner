@@ -108,19 +108,20 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
     """
     DeepSpeed is not supported in this script currently.
     """
-    if args.logging_dir is None:
-        logging_dir = None
-    else:
-        log_prefix = "" if args.log_prefix is None else args.log_prefix
-        logging_dir = args.logging_dir + "/" + log_prefix + time.strftime("%Y%m%d%H%M%S", time.localtime())
+    logging_dir = train_utils.build_run_logging_dir(
+        logging_dir=args.logging_dir,
+        log_prefix=args.log_prefix,
+        log_with=args.log_with,
+        output_dir=getattr(args, "output_dir", None),
+    )
 
-    if args.log_with is None:
+    if args.log_with is None or (isinstance(args.log_with, str) and args.log_with.strip() == ""):
         if logging_dir is not None:
             log_with = "tensorboard"
         else:
             log_with = None
     else:
-        log_with = args.log_with
+        log_with = args.log_with.strip() if isinstance(args.log_with, str) else args.log_with
         if log_with in ["tensorboard", "all"]:
             if logging_dir is None:
                 raise ValueError(
