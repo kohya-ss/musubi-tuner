@@ -58,6 +58,11 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/01/29
+    - Z-Image-Baseのリリースに伴いLoRA、finetuningの動作確認を行い、共に動作することを確認しました。
+    - Z-Imageの[関連ドキュメント](./docs/zimage.md)を修正しました。
+    - またZ-ImageのLoRA学習、finetuningでサンプル画像生成が正しく動作しなかったのを修正しました。以上は[PR #861](https://github.com/kohya-ss/musubi-tuner/pull/861)
+
 - 2026/01/24
     - FLUX.2 [klein]のLoRA学習が動かなかったのを修正しました。またFLUX.2に関する各種の不具合修正、機能追加を行いました。[PR #858](https://github.com/kohya-ss/musubi-tuner/pull/858)
         - `--model_version`の指定は`flux.2-dev`や`flux.2-klein-4b`等から、`dev`や`klein-4b`等に変更されました。
