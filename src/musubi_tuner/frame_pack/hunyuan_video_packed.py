@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.nvfp4_optimization_utils import apply_nvfp4_monkey_patch
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_quant
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import load_split_weights
@@ -1507,6 +1508,8 @@ class HunyuanVideoPatchEmbedForCleanLatents(nn.Module):
 
 FP8_OPTIMIZATION_TARGET_KEYS = ["transformer_blocks", "single_transformer_blocks"]
 FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm"]  # Exclude norm layers (e.g., LayerNorm, RMSNorm) from FP8
+NVFP4_OPTIMIZATION_TARGET_KEYS = FP8_OPTIMIZATION_TARGET_KEYS
+NVFP4_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "timestep_embedder", "guidance_embedder", "text_embedder","x_embedder","clean_x_embedder"]
 
 
 class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin, GenerationMixin,
@@ -2041,11 +2044,13 @@ def load_packed_model(
     attn_mode: str,
     loading_device: Union[str, torch.device],
     fp8_scaled: bool = False,
+    nvfp4:bool=False,
     split_attn: bool = False,
     for_inference: bool = False,
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     disable_numpy_memmap: bool = False,
+    use_torch_compile: bool = False,
 ) -> HunyuanVideoTransformer3DModelPacked:
     """
     Load a packed DiT model from a given path.
@@ -2057,11 +2062,13 @@ def load_packed_model(
         attn_mode (str): The attention mode to use.
         loading_device (Union[str, torch.device]): The device to load the model weights to.
         fp8_scaled (bool): Whether to optimize the model weights to fp8.
+        nvfp4 (bool): Whether to use NVidia FP4 format.
         split_attn (bool): Whether to use split attention.
         for_inference (bool): Whether to create the model for inference.
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): List of state_dicts for LoRA weights.
         lora_multipliers (Optional[List[float]]): List of multipliers for LoRA weights.
         disable_numpy_memmap (bool): Whether to disable numpy memory mapping when loading weights.
+        use_torch_compile (bool): Whether to use torch.compile for nvfp4 optimization.
 
     Returns:
         HunyuanVideoTransformer3DModelPacked: The loaded DiT model.
@@ -2114,6 +2121,8 @@ def load_packed_model(
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
 
+    target_keys = NVFP4_OPTIMIZATION_TARGET_KEYS if nvfp4 else FP8_OPTIMIZATION_TARGET_KEYS
+    exclude_keys = NVFP4_OPTIMIZATION_EXCLUDE_KEYS if nvfp4 else FP8_OPTIMIZATION_EXCLUDE_KEYS
     sd = load_safetensors_with_lora_and_quant(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
@@ -2121,14 +2130,18 @@ def load_packed_model(
         fp8_optimization=fp8_scaled,
         calc_device=device,
         move_to_device=(loading_device == device),
-        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
-        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        target_keys=target_keys,
+        exclude_keys=exclude_keys,
         disable_numpy_memmap=disable_numpy_memmap,
+        nvfp4_optimization=nvfp4,
     )
 
-    if fp8_scaled:
-        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
-
+    if fp8_scaled or nvfp4:
+        # apply monkey patching for fp8 or nvfp4
+        if fp8_scaled:
+            apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+        if nvfp4:
+            apply_nvfp4_monkey_patch(model, sd, use_scaled_mm=use_torch_compile)
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device
             logger.info(f"Moving weights to {loading_device}")

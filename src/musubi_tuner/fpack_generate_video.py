@@ -223,7 +223,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
-    # parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arithmetic (RTX 4XXX+), only for fp8_scaled")
+
+    parser.add_argument(
+        "--nvfp4", action="store_true", help="use NVFP4 for DiT model (requires PyTorch 2.6+, Blackwell GPU recommended)"
+    )
+    parser.add_argument("--nvfp4_compile", action="store_true", help="enable torch.compile for NVFP4 input quantization")
+
     parser.add_argument(
         "--rope_scaling_factor", type=float, default=0.5, help="RoPE scaling factor for high resolution (H/W), default is 0.5"
     )
@@ -476,10 +481,12 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         args.attn_mode,
         loading_device,
         args.fp8_scaled and not args.lycoris,
+        args.nvfp4 and not args.lycoris,
         for_inference=True,
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         disable_numpy_memmap=args.disable_numpy_memmap,
+        use_torch_compile=args.nvfp4_compile,
     )
 
     # apply RoPE scaling factor
@@ -518,12 +525,14 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
 
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
+        if args.nvfp4:
+            raise NotImplementedError("NVFP4 with LyCORIS is not supported yet")
 
     # if we only want to save the model, we can skip the rest
     if args.save_merged_model:
         return model
 
-    if not args.fp8_scaled:
+    if not args.fp8_scaled and not args.nvfp4:
         # simple cast to dit_dtype
         target_dtype = None  # load as-is (dit_weight_dtype == dtype of the weights in state_dict)
         target_device = None
@@ -2090,6 +2099,8 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
     dit_weight_dtype = None  # default
     if args.fp8_scaled:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
+    elif args.nvfp4:
+        dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype
     elif args.fp8:
         dit_weight_dtype = torch.float8_e4m3fn
 
@@ -2103,7 +2114,9 @@ def main():
     # Parse arguments
     args = parse_args()
 
-    assert (not args.save_merged_model) or (not args.fp8_scaled), "Save merged model is not compatible with fp8_scaled"
+    assert (not args.save_merged_model) or (not args.fp8_scaled and not args.nvfp4), (
+        "Save merged model is not compatible with fp8_scaled or nvfp4 options."
+    )
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0

@@ -504,7 +504,14 @@ class FramePackNetworkTrainer(NetworkTrainer):
         logger.info(f"Loading DiT model from {dit_path}")
         device = accelerator.device
         model = load_packed_model(
-            device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn, disable_numpy_memmap=args.disable_numpy_memmap
+            device,
+            dit_path,
+            attn_mode,
+            loading_device,
+            args.fp8_scaled,
+            False,
+            split_attn,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
         return model
 
