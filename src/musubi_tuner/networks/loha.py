@@ -7,8 +7,7 @@
 
 import ast
 import logging
-import math
-from typing import Any, Dict, List, Optional, Type
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -289,9 +288,7 @@ def create_arch_network_from_weights(
 ) -> lora_module.LoRANetwork:
     """Create LoHa network from saved weights with auto-detected architecture."""
     target_replace_modules, _ = detect_arch_config(unet)
-    return create_network_from_weights(
-        target_replace_modules, multiplier, weights_sd, text_encoders, unet, for_inference, **kwargs
-    )
+    return create_network_from_weights(target_replace_modules, multiplier, weights_sd, text_encoders, unet, for_inference, **kwargs)
 
 
 def merge_weights_to_tensor(

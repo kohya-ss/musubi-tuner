@@ -128,10 +128,7 @@ def load_safetensors_with_lora_and_fp8(
         lora_network_types = [detect_network_type(lora_sd) for lora_sd in lora_weights_list]
 
         # Merge LoRA weights into the state dict
-        logger.info(
-            f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}, "
-            f"network types: {lora_network_types}"
-        )
+        logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}, network types: {lora_network_types}")
 
         # make hook for LoRA merging
         def weight_hook_func(model_weight_key, model_weight: torch.Tensor, keep_on_calc_device=False):
@@ -196,16 +193,12 @@ def load_safetensors_with_lora_and_fp8(
                         model_weight = (
                             model_weight
                             + multiplier
-                            * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2))
-                            .unsqueeze(2)
-                            .unsqueeze(3)
+                            * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
                             * scale
                         )
                     else:
                         # conv2d 3x3
-                        conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(
-                            1, 0, 2, 3
-                        )
+                        conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
                         model_weight = model_weight + multiplier * conved * scale
 
                     if original_dtype.itemsize == 1:  # fp8
