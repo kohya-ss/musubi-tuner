@@ -9,6 +9,8 @@ In addition to standard LoRA, Musubi Tuner supports **LoHa** (Low-rank Hadamard 
 - **LoHa**: Represents weight updates as a Hadamard (element-wise) product of two low-rank matrices. Reference: [FedPara (arXiv:2108.06098)](https://arxiv.org/abs/2108.06098)
 - **LoKr**: Represents weight updates as a Kronecker product with optional low-rank decomposition. Reference: [LoKr (arXiv:2309.14859)](https://arxiv.org/abs/2309.14859)
 
+The algorithms and recommended settings are described in the [LyCORIS documentation](https://github.com/KohakuBlueleaf/LyCORIS/blob/main/docs/Algo-List.md) and [guidelines](https://github.com/KohakuBlueleaf/LyCORIS/blob/main/docs/Guidelines.md).
+
 Both methods target Linear layers only (Conv2d layers are not supported in this implementation).
 
 This feature is experimental.
@@ -20,6 +22,8 @@ Musubi Tunerでは、標準的なLoRAに加え、代替のパラメータ効率�
 
 - **LoHa**: 重みの更新を2つの低ランク行列のHadamard積（要素ごとの積）で表現します。参考文献: [FedPara (arXiv:2108.06098)](https://arxiv.org/abs/2108.06098)
 - **LoKr**: 重みの更新をKronecker積と、オプションの低ランク分解で表現します。参考文献: [LoKr (arXiv:2309.14859)](https://arxiv.org/abs/2309.14859)
+
+アルゴリズムと推奨設定は[LyCORISのアルゴリズム解説](https://github.com/KohakuBlueleaf/LyCORIS/blob/main/docs/Algo-List.md)と[ガイドライン](https://github.com/KohakuBlueleaf/LyCORIS/blob/main/docs/Guidelines.md)を参照してください。
 
 いずれもLinear層のみを対象としています（Conv2d層はこの実装ではサポートしていません）。
 
