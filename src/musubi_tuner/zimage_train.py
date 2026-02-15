@@ -545,7 +545,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                         if blocks_to_swap > 0 and args.block_swap_optimizer_patch_params:
-                            # Move grad to same device of parameter: workaround for optimizer step, working with AdamW and Adafactor for now. 
+                            # Move grad to same device of parameter: workaround for optimizer step, working with AdamW and Adafactor for now.
                             # AdamW8bit and other optimizers does not work with this patch because of their specific implementation.
                             unwrapped_optimizer = accelerator.unwrap_model(optimizer)
                             for group in unwrapped_optimizer.param_groups:
