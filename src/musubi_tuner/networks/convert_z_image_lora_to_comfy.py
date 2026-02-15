@@ -262,10 +262,7 @@ def main(args):
                 # Log reconstruction quality
                 reconstructed = (U[:, :svd_rank] * S[:svd_rank].unsqueeze(0)) @ Vt[:svd_rank, :]
                 rel_error = (delta_qkv - reconstructed).norm() / delta_qkv.norm()
-                logger.info(
-                    f"  LoKr->LoRA QKV {lora_name_prefix}qkv: rank={svd_rank}/{S.shape[0]}, "
-                    f"relative error={rel_error:.6f}"
-                )
+                logger.info(f"  LoKr->LoRA QKV {lora_name_prefix}qkv: rank={svd_rank}/{S.shape[0]}, relative error={rel_error:.6f}")
 
                 # Construct LoRA weights: ΔW ≈ lora_up @ lora_down, with alpha = rank (scale = 1)
                 sqrt_S = torch.sqrt(S[:svd_rank])
@@ -299,6 +296,8 @@ if __name__ == "__main__":
     parser.add_argument("src_path", type=str, default=None, help="source path, sd-scripts format")
     parser.add_argument("dst_path", type=str, default=None, help="destination path, ComfyUI format")
     parser.add_argument("--reverse", action="store_true", help="reverse conversion direction (LoRA only)")
-    parser.add_argument("--lokr_rank", type=int, default=None, help="max rank for LoKr to LoRA QKV conversion (auto if not specified)")
+    parser.add_argument(
+        "--lokr_rank", type=int, default=None, help="max rank for LoKr to LoRA QKV conversion (auto if not specified)"
+    )
     args = parser.parse_args()
     main(args)
