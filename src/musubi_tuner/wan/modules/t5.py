@@ -454,13 +454,25 @@ class T5EncoderModel:
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        device=None,
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
         weight_path=None,
         fp8=False,
     ):
+        if device is None:
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+        elif isinstance(device, int):
+            # Historically this class used torch.cuda.current_device() (int) as a default.
+            # Normalize to a proper torch.device, and avoid CUDA calls on non-CUDA builds.
+            device = torch.device("cuda", device) if torch.cuda.is_available() else torch.device("cpu")
+
         self.text_len = text_len
         self.dtype = dtype if not fp8 else torch.float8_e4m3fn
         self.device = device
