@@ -64,6 +64,9 @@ If you find this project helpful, please consider supporting its development via
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
 - February 15, 2026
+    - Added support for LoHa/LoKr training. See [PR #900](https://github.com/kohya-ss/musubi-tuner/pull/900)
+        - Implemented based on the LoHa/LoKr algorithms from LyCORIS. Special thanks to KohakuBlueleaf from the LyCORIS project.
+        - Please refer to the [documentation](./docs/loha_lokr.md) for details.
     - Added `--block_swap_optimizer_patch_params` option to enable the use of some optimizers when using `blocks_to_swap` in Z-Image fine-tuning. See [PR #899](https://github.com/kohya-ss/musubi-tuner/pull/899)
         - Please refer to the [documentation](./docs/zimage.md#finetuning) for details.
         

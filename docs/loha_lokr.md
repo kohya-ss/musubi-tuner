@@ -31,6 +31,17 @@ Musubi Tunerでは、標準的なLoRAに加え、代替のパラメータ効率�
 
 </details>
 
+## Acknowledgments / 謝辞
+
+The LoHa and LoKr implementations in Musubi Tuner are based on the [LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS) project by [KohakuBlueleaf](https://github.com/KohakuBlueleaf). We would like to express our sincere gratitude for the excellent research and open-source contributions that made this implementation possible.
+
+<details>
+<summary>日本語</summary>
+
+Musubi TunerのLoHaおよびLoKrの実装は、[KohakuBlueleaf](https://github.com/KohakuBlueleaf)氏による[LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS)プロジェクトに基づいています。この実装を可能にしてくださった素晴らしい研究とオープンソースへの貢献に心から感謝いたします。
+
+</details>
+
 ## Supported architectures / 対応アーキテクチャ
 
 LoHa and LoKr automatically detect the model architecture and apply appropriate default settings. The following architectures are supported:
@@ -326,16 +337,5 @@ LoHa/LoKrのネイティブサポートがあるアーキテクチャ（上記�
 <summary>日本語</summary>
 
 `convert_lora.py` は、LoRAに加えて、LoHa/LoKrの重みのフォーマット変換（Musubi Tuner形式とDiffusers形式間の変換）についてもサポートするよう、拡張されています。
-
-</details>
-
-## Acknowledgments / 謝辞
-
-The LoHa and LoKr implementations in Musubi Tuner are based on the [LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS) project by [KohakuBlueleaf](https://github.com/KohakuBlueleaf). We would like to express our sincere gratitude for the excellent research and open-source contributions that made this implementation possible.
-
-<details>
-<summary>日本語</summary>
-
-Musubi TunerのLoHaおよびLoKrの実装は、[KohakuBlueleaf](https://github.com/KohakuBlueleaf)氏による[LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS)プロジェクトに基づいています。この実装を可能にしてくださった素晴らしい研究とオープンソースへの貢献に心から感謝いたします。
 
 </details>
