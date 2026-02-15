@@ -6,7 +6,7 @@ import math
 import os
 import random
 import time
-from typing import Any, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+from typing import Any, List, Optional, Sequence, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from multiprocessing.sharedctypes import Synchronized
@@ -134,6 +134,105 @@ def glob_videos(directory, base="*"):
     video_paths = list(set(video_paths))  # remove duplicates
     video_paths.sort()
     return video_paths
+
+
+def _check_duplicate_basenames(paths: list[str], kind: str = "image") -> None:
+    """
+    Check for duplicate basenames which would cause cache collisions.
+    Raises ValueError with examples if duplicates found.
+    """
+    seen: dict[str, str] = {}  # basename -> first path
+    duplicate_count = 0
+    examples: list[tuple[str, str, str]] = []  # (basename, path1, path2) - bounded to 3
+
+    for path in paths:
+        basename = os.path.splitext(os.path.basename(path))[0]
+        if basename in seen:
+            duplicate_count += 1
+            if len(examples) < 3:
+                examples.append((basename, seen[basename], path))
+        else:
+            seen[basename] = path
+
+    if duplicate_count:
+        msg = "; ".join(f"'{b}' in both '{p1}' and '{p2}'" for b, p1, p2 in examples)
+        more = f" (and {duplicate_count - len(examples)} more)" if duplicate_count > len(examples) else ""
+        raise ValueError(
+            f"Duplicate {kind} basenames detected - this will cause cache file collisions "
+            f"(TE caches are named by basename only). "
+            f"Examples: {msg}{more}. "
+            f"Rename files to have unique basenames."
+        )
+
+
+def _filter_paths_by_caption(
+    paths: list[str],
+    caption_extension: str,
+    caption_directory: str,
+    media_directory: str,
+    kind: str = "image",
+) -> list[str]:
+    """
+    Filter paths to only those with existing caption files.
+    Emits one warning if some items filtered.
+    Raises ValueError if all items filtered (but some existed).
+    """
+    total_count = len(paths)
+
+    # Case 1: No media files found - not a caption problem
+    # (Datasource already logs "found 0 images" - don't duplicate)
+    if total_count == 0:
+        return []
+
+    filtered = []
+    missing_count = 0
+    missing_preview: list[str] = []  # Only keep first 20 for memory efficiency
+    caption_dir_resolved = os.path.abspath(caption_directory)
+
+    for path in paths:
+        basename_no_ext = os.path.splitext(os.path.basename(path))[0]
+        caption_path = os.path.join(caption_directory, basename_no_ext + caption_extension)
+
+        if os.path.isfile(caption_path):
+            filtered.append(path)
+        else:
+            missing_count += 1
+            if len(missing_preview) < 20:
+                missing_preview.append(basename_no_ext)
+
+    filtered_count = len(filtered)
+
+    # Case 2: Had media but zero captions matched - hard error
+    if filtered_count == 0:
+        example_paths = [
+            os.path.join(caption_dir_resolved, os.path.splitext(os.path.basename(paths[i]))[0] + caption_extension)
+            for i in range(min(3, total_count))
+        ]
+        raise ValueError(
+            f"No {kind}s with matching caption files found. "
+            f"Found {total_count} {kind}(s) in '{media_directory}' but 0 had matching captions. "
+            f"caption_extension='{caption_extension}', caption_directory='{caption_dir_resolved}'. "
+            f"Expected caption files like: {example_paths}"
+        )
+
+    # Case 3: Some items filtered - warn and continue
+    if missing_count > 0:
+        suffix = f" and {missing_count - 20} more" if missing_count > 20 else ""
+        example_expected = [os.path.join(caption_dir_resolved, b + caption_extension) for b in missing_preview[:3]]
+
+        # Single warning with optional >50% smell folded in
+        pct_missing = missing_count / total_count * 100
+        smell_note = " This may indicate a misconfiguration." if pct_missing > 50 else ""
+
+        logger.warning(
+            f"Filtered {missing_count}/{total_count} {kind}(s) without matching captions.{smell_note} "
+            f"caption_extension='{caption_extension}', caption_directory='{caption_dir_resolved}'. "
+            f"Missing: {missing_preview}{suffix}. "
+            f"Expected paths like: {example_expected}. "
+            f"Hint: If you changed captions, recache TE outputs or use a fresh cache_directory."
+        )
+
+    return filtered
 
 
 def divisible_by(num: int, divisor: int) -> int:
@@ -505,16 +604,82 @@ def save_latent_cache_hunyuan_video_1_5(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
-def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
-    """Z-Image architecture. No control latent is supported."""
+def save_latent_cache_z_image(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    control_latents: Optional[List[torch.Tensor]] = None,
+    siglip_features: Optional[List[torch.Tensor]] = None,
+):
+    """
+    Z-Image architecture cache saver.
+
+    Standard mode (existing behavior):
+        latent: [C, H, W] target image latent
+        control_latents: None
+        siglip_features: None
+
+    OmniBase mode (new):
+        latent: [C, H, W] target image latent
+        control_latents: List of [C, H, W] control image latents
+        siglip_features: List of [H_sig, W_sig, D_sig] SigLIP2 features
+
+    Args:
+        item_info: Item metadata for cache path
+        latent: Target image latent [C, H, W]
+        control_latents: Optional list of control image latents (OmniBase)
+        siglip_features: Optional list of SigLIP2 features (OmniBase)
+    """
     assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
 
-    C, H, W = latent.shape
+    # Validate 1:1 relationship between control_latents and siglip_features if both provided
+    if control_latents is not None and siglip_features is not None:
+        assert len(control_latents) == len(siglip_features), (
+            f"control_latents and siglip_features must have same length: "
+            f"got {len(control_latents)} control latents and {len(siglip_features)} siglip features"
+        )
+
+    _, H, W = latent.shape
     F = 1
     dtype_str = dtype_to_str(latent.dtype)
+
+    # Base cache dict (unchanged for backward compatibility)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
 
+    # OmniBase additions (new keys only when provided)
+    if control_latents is not None:
+        for i, ctrl in enumerate(control_latents):
+            assert ctrl.dim() == 3, f"control_latent[{i}] should be 3D tensor (channel, height, width)"
+            _, ctrl_H, ctrl_W = ctrl.shape
+            ctrl_dtype = dtype_to_str(ctrl.dtype)
+            sd[f"latents_control_{i}_{F}x{ctrl_H}x{ctrl_W}_{ctrl_dtype}"] = ctrl.detach().cpu().contiguous()
+
+    if siglip_features is not None:
+        for i, sig in enumerate(siglip_features):
+            assert sig.dim() == 3, f"siglip_features[{i}] should be 3D tensor [H, W, C]"
+            sig_dtype = dtype_to_str(sig.dtype)
+            sd[f"siglip_{i}_{sig_dtype}"] = sig.detach().cpu().contiguous()
+
     save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
+
+
+def has_omnibase_cache(cache_path: str) -> bool:
+    """
+    Check if a Z-Image cache file contains OmniBase data (control latents/SigLIP features).
+
+    Args:
+        cache_path: Path to the .safetensors cache file
+
+    Returns:
+        True if cache contains OmniBase data (latents_control_* or siglip_* keys)
+    """
+    try:
+        from safetensors import safe_open
+
+        with safe_open(cache_path, framework="pt") as f:
+            keys = f.keys()
+            return any(k.startswith("latents_control_") or k.startswith("siglip_") for k in keys)
+    except Exception:
+        return False
 
 
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
@@ -1147,22 +1312,83 @@ class ImageDirectoryDatasource(ImageDatasource):
         self,
         image_directory: str,
         caption_extension: Optional[str] = None,
+        caption_directory: Optional[str] = None,
         control_directory: Optional[str] = None,
         control_count_per_image: Optional[int] = None,
         multiple_target: bool = False,
     ):
         super().__init__()
         self.image_directory = image_directory
-        self.caption_extension = caption_extension
         self.control_directory = control_directory
         self.control_count_per_image = control_count_per_image
         self.multiple_target = multiple_target
         self.current_idx = 0
 
-        # glob images
+        # 0. Fail-fast: validate image_directory exists
+        if not os.path.exists(image_directory):
+            raise ValueError(f"image_directory does not exist: {image_directory}")
+        if not os.path.isdir(image_directory):
+            raise ValueError(f"image_directory is not a directory: {image_directory}")
+
+        # 1. Fail-fast: caption_extension is required for directory datasets
+        if caption_extension is None:
+            raise ValueError(
+                "caption_extension is required for directory-based datasets. "
+                "Use image_jsonl_file if you want to embed captions directly."
+            )
+
+        # 1. Validate caption_extension format
+        stripped = caption_extension.strip()
+        if stripped == "":
+            raise ValueError("caption_extension cannot be empty or whitespace")
+        if stripped != caption_extension:
+            logger.warning(
+                f"caption_extension '{caption_extension!r}' contains leading/trailing whitespace; using stripped value '{stripped}'"
+            )
+            caption_extension = stripped
+        if not caption_extension.startswith("."):
+            logger.warning(
+                f"caption_extension '{caption_extension}' does not start with '.'; "
+                f"this may cause unexpected behavior (e.g., 'txt' expects files like 'footxt')"
+            )
+
+        self.caption_extension = caption_extension
+
+        # 2. Validate caption_directory
+        effective_caption_dir = image_directory
+        if caption_directory is not None:
+            stripped_dir = caption_directory.strip()
+            if stripped_dir == "":
+                raise ValueError("caption_directory cannot be empty or whitespace")
+            if stripped_dir != caption_directory:
+                logger.warning(
+                    f"caption_directory contains leading/trailing whitespace: {caption_directory!r} -> {stripped_dir!r}"
+                )
+                caption_directory = stripped_dir
+            if not os.path.exists(caption_directory):
+                raise ValueError(f"caption_directory does not exist: {caption_directory}")
+            if not os.path.isdir(caption_directory):
+                raise ValueError(f"caption_directory is not a directory: {caption_directory}")
+            effective_caption_dir = caption_directory
+
+        self.caption_directory = effective_caption_dir
+
+        # 3. Glob media files (without caption filtering - we do that separately)
         logger.info(f"glob images in {self.image_directory}")
-        self.image_paths = glob_images(self.image_directory, caption_extension=self.caption_extension)
+        self.image_paths = glob_images(self.image_directory)  # No caption_extension here
         logger.info(f"found {len(self.image_paths)} images")
+
+        # 4. Check duplicate basenames (before filtering, on all media files)
+        _check_duplicate_basenames(self.image_paths, kind="image")
+
+        # 5. Filter by caption existence
+        self.image_paths = _filter_paths_by_caption(
+            self.image_paths,
+            self.caption_extension,
+            self.caption_directory,
+            self.image_directory,
+            kind="image",
+        )
 
         # check if multiple-target images exist
         self.target_paths: dict[str, list[str]] = {}  # image_path -> list of target image paths
@@ -1326,7 +1552,8 @@ class ImageDirectoryDatasource(ImageDatasource):
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
-        caption_path = os.path.splitext(image_path)[0] + self.caption_extension if self.caption_extension else ""
+        basename_no_ext = os.path.splitext(os.path.basename(image_path))[0]
+        caption_path = os.path.join(self.caption_directory, basename_no_ext + self.caption_extension)
         with open(caption_path, "r", encoding="utf-8") as f:
             caption = f.read().strip()
         return image_path, caption
@@ -1371,14 +1598,26 @@ class ImageJsonlDatasource(ImageDatasource):
         logger.info(f"load image jsonl from {self.image_jsonl_file}")
         self.data = []
         with open(self.image_jsonl_file, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_num, line in enumerate(f, start=1):
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError:
-                    logger.error(f"failed to load json: {line} @ {self.image_jsonl_file}")
+                    logger.error(f"failed to load json at line {line_num}: {line} @ {self.image_jsonl_file}")
                     raise
+
+                # Validate required image_path key
+                image_path = data.get("image_path", data.get("image_path_0"))
+                if not image_path:
+                    raise ValueError(
+                        f"Missing 'image_path' (or 'image_path_0') at line {line_num} in {self.image_jsonl_file}"
+                    )
+
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} images")
+
+        # Check for duplicate basenames (cache keys are basename-based)
+        image_paths = [item.get("image_path", item.get("image_path_0")) for item in self.data]
+        _check_duplicate_basenames(image_paths, kind="image")
 
         # Normalize control paths
         for item in self.data:
@@ -1556,17 +1795,83 @@ class VideoDatasource(ContentDatasource):
 
 
 class VideoDirectoryDatasource(VideoDatasource):
-    def __init__(self, video_directory: str, caption_extension: Optional[str] = None, control_directory: Optional[str] = None):
+    def __init__(
+        self,
+        video_directory: str,
+        caption_extension: Optional[str] = None,
+        caption_directory: Optional[str] = None,
+        control_directory: Optional[str] = None,
+    ):
         super().__init__()
         self.video_directory = video_directory
-        self.caption_extension = caption_extension
-        self.control_directory = control_directory  # 新しく追加: コントロール画像ディレクトリ
+        self.control_directory = control_directory
         self.current_idx = 0
 
-        # glob videos
+        # 0. Fail-fast: validate video_directory exists
+        if not os.path.exists(video_directory):
+            raise ValueError(f"video_directory does not exist: {video_directory}")
+        if not os.path.isdir(video_directory):
+            raise ValueError(f"video_directory is not a directory: {video_directory}")
+
+        # 1. Fail-fast: caption_extension is required for directory datasets
+        if caption_extension is None:
+            raise ValueError(
+                "caption_extension is required for directory-based datasets. "
+                "Use video_jsonl_file if you want to embed captions directly."
+            )
+
+        # 1. Validate caption_extension format
+        stripped = caption_extension.strip()
+        if stripped == "":
+            raise ValueError("caption_extension cannot be empty or whitespace")
+        if stripped != caption_extension:
+            logger.warning(
+                f"caption_extension '{caption_extension!r}' contains leading/trailing whitespace; using stripped value '{stripped}'"
+            )
+            caption_extension = stripped
+        if not caption_extension.startswith("."):
+            logger.warning(
+                f"caption_extension '{caption_extension}' does not start with '.'; "
+                f"this may cause unexpected behavior (e.g., 'txt' expects files like 'footxt')"
+            )
+
+        self.caption_extension = caption_extension
+
+        # 2. Validate caption_directory
+        effective_caption_dir = video_directory
+        if caption_directory is not None:
+            stripped_dir = caption_directory.strip()
+            if stripped_dir == "":
+                raise ValueError("caption_directory cannot be empty or whitespace")
+            if stripped_dir != caption_directory:
+                logger.warning(
+                    f"caption_directory contains leading/trailing whitespace: {caption_directory!r} -> {stripped_dir!r}"
+                )
+                caption_directory = stripped_dir
+            if not os.path.exists(caption_directory):
+                raise ValueError(f"caption_directory does not exist: {caption_directory}")
+            if not os.path.isdir(caption_directory):
+                raise ValueError(f"caption_directory is not a directory: {caption_directory}")
+            effective_caption_dir = caption_directory
+
+        self.caption_directory = effective_caption_dir
+
+        # 3. Glob media files
         logger.info(f"glob videos in {self.video_directory}")
         self.video_paths = glob_videos(self.video_directory)
         logger.info(f"found {len(self.video_paths)} videos")
+
+        # 4. Check duplicate basenames (before filtering, on all media files)
+        _check_duplicate_basenames(self.video_paths, kind="video")
+
+        # 5. Filter by caption existence (fixes the video caption filtering bug)
+        self.video_paths = _filter_paths_by_caption(
+            self.video_paths,
+            self.caption_extension,
+            self.caption_directory,
+            self.video_directory,
+            kind="video",
+        )
 
         # glob control images if specified
         if self.control_directory is not None:
@@ -1635,7 +1940,8 @@ class VideoDirectoryDatasource(VideoDatasource):
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         video_path = self.video_paths[idx]
-        caption_path = os.path.splitext(video_path)[0] + self.caption_extension if self.caption_extension else ""
+        basename_no_ext = os.path.splitext(os.path.basename(video_path))[0]
+        caption_path = os.path.join(self.caption_directory, basename_no_ext + self.caption_extension)
         with open(caption_path, "r", encoding="utf-8") as f:
             caption = f.read().strip()
         return video_path, caption
@@ -1676,10 +1982,24 @@ class VideoJsonlDatasource(VideoDatasource):
         logger.info(f"load video jsonl from {self.video_jsonl_file}")
         self.data = []
         with open(self.video_jsonl_file, "r", encoding="utf-8") as f:
-            for line in f:
-                data = json.loads(line)
+            for line_num, line in enumerate(f, start=1):
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.error(f"failed to load json at line {line_num}: {line} @ {self.video_jsonl_file}")
+                    raise
+
+                # Validate required video_path key
+                video_path = data.get("video_path")
+                if not video_path:
+                    raise ValueError(f"Missing 'video_path' at line {line_num} in {self.video_jsonl_file}")
+
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} videos")
+
+        # Check for duplicate basenames (cache keys are basename-based)
+        video_paths = [item["video_path"] for item in self.data]
+        _check_duplicate_basenames(video_paths, kind="video")
 
         # Check if there are control paths in the JSONL
         self.has_control = any("control_path" in item for item in self.data)
@@ -1922,6 +2242,7 @@ class ImageDataset(BaseDataset):
         bucket_no_upscale: bool,
         image_directory: Optional[str] = None,
         image_jsonl_file: Optional[str] = None,
+        caption_directory: Optional[str] = None,
         control_directory: Optional[str] = None,
         mask_directory: Optional[str] = None,
         alpha_mask: bool = False,
@@ -1950,6 +2271,7 @@ class ImageDataset(BaseDataset):
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
+        self.caption_directory = caption_directory
         self.control_directory = control_directory
         self.mask_directory = mask_directory
         self.alpha_mask = alpha_mask
@@ -1994,7 +2316,12 @@ class ImageDataset(BaseDataset):
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
-                image_directory, caption_extension, control_directory, control_count_per_image, multiple_target
+                image_directory,
+                caption_extension,
+                caption_directory,
+                control_directory,
+                control_count_per_image,
+                multiple_target,
             )
         elif image_jsonl_file is not None:
             self.datasource = ImageJsonlDatasource(image_jsonl_file, control_count_per_image, multiple_target)
@@ -2341,6 +2668,7 @@ class VideoDataset(BaseDataset):
         source_fps: Optional[float] = None,
         video_directory: Optional[str] = None,
         video_jsonl_file: Optional[str] = None,
+        caption_directory: Optional[str] = None,
         control_directory: Optional[str] = None,
         mask_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
@@ -2361,6 +2689,7 @@ class VideoDataset(BaseDataset):
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
+        self.caption_directory = caption_directory
         self.control_directory = control_directory
         self.mask_directory = mask_directory
         self.frame_extraction = frame_extraction
@@ -2404,7 +2733,7 @@ class VideoDataset(BaseDataset):
         self.target_frames = target_frames
 
         if video_directory is not None:
-            self.datasource = VideoDirectoryDatasource(video_directory, caption_extension, control_directory)
+            self.datasource = VideoDirectoryDatasource(video_directory, caption_extension, caption_directory, control_directory)
         elif video_jsonl_file is not None:
             self.datasource = VideoJsonlDatasource(video_jsonl_file)
 

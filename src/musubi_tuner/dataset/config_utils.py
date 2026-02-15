@@ -96,6 +96,7 @@ class BaseDatasetParams:
 class ImageDatasetParams(BaseDatasetParams):
     image_directory: Optional[str] = None
     image_jsonl_file: Optional[str] = None
+    caption_directory: Optional[str] = None  # Directory containing caption files (defaults to image_directory)
     control_directory: Optional[str] = None
     mask_directory: Optional[str] = None  # Directory containing mask images for mask-weighted loss training
     alpha_mask: bool = False  # Try to read mask from target image alpha channel (RGBA PNGs)
@@ -117,6 +118,7 @@ class ImageDatasetParams(BaseDatasetParams):
 class VideoDatasetParams(BaseDatasetParams):
     video_directory: Optional[str] = None
     video_jsonl_file: Optional[str] = None
+    caption_directory: Optional[str] = None  # Directory containing caption files (defaults to video_directory)
     control_directory: Optional[str] = None
     mask_directory: Optional[str] = None  # Directory containing mask images/videos for mask-weighted loss training
     target_frames: Sequence[int] = (1,)
@@ -175,6 +177,7 @@ class ConfigSanitizer:
     IMAGE_DATASET_DISTINCT_SCHEMA = {
         "image_directory": str,
         "image_jsonl_file": str,
+        "caption_directory": str,
         "cache_directory": str,
         "control_directory": str,
         "mask_directory": str,
@@ -191,6 +194,7 @@ class ConfigSanitizer:
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
         "video_jsonl_file": str,
+        "caption_directory": str,
         "control_directory": str,
         "mask_directory": str,
         "target_frames": [int],
@@ -375,6 +379,7 @@ def generate_dataset_group_by_blueprint(
                     f"""\
         image_directory: "{dataset.image_directory}"
         image_jsonl_file: "{dataset.image_jsonl_file}"
+        caption_directory: "{dataset.caption_directory or dataset.image_directory}"
         control_directory: "{dataset.control_directory}"
         mask_directory: "{dataset.mask_directory}"
         alpha_mask: {dataset.alpha_mask}
@@ -396,6 +401,7 @@ def generate_dataset_group_by_blueprint(
                     f"""\
         video_directory: "{dataset.video_directory}"
         video_jsonl_file: "{dataset.video_jsonl_file}"
+        caption_directory: "{dataset.caption_directory or dataset.video_directory}"
         control_directory: "{dataset.control_directory}"
         target_frames: {dataset.target_frames}
         frame_extraction: {dataset.frame_extraction}
