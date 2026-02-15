@@ -320,9 +320,9 @@ def create_network_from_weights(
             dim = value.shape[1]
             modules_dim[lora_name] = dim
         elif "lokr_w2" in key and "lokr_w2_a" not in key and "lokr_w2_b" not in key:
-            # full matrix mode: use dim=1 as placeholder
+            # full matrix mode: set dim large enough to trigger full-matrix path
             if lora_name not in modules_dim:
-                modules_dim[lora_name] = 1
+                modules_dim[lora_name] = max(value.shape)
 
     # extract factor for LoKr (user must specify via --network_args factor=N if different from default)
     factor = int(kwargs.pop("factor", -1))

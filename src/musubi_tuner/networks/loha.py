@@ -27,7 +27,9 @@ class HadaWeight(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, w1a, w1b, w2a, w2b, scale=torch.tensor(1)):
+    def forward(ctx, w1a, w1b, w2a, w2b, scale=None):
+        if scale is None:
+            scale = torch.tensor(1, device=w1a.device, dtype=w1a.dtype)
         ctx.save_for_backward(w1a, w1b, w2a, w2b, scale)
         diff_weight = ((w1a @ w1b) * (w2a @ w2b)) * scale
         return diff_weight
