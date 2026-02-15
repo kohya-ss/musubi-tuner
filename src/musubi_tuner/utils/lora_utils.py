@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 import torch
 from tqdm import tqdm
 
@@ -17,6 +17,30 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
+def detect_network_type(lora_sd_or_keys: Union[Dict[str, torch.Tensor], Iterable[str]]) -> str:
+    """Detect network type from state dict keys.
+
+    Returns 'lora', 'loha', 'lokr', 'hybrid', or 'unknown'.
+    'hybrid' means multiple key families coexist (e.g. after QKV conversion).
+    Accepts a state dict or an iterable of key strings.
+    """
+    keys = lora_sd_or_keys.keys() if isinstance(lora_sd_or_keys, dict) else lora_sd_or_keys
+    found_types = set()
+    for key in keys:
+        # Standard LoRA keys (lora_down/lora_up) AND Diffusers-format keys (lora_A/lora_B)
+        if "lora_down" in key or "lora_up" in key or "lora_A" in key or "lora_B" in key:
+            found_types.add("lora")
+        elif "hada_w1_a" in key or "hada_w2_a" in key:
+            found_types.add("loha")
+        elif "lokr_w1" in key or "lokr_w2" in key or "lokr_w2_a" in key:
+            found_types.add("lokr")
+    if len(found_types) > 1:
+        return "hybrid"
+    if len(found_types) == 1:
+        return found_types.pop()
+    return "unknown"
+
+
 def filter_lora_state_dict(
     weights_sd: Dict[str, torch.Tensor],
     include_pattern: Optional[str] = None,
@@ -26,13 +50,13 @@ def filter_lora_state_dict(
     original_key_count = len(weights_sd.keys())
     if include_pattern is not None:
         regex_include = re.compile(include_pattern)
-        weights_sd = {k: v for k, v in weights_sd.items() if regex_include.search(k)}
+        weights_sd = {k: v for k, v in weights_sd.items() if "." not in k or regex_include.search(k)}
         logger.info(f"Filtered keys with include pattern {include_pattern}: {original_key_count} -> {len(weights_sd.keys())}")
 
     if exclude_pattern is not None:
         original_key_count_ex = len(weights_sd.keys())
         regex_exclude = re.compile(exclude_pattern)
-        weights_sd = {k: v for k, v in weights_sd.items() if not regex_exclude.search(k)}
+        weights_sd = {k: v for k, v in weights_sd.items() if "." not in k or not regex_exclude.search(k)}
         logger.info(f"Filtered keys with exclude pattern {exclude_pattern}: {original_key_count_ex} -> {len(weights_sd.keys())}")
 
     if len(weights_sd) != original_key_count:
@@ -108,8 +132,9 @@ def load_safetensors_with_lora_and_fp8(
         if len(lora_multipliers) > len(lora_weights_list):
             lora_multipliers = lora_multipliers[: len(lora_weights_list)]
 
-        # Merge LoRA weights into the state dict
-        logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}")
+        # Detect network types for summary logging (actual dispatch is per-key-family)
+        lora_network_types = [detect_network_type(lora_sd) for lora_sd in lora_weights_list]
+        logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}, types: {lora_network_types}")
 
         # make hook for LoRA merging
         def weight_hook_func(model_weight_key, model_weight: torch.Tensor, keep_on_calc_device=False):
@@ -124,9 +149,21 @@ def load_safetensors_with_lora_and_fp8(
                 model_weight = model_weight.to(calc_device)  # to make calculation faster
 
             for lora_weight_keys, lora_sd, multiplier in zip(list_of_lora_weight_keys, lora_weights_list, lora_multipliers):
-                # check if this weight has LoRA weights
                 lora_name = model_weight_key.rsplit(".", 1)[0]  # remove trailing ".weight"
                 lora_name = "lora_unet_" + lora_name.replace(".", "_")
+
+                # Per-key-family dispatch: try each family in deterministic order.
+                # Each merge function is a no-op if no matching keys found.
+                # This handles hybrid dicts (lokr_* + lora_* after QKV conversion).
+                from musubi_tuner.networks.loha import merge_weights_to_tensor as loha_merge
+
+                model_weight = loha_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
+
+                from musubi_tuner.networks.lokr import merge_weights_to_tensor as lokr_merge
+
+                model_weight = lokr_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
+
+                # Standard LoRA path
                 down_key = lora_name + ".lora_down.weight"
                 up_key = lora_name + ".lora_up.weight"
                 alpha_key = lora_name + ".alpha"
@@ -203,11 +240,10 @@ def load_safetensors_with_lora_and_fp8(
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
-        # check if all LoRA keys are used
-        if len(lora_weight_keys) > 0:
-            # if there are still LoRA keys left, it means they are not used in the model
-            # this is a warning, not an error
-            logger.warning(f"Warning: not all LoRA keys are used: {', '.join(lora_weight_keys)}")
+        # Exclude non-dotted keys (network-level metadata like lokr_factor, use_rslora_flag)
+        remaining = {k for k in lora_weight_keys if "." in k}
+        if len(remaining) > 0:
+            logger.warning(f"Warning: not all LoRA keys are used: {', '.join(sorted(remaining))}")
 
     return state_dict
 
