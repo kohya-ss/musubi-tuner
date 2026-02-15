@@ -63,6 +63,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- February 15, 2026
+    - Added `--block_swap_optimizer_patch_params` option to enable the use of some optimizers when using `blocks_to_swap` in Z-Image fine-tuning. See [PR #899](https://github.com/kohya-ss/musubi-tuner/pull/899)
+        - Please refer to the [documentation](./docs/zimage.md#finetuning) for details.
+        
 - January 29, 2026
     - With the release of Z-Image-Base, we have verified that both LoRA and finetuning work correctly.
     - Updated the [related documentation](./docs/zimage.md) for Z-Image.
@@ -90,16 +94,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
     - Added support for LoRA training of Qwen-Image-Layered. See [PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816).
         - Please refer to the [documentation](./docs/qwen_image.md) for details.
         - In the caching, training, and inference scripts, specify `--model_version` option as `layered`.
-
-- December 27, 2025
-    - Added support for Qwen-Image-Edit-2511. See [PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808).
-        - Please refer to the [documentation](./docs/qwen_image.md) for details such as checkpoints and options.
-        - In the caching, training, and inference scripts, specify `--model_version` option as `edit-2511`.
-
-- December 25, 2025
-    - Added support for LoRA training of Kandinsky 5. See [PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774). Many thanks to AkaneTendo25 for this contribution.
-        - Please refer to the [documentation](./docs/kandinsky5.md) for details.
-        - **Note that some weight specifications are in Hugging Face ID format. We plan to change to direct *.safetensors specification like other models soon, so please be aware.**
 
 ### Releases
 
