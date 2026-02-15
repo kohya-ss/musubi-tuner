@@ -7,7 +7,7 @@ import ast
 import math
 import os
 import re
-from typing import Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union
 from transformers import CLIPTextModel
 import torch
 import torch.nn as nn
@@ -179,19 +179,6 @@ class LoRAInfModule(LoRAModule):
     def set_network(self, network):
         self.network = network
 
-    # merge weight to org_module
-    # def merge_to(self, sd, dtype, device, non_blocking=False):
-    #     if torch.cuda.is_available():
-    #         stream = torch.cuda.Stream(device=device)
-    #         with torch.cuda.stream(stream):
-    #             print(f"merge_to {self.lora_name}")
-    #             self._merge_to(sd, dtype, device, non_blocking)
-    #             torch.cuda.synchronize(device=device)
-    #             print(f"merge_to {self.lora_name} done")
-    #         torch.cuda.empty_cache()
-    #     else:
-    #         self._merge_to(sd, dtype, device, non_blocking)
-
     def merge_to(self, sd, dtype, device, non_blocking=False):
         # extract weight from org_module
         org_sd = self.org_module.state_dict()
@@ -340,6 +327,8 @@ def create_network(
     text_encoders: List[nn.Module],
     unet: nn.Module,
     neuron_dropout: Optional[float] = None,
+    module_class: Type[object] = None,
+    module_kwargs: Optional[Dict[str, Any]] = None,
     **kwargs,
 ):
     """architecture independent network creation"""
@@ -381,6 +370,9 @@ def create_network(
     if include_patterns is not None and isinstance(include_patterns, str):
         include_patterns = ast.literal_eval(include_patterns)
 
+    if module_class is None:
+        module_class = LoRAModule
+
     # too many arguments ( ^ω^)･･･
     network = LoRANetwork(
         target_replace_modules,
@@ -395,6 +387,8 @@ def create_network(
         module_dropout=module_dropout,
         conv_lora_dim=conv_dim,
         conv_alpha=conv_alpha,
+        module_class=module_class,
+        module_kwargs=module_kwargs,
         exclude_patterns=exclude_patterns,
         include_patterns=include_patterns,
         verbose=verbose,
@@ -430,6 +424,7 @@ class LoRANetwork(torch.nn.Module):
         conv_lora_dim: Optional[int] = None,
         conv_alpha: Optional[float] = None,
         module_class: Type[object] = LoRAModule,
+        module_kwargs: Optional[Dict[str, Any]] = None,
         modules_dim: Optional[Dict[str, int]] = None,
         modules_alpha: Optional[Dict[str, int]] = None,
         exclude_patterns: Optional[List[str]] = None,
@@ -448,6 +443,7 @@ class LoRANetwork(torch.nn.Module):
         self.module_dropout = module_dropout
         self.target_replace_modules = target_replace_modules
         self.prefix = prefix
+        self.module_kwargs = module_kwargs or {}
 
         self.loraplus_lr_ratio = None
         # self.loraplus_unet_lr_ratio = None
@@ -516,12 +512,12 @@ class LoRANetwork(torch.nn.Module):
                             # exclude/include filter
                             excluded = False
                             for pattern in exclude_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     excluded = True
                                     break
                             included = False
                             for pattern in include_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     included = True
                                     break
                             if excluded and not included:
@@ -565,6 +561,7 @@ class LoRANetwork(torch.nn.Module):
                                 dropout=dropout,
                                 rank_dropout=rank_dropout,
                                 module_dropout=module_dropout,
+                                **self.module_kwargs,
                             )
                             loras.append(lora)
 
@@ -712,6 +709,9 @@ class LoRANetwork(torch.nn.Module):
                     else:
                         param_groups["lora"][f"{lora.lora_name}.{name}"] = param
 
+            if loraplus_ratio is not None and len(param_groups["plus"]) == 0:
+                logger.warning("LoRA+ is not effective for this network type (no 'lora_up' parameters found)")
+
             params = []
             descriptions = []
             for key in param_groups.keys():
@@ -830,6 +830,12 @@ class LoRANetwork(torch.nn.Module):
         keys_scaled = 0
 
         state_dict = self.state_dict()
+
+        # guard: only supported for LoRA (lora_down/lora_up parameterization)
+        if not any("lora_down" in k and "weight" in k for k in state_dict.keys()):
+            logger.warning("max_norm_regularization is only supported for LoRA")
+            return 0, 0.0, 0.0
+
         for key in state_dict.keys():
             if "lora_down" in key and "weight" in key:
                 downkeys.append(key)
@@ -887,6 +893,8 @@ def create_network_from_weights(
     text_encoders: Optional[List[nn.Module]] = None,
     unet: Optional[nn.Module] = None,
     for_inference: bool = False,
+    module_class: Optional[Type[object]] = None,
+    module_kwargs: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> LoRANetwork:
     # get dim/alpha mapping
@@ -904,7 +912,8 @@ def create_network_from_weights(
             modules_dim[lora_name] = dim
             # logger.info(lora_name, value.size(), dim)
 
-    module_class = LoRAInfModule if for_inference else LoRAModule
+    if module_class is None:
+        module_class = LoRAInfModule if for_inference else LoRAModule
 
     network = LoRANetwork(
         target_replace_modules,
@@ -915,5 +924,6 @@ def create_network_from_weights(
         modules_dim=modules_dim,
         modules_alpha=modules_alpha,
         module_class=module_class,
+        module_kwargs=module_kwargs,
     )
     return network
