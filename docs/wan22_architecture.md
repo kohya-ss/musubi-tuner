@@ -10,12 +10,12 @@ A comprehensive architecture reference for the WAN 2.2 video generation model fa
 |-----------|-------|-------|
 | **Model Family** | WAN 2.2 | Alibaba Wan Team |
 | **Architecture** | DiT (Diffusion Transformer) | Flow Matching + Cross-Attention |
-| **Total Parameters** | ~27B (MoE), 14B active | A14B = 2x14B experts |
+| **A14B Checkpoints** | 2× ~14B (high-noise + low-noise) | Switches between two *separate* DiT checkpoints via `boundary` (not in-model MoE routing) |
 | **DiT Dimension** | 5120 | Hidden size |
 | **DiT Layers** | 40 | Transformer blocks |
 | **Attention Heads** | 40 | 128 dim per head |
 | **FFN Dimension** | 13824 | ~2.7x hidden dim |
-| **Text Encoder** | umT5-XXL | 5.3B parameters |
+| **Text Encoder** | `google/umt5-xxl` | ~5.3B parameters (umT5-XXL) |
 | **Text Length** | 512 tokens | Max sequence |
 | **VAE Compression** | 4×8×8 | Temporal × Height × Width |
 | **Latent Channels** | 16 | z_dim |
@@ -51,11 +51,11 @@ A comprehensive architecture reference for the WAN 2.2 video generation model fa
 │         │                      │                        │              │
 │         ▼                      ▼                        ▼              │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │            MoE Expert Selection (SNR-based)                     │   │
+│  │     High/Low-Noise Checkpoint Selection (boundary-based)        │   │
 │  │  ┌───────────────────┐    ┌───────────────────┐                 │   │
-│  │  │  High-Noise Expert│    │  Low-Noise Expert │                 │   │
-│  │  │  (t >= t_moe)     │    │  (t < t_moe)      │                 │   │
-│  │  │  Layout/Structure │    │  Details/Refine   │                 │   │
+│  │  │ High-noise model   │    │ Low-noise model    │                 │   │
+│  │  │ (t >= boundary)    │    │ (t < boundary)     │                 │   │
+│  │  │ Layout/Structure   │    │ Details/Refine     │                 │   │
 │  │  └───────────────────┘    └───────────────────┘                 │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │         │                                                              │
@@ -100,31 +100,34 @@ A comprehensive architecture reference for the WAN 2.2 video generation model fa
 
 ## Model Variants
 
-### WAN 2.2 A14B (MoE Architecture)
+### WAN 2.2 A14B (Dual-checkpoint “MoE-like” setup)
 
-WAN 2.2 introduces a **Mixture-of-Experts (MoE)** architecture with two specialized experts:
+WAN 2.2 A14B is commonly described as a 2-expert “MoE”, but in this repo it’s implemented as **two separate DiT checkpoints**
+(`low_noise_model` and `high_noise_model`) and the pipeline **switches which checkpoint is used** based on a fixed `boundary`.
 
-| Expert | Activation | Focus | Parameters |
+| Checkpoint | Activation | Focus | Parameters |
 |--------|------------|-------|------------|
-| **High-Noise Expert** | t >= t_moe | Overall layout, composition | 14B |
-| **Low-Noise Expert** | t < t_moe | Fine details, textures | 14B |
-| **Total** | - | - | ~27B (14B active) |
+| **High-noise model** | t >= boundary | Overall layout, composition | ~14B |
+| **Low-noise model** | t < boundary | Fine details, textures | ~14B |
+| **Total** | - | - | ~27B (only one “active” at a given timestep; memory may include both if loaded) |
 
-#### MoE Boundary (t_moe)
+#### Boundary (`boundary` / `timestep_boundary`)
 
-The transition point is determined by Signal-to-Noise Ratio (SNR):
+Official materials often motivate the switch using SNR, but the code path here uses a **fixed threshold** from config.
+Internally, timesteps are typically integers in `[0..1000]` and the code compares `t / 1000.0` against `boundary`.
 
-| Task | Boundary | Interpretation |
+| Task | Boundary | Interpretation (this repo) |
 |------|----------|----------------|
-| **T2V** | 0.875 | Switch at t = 0.875 (87.5% of denoising complete) |
-| **I2V** | 0.900 | Switch at t = 0.900 (90% of denoising complete) |
+| **T2V** | 0.875 | Use **high-noise** checkpoint for `t >= 0.875`, otherwise low-noise |
+| **I2V** | 0.900 | Use **high-noise** checkpoint for `t >= 0.900`, otherwise low-noise |
 
 ```python
-# MoE switching logic
-if t >= boundary:
-    model = high_noise_model  # Early denoising: structure
+# Checkpoint switching logic used in this repo
+# (t is typically in [0..1000] during training/inference codepaths)
+if (t / 1000.0) >= boundary:
+    model = high_noise_model  # high-noise region (early steps if timesteps decrease during sampling)
 else:
-    model = low_noise_model   # Late denoising: details
+    model = low_noise_model   # lower-noise region (later refinement)
 ```
 
 ### Model Configurations
@@ -180,11 +183,15 @@ t2v_A14B = {
 # From wan/configs/wan_i2v_A14B.py
 i2v_A14B = {
     # Same as T2V except:
+    "in_dim": 36,             # IMPORTANT: I2V changes patch_embedding input channels (16 -> 36)
     "sample_shift": 5.0,      # Lower shift for I2V
     "boundary": 0.900,        # Later switch to low-noise expert
     "sample_guide_scale": (3.5, 3.5),  # Equal guidance for both
 }
 ```
+
+> **I2V conditioning note (WAN 2.2 in this repo):** The image conditioning is done via **extra latent channels** (passed as `y` and concatenated
+> to the noisy latents), *not* via CLIP tokens in the cross-attention context (that CLIP path exists for WAN 2.1 I2V).
 
 #### TI2V-5B (Dense Model with High-Compression VAE)
 
@@ -195,6 +202,10 @@ i2v_A14B = {
 | **Total Compression** | 4×32×32 with patchification |
 | **FPS** | 24 (vs 16) |
 | **Consumer GPU** | Yes (single 4090) |
+
+> **Integration note:** Upstream WAN 2.2 includes TI2V-5B configs/sizes, but blissful-tuner currently does not expose a `--task ti2v-5B`
+> entry in `WAN_CONFIGS` (even though some TI2V sizes appear in `SUPPORTED_SIZES`). Treat this section as upstream/paper reference unless you
+> add the missing config wiring.
 
 ---
 
@@ -209,8 +220,8 @@ i2v_A14B = {
 | **Model Size** | 127M | Compact design |
 | **Compression Ratio** | 4×8×8 | T×H×W |
 | **Latent Channels** | 16 | z_dim |
-| **Input Format** | (1+T)×H×W×3 | First frame special |
-| **Output Format** | (1+T/4)×H/8×W/8×16 | Latent shape |
+| **Input Format** | T×H×W×3 | First frame processed separately, remaining frames in chunks of 4 |
+| **Output Format** | (1 + (T-1)/4)×H/8×W/8×16 | Training typically uses `T = 4k + 1` (e.g. 81 → 21 latent frames) |
 | **Normalization** | RMSNorm | Replaces GroupNorm for causality |
 
 #### Causal 3D Convolution
@@ -298,8 +309,8 @@ class WanAttentionBlock(nn.Module):
 #### Modulation (AdaLN-single)
 
 ```python
-# 6 modulation parameters per block:
-# [scale1, shift1, gate1, scale2, shift2, gate2]
+# 6 modulation slots per block:
+# [shift1, scale1, gate1, shift2, scale2, gate2]
 # Applied to: self-attn (1-3), FFN (4-6)
 
 def forward(self, x, e, ...):
@@ -325,9 +336,14 @@ def forward(self, x, e, ...):
 
 ```python
 # RoPE frequency dimensions split for 3D:
-# - Temporal: (d - 4*(d//6)) dims  ~44% for frame position
-# - Height:   2*(d//6) dims        ~28% for spatial H
-# - Width:    2*(d//6) dims        ~28% for spatial W
+# Real-valued per-head dimension is `d = dim // num_heads` (A14B: 5120/40 = 128).
+# The model constructs freqs using the real-dim split:
+# - Temporal: d - 4*(d//6) dims
+# - Height:   2*(d//6) dims
+# - Width:    2*(d//6) dims
+#
+# Note: RoPE freqs are stored as complex pairs, so the freqs tensor’s last dim is `c = d//2`,
+# and split sizes use the complex-pair dimensions.
 
 def rope_params(max_seq_len, dim, theta=10000):
     freqs = torch.outer(
@@ -336,10 +352,16 @@ def rope_params(max_seq_len, dim, theta=10000):
     )
     return torch.polar(torch.ones_like(freqs), freqs)
 
-# Application to Q, K
+# Application to Q, K (matches `rope_apply_inplace_cached` / `rope_apply` in this repo)
 def rope_apply(x, grid_sizes, freqs):
-    # freqs split: [temporal, height, width]
-    freqs = freqs.split([c - 2*(c//3), c//3, c//3], dim=1)
+    # x: [B, L, num_heads, head_dim]
+    # freqs: [max_seq_len, head_dim//2] complex
+    d = x.size(3)        # head_dim
+    c = d // 2           # complex-pair dim
+
+    # freqs split (complex-pair dims): [temporal, height, width]
+    # Equivalent real-dim split: [d - 4*(d//6), 2*(d//6), 2*(d//6)]
+    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
     # For each sample, expand freqs to match grid
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
@@ -411,6 +433,11 @@ time_projection.1.weight             # [30720, 5120] (6 * dim)
 time_projection.1.bias               # [30720]
 ```
 
+> **Variant caveat:** for **I2V-A14B**, `in_dim=36`, so `patch_embedding.weight` is `[5120, 36, 1, 2, 2]`.
+
+> **Checkpoint key caveats:** Some WAN checkpoints (notably 1.3B) use a `model.diffusion_model.` prefix (the loader strips it).
+> If you train with `--compile` and swap high/low weights, keys inside `blocks.*` may be nested under `blocks.{N}._orig_mod.*`.
+
 ### Head
 
 ```
@@ -423,19 +450,12 @@ head.modulation                      # [1, 2, 5120]
 ### LoRA Target Modules (Blissful Tuner)
 
 ```python
-# networks/lora_wan.py targets WanAttentionBlock
-target_modules = [
-    "self_attn.q",
-    "self_attn.k",
-    "self_attn.v",
-    "self_attn.o",
-    "cross_attn.q",
-    "cross_attn.k",
-    "cross_attn.v",
-    "cross_attn.o",
-    "ffn.0",  # First linear in FFN
-    "ffn.2",  # Second linear in FFN
-]
+# src/musubi_tuner/networks/lora_wan.py
+# LoRA targeting is class-based, not a hard-coded module list.
+WAN_TARGET_REPLACE_MODULES = ["WanAttentionBlock"]
+
+# Default exclude patterns (anything matching these paths is skipped):
+exclude_patterns.append(r".*(patch_embedding|text_embedding|time_embedding|time_projection|norm|head).*")
 ```
 
 ---
@@ -533,14 +553,14 @@ Translation: Vivid colors, overexposure, static, blurry details, subtitles, styl
 
 ```python
 # VAE temporal compression = 4x
-# First frame special: (1 + T) → (1 + (T-1)/4)
-# For 81 frames: 1 + 80 = 81 → 1 + 80/4 = 21 latent frames
+# First-frame special: T frames -> (1 + (T-1)/4) latent frames (for T = 4k+1)
+# Example: 81 frames -> 1 + 80/4 = 21 latent frames
 
-# Sequence length calculation
-latent_frames = 1 + (frames - 1) // 4  # e.g., 81 → 21
-latent_h = height // 8 // 2  # VAE + patch
-latent_w = width // 8 // 2   # VAE + patch
-seq_len = latent_frames * latent_h * latent_w
+# Sequence length calculation (matches training code)
+latent_frames = 1 + (frames - 1) // 4  # e.g., 81 -> 21
+lat_h = height // 8                   # VAE latent grid
+lat_w = width // 8
+seq_len = latent_frames * lat_h * lat_w // 4  # patch_size=(1,2,2) reduces spatial tokens by 2x2
 ```
 
 ---
