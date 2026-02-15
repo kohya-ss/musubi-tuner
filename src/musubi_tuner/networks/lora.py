@@ -512,12 +512,12 @@ class LoRANetwork(torch.nn.Module):
                             # exclude/include filter
                             excluded = False
                             for pattern in exclude_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     excluded = True
                                     break
                             included = False
                             for pattern in include_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     included = True
                                     break
                             if excluded and not included:
