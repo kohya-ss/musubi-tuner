@@ -305,3 +305,63 @@ def load_safetensors_with_fp8_optimization_and_hook(
             synchronize_device(calc_device)
 
     return state_dict
+
+
+def native_merge_file(
+    weights_sd: Dict[str, torch.Tensor],
+    model: torch.nn.Module,
+    multiplier: float,
+    architecture: str,
+    device: torch.device,
+    **extra_kwargs,
+) -> bool:
+    """Merge a single weight file natively, handling hybrid dicts (LoRA + LoHa + LoKr).
+
+    Uses per-key-family dispatch: tries each network type in order, each is a no-op
+    if no matching keys are found. Returns True if any keys were merged.
+    """
+    merged_any = False
+
+    # 1. LoHa keys
+    loha_keys = {k for k in weights_sd if ".hada_w1_a" in k or ".hada_w2_a" in k}
+    if loha_keys:
+        from musubi_tuner.networks import loha
+
+        loha_modules = {k.rsplit(".", 1)[0] for k in loha_keys}
+        loha_sd = {k: v for k, v in weights_sd.items() if any(k.startswith(m) for m in loha_modules) or "." not in k}
+        net = loha.create_arch_network_from_weights(
+            multiplier, loha_sd, unet=model, for_inference=True, architecture=architecture
+        )
+        net.merge_to(None, model, loha_sd, device=device)
+        merged_any = True
+
+    # 2. LoKr keys
+    lokr_keys = {k for k in weights_sd if ".lokr_w1" in k or ".lokr_w2" in k or ".lokr_w2_a" in k}
+    if lokr_keys:
+        from musubi_tuner.networks import lokr
+
+        lokr_modules = {k.rsplit(".", 1)[0] for k in lokr_keys}
+        lokr_sd = {k: v for k, v in weights_sd.items() if any(k.startswith(m) for m in lokr_modules) or "." not in k}
+        net = lokr.create_arch_network_from_weights(
+            multiplier, lokr_sd, unet=model, for_inference=True, architecture=architecture, **extra_kwargs
+        )
+        net.merge_to(None, model, lokr_sd, device=device)
+        merged_any = True
+
+    # 3. LoRA keys (standard + Diffusers-converted)
+    lora_keys = {k for k in weights_sd if ".lora_down." in k or ".lora_up." in k}
+    if lora_keys:
+        from musubi_tuner.networks import lora
+
+        lora_modules = {k.rsplit(".", 1)[0] for k in lora_keys}
+        lora_sd = {k: v for k, v in weights_sd.items() if any(k.startswith(m) for m in lora_modules) or "." not in k}
+        net = lora.create_arch_network_from_weights(
+            lora.HUNYUAN_TARGET_REPLACE_MODULES, multiplier, lora_sd, unet=model, for_inference=True
+        )
+        net.merge_to(None, model, lora_sd, device=device)
+        merged_any = True
+
+    if not merged_any:
+        logger.warning("No mergeable keys found in weight file")
+
+    return merged_any

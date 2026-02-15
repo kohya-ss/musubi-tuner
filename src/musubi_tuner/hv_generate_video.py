@@ -4,6 +4,7 @@ import gc
 from importlib.util import find_spec
 import random
 import os
+import sys
 import time
 import numpy as np
 import torch
@@ -508,7 +509,12 @@ def parse_args():
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
-        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+        "--prefer_lycoris",
+        "--lycoris",
+        dest="prefer_lycoris",
+        action="store_true",
+        help="Enable LyCORIS backend for non-native weight formats. Native formats always merge natively. "
+        "(--lycoris is a deprecated alias for --prefer_lycoris)",
     )
     parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
     parser.add_argument(
@@ -529,7 +535,9 @@ def parse_args():
 
     # update dit_weight based on model_base if not exists
 
-    if args.lycoris and not lycoris_available:
+    if "--lycoris" in sys.argv:
+        logger.warning("--lycoris is deprecated. Use --prefer_lycoris instead. Behavior is unchanged.")
+    if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
@@ -683,6 +691,8 @@ def main():
                 weights_sd = load_file(lora_weight)
                 conversion_needed = False
                 for key, weight in weights_sd.items():
+                    if "." not in key:
+                        continue  # skip network-level metadata keys (lokr_factor, etc.)
                     prefix, key_body = key.split(".", 1)
                     if prefix == "diffusion_model" or prefix == "transformer":
                         conversion_needed = True
@@ -700,7 +710,7 @@ def main():
                     filtered_weights = {k: v for k, v in weights_sd.items() if "single_blocks" not in k}
                     weights_sd = filtered_weights
 
-                if args.lycoris:
+                if args.prefer_lycoris:
                     lycoris_net, _ = create_network_from_weights(
                         multiplier=lora_multiplier,
                         file=None,
@@ -723,7 +733,7 @@ def main():
                 #     network.eval()
                 #     network.to(device)
                 # except Exception as e:
-                if args.lycoris:
+                if args.prefer_lycoris:
                     lycoris_net.merge_to(None, transformer, weights_sd, dtype=None, device=device)
                 else:
                     network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
