@@ -1,5 +1,6 @@
 import ast
 import asyncio
+from contextlib import contextmanager
 from datetime import timedelta
 import gc
 import importlib
@@ -43,7 +44,7 @@ import musubi_tuner.hunyuan_model.vae as vae_module
 from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.mask_loss import (
     add_mask_loss_args,
-    apply_masked_loss,
+    apply_masked_loss_with_prior,
     log_mask_loss_banner,
     require_mask_weights_if_enabled,
     validate_mask_loss_args as validate_mask_loss_args_impl,
@@ -420,9 +421,10 @@ class NetworkTrainer:
 
         lrs = lr_scheduler.get_last_lr()
         opt_type = args.optimizer_type.lower()
+        use_lr_descriptions = lr_descriptions if lr_descriptions is not None and len(lr_descriptions) == len(lrs) else None
         for i, lr in enumerate(lrs):
-            if lr_descriptions is not None:
-                lr_desc = lr_descriptions[i]
+            if use_lr_descriptions is not None:
+                lr_desc = use_lr_descriptions[i]
             else:
                 idx = i - (0 if network_train_unet_only else 1)
                 if idx == -1:
@@ -432,6 +434,17 @@ class NetworkTrainer:
                         lr_desc = f"group{i}"
                     else:
                         lr_desc = "unet"
+
+                if optimizer is not None and i < len(optimizer.param_groups):
+                    param_group = optimizer.param_groups[i]
+                    group_name = param_group.get("name")
+                    optim_type = param_group.get("optim_type")
+                    if group_name:
+                        lr_desc = group_name
+                    elif optim_type and len(lrs) > 2:
+                        lr_desc = f"{optim_type}_{i}"
+                    if optim_type and optim_type not in lr_desc:
+                        lr_desc = f"{lr_desc}_{optim_type}"
 
             logs[f"lr/{lr_desc}"] = lr
 
@@ -452,9 +465,64 @@ class NetworkTrainer:
                         logs[f"lr/effective_lr/{lr_desc}"] = eff_lr  # Schedule-free LR (without d)
                         logs[f"lr/d*eff_lr/{lr_desc}"] = d * eff_lr  # Full effective LR
 
+            if opt_type.startswith("muon") and optimizer is not None and i < len(optimizer.param_groups):
+                param_group = optimizer.param_groups[i]
+                if param_group.get("use_muon"):
+                    momentum = param_group.get("momentum")
+                    if momentum is not None:
+                        logs[f"muon/momentum/{lr_desc}"] = momentum
+
         return logs
 
-    def get_optimizer(self, args, trainable_params: list[torch.nn.Parameter]) -> tuple[str, str, torch.optim.Optimizer]:
+    @contextmanager
+    def prior_model_context(self, network):
+        """
+        Context manager to temporarily disable LoRA for computing prior predictions.
+
+        Design decision: Keep model in train() mode during teacher forward.
+        - Matches OneTrainer behavior
+        - DiT models (WAN, FLUX, etc.) typically have no dropout, so train/eval makes no difference
+        - If a future model has dropout, train mode gives "realistic" teacher predictions
+
+        Usage:
+            with self.prior_model_context(network):
+                prior_pred = call_dit(...)  # Uses base model only
+        """
+        if network is None:
+            yield
+            return
+
+        # Prefer set_enabled() when available (fast and explicit).
+        # Fall back to set_multiplier(0) for network types that don't expose set_enabled (e.g. some LyCORIS builds).
+        if hasattr(network, "set_enabled"):
+            try:
+                network.set_enabled(False)
+                yield
+            finally:
+                network.set_enabled(True)
+            return
+
+        if hasattr(network, "set_multiplier"):
+            prev_multiplier = getattr(network, "multiplier", None)
+            try:
+                network.set_multiplier(0)
+                yield
+            finally:
+                # Restore previous multiplier when available; otherwise use 1.0 as a reasonable default.
+                network.set_multiplier(1.0 if prev_multiplier is None else prev_multiplier)
+            return
+
+        raise ValueError(
+            "Prior preservation requires the network module to support temporarily disabling adapters via "
+            "`set_enabled(False)` or `set_multiplier(0)`, but neither method exists on this network object."
+        )
+
+    def get_optimizer(
+        self,
+        args: argparse.Namespace,
+        trainable_params: list[torch.nn.Parameter],
+        param_name_map: Optional[Dict[int, str]] = None,
+    ) -> tuple[str, str, torch.optim.Optimizer, Any, Any]:
         # adamw, adamw8bit, adafactor
 
         optimizer_type = args.optimizer_type.lower()
@@ -521,6 +589,73 @@ class NetworkTrainer:
             logger.info(f"use AdamW optimizer | {optimizer_kwargs}")
             optimizer_class = torch.optim.AdamW
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+
+        elif optimizer_type in ("muon", "muonwithadamw", "muonwithauxadam"):
+            if param_name_map is None:
+                raise ValueError(
+                    "Muon optimizer requires `param_name_map` for layer-name filtering. "
+                    "Build `{id(param): full_name}` from the training network/model before calling get_optimizer()."
+                )
+
+            from musubi_tuner.optimizers.muon import create_muon_optimizer
+            from musubi_tuner.optimizers.muon_util import print_muon_summary, split_param_groups_for_muon
+
+            hidden_layer_patterns = optimizer_kwargs.get("muon_hidden_layers", getattr(args, "muon_hidden_layers", None))
+            if isinstance(hidden_layer_patterns, str):
+                hidden_layer_patterns = [p.strip() for p in hidden_layer_patterns.split(",") if p.strip()]
+
+            model_type = optimizer_kwargs.get("muon_model_type", getattr(args, "muon_model_type", "default"))
+
+            muon_lr_override = optimizer_kwargs.get("muon_lr")
+            muon_momentum = optimizer_kwargs.get("muon_momentum", 0.95)
+            muon_weight_decay = optimizer_kwargs.get("muon_weight_decay", 0.0)
+
+            muon_adam_lr = optimizer_kwargs.get("muon_adam_lr", getattr(args, "muon_adam_lr", 3e-4))
+            muon_adam_betas = optimizer_kwargs.get("muon_adam_betas", optimizer_kwargs.get("adam_betas", (0.9, 0.95)))
+            muon_adam_eps = optimizer_kwargs.get("muon_adam_eps", optimizer_kwargs.get("adam_eps", 1e-8))
+            muon_adam_weight_decay = optimizer_kwargs.get(
+                "muon_adam_weight_decay", optimizer_kwargs.get("adam_weight_decay", 0.0)
+            )
+
+            prefer_official = optimizer_kwargs.get("muon_prefer_official", True)
+            verbose = optimizer_kwargs.get("muon_verbose", True)
+
+            # Muon learning rates are in spectral-norm units (typical ~0.01-0.05).
+            # The repo-wide default LR is tuned for Adam-like optimizers and is often too small for Muon.
+            lr_to_check = muon_lr_override if muon_lr_override is not None else lr
+            if lr_to_check is not None and lr_to_check < 1e-3:
+                logger.warning(
+                    f"Muon LR looks very small ({lr_to_check}). Muon learning rates are in spectral-norm units (typical ~0.01-0.05). "
+                    "If you are switching from AdamW-style LRs, increase `--learning_rate` accordingly."
+                )
+
+            param_groups, stats = split_param_groups_for_muon(
+                trainable_params,
+                param_name_map,
+                hidden_layer_patterns=hidden_layer_patterns,
+                model_type=model_type,
+                muon_lr=muon_lr_override,
+                muon_momentum=muon_momentum,
+                muon_weight_decay=muon_weight_decay,
+                adam_lr=muon_adam_lr,
+                adam_betas=muon_adam_betas,
+                adam_eps=muon_adam_eps,
+                adam_weight_decay=muon_adam_weight_decay,
+                verbose=verbose,
+            )
+
+            if verbose:
+                print_muon_summary(stats)
+
+            optimizer = create_muon_optimizer(param_groups, prefer_official=prefer_official)
+            optimizer_class = optimizer.__class__
+
+            # Add metadata after construction (official Muon enforces a strict param-group schema).
+            for i, group in enumerate(optimizer.param_groups):
+                group.setdefault("initial_lr", group.get("lr"))
+                optim_type = "muon" if group.get("use_muon") else "adam"
+                group["optim_type"] = optim_type
+                group.setdefault("name", f"group{i}_{optim_type}")
 
         if optimizer is None:
             # 任意のoptimizerを使う
@@ -1826,6 +1961,13 @@ class NetworkTrainer:
         accelerator.print("import network module:", args.network_module)
         network_module: lora_module = importlib.import_module(args.network_module)  # actual module may be different
 
+        # prepare network args (parsed early so base_weights and dim_from_weights can use them)
+        net_kwargs = {}
+        if args.network_args is not None:
+            for net_arg in args.network_args:
+                key, value = net_arg.split("=")
+                net_kwargs[key] = value
+
         if args.base_weights is not None:
             # if base_weights is specified, merge the weights to DiT model
             for i, weight_path in enumerate(args.base_weights):
@@ -1839,18 +1981,12 @@ class NetworkTrainer:
                 weights_sd = load_file(weight_path)
                 weights_sd = self.convert_weight_keys(weights_sd, args.network_module)
                 module = network_module.create_arch_network_from_weights(
-                    multiplier, weights_sd, unet=transformer, for_inference=True, architecture=self.architecture
+                    multiplier, weights_sd, unet=transformer, for_inference=True,
+                    architecture=self.architecture, **net_kwargs
                 )
                 module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
 
             accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
-
-        # prepare network
-        net_kwargs = {}
-        if args.network_args is not None:
-            for net_arg in args.network_args:
-                key, value = net_arg.split("=")
-                net_kwargs[key] = value
 
         if args.dim_from_weights:
             # --dim_from_weights requires --network_weights to specify the weights file
@@ -1859,7 +1995,7 @@ class NetworkTrainer:
             logger.info(f"Loading network structure from weights: {args.network_weights}")
             weights_sd = load_file(args.network_weights)
             network = network_module.create_arch_network_from_weights(
-                1, weights_sd, unet=transformer, architecture=self.architecture
+                1, weights_sd, unet=transformer, architecture=self.architecture, **net_kwargs
             )
         else:
             # We use the name create_arch_network for compatibility with LyCORIS
@@ -1910,8 +2046,12 @@ class NetworkTrainer:
         # LyCORIS 3.x requires both text_encoder_lr and unet_lr
         # Use 0 for text_encoder_lr since we're not training text encoders for DiT models
         trainable_params, lr_descriptions = network.prepare_optimizer_params(text_encoder_lr=0, unet_lr=args.learning_rate)
+        param_name_map = None
+        if args.optimizer_type.lower() in ("muon", "muonwithadamw", "muonwithauxadam"):
+            param_name_map = {id(p): name for name, p in network.named_parameters() if p.requires_grad}
+
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
-            args, trainable_params
+            args, trainable_params, param_name_map=param_name_map
         )
 
         # prepare dataloader
@@ -2102,6 +2242,11 @@ class NetworkTrainer:
             # metadata["ss_network_args"] = json.dumps(net_kwargs)
             metadata[SS_METADATA_KEY_NETWORK_ARGS] = json.dumps(net_kwargs)
 
+        # Mirror LoKr factor to metadata for human/tooling visibility
+        unwrapped_nw = accelerator.unwrap_model(network)
+        if hasattr(unwrapped_nw, "lokr_factor"):
+            metadata["ss_lokr_factor"] = str(int(unwrapped_nw.lokr_factor.item()))
+
         # model name and hash
         # calculate hash takes time, so we omit it for now
         if args.dit is not None:
@@ -2280,6 +2425,42 @@ class NetworkTrainer:
                         args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
                     )
 
+                    # Compute prior prediction if prior preservation is enabled
+                    prior_pred = None
+                    prior_preservation_weight = getattr(args, "prior_preservation_weight", 0.0)
+                    mask_weights = batch.get("mask_weights")
+
+                    need_prior = (
+                        prior_preservation_weight > 0
+                        and getattr(args, "use_mask_loss", False)
+                        and mask_weights is not None
+                    )
+
+                    if need_prior:
+                        # Optimization: skip teacher forward if mask is all ones (prior_mask will be all zeros)
+                        mask_min = float(mask_weights.min())
+                        prior_mask_threshold = getattr(args, "prior_mask_threshold", None)
+                        if prior_mask_threshold is not None:
+                            # Threshold mode: prior applies only where raw mask < threshold
+                            # If the minimum mask value is >= threshold, prior_mask would be all zeros.
+                            if mask_min >= float(prior_mask_threshold):
+                                need_prior = False
+                        else:
+                            # Continuous mode: prior_mask = 1 - mask_processed, so only all-ones masks produce zero prior.
+                            if mask_min >= (1.0 - 1e-6):
+                                need_prior = False  # No prior loss contribution possible
+
+                    if need_prior:
+                        with torch.no_grad():
+                            # Note: must unwrap network for set_enabled() to work with DDP/accelerator wrapping
+                            with self.prior_model_context(accelerator.unwrap_model(network)):
+                                # Use exact same inputs (noisy_model_input, timesteps, etc.)
+                                prior_pred_raw, _ = self.call_dit(
+                                    args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
+                                )
+                        prior_pred = prior_pred_raw.detach()
+
+                    # Compute model prediction (with LoRA enabled)
                     model_pred, target = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
                     )
@@ -2291,7 +2472,27 @@ class NetworkTrainer:
                     # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                     # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                    loss = apply_masked_loss(loss, batch.get("mask_weights", None), args=args, layout="video")
+                    # Compute prior loss if we have a prior prediction
+                    prior_loss_unreduced = None
+                    if prior_pred is not None:
+                        prior_loss_unreduced = torch.nn.functional.mse_loss(
+                            model_pred.to(network_dtype), prior_pred.to(network_dtype), reduction="none"
+                        )
+                        if weighting is not None:
+                            prior_loss_unreduced = prior_loss_unreduced * weighting
+
+                    layout = "layered" if getattr(args, "is_layered", False) else "video"
+                    drop_base_frame = (
+                        bool(getattr(args, "remove_first_image_from_target", False)) if layout == "layered" else False
+                    )
+                    loss = apply_masked_loss_with_prior(
+                        loss,
+                        mask_weights,
+                        prior_loss_unreduced=prior_loss_unreduced,
+                        args=args,
+                        layout=layout,
+                        drop_base_frame=drop_base_frame,
+                    )
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
@@ -2673,7 +2874,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--optimizer_type",
         type=str,
         default="",
-        help="Optimizer to use / オプティマイザの種類: AdamW (default), AdamW8bit, AdaFactor. "
+        help="Optimizer to use / オプティマイザの種類: AdamW (default), AdamW8bit, AdaFactor, MuonWithAdamW. "
         "Also, you can use any optimizer by specifying the full path to the class, like 'torch.optim.AdamW', 'bitsandbytes.optim.AdEMAMix8bit' or 'bitsandbytes.optim.PagedAdEMAMix8bit' etc. / ",
     )
     parser.add_argument(
@@ -2682,6 +2883,26 @@ def setup_parser_common() -> argparse.ArgumentParser:
         default=None,
         nargs="*",
         help='additional arguments for optimizer (like "weight_decay=0.01 betas=0.9,0.999 ...") / オプティマイザの追加引数（例： "weight_decay=0.01 betas=0.9,0.999 ..."）',
+    )
+    parser.add_argument(
+        "--muon_adam_lr",
+        type=float,
+        default=3e-4,
+        help="Aux Adam LR for non-Muon parameters when using MuonWithAdamW / MuonWithAdamW使用時のAdam側の学習率",
+    )
+    parser.add_argument(
+        "--muon_hidden_layers",
+        type=str,
+        default=None,
+        help="Comma-separated layer patterns for Muon selection (e.g., 'transformer_blocks,encoder.block'). "
+        "If omitted, uses defaults from --muon_model_type.",
+    )
+    parser.add_argument(
+        "--muon_model_type",
+        type=str,
+        default="default",
+        choices=["flux", "sd3", "wan", "hunyuan", "framepack", "qwen_image", "default"],
+        help="Model preset for default Muon hidden-layer patterns / Muonのデフォルトパターン用モデル種別",
     )
     parser.add_argument("--learning_rate", type=float, default=2.0e-6, help="learning rate / 学習率")
     parser.add_argument(

@@ -1366,7 +1366,14 @@ def create_network_from_weights(
             # to maintain backward compatibility with existing weights
             dim = value.shape[0]
             modules_dim[lora_name] = dim
-            # logger.info(lora_name, value.size(), dim)
+        elif "lokr_w2_a" in key:
+            # LoKr low-rank mode: dim is the inner dimension of w2_a
+            dim = value.shape[1]
+            modules_dim[lora_name] = dim
+        elif "lokr_w2" in key and "lokr_w2_a" not in key and "lokr_w2_b" not in key:
+            # LoKr full-matrix mode: dim is max of w2 shape
+            dim = max(value.shape)
+            modules_dim[lora_name] = dim
 
     module_class = LoRAInfModule if for_inference else LoRAModule
 
