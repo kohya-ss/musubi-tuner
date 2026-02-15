@@ -59,7 +59,7 @@ def convert_from_diffusers(prefix, weights_sd):
         if "_lora_" in new_key:  # LoRA
             new_key = new_key.replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
 
-            # support unknown format: do not replace dots but uses lora_up/lora_up/alpha
+            # support unknown format: do not replace dots but uses lora_down/lora_up/alpha
             new_key = new_key.replace("_lora_down_", ".lora_down.").replace("_lora_up_", ".lora_up.")
         else:  # LoHa or LoKr
             new_key = new_key.replace("_hada_", ".hada_").replace("_lokr_", ".lokr_")
