@@ -320,12 +320,12 @@ LoHa/LoKrのネイティブサポートがあるアーキテクチャ（上記�
 
 ### Format conversion / フォーマット変換
 
-`convert_lora.py` supports only standard LoRA format conversion (between Musubi Tuner format and Diffusers format). LoHa/LoKr weights have different parameter structures and are not supported by this conversion tool. Support for LoHa/LoKr conversion (e.g., for ComfyUI) is planned for a future update.
+`convert_lora.py` is extended to also support format conversion of LoHa/LoKr weights between Musubi Tuner format and Diffusers format for ComfyUI.
 
 <details>
 <summary>日本語</summary>
 
-`convert_lora.py` は標準LoRAのフォーマット変換（Musubi Tuner形式とDiffusers形式間の変換）のみをサポートしています。LoHa/LoKrの重みはパラメータ構造が異なるため、この変換ツールではサポートされていません。LoHa/LoKrの変換（ComfyUI向けなど）は今後のアップデートで対応予定です。
+`convert_lora.py` は、LoRAに加えて、LoHa/LoKrの重みのフォーマット変換（Musubi Tuner形式とDiffusers形式間の変換）についてもサポートするよう、拡張されています。
 
 </details>
 
