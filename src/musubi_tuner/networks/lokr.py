@@ -35,9 +35,7 @@ def factorization(dimension: int, factor: int = -1) -> Tuple[int, int]:
     if factor > 0 and dimension % factor == 0:
         return dimension // factor, factor
     if factor > 0:
-        logger.warning(
-            f"factor={factor} does not divide dimension={dimension} evenly, falling back to automatic factorization"
-        )
+        logger.warning(f"factor={factor} does not divide dimension={dimension} evenly, falling back to automatic factorization")
 
     # Find pair (a, b) with a*b == dimension that minimizes |a - b|
     best_a, best_b = 1, dimension
@@ -180,10 +178,26 @@ class LoKrInfModule(LoKrModule):
         org_device = weight.device
         merge_device = org_device if device is None else device
 
-        # Compute diff in float32 for precision, matching LoRA/LoHa merge pattern
-        diff_weight = self.get_weight(multiplier=self.multiplier).to(device=merge_device, dtype=torch.float)
-        weight = weight.to(device=merge_device, dtype=torch.float, non_blocking=non_blocking) + diff_weight
+        # Read weights from sd (matching LoRA/LoHa merge_to contract)
+        w1 = sd["lokr_w1"].to(device=merge_device, dtype=torch.float, non_blocking=non_blocking)
 
+        if "lokr_w2" in sd:
+            w2 = sd["lokr_w2"].to(device=merge_device, dtype=torch.float, non_blocking=non_blocking)
+            dim = max(w2.shape)
+        else:
+            w2_a = sd["lokr_w2_a"].to(device=merge_device, dtype=torch.float, non_blocking=non_blocking)
+            w2_b = sd["lokr_w2_b"].to(device=merge_device, dtype=torch.float, non_blocking=non_blocking)
+            w2 = w2_a @ w2_b
+            dim = w2_a.shape[1]
+
+        alpha = sd.get("alpha", torch.tensor(dim, dtype=torch.float)).to(device=merge_device, dtype=torch.float)
+        scale = alpha.item() / dim
+
+        diff_weight = make_kron(w1, w2, scale) * self.multiplier
+        if weight.shape != diff_weight.shape:
+            diff_weight = diff_weight.view(weight.shape)
+
+        weight = weight.to(device=merge_device, dtype=torch.float, non_blocking=non_blocking) + diff_weight
         org_sd["weight"] = weight.to(device=org_device, dtype=dtype if dtype is not None else org_dtype)
         self.org_module.load_state_dict(org_sd)
 
@@ -199,7 +213,11 @@ def _resolve_factor(
         weights_sd: State dict (may contain lokr_factor tensor buffer).
         explicit_factor: Factor from CLI/network_args (highest precedence).
         metadata_factor: Factor from safetensors metadata (ss_lokr_factor), used as
-            fallback when lokr_factor tensor buffer is absent.
+            fallback when lokr_factor tensor buffer is absent. Callers that load
+            from safetensors should read metadata via safe_open().metadata() and
+            pass ss_lokr_factor here. Note: the primary merge path
+            (merge_nonlora_to_model → merge_weights_to_tensor) does not need
+            factor since it operates on actual weight shapes directly.
 
     Returns (factor: int, had_mismatch_warning: bool).
     """
@@ -369,11 +387,12 @@ def merge_weights_to_tensor(
         alpha = alpha.item()
     scale = alpha / dim
 
+    org_device = model_weight.device
     original_dtype = model_weight.dtype
-    if original_dtype.itemsize == 1:  # fp8
-        model_weight = model_weight.to(torch.float16)
-        w1 = w1.to(torch.float16)
-        w2 = w2.to(torch.float16)
+    compute_dtype = torch.float16 if original_dtype.itemsize == 1 else torch.float32
+    model_weight = model_weight.to(calc_device, dtype=compute_dtype)
+    w1 = w1.to(compute_dtype)
+    w2 = w2.to(compute_dtype)
 
     diff_weight = make_kron(w1, w2, scale)
 
@@ -383,8 +402,7 @@ def merge_weights_to_tensor(
 
     model_weight = model_weight + multiplier * diff_weight
 
-    if original_dtype.itemsize == 1:
-        model_weight = model_weight.to(original_dtype)
+    model_weight = model_weight.to(device=org_device, dtype=original_dtype)
 
     # Remove consumed keys
     for key in [w1_key, w2_key, w2_a_key, w2_b_key, alpha_key]:

@@ -80,6 +80,49 @@ class TestMergeWeightsLoHa(unittest.TestCase):
         self.assertTrue(torch.equal(result, model_weight))
         self.assertEqual(lora_keys, {"unrelated.weight"})  # keys untouched
 
+    def test_device_mismatch_cpu_model_cuda_calc(self):
+        """model_weight on CPU with calc_device=CPU still works (device move/restore)."""
+        lora_name = "module"
+        out_dim, in_dim, rank = 8, 16, 4
+        model_weight = torch.zeros(out_dim, in_dim, device="cpu")
+        lora_sd = self._make_loha_sd(lora_name, out_dim, in_dim, rank)
+        lora_keys = set(lora_sd.keys())
+
+        # Use CPU as calc_device (CUDA may not be available in CI)
+        result = merge_weights_to_tensor(model_weight, lora_name, lora_sd, lora_keys, 1.0, torch.device("cpu"))
+
+        self.assertEqual(result.device, torch.device("cpu"))
+        self.assertFalse(torch.all(result == 0))
+
+    def test_result_returns_to_original_device(self):
+        """Merged result is returned on the same device as the input model_weight."""
+        lora_name = "module"
+        out_dim, in_dim, rank = 8, 16, 4
+        model_weight = torch.zeros(out_dim, in_dim, device="cpu")
+        lora_sd = self._make_loha_sd(lora_name, out_dim, in_dim, rank)
+        lora_keys = set(lora_sd.keys())
+
+        result = merge_weights_to_tensor(model_weight, lora_name, lora_sd, lora_keys, 1.0, torch.device("cpu"))
+
+        self.assertEqual(result.device, model_weight.device)
+
+    def test_mixed_precision_preserves_non_fp8_dtype(self):
+        """Non-FP8 mixed precision keeps original dtype (bf16 model, fp16 adapters)."""
+        lora_name = "mixed_module"
+        model_weight = torch.zeros(8, 16, dtype=torch.bfloat16)
+        lora_sd = {
+            f"{lora_name}.hada_w1_a": torch.randn(8, 4, dtype=torch.float16),
+            f"{lora_name}.hada_w1_b": torch.randn(4, 16, dtype=torch.float16),
+            f"{lora_name}.hada_w2_a": torch.randn(8, 4, dtype=torch.float16),
+            f"{lora_name}.hada_w2_b": torch.randn(4, 16, dtype=torch.float16),
+            f"{lora_name}.alpha": torch.tensor(4.0),
+        }
+        lora_keys = set(lora_sd.keys())
+
+        result = merge_weights_to_tensor(model_weight, lora_name, lora_sd, lora_keys, 1.0, torch.device("cpu"))
+
+        self.assertEqual(result.dtype, torch.bfloat16)
+
 
 if __name__ == "__main__":
     unittest.main()

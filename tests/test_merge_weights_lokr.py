@@ -44,17 +44,24 @@ class TestLoKrModuleConstruction(unittest.TestCase):
 class TestLoKrInfModuleMergeDtype(unittest.TestCase):
     """Tests that LoKrInfModule.merge_to preserves original dtype."""
 
+    def _build_sd(self, module):
+        """Build per-module sd matching LoRANetwork.merge_to contract."""
+        sd = {}
+        for name, param in module.named_parameters():
+            key = name.split(".", 1)[-1] if "." in name else name
+            sd[key] = param.data.clone()
+        # Include alpha buffer
+        if hasattr(module, "alpha"):
+            sd["alpha"] = module.alpha.clone()
+        return sd
+
     def test_merge_preserves_bfloat16(self):
         """merge_to with dtype=None preserves bfloat16 model weights."""
         linear = nn.Linear(16, 8)
         linear.weight.data = linear.weight.data.to(torch.bfloat16)
 
         module = LoKrInfModule("test_module", linear, multiplier=1.0, lora_dim=2, alpha=1.0, factor=-1)
-
-        # Build a fake sd matching the module's parameter names
-        sd = {}
-        for name, param in module.named_parameters():
-            sd[name.split(".", 1)[-1] if "." in name else name] = param.data
+        sd = self._build_sd(module)
 
         module.merge_to(sd, dtype=None, device=torch.device("cpu"))
         self.assertEqual(linear.weight.dtype, torch.bfloat16)
@@ -65,13 +72,40 @@ class TestLoKrInfModuleMergeDtype(unittest.TestCase):
         linear.weight.data = linear.weight.data.to(torch.float16)
 
         module = LoKrInfModule("test_module", linear, multiplier=1.0, lora_dim=2, alpha=1.0, factor=-1)
-
-        sd = {}
-        for name, param in module.named_parameters():
-            sd[name.split(".", 1)[-1] if "." in name else name] = param.data
+        sd = self._build_sd(module)
 
         module.merge_to(sd, dtype=None, device=torch.device("cpu"))
         self.assertEqual(linear.weight.dtype, torch.float16)
+
+    def test_merge_uses_sd_not_internal_params(self):
+        """merge_to reads from sd payload, not from module internal parameters."""
+        linear = nn.Linear(16, 8)
+        linear.weight.data = torch.zeros(8, 16)
+
+        module = LoKrInfModule("test_module", linear, multiplier=1.0, lora_dim=2, alpha=1.0, factor=-1)
+
+        # Build sd with known non-zero values (overriding init zeros in w2_b)
+        sd = self._build_sd(module)
+        sd["lokr_w1"] = torch.ones_like(sd["lokr_w1"])
+        if "lokr_w2_a" in sd:
+            sd["lokr_w2_a"] = torch.ones_like(sd["lokr_w2_a"])
+            sd["lokr_w2_b"] = torch.ones_like(sd["lokr_w2_b"])
+        if "lokr_w2" in sd:
+            sd["lokr_w2"] = torch.ones_like(sd["lokr_w2"])
+
+        # Now zero out internal params — if merge_to uses self, result will be zero
+        with torch.no_grad():
+            module.lokr_w1.zero_()
+            if module.lokr_w2_a is not None:
+                module.lokr_w2_a.zero_()
+                module.lokr_w2_b.zero_()
+            if module.lokr_w2 is not None:
+                module.lokr_w2.zero_()
+
+        module.merge_to(sd, dtype=None, device=torch.device("cpu"))
+
+        # Weight should be non-zero because sd had non-zero values
+        self.assertFalse(torch.all(linear.weight.data == 0), "merge_to should use sd, not zeroed internal params")
 
 
 class TestMergeWeightsLoKr(unittest.TestCase):
@@ -152,6 +186,33 @@ class TestMergeWeightsLoKr(unittest.TestCase):
 
         self.assertTrue(torch.equal(result, model_weight))
         self.assertEqual(lora_keys, {"unrelated.weight"})
+
+    def test_result_returns_to_original_device(self):
+        """Merged result is returned on the same device as the input model_weight."""
+        lora_name = "module"
+        model_weight = torch.zeros(8, 16, device="cpu")
+        lora_sd = self._make_lokr_sd_lowrank(lora_name, w1_shape=(2, 4), w2_out=4, w2_in=4, rank=2)
+        lora_keys = set(lora_sd.keys())
+
+        result = merge_weights_to_tensor(model_weight, lora_name, lora_sd, lora_keys, 1.0, torch.device("cpu"))
+
+        self.assertEqual(result.device, model_weight.device)
+
+    def test_mixed_precision_preserves_non_fp8_dtype(self):
+        """Non-FP8 mixed precision keeps original dtype (bf16 model, fp16 adapters)."""
+        lora_name = "mixed_module"
+        model_weight = torch.zeros(8, 16, dtype=torch.bfloat16)
+        lora_sd = {
+            f"{lora_name}.lokr_w1": torch.randn(2, 4, dtype=torch.float16),
+            f"{lora_name}.lokr_w2_a": torch.randn(4, 2, dtype=torch.float16),
+            f"{lora_name}.lokr_w2_b": torch.randn(2, 4, dtype=torch.float16),
+            f"{lora_name}.alpha": torch.tensor(2.0),
+        }
+        lora_keys = set(lora_sd.keys())
+
+        result = merge_weights_to_tensor(model_weight, lora_name, lora_sd, lora_keys, 1.0, torch.device("cpu"))
+
+        self.assertEqual(result.dtype, torch.bfloat16)
 
 
 if __name__ == "__main__":

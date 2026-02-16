@@ -800,11 +800,12 @@ def merge_weights_to_tensor(
         alpha = alpha.item()
     scale = alpha / dim
 
+    org_device = model_weight.device
     original_dtype = model_weight.dtype
-    if original_dtype.itemsize == 1:  # fp8
-        model_weight = model_weight.to(torch.float16)
-        w1a, w1b = w1a.to(torch.float16), w1b.to(torch.float16)
-        w2a, w2b = w2a.to(torch.float16), w2b.to(torch.float16)
+    compute_dtype = torch.float16 if original_dtype.itemsize == 1 else torch.float32
+    model_weight = model_weight.to(calc_device, dtype=compute_dtype)
+    w1a, w1b = w1a.to(compute_dtype), w1b.to(compute_dtype)
+    w2a, w2b = w2a.to(compute_dtype), w2b.to(compute_dtype)
 
     # ΔW = ((w1a @ w1b) * (w2a @ w2b)) * scale
     diff_weight = ((w1a @ w1b) * (w2a @ w2b)) * scale
@@ -815,8 +816,7 @@ def merge_weights_to_tensor(
 
     model_weight = model_weight + multiplier * diff_weight
 
-    if original_dtype.itemsize == 1:
-        model_weight = model_weight.to(original_dtype)
+    model_weight = model_weight.to(device=org_device, dtype=original_dtype)
 
     # Remove consumed keys
     for key in [w1a_key, w1b_key, w2a_key, w2b_key, alpha_key]:

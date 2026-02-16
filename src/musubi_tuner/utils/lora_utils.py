@@ -307,16 +307,79 @@ def load_safetensors_with_fp8_optimization_and_hook(
     return state_dict
 
 
+def lora_merge_weights_to_tensor(
+    model_weight: torch.Tensor,
+    lora_name: str,
+    lora_sd: Dict[str, torch.Tensor],
+    lora_weight_keys: set,
+    multiplier: float,
+    calc_device: torch.device,
+) -> torch.Tensor:
+    """Merge standard LoRA weights directly into a model weight tensor.
+
+    Supports Linear and Conv2d (1x1 and 3x3). Consumed keys are removed from lora_weight_keys.
+    Returns model_weight unchanged if no matching LoRA keys found.
+    """
+    down_key = lora_name + ".lora_down.weight"
+    up_key = lora_name + ".lora_up.weight"
+    alpha_key = lora_name + ".alpha"
+
+    if down_key not in lora_weight_keys or up_key not in lora_weight_keys:
+        return model_weight
+
+    down_weight = lora_sd[down_key].to(calc_device)
+    up_weight = lora_sd[up_key].to(calc_device)
+
+    dim = down_weight.size()[0]
+    alpha = lora_sd.get(alpha_key, dim)
+    if isinstance(alpha, torch.Tensor):
+        alpha = alpha.item()
+    scale = alpha / dim
+
+    org_device = model_weight.device
+    original_dtype = model_weight.dtype
+    compute_dtype = torch.float16 if original_dtype.itemsize == 1 else torch.float32
+    model_weight = model_weight.to(calc_device, dtype=compute_dtype)
+    down_weight = down_weight.to(compute_dtype)
+    up_weight = up_weight.to(compute_dtype)
+
+    if len(model_weight.size()) == 2:
+        # linear
+        if len(up_weight.size()) == 4:  # use linear projection mismatch
+            up_weight = up_weight.squeeze(3).squeeze(2)
+            down_weight = down_weight.squeeze(3).squeeze(2)
+        model_weight = model_weight + multiplier * (up_weight @ down_weight) * scale
+    elif down_weight.size()[2:4] == (1, 1):
+        # conv2d 1x1
+        model_weight = (
+            model_weight
+            + multiplier * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3) * scale
+        )
+    else:
+        # conv2d 3x3
+        conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
+        model_weight = model_weight + multiplier * conved * scale
+
+    model_weight = model_weight.to(device=org_device, dtype=original_dtype)
+
+    # Remove consumed keys
+    for key in [down_key, up_key, alpha_key]:
+        lora_weight_keys.discard(key)
+
+    return model_weight
+
+
 def merge_nonlora_to_model(
     model: torch.nn.Module,
     weights_sd: Dict[str, torch.Tensor],
     multiplier: float,
     device: torch.device,
 ) -> int:
-    """Merge LoHa/LoKr weights directly into model parameters via per-key-family dispatch.
+    """Merge LoHa/LoKr/LoRA weights directly into model parameters via per-key-family dispatch.
 
     Iterates model named_parameters, constructs lora_name from each param name,
-    and tries LoHa then LoKr merge functions (each is a no-op if no matching keys).
+    and tries each merge family in order (each is a no-op if no matching keys).
+    Handles hybrid dicts (e.g. lokr_* + lora_* after QKV conversion).
     Returns number of consumed keys.
     """
     from musubi_tuner.networks.loha import merge_weights_to_tensor as loha_merge
@@ -331,15 +394,16 @@ def merge_nonlora_to_model(
 
         lora_name = "lora_unet_" + param_name.rsplit(".", 1)[0].replace(".", "_")
 
-        # Per-key-family dispatch: LoHa → LoKr
+        # Per-key-family dispatch: LoHa → LoKr → LoRA
         param.data = loha_merge(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
         param.data = lokr_merge(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
+        param.data = lora_merge_weights_to_tensor(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
 
     merged_count = initial_key_count - len(lora_weight_keys)
 
     # Warn about remaining unmerged keys (exclude non-dotted metadata like lokr_factor)
     remaining = {k for k in lora_weight_keys if "." in k}
     if remaining:
-        logger.warning(f"{len(remaining)} LoHa/LoKr keys were not matched to model parameters")
+        logger.warning(f"{len(remaining)} LoHa/LoKr/LoRA keys were not matched to model parameters")
 
     return merged_count
