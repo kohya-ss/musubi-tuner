@@ -220,11 +220,11 @@ def create_arch_network(
     architecture = kwargs.get("architecture", ARCHITECTURE_HUNYUAN_VIDEO)
     config = get_arch_config(architecture)
 
-    # add default exclude patterns
+    # Add default exclude patterns (always additive — see network_arch.py contract)
     exclude_patterns = kwargs.get("exclude_patterns", None)
     if exclude_patterns is None:
         exclude_patterns = []
-    else:
+    elif isinstance(exclude_patterns, str):
         exclude_patterns = ast.literal_eval(exclude_patterns)
 
     exclude_patterns.extend(config["exclude_patterns"])
@@ -455,7 +455,7 @@ class LoHaNetwork(torch.nn.Module):
                                 # モジュール指定あり
                                 if lora_name in modules_dim:
                                     dim = modules_dim[lora_name]
-                                    alpha = modules_alpha[lora_name]
+                                    alpha = modules_alpha.get(lora_name, dim)
                             else:
                                 # 通常、すべて対象とする
                                 if is_linear or is_conv2d_1x1:

@@ -282,7 +282,7 @@ def create_arch_network(
         logger.warning("conv_alpha is not supported by LoKr v1 (Linear-only). Ignoring.")
         kwargs.pop("conv_alpha")
 
-    # Add default exclude patterns
+    # Add default exclude patterns (always additive — see network_arch.py contract)
     exclude_patterns = kwargs.get("exclude_patterns", None)
     if exclude_patterns is None:
         exclude_patterns = []

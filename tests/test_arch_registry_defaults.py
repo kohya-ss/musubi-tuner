@@ -54,6 +54,27 @@ class TestArchRegistryDefaults(unittest.TestCase):
         self.assertIn("include_patterns", ARCH_CONFIGS[ARCHITECTURE_KANDINSKY5])
         self.assertTrue(len(ARCH_CONFIGS[ARCHITECTURE_KANDINSKY5]["include_patterns"]) > 0)
 
+    def test_critical_exclude_patterns_present(self):
+        """Each architecture must have its critical safety excludes to prevent training instability."""
+        # Map of architecture -> substring that must appear in at least one exclude pattern
+        critical_excludes = [
+            (ARCHITECTURE_WAN, "norm", "WAN must exclude norm layers"),
+            (ARCHITECTURE_WAN, "embedding", "WAN must exclude embedding layers"),
+            (ARCHITECTURE_HUNYUAN_VIDEO, "modulation", "HunyuanVideo must exclude modulation layers"),
+            (ARCHITECTURE_HUNYUAN_VIDEO, "img_mod", "HunyuanVideo must exclude img_mod layers"),
+            (ARCHITECTURE_FLUX_KONTEXT, "modulation", "Flux Kontext must exclude modulation layers"),
+            (ARCHITECTURE_FLUX_KONTEXT, "norm", "Flux Kontext must exclude norm layers"),
+            (ARCHITECTURE_FLUX_2_DEV, "modulation", "Flux 2 must exclude modulation layers"),
+            (ARCHITECTURE_Z_IMAGE, "modulation", "Z-Image must exclude modulation layers"),
+            (ARCHITECTURE_Z_IMAGE, "refiner", "Z-Image must exclude refiner layers"),
+            (ARCHITECTURE_KANDINSKY5, "modulation", "Kandinsky must exclude modulation layers"),
+        ]
+        for arch, substring, msg in critical_excludes:
+            with self.subTest(arch=arch, pattern=substring):
+                patterns = ARCH_CONFIGS[arch]["exclude_patterns"]
+                has_match = any(substring in p for p in patterns)
+                self.assertTrue(has_match, msg)
+
 
 if __name__ == "__main__":
     unittest.main()

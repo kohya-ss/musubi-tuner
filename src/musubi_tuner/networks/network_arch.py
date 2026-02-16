@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 # target_modules are imported from lora_*.py (authoritative source).
 # exclude_patterns / include_patterns match what each lora_*.py applies by default.
 # exclude_mod_patterns is Qwen-specific: only appended when exclude_mod=True (default).
+#
+# Contract: exclude_patterns are ALWAYS ADDITIVE — user-supplied exclude patterns are
+# merged with the registry defaults, never replacing them. This prevents accidentally
+# training norm/modulation layers which causes instability. Users who need to include a
+# normally-excluded layer should use include_patterns (which override excludes per-module).
 ARCH_CONFIGS = {
     ARCHITECTURE_WAN: {
         "target_modules": WAN_TARGET_REPLACE_MODULES,
