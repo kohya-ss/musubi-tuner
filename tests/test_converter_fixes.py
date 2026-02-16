@@ -130,6 +130,27 @@ class TestConverterHashRecompute(unittest.TestCase):
             self.assertNotEqual(out_metadata["sshs_model_hash"], "OLD_HASH")
             self.assertNotEqual(out_metadata["sshs_legacy_hash"], "OLD_LEG")
 
+    def test_ss_lokr_factor_metadata_preserved(self):
+        """ss_lokr_factor in safetensors metadata should survive conversion."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "input.safetensors")
+            output_path = os.path.join(tmpdir, "output.safetensors")
+
+            sd = {
+                "diffusion_model.blocks.0.cross_attn.k_img.lokr_w1": torch.randn(2, 4),
+                "diffusion_model.blocks.0.cross_attn.k_img.lokr_w2": torch.randn(4, 4),
+            }
+            metadata = {"ss_lokr_factor": "8", "ss_network_module": "networks.lokr"}
+            save_file(sd, input_path, metadata=metadata)
+
+            convert(input_path, output_path, "default", None)
+
+            with safe_open(output_path, framework="pt") as f:
+                out_metadata = dict(f.metadata() or {})
+
+            self.assertEqual(out_metadata.get("ss_lokr_factor"), "8", "ss_lokr_factor should survive conversion")
+            self.assertEqual(out_metadata.get("ss_network_module"), "networks.lokr")
+
 
 class TestLoKrRankValidation(unittest.TestCase):
     """convert_z_image_lora_to_comfy should reject non-positive lokr_rank values."""

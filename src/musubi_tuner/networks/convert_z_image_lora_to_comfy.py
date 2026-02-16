@@ -177,8 +177,8 @@ def main(args):
                         i * block_size_2a_0 : (i + 1) * block_size_2a_0, i * rank : (i + 1) * rank
                     ].contiguous()
                     # w1b, w2b are cat'd — split into 3 chunks
-                    state_dict[f"{lora_name_prefix}{suffix}.hada_w1_b"] = w1b[i * rank : (i + 1) * rank]
-                    state_dict[f"{lora_name_prefix}{suffix}.hada_w2_b"] = w2b[i * rank : (i + 1) * rank]
+                    state_dict[f"{lora_name_prefix}{suffix}.hada_w1_b"] = w1b[i * rank : (i + 1) * rank].contiguous()
+                    state_dict[f"{lora_name_prefix}{suffix}.hada_w2_b"] = w2b[i * rank : (i + 1) * rank].contiguous()
                     state_dict[f"{lora_name_prefix}{suffix}.alpha"] = alpha / 3
 
                 loha_qkv_count += 1
