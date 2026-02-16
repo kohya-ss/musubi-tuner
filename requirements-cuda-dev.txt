@@ -13,6 +13,8 @@ uv pip install \
 git+https://github.com/omry/omegaconf.git \
 git+https://github.com/huggingface/pytorch-image-models.git \
 git+https://github.com/Delgan/loguru.git \
+
+uv pip install \
 git+https://github.com/Textualize/rich.git \
 git+https://github.com/hamdanal/rich-argparse.git \
 git+https://github.com/celsiusnarhwal/rich-tracebacks.git \
@@ -57,6 +59,13 @@ av \
 huggingface_hub[mcp,torch,dev]
 
 
+uv pip install "cuda-toolkit[all]==13.*"
+uv pip install \
+  nvidia-cudnn-cu13 \
+  nvidia-nccl-cu13 \
+  nvidia-nvshmem-cu13 \
+  nvidia-cusparselt-cu13
+
 git+https://github.com/huggingface/transformers.git
 git+https://github.com/chaiNNer-org/spandrel.git
 git+https://github.com/ultralytics/ultralytics.git
@@ -73,3 +82,4 @@ git+https://github.com/huggingface/tokenizers.git#subdirectory=bindings/python
 huggingface_hub[mcp,torch,dev]
 opencv-python 
 av
+https://github.com/kozistr/pytorch_optimizer.git

@@ -289,7 +289,7 @@ Key differences from HunyuanVideo inference:
 -   `--prompt`: Prompt for generation.
 -  Optional `--latent_window_size` argument (default 9, should match caching and training).
 -  `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_llm` option is available to reduce memory usage of Text Encoder 1. `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
--   LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--lycoris` is also supported.
+-   LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--prefer_lycoris` forces the LyCORIS backend for all weight merging; `--lycoris` is a deprecated alias.
 -   `--embedded_cfg_scale` (default 10.0) controls the distilled guidance scale.
 -   `--guidance_scale` (default 1.0) controls the standard classifier-free guidance scale. **Changing this from 1.0 is generally not recommended for the base FramePack model.**
 -   `--guidance_rescale` (default 0.0) is available but typically not needed.
@@ -297,7 +297,7 @@ Key differences from HunyuanVideo inference:
 -   `--sample_solver` (default `unipc`) is available but only `unipc` is implemented.
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
 - `--latent_paddings` option overrides the default padding for each section. Specify it as a comma-separated list of integers, e.g., `--latent_paddings 0,0,0,0`. This option is ignored if `--f1` is specified.
-- `--custom_system_prompt` option overrides the default system prompt for the LLaMA Text Encoder 1. Specify it as a string. See [here](../src/musubi_tunerhunyuan_model/text_encoder.py#L152) for the default system prompt.
+- `--custom_system_prompt` option overrides the default system prompt for the LLaMA Text Encoder 1. Specify it as a string. See [here](../src/musubi_tuner/hunyuan_model/text_encoder.py#L152) for the default system prompt.
 - `--rope_scaling_timestep_threshold` option is the RoPE scaling timestep threshold, default is None (disabled). If set, RoPE scaling is applied only when the timestep exceeds the threshold. Start with around 800 and adjust as needed. This option is intended for one-frame inference and may not be suitable for other cases.
 - `--rope_scaling_factor` option is the RoPE scaling factor, default is 0.5, assuming a resolution of 2x. For 1.5x resolution, around 0.7 is recommended.
 
@@ -324,7 +324,7 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -   `--prompt`: 生成用のプロンプトです。
 -  必要に応じて`--latent_window_size`引数（デフォルト9）を指定できます（キャッシング時、学習時と一致させる必要があります）。
 - DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。品質はやや低下する可能性があります。またText Encoder 1のメモリ使用量を削減するために、`--fp8_llm`オプションを指定可能です。DiT用に`--fp8`単独のオプションも用意されていますが、`--fp8_scaled`の方が品質が良い可能性があります。
--  LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。LyCORISもサポートされています。
+-  LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。`--prefer_lycoris`はすべてのLoRA重みマージにLyCORISバックエンドを強制します。`--lycoris`は非推奨のエイリアスです。
 -  `--embedded_cfg_scale`（デフォルト10.0）は、蒸留されたガイダンススケールを制御します。通常は変更しないでください。
 -  `--guidance_scale`（デフォルト1.0）は、標準の分類器フリーガイダンススケールを制御します。**FramePackモデルのベースモデルでは、通常1.0から変更しないことをお勧めします。**
 -  `--guidance_rescale`（デフォルト0.0）も利用可能ですが、通常は必要ありません。

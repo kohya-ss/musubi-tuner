@@ -7,7 +7,7 @@ import ast
 import math
 import os
 import re
-from typing import Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union
 from transformers import CLIPTextModel
 import torch
 import torch.nn as nn
@@ -641,9 +641,7 @@ def create_network(
             neuron_dropout = float(neuron_dropout)
 
     # verbose
-    verbose = kwargs.get("verbose", False)
-    if verbose is not None:
-        verbose = True if verbose == "True" else False
+    verbose = parse_bool_arg(kwargs.get("verbose", None), default=False)
 
     # regular expression for module selection: exclude and include
     exclude_patterns = kwargs.get("exclude_patterns", None)
@@ -656,6 +654,15 @@ def create_network(
     # RS-LoRA and DoRA
     use_rslora = parse_bool_arg(kwargs.get("use_rslora", None), default=False)
     use_dora = parse_bool_arg(kwargs.get("use_dora", None), default=False)
+
+    # Module class override (for LoKr/LoHa reuse of LoRANetwork)
+    module_class = kwargs.pop("module_class", LoRAModule)
+    module_kwargs = kwargs.pop("module_kwargs", None)
+    if isinstance(module_kwargs, str):
+        module_kwargs = ast.literal_eval(module_kwargs)
+    if module_kwargs is not None and not isinstance(module_kwargs, dict):
+        raise ValueError(f"module_kwargs must be a dict, got {type(module_kwargs).__name__}")
+    enable_conv2d = parse_bool_arg(kwargs.pop("enable_conv2d", None), default=True)
 
     # too many arguments ( ^ω^)･･･
     network = LoRANetwork(
@@ -671,11 +678,14 @@ def create_network(
         module_dropout=module_dropout,
         conv_lora_dim=conv_dim,
         conv_alpha=conv_alpha,
+        module_class=module_class,
+        module_kwargs=module_kwargs,
         exclude_patterns=exclude_patterns,
         include_patterns=include_patterns,
         verbose=verbose,
         use_rslora=use_rslora,
         use_dora=use_dora,
+        enable_conv2d=enable_conv2d,
     )
 
     loraplus_lr_ratio = kwargs.get("loraplus_lr_ratio", None)
@@ -708,6 +718,7 @@ class LoRANetwork(torch.nn.Module):
         conv_lora_dim: Optional[int] = None,
         conv_alpha: Optional[float] = None,
         module_class: Type[object] = LoRAModule,
+        module_kwargs: Optional[Dict[str, Any]] = None,
         modules_dim: Optional[Dict[str, int]] = None,
         modules_alpha: Optional[Dict[str, int]] = None,
         exclude_patterns: Optional[List[str]] = None,
@@ -715,6 +726,7 @@ class LoRANetwork(torch.nn.Module):
         verbose: Optional[bool] = False,
         use_rslora: bool = False,
         use_dora: bool = False,
+        enable_conv2d: bool = True,
     ) -> None:
         super().__init__()
         self.multiplier = multiplier
@@ -728,6 +740,8 @@ class LoRANetwork(torch.nn.Module):
         self.module_dropout = module_dropout
         self.target_replace_modules = target_replace_modules
         self.prefix = prefix
+        self.module_kwargs = module_kwargs or {}
+        self.enable_conv2d = enable_conv2d
 
         # RS-LoRA and DoRA flags with network-level buffers for auto-detection
         self.use_rslora = use_rslora
@@ -795,6 +809,12 @@ class LoRANetwork(torch.nn.Module):
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
                         is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
 
+                        # Skip Conv2d when disabled (e.g. LoKr Linear-only)
+                        if is_conv2d and not self.enable_conv2d:
+                            conv2d_skipped_count = getattr(self, "_conv2d_skipped_count", 0) + 1
+                            self._conv2d_skipped_count = conv2d_skipped_count
+                            continue
+
                         if is_linear or is_conv2d:
                             original_name = (name + "." if name else "") + child_name
                             lora_name = f"{pfx}.{original_name}".replace(".", "_")
@@ -802,12 +822,12 @@ class LoRANetwork(torch.nn.Module):
                             # exclude/include filter
                             excluded = False
                             for pattern in exclude_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     excluded = True
                                     break
                             included = False
                             for pattern in include_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     included = True
                                     break
                             if excluded and not included:
@@ -826,7 +846,7 @@ class LoRANetwork(torch.nn.Module):
                                 # モジュール指定あり
                                 if lora_name in modules_dim:
                                     dim = modules_dim[lora_name]
-                                    alpha = modules_alpha[lora_name]
+                                    alpha = modules_alpha.get(lora_name, dim)  # default alpha = dim (LoRA convention)
                             else:
                                 # 通常、すべて対象とする
                                 if is_linear or is_conv2d_1x1:
@@ -853,6 +873,7 @@ class LoRANetwork(torch.nn.Module):
                                 module_dropout=module_dropout,
                                 use_rslora=self.use_rslora,
                                 use_dora=self.use_dora,
+                                **self.module_kwargs,
                             )
                             loras.append(lora)
 
@@ -878,6 +899,9 @@ class LoRANetwork(torch.nn.Module):
         # create LoRA for U-Net
         self.unet_loras: List[Union[LoRAModule, LoRAInfModule]]
         self.unet_loras, skipped_un = create_modules(True, prefix, unet, target_replace_modules)
+
+        if hasattr(self, "_conv2d_skipped_count") and self._conv2d_skipped_count > 0:
+            logger.warning(f"Skipped {self._conv2d_skipped_count} Conv2d modules (enable_conv2d=False)")
 
         logger.info(f"create LoRA for U-Net/DiT: {len(self.unet_loras)} modules.")
         if verbose:
@@ -1137,6 +1161,12 @@ class LoRANetwork(torch.nn.Module):
             all_params.extend(params)
             lr_descriptions.extend(["unet" + (" " + d if d else "") for d in descriptions])
 
+            if self.loraplus_lr_ratio is not None and "plus" not in descriptions:
+                logger.warning(
+                    "LoRA+ has no active plus param group (check loraplus_lr_ratio and lr settings, "
+                    "or this network type may lack 'lora_up' parameters)"
+                )
+
         return all_params, lr_descriptions
 
     def enable_gradient_checkpointing(self):
@@ -1236,6 +1266,11 @@ class LoRANetwork(torch.nn.Module):
                 upkeys.append(key.replace("lora_down", "lora_up"))
                 alphakeys.append(key.replace("lora_down.weight", "alpha"))
 
+        # Guard: only supported for LoRA (lora_down/lora_up parameterization)
+        if not downkeys:
+            logger.warning("max_norm_regularization is only supported for LoRA (no lora_down keys found)")
+            return 0, 0.0, 0.0
+
         for i in range(len(downkeys)):
             down = state_dict[downkeys[i]].to(device)
             up = state_dict[upkeys[i]].to(device)
@@ -1259,15 +1294,17 @@ class LoRANetwork(torch.nn.Module):
 
             norm = updown.norm().clamp(min=max_norm_value / 2)
             desired = torch.clamp(norm, max=max_norm_value)
-            ratio = desired.cpu() / norm.cpu()
+            ratio = (desired / norm).item()  # Python float avoids CPU/CUDA device mismatch
             sqrt_ratio = ratio**0.5
             if ratio != 1:
                 keys_scaled += 1
                 state_dict[upkeys[i]] *= sqrt_ratio
                 state_dict[downkeys[i]] *= sqrt_ratio
-            scalednorm = updown.norm() * ratio
-            norms.append(scalednorm.item())
+            scalednorm = updown.norm().item() * ratio
+            norms.append(scalednorm)
 
+        if not norms:
+            return keys_scaled, 0.0, 0.0
         return keys_scaled, sum(norms) / len(norms), max(norms)
 
 
@@ -1334,9 +1371,25 @@ def create_network_from_weights(
             # to maintain backward compatibility with existing weights
             dim = value.shape[0]
             modules_dim[lora_name] = dim
-            # logger.info(lora_name, value.size(), dim)
+        elif "lokr_w2_a" in key:
+            # LoKr low-rank mode: dim is the inner dimension of w2_a
+            dim = value.shape[1]
+            modules_dim[lora_name] = dim
+        elif "lokr_w2" in key and "lokr_w2_a" not in key and "lokr_w2_b" not in key:
+            # LoKr full-matrix mode: dim is max of w2 shape
+            dim = max(value.shape)
+            modules_dim[lora_name] = dim
 
     module_class = LoRAInfModule if for_inference else LoRAModule
+
+    # Allow caller to override module_class (for LoHa/LoKr)
+    module_class = kwargs.pop("module_class", module_class)
+    module_kwargs = kwargs.pop("module_kwargs", None)
+    if isinstance(module_kwargs, str):
+        module_kwargs = ast.literal_eval(module_kwargs)
+    if module_kwargs is not None and not isinstance(module_kwargs, dict):
+        raise ValueError(f"module_kwargs must be a dict, got {type(module_kwargs).__name__}")
+    enable_conv2d = parse_bool_arg(kwargs.pop("enable_conv2d", None), default=True)
 
     network = LoRANetwork(
         target_replace_modules,
@@ -1347,7 +1400,9 @@ def create_network_from_weights(
         modules_dim=modules_dim,
         modules_alpha=modules_alpha,
         module_class=module_class,
+        module_kwargs=module_kwargs,
         use_rslora=use_rslora,
         use_dora=use_dora,
+        enable_conv2d=enable_conv2d,
     )
     return network

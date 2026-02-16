@@ -4,6 +4,7 @@ import gc
 from importlib.util import find_spec
 import random
 import os
+import sys
 import time
 import numpy as np
 import torch
@@ -25,10 +26,10 @@ from musubi_tuner.hunyuan_model.models import load_transformer
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.networks import lora
 from rich_argparse import RichHelpFormatter
-from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, format_unknown_network_type_error, merge_nonlora_to_model
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
@@ -508,7 +509,12 @@ def parse_args():
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
-        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+        "--prefer_lycoris",
+        "--lycoris",
+        dest="prefer_lycoris",
+        action="store_true",
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). "
+        "(--lycoris is a deprecated alias for --prefer_lycoris)",
     )
     parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
     parser.add_argument(
@@ -529,7 +535,9 @@ def parse_args():
 
     # update dit_weight based on model_base if not exists
 
-    if args.lycoris and not lycoris_available:
+    if "--lycoris" in sys.argv:
+        logger.warning("--lycoris is deprecated; use --prefer_lycoris instead")
+    if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
@@ -681,26 +689,19 @@ def main():
 
                 logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                 weights_sd = load_file(lora_weight)
-                conversion_needed = False
-                for key, weight in weights_sd.items():
-                    prefix, key_body = key.split(".", 1)
-                    if prefix == "diffusion_model" or prefix == "transformer":
-                        conversion_needed = True
-                        break
-                    elif "lora_unet" in prefix:
-                        conversion_needed = False
-                        break
-
-                if conversion_needed:
-                    logger.info("Converting LoRA from diffusers format")
-                    weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
+                net_type = detect_network_type(weights_sd)
+                weights_sd = convert_diffusers_if_needed(weights_sd)
+                if net_type == "unknown":
+                    # Defensive: conversion can normalize foreign LoRA key naming (Diffusers) into detectable keys.
+                    net_type = detect_network_type(weights_sd)
 
                 # Filter to exclude keys that are part of single_blocks
                 if args.exclude_single_blocks:
                     filtered_weights = {k: v for k, v in weights_sd.items() if "single_blocks" not in k}
                     weights_sd = filtered_weights
 
-                if args.lycoris:
+                logger.info("Merging LoRA weights to DiT model")
+                if args.prefer_lycoris:
                     lycoris_net, _ = create_network_from_weights(
                         multiplier=lora_multiplier,
                         file=None,
@@ -710,23 +711,18 @@ def main():
                         vae=None,
                         for_inference=True,
                     )
-                else:
-                    network = lora.create_arch_network_from_weights(
-                        lora_multiplier, weights_sd, unet=transformer, for_inference=True
-                    )
-                logger.info("Merging LoRA weights to DiT model")
-
-                # try:
-                #     network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
-                #     info = network.load_state_dict(weights_sd, strict=True)
-                #     logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
-                #     network.eval()
-                #     network.to(device)
-                # except Exception as e:
-                if args.lycoris:
                     lycoris_net.merge_to(None, transformer, weights_sd, dtype=None, device=device)
                 else:
-                    network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
+                    if net_type in ("loha", "lokr", "hybrid"):
+                        logger.info(f"Detected {net_type} weights, using per-key-family merge")
+                        merge_nonlora_to_model(transformer, weights_sd, lora_multiplier, device)
+                    elif net_type == "unknown":
+                        raise ValueError(format_unknown_network_type_error(lora_weight))
+                    else:
+                        network = lora.create_arch_network_from_weights(
+                            lora_multiplier, weights_sd, unet=transformer, for_inference=True
+                        )
+                        network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
 
                 synchronize_device(device)
 

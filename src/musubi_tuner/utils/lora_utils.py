@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 import torch
 from tqdm import tqdm
 
@@ -17,6 +17,88 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
+UNKNOWN_NETWORK_FORMAT_HINT = (
+    "Some scripts support --prefer_lycoris for non-native formats (IA3, DyLoRA, etc.). Otherwise, convert to a supported format."
+)
+
+
+def format_unknown_network_type_error(lora_path: str) -> str:
+    """Build a consistent error message for unsupported/unknown LoRA weight formats."""
+    return f"Unrecognized weight format in {lora_path}. {UNKNOWN_NETWORK_FORMAT_HINT}"
+
+
+_DIFFUSERS_PREFIXES = frozenset(("diffusion_model", "transformer"))
+
+
+def convert_diffusers_if_needed(lora_sd: Dict[str, torch.Tensor], prefix: str = "lora_unet_") -> Dict[str, torch.Tensor]:
+    """Convert Diffusers-format keys to default format, preserving non-Diffusers keys.
+
+    Splits the state dict into Diffusers-prefixed keys and passthrough keys,
+    converts only the Diffusers subset, and merges back. This avoids data loss
+    when a state dict contains both Diffusers and already-normalized keys.
+    """
+    from musubi_tuner.convert_lora import convert_from_diffusers
+
+    diffusers_sd = {}
+    passthrough_sd = {}
+    for key, value in lora_sd.items():
+        if "." in key and key.split(".", 1)[0] in _DIFFUSERS_PREFIXES:
+            diffusers_sd[key] = value
+        else:
+            passthrough_sd[key] = value
+
+    if not diffusers_sd:
+        return lora_sd  # nothing to convert
+
+    logger.info("Converting LoRA from foreign key naming format")
+    converted = convert_from_diffusers(prefix, diffusers_sd)
+    # Merge: passthrough first, converted on top (converted keys take priority on collision)
+    passthrough_sd.update(converted)
+    return passthrough_sd
+
+
+_MODEL_KEY_PREFIXES = ("model.diffusion_model.", "diffusion_model.")
+
+
+def _make_lora_name_from_model_key(model_weight_key: str) -> str:
+    """Convert a model state-dict key (e.g. 'model.diffusion_model.blocks.0.attn.q.weight')
+    to the corresponding LoRA module name (e.g. 'lora_unet_blocks_0_attn_q').
+
+    Strips the trailing '.weight' suffix and any model-level prefixes that don't
+    appear in LoRA key naming (e.g. 'model.diffusion_model.' from WAN checkpoints).
+    """
+    lora_name = model_weight_key.rsplit(".", 1)[0]  # remove trailing ".weight"
+    for pfx in _MODEL_KEY_PREFIXES:
+        if lora_name.startswith(pfx):
+            lora_name = lora_name[len(pfx):]
+            break
+    return "lora_unet_" + lora_name.replace(".", "_")
+
+
+def detect_network_type(lora_sd_or_keys: Union[Dict[str, torch.Tensor], Iterable[str]]) -> str:
+    """Detect network type from state dict keys.
+
+    Returns 'lora', 'loha', 'lokr', 'hybrid', or 'unknown'.
+    'hybrid' means multiple key families coexist (e.g. after QKV conversion).
+    Accepts a state dict or an iterable of key strings.
+    """
+    keys = lora_sd_or_keys.keys() if isinstance(lora_sd_or_keys, dict) else lora_sd_or_keys
+    found_types = set()
+    for key in keys:
+        # Standard LoRA keys (lora_down/lora_up) AND Diffusers-format keys (lora_A/lora_B)
+        if "lora_down" in key or "lora_up" in key or "lora_A" in key or "lora_B" in key:
+            found_types.add("lora")
+        elif "hada_w1_a" in key or "hada_w2_a" in key:
+            found_types.add("loha")
+        elif "lokr_w1" in key or "lokr_w2" in key or "lokr_w2_a" in key:
+            found_types.add("lokr")
+    if len(found_types) > 1:
+        return "hybrid"
+    if len(found_types) == 1:
+        return found_types.pop()
+    return "unknown"
+
+
 def filter_lora_state_dict(
     weights_sd: Dict[str, torch.Tensor],
     include_pattern: Optional[str] = None,
@@ -26,17 +108,17 @@ def filter_lora_state_dict(
     original_key_count = len(weights_sd.keys())
     if include_pattern is not None:
         regex_include = re.compile(include_pattern)
-        weights_sd = {k: v for k, v in weights_sd.items() if regex_include.search(k)}
+        weights_sd = {k: v for k, v in weights_sd.items() if "." not in k or regex_include.search(k)}
         logger.info(f"Filtered keys with include pattern {include_pattern}: {original_key_count} -> {len(weights_sd.keys())}")
 
     if exclude_pattern is not None:
         original_key_count_ex = len(weights_sd.keys())
         regex_exclude = re.compile(exclude_pattern)
-        weights_sd = {k: v for k, v in weights_sd.items() if not regex_exclude.search(k)}
+        weights_sd = {k: v for k, v in weights_sd.items() if "." not in k or not regex_exclude.search(k)}
         logger.info(f"Filtered keys with exclude pattern {exclude_pattern}: {original_key_count_ex} -> {len(weights_sd.keys())}")
 
     if len(weights_sd) != original_key_count:
-        remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys()]))
+        remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys() if "." in k]))
         remaining_keys.sort()
         logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
         if len(weights_sd) == 0:
@@ -108,8 +190,13 @@ def load_safetensors_with_lora_and_fp8(
         if len(lora_multipliers) > len(lora_weights_list):
             lora_multipliers = lora_multipliers[: len(lora_weights_list)]
 
-        # Merge LoRA weights into the state dict
-        logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}")
+        # Detect network types for summary logging (actual dispatch is per-key-family)
+        lora_network_types = [detect_network_type(lora_sd) for lora_sd in lora_weights_list]
+        logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}, types: {lora_network_types}")
+
+        # Import merge functions once (deferred to avoid circular imports at module level)
+        from musubi_tuner.networks.loha import merge_weights_to_tensor as loha_merge
+        from musubi_tuner.networks.lokr import merge_weights_to_tensor as lokr_merge
 
         # make hook for LoRA merging
         def weight_hook_func(model_weight_key, model_weight: torch.Tensor, keep_on_calc_device=False):
@@ -124,62 +211,18 @@ def load_safetensors_with_lora_and_fp8(
                 model_weight = model_weight.to(calc_device)  # to make calculation faster
 
             for lora_weight_keys, lora_sd, multiplier in zip(list_of_lora_weight_keys, lora_weights_list, lora_multipliers):
-                # check if this weight has LoRA weights
-                lora_name = model_weight_key.rsplit(".", 1)[0]  # remove trailing ".weight"
-                lora_name = "lora_unet_" + lora_name.replace(".", "_")
-                down_key = lora_name + ".lora_down.weight"
-                up_key = lora_name + ".lora_up.weight"
-                alpha_key = lora_name + ".alpha"
-                if down_key not in lora_weight_keys or up_key not in lora_weight_keys:
-                    continue
+                lora_name = _make_lora_name_from_model_key(model_weight_key)
 
-                # get LoRA weights
-                down_weight = lora_sd[down_key]
-                up_weight = lora_sd[up_key]
+                # Per-key-family dispatch: try each family in deterministic order.
+                # Each merge function is a no-op if no matching keys found.
+                # This handles hybrid dicts (lokr_* + lora_* after QKV conversion).
+                model_weight = loha_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
+                model_weight = lokr_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
 
-                dim = down_weight.size()[0]
-                alpha = lora_sd.get(alpha_key, dim)
-                scale = alpha / dim
-
-                down_weight = down_weight.to(calc_device)
-                up_weight = up_weight.to(calc_device)
-
-                original_dtype = model_weight.dtype
-                if original_dtype.itemsize == 1:  # fp8
-                    # temporarily convert to float16 for calculation
-                    model_weight = model_weight.to(torch.float16)
-                    down_weight = down_weight.to(torch.float16)
-                    up_weight = up_weight.to(torch.float16)
-
-                # W <- W + U * D
-                if len(model_weight.size()) == 2:
-                    # linear
-                    if len(up_weight.size()) == 4:  # use linear projection mismatch
-                        up_weight = up_weight.squeeze(3).squeeze(2)
-                        down_weight = down_weight.squeeze(3).squeeze(2)
-                    model_weight = model_weight + multiplier * (up_weight @ down_weight) * scale
-                elif down_weight.size()[2:4] == (1, 1):
-                    # conv2d 1x1
-                    model_weight = (
-                        model_weight
-                        + multiplier
-                        * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
-                        * scale
-                    )
-                else:
-                    # conv2d 3x3
-                    conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
-                    # logger.info(conved.size(), weight.size(), module.stride, module.padding)
-                    model_weight = model_weight + multiplier * conved * scale
-
-                if original_dtype.itemsize == 1:  # fp8
-                    model_weight = model_weight.to(original_dtype)  # convert back to original dtype
-
-                # remove LoRA keys from set
-                lora_weight_keys.remove(down_key)
-                lora_weight_keys.remove(up_key)
-                if alpha_key in lora_weight_keys:
-                    lora_weight_keys.remove(alpha_key)
+                # Standard LoRA path (delegates to shared merge function for dtype safety)
+                model_weight = lora_merge_weights_to_tensor(
+                    model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device
+                )
 
             if not keep_on_calc_device and original_device != calc_device:
                 model_weight = model_weight.to(original_device, original_dtype)  # move back to original device
@@ -203,11 +246,10 @@ def load_safetensors_with_lora_and_fp8(
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
-        # check if all LoRA keys are used
-        if len(lora_weight_keys) > 0:
-            # if there are still LoRA keys left, it means they are not used in the model
-            # this is a warning, not an error
-            logger.warning(f"Warning: not all LoRA keys are used: {', '.join(lora_weight_keys)}")
+        # Exclude non-dotted keys (network-level metadata like lokr_factor, use_rslora_flag)
+        remaining = {k for k in lora_weight_keys if "." in k}
+        if len(remaining) > 0:
+            logger.warning(f"Warning: not all LoRA keys are used: {', '.join(sorted(remaining))}")
 
     return state_dict
 
@@ -269,3 +311,105 @@ def load_safetensors_with_fp8_optimization_and_hook(
             synchronize_device(calc_device)
 
     return state_dict
+
+
+def lora_merge_weights_to_tensor(
+    model_weight: torch.Tensor,
+    lora_name: str,
+    lora_sd: Dict[str, torch.Tensor],
+    lora_weight_keys: set,
+    multiplier: float,
+    calc_device: torch.device,
+) -> torch.Tensor:
+    """Merge standard LoRA weights directly into a model weight tensor.
+
+    Supports Linear and Conv2d (1x1 and 3x3). Consumed keys are removed from lora_weight_keys.
+    Returns model_weight unchanged if no matching LoRA keys found.
+    """
+    down_key = lora_name + ".lora_down.weight"
+    up_key = lora_name + ".lora_up.weight"
+    alpha_key = lora_name + ".alpha"
+
+    if down_key not in lora_weight_keys or up_key not in lora_weight_keys:
+        return model_weight
+
+    down_weight = lora_sd[down_key].to(calc_device)
+    up_weight = lora_sd[up_key].to(calc_device)
+
+    dim = down_weight.size()[0]
+    alpha = lora_sd.get(alpha_key, dim)
+    if isinstance(alpha, torch.Tensor):
+        alpha = alpha.item()
+    scale = alpha / dim
+
+    org_device = model_weight.device
+    original_dtype = model_weight.dtype
+    compute_dtype = torch.float16 if original_dtype.itemsize == 1 else torch.float32
+    model_weight = model_weight.to(calc_device, dtype=compute_dtype)
+    down_weight = down_weight.to(compute_dtype)
+    up_weight = up_weight.to(compute_dtype)
+
+    if len(model_weight.size()) == 2:
+        # linear
+        if len(up_weight.size()) == 4:  # use linear projection mismatch
+            up_weight = up_weight.squeeze(3).squeeze(2)
+            down_weight = down_weight.squeeze(3).squeeze(2)
+        model_weight = model_weight + multiplier * (up_weight @ down_weight) * scale
+    elif down_weight.size()[2:4] == (1, 1):
+        # conv2d 1x1
+        model_weight = (
+            model_weight
+            + multiplier * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3) * scale
+        )
+    else:
+        # conv2d 3x3
+        conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
+        model_weight = model_weight + multiplier * conved * scale
+
+    model_weight = model_weight.to(device=org_device, dtype=original_dtype)
+
+    # Remove consumed keys
+    for key in [down_key, up_key, alpha_key]:
+        lora_weight_keys.discard(key)
+
+    return model_weight
+
+
+def merge_nonlora_to_model(
+    model: torch.nn.Module,
+    weights_sd: Dict[str, torch.Tensor],
+    multiplier: float,
+    device: torch.device,
+) -> int:
+    """Merge LoHa/LoKr/LoRA weights directly into model parameters via per-key-family dispatch.
+
+    Iterates model named_parameters, constructs lora_name from each param name,
+    and tries each merge family in order (each is a no-op if no matching keys).
+    Handles hybrid dicts (e.g. lokr_* + lora_* after QKV conversion).
+    Returns number of consumed keys.
+    """
+    from musubi_tuner.networks.loha import merge_weights_to_tensor as loha_merge
+    from musubi_tuner.networks.lokr import merge_weights_to_tensor as lokr_merge
+
+    lora_weight_keys = set(weights_sd.keys())
+    initial_key_count = len(lora_weight_keys)
+
+    for param_name, param in model.named_parameters():
+        if not param_name.endswith(".weight"):
+            continue
+
+        lora_name = "lora_unet_" + param_name.rsplit(".", 1)[0].replace(".", "_")
+
+        # Per-key-family dispatch: LoHa → LoKr → LoRA
+        param.data = loha_merge(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
+        param.data = lokr_merge(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
+        param.data = lora_merge_weights_to_tensor(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
+
+    merged_count = initial_key_count - len(lora_weight_keys)
+
+    # Warn about remaining unmerged keys (exclude non-dotted metadata like lokr_factor)
+    remaining = {k for k in lora_weight_keys if "." in k}
+    if remaining:
+        logger.warning(f"{len(remaining)} LoHa/LoKr/LoRA keys were not matched to model parameters")
+
+    return merged_count

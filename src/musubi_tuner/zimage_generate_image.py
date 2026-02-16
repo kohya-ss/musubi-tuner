@@ -2,6 +2,7 @@ import argparse
 import gc
 from importlib.util import find_spec
 import random
+import sys
 import os
 import time
 import copy
@@ -13,7 +14,7 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, filter_lora_state_dict, format_unknown_network_type_error
 from musubi_tuner.zimage import zimage_config, zimage_model, zimage_utils
 from musubi_tuner.zimage import zimage_autoencoder
 from musubi_tuner.zimage.zimage_autoencoder import AutoencoderKL
@@ -124,7 +125,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
-        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+        "--prefer_lycoris", "--lycoris", dest="prefer_lycoris", action="store_true",
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). (--lycoris is deprecated)"
     )
     setup_parser_compile(parser)
 
@@ -147,7 +149,10 @@ def parse_args() -> argparse.Namespace:
         if args.prompt is None and not args.from_file and not args.interactive:
             raise ValueError("Either --prompt, --from_file or --interactive must be specified")
 
-    if args.lycoris and not lycoris_available:
+    if "--lycoris" in sys.argv:
+        logger.warning("--lycoris is deprecated; use --prefer_lycoris instead")
+
+    if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
@@ -255,24 +260,31 @@ def load_dit_model(
     # If LyCORIS is enabled, we will load the model to CPU and then merge LoRA weights (static method)
 
     loading_device = "cpu"
-    if args.blocks_to_swap == 0 and not args.lycoris:
+    if args.blocks_to_swap == 0 and not args.prefer_lycoris:
         loading_device = device
 
     # load LoRA weights
-    if not args.lycoris and args.lora_weight is not None and len(args.lora_weight) > 0:
+    if not args.prefer_lycoris and args.lora_weight is not None and len(args.lora_weight) > 0:
         lora_weights_list = []
-        for lora_weight in args.lora_weight:
+        for i, lora_weight in enumerate(args.lora_weight):
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
-            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            net_type = detect_network_type(lora_sd)
+            if net_type == "unknown":
+                raise ValueError(format_unknown_network_type_error(lora_weight))
+            # Convert Diffusers-format keys to default format before merge
+            lora_sd = convert_diffusers_if_needed(lora_sd)
+            include_pat = args.include_patterns[i] if args.include_patterns and len(args.include_patterns) > i else None
+            exclude_pat = args.exclude_patterns[i] if args.exclude_patterns and len(args.exclude_patterns) > i else None
+            lora_sd = filter_lora_state_dict(lora_sd, include_pat, exclude_pat)
             lora_weights_list.append(lora_sd)
     else:
         lora_weights_list = None
 
     loading_weight_dtype = dit_weight_dtype
-    if args.fp8_scaled and not args.lycoris:
+    if args.fp8_scaled and not args.prefer_lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
-    elif args.lycoris:
+    elif args.prefer_lycoris:
         loading_weight_dtype = torch.bfloat16  # lycoris requires bfloat16 or float16, because it merges weights
 
     model = zimage_model.load_zimage_model(
@@ -282,7 +294,7 @@ def load_dit_model(
         False,
         loading_device,
         loading_weight_dtype,
-        args.fp8_scaled and not args.lycoris,
+        args.fp8_scaled and not args.prefer_lycoris,
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         disable_numpy_memmap=args.disable_numpy_memmap,
@@ -290,7 +302,7 @@ def load_dit_model(
     )
 
     # merge LoRA weights
-    if args.lycoris:
+    if args.prefer_lycoris:
         if args.lora_weight is not None and len(args.lora_weight) > 0:
             merge_lora_weights(
                 lora_qwen_image,
@@ -575,6 +587,11 @@ def generate(
 
     # 6. Denoising loop
     do_cfg = args.guidance_scale > 1.0  # 0 for no CFG
+    if do_cfg and negative_embed is None:
+        logger.warning("CFG is enabled but negative prompt is not provided. Using unconditional generation with zeros.")
+        negative_embed = torch.zeros_like(embed)
+        negative_mask = None
+
     with tqdm(total=num_inference_steps, desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
             # cfg_truncation is not supported currently

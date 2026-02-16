@@ -8,7 +8,7 @@ import torch.nn as nn
 import logging
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# Note: logging.basicConfig removed to avoid conflicts with BlissfulLogger - configure at entry points
 
 import musubi_tuner.networks.lora as lora
 

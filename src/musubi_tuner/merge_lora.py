@@ -3,6 +3,7 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 import torch
 from safetensors.torch import load_file
 from musubi_tuner.networks import lora
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, format_unknown_network_type_error, merge_nonlora_to_model
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.hunyuan_model.models import load_transformer
 
@@ -48,11 +49,19 @@ def main():
 
             logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
             weights_sd = load_file(lora_weight)
-            network = lora.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=transformer, for_inference=True)
-            logger.info("Merging LoRA weights to DiT model")
-            network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
+            net_type = detect_network_type(weights_sd)
+            if net_type == "unknown":
+                raise ValueError(format_unknown_network_type_error(lora_weight))
+            weights_sd = convert_diffusers_if_needed(weights_sd)
+            if net_type in ("loha", "lokr", "hybrid"):
+                logger.info(f"Detected {net_type} weights, using per-key-family merge")
+                merge_nonlora_to_model(transformer, weights_sd, lora_multiplier, device)
+            else:
+                network = lora.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=transformer, for_inference=True)
+                logger.info("Merging LoRA weights to DiT model")
+                network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
 
-            logger.info("LoRA weights loaded")
+            logger.info("LoRA weights merged")
 
     # Save the merged model
     logger.info(f"Saving merged model to {args.save_merged_model}")

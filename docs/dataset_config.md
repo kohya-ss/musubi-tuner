@@ -44,7 +44,7 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 # other datasets can be added here. each dataset can have different configurations
 ```
 
-`image_directory` is the directory containing images. The captions are stored in text files with the same filename as the image, but with the extension specified by `caption_extension` (for example, `image1.jpg` and `image1.txt`).
+`image_directory` is the directory containing images. The captions are stored in text files with the same filename as the image, but with the extension specified by `caption_extension` (for example, `image1.jpg` and `image1.txt`). By default, captions are in `image_directory`, but you can override this with `caption_directory`.
 
 `cache_directory` is optional, default is None to use the same directory as the image directory. However, we recommend to set the cache directory to avoid accidental sharing of the cache files between different datasets.
 
@@ -63,7 +63,7 @@ The next combination would be stored as `/path/to/layer_images/image2.txt` for c
 <details>
 <summary>日本語</summary>
 
-`image_directory`は画像を含むディレクトリのパスです。キャプションは、画像と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`image1.jpg`と`image1.txt`）。
+`image_directory`は画像を含むディレクトリのパスです。キャプションは、画像と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`image1.jpg`と`image1.txt`）。デフォルトではキャプションは`image_directory`に配置しますが、`caption_directory`で別の場所を指定できます。
 
 `cache_directory` はオプションです。デフォルトは画像ディレクトリと同じディレクトリに設定されます。ただし、異なるデータセット間でキャッシュファイルが共有されるのを防ぐために、明示的に別のキャッシュディレクトリを設定することをお勧めします。
 
@@ -168,7 +168,7 @@ max_frames = 45
 # other datasets can be added here. each dataset can have different configurations
 ```
 
-`video_directory` is the directory containing videos. The captions are stored in text files with the same filename as the video, but with the extension specified by `caption_extension` (for example, `video1.mp4` and `video1.txt`).
+`video_directory` is the directory containing videos. The captions are stored in text files with the same filename as the video, but with the extension specified by `caption_extension` (for example, `video1.mp4` and `video1.txt`). By default, captions are in `video_directory`, but you can override this with `caption_directory`.
 
 __In HunyuanVideo and Wan2.1, the number of `target_frames` must be "N\*4+1" (N=0,1,2,...).__ Otherwise, it will be truncated to the nearest "N*4+1".
 
@@ -184,7 +184,7 @@ If `source_fps` is not specified (default), all frames of the video will be used
 共通パラメータ（resolution, caption_extension, batch_size, num_repeats, enable_bucket, bucket_no_upscale）は、generalまたはdatasetsのいずれかに設定できます。
 動画固有のパラメータ（target_frames, frame_extraction, frame_stride, frame_sample, max_frames, source_fps）は、各datasetsセクションに設定する必要があります。
 
-`video_directory`は動画を含むディレクトリのパスです。キャプションは、動画と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`video1.mp4`と`video1.txt`）。
+`video_directory`は動画を含むディレクトリのパスです。キャプションは、動画と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`video1.mp4`と`video1.txt`）。デフォルトではキャプションは`video_directory`に配置しますが、`caption_directory`で別の場所を指定できます。
 
 __HunyuanVideoおよびWan2.1では、target_framesの数値は「N\*4+1」である必要があります。__ これ以外の値の場合は、最も近いN\*4+1の値に切り捨てられます。
 
@@ -330,13 +330,153 @@ video2: xxxxxxxxxxxxxxxxxxxxxxxxx (25 frames)
 video3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (trimmed to 31 frames)
 ```
 
+### `caption_directory` (Optional)
+
+By default, caption files are expected to be in the same directory as the images/videos. The `caption_directory` option allows you to specify a separate directory for caption files. This is useful when you want to:
+- Reuse the same images with different captions for different models (e.g., WAN 2.2 vs FLUX.2)
+- Keep captions organized separately from source media
+
+**Only applies to directory-based datasets.** JSONL datasets embed captions directly and ignore `caption_directory`.
+
+#### Caption Matching Rule
+
+Caption filename must be: `<media_basename_without_extension><caption_extension>`
+
+Examples:
+- `portrait.png` + `caption_extension=".txt"` → expects `portrait.txt`
+- `portrait.png` + `caption_extension=".flux2.txt"` → expects `portrait.flux2.txt`
+- `foo.bar.png` + `caption_extension=".txt"` → expects `foo.bar.txt` (multi-dot media names work)
+
+#### Example: Shared Images, Different Captions per Model
+
+```toml
+# FLUX.2 with FLUX-style prompts
+[[datasets]]
+image_directory = "/data/OLVA/images"
+caption_directory = "/data/OLVA/flux2_captions"
+cache_directory = "/data/OLVA/flux2_cache"   # <-- Must be unique!
+caption_extension = ".txt"
+
+# WAN 2.2 with WAN-style prompts (same images!)
+[[datasets]]
+image_directory = "/data/OLVA/images"
+caption_directory = "/data/OLVA/wan_captions"
+cache_directory = "/data/OLVA/wan_cache"     # <-- Different from above!
+caption_extension = ".txt"
+```
+
+**Common mistake:** Using the same `cache_directory` for both datasets. This will trigger a "cache directory should be unique" error. Each caption strategy needs its own cache because text encoder outputs depend on caption text.
+
+#### Behavior
+
+- **Images/videos without matching captions are filtered out** with a warning
+- **If ALL items are filtered (0 matches):** Hard error with actionable message
+- **Duplicate basenames (e.g., `photo.jpg` + `photo.png`):** Hard error (causes cache file collisions)
+
+#### Troubleshooting
+
+**"image_directory does not exist" / "video_directory does not exist" error:**
+- The specified media directory path doesn't exist. Check for typos. Use absolute paths for reliability.
+
+**"image_directory is not a directory" / "video_directory is not a directory" error:**
+- The path points to a file instead of a directory. Verify you're pointing to the correct location.
+
+**"caption_directory does not exist" error:**
+- The specified caption directory path doesn't exist. Check for typos. Use absolute paths for reliability.
+
+**"No images/videos with matching caption files found" error:**
+- All media files were filtered because none had matching captions
+- Check that `caption_directory` contains files with the correct `caption_extension`
+- Verify caption filenames match media basenames exactly
+
+**"Duplicate basenames detected" error:**
+- Multiple images share the same base name (e.g., `photo.jpg` and `photo.png`)
+- This causes cache file collisions (TE caches are named by basename only)
+- Fix: Rename files to have unique basenames
+
+**Stale TE caches after changing captions:**
+- Changing caption text requires recaching text encoder outputs
+- Recommended: use a separate `cache_directory` per caption strategy/model
+
+**Caption not found at runtime despite passing filter:**
+- Possible case sensitivity mismatch (Linux is case-sensitive; macOS/Windows often aren't)
+- Possible Unicode normalization issue (different tools produce visually-identical but binary-different filenames)
+- Try renaming files or normalizing Unicode
+
+**"caption_extension does not start with '.'" warning:**
+- You likely meant `.txt` but wrote `txt`
+- Without the dot, it expects files like `footxt` instead of `foo.txt`
+
+#### Platform Notes
+
+- **Case sensitivity:** Linux is case-sensitive; macOS/Windows are often case-insensitive. Captions work on macOS but fail on Linux if case doesn't match exactly.
+- **Path resolution:** Relative paths are resolved relative to the current working directory (CWD), not the config file location. Use absolute paths for reliability.
+- **Non-recursive:** Only files directly in the directory are scanned (no subdirectories).
+
+<details>
+<summary>日本語</summary>
+
+デフォルトでは、キャプションファイルは画像/動画と同じディレクトリに配置されている必要があります。`caption_directory`オプションを使用すると、キャプションファイル用の別のディレクトリを指定できます。以下のような場合に便利です：
+- 同じ画像を異なるモデル用の異なるキャプションで再利用する（例：WAN 2.2 vs FLUX.2）
+- キャプションをソースメディアとは別に整理する
+
+**ディレクトリベースのデータセットにのみ適用されます。** JSONLデータセットはキャプションを直接埋め込むため、`caption_directory`は無視されます。
+
+#### キャプションマッチングルール
+
+キャプションファイル名は：`<メディアのベース名（拡張子なし）><caption_extension>`
+
+例：
+- `portrait.png` + `caption_extension=".txt"` → `portrait.txt`を期待
+- `portrait.png` + `caption_extension=".flux2.txt"` → `portrait.flux2.txt`を期待
+- `foo.bar.png` + `caption_extension=".txt"` → `foo.bar.txt`を期待（マルチドットのメディア名も動作）
+
+#### 動作
+
+- **キャプションが一致しない画像/動画は警告付きでフィルタリングされます**
+- **すべてのアイテムがフィルタリングされた場合（0マッチ）：** アクション可能なメッセージ付きのハードエラー
+- **重複するベース名（例：`photo.jpg` + `photo.png`）：** ハードエラー（キャッシュファイルの衝突を引き起こす）
+
+#### トラブルシューティング
+
+**「image_directory does not exist」/「video_directory does not exist」エラー:**
+- 指定されたメディアディレクトリのパスが存在しません。タイポを確認してください。信頼性のために絶対パスを使用してください。
+
+**「image_directory is not a directory」/「video_directory is not a directory」エラー:**
+- パスがディレクトリではなくファイルを指しています。正しい場所を指しているか確認してください。
+
+**「caption_directory does not exist」エラー:**
+- 指定されたキャプションディレクトリのパスが存在しません。タイポを確認してください。信頼性のために絶対パスを使用してください。
+
+**「No images/videos with matching caption files found」エラー:**
+- すべてのメディアファイルがキャプションと一致しないためフィルタリングされました
+- `caption_directory`に正しい`caption_extension`のファイルが含まれているか確認してください
+- キャプションファイル名がメディアのベース名と正確に一致しているか確認してください
+
+**「Duplicate basenames detected」エラー:**
+- 複数の画像が同じベース名を共有しています（例：`photo.jpg`と`photo.png`）
+- これはキャッシュファイルの衝突を引き起こします（TEキャッシュはベース名のみで名前付けされます）
+- 修正：ファイル名をユニークなベース名に変更してください
+
+**キャプション変更後の古いTEキャッシュ:**
+- キャプションテキストを変更した場合、テキストエンコーダー出力の再キャッシュが必要です
+- 推奨：キャプション戦略/モデルごとに別の`cache_directory`を使用
+
+#### プラットフォームに関する注意
+
+- **大文字小文字の区別:** Linuxは大文字小文字を区別します。macOS/Windowsは多くの場合区別しません。大文字小文字が正確に一致しない場合、macOSで動作してもLinuxでは失敗します。
+- **パス解決:** 相対パスは設定ファイルの場所ではなく、現在の作業ディレクトリ（CWD）に対して解決されます。信頼性のために絶対パスを使用してください。
+- **非再帰:** ディレクトリ内のファイルのみがスキャンされます（サブディレクトリは対象外）。
+
+</details>
+
 ### Sample for Image Dataset with Control Images
 
 The dataset with control images. This is used for the one frame training for FramePack, or for FLUX.1 Kontext, FLUX.2 and Qwen-Image-Edit training.
 
 The dataset configuration with caption text files is similar to the image dataset, but with an additional `control_directory` parameter.
 
-The control images are used from the `control_directory` with the same filename (or different extension) as the image, for example, `image_dir/image1.jpg` and `control_dir/image1.png`. The images in `image_directory` should be the target images (the images to be generated during inference, the changed images). The `control_directory` should contain the starting images for inference. The captions should be stored in `image_directory`.
+The control images are used from the `control_directory` with the same filename (or different extension) as the image, for example, `image_dir/image1.jpg` and `control_dir/image1.png`. The images in `image_directory` should be the target images (the images to be generated during inference, the changed images). The `control_directory` should contain the starting images for inference. The captions should be stored in `image_directory` (or in `caption_directory` if specified).
 
 If multiple control images are specified, the filenames of the control images should be numbered (excluding the extension). For example, specify `image_dir/image1.jpg` and `control_dir/image1_0.png`, `control_dir/image1_1.png`. You can also specify the numbers with four digits, such as `image1_0000.png`, `image1_0001.png`.
 
@@ -360,7 +500,7 @@ The control images can also have an alpha channel. In this case, the alpha chann
 
 制御画像を持つデータセットです。現時点ではFramePackの単一フレーム学習、FLUX.1 Kontext、FLUX.2、Qwen-Image-Editの学習に使用します。
 
-キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションは`image_directory`へ格納してください。
+キャプションファイルを用いる場合は`control_directory`を追加で指定してください。制御画像は、画像と同じファイル名（または拡張子のみが異なるファイル名）の、`control_directory`にある画像が使用されます（例：`image_dir/image1.jpg`と`control_dir/image1.png`）。`image_directory`の画像は学習対象の画像（推論時に生成する画像、変化後の画像）としてください。`control_directory`には推論時の開始画像を格納してください。キャプションはデフォルトでは`image_directory`へ格納してください（`caption_directory`で別の場所を指定することも可能です）。
 
 複数枚の制御画像が指定可能です。この場合、制御画像のファイル名（拡張子を除く）へ数字を付与してください。例えば、`image_dir/image1.jpg`と`control_dir/image1_0.png`, `control_dir/image1_1.png`のように指定します。`image1_0000.png`, `image1_0001.png`のように数字を4桁で指定することもできます。
 
@@ -670,6 +810,7 @@ bucket_no_upscale = false # optional, default is false. Disable upscaling for bu
 [[datasets]]
 image_directory = "/path/to/image_dir"
 caption_extension = ".txt" # required for caption text files, if general caption extension is not set
+caption_directory = "/path/to/caption_dir" # optional, default is image_directory. Allows separate caption files location
 resolution = [960, 544] # required if general resolution is not set
 batch_size = 4 # optional, overwrite the default batch size
 num_repeats = 1 # optional, overwrite the default num_repeats
@@ -692,6 +833,7 @@ cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
 [[datasets]]
 video_directory = "/path/to/video_dir"
 caption_extension = ".txt" # required for caption text files, if general caption extension is not set
+caption_directory = "/path/to/caption_dir" # optional, default is video_directory. Allows separate caption files location
 resolution = [960, 544] # required if general resolution is not set
 
 control_directory = "/path/to/control_dir" # optional, required for dataset with control images

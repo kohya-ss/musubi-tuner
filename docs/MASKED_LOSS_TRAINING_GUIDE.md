@@ -2,7 +2,7 @@
 
 A comprehensive reference for understanding and using weighted mask loss training in blissful-tuner for WAN2.2 and Qwen Image LoRA training.
 
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-01-29
 
 ---
 
@@ -135,7 +135,7 @@ With a small non-zero weight:
 - This prevents unconstrained hallucination outside the mask
 - Edge artifacts and phantom limbs are significantly reduced
 
-**This is why the recommended settings use `--mask_min_weight 0.05`, not `0.0`.**
+**This is why the recommended settings use `--mask_min_weight 0.05`, not `0.0` (unless you enable** [Masked Prior Preservation](#masked-prior-preservation-optional)**).**
 
 ### When to Use Cropping Instead
 
@@ -159,7 +159,7 @@ If you truly want to train **only** on a subject with no context whatsoever, **c
 
 ### Practical Recommendations
 
-1. **Never use `--mask_min_weight 0.0`** unless you have a specific reason and understand the consequences.
+1. **Avoid `--mask_min_weight 0.0`** unless you have a specific reason, or you are using **Masked Prior Preservation** (`--prior_preservation_weight > 0`).
 
 2. **For character LoRA training**, use:
    ```bash
@@ -169,11 +169,13 @@ If you truly want to train **only** on a subject with no context whatsoever, **c
 
 3. **If you see hallucinations outside the mask**, increase `--mask_min_weight` to 0.1 or higher.
 
-4. **For group photos**, consider combining masking with cropping:
+4. **If you want to keep `--mask_min_weight 0.0` but still avoid hallucinations**, enable **Masked Prior Preservation** and consider `--prior_mask_threshold 0.1`.
+
+5. **For group photos**, consider combining masking with cropping:
    - Crop to include only your subject + reasonable padding
    - Then apply masks within the cropped region for face/body emphasis
 
-5. **Alpha channel masks don't provide "true transparency"**—they're still converted to loss weights. The same trade-offs apply.
+6. **Alpha channel masks don't provide "true transparency"**—they're still converted to loss weights. The same trade-offs apply.
 
 ---
 
@@ -261,8 +263,22 @@ Enable mask-weighted loss during training:
 python wan_train_network.py \
   --dataset_config config.toml \
   --use_mask_loss \
-  --mask_gamma 1.0 \
+  --mask_gamma 0.7 \
+  --mask_min_weight 0.05 \
+  # ... other training args
+```
+
+Optional: enable **Masked Prior Preservation** to reduce phantom limbs / background drift (slower, but often higher quality):
+
+```bash
+python wan_train_network.py \
+  --dataset_config config.toml \
+  --use_mask_loss \
+  --mask_gamma 0.7 \
   --mask_min_weight 0.0 \
+  --prior_preservation_weight 1.0 \
+  --prior_mask_threshold 0.1 \
+  --normalize_per_sample \
   # ... other training args
 ```
 
@@ -328,14 +344,82 @@ mask_weight = mask_weight * (1.0 - mask_min_weight) + mask_min_weight
 - Hair: 0.31 → 0.28 + 0.1 = 0.38
 - Background: 0.0 → 0.0 + 0.1 = 0.1
 
+---
+
+## Masked Prior Preservation (Optional)
+
+Masked Prior Preservation adds a second objective to masked training:
+
+- **Inside mask:** train toward the normal target (current behavior)
+- **Outside mask:** train toward the **base model** prediction (teacher), which reduces phantom limbs / background drift
+
+This requires an additional forward pass with LoRA temporarily disabled (under `torch.no_grad()`), so it is slower than normal masked training.
+
+> **Note:** Masked Prior Preservation requires **LoRA training** (adapters must be temporarily disabled to compute the teacher prediction).  
+> It is not available for **full fine-tuning** runs without adapters (e.g. `qwen_image_train.py` full fine-tune mode).
+
+> **Important:** When using prior preservation, `--mask_min_weight 0.0` is typically recommended.  
+> Non-zero `--mask_min_weight` reduces the prior preservation effect.
+
+### `--prior_preservation_weight`
+
+**Type:** Float  
+**Default:** 0.0 (disabled)  
+**Range:** >= 0
+
+Enables prior preservation when set to a value > 0:
+
+```bash
+--prior_preservation_weight 1.0
+```
+
+**Recommended starting points:** `0.5` or `1.0`
+
+### `--prior_mask_threshold`
+
+**Type:** Float (optional)  
+**Default:** None (continuous mode)  
+**Range:** (0, 1)
+
+Controls how the prior mask is constructed:
+
+- **Continuous mode (default):** prior preservation scales smoothly with inverse mask weights.
+- **Threshold mode:** prior preservation applies only where the **raw** mask is below a threshold.
+
+```bash
+# Preserve only true background (recommended starting point for weighted masks)
+--prior_mask_threshold 0.1
+```
+
+**Notes:**
+- Thresholding is applied to the **latent-resolution** mask (after caching-time resizing/interpolation), not the original pixel mask.
+- In threshold mode, target/prior overlap is prevented by zeroing the target mask wherever the prior mask applies.
+
+**Recommended values:** `0.05–0.15` (start at `0.1`)
+
+### `--normalize_per_sample`
+
+**Type:** Flag (boolean)  
+**Default:** Disabled
+
+Changes masked loss reduction from a **global weighted mean** (default) to **per-sample weighted mean then batch average**.
+
+This is recommended when using prior preservation so `--prior_preservation_weight` behaves predictably even when mask coverage varies across samples.
+
+```bash
+--normalize_per_sample
+```
+
 ### Argument Validation
 
-All mask-related arguments are validated early in training. Invalid values will raise clear errors:
+All mask-related arguments are validated early in training. Invalid values will raise clear errors (some settings may also emit warnings):
 
 | Argument | Valid Range | Error if Invalid |
 |----------|-------------|------------------|
 | `--mask_gamma` | > 0 | `--mask_gamma must be > 0` |
 | `--mask_min_weight` | [0, 1) | `--mask_min_weight must be in range [0, 1)` |
+| `--prior_preservation_weight` | >= 0 | `--prior_preservation_weight must be >= 0` |
+| `--prior_mask_threshold` | (0, 1) | `--prior_mask_threshold must be in range (0, 1)` |
 
 ---
 
@@ -473,7 +557,26 @@ Raw Mask Value (0-255)
 
 ## Recommended Settings
 
-> **Important:** Always use `--mask_min_weight > 0` to prevent the ["phantom limb" problem](#why-this-matters-the-phantom-limb-problem). See the [critical section above](#️-critical-understanding-what-masked-training-actually-does) for details.
+> **Important:** If you are **not** using prior preservation, use `--mask_min_weight > 0` to prevent the ["phantom limb" problem](#why-this-matters-the-phantom-limb-problem).  
+> If you **are** using prior preservation (`--prior_preservation_weight > 0`), `--mask_min_weight 0.0` is typically recommended.
+
+### For Person/Character LoRA Training with Prior Preservation (Recommended)
+
+```bash
+--use_mask_loss \
+--prior_preservation_weight 1.0 \
+--prior_mask_threshold 0.1 \
+--normalize_per_sample \
+--mask_gamma 0.7 \
+--mask_min_weight 0.0
+```
+
+**Rationale:**
+- `prior_preservation_weight=1.0`: Strongly preserves base model behavior outside the mask
+- `prior_mask_threshold=0.1`: Preserves true background while letting body/hair learn normally for weighted masks
+- `normalize_per_sample`: Makes `--prior_preservation_weight` predictable across mixed mask coverage
+- `mask_min_weight=0.0`: Maximizes the "preserve outside mask" effect
+  - If you set `mask_min_weight > 0`, the prior mask is reduced (by design)
 
 ### For Person/Character LoRA Training (Recommended)
 
@@ -499,7 +602,8 @@ Raw Mask Value (0-255)
 - `gamma=1.5`: Sharper masks to heavily prioritize face learning
 - `min_weight=0.02`: Minimal but non-zero—prevents unconstrained hallucination in background
 
-> ⚠️ **Warning:** Using `--mask_min_weight 0.0` is **not recommended**. While it maximizes focus on the masked region, it allows the model to hallucinate freely outside the mask, potentially causing phantom limbs, duplicate subjects, or cluttered backgrounds. If you must use `0.0`, ensure your images are tightly cropped to the subject.
+> ⚠️ **Warning:** Using `--mask_min_weight 0.0` is **not recommended** unless you are also using prior preservation (`--prior_preservation_weight > 0`).  
+> Without prior preservation, a zero floor allows the model to hallucinate freely outside the mask, potentially causing phantom limbs, duplicate subjects, or cluttered backgrounds.
 
 ### For Style/Clothing Training
 
@@ -519,22 +623,23 @@ Raw Mask Value (0-255)
 
 ### Loss Calculation
 
-The mask-weighted loss reducer lives in `apply_masked_loss()` in `src/musubi_tuner/modules/mask_loss.py` and is called from the training loops.
+The mask-weighted loss reducer lives in `apply_masked_loss_with_prior()` in `src/musubi_tuner/modules/mask_loss.py` and is called from the training loops.
 
 Example (video/non-layered loss layout):
 
 ```python
-from musubi_tuner.modules.mask_loss import apply_masked_loss
+from musubi_tuner.modules.mask_loss import apply_masked_loss_with_prior
 
-loss = apply_masked_loss(loss, batch.get("mask_weights"), args=args, layout="video")
+loss = apply_masked_loss_with_prior(loss, batch.get("mask_weights"), prior_loss_unreduced=None, args=args, layout="video")
 ```
 
 Example (Qwen Image layered loss layout):
 
 ```python
-loss = apply_masked_loss(
+loss = apply_masked_loss_with_prior(
     loss,
     batch.get("mask_weights"),
+    prior_loss_unreduced=None,
     args=args,
     layout="layered",
     drop_base_frame=args.remove_first_image_from_target,
@@ -546,7 +651,11 @@ High-level steps performed:
 2. If `layout="layered"`, optionally drop base-frame weights, then permute to match `(B, L, C, H, W)`.
 3. Apply gamma correction: `mask = mask ** mask_gamma`.
 4. Apply min-weight floor: `mask = mask * (1 - mask_min_weight) + mask_min_weight`.
-5. Compute weighted mean: `sum(loss * mask) / sum(mask)`.
+5. Compute region-normalized target loss: `sum(loss * mask) / sum(mask)`.
+6. If `--prior_preservation_weight > 0` and `prior_loss_unreduced` is provided:
+   - Build `prior_mask = 1 - mask` (or threshold on the raw mask)
+   - Compute region-normalized prior loss in the prior region
+   - Combine: `L_target + w_prior * L_prior`
 
 ### Key Implementation Notes
 
@@ -570,16 +679,24 @@ When mask loss is enabled, you'll see a prominent banner in the training logs:
 
 ```
 ============================================================
-MASK-WEIGHTED LOSS TRAINING ENABLED
+MASKED PRIOR PRESERVATION TRAINING ENABLED
 ============================================================
-  mask_min_weight: 0.05
+  mask_min_weight: 0.0
   mask_gamma: 0.7
+  prior_preservation_weight: 1.0
+  prior_mask_threshold: 0.1 (threshold mode)
+  normalize_per_sample: True
+------------------------------------------------------------
+PRIOR PRESERVATION: Unmasked regions will match base model.
+                    Expect ~1.3-1.7x training time.
 ------------------------------------------------------------
 IMPORTANT: Masks must be baked into latent cache!
 If you see 'batch has no mask_weights' errors, re-run
 the cache script with alpha_mask and/or mask_directory enabled.
 ============================================================
 ```
+
+If prior preservation is disabled, the banner will instead say `MASK-WEIGHTED LOSS TRAINING ENABLED`.
 
 If you don't see this banner, `--use_mask_loss` is not enabled.
 
@@ -704,6 +821,9 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 | `--use_mask_loss` | flag | disabled | Enable mask-weighted loss |
 | `--mask_gamma` | float | 1.0 | Gamma correction (< 1 softer, > 1 sharper) |
 | `--mask_min_weight` | float | 0.0 | Minimum weight for all regions |
+| `--prior_preservation_weight` | float | 0.0 | Prior preservation weight (0.0 disables) |
+| `--prior_mask_threshold` | float | none | Optional threshold mode for prior mask (e.g. 0.05–0.15) |
+| `--normalize_per_sample` | flag | disabled | Normalize masked loss per-sample (recommended with prior) |
 
 ### Our Weighted Mask Values
 
@@ -718,12 +838,17 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 
 ## Changelog
 
+### 2026-01-29
+- **NEW:** Masked Prior Preservation (`--prior_preservation_weight`, `--prior_mask_threshold`, `--normalize_per_sample`)
+- **CHANGED:** Training loop uses `apply_masked_loss_with_prior()` (handles both normal masked loss and optional prior preservation)
+- Updated banner to reflect prior preservation when enabled
+
 ### 2026-01-21
 - **NEW:** Added "Critical: Understanding What Masked Training Actually Does" section
   - Explains the common misconception (masks as crops vs loss weights)
   - Documents the "phantom limb" problem when using `mask_min_weight=0.0`
   - Provides guidance on when to use cropping vs masking
-- **CHANGED:** Updated recommended settings to always use `--mask_min_weight > 0`
+- **CHANGED:** Updated recommended settings to use `--mask_min_weight > 0` when prior preservation is disabled
 - Refactor: mask loss moved to `src/musubi_tuner/modules/mask_loss.py`
 - Removed `--mask_loss_scale` (it had no effect with weighted-mean normalization)
 
@@ -751,5 +876,5 @@ python wan_train_network.py --dataset_config config.toml --use_mask_loss
 ---
 
 *Document created: 2026-01-13*
-*Last updated: 2026-01-21*
+*Last updated: 2026-01-29*
 *Based on blissful-tuner codebase analysis*

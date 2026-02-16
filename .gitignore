@@ -22,3 +22,8 @@ nvidia-python-packages.txt
 docs/fork_analysis.md
 docs/archive/
 
+# Local tool databases / caches
+.chunkhound.json
+.chunkhound/
+.serena/
+

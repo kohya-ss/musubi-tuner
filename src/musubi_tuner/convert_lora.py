@@ -41,34 +41,57 @@ QWEN_IMAGE_KEYS = [
 
 
 def convert_from_diffusers(prefix, weights_sd):
-    # convert from diffusers(?) to default LoRA
-    # Diffusers format: {"diffusion_model.module.name.lora_A.weight": weight, "diffusion_model.module.name.lora_B.weight": weight, ...}
-    # default LoRA format: {"prefix_module_name.lora_down.weight": weight, "prefix_module_name.lora_up.weight": weight, ...}
+    # convert from diffusers(?) to default LoRA/LoHa/LoKr
+    # Diffusers format: {"diffusion_model.module.name.lora_A.weight": weight, ...}
+    # default format: {"prefix_module_name.lora_down.weight": weight, ...}
 
     # note: Diffusers has no alpha, so alpha is set to rank
     new_weights_sd = {}
     lora_dims = {}
+
+    # Pass through non-dotted metadata keys (lokr_factor, use_rslora_flag, etc.)
+    for key, value in weights_sd.items():
+        if "." not in key:
+            new_weights_sd[key] = value
+
     for key, weight in weights_sd.items():
+        if "." not in key:
+            continue  # already handled above
+
         diffusers_prefix, key_body = key.split(".", 1)
         if diffusers_prefix != "diffusion_model" and diffusers_prefix != "transformer":
             logger.warning(f"unexpected key: {key} in diffusers format")
             continue
 
         new_key = f"{prefix}{key_body}".replace(".", "_")
-        new_key = new_key.replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
 
-        # support unknown format: do not replace dots but uses lora_up/lora_down/alpha
-        new_key = new_key.replace("_lora_down_", ".lora_down.").replace("_lora_up_", ".lora_up.")
+        if "_lora_" in new_key:
+            # LoRA keys
+            new_key = new_key.replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
+            # support unknown format: do not replace dots but uses lora_up/lora_down/alpha
+            new_key = new_key.replace("_lora_down_", ".lora_down.").replace("_lora_up_", ".lora_up.")
+        else:
+            # LoHa or LoKr keys
+            new_key = new_key.replace("_hada_", ".hada_").replace("_lokr_", ".lokr_")
+
         if new_key.endswith("_alpha"):
             new_key = new_key.replace("_alpha", ".alpha")
 
         new_weights_sd[new_key] = weight
 
         lora_name = new_key.split(".")[0]  # before first dot
-        if lora_name not in lora_dims and "lora_down" in new_key:
-            lora_dims[lora_name] = weight.shape[0]
+        if lora_name not in lora_dims:
+            if "lora_down" in new_key:
+                lora_dims[lora_name] = weight.shape[0]
+            elif "hada_w1_b" in new_key:
+                lora_dims[lora_name] = weight.shape[0]
+            elif "lokr_w2_a" in new_key:
+                lora_dims[lora_name] = weight.shape[1]
+            elif "lokr_w2" in new_key and "lokr_w2_b" not in new_key:
+                # Full-matrix LoKr: dim is max of w2 shape
+                lora_dims[lora_name] = max(weight.shape)
 
-    # add alpha with rank
+    # add alpha with rank (for LoRA keys that lack alpha in Diffusers format)
     for lora_name, dim in lora_dims.items():
         alpha_key = f"{lora_name}.alpha"
         if alpha_key not in new_weights_sd:
@@ -77,10 +100,47 @@ def convert_from_diffusers(prefix, weights_sd):
     return new_weights_sd
 
 
+def _normalize_module_name(lora_name: str, prefix: str) -> str:
+    """Convert a lora_name (e.g. 'lora_unet_blocks_0_cross_attn_k_img') to a Diffusers module name.
+
+    Applies architecture-specific fixups for WAN, Z-Image, and HunyuanVideo module names
+    where naive underscore-to-dot replacement would be lossy.
+    """
+    module_name = lora_name[len(prefix):]  # remove "lora_unet_"
+    module_name = module_name.replace("_", ".")  # replace "_" with "."
+    if ".cross.attn." in module_name or ".self.attn." in module_name:
+        # Wan2.1 lora name to module name
+        module_name = module_name.replace("cross.attn", "cross_attn")
+        module_name = module_name.replace("self.attn", "self_attn")
+        module_name = module_name.replace("k.img", "k_img")
+        module_name = module_name.replace("v.img", "v_img")
+    elif ".attention.to." in module_name or ".feed.forward." in module_name:
+        # Z-Image lora name to module name
+        module_name = module_name.replace("to.q", "to_q")
+        module_name = module_name.replace("to.k", "to_k")
+        module_name = module_name.replace("to.v", "to_v")
+        module_name = module_name.replace("to.out", "to_out")
+        module_name = module_name.replace("feed.forward", "feed_forward")
+    else:
+        # HunyuanVideo lora name to module name
+        module_name = module_name.replace("double.blocks.", "double_blocks.")
+        module_name = module_name.replace("single.blocks.", "single_blocks.")
+        module_name = module_name.replace("img.", "img_")
+        module_name = module_name.replace("txt.", "txt_")
+        module_name = module_name.replace("attn.", "attn_")
+    return module_name
+
+
 def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
-    # convert from default LoRA to diffusers
+    # convert from default LoRA/LoHa/LoKr to diffusers
     if diffusers_prefix is None:
         diffusers_prefix = "diffusion_model"
+
+    # Detect network type for logging
+    from musubi_tuner.utils.lora_utils import detect_network_type
+
+    net_type = detect_network_type(weights_sd)
+    logger.info(f"Detected network type: {net_type}")
 
     # make reverse map from LoRA name to base model module name
     lora_name_to_module_name = {}
@@ -102,59 +162,59 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
                 lora_alphas[lora_name] = weight
 
     new_weights_sd = {}
+
+    # Pass through non-dotted metadata keys (lokr_factor, use_rslora_flag, etc.)
+    for key, value in weights_sd.items():
+        if "." not in key:
+            new_weights_sd[key] = value
+
     for key, weight in weights_sd.items():
-        if key.startswith(prefix):
-            if "alpha" in key:
-                continue
+        if not key.startswith(prefix):
+            continue
+        if "alpha" in key:
+            continue
 
-            lora_name = key.split(".", 1)[0]  # before first dot
+        lora_name = key.split(".", 1)[0]  # before first dot
 
-            if lora_name in lora_name_to_module_name:
-                module_name = lora_name_to_module_name[lora_name]
-            else:
-                module_name = lora_name[len(prefix) :]  # remove "lora_unet_"
-                module_name = module_name.replace("_", ".")  # replace "_" with "."
-                if ".cross.attn." in module_name or ".self.attn." in module_name:
-                    # Wan2.1 lora name to module name: ugly but works
-                    module_name = module_name.replace("cross.attn", "cross_attn")  # fix cross attn
-                    module_name = module_name.replace("self.attn", "self_attn")  # fix self attn
-                    module_name = module_name.replace("k.img", "k_img")  # fix k img
-                    module_name = module_name.replace("v.img", "v_img")  # fix v img
-                elif ".attention.to." in module_name or ".feed.forward." in module_name:
-                    # Z-Image lora name to module name: ugly but works
-                    module_name = module_name.replace("to.q", "to_q")  # fix to q
-                    module_name = module_name.replace("to.k", "to_k")  # fix to k
-                    module_name = module_name.replace("to.v", "to_v")  # fix to v
-                    module_name = module_name.replace("to.out", "to_out")  # fix to out
-                    module_name = module_name.replace("feed.forward", "feed_forward")  # fix feed forward
-                else:
-                    # HunyuanVideo lora name to module name: ugly but works
-                    module_name = module_name.replace("double.blocks.", "double_blocks.")  # fix double blocks
-                    module_name = module_name.replace("single.blocks.", "single_blocks.")  # fix single blocks
-                    module_name = module_name.replace("img.", "img_")  # fix img
-                    module_name = module_name.replace("txt.", "txt_")  # fix txt
-                    module_name = module_name.replace("attn.", "attn_")  # fix attn
+        # Resolve module name (shared normalization for all key families)
+        if lora_name in lora_name_to_module_name:
+            module_name = lora_name_to_module_name[lora_name]
+        else:
+            module_name = _normalize_module_name(lora_name, prefix)
 
-            if "lora_down" in key:
-                new_key = f"{diffusers_prefix}.{module_name}.lora_A.weight"
-                dim = weight.shape[0]
-            elif "lora_up" in key:
-                new_key = f"{diffusers_prefix}.{module_name}.lora_B.weight"
-                dim = weight.shape[1]
-            else:
-                logger.warning(f"unexpected key: {key} in default LoRA format")
-                continue
-
-            # scale weight by alpha
-            if lora_name in lora_alphas:
-                # we scale both down and up, so scale is sqrt
-                scale = lora_alphas[lora_name] / dim
-                scale = scale.sqrt()
-                weight = weight * scale
-            else:
-                logger.warning(f"missing alpha for {lora_name}")
-
+        # LoHa/LoKr keys: pass through with Diffusers-style key renaming
+        if ".hada_" in key or ".lokr_" in key:
+            _, param_part = key.split(".", 1)  # e.g., "hada_w1_a"
+            new_key = f"{diffusers_prefix}.{module_name}.{param_part}"
             new_weights_sd[new_key] = weight
+            # Copy alpha as-is (no sqrt scaling for LoHa/LoKr)
+            alpha_key = f"{lora_name}.alpha"
+            if alpha_key in weights_sd:
+                new_alpha_key = f"{diffusers_prefix}.{module_name}.alpha"
+                new_weights_sd[new_alpha_key] = weights_sd[alpha_key]
+            continue
+
+        # Standard LoRA path
+        if "lora_down" in key:
+            new_key = f"{diffusers_prefix}.{module_name}.lora_A.weight"
+            dim = weight.shape[0]
+        elif "lora_up" in key:
+            new_key = f"{diffusers_prefix}.{module_name}.lora_B.weight"
+            dim = weight.shape[1]
+        else:
+            logger.warning(f"unexpected key: {key} in default LoRA format")
+            continue
+
+        # scale weight by alpha
+        if lora_name in lora_alphas:
+            # we scale both down and up, so scale is sqrt
+            scale = lora_alphas[lora_name] / dim
+            scale = scale.sqrt()
+            weight = weight * scale
+        else:
+            logger.warning(f"missing alpha for {lora_name}")
+
+        new_weights_sd[new_key] = weight
 
     return new_weights_sd
 
@@ -162,19 +222,24 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
 def convert(input_file, output_file, target_format, diffusers_prefix):
     logger.info(f"loading {input_file}")
     weights_sd = load_file(input_file)
+
+    # Read source metadata (preserve all existing metadata through conversion)
     with safe_open(input_file, framework="pt") as f:
-        metadata = f.metadata()
+        metadata = dict(f.metadata() or {})
 
     logger.info(f"converting to {target_format}")
     prefix = "lora_unet_"
     if target_format == "default":
         new_weights_sd = convert_from_diffusers(prefix, weights_sd)
-        metadata = metadata or {}
-        model_utils.precalculate_safetensors_hashes(new_weights_sd, metadata)
     elif target_format == "other":
         new_weights_sd = convert_to_diffusers(prefix, diffusers_prefix, weights_sd)
     else:
         raise ValueError(f"unknown target format: {target_format}")
+
+    # Recompute hashes for the converted weights (old hashes are stale)
+    model_hash, legacy_hash = model_utils.precalculate_safetensors_hashes(new_weights_sd, metadata)
+    metadata["sshs_model_hash"] = model_hash
+    metadata["sshs_legacy_hash"] = legacy_hash
 
     logger.info(f"saving to {output_file}")
     save_file(new_weights_sd, output_file, metadata=metadata)
@@ -183,7 +248,7 @@ def convert(input_file, output_file, target_format, diffusers_prefix):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Convert LoRA weights between default and other formats")
+    parser = argparse.ArgumentParser(description="Convert LoRA/LoHa/LoKr weights between default and other formats")
     parser.add_argument("--input", type=str, required=True, help="input model file")
     parser.add_argument("--output", type=str, required=True, help="output model file")
     parser.add_argument("--target", type=str, required=True, choices=["other", "default"], help="target format")

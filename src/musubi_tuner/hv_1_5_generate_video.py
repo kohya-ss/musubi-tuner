@@ -2,6 +2,7 @@ import argparse
 import gc
 from importlib.util import find_spec
 import random
+import sys
 import os
 import time
 import copy
@@ -30,7 +31,7 @@ from musubi_tuner.frame_pack.framepack_utils import load_image_encoders
 from musubi_tuner.networks import lora_wan
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, filter_lora_state_dict, format_unknown_network_type_error
 
 lycoris_available = find_spec("lycoris") is not None
 
@@ -159,7 +160,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
-        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+        "--prefer_lycoris", "--lycoris", dest="prefer_lycoris", action="store_true",
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). (--lycoris is deprecated)"
     )
     setup_parser_compile(parser)
 
@@ -180,7 +182,10 @@ def parse_args() -> argparse.Namespace:
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
 
-    if args.lycoris and not lycoris_available:
+    if "--lycoris" in sys.argv:
+        logger.warning("--lycoris is deprecated; use --prefer_lycoris instead")
+
+    if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
@@ -343,22 +348,29 @@ def load_dit_model(
     # If LyCORIS is enabled, we will load the model to CPU and then merge LoRA weights (static method)
 
     loading_device = "cpu"
-    if args.blocks_to_swap == 0 and not args.lycoris:
+    if args.blocks_to_swap == 0 and not args.prefer_lycoris:
         loading_device = device
 
     # load LoRA weights
-    if not args.lycoris and lora_weights is not None and len(lora_weights) > 0:
+    if not args.prefer_lycoris and lora_weights is not None and len(lora_weights) > 0:
         lora_weights_list = []
-        for lora_weight in lora_weights:
+        for i, lora_weight in enumerate(lora_weights):
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
-            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            net_type = detect_network_type(lora_sd)
+            if net_type == "unknown":
+                raise ValueError(format_unknown_network_type_error(lora_weight))
+            # Convert Diffusers-format keys to default format before merge
+            lora_sd = convert_diffusers_if_needed(lora_sd)
+            include_pat = args.include_patterns[i] if args.include_patterns and len(args.include_patterns) > i else None
+            exclude_pat = args.exclude_patterns[i] if args.exclude_patterns and len(args.exclude_patterns) > i else None
+            lora_sd = filter_lora_state_dict(lora_sd, include_pat, exclude_pat)
             lora_weights_list.append(lora_sd)
     else:
         lora_weights_list = None
 
     loading_weight_dtype = dit_weight_dtype
-    if args.fp8_scaled and not args.lycoris:
+    if args.fp8_scaled and not args.prefer_lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
 
     model = load_hunyuan_video_1_5_model(
@@ -369,13 +381,13 @@ def load_dit_model(
         False,
         loading_device,
         loading_weight_dtype,
-        args.fp8_scaled and not args.lycoris,
+        args.fp8_scaled and not args.prefer_lycoris,
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
     )
 
     # merge LoRA weights
-    if args.lycoris:
+    if args.prefer_lycoris:
         if lora_weights is not None and len(lora_weights) > 0:
             merge_lora_weights(
                 lora_wan,

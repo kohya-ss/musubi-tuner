@@ -1,3 +1,9 @@
+# NOTE: LoHa uses its own LoHaNetwork class (not LoRANetwork reuse).
+# LoKr (lokr.py) reuses LoRANetwork via module_class/module_kwargs injection.
+# This asymmetry exists because LoHa was implemented first with Conv2d support
+# and a standalone network class. Convergence to LoRANetwork reuse is tracked
+# as a future follow-up (Slice 8).
+
 import ast
 import math
 import os
@@ -10,56 +16,11 @@ import torch.nn.functional as F
 
 import logging
 
-from musubi_tuner.networks import lora as lora_hunyuan
-from musubi_tuner.networks import lora_framepack, lora_flux, lora_qwen_image, lora_wan
-from musubi_tuner.networks import lora_hv_1_5, lora_kandinsky, lora_zimage
-
 logger = logging.getLogger(__name__)
 # Note: logging.basicConfig removed to avoid conflicts with BlissfulLogger - configure at entry points
 
-from musubi_tuner.dataset.image_video_dataset import (
-    ARCHITECTURE_FRAMEPACK,
-    ARCHITECTURE_FLUX_KONTEXT,
-    ARCHITECTURE_HUNYUAN_VIDEO,
-    ARCHITECTURE_HUNYUAN_VIDEO_1_5,
-    ARCHITECTURE_KANDINSKY5,
-    ARCHITECTURE_QWEN_IMAGE,
-    ARCHITECTURE_QWEN_IMAGE_EDIT,
-    ARCHITECTURE_QWEN_IMAGE_LAYERED,
-    ARCHITECTURE_WAN,
-    ARCHITECTURE_Z_IMAGE,
-)
-
-# Mapping from architecture to target modules for LoHa
-TARGET_REPLACE_MODULES = {
-    ARCHITECTURE_FRAMEPACK: lora_framepack.FRAMEPACK_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_FLUX_KONTEXT: lora_flux.FLUX_KONTEXT_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_HUNYUAN_VIDEO: lora_hunyuan.HUNYUAN_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_HUNYUAN_VIDEO_1_5: lora_hv_1_5.HV_1_5_IMAGE_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_KANDINSKY5: lora_kandinsky.KANDINSKY5_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_QWEN_IMAGE: lora_qwen_image.QWEN_IMAGE_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_QWEN_IMAGE_EDIT: lora_qwen_image.QWEN_IMAGE_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_QWEN_IMAGE_LAYERED: lora_qwen_image.QWEN_IMAGE_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_WAN: lora_wan.WAN_TARGET_REPLACE_MODULES,
-    ARCHITECTURE_Z_IMAGE: lora_zimage.ZIMAGE_TARGET_REPLACE_MODULES,
-}
-
-# Default exclude patterns aligned with per-architecture LoRA modules
-# These match the patterns each lora_*.py applies by default
-DEFAULT_EXCLUDE_PATTERNS = {
-    ARCHITECTURE_FRAMEPACK: [],
-    ARCHITECTURE_FLUX_KONTEXT: [],
-    ARCHITECTURE_HUNYUAN_VIDEO: [r".*(img_mod|txt_mod|modulation).*"],
-    ARCHITECTURE_HUNYUAN_VIDEO_1_5: [r".*(img_mod|txt_mod|modulation).*"],
-    ARCHITECTURE_KANDINSKY5: [],
-    ARCHITECTURE_QWEN_IMAGE: [r".*(_mod_).*"],  # matches lora_qwen_image default (exclude_mod=True)
-    ARCHITECTURE_QWEN_IMAGE_EDIT: [r".*(_mod_).*"],
-    ARCHITECTURE_QWEN_IMAGE_LAYERED: [r".*(_mod_).*"],
-    ARCHITECTURE_WAN: [r".*(patch_embedding|text_embedding|time_embedding|time_projection|norm|head).*"],
-    ARCHITECTURE_Z_IMAGE: [],
-}
-
-SUPPORTED_ARCHITECTURES = list(TARGET_REPLACE_MODULES.keys())
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
+from musubi_tuner.networks.network_arch import get_arch_config
 
 
 class LoHaModule(torch.nn.Module):
@@ -257,25 +218,33 @@ def create_arch_network(
     **kwargs,
 ):
     architecture = kwargs.get("architecture", ARCHITECTURE_HUNYUAN_VIDEO)
+    config = get_arch_config(architecture)
 
-    # Validate architecture is supported
-    if architecture not in SUPPORTED_ARCHITECTURES:
-        supported_list = ", ".join(SUPPORTED_ARCHITECTURES)
-        raise ValueError(f"LoHa does not support architecture '{architecture}'. Supported architectures: {supported_list}")
-
-    # add default exclude patterns
+    # Add default exclude patterns (always additive — see network_arch.py contract)
     exclude_patterns = kwargs.get("exclude_patterns", None)
     if exclude_patterns is None:
         exclude_patterns = []
-    else:
+    elif isinstance(exclude_patterns, str):
         exclude_patterns = ast.literal_eval(exclude_patterns)
 
-    exclude_patterns.extend(DEFAULT_EXCLUDE_PATTERNS.get(architecture, []))
+    exclude_patterns.extend(config["exclude_patterns"])
+
+    # Qwen exclude_mod support (parity with lora_qwen_image.py)
+    if "exclude_mod_patterns" in config:
+        exclude_mod = kwargs.get("exclude_mod", True)
+        if isinstance(exclude_mod, str):
+            exclude_mod = ast.literal_eval(exclude_mod)
+        if exclude_mod:
+            exclude_patterns.extend(config["exclude_mod_patterns"])
 
     kwargs["exclude_patterns"] = exclude_patterns
 
+    # Kandinsky include_patterns support
+    if "include_patterns" in config and "include_patterns" not in kwargs:
+        kwargs["include_patterns"] = config["include_patterns"]
+
     return create_network(
-        TARGET_REPLACE_MODULES[architecture],
+        config["target_modules"],
         "lora_unet",
         multiplier,
         network_dim,
@@ -462,12 +431,12 @@ class LoHaNetwork(torch.nn.Module):
                             # exclude/include filter
                             excluded = False
                             for pattern in exclude_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     excluded = True
                                     break
                             included = False
                             for pattern in include_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     included = True
                                     break
                             if excluded and not included:
@@ -486,7 +455,7 @@ class LoHaNetwork(torch.nn.Module):
                                 # モジュール指定あり
                                 if lora_name in modules_dim:
                                     dim = modules_dim[lora_name]
-                                    alpha = modules_alpha[lora_name]
+                                    alpha = modules_alpha.get(lora_name, dim)
                             else:
                                 # 通常、すべて対象とする
                                 if is_linear or is_conv2d_1x1:
@@ -751,14 +720,10 @@ def create_arch_network_from_weights(
     **kwargs,
 ) -> LoHaNetwork:
     architecture = kwargs.get("architecture", ARCHITECTURE_HUNYUAN_VIDEO)
-
-    # Validate architecture is supported
-    if architecture not in SUPPORTED_ARCHITECTURES:
-        supported_list = ", ".join(SUPPORTED_ARCHITECTURES)
-        raise ValueError(f"LoHa does not support architecture '{architecture}'. Supported architectures: {supported_list}")
+    config = get_arch_config(architecture)
 
     return create_network_from_weights(
-        TARGET_REPLACE_MODULES[architecture], multiplier, weights_sd, text_encoders, unet, for_inference, **kwargs
+        config["target_modules"], multiplier, weights_sd, text_encoders, unet, for_inference, **kwargs
     )
 
 
@@ -800,3 +765,61 @@ def create_network_from_weights(
         module_class=module_class,
     )
     return network
+
+
+def merge_weights_to_tensor(
+    model_weight: torch.Tensor,
+    lora_name: str,
+    lora_sd: Dict[str, torch.Tensor],
+    lora_weight_keys: set,
+    multiplier: float,
+    calc_device: torch.device,
+) -> torch.Tensor:
+    """Merge LoHa weights directly into a model weight tensor.
+
+    Supports Linear and Conv2d. Consumed keys are removed from lora_weight_keys.
+    Returns model_weight unchanged if no matching LoHa keys found.
+    """
+    w1a_key = lora_name + ".hada_w1_a"
+    w1b_key = lora_name + ".hada_w1_b"
+    w2a_key = lora_name + ".hada_w2_a"
+    w2b_key = lora_name + ".hada_w2_b"
+    alpha_key = lora_name + ".alpha"
+
+    if w1a_key not in lora_weight_keys:
+        return model_weight
+
+    w1a = lora_sd[w1a_key].to(calc_device)
+    w1b = lora_sd[w1b_key].to(calc_device)
+    w2a = lora_sd[w2a_key].to(calc_device)
+    w2b = lora_sd[w2b_key].to(calc_device)
+
+    dim = w1b.shape[0]
+    alpha = lora_sd.get(alpha_key, torch.tensor(dim))
+    if isinstance(alpha, torch.Tensor):
+        alpha = alpha.item()
+    scale = alpha / dim
+
+    org_device = model_weight.device
+    original_dtype = model_weight.dtype
+    compute_dtype = torch.float16 if original_dtype.itemsize == 1 else torch.float32
+    model_weight = model_weight.to(calc_device, dtype=compute_dtype)
+    w1a, w1b = w1a.to(compute_dtype), w1b.to(compute_dtype)
+    w2a, w2b = w2a.to(compute_dtype), w2b.to(compute_dtype)
+
+    # ΔW = ((w1a @ w1b) * (w2a @ w2b)) * scale
+    diff_weight = ((w1a @ w1b) * (w2a @ w2b)) * scale
+
+    # Reshape for Conv2d if needed (diff is always 2D from matmul)
+    if model_weight.dim() == 4 and diff_weight.dim() == 2:
+        diff_weight = diff_weight.view(model_weight.shape)
+
+    model_weight = model_weight + multiplier * diff_weight
+
+    model_weight = model_weight.to(device=org_device, dtype=original_dtype)
+
+    # Remove consumed keys
+    for key in [w1a_key, w1b_key, w2a_key, w2b_key, alpha_key]:
+        lora_weight_keys.discard(key)
+
+    return model_weight

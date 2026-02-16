@@ -44,7 +44,8 @@ class ZImageNetworkTrainer(NetworkTrainer):
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
         self._control_training = False
-        self.default_guidance_scale = 0.0  # not used for Turbo model
+        self.default_guidance_scale = 0.0  # embedded guidance scale. not used for Z-Image model
+        self.default_discrete_flow_shift = 3.0  # Z-Image uses flux-shift, so it's better to use it
 
     def process_sample_prompts(
         self,
@@ -144,7 +145,9 @@ class ZImageNetworkTrainer(NetworkTrainer):
         embed = sample_parameter["cap_feats"].to(device=device, dtype=torch.bfloat16)
         mask = sample_parameter["cap_mask"].to(device=device, dtype=torch.bool)
 
-        do_cfg = guidance_scale > 1.0
+        if cfg_scale is None:
+            cfg_scale = 4.0  # default for Base model
+        do_cfg = cfg_scale > 1.0
         if do_cfg:
             negative_embed = sample_parameter["negative_cap_feats"].to(device=device, dtype=torch.bfloat16)
             negative_mask = sample_parameter["negative_cap_mask"].to(device=device, dtype=torch.bool)
@@ -164,6 +167,9 @@ class ZImageNetworkTrainer(NetworkTrainer):
         image_sequence_length = (height_latent // model.all_patch_size[0]) * (width_latent // model.all_patch_size[0])
         embed, _ = zimage_utils.trim_pad_embeds_and_mask(image_sequence_length, embed, mask)
         mask = None  # No attention mask needed after trimming
+        if negative_embed is not None:
+            negative_embed, _ = zimage_utils.trim_pad_embeds_and_mask(image_sequence_length, negative_embed, negative_mask)
+            negative_mask = None  # No attention mask needed after trimming
 
         # Prepare timesteps
         timesteps, sigmas = zimage_utils.get_timesteps_sigmas(sample_steps, discrete_flow_shift)
@@ -184,7 +190,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
             if do_cfg:
                 with accelerator.autocast(), torch.no_grad():
                     negative_model_out = transformer(latent_model_input, timestep, negative_embed, negative_mask)
-                noise_pred = negative_model_out + guidance_scale * (model_out - negative_model_out)
+                noise_pred = model_out + cfg_scale * (model_out - negative_model_out)
             else:
                 noise_pred = model_out
 

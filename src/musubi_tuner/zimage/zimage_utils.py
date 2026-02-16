@@ -1,6 +1,6 @@
 import json
 import math
-from typing import Optional, Union
+from typing import Any, Optional, Union
 import logging
 
 import numpy as np
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-ZIMAGE_ID = "Tongyi-MAI/Z-Image-Turbo"
+ZIMAGE_ID = "Tongyi-MAI/Z-Image"
 
 
 def shift_scale_latents_for_decode(latents: torch.Tensor) -> torch.Tensor:
@@ -280,3 +280,248 @@ def step(model_output: torch.Tensor, sample: torch.Tensor, sigmas: torch.Tensor,
     prev_sample = sample + dt * model_output
     prev_sample = prev_sample.to(model_output.dtype)
     return prev_sample
+
+
+# region OmniBase / SigLIP2 Support
+
+# SigLIP2 availability check (requires transformers >= 4.56.1, which is already required)
+try:
+    from transformers import Siglip2VisionModel
+
+    SIGLIP2_AVAILABLE = True
+except ImportError:
+    Siglip2VisionModel = None
+    SIGLIP2_AVAILABLE = False
+
+
+def _is_hf_repo_id(path: str) -> bool:
+    """Check if path looks like a HuggingFace repo ID (e.g., 'google/siglip2-base')."""
+    import os
+
+    # HF repo IDs contain '/' but aren't absolute paths and don't exist locally
+    return "/" in path and not os.path.isabs(path) and not os.path.exists(path)
+
+
+def _get_default_dtype_for_device(device: torch.device) -> torch.dtype:
+    """Get appropriate default dtype based on device type."""
+    if device.type == "cuda":
+        # Check if bfloat16 is supported
+        if torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float16
+    elif device.type == "mps":
+        return torch.float16
+    else:
+        return torch.float32
+
+
+def load_siglip2_encoder(
+    encoder_path: str,
+    device: torch.device,
+    dtype: Optional[torch.dtype] = None,
+) -> tuple[Optional["Siglip2VisionModel"], Optional[Any]]:
+    """
+    Load SigLIP2 vision encoder and processor for OmniBase image editing.
+
+    Args:
+        encoder_path: Path to SigLIP2 checkpoint. Supports:
+            - HuggingFace repo ID (e.g., "google/siglip2-base-patch16-256")
+            - HuggingFace repo ID with image_encoder/ subfolder layout
+            - Local directory (flat or with image_encoder/ subdirectory)
+        device: Device to load the model on.
+        dtype: Data type for model weights. If None, auto-selects based on device.
+
+    Returns:
+        Tuple of (vision_model, processor). Both will be None if loading fails.
+        Processor may be None if checkpoint doesn't include one (caller should handle).
+    """
+    if not SIGLIP2_AVAILABLE:
+        logger.warning("SigLIP2 not available in transformers. OmniBase image editing features will be disabled.")
+        return None, None
+
+    import os
+    from transformers import AutoProcessor, AutoImageProcessor
+
+    if dtype is None:
+        dtype = _get_default_dtype_for_device(device)
+
+    # Build list of (model_path, subfolder, processor_paths) tuples to try
+    # processor_paths is a list of paths to try for the processor
+    load_configs = []
+
+    if _is_hf_repo_id(encoder_path):
+        # HuggingFace repo ID - try direct, then with subfolder="image_encoder"
+        load_configs.append((encoder_path, None, [encoder_path]))
+        load_configs.append((encoder_path, "image_encoder", [encoder_path]))
+    elif os.path.isdir(encoder_path):
+        # Local directory - try image_encoder/ subfolder first, then flat
+        subfolder = os.path.join(encoder_path, "image_encoder")
+        if os.path.isdir(subfolder):
+            # Prefer subfolder for model, but try both subfolder and parent for processor
+            load_configs.append((subfolder, None, [subfolder, encoder_path]))
+        # Also try flat directory
+        load_configs.append((encoder_path, None, [encoder_path]))
+    elif os.path.isfile(encoder_path):
+        logger.error(
+            f"encoder_path '{encoder_path}' is a file, not a directory. "
+            "SigLIP2 requires a directory with config.json or a HuggingFace repo ID."
+        )
+        return None, None
+    else:
+        logger.error(f"encoder_path '{encoder_path}' does not exist.")
+        return None, None
+
+    for model_path, subfolder, processor_paths in load_configs:
+        try:
+            # Load vision model
+            load_kwargs = {"torch_dtype": dtype}
+            if subfolder is not None:
+                load_kwargs["subfolder"] = subfolder
+
+            vision_model = Siglip2VisionModel.from_pretrained(model_path, **load_kwargs).to(device)
+            vision_model.eval()
+
+            # Load processor - try multiple paths and loaders
+            processor = None
+            processor_errors = []
+            for proc_path in processor_paths:
+                for processor_loader in [AutoProcessor, AutoImageProcessor]:
+                    try:
+                        proc_kwargs = {}
+                        # For HF repo with subfolder, also try loading processor from subfolder
+                        if _is_hf_repo_id(proc_path) and subfolder is not None:
+                            try:
+                                processor = processor_loader.from_pretrained(proc_path, subfolder=subfolder)
+                                break
+                            except Exception:
+                                pass  # Fall through to try without subfolder
+                        processor = processor_loader.from_pretrained(proc_path, **proc_kwargs)
+                        break
+                    except Exception as e:
+                        processor_errors.append(f"{processor_loader.__name__} from {proc_path}: {e}")
+                if processor is not None:
+                    break
+
+            if processor is None:
+                logger.warning(
+                    f"Could not load processor for model at {model_path}. "
+                    f"Tried: {processor_paths}. Errors: {processor_errors}. "
+                    "Caller must provide image preprocessing."
+                )
+
+            location = f"{model_path}" + (f" (subfolder={subfolder})" if subfolder else "")
+            logger.info(f"Loaded SigLIP2 encoder from {location} (dtype={dtype}, processor={'OK' if processor else 'None'})")
+            return vision_model, processor
+
+        except Exception as e:
+            logger.debug(f"Failed to load SigLIP2 from {model_path} (subfolder={subfolder}): {e}")
+            continue
+
+    logger.error(f"Failed to load SigLIP2 from any path variant of {encoder_path}")
+    return None, None
+
+
+def siglip_last_hidden_to_grid(last_hidden_state: torch.Tensor) -> torch.Tensor:
+    """
+    Convert SigLIP2 last_hidden_state to spatial grid.
+
+    SigLIP2 output shape is typically:
+        - [N, C] where N = grid^2 (without CLS) or grid^2 + 1 (with CLS at position 0)
+        - [B, N, C] batched variant (first dim is batch)
+
+    Args:
+        last_hidden_state: [N, C] or [B, N, C] tensor from SigLIP2 vision model.
+
+    Returns:
+        [H, W, C] or [B, H, W, C] spatial grid tensor (CLS token dropped if present).
+
+    Raises:
+        ValueError: If num_tokens cannot be reshaped to a square grid.
+    """
+    # Handle batched input
+    if last_hidden_state.dim() == 3:
+        batch_size = last_hidden_state.shape[0]
+        grids = [siglip_last_hidden_to_grid(last_hidden_state[i]) for i in range(batch_size)]
+        return torch.stack(grids, dim=0)
+
+    num_tokens, channels = last_hidden_state.shape
+
+    # Case 1: Perfect square (no CLS token)
+    grid_size = math.isqrt(num_tokens)
+    if grid_size * grid_size == num_tokens:
+        return last_hidden_state.reshape(grid_size, grid_size, channels)
+
+    # Case 2: grid^2 + 1 (CLS token at position 0)
+    grid_size = math.isqrt(num_tokens - 1)
+    if grid_size * grid_size == num_tokens - 1:
+        # Drop CLS token (first token), reshape remaining patch tokens
+        patch_tokens = last_hidden_state[1:]  # [grid^2, C]
+        return patch_tokens.reshape(grid_size, grid_size, channels)
+
+    raise ValueError(
+        f"Cannot reshape {num_tokens} tokens to square grid. "
+        f"Expected grid^2 ({grid_size}^2={grid_size * grid_size}) or "
+        f"grid^2+1 ({grid_size * grid_size + 1}) tokens."
+    )
+
+
+def should_enable_omnibase(state_dict: dict) -> bool:
+    """
+    Detect OmniBase capability from checkpoint state dict keys.
+
+    OmniBase checkpoints contain SigLIP embedder weights that standard
+    Z-Image-Turbo checkpoints do not have.
+
+    Args:
+        state_dict: Model state dict (or iterable of keys).
+
+    Returns:
+        True if checkpoint contains SigLIP embedder weights (OmniBase capable).
+    """
+    keys = state_dict.keys() if hasattr(state_dict, "keys") else state_dict
+    # Use 'in' to handle common prefixes like "module.", "model.", etc.
+    return any("siglip_embedder." in k for k in keys)
+
+
+def infer_siglip_feat_dim(state_dict: dict) -> Optional[int]:
+    """
+    Infer SigLIP feature dimension from checkpoint weights.
+
+    Examines the siglip_embedder linear layer weight shape to determine
+    the input dimension (SigLIP feature dim).
+
+    Args:
+        state_dict: Model state dict.
+
+    Returns:
+        SigLIP feature dimension (e.g., 1152) or None if not OmniBase.
+    """
+    # siglip_embedder is Sequential(RMSNorm, Linear)
+    # The linear layer weight has shape [out_dim, in_dim] where in_dim = siglip_feat_dim
+    # Key may be prefixed (e.g., "module.siglip_embedder.1.weight")
+
+    # Find any siglip_embedder linear weight
+    for key, value in state_dict.items():
+        if "siglip_embedder." in key and key.endswith(".weight"):
+            # Check it's a 2D tensor (linear layer weight)
+            if value is not None and hasattr(value, "ndim") and value.ndim == 2:
+                # Linear weight is [out_features, in_features]
+                # For siglip_embedder.1 (the Linear after RMSNorm), in_features = siglip_feat_dim
+                if ".1.weight" in key:  # The Linear layer in Sequential
+                    siglip_feat_dim = value.shape[1]
+                    logger.debug(f"Inferred siglip_feat_dim={siglip_feat_dim} from {key}")
+                    return siglip_feat_dim
+
+    # Check if it's OmniBase at all
+    if should_enable_omnibase(state_dict):
+        # Fallback to default if we can't infer from weights
+        logger.warning(
+            f"OmniBase checkpoint detected but could not infer siglip_feat_dim from weights. "
+            f"Using default: {zimage_config.DEFAULT_TRANSFORMER_SIGLIP_FEAT_DIM}"
+        )
+        return zimage_config.DEFAULT_TRANSFORMER_SIGLIP_FEAT_DIM
+
+    return None
+
+
+# endregion

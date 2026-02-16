@@ -249,7 +249,7 @@ Control which submodules receive LoRA adapters using regex patterns.
 
 **Option:** `exclude_patterns=<python-literal-list-of-regex>`
 
-A list of regex patterns matched against the module's original dotted name (before `.` → `_` conversion). If a module matches an exclude pattern, it is **skipped** unless it also matches an include pattern.
+A list of regex patterns matched against the module's original dotted name (before `.` → `_` conversion) using `re.fullmatch()`. Patterns must match the **entire** module name, not just a prefix — use `.*` anchors (e.g., `'.*attn.*'` not `'attn'`). If a module matches an exclude pattern, it is **skipped** unless it also matches an include pattern.
 
 **Example:**
 ```toml
@@ -272,16 +272,21 @@ network_args = [
 
 ### Pattern application order
 
-1. Check `exclude_patterns` → if matches, mark for exclusion
-2. Check `include_patterns` → if matches, override exclusion
-3. Apply default exclusions (architecture-specific)
+1. Architecture-specific default excludes are **always applied** (additive, cannot be removed via user patterns)
+2. User-supplied `exclude_patterns` are appended to the defaults
+3. For each module: check exclude list → if matches, mark for exclusion
+4. Check `include_patterns` → if matches, override exclusion (use this to selectively re-enable a default-excluded module)
 
 ### Default exclusions
 
-By default, **modulation layers** are excluded:
+Each architecture has safety excludes for layers that cause instability if trained (norm, modulation, embeddings). For example, HunyuanVideo excludes:
 ```
 .*(img_mod|txt_mod|modulation).*
 ```
+
+These defaults are always active. To train a default-excluded module, add it to `include_patterns` rather than trying to remove the default exclude. (Exception: Qwen-Image's `exclude_mod=False` disables the modulation default entirely — see below.)
+
+> **LoKr-specific args:** For LoKr's `factor` option and other LoKr/LoHa-specific configuration, see `docs/loha_lokr.md`.
 
 ---
 

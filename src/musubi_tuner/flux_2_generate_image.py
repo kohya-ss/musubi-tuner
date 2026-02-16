@@ -1,6 +1,7 @@
 import argparse
 from importlib.util import find_spec
 import random
+import sys
 import os
 import time
 import copy
@@ -137,7 +138,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
-        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+        "--prefer_lycoris", "--lycoris", dest="prefer_lycoris", action="store_true",
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). (--lycoris is deprecated)"
     )
     setup_parser_compile(parser)
 
@@ -196,7 +198,10 @@ def parse_args() -> argparse.Namespace:
         if args.prompt is None and not args.from_file and not args.interactive:
             raise ValueError("Either --prompt, --from_file or --interactive must be specified")
 
-    if args.lycoris and not lycoris_available:
+    if "--lycoris" in sys.argv:
+        logger.warning("--lycoris is deprecated; use --prefer_lycoris instead")
+
+    if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
@@ -651,7 +656,7 @@ def generate(
                 args.include_patterns,
                 args.exclude_patterns,
                 device,
-                args.lycoris,
+                args.prefer_lycoris,
                 args.save_merged_model,
             )
 
@@ -987,7 +992,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             first_prompt_args.include_patterns,
             first_prompt_args.exclude_patterns,
             device,
-            first_prompt_args.lycoris,
+            first_prompt_args.prefer_lycoris,
             first_prompt_args.save_merged_model,
         )
         if first_prompt_args.save_merged_model:

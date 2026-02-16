@@ -4,6 +4,7 @@ from importlib.util import find_spec
 import random
 import os
 import re
+import sys
 import time
 import math
 import copy
@@ -24,7 +25,13 @@ from contextlib import nullcontext
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.networks import lora_wan
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import (
+    convert_diffusers_if_needed,
+    detect_network_type,
+    filter_lora_state_dict,
+    format_unknown_network_type_error,
+    merge_nonlora_to_model,
+)
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
 from musubi_tuner.wan.modules.model import WanModel, load_wan_model, detect_wan_sd_dtype
@@ -34,7 +41,6 @@ from musubi_tuner.wan.modules.clip import CLIPModel
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
 from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, setup_parser_compile
@@ -242,7 +248,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
-        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+        "--prefer_lycoris",
+        "--lycoris",
+        dest="prefer_lycoris",
+        action="store_true",
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). "
+        "(--lycoris is a deprecated alias for --prefer_lycoris)",
     )
     parser.add_argument(
         "--compile_args",
@@ -271,7 +282,9 @@ def parse_args() -> argparse.Namespace:
         args.output_type == "images" or args.output_type == "video"
     ), "latent_path is only supported for images or video output"
 
-    if args.lycoris and not lycoris_available:
+    if "--lycoris" in sys.argv:
+        logger.warning("--lycoris is deprecated; use --prefer_lycoris instead")
+    if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
@@ -642,34 +655,28 @@ def load_dit_model(
     # If LyCORIS is enabled, we will load the model to CPU and then merge LoRA weights (static method)
 
     loading_device = "cpu"
-    if args.blocks_to_swap == 0 and not args.lycoris:
+    if args.blocks_to_swap == 0 and not args.prefer_lycoris:
         loading_device = device
 
     # load LoRA weights
-    if not args.lycoris and lora_weights is not None and len(lora_weights) > 0:
+    if not args.prefer_lycoris and lora_weights is not None and len(lora_weights) > 0:
         lora_weights_list = []
-        for lora_weight in lora_weights:
+        for i, lora_weight in enumerate(lora_weights):
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
-            conversion_needed = False
-            for key, weight in lora_sd.items():
-                prefix, key_body = key.split(".", 1)
-                if prefix == "diffusion_model" or prefix == "transformer":
-                    conversion_needed = True
-                    break
-                elif "lora_unet" in prefix:
-                    conversion_needed = False
-                    break
-            if conversion_needed:
-                logger.info("Converting LoRA from foreign key naming format")
-                lora_sd = convert_from_diffusers("lora_unet_", lora_sd)
-            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            net_type = detect_network_type(lora_sd)
+            if net_type == "unknown":
+                raise ValueError(format_unknown_network_type_error(lora_weight))
+            lora_sd = convert_diffusers_if_needed(lora_sd)
+            include_pat = args.include_patterns[i] if args.include_patterns and len(args.include_patterns) > i else None
+            exclude_pat = args.exclude_patterns[i] if args.exclude_patterns and len(args.exclude_patterns) > i else None
+            lora_sd = filter_lora_state_dict(lora_sd, include_pat, exclude_pat)
             lora_weights_list.append(lora_sd)
     else:
         lora_weights_list = None
 
     loading_weight_dtype = dit_weight_dtype
-    if (args.fp8_scaled or args.mixed_precision_transformer) and not args.lycoris:
+    if (args.fp8_scaled or args.mixed_precision_transformer) and not args.prefer_lycoris:
         loading_weight_dtype = None  # we will load weights as-is
 
     blissful_kwargs = {
@@ -692,7 +699,7 @@ def load_dit_model(
         False,
         loading_device,
         loading_weight_dtype,
-        args.fp8_scaled and not args.lycoris,
+        args.fp8_scaled and not args.prefer_lycoris,
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
         use_scaled_mm=args.fp8_fast,
@@ -703,7 +710,7 @@ def load_dit_model(
     #     model.set_time_embedding_v2_1(True)
 
     # merge LoRA weights
-    if args.lycoris:
+    if args.prefer_lycoris:
         if lora_weights is not None and len(lora_weights) > 0:
             merge_lora_weights(
                 lora_wan,
@@ -811,39 +818,27 @@ def merge_lora_weights(
 
         logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
         weights_sd = load_file(lora_weight)
-        conversion_needed = False
         if converter is not None:
             weights_sd = converter(weights_sd)
         else:  # Kohya still hasn't implemented conversion for Wan/Hunyuan so this else handles that
-            for key, weight in weights_sd.items():
-                prefix, key_body = key.split(".", 1)
-                if prefix == "diffusion_model" or prefix == "transformer":
-                    conversion_needed = True
-                    break
-                elif "lora_unet" in prefix:
-                    conversion_needed = False
-                    break
-
-        if conversion_needed:
-            logger.info("Converting LoRA from foreign key naming format")
-            weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
+            weights_sd = convert_diffusers_if_needed(weights_sd)
         # apply include/exclude patterns
         original_key_count = len(weights_sd.keys())
         if include_patterns is not None and len(include_patterns) > i:
             include_pattern = include_patterns[i]
             regex_include = re.compile(include_pattern)
-            weights_sd = {k: v for k, v in weights_sd.items() if regex_include.search(k)}
+            weights_sd = {k: v for k, v in weights_sd.items() if "." not in k or regex_include.search(k)}
             logger.info(f"Filtered keys with include pattern {include_pattern}: {original_key_count} -> {len(weights_sd.keys())}")
         if exclude_patterns is not None and len(exclude_patterns) > i:
             original_key_count_ex = len(weights_sd.keys())
             exclude_pattern = exclude_patterns[i]
             regex_exclude = re.compile(exclude_pattern)
-            weights_sd = {k: v for k, v in weights_sd.items() if not regex_exclude.search(k)}
+            weights_sd = {k: v for k, v in weights_sd.items() if "." not in k or not regex_exclude.search(k)}
             logger.info(
                 f"Filtered keys with exclude pattern {exclude_pattern}: {original_key_count_ex} -> {len(weights_sd.keys())}"
             )
         if len(weights_sd) != original_key_count:
-            remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys()]))
+            remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys() if "." in k]))
             remaining_keys.sort()
             logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
             if len(weights_sd) == 0:
@@ -862,8 +857,17 @@ def merge_lora_weights(
             )
             lycoris_net.merge_to(None, model, weights_sd, dtype=None, device=device)
         else:
-            network = lora_module.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=model, for_inference=True)
-            network.merge_to(None, model, weights_sd, device=device, non_blocking=True)
+            net_type = detect_network_type(weights_sd)
+            if net_type in ("loha", "lokr", "hybrid"):
+                logger.info(f"Detected {net_type} weights, using per-key-family merge")
+                merge_nonlora_to_model(model, weights_sd, lora_multiplier, device)
+            elif net_type == "unknown":
+                raise ValueError(format_unknown_network_type_error(lora_weight))
+            else:
+                network = lora_module.create_arch_network_from_weights(
+                    lora_multiplier, weights_sd, unet=model, for_inference=True
+                )
+                network.merge_to(None, model, weights_sd, device=device, non_blocking=True)
 
         synchronize_device(device)
         logger.info("LoRA weights loaded")

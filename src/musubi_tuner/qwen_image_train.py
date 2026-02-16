@@ -17,7 +17,7 @@ from musubi_tuner import qwen_image_train_network
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.modules.mask_loss import (
-    apply_masked_loss,
+    apply_masked_loss_with_prior,
     log_mask_loss_banner,
     require_mask_weights_if_enabled,
     validate_mask_loss_args,
@@ -289,8 +289,11 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         accelerator.print(f"number of trainable parameters: {n_params}")
 
         # trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
+        param_name_map = None
+        if args.optimizer_type.lower() in ("muon", "muonwithadamw", "muonwithauxadam"):
+            param_name_map = {id(p): name for name, p in name_and_params if p.requires_grad}
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
-            args, params_to_optimize
+            args, params_to_optimize, param_name_map=param_name_map
         )
 
         # prepare dataloader
@@ -647,11 +650,14 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                     if weighting is not None:
                         loss = loss * weighting
 
+                    # Note: Prior preservation is not supported for full fine-tuning (no LoRA to disable).
+                    # We use apply_masked_loss_with_prior for API consistency; it handles None prior_loss gracefully.
                     layout = "layered" if getattr(args, "is_layered", False) else "video"
                     drop_base_frame = bool(getattr(args, "remove_first_image_from_target", False)) if layout == "layered" else False
-                    loss = apply_masked_loss(
+                    loss = apply_masked_loss_with_prior(
                         loss,
                         batch.get("mask_weights", None),
+                        prior_loss_unreduced=None,  # Full fine-tuning: no prior preservation
                         args=args,
                         layout=layout,
                         drop_base_frame=drop_base_frame,

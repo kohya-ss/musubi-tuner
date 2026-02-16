@@ -214,8 +214,12 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
         accelerator.print(f"number of trainable parameters: {n_params}")
 
+        param_name_map = None
+        if args.optimizer_type.lower() in ("muon", "muonwithadamw", "muonwithauxadam"):
+            param_name_map = {id(p): name for name, p in name_and_params if p.requires_grad}
+
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
-            args, params_to_optimize
+            args, params_to_optimize, param_name_map=param_name_map
         )
 
         # prepare dataloader
@@ -544,6 +548,15 @@ class ZImageTrainer(ZImageNetworkTrainer):
                             params_to_clip = transformer.parameters()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
+                        if blocks_to_swap > 0 and args.block_swap_optimizer_patch_params:
+                            # Move grad to same device of parameter: workaround for optimizer step, working with AdamW and Adafactor for now.
+                            # AdamW8bit and other optimizers does not work with this patch because of their specific implementation.
+                            unwrapped_optimizer = accelerator.unwrap_model(optimizer)
+                            for group in unwrapped_optimizer.param_groups:
+                                for param in group["params"]:
+                                    if param.grad is not None and param.device != param.grad.device:
+                                        param.grad = param.grad.to(param.device, non_blocking=True)
+
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad(set_to_none=True)
@@ -671,6 +684,11 @@ def zimage_finetune_setup_parser(parser: argparse.ArgumentParser) -> argparse.Ar
         "--mem_eff_save",
         action="store_true",
         help="Enable memory efficient saving (saving states requires use normal saving, so it takes same amount of memory even with this option enabled)",
+    )
+    parser.add_argument(
+        "--block_swap_optimizer_patch_params",
+        action="store_true",
+        help="Patch optimizer parameters for block swap when blocks_to_swap > 0. Only works for some optimizers. Not needed when using --fused_backward_pass.",
     )
     return parser
 
