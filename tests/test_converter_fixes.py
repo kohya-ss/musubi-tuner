@@ -274,5 +274,92 @@ class TestMixedKeyConversion(unittest.TestCase):
         self.assertNotIn("transformer.blocks.0.attn.q.lora_A.weight", result)
 
 
+class TestLoraMergeDtypeStability(unittest.TestCase):
+    """lora_merge_weights_to_tensor must preserve the base weight's dtype."""
+
+    def test_bf16_base_fp16_lora_preserves_dtype(self):
+        """bf16 base + fp16 LoRA weights must not promote to fp32."""
+        from musubi_tuner.utils.lora_utils import lora_merge_weights_to_tensor
+
+        base = torch.randn(8, 16, dtype=torch.bfloat16)
+        lora_sd = {
+            "lora_unet_test.lora_down.weight": torch.randn(4, 16, dtype=torch.float16),
+            "lora_unet_test.lora_up.weight": torch.randn(8, 4, dtype=torch.float16),
+            "lora_unet_test.alpha": torch.tensor(4.0),
+        }
+        keys = set(lora_sd.keys())
+        result = lora_merge_weights_to_tensor(base, "lora_unet_test", lora_sd, keys, 1.0, torch.device("cpu"))
+        self.assertEqual(result.dtype, torch.bfloat16, "output dtype must match base weight dtype")
+        self.assertFalse(torch.equal(result, base), "merge must actually modify the weight")
+        # Keys should be consumed
+        self.assertNotIn("lora_unet_test.lora_down.weight", keys)
+
+    def test_fp32_base_fp16_lora_preserves_dtype(self):
+        """fp32 base + fp16 LoRA weights must stay fp32."""
+        from musubi_tuner.utils.lora_utils import lora_merge_weights_to_tensor
+
+        base = torch.randn(8, 16, dtype=torch.float32)
+        lora_sd = {
+            "lora_unet_test.lora_down.weight": torch.randn(4, 16, dtype=torch.float16),
+            "lora_unet_test.lora_up.weight": torch.randn(8, 4, dtype=torch.float16),
+        }
+        keys = set(lora_sd.keys())
+        result = lora_merge_weights_to_tensor(base, "lora_unet_test", lora_sd, keys, 1.0, torch.device("cpu"))
+        self.assertEqual(result.dtype, torch.float32)
+        self.assertFalse(torch.equal(result, base), "merge must actually modify the weight")
+
+    def test_no_match_returns_unchanged(self):
+        """When no LoRA keys match, return base weight unchanged."""
+        from musubi_tuner.utils.lora_utils import lora_merge_weights_to_tensor
+
+        base = torch.randn(8, 16, dtype=torch.bfloat16)
+        lora_sd = {"lora_unet_other.lora_down.weight": torch.randn(4, 16)}
+        keys = set(lora_sd.keys())
+        result = lora_merge_weights_to_tensor(base, "lora_unet_test", lora_sd, keys, 1.0, torch.device("cpu"))
+        self.assertTrue(torch.equal(result, base))
+
+
+class TestWeightHookPrefixStripping(unittest.TestCase):
+    """weight_hook_func must strip model-level prefixes for LoRA name matching.
+
+    Tests call the shipped _make_lora_name_from_model_key() helper directly,
+    so they break if the production code is changed or deleted.
+    """
+
+    def test_wan_prefix_stripped_for_lora_matching(self):
+        """model.diffusion_model.* keys should match LoRA weights after prefix stripping."""
+        from musubi_tuner.utils.lora_utils import _make_lora_name_from_model_key, lora_merge_weights_to_tensor
+
+        lora_name = _make_lora_name_from_model_key("model.diffusion_model.blocks.0.attn.q.weight")
+        self.assertEqual(lora_name, "lora_unet_blocks_0_attn_q")
+
+        # Now verify the merge actually works with that name
+        base = torch.randn(8, 16, dtype=torch.bfloat16)
+        lora_sd = {
+            "lora_unet_blocks_0_attn_q.lora_down.weight": torch.randn(4, 16, dtype=torch.bfloat16),
+            "lora_unet_blocks_0_attn_q.lora_up.weight": torch.randn(8, 4, dtype=torch.bfloat16),
+            "lora_unet_blocks_0_attn_q.alpha": torch.tensor(4.0),
+        }
+        keys = set(lora_sd.keys())
+        result = lora_merge_weights_to_tensor(base, lora_name, lora_sd, keys, 1.0, torch.device("cpu"))
+        # If the name matched, keys should be consumed
+        self.assertEqual(len(keys), 0, "all LoRA keys should be consumed")
+        self.assertEqual(result.dtype, torch.bfloat16)
+
+    def test_diffusion_model_prefix_stripped(self):
+        """diffusion_model.* keys (without model. prefix) should also match."""
+        from musubi_tuner.utils.lora_utils import _make_lora_name_from_model_key
+
+        lora_name = _make_lora_name_from_model_key("diffusion_model.blocks.0.attn.q.weight")
+        self.assertEqual(lora_name, "lora_unet_blocks_0_attn_q")
+
+    def test_no_prefix_unchanged(self):
+        """Keys without model prefixes should produce the same lora_name as before."""
+        from musubi_tuner.utils.lora_utils import _make_lora_name_from_model_key
+
+        lora_name = _make_lora_name_from_model_key("blocks.0.attn.q.weight")
+        self.assertEqual(lora_name, "lora_unet_blocks_0_attn_q")
+
+
 if __name__ == "__main__":
     unittest.main()

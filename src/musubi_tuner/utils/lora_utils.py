@@ -57,6 +57,24 @@ def convert_diffusers_if_needed(lora_sd: Dict[str, torch.Tensor], prefix: str = 
     return passthrough_sd
 
 
+_MODEL_KEY_PREFIXES = ("model.diffusion_model.", "diffusion_model.")
+
+
+def _make_lora_name_from_model_key(model_weight_key: str) -> str:
+    """Convert a model state-dict key (e.g. 'model.diffusion_model.blocks.0.attn.q.weight')
+    to the corresponding LoRA module name (e.g. 'lora_unet_blocks_0_attn_q').
+
+    Strips the trailing '.weight' suffix and any model-level prefixes that don't
+    appear in LoRA key naming (e.g. 'model.diffusion_model.' from WAN checkpoints).
+    """
+    lora_name = model_weight_key.rsplit(".", 1)[0]  # remove trailing ".weight"
+    for pfx in _MODEL_KEY_PREFIXES:
+        if lora_name.startswith(pfx):
+            lora_name = lora_name[len(pfx):]
+            break
+    return "lora_unet_" + lora_name.replace(".", "_")
+
+
 def detect_network_type(lora_sd_or_keys: Union[Dict[str, torch.Tensor], Iterable[str]]) -> str:
     """Detect network type from state dict keys.
 
@@ -193,8 +211,7 @@ def load_safetensors_with_lora_and_fp8(
                 model_weight = model_weight.to(calc_device)  # to make calculation faster
 
             for lora_weight_keys, lora_sd, multiplier in zip(list_of_lora_weight_keys, lora_weights_list, lora_multipliers):
-                lora_name = model_weight_key.rsplit(".", 1)[0]  # remove trailing ".weight"
-                lora_name = "lora_unet_" + lora_name.replace(".", "_")
+                lora_name = _make_lora_name_from_model_key(model_weight_key)
 
                 # Per-key-family dispatch: try each family in deterministic order.
                 # Each merge function is a no-op if no matching keys found.
@@ -202,62 +219,10 @@ def load_safetensors_with_lora_and_fp8(
                 model_weight = loha_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
                 model_weight = lokr_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
 
-                # Standard LoRA path
-                down_key = lora_name + ".lora_down.weight"
-                up_key = lora_name + ".lora_up.weight"
-                alpha_key = lora_name + ".alpha"
-                if down_key not in lora_weight_keys or up_key not in lora_weight_keys:
-                    continue
-
-                # get LoRA weights
-                down_weight = lora_sd[down_key]
-                up_weight = lora_sd[up_key]
-
-                dim = down_weight.size()[0]
-                alpha = lora_sd.get(alpha_key, dim)
-                if isinstance(alpha, torch.Tensor):
-                    alpha = alpha.item()
-                scale = alpha / dim
-
-                down_weight = down_weight.to(calc_device)
-                up_weight = up_weight.to(calc_device)
-
-                original_dtype = model_weight.dtype
-                if original_dtype.itemsize == 1:  # fp8
-                    # temporarily convert to float16 for calculation
-                    model_weight = model_weight.to(torch.float16)
-                    down_weight = down_weight.to(torch.float16)
-                    up_weight = up_weight.to(torch.float16)
-
-                # W <- W + U * D
-                if len(model_weight.size()) == 2:
-                    # linear
-                    if len(up_weight.size()) == 4:  # use linear projection mismatch
-                        up_weight = up_weight.squeeze(3).squeeze(2)
-                        down_weight = down_weight.squeeze(3).squeeze(2)
-                    model_weight = model_weight + multiplier * (up_weight @ down_weight) * scale
-                elif down_weight.size()[2:4] == (1, 1):
-                    # conv2d 1x1
-                    model_weight = (
-                        model_weight
-                        + multiplier
-                        * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
-                        * scale
-                    )
-                else:
-                    # conv2d 3x3
-                    conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
-                    # logger.info(conved.size(), weight.size(), module.stride, module.padding)
-                    model_weight = model_weight + multiplier * conved * scale
-
-                if original_dtype.itemsize == 1:  # fp8
-                    model_weight = model_weight.to(original_dtype)  # convert back to original dtype
-
-                # remove LoRA keys from set
-                lora_weight_keys.remove(down_key)
-                lora_weight_keys.remove(up_key)
-                if alpha_key in lora_weight_keys:
-                    lora_weight_keys.remove(alpha_key)
+                # Standard LoRA path (delegates to shared merge function for dtype safety)
+                model_weight = lora_merge_weights_to_tensor(
+                    model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device
+                )
 
             if not keep_on_calc_device and original_device != calc_device:
                 model_weight = model_weight.to(original_device, original_dtype)  # move back to original device
