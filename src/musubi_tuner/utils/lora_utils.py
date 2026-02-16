@@ -18,7 +18,7 @@ logger = BlissfulLogger(__name__, "green")
 
 
 UNKNOWN_NETWORK_FORMAT_HINT = (
-    "Try --prefer_lycoris for non-native formats (IA3, DyLoRA, etc.) or convert to a supported format."
+    "Some scripts support --prefer_lycoris for non-native formats (IA3, DyLoRA, etc.). Otherwise, convert to a supported format."
 )
 
 
