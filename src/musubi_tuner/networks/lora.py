@@ -1385,7 +1385,11 @@ def create_network_from_weights(
     # Allow caller to override module_class (for LoHa/LoKr)
     module_class = kwargs.pop("module_class", module_class)
     module_kwargs = kwargs.pop("module_kwargs", None)
-    enable_conv2d = kwargs.pop("enable_conv2d", True)
+    if isinstance(module_kwargs, str):
+        module_kwargs = ast.literal_eval(module_kwargs)
+    if module_kwargs is not None and not isinstance(module_kwargs, dict):
+        raise ValueError(f"module_kwargs must be a dict, got {type(module_kwargs).__name__}")
+    enable_conv2d = parse_bool_arg(kwargs.pop("enable_conv2d", None), default=True)
 
     network = LoRANetwork(
         target_replace_modules,
