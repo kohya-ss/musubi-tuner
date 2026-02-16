@@ -59,6 +59,7 @@ class LoKrModule(nn.Module):
     """LoKr training module. Linear-only — Conv2d raises ValueError."""
 
     _kron_warning_emitted = False
+    _dropout_warning_emitted = False
 
     def __init__(
         self,
@@ -81,8 +82,11 @@ class LoKrModule(nn.Module):
         self.org_module = org_module  # temporary reference, deleted in apply_to()
         self.enabled = True
 
-        if dropout is not None or rank_dropout is not None:
+        if not LoKrModule._dropout_warning_emitted and (
+            (dropout is not None and dropout > 0) or (rank_dropout is not None and rank_dropout > 0)
+        ):
             logger.warning("LoKr v1 does not implement dropout or rank_dropout; these arguments are ignored.")
+            LoKrModule._dropout_warning_emitted = True
 
         if org_module.__class__.__name__ != "Linear":
             raise ValueError(f"LoKr v1 only supports Linear modules, got {org_module.__class__.__name__}")
@@ -135,26 +139,22 @@ class LoKrModule(nn.Module):
         alpha = self.alpha.item() if isinstance(self.alpha, torch.Tensor) else self.alpha
         scale = alpha / dim
 
-        diff_weight = make_kron(w1, w2, scale)
-
         if not LoKrModule._kron_warning_emitted:
-            numel = diff_weight.numel()
-            if numel > 16_000_000:
+            expected_numel = w1.shape[0] * w2.shape[0] * w1.shape[1] * w2.shape[1]
+            if expected_numel > 16_000_000:
                 logger.warning(
-                    f"LoKr v1 materializes full Kronecker product ({numel:,} elements) in forward pass. "
+                    f"LoKr v1 materializes full Kronecker product ({expected_numel:,} elements) in forward pass. "
                     "This uses significantly more memory than LoRA. Consider reducing target modules or using LoRA for large layers."
                 )
                 LoKrModule._kron_warning_emitted = True
 
+        diff_weight = make_kron(w1, w2, scale)
         return diff_weight * multiplier
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
         del self.org_module  # prevent base module from appearing in state_dict
-
-    def restore(self):
-        self.org_module.forward = self.org_forward
 
     def forward(self, x, *args, **kwargs):
         if not self.enabled:
