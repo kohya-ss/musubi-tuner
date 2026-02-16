@@ -178,7 +178,7 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 - `--network_module networks.lora_flux_2`を指定する必要があります。
 - FLUX.2の学習には`--mixed_precision bf16`を推奨します。
 - FLUX.2には`--timestep_sampling flux2_shift`を推奨します。
-- `--fp8`（DiT用）や`--fp8_t5`（テキストエンコーダー1用）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
+- `--fp8`（DiT用）や`--fp8_text_encoder`（テキストエンコーダー用、Qwen3のみ）などのメモリ節約オプションが利用可能です。`--fp8_scaled`を使用することをお勧めします。
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
 
 </details>
@@ -210,8 +210,8 @@ python src/musubi_tuner/flux_2_generate_image.py \
 
 - `--image_size` is the size of the generated image, height and width are specified in that order.
 - `--prompt`: Prompt for generation.
-- `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_t5` option is available to reduce memory usage of Text Encoder. `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
-- LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--lycoris` is also supported.
+- `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_text_encoder` option is available to reduce memory usage of Text Encoder (Qwen3 only). `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
+- LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--prefer_lycoris` forces the LyCORIS backend for all weight merging; `--lycoris` is a deprecated alias.
 - `--embedded_cfg_scale` (default 2.5) controls the distilled guidance scale.
 - `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
 
@@ -229,8 +229,8 @@ FLUX.2の推論は専用のスクリプト`flux_2_generate_image.py`を使用し
 
 - `--image_size`は生成する画像のサイズで、高さと幅をその順番で指定します。
 - `--prompt`: 生成用のプロンプトです。
-- DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。品質はやや低下する可能性があります。またText Encoder 1のメモリ使用量を削減するために、`--fp8_t5`オプションを指定可能です。DiT用に`--fp8`単独のオプションも用意されていますが、`--fp8_scaled`の方が品質が良い可能性があります。
-- LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。LyCORISもサポートされています。
+- DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。品質はやや低下する可能性があります。またText Encoderのメモリ使用量を削減するために、`--fp8_text_encoder`オプションを指定可能です（Qwen3のみ）。DiT用に`--fp8`単独のオプションも用意されていますが、`--fp8_scaled`の方が品質が良い可能性があります。
+- LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。`--prefer_lycoris`はすべてのLoRA重みマージにLyCORISバックエンドを強制します。`--lycoris`は非推奨のエイリアスです。
 - `--embedded_cfg_scale`（デフォルト2.5）は、蒸留されたガイダンススケールを制御します。
 - `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
 

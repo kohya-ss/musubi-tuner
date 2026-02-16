@@ -328,7 +328,7 @@ python src/musubi_tuner/hv_1_5_generate_video.py \
 - `--vae_sample_size` (default 128) controls VAE tiling size. Set to 256 if VRAM is sufficient for better quality. Set to 0 to disable tiling.
 - `--vae_enable_patch_conv` enables patch-based convolution in VAE for memory optimization.
 - `--blocks_to_swap` option is available to offload some blocks to CPU. The maximum number of blocks that can be offloaded is 51.
-- LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--lycoris` is also supported.
+- LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--prefer_lycoris` forces the LyCORIS backend for all weight merging; `--lycoris` is a deprecated alias.
 - `--guidance_scale` (default 6.0) controls the classifier-free guidance scale.
 - `--flow_shift` (default 7.0) controls the discrete flow shift.
 - `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
@@ -362,7 +362,7 @@ I2V推論を行う場合、`--image_path`と`--image_encoder`を指定します�
 - `--blocks_to_swap`オプションで、一部のブロックをCPUにオフロードできます。オフロード可能な最大ブロック数は51です。
 - `--vae_sample_size`（デフォルト128）でVAEのタイリングサイズを制御します。VRAMが十分な場合は256に設定すると品質が向上します。0に設定するとタイリングを無効にします。
 - `--vae_enable_patch_conv`でVAEのパッチベース畳み込みを有効にし、メモリを最適化します。
-- LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。LyCORISもサポートされています。
+- LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。`--prefer_lycoris`はすべてのLoRA重みマージにLyCORISバックエンドを強制します。`--lycoris`は非推奨のエイリアスです。
 - `--guidance_scale`（デフォルト6.0）は、classifier-free guidanceスケールを制御します。
 - `--flow_shift`（デフォルト7.0）は、discrete flow shiftを制御します。
 - `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。

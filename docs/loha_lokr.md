@@ -124,9 +124,9 @@ python wan_generate_video.py \
 
 The backend automatically detects the network type (LoRA, LoHa, or LoKr) from the state dict keys and routes to the appropriate merge function.
 
-### LyCORIS Backend (Fallback)
+### LyCORIS Backend (Force Override)
 
-If you need the LyCORIS library for advanced features, use `--prefer_lycoris`:
+To force all weight merging through the LyCORIS library instead of native merge, use `--prefer_lycoris`. Requires LyCORIS to be installed:
 
 ```bash
 python wan_generate_video.py \
@@ -152,7 +152,7 @@ python convert_lora.py --input converted.safetensors --output reconverted.safete
 For Z-Image LoKr QKV conversion (ComfyUI compatibility), use the dedicated Z-Image converter:
 
 ```bash
-python convert_z_image_lora_to_comfy.py --input lokr_lora.safetensors --output comfy_lora.safetensors
+python src/musubi_tuner/networks/convert_z_image_lora_to_comfy.py lokr_lora.safetensors comfy_lora.safetensors --lokr_rank 64
 ```
 
 Converters preserve:
