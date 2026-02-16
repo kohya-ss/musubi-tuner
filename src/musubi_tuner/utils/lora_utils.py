@@ -176,6 +176,10 @@ def load_safetensors_with_lora_and_fp8(
         lora_network_types = [detect_network_type(lora_sd) for lora_sd in lora_weights_list]
         logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}, types: {lora_network_types}")
 
+        # Import merge functions once (deferred to avoid circular imports at module level)
+        from musubi_tuner.networks.loha import merge_weights_to_tensor as loha_merge
+        from musubi_tuner.networks.lokr import merge_weights_to_tensor as lokr_merge
+
         # make hook for LoRA merging
         def weight_hook_func(model_weight_key, model_weight: torch.Tensor, keep_on_calc_device=False):
             nonlocal list_of_lora_weight_keys, lora_weights_list, lora_multipliers, calc_device
@@ -195,12 +199,7 @@ def load_safetensors_with_lora_and_fp8(
                 # Per-key-family dispatch: try each family in deterministic order.
                 # Each merge function is a no-op if no matching keys found.
                 # This handles hybrid dicts (lokr_* + lora_* after QKV conversion).
-                from musubi_tuner.networks.loha import merge_weights_to_tensor as loha_merge
-
                 model_weight = loha_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
-
-                from musubi_tuner.networks.lokr import merge_weights_to_tensor as lokr_merge
-
                 model_weight = lokr_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
 
                 # Standard LoRA path
@@ -216,6 +215,8 @@ def load_safetensors_with_lora_and_fp8(
 
                 dim = down_weight.size()[0]
                 alpha = lora_sd.get(alpha_key, dim)
+                if isinstance(alpha, torch.Tensor):
+                    alpha = alpha.item()
                 scale = alpha / dim
 
                 down_weight = down_weight.to(calc_device)
