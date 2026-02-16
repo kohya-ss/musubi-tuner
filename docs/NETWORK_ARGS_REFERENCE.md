@@ -284,7 +284,9 @@ Each architecture has safety excludes for layers that cause instability if train
 .*(img_mod|txt_mod|modulation).*
 ```
 
-These defaults are always active. To train a default-excluded module, add it to `include_patterns` rather than trying to remove the default exclude.
+These defaults are always active. To train a default-excluded module, add it to `include_patterns` rather than trying to remove the default exclude. (Exception: Qwen-Image's `exclude_mod=False` disables the modulation default entirely — see below.)
+
+> **LoKr-specific args:** For LoKr's `factor` option and other LoKr/LoHa-specific configuration, see `docs/loha_lokr.md`.
 
 ---
 
