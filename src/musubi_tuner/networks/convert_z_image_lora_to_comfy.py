@@ -235,15 +235,19 @@ def main(args):
                 for suffix in ["to_q", "to_k", "to_v"]:
                     name = f"{lora_name_prefix}{suffix}"
                     w1 = state_dict.pop(f"{name}.lokr_w1")
-                    if f"{name}.lokr_w2_a" in state_dict:
-                        w2 = state_dict.pop(f"{name}.lokr_w2_a") @ state_dict.pop(f"{name}.lokr_w2_b")
+                    is_lowrank = f"{name}.lokr_w2_a" in state_dict
+                    if is_lowrank:
+                        w2_a = state_dict.pop(f"{name}.lokr_w2_a")
+                        w2_b = state_dict.pop(f"{name}.lokr_w2_b")
+                        dim = w2_a.shape[1]  # low-rank dimension
+                        w2 = w2_a @ w2_b
                     else:
                         w2 = state_dict.pop(f"{name}.lokr_w2")
+                        dim = max(w2.shape)
                     alpha_val = state_dict.pop(f"{name}.alpha", None)
-                    dim = w2.shape[1] if f"{name}.lokr_w2_a" in state_dict else max(w2.shape)
                     if alpha_val is not None:
                         a = alpha_val.item() if isinstance(alpha_val, torch.Tensor) else alpha_val
-                        scale = a / max(w2.shape)
+                        scale = a / dim
                     else:
                         scale = 1.0
                     delta = make_kron(w1, w2, scale)

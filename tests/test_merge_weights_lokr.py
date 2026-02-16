@@ -1,8 +1,77 @@
 import unittest
 
 import torch
+import torch.nn as nn
 
-from musubi_tuner.networks.lokr import merge_weights_to_tensor
+from musubi_tuner.networks.lokr import LoKrInfModule, LoKrModule, merge_weights_to_tensor
+
+
+class TestLoKrModuleConstruction(unittest.TestCase):
+    """Smoke tests for LoKrModule instantiation (alpha buffer, parameter shapes)."""
+
+    def test_construction_does_not_crash(self):
+        """LoKrModule can be instantiated without alpha buffer collision."""
+        linear = nn.Linear(16, 8)
+        module = LoKrModule("test_module", linear, lora_dim=2, alpha=1.0, factor=-1)
+        self.assertIsInstance(module.alpha, torch.Tensor)
+        self.assertEqual(module.alpha.item(), 1.0)
+        self.assertIsNotNone(module.lokr_w1)
+
+    def test_construction_lowrank_mode(self):
+        """Low-rank mode creates w2_a + w2_b when dim < max(factored shape)."""
+        linear = nn.Linear(16, 8)
+        module = LoKrModule("test_module", linear, lora_dim=2, alpha=1.0, factor=-1)
+        self.assertIsNotNone(module.lokr_w2_a)
+        self.assertIsNotNone(module.lokr_w2_b)
+        self.assertIsNone(module.lokr_w2)
+
+    def test_construction_fullmatrix_mode(self):
+        """Full-matrix mode creates w2 when dim >= max(factored shape)."""
+        linear = nn.Linear(16, 8)
+        # Use very large dim to force full-matrix
+        module = LoKrModule("test_module", linear, lora_dim=999, alpha=1.0, factor=-1)
+        self.assertIsNotNone(module.lokr_w2)
+        self.assertIsNone(module.lokr_w2_a)
+        self.assertIsNone(module.lokr_w2_b)
+
+    def test_conv2d_raises(self):
+        """Conv2d modules raise ValueError (LoKr v1 is Linear-only)."""
+        conv = nn.Conv2d(3, 16, 3)
+        with self.assertRaises(ValueError):
+            LoKrModule("test_conv", conv, lora_dim=2, alpha=1.0, factor=-1)
+
+
+class TestLoKrInfModuleMergeDtype(unittest.TestCase):
+    """Tests that LoKrInfModule.merge_to preserves original dtype."""
+
+    def test_merge_preserves_bfloat16(self):
+        """merge_to with dtype=None preserves bfloat16 model weights."""
+        linear = nn.Linear(16, 8)
+        linear.weight.data = linear.weight.data.to(torch.bfloat16)
+
+        module = LoKrInfModule("test_module", linear, multiplier=1.0, lora_dim=2, alpha=1.0, factor=-1)
+
+        # Build a fake sd matching the module's parameter names
+        sd = {}
+        for name, param in module.named_parameters():
+            sd[name.split(".", 1)[-1] if "." in name else name] = param.data
+
+        module.merge_to(sd, dtype=None, device=torch.device("cpu"))
+        self.assertEqual(linear.weight.dtype, torch.bfloat16)
+
+    def test_merge_preserves_float16(self):
+        """merge_to with dtype=None preserves float16 model weights."""
+        linear = nn.Linear(16, 8)
+        linear.weight.data = linear.weight.data.to(torch.float16)
+
+        module = LoKrInfModule("test_module", linear, multiplier=1.0, lora_dim=2, alpha=1.0, factor=-1)
+
+        sd = {}
+        for name, param in module.named_parameters():
+            sd[name.split(".", 1)[-1] if "." in name else name] = param.data
+
+        module.merge_to(sd, dtype=None, device=torch.device("cpu"))
+        self.assertEqual(linear.weight.dtype, torch.float16)
 
 
 class TestMergeWeightsLoKr(unittest.TestCase):

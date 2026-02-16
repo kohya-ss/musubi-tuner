@@ -25,7 +25,7 @@ from contextlib import nullcontext
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.networks import lora_wan
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import detect_network_type, filter_lora_state_dict, merge_nonlora_to_model
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
 from musubi_tuner.wan.modules.model import WanModel, load_wan_model, detect_wan_sd_dtype
@@ -876,8 +876,15 @@ def merge_lora_weights(
             )
             lycoris_net.merge_to(None, model, weights_sd, dtype=None, device=device)
         else:
-            network = lora_module.create_arch_network_from_weights(lora_multiplier, weights_sd, unet=model, for_inference=True)
-            network.merge_to(None, model, weights_sd, device=device, non_blocking=True)
+            net_type = detect_network_type(weights_sd)
+            if net_type in ("loha", "lokr", "hybrid"):
+                logger.info(f"Detected {net_type} weights, using per-key-family merge")
+                merge_nonlora_to_model(model, weights_sd, lora_multiplier, device)
+            else:
+                network = lora_module.create_arch_network_from_weights(
+                    lora_multiplier, weights_sd, unet=model, for_inference=True
+                )
+                network.merge_to(None, model, weights_sd, device=device, non_blocking=True)
 
         synchronize_device(device)
         logger.info("LoRA weights loaded")

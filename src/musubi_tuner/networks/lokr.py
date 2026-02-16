@@ -77,7 +77,6 @@ class LoKrModule(nn.Module):
         self.lora_name = lora_name
         self.multiplier = multiplier
         self.lora_dim = lora_dim
-        self.alpha = alpha
         self.dropout = dropout
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
@@ -175,28 +174,41 @@ class LoKrInfModule(LoKrModule):
         self.enabled = False  # disabled by default for inference (will be merged)
 
     def merge_to(self, sd, dtype, device, non_blocking=False):
-        # get up/down weight from module
-        diff_weight = self.get_weight(multiplier=self.multiplier)
+        org_sd = self.org_module.state_dict()
+        weight = org_sd["weight"]
+        org_dtype = weight.dtype
+        org_device = weight.device
+        merge_device = org_device if device is None else device
 
-        # get target weight
-        target_weight = self.org_module.weight.data
-        if dtype is not None:
-            diff_weight = diff_weight.to(dtype)
-        diff_weight = diff_weight.to(device, non_blocking=non_blocking)
-        target_weight = target_weight + diff_weight
-        self.org_module.weight.data = target_weight
+        # Compute diff in float32 for precision, matching LoRA/LoHa merge pattern
+        diff_weight = self.get_weight(multiplier=self.multiplier).to(device=merge_device, dtype=torch.float)
+        weight = weight.to(device=merge_device, dtype=torch.float, non_blocking=non_blocking) + diff_weight
+
+        org_sd["weight"] = weight.to(device=org_device, dtype=dtype if dtype is not None else org_dtype)
+        self.org_module.load_state_dict(org_sd)
 
 
 def _resolve_factor(
-    weights_sd: Dict[str, torch.Tensor], explicit_factor: Optional[int] = None
+    weights_sd: Dict[str, torch.Tensor],
+    explicit_factor: Optional[int] = None,
+    metadata_factor: Optional[int] = None,
 ) -> Tuple[int, bool]:
-    """Resolve LoKr factor with precedence: explicit > persisted buffer > default(-1).
+    """Resolve LoKr factor with precedence: explicit > persisted buffer > metadata > default(-1).
+
+    Args:
+        weights_sd: State dict (may contain lokr_factor tensor buffer).
+        explicit_factor: Factor from CLI/network_args (highest precedence).
+        metadata_factor: Factor from safetensors metadata (ss_lokr_factor), used as
+            fallback when lokr_factor tensor buffer is absent.
 
     Returns (factor: int, had_mismatch_warning: bool).
     """
     persisted_factor = None
     if "lokr_factor" in weights_sd:
         persisted_factor = int(weights_sd["lokr_factor"].item())
+    elif metadata_factor is not None:
+        persisted_factor = int(metadata_factor)
+        logger.info(f"Recovered lokr_factor={persisted_factor} from safetensors metadata (buffer was absent)")
 
     if explicit_factor is not None:
         factor = int(explicit_factor)
@@ -291,7 +303,10 @@ def create_arch_network_from_weights(
     explicit_factor = kwargs.pop("factor", None)
     if explicit_factor is not None:
         explicit_factor = int(explicit_factor)
-    factor, _ = _resolve_factor(weights_sd, explicit_factor)
+    metadata_factor = kwargs.pop("metadata_factor", None)
+    if metadata_factor is not None:
+        metadata_factor = int(metadata_factor)
+    factor, _ = _resolve_factor(weights_sd, explicit_factor, metadata_factor)
 
     module_class = LoKrInfModule if for_inference else LoKrModule
     module_kwargs = {"factor": factor}

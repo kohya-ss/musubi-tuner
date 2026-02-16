@@ -307,61 +307,39 @@ def load_safetensors_with_fp8_optimization_and_hook(
     return state_dict
 
 
-def native_merge_file(
-    weights_sd: Dict[str, torch.Tensor],
+def merge_nonlora_to_model(
     model: torch.nn.Module,
+    weights_sd: Dict[str, torch.Tensor],
     multiplier: float,
-    architecture: str,
     device: torch.device,
-    **extra_kwargs,
-) -> bool:
-    """Merge a single weight file natively, handling hybrid dicts (LoRA + LoHa + LoKr).
+) -> int:
+    """Merge LoHa/LoKr weights directly into model parameters via per-key-family dispatch.
 
-    Uses per-key-family dispatch: tries each network type in order, each is a no-op
-    if no matching keys are found. Returns True if any keys were merged.
+    Iterates model named_parameters, constructs lora_name from each param name,
+    and tries LoHa then LoKr merge functions (each is a no-op if no matching keys).
+    Returns number of consumed keys.
     """
-    merged_any = False
+    from musubi_tuner.networks.loha import merge_weights_to_tensor as loha_merge
+    from musubi_tuner.networks.lokr import merge_weights_to_tensor as lokr_merge
 
-    # 1. LoHa keys
-    loha_keys = {k for k in weights_sd if ".hada_w1_a" in k or ".hada_w2_a" in k}
-    if loha_keys:
-        from musubi_tuner.networks import loha
+    lora_weight_keys = set(weights_sd.keys())
+    initial_key_count = len(lora_weight_keys)
 
-        loha_modules = {k.rsplit(".", 1)[0] for k in loha_keys}
-        loha_sd = {k: v for k, v in weights_sd.items() if any(k.startswith(m) for m in loha_modules) or "." not in k}
-        net = loha.create_arch_network_from_weights(
-            multiplier, loha_sd, unet=model, for_inference=True, architecture=architecture
-        )
-        net.merge_to(None, model, loha_sd, device=device)
-        merged_any = True
+    for param_name, param in model.named_parameters():
+        if not param_name.endswith(".weight"):
+            continue
 
-    # 2. LoKr keys
-    lokr_keys = {k for k in weights_sd if ".lokr_w1" in k or ".lokr_w2" in k or ".lokr_w2_a" in k}
-    if lokr_keys:
-        from musubi_tuner.networks import lokr
+        lora_name = "lora_unet_" + param_name.rsplit(".", 1)[0].replace(".", "_")
 
-        lokr_modules = {k.rsplit(".", 1)[0] for k in lokr_keys}
-        lokr_sd = {k: v for k, v in weights_sd.items() if any(k.startswith(m) for m in lokr_modules) or "." not in k}
-        net = lokr.create_arch_network_from_weights(
-            multiplier, lokr_sd, unet=model, for_inference=True, architecture=architecture, **extra_kwargs
-        )
-        net.merge_to(None, model, lokr_sd, device=device)
-        merged_any = True
+        # Per-key-family dispatch: LoHa → LoKr
+        param.data = loha_merge(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
+        param.data = lokr_merge(param.data, lora_name, weights_sd, lora_weight_keys, multiplier, device)
 
-    # 3. LoRA keys (standard + Diffusers-converted)
-    lora_keys = {k for k in weights_sd if ".lora_down." in k or ".lora_up." in k}
-    if lora_keys:
-        from musubi_tuner.networks import lora
+    merged_count = initial_key_count - len(lora_weight_keys)
 
-        lora_modules = {k.rsplit(".", 1)[0] for k in lora_keys}
-        lora_sd = {k: v for k, v in weights_sd.items() if any(k.startswith(m) for m in lora_modules) or "." not in k}
-        net = lora.create_arch_network_from_weights(
-            lora.HUNYUAN_TARGET_REPLACE_MODULES, multiplier, lora_sd, unet=model, for_inference=True
-        )
-        net.merge_to(None, model, lora_sd, device=device)
-        merged_any = True
+    # Warn about remaining unmerged keys (exclude non-dotted metadata like lokr_factor)
+    remaining = {k for k in lora_weight_keys if "." in k}
+    if remaining:
+        logger.warning(f"{len(remaining)} LoHa/LoKr keys were not matched to model parameters")
 
-    if not merged_any:
-        logger.warning("No mergeable keys found in weight file")
-
-    return merged_any
+    return merged_count

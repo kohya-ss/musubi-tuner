@@ -30,6 +30,7 @@ from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
+from musubi_tuner.utils.lora_utils import detect_network_type, merge_nonlora_to_model
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
@@ -710,6 +711,7 @@ def main():
                     filtered_weights = {k: v for k, v in weights_sd.items() if "single_blocks" not in k}
                     weights_sd = filtered_weights
 
+                logger.info("Merging LoRA weights to DiT model")
                 if args.prefer_lycoris:
                     lycoris_net, _ = create_network_from_weights(
                         multiplier=lora_multiplier,
@@ -720,23 +722,17 @@ def main():
                         vae=None,
                         for_inference=True,
                     )
-                else:
-                    network = lora.create_arch_network_from_weights(
-                        lora_multiplier, weights_sd, unet=transformer, for_inference=True
-                    )
-                logger.info("Merging LoRA weights to DiT model")
-
-                # try:
-                #     network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
-                #     info = network.load_state_dict(weights_sd, strict=True)
-                #     logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
-                #     network.eval()
-                #     network.to(device)
-                # except Exception as e:
-                if args.prefer_lycoris:
                     lycoris_net.merge_to(None, transformer, weights_sd, dtype=None, device=device)
                 else:
-                    network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
+                    net_type = detect_network_type(weights_sd)
+                    if net_type in ("loha", "lokr", "hybrid"):
+                        logger.info(f"Detected {net_type} weights, using per-key-family merge")
+                        merge_nonlora_to_model(transformer, weights_sd, lora_multiplier, device)
+                    else:
+                        network = lora.create_arch_network_from_weights(
+                            lora_multiplier, weights_sd, unet=transformer, for_inference=True
+                        )
+                        network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
 
                 synchronize_device(device)
 

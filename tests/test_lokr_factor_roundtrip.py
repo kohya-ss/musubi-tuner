@@ -70,6 +70,21 @@ class TestLoKrFactorRoundtrip(unittest.TestCase):
         self.assertEqual(factor, -1)
         self.assertFalse(warning)
 
+    def test_factor_metadata_fallback_when_buffer_absent(self):
+        """metadata_factor used when lokr_factor buffer is absent."""
+        sd = self._make_lokr_sd(factor=4)
+        del sd["lokr_factor"]
+        factor, warning = _resolve_factor(sd, explicit_factor=None, metadata_factor=4)
+        self.assertEqual(factor, 4)
+        self.assertFalse(warning)
+
+    def test_factor_buffer_takes_precedence_over_metadata(self):
+        """Buffer value wins over metadata_factor."""
+        sd = self._make_lokr_sd(factor=4)
+        factor, warning = _resolve_factor(sd, explicit_factor=None, metadata_factor=8)
+        self.assertEqual(factor, 4)  # buffer wins
+        self.assertFalse(warning)
+
     def test_factor_fallback_from_metadata(self):
         """When lokr_factor buffer is missing, factor recovered from ss_lokr_factor metadata."""
         state_dict = self._make_lokr_sd(factor=4)

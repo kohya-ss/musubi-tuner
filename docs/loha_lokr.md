@@ -142,11 +142,17 @@ Note: `--lycoris` is a deprecated alias for `--prefer_lycoris` and will be remov
 LoHa and LoKr weights are supported by the format converters:
 
 ```bash
-# Convert to Diffusers format
-python convert_lora.py --input lokr_lora.safetensors --output converted.safetensors --target diffusers
+# Convert from sd-scripts to Diffusers format
+python convert_lora.py --input lokr_lora.safetensors --output converted.safetensors --target other
 
-# Convert to ComfyUI format (Z-Image)
-python convert_lora.py --input lokr_lora.safetensors --output converted.safetensors --target comfy
+# Convert from Diffusers back to sd-scripts format
+python convert_lora.py --input converted.safetensors --output reconverted.safetensors --target default
+```
+
+For Z-Image LoKr QKV conversion (ComfyUI compatibility), use the dedicated Z-Image converter:
+
+```bash
+python convert_z_image_lora_to_comfy.py --input lokr_lora.safetensors --output comfy_lora.safetensors
 ```
 
 Converters preserve:
