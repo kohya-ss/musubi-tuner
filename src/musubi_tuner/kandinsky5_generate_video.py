@@ -20,6 +20,7 @@ from musubi_tuner.kandinsky5.models.text_embedders import get_text_embedder
 from musubi_tuner.kandinsky5_train_network import Kandinsky5NetworkTrainer
 from musubi_tuner.hv_train_network import clean_memory_on_device
 from musubi_tuner.networks import lora_kandinsky
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, format_unknown_network_type_error, merge_nonlora_to_model
 
 from blissful_tuner.utils import ensure_dtype_form
 from blissful_tuner.blissful_core import add_blissful_k5_args, parse_blissful_args
@@ -297,8 +298,17 @@ def main():
                 for idx, lora_path in enumerate(args.lora_weight):
                     mult = args.lora_multiplier[idx] if args.lora_multiplier and len(args.lora_multiplier) > idx else 1.0
                     lora_sd = load_file(lora_path)
-                    net = lora_kandinsky.create_arch_network_from_weights(mult, lora_sd, unet=dit, for_inference=True)
-                    net.merge_to(None, dit, lora_sd, device=dit.device if hasattr(dit, "device") else device, non_blocking=True)
+                    net_type = detect_network_type(lora_sd)
+                    if net_type == "unknown":
+                        raise ValueError(format_unknown_network_type_error(lora_path))
+                    lora_sd = convert_diffusers_if_needed(lora_sd)
+                    merge_device = dit.device if hasattr(dit, "device") else device
+                    if net_type in ("loha", "lokr", "hybrid"):
+                        logger.info(f"Detected {net_type} weights, using per-key-family merge")
+                        merge_nonlora_to_model(dit, lora_sd, mult, merge_device)
+                    else:
+                        net = lora_kandinsky.create_arch_network_from_weights(mult, lora_sd, unet=dit, for_inference=True)
+                        net.merge_to(None, dit, lora_sd, device=merge_device, non_blocking=True)
                 clean_memory_on_device(device)
                 if args.fp8_base or args.fp8_scaled:
                     state_dict = dit.state_dict()
