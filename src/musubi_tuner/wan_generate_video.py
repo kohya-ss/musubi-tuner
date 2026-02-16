@@ -283,7 +283,7 @@ def parse_args() -> argparse.Namespace:
     ), "latent_path is only supported for images or video output"
 
     if "--lycoris" in sys.argv:
-        logger.warning("--lycoris is deprecated. Use --prefer_lycoris instead. Behavior is unchanged.")
+        logger.warning("--lycoris is deprecated; use --prefer_lycoris instead")
     if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 

@@ -536,7 +536,7 @@ def parse_args():
     # update dit_weight based on model_base if not exists
 
     if "--lycoris" in sys.argv:
-        logger.warning("--lycoris is deprecated. Use --prefer_lycoris instead. Behavior is unchanged.")
+        logger.warning("--lycoris is deprecated; use --prefer_lycoris instead")
     if args.prefer_lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
@@ -689,7 +689,11 @@ def main():
 
                 logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                 weights_sd = load_file(lora_weight)
+                net_type = detect_network_type(weights_sd)
                 weights_sd = convert_diffusers_if_needed(weights_sd)
+                if net_type == "unknown":
+                    # Defensive: conversion can normalize foreign LoRA key naming (Diffusers) into detectable keys.
+                    net_type = detect_network_type(weights_sd)
 
                 # Filter to exclude keys that are part of single_blocks
                 if args.exclude_single_blocks:
@@ -709,7 +713,6 @@ def main():
                     )
                     lycoris_net.merge_to(None, transformer, weights_sd, dtype=None, device=device)
                 else:
-                    net_type = detect_network_type(weights_sd)
                     if net_type in ("loha", "lokr", "hybrid"):
                         logger.info(f"Detected {net_type} weights, using per-key-family merge")
                         merge_nonlora_to_model(transformer, weights_sd, lora_multiplier, device)
