@@ -2,7 +2,7 @@
 
 A comprehensive guide for configuring LoRA training in blissful-tuner, covering all features, network arguments, and optimization techniques.
 
-**Last Updated:** 2026-01-16
+**Last Updated:** 2026-02-16
 
 ---
 
@@ -51,11 +51,17 @@ This document serves as a reference for configuring LoRA training in blissful-tu
 
 | Architecture | Training Script | Network Module |
 |--------------|----------------|----------------|
-| Qwen-Image | `qwen_image_train_network.py` | `networks.lora_qwen_image` |
 | WAN 2.1/2.2 | `wan_train_network.py` | `networks.lora_wan` |
-| FramePack | `fpack_train_network.py` | `networks.lora_fpack` |
-| FLUX.1 Kontext | `flux_kontext_train_network.py` | `networks.lora_flux` |
 | HunyuanVideo | `hv_train_network.py` | `networks.lora` |
+| HunyuanVideo 1.5 | `hv_1_5_train_network.py` | `networks.lora_hv_1_5` |
+| FramePack | `fpack_train_network.py` | `networks.lora_framepack` |
+| FLUX.1 Kontext | `flux_kontext_train_network.py` | `networks.lora_flux` |
+| FLUX.2 (Dev, Klein 4B, Klein 9B) | `flux_2_train_network.py` | `networks.lora_flux_2` |
+| Qwen-Image | `qwen_image_train_network.py` | `networks.lora_qwen_image` |
+| Z-Image | `zimage_train_network.py` | `networks.lora_zimage` |
+| Kandinsky5 | `kandinsky5_train_network.py` | `networks.lora_kandinsky` |
+
+You can also use LoHa / LoKr by setting `network_module` to `networks.loha` or `networks.lokr`. See `docs/loha_lokr.md`.
 
 ---
 
