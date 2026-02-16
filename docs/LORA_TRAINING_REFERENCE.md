@@ -162,6 +162,7 @@ where `⊙` is element-wise multiplication. This provides different expressivity
 - WAN (`wan`)
 - FramePack (`fp`)
 - FLUX Kontext (`fk`)
+- FLUX.2 (Dev, Klein 4B, Klein 9B) (`f2d`, `f2k4`, `f2k9`)
 - Qwen-Image / Qwen-Image-Edit / Qwen-Image-Layered (`qi`, `qie`, `qil`)
 - Kandinsky5 (`k5`)
 - Z-Image (`zi`)
@@ -185,22 +186,7 @@ network_dim = 8
 network_alpha = 1
 ```
 
-**⚠️ Important: Inference/Merge Scripts Assume LoRA**
-
-The current `merge_lora.py` and generation scripts (`hv_generate_video.py`, `wan_generate_video.py`, etc.) have hardcoded LoRA module imports. They will not correctly load or merge LoHa weights.
-
-| Script | Issue |
-|--------|-------|
-| `merge_lora.py` | Hardcoded `from networks import lora` |
-| `hv_generate_video.py` | Hardcoded LoRA import |
-| `wan_generate_video.py` | Architecture-specific LoRA import |
-
-**Workarounds:**
-1. **Merge during training**: Save checkpoints with weights merged into the base model
-2. **Manual script modification**: Update the import in your local copy to use `networks.loha`
-3. **Future update**: Automatic network type detection may be added (based on weight key patterns like `hada_w1_a`)
-
-> **Note**: LyCORIS also supports LoHa, but weight key compatibility between this implementation and LyCORIS has not been verified. Use with caution if attempting cross-tool workflows.
+**Inference:** LoHa weights are natively detected and merged by all generation scripts — use them exactly like LoRA weights with `--lora_weight`. See `docs/loha_lokr.md` for details.
 
 ---
 
