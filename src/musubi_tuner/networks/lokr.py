@@ -58,6 +58,8 @@ def make_kron(w1: torch.Tensor, w2: torch.Tensor, scale: float = 1.0) -> torch.T
 class LoKrModule(nn.Module):
     """LoKr training module. Linear-only — Conv2d raises ValueError."""
 
+    _kron_warning_emitted = False
+
     def __init__(
         self,
         lora_name: str,
@@ -75,11 +77,12 @@ class LoKrModule(nn.Module):
         self.lora_name = lora_name
         self.multiplier = multiplier
         self.lora_dim = lora_dim
-        self.dropout = dropout
-        self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
-        self.org_module = org_module
+        self.org_module = org_module  # temporary reference, deleted in apply_to()
         self.enabled = True
+
+        if dropout is not None or rank_dropout is not None:
+            logger.warning("LoKr v1 does not implement dropout or rank_dropout; these arguments are ignored.")
 
         if org_module.__class__.__name__ != "Linear":
             raise ValueError(f"LoKr v1 only supports Linear modules, got {org_module.__class__.__name__}")
@@ -133,11 +136,22 @@ class LoKrModule(nn.Module):
         scale = alpha / dim
 
         diff_weight = make_kron(w1, w2, scale)
+
+        if not LoKrModule._kron_warning_emitted:
+            numel = diff_weight.numel()
+            if numel > 16_000_000:
+                logger.warning(
+                    f"LoKr v1 materializes full Kronecker product ({numel:,} elements) in forward pass. "
+                    "This uses significantly more memory than LoRA. Consider reducing target modules or using LoRA for large layers."
+                )
+                LoKrModule._kron_warning_emitted = True
+
         return diff_weight * multiplier
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
+        del self.org_module  # prevent base module from appearing in state_dict
 
     def restore(self):
         self.org_module.forward = self.org_forward
@@ -167,12 +181,19 @@ class LoKrModule(nn.Module):
 class LoKrInfModule(LoKrModule):
     """LoKr inference module with merge_to and get_weight support."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, lora_name, org_module, *args, **kwargs):
+        super().__init__(lora_name, org_module, *args, **kwargs)
+        self.org_module_ref = [org_module]  # non-module container to avoid state_dict bloat
         self.enabled = False  # disabled by default for inference (will be merged)
 
+    def apply_to(self):
+        # Override parent: keep org_module_ref intact (needed for merge_to)
+        self.org_forward = self.org_module.forward
+        self.org_module.forward = self.forward
+        del self.org_module
+
     def merge_to(self, sd, dtype, device, non_blocking=False):
-        org_sd = self.org_module.state_dict()
+        org_sd = self.org_module_ref[0].state_dict()
         weight = org_sd["weight"]
         org_dtype = weight.dtype
         org_device = weight.device
@@ -199,7 +220,7 @@ class LoKrInfModule(LoKrModule):
 
         weight = weight.to(device=merge_device, dtype=torch.float, non_blocking=non_blocking) + diff_weight
         org_sd["weight"] = weight.to(device=org_device, dtype=dtype if dtype is not None else org_dtype)
-        self.org_module.load_state_dict(org_sd)
+        self.org_module_ref[0].load_state_dict(org_sd)
 
 
 def _resolve_factor(
@@ -265,7 +286,7 @@ def create_arch_network(
     exclude_patterns = kwargs.get("exclude_patterns", None)
     if exclude_patterns is None:
         exclude_patterns = []
-    else:
+    elif isinstance(exclude_patterns, str):
         exclude_patterns = ast.literal_eval(exclude_patterns)
 
     exclude_patterns.extend(config["exclude_patterns"])

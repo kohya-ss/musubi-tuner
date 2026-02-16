@@ -107,5 +107,36 @@ class TestLoKrFactorRoundtrip(unittest.TestCase):
         self.assertIn("lokr_factor", filtered)
 
 
+class TestLoKrModuleStateDict(unittest.TestCase):
+    """LoKrModule.state_dict() must not contain base model weights."""
+
+    def test_state_dict_excludes_org_module(self):
+        """After apply_to(), org_module.weight must NOT appear in LoKr state_dict."""
+        from musubi_tuner.networks.lokr import LoKrModule
+
+        linear = torch.nn.Linear(8, 4)
+        module = LoKrModule("test_lokr", linear, multiplier=1.0, lora_dim=2, alpha=2.0, factor=-1)
+        module.apply_to()
+        keys = set(module.state_dict().keys())
+        # Should contain LoKr parameters and alpha buffer
+        self.assertIn("lokr_w1", keys)
+        self.assertIn("alpha", keys)
+        # Must NOT contain base model weights
+        self.assertNotIn("org_module.weight", keys)
+        self.assertNotIn("org_module.bias", keys)
+
+    def test_inf_module_state_dict_excludes_org_module(self):
+        """LoKrInfModule.state_dict() must also exclude base model weights."""
+        from musubi_tuner.networks.lokr import LoKrInfModule
+
+        linear = torch.nn.Linear(8, 4)
+        module = LoKrInfModule("test_lokr", linear, multiplier=1.0, lora_dim=2, alpha=2.0, factor=-1)
+        module.apply_to()
+        keys = set(module.state_dict().keys())
+        self.assertIn("lokr_w1", keys)
+        self.assertNotIn("org_module.weight", keys)
+        self.assertNotIn("org_module_ref.weight", keys)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -844,7 +844,7 @@ class LoRANetwork(torch.nn.Module):
                                 # モジュール指定あり
                                 if lora_name in modules_dim:
                                     dim = modules_dim[lora_name]
-                                    alpha = modules_alpha[lora_name]
+                                    alpha = modules_alpha.get(lora_name, dim)  # default alpha = dim (LoRA convention)
                             else:
                                 # 通常、すべて対象とする
                                 if is_linear or is_conv2d_1x1:

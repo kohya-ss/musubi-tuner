@@ -91,6 +91,8 @@ The `w2` component can be either:
 ### LoKr v1 Limitations
 
 - **Linear-only**: Conv2d layers are automatically skipped with a warning. `--conv_dim` / `--conv_alpha` are ignored if provided.
+- **Full Kronecker materialization during training**: LoKr v1 constructs the full `(out_dim, in_dim)` Kronecker product matrix on every forward pass. This uses significantly more memory per layer than LoRA (which uses two small matmuls). For very large linear layers, this can become a bottleneck. An optimized Kron-matmul-without-materialization path is planned for a future update.
+- **dropout / rank_dropout**: These arguments are accepted but not implemented in LoKr v1 (a warning is logged if passed). Only `module_dropout` is functional.
 - Full Conv2d support is planned for a future update.
 
 ## Factor Persistence
