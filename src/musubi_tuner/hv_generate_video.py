@@ -671,9 +671,7 @@ def main():
         # if image_latents is given, the model should be I2V model, so the in_channels should be 32
         dit_in_channels = args.dit_in_channels if args.dit_in_channels is not None else (32 if image_latents is not None else 16)
 
-        # if we use LoRA, weigths should be bf16 instead of fp8, because merging should be done in bf16 <--- shoulda read this Blyss :P
-        # the model is too large, so we load the model to cpu. in addition, the .pt file is loaded to cpu anyway
-        # on the fly merging will be a solution for this issue for .safetenors files (not implemented yet)
+        # Model loaded to CPU for block-swap support and LoRA/LoHa/LoKr merge (merge is done before any dtype casting)
         transformer = load_transformer(
             args.dit, args.attn_mode, args.split_attn, loading_device, device, dit_dtype, in_channels=dit_in_channels
         )

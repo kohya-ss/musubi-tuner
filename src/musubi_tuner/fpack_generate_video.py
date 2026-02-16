@@ -932,51 +932,6 @@ def prepare_i2v_inputs(
     )
 
 
-# def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> Tuple[Any, torch.Tensor]:
-#     """setup scheduler for sampling
-
-#     Args:
-#         args: command line arguments
-#         config: model configuration
-#         device: device to use
-
-#     Returns:
-#         Tuple[Any, torch.Tensor]: (scheduler, timesteps)
-#     """
-#     if args.sample_solver == "unipc":
-#         scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False)
-#         scheduler.set_timesteps(args.infer_steps, device=device, shift=args.flow_shift)
-#         timesteps = scheduler.timesteps
-#     elif args.sample_solver == "dpm++":
-#         scheduler = FlowDPMSolverMultistepScheduler(
-#             num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False
-#         )
-#         sampling_sigmas = get_sampling_sigmas(args.infer_steps, args.flow_shift)
-#         timesteps, _ = retrieve_timesteps(scheduler, device=device, sigmas=sampling_sigmas)
-#     elif args.sample_solver == "vanilla":
-#         scheduler = FlowMatchDiscreteScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
-#         scheduler.set_timesteps(args.infer_steps, device=device)
-#         timesteps = scheduler.timesteps
-
-#         # FlowMatchDiscreteScheduler does not support generator argument in step method
-#         org_step = scheduler.step
-
-#         def step_wrapper(
-#             model_output: torch.Tensor,
-#             timestep: Union[int, torch.Tensor],
-#             sample: torch.Tensor,
-#             return_dict: bool = True,
-#             generator=None,
-#         ):
-#             return org_step(model_output, timestep, sample, return_dict=return_dict)
-
-#         scheduler.step = step_wrapper
-#     else:
-#         raise NotImplementedError("Unsupported solver.")
-
-#     return scheduler, timesteps
-
-
 def convert_lora_for_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     # Check the format of the LoRA file and convert Diffusers-format keys if needed.
     # Uses shared convert_from_diffusers which handles LoRA, LoHa, and LoKr key families.

@@ -1462,7 +1462,7 @@ class NetworkTrainer:
     def control_training(self) -> bool:
         return self._control_training
 
-    def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module: lora_module):
+    def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor]):
         return convert_diffusers_if_needed(weights_sd)
 
     def process_sample_prompts(
@@ -1973,7 +1973,7 @@ class NetworkTrainer:
                 accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
 
                 weights_sd = load_file(weight_path)
-                weights_sd = self.convert_weight_keys(weights_sd, args.network_module)
+                weights_sd = self.convert_weight_keys(weights_sd)
                 # Read safetensors metadata for LoKr factor fallback (when tensor buffer is absent)
                 call_kwargs = dict(net_kwargs)
                 with safe_open(weight_path, framework="pt") as f:
