@@ -641,9 +641,7 @@ def create_network(
             neuron_dropout = float(neuron_dropout)
 
     # verbose
-    verbose = kwargs.get("verbose", False)
-    if verbose is not None:
-        verbose = True if verbose == "True" else False
+    verbose = parse_bool_arg(kwargs.get("verbose", None), default=False)
 
     # regular expression for module selection: exclude and include
     exclude_patterns = kwargs.get("exclude_patterns", None)
@@ -660,7 +658,11 @@ def create_network(
     # Module class override (for LoKr/LoHa reuse of LoRANetwork)
     module_class = kwargs.pop("module_class", LoRAModule)
     module_kwargs = kwargs.pop("module_kwargs", None)
-    enable_conv2d = kwargs.pop("enable_conv2d", True)
+    if isinstance(module_kwargs, str):
+        module_kwargs = ast.literal_eval(module_kwargs)
+    if module_kwargs is not None and not isinstance(module_kwargs, dict):
+        raise ValueError(f"module_kwargs must be a dict, got {type(module_kwargs).__name__}")
+    enable_conv2d = parse_bool_arg(kwargs.pop("enable_conv2d", None), default=True)
 
     # too many arguments ( ^ω^)･･･
     network = LoRANetwork(
@@ -1160,7 +1162,10 @@ class LoRANetwork(torch.nn.Module):
             lr_descriptions.extend(["unet" + (" " + d if d else "") for d in descriptions])
 
             if self.loraplus_lr_ratio is not None and "plus" not in descriptions:
-                logger.warning("LoRA+ is not effective for this network type (no 'lora_up' parameters found)")
+                logger.warning(
+                    "LoRA+ has no active plus param group (check loraplus_lr_ratio and lr settings, "
+                    "or this network type may lack 'lora_up' parameters)"
+                )
 
         return all_params, lr_descriptions
 
@@ -1289,14 +1294,14 @@ class LoRANetwork(torch.nn.Module):
 
             norm = updown.norm().clamp(min=max_norm_value / 2)
             desired = torch.clamp(norm, max=max_norm_value)
-            ratio = desired.cpu() / norm.cpu()
+            ratio = (desired / norm).item()  # Python float avoids CPU/CUDA device mismatch
             sqrt_ratio = ratio**0.5
             if ratio != 1:
                 keys_scaled += 1
                 state_dict[upkeys[i]] *= sqrt_ratio
                 state_dict[downkeys[i]] *= sqrt_ratio
-            scalednorm = updown.norm() * ratio
-            norms.append(scalednorm.item())
+            scalednorm = updown.norm().item() * ratio
+            norms.append(scalednorm)
 
         if not norms:
             return keys_scaled, 0.0, 0.0
