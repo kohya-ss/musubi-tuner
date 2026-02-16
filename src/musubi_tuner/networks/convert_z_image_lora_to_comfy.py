@@ -217,6 +217,8 @@ def main(args):
     # LoKr QKV merge/split (lossy via SVD -> LoRA for QKV only)
     lokr_qkv_count = 0
     lokr_rank = getattr(args, "lokr_rank", 64)
+    if lokr_rank < 1:
+        raise ValueError(f"--lokr_rank must be >= 1, got {lokr_rank}")
     if args.reverse:
         # ComfyUI to sd-scripts: QKV LoKr keys would have been converted to LoRA by forward pass,
         # so reverse just uses the standard LoRA split above. Nothing extra needed.

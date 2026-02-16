@@ -87,6 +87,9 @@ def convert_from_diffusers(prefix, weights_sd):
                 lora_dims[lora_name] = weight.shape[0]
             elif "lokr_w2_a" in new_key:
                 lora_dims[lora_name] = weight.shape[1]
+            elif "lokr_w2" in new_key and "lokr_w2_b" not in new_key:
+                # Full-matrix LoKr: dim is max of w2 shape
+                lora_dims[lora_name] = max(weight.shape)
 
     # add alpha with rank (for LoRA keys that lack alpha in Diffusers format)
     for lora_name, dim in lora_dims.items():
@@ -95,6 +98,37 @@ def convert_from_diffusers(prefix, weights_sd):
             new_weights_sd[f"{lora_name}.alpha"] = torch.tensor(dim)
 
     return new_weights_sd
+
+
+def _normalize_module_name(lora_name: str, prefix: str) -> str:
+    """Convert a lora_name (e.g. 'lora_unet_blocks_0_cross_attn_k_img') to a Diffusers module name.
+
+    Applies architecture-specific fixups for WAN, Z-Image, and HunyuanVideo module names
+    where naive underscore-to-dot replacement would be lossy.
+    """
+    module_name = lora_name[len(prefix):]  # remove "lora_unet_"
+    module_name = module_name.replace("_", ".")  # replace "_" with "."
+    if ".cross.attn." in module_name or ".self.attn." in module_name:
+        # Wan2.1 lora name to module name
+        module_name = module_name.replace("cross.attn", "cross_attn")
+        module_name = module_name.replace("self.attn", "self_attn")
+        module_name = module_name.replace("k.img", "k_img")
+        module_name = module_name.replace("v.img", "v_img")
+    elif ".attention.to." in module_name or ".feed.forward." in module_name:
+        # Z-Image lora name to module name
+        module_name = module_name.replace("to.q", "to_q")
+        module_name = module_name.replace("to.k", "to_k")
+        module_name = module_name.replace("to.v", "to_v")
+        module_name = module_name.replace("to.out", "to_out")
+        module_name = module_name.replace("feed.forward", "feed_forward")
+    else:
+        # HunyuanVideo lora name to module name
+        module_name = module_name.replace("double.blocks.", "double_blocks.")
+        module_name = module_name.replace("single.blocks.", "single_blocks.")
+        module_name = module_name.replace("img.", "img_")
+        module_name = module_name.replace("txt.", "txt_")
+        module_name = module_name.replace("attn.", "attn_")
+    return module_name
 
 
 def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
@@ -142,14 +176,15 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
 
         lora_name = key.split(".", 1)[0]  # before first dot
 
+        # Resolve module name (shared normalization for all key families)
+        if lora_name in lora_name_to_module_name:
+            module_name = lora_name_to_module_name[lora_name]
+        else:
+            module_name = _normalize_module_name(lora_name, prefix)
+
         # LoHa/LoKr keys: pass through with Diffusers-style key renaming
         if ".hada_" in key or ".lokr_" in key:
             _, param_part = key.split(".", 1)  # e.g., "hada_w1_a"
-            if lora_name in lora_name_to_module_name:
-                module_name = lora_name_to_module_name[lora_name]
-            else:
-                module_name = lora_name[len(prefix):]
-                module_name = module_name.replace("_", ".")
             new_key = f"{diffusers_prefix}.{module_name}.{param_part}"
             new_weights_sd[new_key] = weight
             # Copy alpha as-is (no sqrt scaling for LoHa/LoKr)
@@ -160,32 +195,6 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
             continue
 
         # Standard LoRA path
-        if lora_name in lora_name_to_module_name:
-            module_name = lora_name_to_module_name[lora_name]
-        else:
-            module_name = lora_name[len(prefix):]  # remove "lora_unet_"
-            module_name = module_name.replace("_", ".")  # replace "_" with "."
-            if ".cross.attn." in module_name or ".self.attn." in module_name:
-                # Wan2.1 lora name to module name: ugly but works
-                module_name = module_name.replace("cross.attn", "cross_attn")  # fix cross attn
-                module_name = module_name.replace("self.attn", "self_attn")  # fix self attn
-                module_name = module_name.replace("k.img", "k_img")  # fix k img
-                module_name = module_name.replace("v.img", "v_img")  # fix v img
-            elif ".attention.to." in module_name or ".feed.forward." in module_name:
-                # Z-Image lora name to module name: ugly but works
-                module_name = module_name.replace("to.q", "to_q")  # fix to q
-                module_name = module_name.replace("to.k", "to_k")  # fix to k
-                module_name = module_name.replace("to.v", "to_v")  # fix to v
-                module_name = module_name.replace("to.out", "to_out")  # fix to out
-                module_name = module_name.replace("feed.forward", "feed_forward")  # fix feed forward
-            else:
-                # HunyuanVideo lora name to module name: ugly but works
-                module_name = module_name.replace("double.blocks.", "double_blocks.")  # fix double blocks
-                module_name = module_name.replace("single.blocks.", "single_blocks.")  # fix single blocks
-                module_name = module_name.replace("img.", "img_")  # fix img
-                module_name = module_name.replace("txt.", "txt_")  # fix txt
-                module_name = module_name.replace("attn.", "attn_")  # fix attn
-
         if "lora_down" in key:
             new_key = f"{diffusers_prefix}.{module_name}.lora_A.weight"
             dim = weight.shape[0]
@@ -222,11 +231,15 @@ def convert(input_file, output_file, target_format, diffusers_prefix):
     prefix = "lora_unet_"
     if target_format == "default":
         new_weights_sd = convert_from_diffusers(prefix, weights_sd)
-        model_utils.precalculate_safetensors_hashes(new_weights_sd, metadata)
     elif target_format == "other":
         new_weights_sd = convert_to_diffusers(prefix, diffusers_prefix, weights_sd)
     else:
         raise ValueError(f"unknown target format: {target_format}")
+
+    # Recompute hashes for the converted weights (old hashes are stale)
+    model_hash, legacy_hash = model_utils.precalculate_safetensors_hashes(new_weights_sd, metadata)
+    metadata["sshs_model_hash"] = model_hash
+    metadata["sshs_legacy_hash"] = legacy_hash
 
     logger.info(f"saving to {output_file}")
     save_file(new_weights_sd, output_file, metadata=metadata)

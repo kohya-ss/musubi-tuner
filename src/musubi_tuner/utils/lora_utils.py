@@ -17,6 +17,46 @@ from blissful_tuner.blissful_logger import BlissfulLogger
 logger = BlissfulLogger(__name__, "green")
 
 
+UNKNOWN_NETWORK_FORMAT_HINT = (
+    "Try --prefer_lycoris for non-native formats (IA3, DyLoRA, etc.) or convert to a supported format."
+)
+
+
+def format_unknown_network_type_error(lora_path: str) -> str:
+    """Build a consistent error message for unsupported/unknown LoRA weight formats."""
+    return f"Unrecognized weight format in {lora_path}. {UNKNOWN_NETWORK_FORMAT_HINT}"
+
+
+_DIFFUSERS_PREFIXES = frozenset(("diffusion_model", "transformer"))
+
+
+def convert_diffusers_if_needed(lora_sd: Dict[str, torch.Tensor], prefix: str = "lora_unet_") -> Dict[str, torch.Tensor]:
+    """Convert Diffusers-format keys to default format, preserving non-Diffusers keys.
+
+    Splits the state dict into Diffusers-prefixed keys and passthrough keys,
+    converts only the Diffusers subset, and merges back. This avoids data loss
+    when a state dict contains both Diffusers and already-normalized keys.
+    """
+    from musubi_tuner.convert_lora import convert_from_diffusers
+
+    diffusers_sd = {}
+    passthrough_sd = {}
+    for key, value in lora_sd.items():
+        if "." in key and key.split(".", 1)[0] in _DIFFUSERS_PREFIXES:
+            diffusers_sd[key] = value
+        else:
+            passthrough_sd[key] = value
+
+    if not diffusers_sd:
+        return lora_sd  # nothing to convert
+
+    logger.info("Converting LoRA from foreign key naming format")
+    converted = convert_from_diffusers(prefix, diffusers_sd)
+    # Merge: passthrough first, converted on top (converted keys take priority on collision)
+    passthrough_sd.update(converted)
+    return passthrough_sd
+
+
 def detect_network_type(lora_sd_or_keys: Union[Dict[str, torch.Tensor], Iterable[str]]) -> str:
     """Detect network type from state dict keys.
 
@@ -60,7 +100,7 @@ def filter_lora_state_dict(
         logger.info(f"Filtered keys with exclude pattern {exclude_pattern}: {original_key_count_ex} -> {len(weights_sd.keys())}")
 
     if len(weights_sd) != original_key_count:
-        remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys()]))
+        remaining_keys = list(set([k.split(".", 1)[0] for k in weights_sd.keys() if "." in k]))
         remaining_keys.sort()
         logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
         if len(weights_sd) == 0:

@@ -139,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
         "--prefer_lycoris", "--lycoris", dest="prefer_lycoris", action="store_true",
-        help="Enable LyCORIS backend for non-native weight formats. (--lycoris is deprecated)"
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). (--lycoris is deprecated)"
     )
     setup_parser_compile(parser)
 

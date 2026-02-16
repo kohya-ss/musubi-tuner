@@ -15,7 +15,6 @@ from safetensors import safe_open
 from tqdm import tqdm
 from rich_argparse import RichHelpFormatter
 from rich.traceback import install as install_rich_tracebacks
-from musubi_tuner.convert_lora import convert_from_diffusers
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image
@@ -23,7 +22,7 @@ from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, filter_lora_state_dict, format_unknown_network_type_error
 from musubi_tuner.networks import lora_qwen_image
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, setup_parser_compile, synchronize_device
@@ -160,7 +159,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
         "--prefer_lycoris", "--lycoris", dest="prefer_lycoris", action="store_true",
-        help="Enable LyCORIS backend for non-native weight formats. (--lycoris is deprecated)"
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). (--lycoris is deprecated)"
     )
     parser.add_argument(
         "--append_original_name", action="store_true", help="append original base name when saving images when editing"
@@ -358,20 +357,10 @@ def load_dit_model(
         for i, lora_weight in enumerate(args.lora_weight):
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
-            conversion_needed = False
-            for key, weight in lora_sd.items():
-                if "." not in key:
-                    continue  # skip network-level metadata keys (lokr_factor, etc.)
-                prefix, key_body = key.split(".", 1)
-                if prefix == "diffusion_model" or prefix == "transformer":
-                    conversion_needed = True
-                    break
-                elif "lora_unet" in prefix:
-                    conversion_needed = False
-                    break
-            if conversion_needed:
-                logger.info("Converting LoRA from foreign key naming format")
-                lora_sd = convert_from_diffusers("lora_unet_", lora_sd)
+            net_type = detect_network_type(lora_sd)
+            if net_type == "unknown":
+                raise ValueError(format_unknown_network_type_error(lora_weight))
+            lora_sd = convert_diffusers_if_needed(lora_sd)
             include_pat = args.include_patterns[i] if args.include_patterns and len(args.include_patterns) > i else None
             exclude_pat = args.exclude_patterns[i] if args.exclude_patterns and len(args.exclude_patterns) > i else None
             lora_sd = filter_lora_state_dict(lora_sd, include_pat, exclude_pat)

@@ -27,6 +27,7 @@ import torch
 from tqdm import tqdm
 from accelerate.utils import TorchDynamoPlugin, set_seed, DynamoBackend
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs, PartialState
+from safetensors import safe_open
 from safetensors.torch import load_file
 import transformers
 from diffusers.optimization import (
@@ -35,7 +36,6 @@ from diffusers.optimization import (
 )
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
-from musubi_tuner import convert_lora
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape, HYVideoDiffusionTransformer
 import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
@@ -58,6 +58,7 @@ from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, r
 from blissful_tuner.blissful_logger import BlissfulLogger
 
 from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed
 
 logger = BlissfulLogger(__name__, "green")
 
@@ -1462,14 +1463,7 @@ class NetworkTrainer:
         return self._control_training
 
     def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module: lora_module):
-        keys = list(weights_sd.keys())
-        if keys[0].startswith("lora_"):
-            return weights_sd  # default format
-        if keys[0].startswith("diffusion_model.") or keys[0].startswith("transformer."):
-            # Diffusers? format
-            logger.info("converting LoRA weights from diffusers format to default format")
-            return convert_lora.convert_from_diffusers("lora_unet_", weights_sd)
-        return weights_sd  # unknown format, return as is
+        return convert_diffusers_if_needed(weights_sd)
 
     def process_sample_prompts(
         self,
@@ -1980,9 +1974,15 @@ class NetworkTrainer:
 
                 weights_sd = load_file(weight_path)
                 weights_sd = self.convert_weight_keys(weights_sd, args.network_module)
+                # Read safetensors metadata for LoKr factor fallback (when tensor buffer is absent)
+                call_kwargs = dict(net_kwargs)
+                with safe_open(weight_path, framework="pt") as f:
+                    ss_lokr_factor = (f.metadata() or {}).get("ss_lokr_factor")
+                if ss_lokr_factor is not None:
+                    call_kwargs["metadata_factor"] = int(ss_lokr_factor)
                 module = network_module.create_arch_network_from_weights(
                     multiplier, weights_sd, unet=transformer, for_inference=True,
-                    architecture=self.architecture, **net_kwargs
+                    architecture=self.architecture, **call_kwargs
                 )
                 module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
 
@@ -1994,8 +1994,14 @@ class NetworkTrainer:
                 raise ValueError("--dim_from_weights requires --network_weights to be specified")
             logger.info(f"Loading network structure from weights: {args.network_weights}")
             weights_sd = load_file(args.network_weights)
+            # Read safetensors metadata for LoKr factor fallback (when tensor buffer is absent)
+            call_kwargs = dict(net_kwargs)
+            with safe_open(args.network_weights, framework="pt") as f:
+                ss_lokr_factor = (f.metadata() or {}).get("ss_lokr_factor")
+            if ss_lokr_factor is not None:
+                call_kwargs["metadata_factor"] = int(ss_lokr_factor)
             network = network_module.create_arch_network_from_weights(
-                1, weights_sd, unet=transformer, architecture=self.architecture, **net_kwargs
+                1, weights_sd, unet=transformer, architecture=self.architecture, **call_kwargs
             )
         else:
             # We use the name create_arch_network for compatibility with LyCORIS

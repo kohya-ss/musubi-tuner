@@ -26,11 +26,10 @@ from musubi_tuner.hunyuan_model.models import load_transformer
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.networks import lora
 from rich_argparse import RichHelpFormatter
-from musubi_tuner.convert_lora import convert_from_diffusers
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
-from musubi_tuner.utils.lora_utils import detect_network_type, merge_nonlora_to_model
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, format_unknown_network_type_error, merge_nonlora_to_model
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
 from blissful_tuner.fp8_optimization import convert_fp8_linear
@@ -514,7 +513,7 @@ def parse_args():
         "--lycoris",
         dest="prefer_lycoris",
         action="store_true",
-        help="Enable LyCORIS backend for non-native weight formats. Native formats always merge natively. "
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). "
         "(--lycoris is a deprecated alias for --prefer_lycoris)",
     )
     parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
@@ -690,21 +689,7 @@ def main():
 
                 logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                 weights_sd = load_file(lora_weight)
-                conversion_needed = False
-                for key, weight in weights_sd.items():
-                    if "." not in key:
-                        continue  # skip network-level metadata keys (lokr_factor, etc.)
-                    prefix, key_body = key.split(".", 1)
-                    if prefix == "diffusion_model" or prefix == "transformer":
-                        conversion_needed = True
-                        break
-                    elif "lora_unet" in prefix:
-                        conversion_needed = False
-                        break
-
-                if conversion_needed:
-                    logger.info("Converting LoRA from diffusers format")
-                    weights_sd = convert_from_diffusers("lora_unet_", weights_sd)
+                weights_sd = convert_diffusers_if_needed(weights_sd)
 
                 # Filter to exclude keys that are part of single_blocks
                 if args.exclude_single_blocks:
@@ -728,6 +713,8 @@ def main():
                     if net_type in ("loha", "lokr", "hybrid"):
                         logger.info(f"Detected {net_type} weights, using per-key-family merge")
                         merge_nonlora_to_model(transformer, weights_sd, lora_multiplier, device)
+                    elif net_type == "unknown":
+                        raise ValueError(format_unknown_network_type_error(lora_weight))
                     else:
                         network = lora.create_arch_network_from_weights(
                             lora_multiplier, weights_sd, unet=transformer, for_inference=True

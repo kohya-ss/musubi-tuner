@@ -26,7 +26,7 @@ from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import convert_diffusers_if_needed, detect_network_type, filter_lora_state_dict, format_unknown_network_type_error
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import (
     get_time_flag,
@@ -280,7 +280,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument(
         "--prefer_lycoris", "--lycoris", dest="prefer_lycoris", action="store_true",
-        help="Enable LyCORIS backend for non-native weight formats. (--lycoris is deprecated)"
+        help="Force LyCORIS backend for all LoRA weight merging (requires lycoris installed). (--lycoris is deprecated)"
     )
 
     setup_parser_compile(parser)
@@ -478,6 +478,9 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         for i, lora_weight in enumerate(args.lora_weight):
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
+            net_type = detect_network_type(lora_sd)
+            if net_type == "unknown":
+                raise ValueError(format_unknown_network_type_error(lora_weight))
             lora_sd = convert_lora_for_framepack(lora_sd)
             include_pat = args.include_patterns[i] if args.include_patterns and len(args.include_patterns) > i else None
             exclude_pat = args.exclude_patterns[i] if args.exclude_patterns and len(args.exclude_patterns) > i else None
@@ -975,32 +978,9 @@ def prepare_i2v_inputs(
 
 
 def convert_lora_for_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    # Check the format of the LoRA file
-    keys = list(lora_sd.keys())
-    if keys[0].startswith("lora_unet_"):
-        # logging.info(f"Musubi Tuner LoRA detected")
-        pass
-
-    else:
-        transformer_prefixes = ["diffusion_model", "transformer"]  # to ignore Text Encoder modules
-        lora_suffix = None
-        prefix = None
-        for key in keys:
-            if lora_suffix is None and "lora_A" in key:
-                lora_suffix = "lora_A"
-            if prefix is None:
-                pfx = key.split(".")[0]
-                if pfx in transformer_prefixes:
-                    prefix = pfx
-            if lora_suffix is not None and prefix is not None:
-                break
-
-        if lora_suffix == "lora_A" and prefix is not None:
-            logger.info("Diffusion-pipe (?) LoRA detected, converting to the default LoRA format")
-            lora_sd = convert_lora_from_diffusion_pipe_or_something(lora_sd, "lora_unet_")
-
-        else:
-            logger.info("LoRA file format not recognized. Using it as-is.")
+    # Check the format of the LoRA file and convert Diffusers-format keys if needed.
+    # Uses shared convert_from_diffusers which handles LoRA, LoHa, and LoKr key families.
+    lora_sd = convert_diffusers_if_needed(lora_sd)
 
     # Check LoRA is for FramePack or for HunyuanVideo
     is_hunyuan = False
@@ -1015,44 +995,20 @@ def convert_lora_for_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, to
     return lora_sd
 
 
-def convert_lora_from_diffusion_pipe_or_something(lora_sd: dict[str, torch.Tensor], prefix: str) -> dict[str, torch.Tensor]:
-    """
-    Convert LoRA weights to the format used by the diffusion pipeline to Musubi Tuner.
-    Copy from Musubi Tuner repo.
-    """
-    # convert from diffusers(?) to default LoRA
-    # Diffusers format: {"diffusion_model.module.name.lora_A.weight": weight, "diffusion_model.module.name.lora_B.weight": weight, ...}
-    # default LoRA format: {"prefix_module_name.lora_down.weight": weight, "prefix_module_name.lora_up.weight": weight, ...}
-
-    # note: Diffusers has no alpha, so alpha is set to rank
-    new_weights_sd = {}
-    lora_dims = {}
-    for key, weight in lora_sd.items():
-        diffusers_prefix, key_body = key.split(".", 1)
-        if diffusers_prefix != "diffusion_model" and diffusers_prefix != "transformer":
-            print(f"unexpected key: {key} in diffusers format")
-            continue
-
-        new_key = f"{prefix}{key_body}".replace(".", "_").replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
-        new_weights_sd[new_key] = weight
-
-        lora_name = new_key.split(".")[0]  # before first dot
-        if lora_name not in lora_dims and "lora_down" in new_key:
-            lora_dims[lora_name] = weight.shape[0]
-
-    # add alpha with rank
-    for lora_name, dim in lora_dims.items():
-        new_weights_sd[f"{lora_name}.alpha"] = torch.tensor(dim)
-
-    return new_weights_sd
-
-
 def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """
     Convert HunyuanVideo LoRA weights to FramePack format.
+
+    Note: QKV splitting only supports standard LoRA keys (_down/_up/alpha).
+    LoKr and LoHa keys in QKV modules will raise an error because their
+    decompositions cannot be split without lossy materialization + SVD.
     """
     new_lora_sd = {}
     for key, weight in lora_sd.items():
+        # Pass through non-dotted metadata keys (lokr_factor, use_rslora_flag, etc.)
+        if "." not in key:
+            new_lora_sd[key] = weight
+            continue
         if "double_blocks" in key:
             key = key.replace("double_blocks", "transformer_blocks")
             key = key.replace("img_mod_linear", "norm1_linear")
@@ -1071,7 +1027,7 @@ def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, 
             key = key.replace("linear2", "proj_out")
             key = key.replace("modulation_linear", "norm_linear")
         else:
-            print(f"Unsupported module name: {key}, only double_blocks and single_blocks are supported")
+            logger.warning(f"Unsupported module name: {key}, only double_blocks and single_blocks are supported")
             continue
 
         if "QKVM" in key:
@@ -1094,8 +1050,13 @@ def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, 
                 new_lora_sd[key_k] = weight[3072 : 3072 * 2]
                 new_lora_sd[key_v] = weight[3072 * 2 : 3072 * 3]
                 new_lora_sd[key_m] = weight[3072 * 3 :]  # 21504 - 3072 * 3 = 12288
+            elif ".lokr_" in key or ".hada_" in key:
+                raise ValueError(
+                    f"LoKr/LoHa QKV splitting is not supported in HunyuanVideo-to-FramePack conversion: {key}. "
+                    "Use --prefer_lycoris; native QKV conversion for LoKr/LoHa is not implemented."
+                )
             else:
-                print(f"Unsupported module name: {key}")
+                logger.warning(f"Unsupported key in QKVM split, skipping: {key}")
                 continue
         elif "QKV" in key:
             # split QKV into Q, K, V
@@ -1114,8 +1075,13 @@ def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, 
                 new_lora_sd[key_q] = weight[:3072]
                 new_lora_sd[key_k] = weight[3072 : 3072 * 2]
                 new_lora_sd[key_v] = weight[3072 * 2 :]
+            elif ".lokr_" in key or ".hada_" in key:
+                raise ValueError(
+                    f"LoKr/LoHa QKV splitting is not supported in HunyuanVideo-to-FramePack conversion: {key}. "
+                    "Use --prefer_lycoris; native QKV conversion for LoKr/LoHa is not implemented."
+                )
             else:
-                print(f"Unsupported module name: {key}")
+                logger.warning(f"Unsupported key in QKV split, skipping: {key}")
                 continue
         else:
             # no split needed
