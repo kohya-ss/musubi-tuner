@@ -2058,6 +2058,7 @@ def load_packed_model(
     lora_multipliers: Optional[List[float]] = None,
     disable_numpy_memmap: bool = False,
     fp8_fast_quantization_mode: str = None,
+    block_size: Optional[int] = None,
     nvfp4_use_scaled_mm: bool = True,
     nvfp4_use_torch_compile: bool = False,
 ) -> HunyuanVideoTransformer3DModelPacked:
@@ -2146,6 +2147,7 @@ def load_packed_model(
         disable_numpy_memmap=disable_numpy_memmap,
         nvfp4_optimization=nvfp4,
         fp8_fast_quantization_mode=fp8_fast_quantization_mode,
+        block_size=block_size,
     )
 
     if fp8_scaled or nvfp4:

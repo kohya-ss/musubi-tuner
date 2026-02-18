@@ -228,7 +228,13 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         choices=["tensor", "block", "channel"],
-        help="quantization mode for fp8 optimization, only for fp8_scaled. Default is None (disable scaled_mm).",
+        help="quantization mode for fp8 optimization with scaled_mm, only for fp8_scaled. Default is None (disable scaled_mm).",
+    )
+    parser.add_argument(
+        "--fp8_block_size",
+        type=int,
+        default=64,
+        help="block size for fp8 optimization, only for fp8_scaled. Default is 64. Use 128/32/16 for scaled_mm quantization.",
     )
     parser.add_argument(
         "--nvfp4", action="store_true", help="use NVFP4 for DiT model (requires PyTorch 2.6+, Blackwell GPU recommended)"
@@ -494,6 +500,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         disable_numpy_memmap=args.disable_numpy_memmap,
         fp8_fast_quantization_mode=args.fp8_fast_quantization_mode if args.fp8_scaled and not args.lycoris else None,
         nvfp4_use_torch_compile=args.nvfp4_compile,
+        block_size=args.fp8_block_size,
     )
 
     # apply RoPE scaling factor
@@ -2123,9 +2130,9 @@ def main():
     # Parse arguments
     args = parse_args()
 
-    assert (not args.save_merged_model) or (
-        not args.fp8_scaled and not args.nvfp4
-    ), "Save merged model is not compatible with fp8_scaled or nvfp4 options."
+    assert (not args.save_merged_model) or (not args.fp8_scaled and not args.nvfp4), (
+        "Save merged model is not compatible with fp8_scaled or nvfp4 options."
+    )
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0

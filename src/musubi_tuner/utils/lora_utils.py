@@ -65,6 +65,7 @@ def load_safetensors_with_lora_and_quant(
     weight_transform_hooks: Optional[WeightTransformHooks] = None,
     nvfp4_optimization: bool = False,
     fp8_fast_quantization_mode: Optional[str] = None,
+    block_size: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -82,6 +83,7 @@ def load_safetensors_with_lora_and_quant(
         weight_transform_hooks (Optional[WeightTransformHooks]): Hooks for transforming weights during loading.
         nvfp4_optimization: bool: Whether to apply NVFP4 optimization.
         fp8_fast_quantization_mode (Optional[str]): Quantization mode for fp8 optimization, only for fp8_scaled. Default is None (disable scaled_mm).
+        block_size (Optional[int]): Block size for fp8 optimization, only for fp8_scaled. Default is None (64 for non scaled_mm quantization).
     Returns:
         dict[str, torch.Tensor]: Merged state dict.
     """
@@ -210,6 +212,7 @@ def load_safetensors_with_lora_and_quant(
             weight_hook=weight_hook,
             disable_numpy_memmap=disable_numpy_memmap,
             weight_transform_hooks=weight_transform_hooks,
+            block_size=block_size,
         )
     else:
         state_dict = load_safetensors_with_nvfp4_optimization(
@@ -245,6 +248,7 @@ def load_safetensors_with_optional_fp8_optimization_and_hook(
     weight_hook: callable = None,
     disable_numpy_memmap: bool = False,
     weight_transform_hooks: Optional[WeightTransformHooks] = None,
+    block_size: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
@@ -261,7 +265,8 @@ def load_safetensors_with_optional_fp8_optimization_and_hook(
             exclude_keys,
             move_to_device=move_to_device,
             weight_hook=weight_hook,
-            quantization_mode=fp8_fast_quantization_mode,
+            fp8_fast_quantization_mode=fp8_fast_quantization_mode,
+            block_size=block_size,
             disable_numpy_memmap=disable_numpy_memmap,
             weight_transform_hooks=weight_transform_hooks,
         )
