@@ -58,6 +58,10 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/02/15
+    - Z-Imageのfine-tuningで、blocks_to_swapを使用している場合に、一部のオプティマイザを使用可能にする`--block_swap_optimizer_patch_params`オプションを追加しました。[PR #899](https://github.com/kohya-ss/musubi-tuner/pull/899)
+        - 詳細は[ドキュメント](./docs/zimage.md#finetuning)を参照してください。
+
 - 2026/01/29
     - Z-Image-Baseのリリースに伴いLoRA、finetuningの動作確認を行い、共に動作することを確認しました。
     - Z-Imageの[関連ドキュメント](./docs/zimage.md)を修正しました。
@@ -85,16 +89,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - Qwen-Image-LayeredのLoRA学習に対応しました。[PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816)
         - 詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
         - キャッシュ作成、学習、推論の各スクリプトで、`--model_version` オプションに `layered` を指定してください。
-
-- 2025/12/27
-    - Qwen-Image-Edit-2511に対応しました。[PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808)
-        - チェックポイントやオプションの詳細など、詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
-        - キャッシュ作成、学習、推論の各スクリプトで、`--model_version` オプションに `edit-2511` を指定してください。
-
-- 2025/12/25
-    - Kandinsky 5のLoRA学習に対応しました。[PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774) AkaneTendo25氏に深く感謝します。
-        - 詳細は[ドキュメント](./docs/kandinsky5.md)を参照してください。
-        - **重みの指定が一部、Hugging FaceのID形式になっています。近日中に（他のモデルと同様の）*.safetensorsの直接指定方式に変更予定ですのでご注意ください。**
 
 ### リリースについて
 
