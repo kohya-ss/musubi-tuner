@@ -16,6 +16,9 @@ logging.basicConfig(level=logging.INFO)
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 
 
+warn_float32_output_logged = False
+
+
 def calculate_fp8_maxval(exp_bits=4, mantissa_bits=3, sign_bits=1):
     """
     Calculate the maximum representable value in FP8 format.
@@ -350,6 +353,133 @@ def load_safetensors_with_fp8_optimization(
     return state_dict
 
 
+def fp8_linear_forward_scaled_mm(
+    input_qdata: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight_qdata: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """NVFP4 linear using scaled_mm (hardware-accelerated path).
+
+    Args:
+        input_qdata: Quantized input data
+        input_scale: Input scale tensor
+        weight_qdata: Quantized weight data
+        weight_scale: Weight scale tensor
+        bias: Optional bias tensor
+        out_dtype: Output dtype
+
+    Returns:
+        Result of linear transformation
+    """
+    from torch.nn.functional import ScalingType
+
+    global warn_float32_output_logged
+    if out_dtype == torch.float32 and warn_float32_output_logged is False:
+        logger.warning("Output dtype is float32. This may be an internal bug, as NVFP4 is typically used with bfloat16 or float16.")
+        warn_float32_output_logged = True
+
+    if input_qdata.ndim != 2:
+        raise ValueError(f"input_qdata must be 2D for scaled_mm, got shape {tuple(input_qdata.shape)}")
+
+    if weight_qdata.ndim != 2:
+        raise ValueError(f"weight_qdata must be 2D for scaled_mm, got shape {tuple(weight_qdata.shape)}")
+
+    out_features, _ = weight_qdata.shape
+
+    # RowWise scaling for mat_a (M, K): scale_a shape must be (M, 1)
+    if input_scale.ndim == 2 and input_scale.shape[0] == input_qdata.shape[0]:
+        # RowWise scaling for mat_b (K, N): scale_b shape must be (1, N)
+        if weight_scale.numel() == 1:
+            scale_b = (
+                weight_scale.to(dtype=torch.float32, device=weight_qdata.device).reshape(1, 1).expand(1, out_features).contiguous()
+            )
+        elif weight_scale.ndim == 1 and weight_scale.shape[0] == out_features:
+            scale_b = weight_scale.to(dtype=torch.float32, device=weight_qdata.device).reshape(1, out_features).contiguous()
+        elif weight_scale.ndim == 2 and weight_scale.shape[0] == out_features and weight_scale.shape[1] == 1:
+            scale_b = weight_scale.to(dtype=torch.float32, device=weight_qdata.device).transpose(0, 1).contiguous()
+        else:
+            raise ValueError(
+                "scaled_mm (RowWise) currently supports scale_weight shapes [1], [out_features], or [out_features, 1]. "
+                f"Got {tuple(weight_scale.shape)}. Please quantize weights in tensor/channel mode when using --use_scaled_mm."
+            )
+
+        scale_a = input_scale.to(dtype=torch.float32, device=input_qdata.device).contiguous()
+
+        # F.scaled_mm expects mat_b in column-major layout for cuBLASLt kernels.
+        mat_b = weight_qdata.contiguous().t()
+
+        result = torch.nn.functional.scaled_mm(
+            input_qdata,
+            mat_b,
+            scale_a=scale_a,
+            scale_recipe_a=ScalingType.RowWise,
+            scale_b=scale_b,
+            scale_recipe_b=ScalingType.RowWise,
+            swizzle_a=None,
+            swizzle_b=None,
+            bias=bias,
+            output_dtype=out_dtype,
+        )
+    else:
+        # Tensor scaling for mat_a (M, K): scale_a shape must be (1,) and mat_b (K, N): scale_b shape must be (1,)
+        if input_scale.numel() != 1:
+            raise ValueError(f"input_scale must be a scalar for Tensor scaled_mm. Got shape {tuple(input_scale.shape)}")
+        if weight_scale.numel() != 1:
+            raise ValueError(f"weight_scale must be a scalar for Tensor scaled_mm. Got shape {tuple(weight_scale.shape)}")
+
+        scale_a = input_scale.to(dtype=torch.float32, device=input_qdata.device).reshape(1).contiguous()
+        scale_b = weight_scale.to(dtype=torch.float32, device=weight_qdata.device).reshape(1).contiguous()
+        mat_b = weight_qdata.contiguous().t()
+        result = torch.nn.functional.scaled_mm(
+            input_qdata,
+            mat_b,
+            scale_a=scale_a,
+            scale_recipe_a=ScalingType.TensorWise,
+            scale_b=scale_b,
+            scale_recipe_b=ScalingType.TensorWise,
+            swizzle_a=None,
+            swizzle_b=None,
+            bias=bias,
+            output_dtype=out_dtype,
+        )
+    return result
+
+
+def quantize_fp8_for_scaled_mm(x: torch.Tensor, fp8_dtype: torch.dtype = torch.float8_e4m3fn, rowwise: bool = True):
+    """Quantize input activations for `torch.nn.functional.scaled_mm` RowWise/Tensor mode.
+
+    This produces:
+      - quantized activation: shape (M, K), dtype fp8
+      - scale_a: shape (M, 1), dtype float32
+
+    where M is the flattened batch/token dimension and K is hidden size.
+    """
+    if x.ndim < 2:
+        raise ValueError(f"Input must be at least 2D, got shape {tuple(x.shape)}")
+
+    if fp8_dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+        raise ValueError(f"Unsupported fp8_dtype for scaled_mm: {fp8_dtype}")
+
+    hidden_size = x.shape[-1]
+    x_2d = x.reshape(-1, hidden_size).contiguous()
+
+    fp8_max = torch.finfo(fp8_dtype).max
+    fp8_min = -fp8_max
+
+    if rowwise:
+        row_absmax = torch.max(torch.abs(x_2d), dim=1, keepdim=True).values
+        scale = torch.clamp(row_absmax / fp8_max, min=1e-8).to(dtype=torch.float32)
+    else:
+        absmax = torch.max(torch.abs(x_2d))
+        scale = torch.clamp(absmax / fp8_max, min=1e-8).to(dtype=torch.float32)
+
+    qdata = quantize_fp8(x_2d, scale, fp8_dtype, fp8_max, fp8_min).contiguous()
+    return qdata, scale.contiguous()
+
+
 def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=None):
     """
     Patched forward method for Linear layers with FP8 weights.
@@ -364,6 +494,24 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         torch.Tensor: Result of linear transformation
     """
     if use_scaled_mm:
+        # Quantize input
+        input_dtype = x.dtype
+        original_shape = x.shape
+
+        # Flatten to 2D for quantization
+        rowwise_quantization_mode = self.scale_weight.ndim == 2 and self.scale_weight.shape[1] == 1
+        input_qdata, input_scale = quantize_fp8_for_scaled_mm(x, rowwise=rowwise_quantization_mode)
+
+        # Perform fast FP8 matmul
+        result = fp8_linear_forward_scaled_mm(input_qdata, input_scale, self.weight, self.scale_weight, self.bias, input_dtype)
+
+        # Reshape back to original batch dimensions
+        if len(original_shape) > 2:
+            result = result.reshape(*original_shape[:-1], -1)
+
+        return result
+
+        """ Old version using torch._scaled_mm, which seems to have some issues with bias and per-channel scale. Keeping it here for reference and future debugging.
         # **not tested**
         # _scaled_mm only works for per-tensor scale for now (per-channel scale does not work in certain cases)
         if self.scale_weight.ndim != 1:
@@ -400,6 +548,7 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
 
         o = o.reshape(original_shape[0], original_shape[1], -1) if len(original_shape) == 3 else o.reshape(original_shape[0], -1)
         return o.to(input_dtype)
+        """
 
     else:
         # Dequantize the weight

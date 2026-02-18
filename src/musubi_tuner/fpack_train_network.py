@@ -510,6 +510,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
             loading_device,
             args.fp8_scaled,
             False,
+            False,
             split_attn,
             disable_numpy_memmap=args.disable_numpy_memmap,
         )
@@ -629,9 +630,9 @@ def main():
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    assert args.vae_dtype is None or args.vae_dtype == "float16", (
-        "VAE dtype must be float16 / VAEのdtypeはfloat16でなければなりません"
-    )
+    assert (
+        args.vae_dtype is None or args.vae_dtype == "float16"
+    ), "VAE dtype must be float16 / VAEのdtypeはfloat16でなければなりません"
     args.vae_dtype = "float16"  # fixed
     args.dit_dtype = "bfloat16"  # fixed
     args.sample_solver = "unipc"  # for sample generation, fixed to unipc

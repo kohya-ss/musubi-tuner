@@ -1509,7 +1509,14 @@ class HunyuanVideoPatchEmbedForCleanLatents(nn.Module):
 FP8_OPTIMIZATION_TARGET_KEYS = ["transformer_blocks", "single_transformer_blocks"]
 FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm"]  # Exclude norm layers (e.g., LayerNorm, RMSNorm) from FP8
 NVFP4_OPTIMIZATION_TARGET_KEYS = FP8_OPTIMIZATION_TARGET_KEYS
-NVFP4_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "timestep_embedder", "guidance_embedder", "text_embedder","x_embedder","clean_x_embedder"]
+NVFP4_OPTIMIZATION_EXCLUDE_KEYS = [
+    "norm",
+    "timestep_embedder",
+    "guidance_embedder",
+    "text_embedder",
+    "x_embedder",
+    "clean_x_embedder",
+]
 
 
 class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin, GenerationMixin,
@@ -2044,13 +2051,15 @@ def load_packed_model(
     attn_mode: str,
     loading_device: Union[str, torch.device],
     fp8_scaled: bool = False,
-    nvfp4:bool=False,
+    nvfp4: bool = False,
     split_attn: bool = False,
     for_inference: bool = False,
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     disable_numpy_memmap: bool = False,
-    use_torch_compile: bool = False,
+    fp8_fast_quantization_mode: str = None,
+    nvfp4_use_scaled_mm: bool = True,
+    nvfp4_use_torch_compile: bool = False,
 ) -> HunyuanVideoTransformer3DModelPacked:
     """
     Load a packed DiT model from a given path.
@@ -2068,7 +2077,9 @@ def load_packed_model(
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): List of state_dicts for LoRA weights.
         lora_multipliers (Optional[List[float]]): List of multipliers for LoRA weights.
         disable_numpy_memmap (bool): Whether to disable numpy memory mapping when loading weights.
-        use_torch_compile (bool): Whether to use torch.compile for nvfp4 optimization.
+        fp8_fast_quantization_mode (str): Quantization mode for fp8 optimization, only for fp8_scaled. Default is None (disable scaled_mm).
+        nvfp4_use_scaled_mm (bool): Whether to use scaled matrix multiplication for NVFP4.
+        nvfp4_use_torch_compile (bool): Whether to use torch.compile for nvfp4 optimization.
 
     Returns:
         HunyuanVideoTransformer3DModelPacked: The loaded DiT model.
@@ -2134,14 +2145,15 @@ def load_packed_model(
         exclude_keys=exclude_keys,
         disable_numpy_memmap=disable_numpy_memmap,
         nvfp4_optimization=nvfp4,
+        fp8_fast_quantization_mode=fp8_fast_quantization_mode,
     )
 
     if fp8_scaled or nvfp4:
         # apply monkey patching for fp8 or nvfp4
         if fp8_scaled:
-            apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+            apply_fp8_monkey_patch(model, sd, use_scaled_mm=fp8_fast_quantization_mode is not None)
         if nvfp4:
-            apply_nvfp4_monkey_patch(model, sd, use_scaled_mm=use_torch_compile)
+            apply_nvfp4_monkey_patch(model, sd, nvfp4_use_scaled_mm, nvfp4_use_torch_compile)
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device
             logger.info(f"Moving weights to {loading_device}")

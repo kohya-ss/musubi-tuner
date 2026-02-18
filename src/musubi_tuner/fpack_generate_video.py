@@ -223,7 +223,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
-
+    parser.add_argument(
+        "--fp8_fast_quantization_mode",
+        type=str,
+        default=None,
+        choices=["tensor", "block", "channel"],
+        help="quantization mode for fp8 optimization, only for fp8_scaled. Default is None (disable scaled_mm).",
+    )
     parser.add_argument(
         "--nvfp4", action="store_true", help="use NVFP4 for DiT model (requires PyTorch 2.6+, Blackwell GPU recommended)"
     )
@@ -486,7 +492,8 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
         disable_numpy_memmap=args.disable_numpy_memmap,
-        use_torch_compile=args.nvfp4_compile,
+        fp8_fast_quantization_mode=args.fp8_fast_quantization_mode if args.fp8_scaled and not args.lycoris else None,
+        nvfp4_use_torch_compile=args.nvfp4_compile,
     )
 
     # apply RoPE scaling factor
@@ -521,7 +528,9 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
 
             # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
             move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=False)  # args.fp8_fast)
+            state_dict = model.fp8_optimization(
+                state_dict, device, move_to_device, use_scaled_mm=False
+            )  # args.fp8_fast_quantization_mode)
 
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
@@ -2114,9 +2123,9 @@ def main():
     # Parse arguments
     args = parse_args()
 
-    assert (not args.save_merged_model) or (not args.fp8_scaled and not args.nvfp4), (
-        "Save merged model is not compatible with fp8_scaled or nvfp4 options."
-    )
+    assert (not args.save_merged_model) or (
+        not args.fp8_scaled and not args.nvfp4
+    ), "Save merged model is not compatible with fp8_scaled or nvfp4 options."
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0
@@ -2214,6 +2223,7 @@ def main():
 
         # Save latent and video
         # returned_vae from generate will be used for decoding here.
+        clean_memory_on_device(device)  # Clean memory before decoding
         save_output(args, returned_vae, latent[0], device)
 
     logger.info("Done!")
