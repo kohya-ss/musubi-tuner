@@ -717,9 +717,7 @@ def load_safetensors_with_nvfp4_optimization(
     Returns:
         NVFP4 optimized state dict
     """
-    logger.info(
-        f"Loading state dict with NVFP4 optimization. Hook enabled: {weight_hook is not None}"
-    )
+    logger.info(f"Loading state dict with NVFP4 optimization. Hook enabled: {weight_hook is not None}")
 
     def is_target_key(key):
         is_target = (target_layer_keys is None or any(pattern in key for pattern in target_layer_keys)) and key.endswith(".weight")
@@ -803,11 +801,16 @@ def nvfp4_linear_forward_patch(
         Result of linear transformation
     """
     # Reconstruct NvFp4Params from stored tensors
+    cached_orig_shape = getattr(self, "_nvfp4_orig_shape_tuple", None)
+    if cached_orig_shape is None:
+        cached_orig_shape = tuple(self.nvfp4_orig_shape.tolist())
+        self._nvfp4_orig_shape_tuple = cached_orig_shape
+
     weight_params = NvFp4Params(
         scale=self.nvfp4_scale,
         block_scale=self.nvfp4_block_scale,
         orig_dtype=x.dtype,
-        orig_shape=tuple(self.nvfp4_orig_shape.tolist()),
+        orig_shape=cached_orig_shape,
     )
 
     if use_scaled_mm:
@@ -834,10 +837,7 @@ def nvfp4_linear_forward_patch(
 
 
 def apply_nvfp4_monkey_patch(
-    model: nn.Module,
-    optimized_state_dict: dict,
-    use_scaled_mm: bool = False,
-    use_torch_compile: bool = True,
+    model: nn.Module, optimized_state_dict: dict, use_scaled_mm: bool = False, use_torch_compile: bool = True
 ) -> nn.Module:
     """Apply monkey patching to a model using NVFP4 optimized state dict.
 
@@ -880,6 +880,8 @@ def apply_nvfp4_monkey_patch(
             module.weight = nn.Parameter(optimized_state_dict[f"{name}.weight"], requires_grad=False)
 
             # Create patched forward method
+            module._nvfp4_orig_shape_tuple = tuple(int(v) for v in optimized_state_dict[orig_shape_key].tolist())
+
             def new_forward(self, x, _use_scaled_mm=use_scaled_mm, _use_torch_compile=use_torch_compile):
                 return nvfp4_linear_forward_patch(self, x, _use_scaled_mm, _use_torch_compile)
 
@@ -892,4 +894,3 @@ def apply_nvfp4_monkey_patch(
 
 
 # endregion
-
