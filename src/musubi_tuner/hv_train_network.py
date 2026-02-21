@@ -1640,6 +1640,134 @@ class NetworkTrainer:
 
     # endregion model specific
 
+    # region caption analysis utilities
+    
+    def _extract_captions_from_dataset(self, datasource) -> List[str]:
+        """Extract captions from dataset datasource
+        
+        Args:
+            datasource: Dataset datasource object
+            
+        Returns:
+            List of caption strings
+        """
+        captions = []
+        
+        try:
+            # Check if it's a JSONL datasource with caption data
+            if hasattr(datasource, 'data') and hasattr(datasource, 'is_indexable') and datasource.is_indexable():
+                # For JSONL datasources, iterate through data
+                for item in datasource.data:
+                    if isinstance(item, dict) and 'caption' in item:
+                        caption = item['caption']
+                        if caption and isinstance(caption, str):
+                            captions.append(caption.strip())
+            
+            # For other datasource types, try to get captions through get_caption method
+            elif hasattr(datasource, 'get_caption') and hasattr(datasource, '__len__'):
+                try:
+                    for i in range(min(len(datasource), 1000)):  # Limit to first 1000 for performance
+                        try:
+                            _, caption = datasource.get_caption(i)
+                            if caption and isinstance(caption, str):
+                                captions.append(caption.strip())
+                        except (IndexError, TypeError, AttributeError):
+                            continue
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            logger.warning(f"Could not extract captions from datasource: {e}")
+        
+        return captions
+    
+    def _analyze_training_captions(self, folder_captions: Dict[str, List[str]], min_frequency: int = 1, min_word_length: int = 3) -> Dict[str, str]:
+        """Analyze training captions for trigger words and patterns per folder
+        
+        Args:
+            folder_captions: Dict mapping folder names to lists of caption strings
+            min_frequency: Minimum frequency for trigger detection
+            min_word_length: Minimum word length for single words
+            
+        Returns:
+            Dict of metadata fields with analysis results
+        """
+        if not folder_captions:
+            return {}
+        
+        # Collect all captions for overall statistics
+        all_captions = []
+        for captions in folder_captions.values():
+            all_captions.extend(captions)
+        
+        if not all_captions:
+            return {}
+        
+        # Analyze each folder separately
+        folder_tag_frequencies = {}
+        
+        for folder_name, captions in folder_captions.items():
+            if not captions:
+                continue
+                
+            # Prepare text: lowercase, split into sentences and words
+            all_words = []
+            all_phrases = []
+            
+            for caption in captions:
+                # Split by dots to get sentences
+                sentences = re.split(r'\.', caption.lower())
+                
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+                    
+                    # Clean and tokenize words in the sentence
+                    words = re.findall(r'\b\w+\b', sentence)
+                    if not words:
+                        continue
+                    
+                    # Add individual words
+                    all_words.extend(words)
+                    
+                    # Add the entire sentence as a phrase (up to dot)
+                    all_phrases.append(sentence)
+            
+            # Count frequencies using Counter
+            from collections import Counter
+            
+            word_counts = Counter(word for word in all_words if len(word) >= min_word_length)
+            phrase_counts = Counter(all_phrases)
+            
+            # Filter by minimum frequency
+            trigger_words = {word: count for word, count in word_counts.items() if count >= min_frequency}
+            trigger_phrases = {phrase: count for phrase, count in phrase_counts.items() if count >= min_frequency}
+            
+            # Combine words and phrases into tag frequency for this folder
+            folder_tag_frequency = {}
+            folder_tag_frequency.update(trigger_words)
+            folder_tag_frequency.update(trigger_phrases)
+            
+            if folder_tag_frequency:
+                # Sort by frequency, get top 200 for this folder
+                top_tags = dict(sorted(folder_tag_frequency.items(), key=lambda x: x[1], reverse=True)[:200])
+                folder_tag_frequencies[folder_name] = top_tags
+        
+        # Build result metadata
+        result = {
+            "ss_caption_total": str(len(all_captions)),
+            "ss_caption_unique": str(len(set(all_captions))),
+        }
+        
+        # Store per-folder tag frequencies
+        if folder_tag_frequencies:
+            result["ss_tag_frequency"] = json.dumps(folder_tag_frequencies)
+        
+        return result
+
+    # endregion caption analysis utilities
+
     def train(self, args):
         if torch.cuda.is_available():
             if args.cuda_allow_tf32:
@@ -2037,12 +2165,46 @@ class NetworkTrainer:
         }
 
         datasets_metadata = []
+        all_captions = []  # Collect all captions for trigger word analysis
+        folder_captions = {}  # Collect captions per folder
+        
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
         for dataset in train_dataset_group.datasets:
             dataset_metadata = dataset.get_metadata()
+            
+            # Extract captions from JSONL datasets for trigger word analysis
+            if hasattr(dataset, 'datasource'):
+                dataset_captions = self._extract_captions_from_dataset(dataset.datasource)
+                all_captions.extend(dataset_captions)
+                
+                # Get folder name from dataset metadata
+                folder_name = None
+                if "image_directory" in dataset_metadata:
+                    folder_name = dataset_metadata["image_directory"]
+                elif "video_directory" in dataset_metadata:
+                    folder_name = dataset_metadata["video_directory"]
+                elif "image_jsonl_file" in dataset_metadata:
+                    folder_name = dataset_metadata["image_jsonl_file"]
+                elif "video_jsonl_file" in dataset_metadata:
+                    folder_name = dataset_metadata["video_jsonl_file"]
+                else:
+                    folder_name = f"dataset_{len(datasets_metadata)}"
+                
+                if dataset_captions:
+                    
+                    # Store captions per folder
+                    if folder_name not in folder_captions:
+                        folder_captions[folder_name] = []
+                    folder_captions[folder_name].extend(dataset_captions)
+            
             datasets_metadata.append(dataset_metadata)
 
         metadata["ss_datasets"] = json.dumps(datasets_metadata)
+        
+        # Analyze captions for trigger words and patterns (per folder)
+        if folder_captions:
+            caption_analysis = self._analyze_training_captions(folder_captions)
+            metadata.update(caption_analysis)
 
         # add extra args
         if args.network_args:
