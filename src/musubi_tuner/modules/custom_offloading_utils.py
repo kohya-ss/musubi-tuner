@@ -95,8 +95,13 @@ class Offloader:
 
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
         self.futures = {}
-        self.cuda_available = device.type == "cuda"
-        self.stream = torch.cuda.Stream(device=device) if self.cuda_available else None
+        self.stream_available = device.type == "cuda" or device.type == "xpu"
+        if device.type == "cuda":
+            self.stream = torch.cuda.Stream(device=device)
+        elif device.type == "xpu":
+            self.stream = torch.xpu.Stream(device=device)
+        else:
+            self.stream = None
 
         # Staging buffers for cuda offloading without large pinned memory. These are pinned memory buffers to speed up the transfer between CPU and GPU
         # We create one staging buffer per transfer direction (A: GPU to CPU, B: CPU to GPU)
@@ -108,6 +113,10 @@ class Offloader:
 
     def swap_weight_devices_cuda(self, device: torch.device, layer_to_cpu: nn.Module, layer_to_cuda: nn.Module):
         assert layer_to_cpu.__class__ == layer_to_cuda.__class__
+
+        current_stream_fn = torch.cuda.current_stream if device.type == "cuda" else torch.xpu.current_stream
+        stream_ctx_fn = torch.cuda.stream if device.type == "cuda" else torch.xpu.stream
+        EventCls = torch.cuda.Event if device.type == "cuda" else torch.xpu.Event
 
         debug_print = False
         if self.debug:
@@ -159,12 +168,12 @@ class Offloader:
                             module_to_cuda.weight.data = module_to_cuda.weight.data.to(device)
 
         with T.section("synchronize before swap"):
-            torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value by ensuring offloading layer's calculation is done
+            current_stream_fn().synchronize()  # this prevents the illegal loss value by ensuring offloading layer's calculation is done
 
         if not self.use_pinned_memory:
             # Minimize using pinned memory for lower shared GPU RAM usage
             stream = self.stream
-            with torch.cuda.stream(stream):
+            with stream_ctx_fn(stream):
                 if self.staging_buffer_a is None:
                     # Create staging buffer as pinned memory (as shared GPU ram). We specify device for correct pinning on multi-GPU systems
                     self.staging_buffer_a = [
@@ -182,7 +191,7 @@ class Offloader:
                     self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
                 ):
                     # CUDA to staging buffer A, non-blocking copy
-                    event_a = torch.cuda.Event()
+                    event_a = EventCls()
                     with T.section("cuda to staging A"):
                         sbuf_a.copy_(cuda_data_view.data, non_blocking=True)
                         event_a.record(stream)
@@ -202,7 +211,7 @@ class Offloader:
                         event_a.synchronize()
 
                     # Staging buffer B to CUDA, non-blocking copy.
-                    event_b = torch.cuda.Event()
+                    event_b = EventCls()
                     with T.section("staging B to CUDA"):
                         cuda_data_view.copy_(sbuf_b, non_blocking=True)
                         event_b.record(stream)
@@ -223,7 +232,7 @@ class Offloader:
         else:
             # Use pinned memory for faster transfer between CPU and GPU, but it requires more memory
             if self.pinned_buffer is None:
-                with torch.cuda.stream(self.stream):
+                with stream_ctx_fn(self.stream):
                     # Create pinned buffer as pinned memory (as shared GPU ram). We specify device for correct pinning on multi-GPU systems
                     self.pinned_buffer = [
                         torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
@@ -232,21 +241,21 @@ class Offloader:
                 self.stream.synchronize()
             released_pinned_buffer = []
 
-            events = [torch.cuda.Event() for _ in weight_swap_jobs]  # Waiting events for GPU to CPU non-blocking copy
+            events = [EventCls() for _ in weight_swap_jobs]  # Waiting events for GPU to CPU non-blocking copy
 
             # Copy weights to CPU
             for event, module_pin_buf, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
                 events, self.pinned_buffer, weight_swap_jobs
             ):
                 # CUDA to CPU, non-blocking copy
-                with torch.cuda.stream(self.stream):
+                with stream_ctx_fn(self.stream):
                     with T.section("cuda to cpu"):
                         module_pin_buf.copy_(cuda_data_view, non_blocking=True)
                         event.record(self.stream)
 
             # CPU to CUDA
             for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
-                with torch.cuda.stream(self.stream):
+                with stream_ctx_fn(self.stream):
                     # Wait for cuda_data_view to be ready
                     with T.section("wait cpu"):
                         self.stream.wait_event(event)
@@ -266,7 +275,7 @@ class Offloader:
             # Reuse released pinned buffers
             if not released_pinned_buffer[0].is_pinned():
                 # In first time, we need to create pinned buffers because offloaded weights are not pinned yet
-                with torch.cuda.stream(self.stream):
+                with stream_ctx_fn(self.stream):
                     released_pinned_buffer = [
                         torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
                         for _, _, cuda_data_view, _ in weight_swap_jobs
@@ -282,14 +291,11 @@ class Offloader:
             print(
                 f"Overall time: {(time.perf_counter() - T.start_time) * 1000:.2f}ms, total time in sections: {sum(T.totals.values()) * 1000:.2f}ms"
             )
-        # print(
-        #     f"[{self.block_type}] Swapped weights in {time.perf_counter() - start_time:.2f}s. Count of modules swapped: {len(weight_swap_jobs)}"
-        # )
 
         return sync_event
 
     def swap_weight_devices(self, block_to_cpu: nn.Module, block_to_cuda: nn.Module):
-        if self.cuda_available:
+        if self.stream_available:
             sync_event = self.swap_weight_devices_cuda(self.device, block_to_cpu, block_to_cuda)
         else:
             swap_weight_devices_no_cuda(self.device, block_to_cpu, block_to_cuda)
@@ -301,17 +307,22 @@ class Offloader:
             if self.debug:
                 start_time = time.perf_counter()
                 print(
-                    f"[{self.block_type}] Move block {bidx_to_cpu} to CPU and block {bidx_to_cuda} to {'CUDA' if self.cuda_available else 'device'}"
+                    f"[{self.block_type}] Move block {bidx_to_cpu} to CPU and block {bidx_to_cuda} to {'CUDA' if self.stream_available else 'device'}"
                 )
 
-            dev = self.device.index if self.device.index is not None else torch.cuda.current_device()
-            torch.cuda.set_device(dev)
+            # set device for multi-GPU systems
+            current_device = torch.cuda.current_device() if self.device.type == "cuda" else torch.xpu.current_device()
+            dev = self.device.index if self.device.index is not None else current_device
+            if self.device.type == "cuda":
+                torch.cuda.set_device(dev)
+            else:
+                torch.xpu.set_device(dev)
 
             sync_event = self.swap_weight_devices(block_to_cpu, block_to_cuda)
 
             if self.debug:
                 print(
-                    f"[{self.block_type}] Moved blocks {bidx_to_cpu} to CPU and {bidx_to_cuda} to {'CUDA' if self.cuda_available else 'device'} in {time.perf_counter() - start_time:.2f}s"
+                    f"[{self.block_type}] Moved blocks {bidx_to_cpu} to CPU and {bidx_to_cuda} to {'CUDA' if self.stream_available else 'device'} in {time.perf_counter() - start_time:.2f}s"
                 )
             return bidx_to_cpu, bidx_to_cuda, sync_event
 
@@ -335,9 +346,12 @@ class Offloader:
 
         assert block_idx == bidx_to_cuda, f"Block index mismatch: {block_idx} != {bidx_to_cuda}"
 
-        if self.cuda_available and sync_event is not None:
+        if self.stream_available and sync_event is not None:
             # this does not wait CPU side, so the log below should be immediate when pinned memory is used
-            torch.cuda.current_stream().wait_event(sync_event)
+            if self.device.type == "cuda":
+                torch.cuda.current_stream().wait_event(sync_event)
+            else:
+                torch.xpu.current_stream().wait_event(sync_event)
 
         if self.debug:
             print(f"[{self.block_type}] Waited for block {block_idx}: {time.perf_counter() - start_time:.2f}s")
@@ -364,6 +378,10 @@ class ModelOffloader(Offloader):
         self.supports_backward = supports_backward
         self.forward_only = not supports_backward  # forward only offloading: can be changed to True for inference
 
+        self.ring_indices = []
+        self.ring_set = set()
+        self.next_ring = {}
+
         if self.supports_backward:
             # register backward hooks
             self.remove_handles = []
@@ -379,6 +397,19 @@ class ModelOffloader(Offloader):
             self._wait_blocks_move(block_idx)
 
         self.forward_only = forward_only
+
+        # prepare ring buffer indices for forward-only offloading
+        if self.forward_only:
+            # number of ring blocks = number of CPU blocks + 1
+            n_ring_blocks = self.blocks_to_swap + 1
+
+            # distribute ring block indices evenly (0-indexed)
+            # e.g. for 12 blocks and 3 blocks_to_swap, ring_indices = [2, 5, 8, 11]
+            self.ring_indices = [(i * self.num_blocks) // n_ring_blocks - 1 for i in range(1, n_ring_blocks + 1)]
+            self.ring_set = set(self.ring_indices)
+
+            # mapping from each ring block to the next ring block
+            self.next_ring = {self.ring_indices[j]: self.ring_indices[(j + 1) % n_ring_blocks] for j in range(n_ring_blocks)}
 
     def __del__(self):
         if self.supports_backward:
@@ -418,14 +449,31 @@ class ModelOffloader(Offloader):
         if self.debug:
             print(f"[{self.block_type}] Prepare block devices before forward")
 
-        for b in blocks[0 : self.num_blocks - self.blocks_to_swap]:
-            b.to(self.device)
-            weighs_to_device(b, self.device)  # make sure weights are on device
+        if not self.forward_only:
+            # pure offloading: first N - blocks_to_swap on device, last blocks_to_swap on CPU
+            for b in blocks[0 : self.num_blocks - self.blocks_to_swap]:
+                b.to(self.device)
+                weighs_to_device(b, self.device)  # make sure weights are on device
 
-        cpu_device = torch.device("cpu")
-        for b in blocks[self.num_blocks - self.blocks_to_swap :]:
-            b.to(self.device)  # move block to device first. this makes sure that buffers (non weights) are on the device
-            weighs_to_device(b, cpu_device)  # make sure weights are on cpu
+            cpu_device = torch.device("cpu")
+            for b in blocks[self.num_blocks - self.blocks_to_swap :]:
+                b.to(self.device)  # move block to device first. this makes sure that buffers (non weights) are on the device
+                weighs_to_device(b, cpu_device)  # make sure weights are on cpu
+        else:
+            if len(self.ring_indices) == 0:
+                # prepare ring buffer indices: this is needed when set_forward_only is not called explicitly (e.g. generation scripts)
+                self.set_forward_only(True)
+
+            # forward-only offloading with ring buffer: first block of ring on device, rest on CPU
+            cpu_device = torch.device("cpu")
+            for i, b in enumerate(blocks):
+                b.to(self.device)  # move block to device first. this makes sure that buffers (non weights) are on the device
+
+                on_gpu = (i not in self.ring_set) or (i == self.ring_indices[0])
+                if on_gpu:
+                    weighs_to_device(b, self.device)  # make sure weights are on device (actually not needed)
+                else:
+                    weighs_to_device(b, cpu_device)  # make sure weights are on cpu
 
         _synchronize_device(self.device)
         _clean_memory_on_device(self.device)
@@ -450,30 +498,9 @@ class ModelOffloader(Offloader):
             self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
             return
 
-        # We use two strategies here for forward-only offloading:
-        # 1. If blocks_to_swap is less than half of num_blocks, we swap the num_blocks blocks without wrapping around.
-        #   This reduces the number of swaps, so it is especially useful for small blocks_to_swap or lightweight models like Qwen-Image
-        # 2. If blocks_to_swap is more than half of num_blocks, we swap the blocks with wrapping around.
-        #   This is the common strategy used in most offloading implementations. It transfers all blocks in a wrapping manner.
-        #   This is useful for large blocks_to_swap or heavyweight models like Wan/HunyuanVideo, where the transfer time is less significant compared to computation time.
-
-        # current block to swap out (to CPU)
+        # forward-only offloading with ring buffer
+        if block_idx not in self.ring_set:
+            return
         block_idx_to_cpu = block_idx
-
-        if self.blocks_to_swap < (self.num_blocks // 2):
-            # strategy 1: no wrap around
-            # If the current block is in the middle blocks that are not swapped, do nothing
-            if self.blocks_to_swap <= block_idx < self.num_blocks - self.blocks_to_swap:
-                return
-            if block_idx < self.blocks_to_swap:
-                # move the next block to cuda
-                block_idx_to_cuda = (self.num_blocks - self.blocks_to_swap + block_idx) % self.num_blocks
-            else:
-                # move the previous block to cuda
-                block_idx_to_cuda = block_idx - (self.num_blocks - self.blocks_to_swap)
-        else:
-            # strategy 2: with wrap around
-            block_idx_to_cuda = self.num_blocks - self.blocks_to_swap + block_idx
-            block_idx_to_cuda = block_idx_to_cuda % self.num_blocks  # this works for forward-only offloading
-
+        block_idx_to_cuda = self.next_ring[block_idx]
         self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
