@@ -575,6 +575,11 @@ def generate(
 
     # 6. Denoising loop
     do_cfg = args.guidance_scale > 1.0  # 0 for no CFG
+    if do_cfg and negative_embed is None:
+        logger.warning("CFG is enabled but negative prompt is not provided. Using unconditional generation with zeros.")
+        negative_embed = torch.zeros_like(embed)
+        negative_mask = None
+
     with tqdm(total=num_inference_steps, desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
             # cfg_truncation is not supported currently

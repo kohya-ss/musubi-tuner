@@ -351,7 +351,7 @@ Qwen-Imageで使用されているQwen2.5-VLモデルは、元のQwen2.5-VL-Inst
 
 `--max_size` can be reduced to decrease the image size passed to the VLM. This can reduce the memory usage of the VLM, but may also decrease the quality of the generated captions.
 
-The default prompt is defined in the [source file](./src/musubi_tuner/caption_images_by_qwen_vl.py). It is based on the [Qwen-Image Technical Report](https://arxiv.org/abs/2508.02324).
+The default prompt is defined in the [source file](/src/musubi_tuner/caption_images_by_qwen_vl.py). It is based on the [Qwen-Image Technical Report](https://arxiv.org/abs/2508.02324).
 
 <details>
 <summary>日本語</summary>
@@ -367,7 +367,7 @@ The default prompt is defined in the [source file](./src/musubi_tuner/caption_im
 
 `--max_size` を小さくするとVLMに渡される画像サイズが小さくなります。これにより、VLMのメモリ使用量が削減されますが、生成されるキャプションの品質が低下する可能性があります。
 
-プロンプトのデフォルトは、[ソースファイル](./src/musubi_tuner/caption_images_by_qwen_vl.py)内で定義されています。[Qwen-Image Technical Report](https://arxiv.org/abs/2508.02324)を参考にしたものです。
+プロンプトのデフォルトは、[ソースファイル](/src/musubi_tuner/caption_images_by_qwen_vl.py)内で定義されています。[Qwen-Image Technical Report](https://arxiv.org/abs/2508.02324)を参考にしたものです。
 
 </details>
 

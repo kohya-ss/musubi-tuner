@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-ZIMAGE_ID = "Tongyi-MAI/Z-Image-Turbo"
+ZIMAGE_ID = "Tongyi-MAI/Z-Image"
 
 
 SIGLIP2_IMAGE_PROCESSOR_CONFIG = {
