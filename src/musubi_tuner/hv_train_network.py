@@ -1579,23 +1579,28 @@ class NetworkTrainer:
         latents = latents * vae_module.SCALING_FACTOR
         return latents
 
-    def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, **kwargs) -> tuple[torch.Tensor, dict[str, Any]]:
-        return torch.nn.functional.mse_loss(pred, target, reduction="none"), {}
+    def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, weighting: float | None, **kwargs) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Returns loss and loss metrics"""
+        loss = torch.nn.functional.mse_loss(pred, target, reduction="none")
+
+        if weighting is not None:
+            loss = loss * weighting
+        return loss, {}
 
     def _self_flow_step(
         self,
         args: argparse.Namespace,
         accelerator: Accelerator,
-        transformer,
-        network,
+        transformer: torch.nn.Module,
+        network: torch.nn.Module,
         latents: torch.Tensor,
         batch: dict,
         noise: torch.Tensor,
         noise_scheduler,
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
-        vae,
-        rep_proj,
+        vae: torch.nn.Module,
+        rep_proj: torch.nn.Module,
         ema_lora_state: dict,
     ) -> torch.Tensor:
         """Self-flow training step: dual-timestep scheduling + representation alignment."""
@@ -1619,7 +1624,6 @@ class NetworkTrainer:
 
         # Reconstruct noisy inputs using per-sample teacher/student timesteps.
         # Convert timesteps back to t in [0, 1]: t = (timestep - 1) / 1000.
-        # Note: Path B (sigma mode) may use a slightly different formula but this is acceptable for self-flow.
         t_teacher = (timesteps_teacher.float() - 1.0) / 1000.0
         t_student = (timesteps_student.float() - 1.0) / 1000.0
 
@@ -1635,7 +1639,7 @@ class NetworkTrainer:
         noisy_input_teacher = (1 - t_teacher_exp) * latents + t_teacher_exp * noise
         noisy_input_student = (1 - t_student_exp) * latents + t_student_exp * noise
 
-        # --- Per-token masking (paper Eq. 4-5) ---
+        # Per-token masking (paper Eq. 4-5)
         mask_ratio = args.mask_ratio
         if latents.ndim == 5:
             B, _C, T, H, W = latents.shape
@@ -1655,7 +1659,7 @@ class NetworkTrainer:
         student_feature_layer = args.student_feature_layer
         teacher_feature_layer = args.teacher_feature_layer
 
-        # --- Teacher forward (no grad, EMA weights) ---
+        # Teacher forward (no grad, EMA weights)
         student_lora_state = {k: v.clone() for k, v in network.state_dict().items()}
         network.load_state_dict(ema_lora_state)
         with torch.no_grad():
@@ -1667,7 +1671,7 @@ class NetworkTrainer:
             feat_teacher = result[2].detach() if len(result) > 2 and result[2] is not None else None
         network.load_state_dict(student_lora_state)
 
-        # --- Student forward (gradients flow) ---
+        # Student forward (gradients flow)
         weighting = compute_loss_weighting_for_sd3(
             args.weighting_scheme, noise_scheduler, timesteps_student, accelerator.device, dit_dtype
         )
@@ -1692,8 +1696,6 @@ class NetworkTrainer:
             accelerator=accelerator,
             noise_scheduler=noise_scheduler
         )
-        if weighting is not None:
-            loss = loss * weighting
         L_gen = loss.mean()
 
         # --- L_rep (Eq. 6) ---
@@ -1710,8 +1712,8 @@ class NetworkTrainer:
         self._self_flow_logs = {
             "self_flow/L_gen": L_gen.detach().item(),
             "self_flow/L_rep": L_rep.detach().item() if L_rep is not None else 0.0,
-            "self_flow/timestep_student": timesteps_student.float().mean().item(),
-            "self_flow/timestep_teacher": timesteps_teacher.float().mean().item(),
+            "self_flow/timestep_student_mean": timesteps_student.float().mean().item(),
+            "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
             "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
         }
 
@@ -3236,21 +3238,21 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument(
         "--self_flow_gamma",
         type=float,
-        default=0.25,
+        default=0.8,
         help="Weight for representation alignment loss L_rep (paper Eq. 7). 0 disables L_rep."
         " / 表現アライメント損失L_repの重み（論文のEq. 7）。0でL_repを無効化。",
     )
     parser.add_argument(
         "--mask_ratio",
         type=float,
-        default=0.3,
+        default=0.25,
         help="Ratio of tokens to mask with cleaner (teacher) noise level for dual-timestep scheduling (paper Eq. 4, R_M <= 0.5)."
         " / デュアルタイムステップスケジューリングでクリーン（教師）ノイズレベルでマスクするトークンの割合（論文Eq. 4、R_M <= 0.5）。",
     )
     parser.add_argument(
         "--ema_decay",
         type=float,
-        default=0.999,
+        default=0.9999,
         help="EMA decay rate for self-flow teacher LoRA weights."
         " / セルフフロー教師LoRA重みのEMA減衰率。",
     )
@@ -3258,14 +3260,14 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--student_feature_layer",
         type=int,
         default=None,
-        help="Global block index for student feature extraction (l in paper, must be < teacher_feature_layer). None uses last block."
+        help="Global block index for student feature extraction (l in paper, must be < teacher_feature_layer). None uses last block. Recommends 0.3D where D is number of blocks"
         " / 学生特徴抽出のグローバルブロックインデックス（論文のl、teacher_feature_layerより小さい必要あり）。Noneで最終ブロックを使用。",
     )
     parser.add_argument(
         "--teacher_feature_layer",
         type=int,
         default=None,
-        help="Global block index for teacher feature extraction (k in paper, must be > student_feature_layer). None uses last block."
+        help="Global block index for teacher feature extraction (k in paper, must be > student_feature_layer). None uses last block. Recommends 0.7D where D is number of blocks"
         " / 教師特徴抽出のグローバルブロックインデックス（論文のk、student_feature_layerより大きい必要あり）。Noneで最終ブロックを使用。",
     )
 
