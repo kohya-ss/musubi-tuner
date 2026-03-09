@@ -592,7 +592,7 @@ class Flux2(nn.Module):
         self.offloader_double.prepare_block_devices_before_forward(self.double_blocks)
         self.offloader_single.prepare_block_devices_before_forward(self.single_blocks)
 
-    def forward(self, x: Tensor, x_ids: Tensor, timesteps: Tensor, ctx: Tensor, ctx_ids: Tensor, guidance: Tensor | None) -> Tensor:
+    def forward(self, x: Tensor, x_ids: Tensor, timesteps: Tensor, ctx: Tensor, ctx_ids: Tensor, guidance: Tensor | None, hidden_features: bool = False, feature_layer: int | None = None) -> Tensor:
         num_txt_tokens = ctx.shape[1]
 
         timestep_emb = timestep_embedding(timesteps, 256)
@@ -619,11 +619,19 @@ class Flux2(nn.Module):
 
         attn_params = AttentionParams.create_attention_params(self.attn_mode, self.split_attn)  # No attention mask
 
+        features = None
+        global_block_idx = 0
+
         for block_idx, block in enumerate(self.double_blocks):
             if self.blocks_to_swap:
                 self.offloader_double.wait_for_block(block_idx)
 
             img, txt = block(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt, attn_params)
+
+            if hidden_features and feature_layer is not None and global_block_idx == feature_layer:
+                features = img.clone()
+
+            global_block_idx += 1
 
             if self.blocks_to_swap:
                 self.offloader_double.submit_move_blocks_forward(self.double_blocks, block_idx)
@@ -641,6 +649,11 @@ class Flux2(nn.Module):
 
             img = block(img, pe, single_block_mod, attn_params)
 
+            if hidden_features and feature_layer is not None and global_block_idx == feature_layer:
+                features = img[:, num_txt_tokens:, ...].clone()
+
+            global_block_idx += 1
+
             if self.blocks_to_swap:
                 self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
 
@@ -650,7 +663,14 @@ class Flux2(nn.Module):
 
         img = img[:, num_txt_tokens:, ...]
 
+        # Default: features from last block before final_layer
+        if hidden_features and features is None:
+            features = img.clone()
+
         img = self.final_layer(img, vec)
+
+        if hidden_features:
+            return img, features
         return img
 
 

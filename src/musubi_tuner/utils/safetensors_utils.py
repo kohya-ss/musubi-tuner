@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import time
 import os
 import re
 import numpy as np
@@ -63,24 +64,39 @@ def mem_eff_save_file(tensors: Dict[str, torch.Tensor], filename: str, metadata:
     hjson += b" " * (-(len(hjson) + 8) % _ALIGN)
 
     with open(filename, "wb") as f:
-        f.write(struct.pack("<Q", len(hjson)))
-        f.write(hjson)
+        try:
+            f.write(struct.pack("<Q", len(hjson)))
+            f.write(hjson)
 
-        for k, v in tensors.items():
-            if v.numel() == 0:
-                continue
-            if v.is_cuda:
-                # Direct GPU to disk save
-                with torch.cuda.device(v.device):
+            for k, v in tensors.items():
+                if v.numel() == 0:
+                    continue
+                if v.is_cuda:
+                    # Direct GPU to disk save
+                    with torch.cuda.device(v.device):
+                        if v.dim() == 0:  # if scalar, need to add a dimension to work with view
+                            v = v.unsqueeze(0)
+                        tensor_bytes = v.contiguous().view(torch.uint8)
+                        tensor_bytes.cpu().numpy().tofile(f)
+                else:
+                    # CPU tensor save
                     if v.dim() == 0:  # if scalar, need to add a dimension to work with view
                         v = v.unsqueeze(0)
-                    tensor_bytes = v.contiguous().view(torch.uint8)
-                    tensor_bytes.cpu().numpy().tofile(f)
+                    v.contiguous().view(torch.uint8).numpy().tofile(f)
+        except OSError:
+            f.close()
+            file_removed = False
+            # Try to remove file, which may be held on to by OS/antivirus
+            for _ in range(3):
+                try:
+                    os.remove(filename)
+                    file_removed = True
+                except OSError:
+                    time.sleep(1)
+            if file_removed:
+                raise ValueError(f"Could not save file ({filename}) to disk. Removed incomplete file")
             else:
-                # CPU tensor save
-                if v.dim() == 0:  # if scalar, need to add a dimension to work with view
-                    v = v.unsqueeze(0)
-                v.contiguous().view(torch.uint8).numpy().tofile(f)
+                raise ValueError(f"Could not save file ({filename}) to disk. Possible invalid file remains")
 
 
 class MemoryEfficientSafeOpen:
