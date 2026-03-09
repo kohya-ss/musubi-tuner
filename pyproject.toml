@@ -24,12 +24,6 @@ dependencies = [
     "easydict==1.13",
     # FLUX.1 Kontext
     "sentencepiece==0.2.1",
-    "torchvision>=0.21.0",
-    "flash-attn",
-    "rex-lr",
-    "wandb>=0.24.0",
-    "prodigyopt>=1.1.2",
-    "prodigy-plus-schedule-free",
 ]
 
 [project.optional-dependencies]
@@ -82,9 +76,6 @@ torchvision = [
   { index = "pytorch-cu128", extra = "cu128" },
   { index = "pytorch-cu130", extra = "cu130" },
 ]
-flash-attn = { path = "../../modal_example/flash_attn-2.8.3+cu13torch2.9cxx11abitrue-cp311-cp311-linux_x86_64.whl" }
-rex-lr = { git = "https://github.com/rockerBOO/REX_LR" }
-prodigy-plus-schedule-free = { git = "https://github.com/LoganBooker/prodigy-plus-schedule-free" }
 
 [[tool.uv.index]]
 name = "pytorch-cu124"
