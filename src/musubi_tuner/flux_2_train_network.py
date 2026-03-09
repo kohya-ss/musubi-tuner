@@ -266,6 +266,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
+        hidden_features: bool = False,
+        feature_layer: int | None = None,
+        **kwargs
     ):
         model: flux2_models.Flux2 = transformer
 
@@ -320,7 +323,12 @@ class Flux2NetworkTrainer(NetworkTrainer):
             img_input_ids = torch.cat((img_input_ids, ref_ids), dim=1)
 
         timesteps = timesteps / 1000.0
-        model_pred = model(x=img_input, x_ids=img_input_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+        model_output = model(x=img_input, x_ids=img_input_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec, hidden_features=hidden_features, feature_layer=feature_layer)
+        if hidden_features:
+            model_pred, features = model_output
+        else:
+            model_pred = model_output
+            features = None
         model_pred = model_pred[:, : noisy_model_input.shape[1]]  # [B, 4096, 128]
 
         # unpack height/width latents
@@ -330,7 +338,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         target = noise - latents
 
-        return model_pred, target
+        return model_pred, target, features
 
     # endregion model specific
 
