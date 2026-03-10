@@ -1587,6 +1587,172 @@ class NetworkTrainer:
             loss = loss * weighting
         return loss, {}
 
+    def _assign_teacher_student_timesteps(
+        self,
+        timesteps_a: torch.Tensor,  # (B,) - timesteps in [1, 1001]
+        timesteps_b: torch.Tensor,  # (B,) - timesteps in [1, 1001]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Per-sample teacher/student assignment (paper Eq. 4-5).
+
+        Teacher gets cleaner (lower) timestep, student gets noisier (higher) timestep.
+
+        Args:
+            timesteps_a: First sampled timesteps, shape (B,)
+            timesteps_b: Second sampled timesteps, shape (B,)
+
+        Returns:
+            (timesteps_teacher, timesteps_student): Both shape (B,)
+        """
+        t_a = timesteps_a.float()  # (B,)
+        t_b = timesteps_b.float()  # (B,)
+        timesteps_teacher = torch.min(t_a, t_b).to(timesteps_a.dtype)  # (B,)
+        timesteps_student = torch.max(t_a, t_b).to(timesteps_a.dtype)  # (B,)
+        return timesteps_teacher, timesteps_student
+
+    def _reconstruct_noisy_input(
+        self,
+        latents: torch.Tensor,      # (B, C, H, W) or (B, C, T, H, W)
+        noise: torch.Tensor,        # same shape as latents
+        timesteps: torch.Tensor,    # (B,) - timesteps in [1, 1001]
+    ) -> torch.Tensor:
+        """
+        Reconstruct noisy input using flow matching formula: (1-t)*latents + t*noise
+
+        Args:
+            latents: Clean latents
+            noise: Sampled noise (same shape as latents)
+            timesteps: Timesteps in [1, 1001] range, shape (B,)
+
+        Returns:
+            Noisy input with same shape as latents
+        """
+        # Convert timesteps to [0, 1]: t = (timestep - 1) / 1000
+        t = (timesteps.float() - 1.0) / 1000.0  # (B,)
+
+        # Expand for broadcasting
+        if latents.ndim == 5:
+            t_exp = t.view(-1, 1, 1, 1, 1)  # (B, 1, 1, 1, 1)
+        else:
+            t_exp = t.view(-1, 1, 1, 1)  # (B, 1, 1, 1)
+
+        return (1 - t_exp) * latents + t_exp * noise
+
+    def _apply_per_token_mask(
+        self,
+        noisy_input_student: torch.Tensor,  # (B, C, H, W) or (B, C, T, H, W)
+        noisy_input_teacher: torch.Tensor,  # same shape as student
+        mask_ratio: float,                   # R_M in [0, 0.5] from paper
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Apply per-token masking (paper Eq. 4-5).
+
+        Masked tokens in student input get replaced with teacher (cleaner) noise level.
+
+        Args:
+            noisy_input_student: Student noisy input
+            noisy_input_teacher: Teacher noisy input (cleaner)
+            mask_ratio: Fraction of tokens to mask, must be <= 0.5
+            device: Device for mask tensor
+
+        Returns:
+            Masked student input with same shape
+        """
+        if noisy_input_student.ndim == 5:
+            B, _C, T, H, W = noisy_input_student.shape
+            num_tokens = T * H * W
+            # Shape: (B, num_tokens)
+            mask = (torch.rand(B, num_tokens, device=device) < mask_ratio)
+            # Shape: (B, 1, T, H, W)
+            mask = mask.view(B, 1, T, H, W).expand_as(noisy_input_student)
+        else:
+            B, _C, H, W = noisy_input_student.shape
+            num_tokens = H * W
+            # Shape: (B, num_tokens)
+            mask = (torch.rand(B, num_tokens, device=device) < mask_ratio)
+            # Shape: (B, 1, H, W)
+            mask = mask.view(B, 1, H, W).expand_as(noisy_input_student)
+
+        # Masked positions get teacher (cleaner) value
+        return torch.where(mask, noisy_input_teacher, noisy_input_student)
+
+    def _update_ema_weights(
+        self,
+        ema_state: dict[str, torch.Tensor],     # EMA copy of weights
+        current_state: dict[str, torch.Tensor], # Current model weights
+        decay: float,                            # EMA decay rate (e.g., 0.9999)
+    ) -> None:
+        """
+        Update EMA weights in-place: ema = decay * ema + (1 - decay) * current
+
+        Args:
+            ema_state: EMA weight dictionary (modified in-place)
+            current_state: Current model weights
+            decay: EMA decay rate, typically 0.9999
+        """
+        with torch.no_grad():
+            for k, v in current_state.items():
+                if v.is_floating_point():
+                    # ema_state[k] = decay * ema_state[k] + (1 - decay) * v
+                    ema_state[k].lerp_(v, 1 - decay)
+                else:
+                    # For non-floating point (e.g., int buffers), just copy
+                    ema_state[k].copy_(v)
+
+    def _compute_representation_loss(
+        self,
+        student_features: torch.Tensor,  # (B, N, D) - student layer features
+        teacher_features: torch.Tensor,  # (B, N, D) - teacher layer features
+        rep_proj: torch.nn.Module,       # Projection network
+    ) -> torch.Tensor:
+        """
+        Compute representation alignment loss L_rep (paper Eq. 6).
+
+        L_rep = -cosine_similarity(proj(f_student), f_teacher)
+
+        Args:
+            student_features: Features from student layer l, shape (B, N, D)
+            teacher_features: Features from teacher layer k, shape (B, N, D)
+            rep_proj: Projection network (maps D -> D)
+
+        Returns:
+            Scalar loss (negative mean cosine similarity)
+        """
+        # Project student features: (B, N, D) -> (B, N, D)
+        student_proj = rep_proj(student_features)
+
+        # Cosine similarity along feature dim: (B, N, D) -> scalar
+        cos_sim = torch.nn.functional.cosine_similarity(
+            student_proj, teacher_features, dim=-1
+        )  # (B, N)
+
+        # Negative mean (we want to maximize similarity = minimize negative)
+        return -cos_sim.mean()
+
+    def _compute_combined_loss(
+        self,
+        l_gen: torch.Tensor,          # Scalar generation loss
+        l_rep: torch.Tensor | None,   # Scalar representation loss (or None)
+        gamma: float,                  # Weight for L_rep (paper default: 0.8)
+    ) -> torch.Tensor:
+        """
+        Compute combined self-flow loss (paper Eq. 7).
+
+        L_total = L_gen + gamma * L_rep
+
+        Args:
+            l_gen: Generation loss (MSE between prediction and target)
+            l_rep: Representation alignment loss (or None if features unavailable)
+            gamma: Weight for representation loss
+
+        Returns:
+            Combined scalar loss
+        """
+        if l_rep is None:
+            return l_gen
+        return l_gen + gamma * l_rep
+
     def _self_flow_step(
         self,
         args: argparse.Namespace,
@@ -1616,44 +1782,16 @@ class NetworkTrainer:
 
         # Per-sample: teacher = min(t, s), student = max(t, s)
         # timesteps shape: (B,), values in [1, 1001], higher = noisier
-        t_a = timesteps_a.float()
-        t_b = timesteps_b.float()
+        timesteps_teacher, timesteps_student = self._assign_teacher_student_timesteps(timesteps_a, timesteps_b)
 
-        timesteps_teacher = torch.min(t_a, t_b).to(timesteps_a.dtype)
-        timesteps_student = torch.max(t_a, t_b).to(timesteps_a.dtype)
-
-        # Reconstruct noisy inputs using per-sample teacher/student timesteps.
-        # Convert timesteps back to t in [0, 1]: t = (timestep - 1) / 1000.
-        t_teacher = (timesteps_teacher.float() - 1.0) / 1000.0
-        t_student = (timesteps_student.float() - 1.0) / 1000.0
-
-        # Expand for broadcasting: (B,) -> (B, 1, 1, 1) or (B, 1, 1, 1, 1)
-        if latents.ndim == 5:
-            t_teacher_exp = t_teacher.view(-1, 1, 1, 1, 1)
-            t_student_exp = t_student.view(-1, 1, 1, 1, 1)
-        else:
-            t_teacher_exp = t_teacher.view(-1, 1, 1, 1)
-            t_student_exp = t_student.view(-1, 1, 1, 1)
-
-        # noisy = (1 - t) * latents + t * noise  (Path A flow matching formula)
-        noisy_input_teacher = (1 - t_teacher_exp) * latents + t_teacher_exp * noise
-        noisy_input_student = (1 - t_student_exp) * latents + t_student_exp * noise
+        # Reconstruct noisy inputs using per-sample teacher/student timesteps
+        noisy_input_teacher = self._reconstruct_noisy_input(latents, noise, timesteps_teacher)
+        noisy_input_student = self._reconstruct_noisy_input(latents, noise, timesteps_student)
 
         # Per-token masking (paper Eq. 4-5)
-        mask_ratio = args.mask_ratio
-        if latents.ndim == 5:
-            B, _C, T, H, W = latents.shape
-            num_tokens = T * H * W
-            mask = (torch.rand(B, num_tokens, device=accelerator.device) < mask_ratio)
-            mask = mask.view(B, 1, T, H, W).expand_as(noisy_input_student)
-        else:
-            B, _C, H, W = latents.shape
-            num_tokens = H * W
-            mask = (torch.rand(B, num_tokens, device=accelerator.device) < mask_ratio)
-            mask = mask.view(B, 1, H, W).expand_as(noisy_input_student)
-
-        # Masked tokens get cleaner (teacher) noise level
-        noisy_input_student = torch.where(mask, noisy_input_teacher, noisy_input_student)
+        noisy_input_student = self._apply_per_token_mask(
+            noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device
+        )
 
         # Feature layer indices: student (l) < teacher (k)
         student_feature_layer = args.student_feature_layer
@@ -1700,13 +1838,11 @@ class NetworkTrainer:
 
         # --- L_rep (Eq. 6) ---
         if feat_student is not None and feat_teacher is not None:
-            gamma = args.self_flow_gamma
-            feat_student_proj = rep_proj(feat_student)
-            L_rep = -torch.nn.functional.cosine_similarity(feat_student_proj, feat_teacher, dim=-1).mean()
-            loss = L_gen + gamma * L_rep
+            L_rep = self._compute_representation_loss(feat_student, feat_teacher, rep_proj)
+            loss = self._compute_combined_loss(L_gen, L_rep, args.self_flow_gamma)
         else:
             L_rep = None
-            loss = L_gen
+            loss = self._compute_combined_loss(L_gen, None, args.self_flow_gamma)
 
         # --- Self-flow metrics ---
         self._self_flow_logs = {
@@ -2430,12 +2566,7 @@ class NetworkTrainer:
                         rep_proj_optimizer.zero_grad(set_to_none=True)
 
                         # Update EMA of LoRA weights (only after actual optimizer step)
-                        with torch.no_grad():
-                            for k, v in network.state_dict().items():
-                                if v.is_floating_point():
-                                    ema_lora_state[k].lerp_(v, 1 - args.ema_decay)
-                                else:
-                                    ema_lora_state[k].copy_(v)
+                        self._update_ema_weights(ema_lora_state, network.state_dict(), args.ema_decay)
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
