@@ -2091,11 +2091,19 @@ class NetworkTrainer:
                 init_kwargs=init_kwargs,
             )
 
-        # TODO skip until initial step
-        progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
+        # Resume from saved step if applicable
+        initial_step = 0
+        if args.resume:
+            # lr_scheduler state is restored by accelerator.load_state();
+            # scheduler.last_epoch tracks the global optimizer step (not epoch)
+            initial_step = lr_scheduler.scheduler.last_epoch
+            if initial_step > 0:
+                logger.info(f"Resuming from step {initial_step}")
 
-        epoch_to_start = 0
-        global_step = 0
+        progress_bar = tqdm(range(args.max_train_steps), initial=initial_step, smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
+
+        epoch_to_start = initial_step // num_update_steps_per_epoch
+        global_step = initial_step
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
         loss_recorder = train_utils.LossRecorder()
@@ -2179,7 +2187,12 @@ class NetworkTrainer:
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
+            steps_in_current_epoch = initial_step - epoch_to_start * num_update_steps_per_epoch
             for step, batch in enumerate(train_dataloader):
+                # Skip already-trained steps in the first resumed epoch
+                if epoch == epoch_to_start and step < steps_in_current_epoch:
+                    continue
+
                 # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
 
                 latents = batch["latents"]
