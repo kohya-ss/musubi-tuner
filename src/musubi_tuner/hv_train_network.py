@@ -1680,7 +1680,7 @@ class NetworkTrainer:
         noisy_input_teacher: torch.Tensor,  # same shape as student
         mask_ratio: float,                   # R_M in [0, 0.5] from paper
         device: torch.device,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply per-token masking (paper Eq. 4-5).
 
@@ -1693,25 +1693,51 @@ class NetworkTrainer:
             device: Device for mask tensor
 
         Returns:
-            Masked student input with same shape
+            (masked_input, mask_flat) where mask_flat is (B, N) bool tensor,
+            True = masked (uses teacher value). Returned so callers can build
+            per-token timestep maps.
         """
         if noisy_input_student.ndim == 5:
             B, _C, T, H, W = noisy_input_student.shape
             num_tokens = T * H * W
-            # Shape: (B, num_tokens)
-            mask = (torch.rand(B, num_tokens, device=device) < mask_ratio)
-            # Shape: (B, 1, T, H, W)
-            mask = mask.view(B, 1, T, H, W).expand_as(noisy_input_student)
+            mask_flat = (torch.rand(B, num_tokens, device=device) < mask_ratio)
+            mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
         else:
             B, _C, H, W = noisy_input_student.shape
             num_tokens = H * W
-            # Shape: (B, num_tokens)
-            mask = (torch.rand(B, num_tokens, device=device) < mask_ratio)
-            # Shape: (B, 1, H, W)
-            mask = mask.view(B, 1, H, W).expand_as(noisy_input_student)
+            mask_flat = (torch.rand(B, num_tokens, device=device) < mask_ratio)
+            mask_spatial = mask_flat.view(B, 1, H, W).expand_as(noisy_input_student)
 
         # Masked positions get teacher (cleaner) value
-        return torch.where(mask, noisy_input_teacher, noisy_input_student)
+        masked_input = torch.where(mask_spatial, noisy_input_teacher, noisy_input_student)
+        return masked_input, mask_flat
+
+    def _build_per_token_timestep_map(
+        self,
+        timesteps_teacher: torch.Tensor,  # (B,)
+        timesteps_student: torch.Tensor,  # (B,)
+        mask_flat: torch.Tensor,          # (B, N) bool — True = masked = teacher
+    ) -> torch.Tensor:
+        """
+        Build per-token timestep map for dual-timestep conditioning (paper §A.3).
+
+        Each token is conditioned on its actual noise level:
+        - Masked tokens (teacher noise): get timesteps_teacher
+        - Unmasked tokens (student noise): get timesteps_student
+
+        Args:
+            timesteps_teacher: Teacher timesteps, shape (B,)
+            timesteps_student: Student timesteps, shape (B,)
+            mask_flat: Boolean mask from _apply_per_token_mask, shape (B, N)
+
+        Returns:
+            Per-token timestep tensor of shape (B, N), same dtype as inputs
+        """
+        B, N = mask_flat.shape
+        # Start with student timestep everywhere, then fill masked positions with teacher
+        t_student_expanded = timesteps_student.unsqueeze(1).expand(B, N)   # (B, N)
+        t_teacher_expanded = timesteps_teacher.unsqueeze(1).expand(B, N)   # (B, N)
+        return torch.where(mask_flat, t_teacher_expanded, t_student_expanded)
 
     def _update_ema_weights(
         self,
@@ -1765,6 +1791,49 @@ class NetworkTrainer:
 
         # Negative mean (we want to maximize similarity = minimize negative)
         return -cos_sim.mean()
+
+    def _compute_ema_weight_drift(
+        self,
+        ema_state: dict[str, torch.Tensor],
+        current_state: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Compute mean L2 distance between EMA and current weights (floating-point only).
+
+        Healthy training shows a stable moderate drift — too low means the teacher
+        has collapsed into the student; a sudden spike indicates a training problem.
+
+        Returns:
+            Scalar tensor: mean L2 norm across all floating-point parameter differences
+        """
+        diffs = []
+        for k, ema_v in ema_state.items():
+            if ema_v.is_floating_point():
+                diffs.append((ema_v - current_state[k]).norm())
+        if not diffs:
+            return torch.tensor(0.0)
+        return torch.stack(diffs).mean()
+
+    def _update_self_flow_logs(
+        self,
+        L_gen: torch.Tensor,
+        L_rep: torch.Tensor | None,
+        timesteps_student: torch.Tensor,
+        timesteps_teacher: torch.Tensor,
+        mask_flat: torch.Tensor,
+        per_token_timesteps_student: torch.Tensor,
+        ema_weight_drift: torch.Tensor,
+    ) -> None:
+        """Populate self._self_flow_logs with all self-flow training metrics."""
+        self._self_flow_logs = {
+            "self_flow/L_gen": L_gen.detach().item(),
+            "self_flow/L_rep": L_rep.detach().item() if L_rep is not None else 0.0,
+            "self_flow/feat_cosine_sim": (-L_rep.detach().item()) if L_rep is not None else 0.0,
+            "self_flow/timestep_student_mean": timesteps_student.float().mean().item(),
+            "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
+            "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
+            "self_flow/ema_weight_drift": ema_weight_drift.detach().item(),
+        }
 
     def _compute_combined_loss(
         self,
@@ -1824,9 +1893,13 @@ class NetworkTrainer:
         noisy_input_teacher = self._reconstruct_noisy_input(latents, noise, timesteps_teacher)
         noisy_input_student = self._reconstruct_noisy_input(latents, noise, timesteps_student)
 
-        # Per-token masking (paper Eq. 4-5)
-        noisy_input_student = self._apply_per_token_mask(
+        # Per-token masking (paper Eq. 4-5) — returns (masked_input, mask_flat)
+        noisy_input_student, mask_flat = self._apply_per_token_mask(
             noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device
+        )
+        # Per-token timestep map: masked tokens conditioned on teacher timestep
+        per_token_timesteps_student = self._build_per_token_timestep_map(
+            timesteps_teacher, timesteps_student, mask_flat
         )
 
         # Feature layer indices: student (l) < teacher (k)
@@ -1852,7 +1925,8 @@ class NetworkTrainer:
         result = self.call_dit(
             args, accelerator, transformer, latents, batch, noise,
             noisy_input_student, timesteps_student, network_dtype,
-            hidden_features=True, feature_layer=student_feature_layer
+            hidden_features=True, feature_layer=student_feature_layer,
+            per_token_timesteps=per_token_timesteps_student,
         )
         model_pred, target = result[0], result[1]
         feat_student = result[2] if len(result) > 2 and result[2] is not None else None
@@ -1881,13 +1955,16 @@ class NetworkTrainer:
             loss = self._compute_combined_loss(L_gen, None, args.self_flow_gamma)
 
         # --- Self-flow metrics ---
-        self._self_flow_logs = {
-            "self_flow/L_gen": L_gen.detach().item(),
-            "self_flow/L_rep": L_rep.detach().item() if L_rep is not None else 0.0,
-            "self_flow/timestep_student_mean": timesteps_student.float().mean().item(),
-            "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
-            "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
-        }
+        ema_drift = self._compute_ema_weight_drift(ema_lora_state, network.state_dict())
+        self._update_self_flow_logs(
+            L_gen=L_gen,
+            L_rep=L_rep,
+            timesteps_student=timesteps_student,
+            timesteps_teacher=timesteps_teacher,
+            mask_flat=mask_flat,
+            per_token_timesteps_student=per_token_timesteps_student,
+            ema_weight_drift=ema_drift,
+        )
 
         return loss
 

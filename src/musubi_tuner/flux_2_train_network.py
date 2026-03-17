@@ -268,6 +268,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         hidden_features: bool = False,
         feature_layer: int | None = None,
+        per_token_timesteps: torch.Tensor | None = None,
         **kwargs
     ):
         model: flux2_models.Flux2 = transformer
@@ -322,8 +323,12 @@ class Flux2NetworkTrainer(NetworkTrainer):
             img_input = torch.cat((img_input, ref_tokens), dim=1)
             img_input_ids = torch.cat((img_input_ids, ref_ids), dim=1)
 
-        timesteps = timesteps / 1000.0
-        model_output = model(x=img_input, x_ids=img_input_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec, hidden_features=hidden_features, feature_layer=feature_layer)
+        if per_token_timesteps is not None:
+            # Self-flow: per-token timesteps (B, N_img) — each token conditioned on its noise level
+            model_timesteps = per_token_timesteps.to(device=accelerator.device) / 1000.0
+        else:
+            model_timesteps = timesteps / 1000.0
+        model_output = model(x=img_input, x_ids=img_input_ids, timesteps=model_timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec, hidden_features=hidden_features, feature_layer=feature_layer)
         if hidden_features:
             model_pred, features = model_output
         else:
