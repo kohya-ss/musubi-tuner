@@ -7,11 +7,8 @@ on:
   push:
     paths:
       - ".github/workflows/tests.yml"
-      - "src/musubi_tuner/hv_train_network.py"
-      - "src/musubi_tuner/flux_2/flux2_models.py"
-      - "src/musubi_tuner/flux_2_train_network.py"
-      - "tests/test_self_flow_*.py"
-      - "tests/conftest.py"
+      - "src/musubi_tuner/**"
+      - "tests/**"
       - ".python-version"
       - "pyproject.toml"
   workflow_dispatch:
@@ -32,15 +29,11 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install the project with dev dependencies
-        run: uv sync --dev
+      - name: Install the project with dev and pytorch cpu dependencies
+        run: uv sync --dev --extra cpu
 
-      - name: "Run tests"
-        run: uv run pytest -v --tb=short
-
-      - name: "Generate coverage report"
-        if: always()
-        run: uv run pytest tests/test_self_flow_*.py --cov=src/musubi_tuner --cov-report=term-missing --cov-report=xml
+      - name: "Run tests with coverage"
+        run: uv run pytest -v --tb=short --cov=src/musubi_tuner --cov-report=term-missing --cov-report=xml
 
       - name: "Upload coverage to artifacts"
         if: always()
