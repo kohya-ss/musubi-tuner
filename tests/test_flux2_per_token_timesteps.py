@@ -50,6 +50,7 @@ def make_inputs(B=2, N_img=4, N_txt=3, in_channels=4, hidden_ctx=8):
 # Regression: global (B,) timestep path must work exactly as before
 # ---------------------------------------------------------------------------
 
+
 def test_flux2_global_timesteps_still_work(tiny_model):
     """Original (B,) timestep path must produce correct-shaped output."""
     B, N_img = 2, 4
@@ -77,6 +78,7 @@ def test_flux2_global_timesteps_deterministic(tiny_model):
 # RED: per-token (B, N) timestep path — new behavior
 # ---------------------------------------------------------------------------
 
+
 def test_flux2_per_token_timesteps_correct_output_shape(tiny_model):
     """Per-token (B, N_img) timesteps should produce same-shaped output as global."""
     B, N_img = 2, 4
@@ -86,9 +88,7 @@ def test_flux2_per_token_timesteps_correct_output_shape(tiny_model):
 
     out = tiny_model(x=x, x_ids=x_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
 
-    assert out.shape == (B, N_img, tiny_model.out_channels), (
-        f"Expected ({B}, {N_img}, {tiny_model.out_channels}), got {out.shape}"
-    )
+    assert out.shape == (B, N_img, tiny_model.out_channels), f"Expected ({B}, {N_img}, {tiny_model.out_channels}), got {out.shape}"
 
 
 def test_flux2_uniform_per_token_matches_global(tiny_model):
@@ -105,9 +105,7 @@ def test_flux2_uniform_per_token_matches_global(tiny_model):
     t_per_token = t_val.unsqueeze(1).expand(B, N_img)  # (B, N_img) all same
     out_per_token = tiny_model(x=x, x_ids=x_ids, timesteps=t_per_token, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
 
-    assert torch.allclose(out_global, out_per_token, atol=1e-5), (
-        "Uniform per-token timesteps should match global timestep output"
-    )
+    assert torch.allclose(out_global, out_per_token, atol=1e-5), "Uniform per-token timesteps should match global timestep output"
 
 
 def test_flux2_varied_per_token_differs_from_global(tiny_model):
@@ -117,8 +115,7 @@ def test_flux2_varied_per_token_differs_from_global(tiny_model):
 
     t_global = torch.tensor([0.3, 0.7])
     # Mix of teacher (0.1) and student (0.8) timesteps per token
-    t_per_token = torch.tensor([[0.1, 0.8, 0.1, 0.8],
-                                 [0.1, 0.8, 0.1, 0.8]])  # (B, N_img)
+    t_per_token = torch.tensor([[0.1, 0.8, 0.1, 0.8], [0.1, 0.8, 0.1, 0.8]])  # (B, N_img)
 
     out_global = tiny_model(x=x, x_ids=x_ids, timesteps=t_global, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
     out_per_token = tiny_model(x=x, x_ids=x_ids, timesteps=t_per_token, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
@@ -174,8 +171,7 @@ def test_flux2_per_token_hidden_features_work(tiny_model):
     timesteps = torch.rand(B, N_img)
 
     out, features = tiny_model(
-        x=x, x_ids=x_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids,
-        guidance=guidance, hidden_features=True
+        x=x, x_ids=x_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance, hidden_features=True
     )
 
     assert out.shape == (B, N_img, tiny_model.out_channels)

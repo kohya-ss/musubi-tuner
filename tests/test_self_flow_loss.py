@@ -14,6 +14,7 @@ def trainer():
 @pytest.fixture
 def mock_rep_proj():
     """Simple linear projection for testing."""
+
     class SimpleProj(torch.nn.Module):
         def __init__(self):
             super().__init__()

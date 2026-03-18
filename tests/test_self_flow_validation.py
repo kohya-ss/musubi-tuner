@@ -97,9 +97,7 @@ def test_mask_ratio_exceeds_limit():
     with pytest.raises(ValueError, match="mask_ratio.*must be <= 0.5"):
         if args.self_flow:
             if args.mask_ratio > 0.5:
-                raise ValueError(
-                    f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)"
-                )
+                raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)")
 
 
 def test_mask_ratio_zero_valid():

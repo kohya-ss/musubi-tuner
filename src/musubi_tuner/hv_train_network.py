@@ -883,32 +883,37 @@ class NetworkTrainer:
                     sigma = args.sigmoid_scale
 
                     mode_t = torch.sigmoid(torch.tensor(mu_shifted)).item()
-                    
+
                     # PDF at mode (for normalization)
                     from scipy.stats import norm as sp_norm
+
                     # logit-normal pdf at mode_t
                     logit_mode = math.log(mode_t / (1 - mode_t))
-                    pdf_at_mode = (1 / (sigma * math.sqrt(2 * math.pi)) *
-                                   1 / (mode_t * (1 - mode_t)) *
-                                   math.exp(-(logit_mode - mu_shifted)**2 / (2 * sigma**2)))
-                    
+                    pdf_at_mode = (
+                        1
+                        / (sigma * math.sqrt(2 * math.pi))
+                        * 1
+                        / (mode_t * (1 - mode_t))
+                        * math.exp(-((logit_mode - mu_shifted) ** 2) / (2 * sigma**2))
+                    )
+
                     # CDF has two regions:
                     # [0, mode_t]: integral of logit-normal
                     # [mode_t, 1]: pdf_at_mode * (t - mode_t)
                     cdf_at_mode = sp_norm.cdf((logit_mode - mu_shifted) / sigma)
                     plateau_mass = pdf_at_mode * (1 - mode_t)
                     total_mass = cdf_at_mode + plateau_mass
-                    
+
                     # Sample via inverse CDF
                     u = torch.rand(batch_size, device=device) * total_mass
                     t = torch.zeros(batch_size, device=device)
-                    
+
                     in_logit_normal = u < cdf_at_mode
                     if in_logit_normal.any():
                         # Inverse CDF of logit-normal region
                         z = torch.tensor(sp_norm.ppf((u[in_logit_normal] / 1.0).cpu().numpy()), device=device)
                         t[in_logit_normal] = torch.sigmoid(z.float() * sigma + mu_shifted)
-                    
+
                     in_plateau = ~in_logit_normal
                     if in_plateau.any():
                         t[in_plateau] = mode_t + (u[in_plateau] - cdf_at_mode) / pdf_at_mode
@@ -1615,7 +1620,9 @@ class NetworkTrainer:
         latents = latents * vae_module.SCALING_FACTOR
         return latents
 
-    def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, weighting: float | None, **kwargs) -> tuple[torch.Tensor, dict[str, Any]]:
+    def compute_loss(
+        self, pred: torch.Tensor, target: torch.Tensor, weighting: float | None, **kwargs
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Returns loss and loss metrics"""
         loss = torch.nn.functional.mse_loss(pred, target, reduction="none")
 
@@ -1648,9 +1655,9 @@ class NetworkTrainer:
 
     def _reconstruct_noisy_input(
         self,
-        latents: torch.Tensor,      # (B, C, H, W) or (B, C, T, H, W)
-        noise: torch.Tensor,        # same shape as latents
-        timesteps: torch.Tensor,    # (B,) - timesteps in [1, 1001]
+        latents: torch.Tensor,  # (B, C, H, W) or (B, C, T, H, W)
+        noise: torch.Tensor,  # same shape as latents
+        timesteps: torch.Tensor,  # (B,) - timesteps in [1, 1001]
     ) -> torch.Tensor:
         """
         Reconstruct noisy input using flow matching formula: (1-t)*latents + t*noise
@@ -1678,7 +1685,7 @@ class NetworkTrainer:
         self,
         noisy_input_student: torch.Tensor,  # (B, C, H, W) or (B, C, T, H, W)
         noisy_input_teacher: torch.Tensor,  # same shape as student
-        mask_ratio: float,                   # R_M in [0, 0.5] from paper
+        mask_ratio: float,  # R_M in [0, 0.5] from paper
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -1700,12 +1707,12 @@ class NetworkTrainer:
         if noisy_input_student.ndim == 5:
             B, _C, T, H, W = noisy_input_student.shape
             num_tokens = T * H * W
-            mask_flat = (torch.rand(B, num_tokens, device=device) < mask_ratio)
+            mask_flat = torch.rand(B, num_tokens, device=device) < mask_ratio
             mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
         else:
             B, _C, H, W = noisy_input_student.shape
             num_tokens = H * W
-            mask_flat = (torch.rand(B, num_tokens, device=device) < mask_ratio)
+            mask_flat = torch.rand(B, num_tokens, device=device) < mask_ratio
             mask_spatial = mask_flat.view(B, 1, H, W).expand_as(noisy_input_student)
 
         # Masked positions get teacher (cleaner) value
@@ -1716,7 +1723,7 @@ class NetworkTrainer:
         self,
         timesteps_teacher: torch.Tensor,  # (B,)
         timesteps_student: torch.Tensor,  # (B,)
-        mask_flat: torch.Tensor,          # (B, N) bool — True = masked = teacher
+        mask_flat: torch.Tensor,  # (B, N) bool — True = masked = teacher
     ) -> torch.Tensor:
         """
         Build per-token timestep map for dual-timestep conditioning (paper §A.3).
@@ -1735,15 +1742,15 @@ class NetworkTrainer:
         """
         B, N = mask_flat.shape
         # Start with student timestep everywhere, then fill masked positions with teacher
-        t_student_expanded = timesteps_student.unsqueeze(1).expand(B, N)   # (B, N)
-        t_teacher_expanded = timesteps_teacher.unsqueeze(1).expand(B, N)   # (B, N)
+        t_student_expanded = timesteps_student.unsqueeze(1).expand(B, N)  # (B, N)
+        t_teacher_expanded = timesteps_teacher.unsqueeze(1).expand(B, N)  # (B, N)
         return torch.where(mask_flat, t_teacher_expanded, t_student_expanded)
 
     def _update_ema_weights(
         self,
-        ema_state: dict[str, torch.Tensor],     # EMA copy of weights
-        current_state: dict[str, torch.Tensor], # Current model weights
-        decay: float,                            # EMA decay rate (e.g., 0.9999)
+        ema_state: dict[str, torch.Tensor],  # EMA copy of weights
+        current_state: dict[str, torch.Tensor],  # Current model weights
+        decay: float,  # EMA decay rate (e.g., 0.9999)
     ) -> None:
         """
         Update EMA weights in-place: ema = decay * ema + (1 - decay) * current
@@ -1766,7 +1773,7 @@ class NetworkTrainer:
         self,
         student_features: torch.Tensor,  # (B, N, D) - student layer features
         teacher_features: torch.Tensor,  # (B, N, D) - teacher layer features
-        rep_proj: torch.nn.Module,       # Projection network
+        rep_proj: torch.nn.Module,  # Projection network
     ) -> torch.Tensor:
         """
         Compute representation alignment loss L_rep (paper Eq. 6).
@@ -1785,9 +1792,7 @@ class NetworkTrainer:
         student_proj = rep_proj(student_features)
 
         # Cosine similarity along feature dim: (B, N, D) -> scalar
-        cos_sim = torch.nn.functional.cosine_similarity(
-            student_proj, teacher_features, dim=-1
-        )  # (B, N)
+        cos_sim = torch.nn.functional.cosine_similarity(student_proj, teacher_features, dim=-1)  # (B, N)
 
         # Negative mean (we want to maximize similarity = minimize negative)
         return -cos_sim.mean()
@@ -1837,9 +1842,9 @@ class NetworkTrainer:
 
     def _compute_combined_loss(
         self,
-        l_gen: torch.Tensor,          # Scalar generation loss
-        l_rep: torch.Tensor | None,   # Scalar representation loss (or None)
-        gamma: float,                  # Weight for L_rep (paper default: 0.8)
+        l_gen: torch.Tensor,  # Scalar generation loss
+        l_rep: torch.Tensor | None,  # Scalar representation loss (or None)
+        gamma: float,  # Weight for L_rep (paper default: 0.8)
     ) -> torch.Tensor:
         """
         Compute combined self-flow loss (paper Eq. 7).
@@ -1877,11 +1882,11 @@ class NetworkTrainer:
         """Self-flow training step: dual-timestep scheduling + representation alignment."""
         # Sample two timesteps per sample (noisy inputs are reconstructed below with per-sample min/max)
         _, timesteps_a = self.get_noisy_model_input_and_timesteps(
-            args, noise, latents, batch['timesteps'], noise_scheduler, accelerator.device, dit_dtype
+            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
         )
         assert isinstance(timesteps_a, torch.Tensor), "timesteps_a must be a tensor"
         _, timesteps_b = self.get_noisy_model_input_and_timesteps(
-            args, noise, latents, batch['timesteps'], noise_scheduler, accelerator.device, dit_dtype
+            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
         )
         assert isinstance(timesteps_b, torch.Tensor), "timesteps_b must be a tensor"
 
@@ -1898,9 +1903,7 @@ class NetworkTrainer:
             noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device
         )
         # Per-token timestep map: masked tokens conditioned on teacher timestep
-        per_token_timesteps_student = self._build_per_token_timestep_map(
-            timesteps_teacher, timesteps_student, mask_flat
-        )
+        per_token_timesteps_student = self._build_per_token_timestep_map(timesteps_teacher, timesteps_student, mask_flat)
 
         # Feature layer indices: student (l) < teacher (k)
         student_feature_layer = args.student_feature_layer
@@ -1911,9 +1914,17 @@ class NetworkTrainer:
         network.load_state_dict(ema_lora_state)
         with torch.no_grad():
             result = self.call_dit(
-                args, accelerator, transformer, latents, batch, noise,
-                noisy_input_teacher, timesteps_teacher, network_dtype,
-                hidden_features=True, feature_layer=teacher_feature_layer
+                args,
+                accelerator,
+                transformer,
+                latents,
+                batch,
+                noise,
+                noisy_input_teacher,
+                timesteps_teacher,
+                network_dtype,
+                hidden_features=True,
+                feature_layer=teacher_feature_layer,
             )
             feat_teacher = result[2].detach() if len(result) > 2 and result[2] is not None else None
         network.load_state_dict(student_lora_state)
@@ -1923,9 +1934,17 @@ class NetworkTrainer:
             args.weighting_scheme, noise_scheduler, timesteps_student, accelerator.device, dit_dtype
         )
         result = self.call_dit(
-            args, accelerator, transformer, latents, batch, noise,
-            noisy_input_student, timesteps_student, network_dtype,
-            hidden_features=True, feature_layer=student_feature_layer,
+            args,
+            accelerator,
+            transformer,
+            latents,
+            batch,
+            noise,
+            noisy_input_student,
+            timesteps_student,
+            network_dtype,
+            hidden_features=True,
+            feature_layer=student_feature_layer,
             per_token_timesteps=per_token_timesteps_student,
         )
         model_pred, target = result[0], result[1]
@@ -1942,7 +1961,7 @@ class NetworkTrainer:
             noisy_model_input=noisy_input_student,
             vae=vae,
             accelerator=accelerator,
-            noise_scheduler=noise_scheduler
+            noise_scheduler=noise_scheduler,
         )
         L_gen = loss.mean()
 
@@ -1979,7 +1998,7 @@ class NetworkTrainer:
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-        **kwargs
+        **kwargs,
     ):
         transformer: HYVideoDiffusionTransformer = transformer_arg
         bsz = latents.shape[0]
@@ -2065,9 +2084,7 @@ class NetworkTrainer:
                     "The paper requires l < k for the representation alignment loss."
                 )
             if args.mask_ratio > 0.5:
-                raise ValueError(
-                    f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)"
-                )
+                raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)")
 
         if args.disable_numpy_memmap:
             logger.info(
@@ -2273,7 +2290,7 @@ class NetworkTrainer:
             rep_proj = torch.nn.Sequential(
                 torch.nn.Linear(transformer.hidden_size, transformer.hidden_size),
                 torch.nn.GELU(),
-                torch.nn.Linear(transformer.hidden_size, transformer.hidden_size)
+                torch.nn.Linear(transformer.hidden_size, transformer.hidden_size),
             )
             rep_proj_optimizer = torch.optim.AdamW(rep_proj.parameters(), lr=1e-4)
             rep_proj, rep_proj_optimizer = accelerator.prepare(rep_proj, rep_proj_optimizer)
@@ -2631,9 +2648,19 @@ class NetworkTrainer:
                         assert rep_proj is not None
                         assert ema_lora_state is not None
                         loss = self._self_flow_step(
-                            args, accelerator, transformer, network, latents, batch, noise,
-                            noise_scheduler, dit_dtype, network_dtype, vae,
-                            rep_proj, ema_lora_state,
+                            args,
+                            accelerator,
+                            transformer,
+                            network,
+                            latents,
+                            batch,
+                            noise,
+                            noise_scheduler,
+                            dit_dtype,
+                            network_dtype,
+                            vae,
+                            rep_proj,
+                            ema_lora_state,
                         )
                     else:
                         # --- Vanilla flow matching ---
@@ -2733,7 +2760,7 @@ class NetworkTrainer:
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
-                    if hasattr(self, '_self_flow_logs'):
+                    if hasattr(self, "_self_flow_logs"):
                         logs.update(self._self_flow_logs)
                     accelerator.log(logs, step=global_step)
 
@@ -3497,8 +3524,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--ema_decay",
         type=float,
         default=0.9999,
-        help="EMA decay rate for self-flow teacher LoRA weights."
-        " / セルフフロー教師LoRA重みのEMA減衰率。",
+        help="EMA decay rate for self-flow teacher LoRA weights. / セルフフロー教師LoRA重みのEMA減衰率。",
     )
     parser.add_argument(
         "--student_feature_layer",

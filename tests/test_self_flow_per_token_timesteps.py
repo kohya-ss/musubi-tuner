@@ -24,6 +24,7 @@ def trainer():
 # Document the bug: mixed-noise input with a single global timestep
 # ---------------------------------------------------------------------------
 
+
 def test_masked_input_has_two_noise_levels_but_single_timestep(trainer):
     """
     Demonstrates the root cause of distortions.
@@ -36,8 +37,8 @@ def test_masked_input_has_two_noise_levels_but_single_timestep(trainer):
     latents = torch.ones(1, 4, 8, 8)
     noise = torch.zeros(1, 4, 8, 8)
 
-    t_teacher = torch.tensor([100])   # cleaner: x = 0.9*latents + 0.1*noise
-    t_student = torch.tensor([800])   # noisier: x = 0.2*latents + 0.8*noise
+    t_teacher = torch.tensor([100])  # cleaner: x = 0.9*latents + 0.1*noise
+    t_student = torch.tensor([800])  # noisier: x = 0.2*latents + 0.8*noise
 
     t_teacher_f = (t_teacher.float() - 1.0) / 1000.0
     t_student_f = (t_student.float() - 1.0) / 1000.0
@@ -59,15 +60,14 @@ def test_masked_input_has_two_noise_levels_but_single_timestep(trainer):
     student_positions = masked[~mask_4d].mean()
 
     # Teacher positions (masked) should be closer to latents value (1.0)
-    assert teacher_positions > student_positions, (
-        "Masked positions should have teacher (cleaner) noise level"
-    )
+    assert teacher_positions > student_positions, "Masked positions should have teacher (cleaner) noise level"
     # But the model will be told t_student for ALL tokens — this is the bug.
 
 
 # ---------------------------------------------------------------------------
 # RED: _apply_per_token_mask must return (masked_input, mask)
 # ---------------------------------------------------------------------------
+
 
 def test_apply_per_token_mask_returns_tuple_with_mask_4d(trainer):
     """_apply_per_token_mask should return (masked_input, mask) where mask is (B, N)."""
@@ -121,31 +121,32 @@ def test_apply_per_token_mask_mask_true_means_teacher_token(trainer):
 # RED: _build_per_token_timestep_map — new function that does not exist yet
 # ---------------------------------------------------------------------------
 
+
 def test_build_per_token_timestep_map_assigns_teacher_to_masked(trainer):
     """
     _build_per_token_timestep_map(t_teacher, t_student, mask) → (B, N) tensor.
     Masked positions (mask=True) get teacher timestep.
     Unmasked positions (mask=False) get student timestep.
     """
-    t_teacher = torch.tensor([100, 200])   # (B,)
-    t_student = torch.tensor([500, 600])   # (B,)
+    t_teacher = torch.tensor([100, 200])  # (B,)
+    t_student = torch.tensor([500, 600])  # (B,)
 
     # mask: (B, N) - True = masked = use teacher
     mask = torch.zeros(2, 16, dtype=torch.bool)
-    mask[0, :4] = True   # first 4 tokens masked in batch 0
-    mask[1, 8:] = True   # last 8 tokens masked in batch 1
+    mask[0, :4] = True  # first 4 tokens masked in batch 0
+    mask[1, 8:] = True  # last 8 tokens masked in batch 1
 
     timestep_map = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
 
     assert timestep_map.shape == (2, 16)
 
     # Batch 0: teacher=100, student=500
-    assert (timestep_map[0, :4] == 100).all(),  "Masked tokens should get t_teacher"
-    assert (timestep_map[0, 4:] == 500).all(),  "Unmasked tokens should get t_student"
+    assert (timestep_map[0, :4] == 100).all(), "Masked tokens should get t_teacher"
+    assert (timestep_map[0, 4:] == 500).all(), "Unmasked tokens should get t_student"
 
     # Batch 1: teacher=200, student=600
-    assert (timestep_map[1, :8] == 600).all(),  "Unmasked tokens should get t_student"
-    assert (timestep_map[1, 8:] == 200).all(),  "Masked tokens should get t_teacher"
+    assert (timestep_map[1, :8] == 600).all(), "Unmasked tokens should get t_student"
+    assert (timestep_map[1, 8:] == 200).all(), "Masked tokens should get t_teacher"
 
 
 def test_build_per_token_timestep_map_no_mask_all_student(trainer):
@@ -185,6 +186,7 @@ def test_build_per_token_timestep_map_dtype_preserved(trainer):
 # RED: Flux2 model forward accepts per-token (B, N) timesteps
 # ---------------------------------------------------------------------------
 
+
 def test_flux2_modulation_handles_per_token_vec():
     """
     Flux2 Modulation already handles (B, N, D) vec without modification
@@ -209,9 +211,7 @@ def test_flux2_modulation_handles_per_token_vec():
     vec_per_token = torch.randn(B, N, hidden)
     out_per_token, _ = mod(vec_per_token)
     shift_per_token, scale_per_token, gate_per_token = out_per_token
-    assert shift_per_token.shape == (B, N, hidden), (
-        f"Per-token vec should give (B, N, D) modulation, got {shift_per_token.shape}"
-    )
+    assert shift_per_token.shape == (B, N, hidden), f"Per-token vec should give (B, N, D) modulation, got {shift_per_token.shape}"
 
 
 def test_flux2_last_layer_handles_per_token_vec():
@@ -240,6 +240,4 @@ def test_flux2_last_layer_handles_per_token_vec():
     assert out_per_token.shape == (B, N, out_channels)
 
     # Per-token output should differ from global (different conditioning per token)
-    assert not torch.allclose(out_global, out_per_token), (
-        "Per-token and global conditioning should produce different outputs"
-    )
+    assert not torch.allclose(out_global, out_per_token), "Per-token and global conditioning should produce different outputs"

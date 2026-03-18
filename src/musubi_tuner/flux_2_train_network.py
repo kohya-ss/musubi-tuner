@@ -269,7 +269,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         hidden_features: bool = False,
         feature_layer: int | None = None,
         per_token_timesteps: torch.Tensor | None = None,
-        **kwargs
+        **kwargs,
     ):
         model: flux2_models.Flux2 = transformer
 
@@ -332,7 +332,16 @@ class Flux2NetworkTrainer(NetworkTrainer):
                 model_timesteps = torch.cat([model_timesteps, ref_ts], dim=1)
         else:
             model_timesteps = timesteps / 1000.0
-        model_output = model(x=img_input, x_ids=img_input_ids, timesteps=model_timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec, hidden_features=hidden_features, feature_layer=feature_layer)
+        model_output = model(
+            x=img_input,
+            x_ids=img_input_ids,
+            timesteps=model_timesteps,
+            ctx=ctx,
+            ctx_ids=ctx_ids,
+            guidance=guidance_vec,
+            hidden_features=hidden_features,
+            feature_layer=feature_layer,
+        )
         if hidden_features:
             model_pred, features = model_output
         else:

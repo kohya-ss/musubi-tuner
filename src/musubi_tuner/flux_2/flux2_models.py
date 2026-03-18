@@ -592,7 +592,17 @@ class Flux2(nn.Module):
         self.offloader_double.prepare_block_devices_before_forward(self.double_blocks)
         self.offloader_single.prepare_block_devices_before_forward(self.single_blocks)
 
-    def forward(self, x: Tensor, x_ids: Tensor, timesteps: Tensor, ctx: Tensor, ctx_ids: Tensor, guidance: Tensor | None, hidden_features: bool = False, feature_layer: int | None = None) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        x_ids: Tensor,
+        timesteps: Tensor,
+        ctx: Tensor,
+        ctx_ids: Tensor,
+        guidance: Tensor | None,
+        hidden_features: bool = False,
+        feature_layer: int | None = None,
+    ) -> Tensor:
         num_txt_tokens = ctx.shape[1]
 
         if timesteps.ndim == 1:
@@ -619,13 +629,13 @@ class Flux2(nn.Module):
             vec_img = self.time_in(timestep_emb_flat).reshape(B, N_img, -1)  # (B, N_img, D)
             del timestep_emb_flat
             if self.use_guidance_embed:
-                guidance_emb = timestep_embedding(guidance, 256)               # (B, 256)
-                guidance_vec = self.guidance_in(guidance_emb).unsqueeze(1)     # (B, 1, D)
+                guidance_emb = timestep_embedding(guidance, 256)  # (B, 256)
+                guidance_vec = self.guidance_in(guidance_emb).unsqueeze(1)  # (B, 1, D)
                 del guidance_emb
-                vec_img = vec_img + guidance_vec                                # (B, N_img, D)
+                vec_img = vec_img + guidance_vec  # (B, N_img, D)
 
             # Text tokens are not noised; use mean of per-token vecs as global representative
-            vec_global = vec_img.mean(dim=1)                                   # (B, D)
+            vec_global = vec_img.mean(dim=1)  # (B, D)
 
             # Image tokens: per-token modulation (B, N_img, D*6)
             double_block_mod_img = self.double_stream_modulation_img(vec_img)
@@ -634,12 +644,12 @@ class Flux2(nn.Module):
 
             # Single blocks process txt+img together — combine per-token vecs
             vec_txt_expanded = vec_global.unsqueeze(1).expand(-1, num_txt_tokens, -1)  # (B, N_txt, D)
-            vec_combined = torch.cat([vec_txt_expanded, vec_img], dim=1)               # (B, N_txt+N_img, D)
+            vec_combined = torch.cat([vec_txt_expanded, vec_img], dim=1)  # (B, N_txt+N_img, D)
             single_block_mod, _ = self.single_stream_modulation(vec_combined)
             del vec_combined, vec_txt_expanded, vec_global
 
             vec_for_final = vec_img  # per-token conditioning for final layer
-            vec = vec_img            # keep reference for device move below
+            vec = vec_img  # keep reference for device move below
 
         img = self.img_in(x)
         del x

@@ -14,6 +14,7 @@ def trainer():
 # RED: _compute_ema_weight_drift
 # ---------------------------------------------------------------------------
 
+
 def test_ema_drift_zero_for_identical_states(trainer):
     """EMA drift is 0 when EMA and current weights are identical."""
     state = {
@@ -68,6 +69,7 @@ def test_ema_drift_returns_scalar_tensor(trainer):
 # ---------------------------------------------------------------------------
 # RED: self_flow_logs contains feat_cosine_sim and ema_weight_drift
 # ---------------------------------------------------------------------------
+
 
 def test_self_flow_logs_contain_feat_cosine_sim_key(trainer):
     """

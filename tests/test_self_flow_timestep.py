@@ -18,13 +18,13 @@ def test_per_sample_timestep_assignment(trainer):
     """Verify teacher gets min(t_a, t_b) per sample, student gets max."""
     # Sample 0: t_a=200 < t_b=800 → teacher=200, student=800
     # Sample 1: t_a=900 > t_b=100 → teacher=100, student=900
-    timesteps_a = torch.tensor([200., 900.])
-    timesteps_b = torch.tensor([800., 100.])
+    timesteps_a = torch.tensor([200.0, 900.0])
+    timesteps_b = torch.tensor([800.0, 100.0])
 
     teacher, student = trainer._assign_teacher_student_timesteps(timesteps_a, timesteps_b)
 
-    assert teacher.tolist() == [200., 100.]
-    assert student.tolist() == [800., 900.]
+    assert teacher.tolist() == [200.0, 100.0]
+    assert student.tolist() == [800.0, 900.0]
     assert teacher.shape == (2,)
     assert student.shape == (2,)
 
@@ -45,7 +45,7 @@ def test_reconstruct_noisy_input_4d(trainer):
     torch.manual_seed(42)
     latents = torch.randn(2, 4, 16, 16)  # (B, C, H, W)
     noise = torch.randn_like(latents)
-    timesteps = torch.tensor([1., 1001.])  # Min and max timesteps
+    timesteps = torch.tensor([1.0, 1001.0])  # Min and max timesteps
 
     noisy = trainer._reconstruct_noisy_input(latents, noise, timesteps)
 
@@ -63,7 +63,7 @@ def test_reconstruct_noisy_input_5d(trainer):
     torch.manual_seed(42)
     latents = torch.randn(2, 4, 8, 16, 16)  # (B, C, T, H, W)
     noise = torch.randn_like(latents)
-    timesteps = torch.tensor([500., 800.])
+    timesteps = torch.tensor([500.0, 800.0])
 
     noisy = trainer._reconstruct_noisy_input(latents, noise, timesteps)
 
@@ -71,7 +71,7 @@ def test_reconstruct_noisy_input_5d(trainer):
 
     # Verify it's a blend of latents and noise
     # At t=0.499: noisy ≈ 0.501*latents + 0.499*noise
-    t0 = (500. - 1.) / 1000.
+    t0 = (500.0 - 1.0) / 1000.0
     expected_0 = (1 - t0) * latents[0] + t0 * noise[0]
     assert torch.allclose(noisy[0], expected_0, atol=1e-5)
 
@@ -86,8 +86,8 @@ def test_timestep_range_validation():
 
 def test_per_sample_vs_batch_mean(trainer):
     """Verify per-sample logic differs from incorrect batch-mean approach."""
-    t_a = torch.tensor([200., 900.])
-    t_b = torch.tensor([800., 100.])
+    t_a = torch.tensor([200.0, 900.0])
+    t_b = torch.tensor([800.0, 100.0])
 
     # Correct: per-sample
     teacher_correct, _ = trainer._assign_teacher_student_timesteps(t_a, t_b)
