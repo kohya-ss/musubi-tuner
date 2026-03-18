@@ -1,7 +1,6 @@
 """Tests for self-flow feature extraction from Flux2 model layers."""
 
 import torch
-import pytest
 from unittest.mock import Mock
 
 
