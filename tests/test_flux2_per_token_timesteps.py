@@ -128,6 +128,45 @@ def test_flux2_varied_per_token_differs_from_global(tiny_model):
     )
 
 
+def test_flux2_per_token_timesteps_raises_when_ref_tokens_not_covered(tiny_model):
+    """Per-token timesteps that don't cover ref tokens must raise RuntimeError.
+
+    This documents the bug: call_dit passes (B, N_noisy) timesteps but x
+    has N_noisy + N_ref tokens, causing a shape mismatch in modulation.
+    """
+    B, N_noisy, N_ref = 2, 4, 3
+    x_noisy, _, ctx, ctx_ids, guidance = make_inputs(B=B, N_img=N_noisy)
+    x_ref = torch.randn(B, N_ref, x_noisy.shape[-1])
+    x = torch.cat([x_noisy, x_ref], dim=1)
+    x_ids = torch.zeros(B, N_noisy + N_ref, 4, dtype=torch.long)
+
+    timesteps = torch.rand(B, N_noisy)  # only N_noisy — missing N_ref coverage
+
+    with pytest.raises(RuntimeError):
+        tiny_model(x=x, x_ids=x_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
+
+
+def test_flux2_per_token_timesteps_padded_for_ref_tokens(tiny_model):
+    """Per-token timesteps padded with t=0 for ref tokens must work.
+
+    This is the correct call pattern after the call_dit fix: extend
+    per_token_timesteps to cover ref/control tokens (at t=0, clean).
+    """
+    B, N_noisy, N_ref = 2, 4, 3
+    x_noisy, _, ctx, ctx_ids, guidance = make_inputs(B=B, N_img=N_noisy)
+    x_ref = torch.randn(B, N_ref, x_noisy.shape[-1])
+    x = torch.cat([x_noisy, x_ref], dim=1)
+    x_ids = torch.zeros(B, N_noisy + N_ref, 4, dtype=torch.long)
+
+    t_noisy = torch.rand(B, N_noisy)
+    t_ref = torch.zeros(B, N_ref)  # ref tokens are clean (t=0)
+    timesteps = torch.cat([t_noisy, t_ref], dim=1)  # (B, N_noisy + N_ref)
+
+    out = tiny_model(x=x, x_ids=x_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
+
+    assert out.shape == (B, N_noisy + N_ref, tiny_model.out_channels)
+
+
 def test_flux2_per_token_hidden_features_work(tiny_model):
     """Per-token timesteps should work with hidden_features=True."""
     B, N_img = 2, 4

@@ -326,6 +326,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
         if per_token_timesteps is not None:
             # Self-flow: per-token timesteps (B, N_img) — each token conditioned on its noise level
             model_timesteps = per_token_timesteps.to(device=accelerator.device) / 1000.0
+            if ref_tokens is not None:
+                # Ref/control tokens are clean (t=0); extend to cover full sequence
+                ref_ts = torch.zeros(bsize, ref_tokens.shape[1], device=accelerator.device, dtype=model_timesteps.dtype)
+                model_timesteps = torch.cat([model_timesteps, ref_ts], dim=1)
         else:
             model_timesteps = timesteps / 1000.0
         model_output = model(x=img_input, x_ids=img_input_ids, timesteps=model_timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec, hidden_features=hidden_features, feature_layer=feature_layer)
