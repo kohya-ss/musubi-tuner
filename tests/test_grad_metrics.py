@@ -1,4 +1,5 @@
 """Tests for gradient metrics collection (grad/norm, grad/max)."""
+
 import torch
 import torch.nn as nn
 import pytest
@@ -34,7 +35,7 @@ def test_grad_norm_multiple_params(trainer):
     params = _params_with_grads([[1.0, 0.0], [0.0, 1.0]])
     metrics = trainer.collect_grad_metrics(params)
     # norm of [1,0,0,1] = sqrt(2)
-    assert metrics["grad/norm"] == pytest.approx(2.0 ** 0.5, rel=1e-5)
+    assert metrics["grad/norm"] == pytest.approx(2.0**0.5, rel=1e-5)
 
 
 def test_grad_max_single_param(trainer):

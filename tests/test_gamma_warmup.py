@@ -4,6 +4,7 @@ Motivation: early in training the EMA teacher hasn't diverged from the student y
 so applying full gamma immediately trains rep_proj on a near-identity signal.
 Warmup delays full L_rep influence until the teacher is meaningful.
 """
+
 import pytest
 from musubi_tuner.hv_train_network import NetworkTrainer
 

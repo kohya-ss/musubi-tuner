@@ -3,6 +3,7 @@
 Before the fix: rep_proj had its own AdamW optimizer, updated independently.
 After the fix: rep_proj params are merged into the first param group of the main optimizer.
 """
+
 import torch
 import torch.nn as nn
 import pytest
