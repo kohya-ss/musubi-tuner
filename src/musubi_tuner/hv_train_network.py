@@ -1819,6 +1819,35 @@ class NetworkTrainer:
             return torch.tensor(0.0)
         return torch.stack(diffs).mean()
 
+    def collect_grad_metrics(self, params) -> dict:
+        """Collect gradient diagnostics for logging.
+
+        Returns grad/norm (total L2, pre-clip) and grad/max (max absolute element).
+        Returns empty dict if no parameters have gradients.
+        """
+        grads = [p.grad.detach() for p in params if p.grad is not None]
+        if not grads:
+            return {}
+        per_norm = torch.stack([g.norm() for g in grads])
+        total_norm = per_norm.norm()
+        mean_norm = per_norm.mean()
+        max_grad = torch.stack([g.abs().max() for g in grads]).max()
+        return {
+            "grad/norm": total_norm.item(),
+            "grad/mean_norm": mean_norm.item(),
+            "grad/max": max_grad.item(),
+        }
+
+    def effective_gamma(self, gamma: float, global_step: int, warmup_steps: int) -> float:
+        """Return the gamma weight for L_rep after applying linear warmup.
+
+        Linearly ramps from 0 to gamma over warmup_steps steps, then holds at gamma.
+        Set warmup_steps=0 to disable warmup (gamma applied immediately).
+        """
+        if warmup_steps <= 0:
+            return gamma
+        return gamma * min(1.0, global_step / warmup_steps)
+
     def _update_self_flow_logs(
         self,
         L_gen: torch.Tensor,
@@ -1878,6 +1907,7 @@ class NetworkTrainer:
         vae: torch.nn.Module,
         rep_proj: torch.nn.Module,
         ema_lora_state: dict,
+        global_step: int = 0,
     ) -> torch.Tensor:
         """Self-flow training step: dual-timestep scheduling + representation alignment."""
         # Sample two timesteps per sample (noisy inputs are reconstructed below with per-sample min/max)
@@ -1966,12 +1996,13 @@ class NetworkTrainer:
         L_gen = loss.mean()
 
         # --- L_rep (Eq. 6) ---
+        gamma = self.effective_gamma(args.self_flow_gamma, global_step, args.self_flow_gamma_warmup_steps)
         if feat_student is not None and feat_teacher is not None:
             L_rep = self._compute_representation_loss(feat_student, feat_teacher, rep_proj)
-            loss = self._compute_combined_loss(L_gen, L_rep, args.self_flow_gamma)
+            loss = self._compute_combined_loss(L_gen, L_rep, gamma)
         else:
             L_rep = None
-            loss = self._compute_combined_loss(L_gen, None, args.self_flow_gamma)
+            loss = self._compute_combined_loss(L_gen, None, gamma)
 
         # --- Self-flow metrics ---
         ema_drift = self._compute_ema_weight_drift(ema_lora_state, network.state_dict())
@@ -2280,20 +2311,28 @@ class NetworkTrainer:
         accelerator.print("prepare optimizer, data loader etc.")
 
         trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
-        optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
-            args, trainable_params
-        )
 
         rep_proj = None
-        rep_proj_optimizer = None
         if args.self_flow:
             rep_proj = torch.nn.Sequential(
                 torch.nn.Linear(transformer.hidden_size, transformer.hidden_size),
                 torch.nn.GELU(),
                 torch.nn.Linear(transformer.hidden_size, transformer.hidden_size),
             )
-            rep_proj_optimizer = torch.optim.AdamW(rep_proj.parameters(), lr=1e-4)
-            rep_proj, rep_proj_optimizer = accelerator.prepare(rep_proj, rep_proj_optimizer)
+            # Merge rep_proj params into the first param group so they share the main
+            # optimizer's LR schedule (Prodigy and similar optimizers don't support
+            # per-group LRs, so a separate group/optimizer would be incompatible).
+            if trainable_params:
+                trainable_params[0]["params"] = list(trainable_params[0]["params"]) + list(rep_proj.parameters())
+            else:
+                trainable_params = [{"params": list(rep_proj.parameters())}]
+
+        optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
+            args, trainable_params
+        )
+
+        if rep_proj is not None:
+            rep_proj = accelerator.prepare(rep_proj)
 
         # prepare dataloader
 
@@ -2483,6 +2522,7 @@ class NetworkTrainer:
         if args.self_flow:
             metadata["ss_self_flow"] = True
             metadata["ss_self_flow_gamma"] = args.self_flow_gamma
+            metadata["ss_self_flow_gamma_warmup_steps"] = args.self_flow_gamma_warmup_steps
             metadata["ss_self_flow_mask_ratio"] = args.mask_ratio
             metadata["ss_self_flow_ema_decay"] = args.ema_decay
             metadata["ss_self_flow_student_layer"] = args.student_feature_layer
@@ -2661,6 +2701,7 @@ class NetworkTrainer:
                             vae,
                             rep_proj,
                             ema_lora_state,
+                            global_step=global_step,
                         )
                     else:
                         # --- Vanilla flow matching ---
@@ -2683,6 +2724,7 @@ class NetworkTrainer:
                         loss = loss.mean()
 
                     accelerator.backward(loss)
+                    grad_metrics = {}
                     if accelerator.sync_gradients:
                         # self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         state = accelerate.PartialState()
@@ -2691,6 +2733,7 @@ class NetworkTrainer:
                                 if param.grad is not None:
                                     param.grad = accelerator.reduce(param.grad, reduction="mean")
 
+                        grad_metrics = self.collect_grad_metrics(network.parameters())
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
@@ -2700,11 +2743,7 @@ class NetworkTrainer:
                     optimizer.zero_grad(set_to_none=True)
 
                     if args.self_flow and accelerator.sync_gradients:
-                        assert rep_proj_optimizer is not None
                         assert ema_lora_state is not None
-                        rep_proj_optimizer.step()
-                        rep_proj_optimizer.zero_grad(set_to_none=True)
-
                         # Update EMA of LoRA weights (only after actual optimizer step)
                         self._update_ema_weights(ema_lora_state, network.state_dict(), args.ema_decay)
 
@@ -2762,6 +2801,7 @@ class NetworkTrainer:
                     )
                     if hasattr(self, "_self_flow_logs"):
                         logs.update(self._self_flow_logs)
+                    logs.update(grad_metrics)
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:
@@ -3512,6 +3552,13 @@ def setup_parser_common() -> argparse.ArgumentParser:
         default=0.8,
         help="Weight for representation alignment loss L_rep (paper Eq. 7). 0 disables L_rep."
         " / 表現アライメント損失L_repの重み（論文のEq. 7）。0でL_repを無効化。",
+    )
+    parser.add_argument(
+        "--self_flow_gamma_warmup_steps",
+        type=int,
+        default=0,
+        help="Linearly ramp gamma from 0 to --self_flow_gamma over this many steps. 0 disables warmup."
+        " / このステップ数かけてgammaを0から目標値に線形ランプアップする。0でウォームアップ無効。",
     )
     parser.add_argument(
         "--mask_ratio",
