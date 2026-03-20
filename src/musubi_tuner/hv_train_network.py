@@ -1959,6 +1959,9 @@ class NetworkTrainer:
             feat_teacher = result[2].detach() if len(result) > 2 and result[2] is not None else None
         network.load_state_dict(student_lora_state)
 
+        # Reset after teacher forward due to a lack of the backwards
+        accelerator.unwrap_model(transformer).prepare_block_swap_before_forward()
+
         # Student forward (gradients flow)
         weighting = compute_loss_weighting_for_sd3(
             args.weighting_scheme, noise_scheduler, timesteps_student, accelerator.device, dit_dtype
