@@ -1,4 +1,9 @@
-"""Common argument parser and config-file loader shared by all training scripts."""
+"""Common argument parser and config-file loader shared by all training scripts.
+
+`setup_parser_common()` assembles the parser by calling category-specific
+`_add_*_args` helpers. Each helper owns a cohesive slice of the CLI surface,
+so adding / relocating an argument only requires editing one helper.
+"""
 
 import argparse
 import logging
@@ -12,24 +17,22 @@ from accelerate.utils import DynamoBackend
 logger = logging.getLogger(__name__)
 
 
-def setup_parser_common() -> argparse.ArgumentParser:
-    def int_or_float(value):
-        if value.endswith("%"):
-            try:
-                return float(value[:-1]) / 100.0
-            except ValueError:
-                raise argparse.ArgumentTypeError(f"Value '{value}' is not a valid percentage")
+def _int_or_float(value):
+    if value.endswith("%"):
         try:
-            float_value = float(value)
-            if float_value >= 1 and float_value.is_integer():
-                return int(value)
-            return float(value)
+            return float(value[:-1]) / 100.0
         except ValueError:
-            raise argparse.ArgumentTypeError(f"'{value}' is not an int or float")
+            raise argparse.ArgumentTypeError(f"Value '{value}' is not a valid percentage")
+    try:
+        float_value = float(value)
+        if float_value >= 1 and float_value.is_integer():
+            return int(value)
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not an int or float")
 
-    parser = argparse.ArgumentParser()
 
-    # general settings
+def _add_general_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config_file",
         type=str,
@@ -43,7 +46,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="config file for dataset / データセットの設定ファイル",
     )
 
-    # model settings
+
+def _add_attention_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sdpa",
         action="store_true",
@@ -76,6 +80,9 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="use split attention for attention calculation (split batch size=1, affects memory usage and speed)"
         " / attentionを分割して計算する（バッチサイズ=1に分割、メモリ使用量と速度に影響）",
     )
+
+
+def _add_compile_and_dynamo_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
@@ -124,7 +131,36 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="Enable cudnn benchmark for possibly faster training / cudnnのベンチマークを有効にして学習の高速化を図る",
     )
 
-    # training settings
+    parser.add_argument(
+        "--dynamo_backend",
+        type=str,
+        default="NO",
+        choices=[e.value for e in DynamoBackend],
+        help="dynamo backend type (default is None) / dynamoのbackendの種類（デフォルトは None）",
+    )
+
+    parser.add_argument(
+        "--dynamo_mode",
+        type=str,
+        default=None,
+        choices=["default", "reduce-overhead", "max-autotune"],
+        help="dynamo mode (default is default) / dynamoのモード（デフォルトは default）",
+    )
+
+    parser.add_argument(
+        "--dynamo_fullgraph",
+        action="store_true",
+        help="use fullgraph mode for dynamo / dynamoのfullgraphモードを使う",
+    )
+
+    parser.add_argument(
+        "--dynamo_dynamic",
+        action="store_true",
+        help="use dynamic mode for dynamo / dynamoのdynamicモードを使う",
+    )
+
+
+def _add_training_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max_train_steps", type=int, default=1600, help="training steps / 学習ステップ数")
     parser.add_argument(
         "--max_train_epochs",
@@ -166,6 +202,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="use mixed precision / 混合精度を使う場合、その精度",
     )
 
+
+def _add_logging_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--logging_dir",
         type=str,
@@ -208,6 +246,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument("--log_config", action="store_true", help="log training configuration / 学習設定をログに出力する")
 
+
+def _add_ddp_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ddp_timeout",
         type=int,
@@ -225,6 +265,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="enable static_graph for DDP / DDPでstatic_graphを有効にする",
     )
 
+
+def _add_sampling_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sample_every_n_steps",
         type=int,
@@ -247,7 +289,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="file for prompts to generate sample images / 学習中モデルのサンプル出力用プロンプトのファイル",
     )
 
-    # optimizer and lr scheduler settings
+
+def _add_optimizer_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--optimizer_type",
         type=str,
@@ -270,6 +313,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="Max gradient norm, 0 for no clipping / 勾配正規化の最大norm、0でclippingを行わない",
     )
 
+
+def _add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--lr_scheduler",
         type=str,
@@ -278,14 +323,14 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--lr_warmup_steps",
-        type=int_or_float,
+        type=_int_or_float,
         default=0,
         help="Int number of steps for the warmup in the lr scheduler (default is 0) or float with ratio of train steps"
         " / 学習率のスケジューラをウォームアップするステップ数（デフォルト0）、または学習ステップの比率（1未満のfloat値の場合）",
     )
     parser.add_argument(
         "--lr_decay_steps",
-        type=int_or_float,
+        type=_int_or_float,
         default=0,
         help="Int number of steps for the decay in the lr scheduler (default is 0) or float (<1) with ratio of train steps"
         " / 学習率のスケジューラを減衰させるステップ数（デフォルト0）、または学習ステップの比率（1未満のfloat値の場合）",
@@ -325,37 +370,11 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help='additional arguments for scheduler (like "T_max=100") / スケジューラの追加引数（例： "T_max100"）',
     )
 
+
+def _add_memory_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fp8_base", action="store_true", help="use fp8 for base model / base modelにfp8を使う")
     # parser.add_argument("--full_fp16", action="store_true", help="fp16 training including gradients / 勾配も含めてfp16で学習する")
     # parser.add_argument("--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する")
-
-    parser.add_argument(
-        "--dynamo_backend",
-        type=str,
-        default="NO",
-        choices=[e.value for e in DynamoBackend],
-        help="dynamo backend type (default is None) / dynamoのbackendの種類（デフォルトは None）",
-    )
-
-    parser.add_argument(
-        "--dynamo_mode",
-        type=str,
-        default=None,
-        choices=["default", "reduce-overhead", "max-autotune"],
-        help="dynamo mode (default is default) / dynamoのモード（デフォルトは default）",
-    )
-
-    parser.add_argument(
-        "--dynamo_fullgraph",
-        action="store_true",
-        help="use fullgraph mode for dynamo / dynamoのfullgraphモードを使う",
-    )
-
-    parser.add_argument(
-        "--dynamo_dynamic",
-        action="store_true",
-        help="use dynamic mode for dynamo / dynamoのdynamicモードを使う",
-    )
 
     parser.add_argument(
         "--blocks_to_swap",
@@ -381,6 +400,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         " / モデル読み込み時のnumpyメモリマッピングを無効にします。Wan、FramePack、Qwen-Image、FLUX.2で有効です。RAM使用量が増えますが、場合によってはモデルの読み込みが高速化されます。",
     )
 
+
+def _add_timestep_args(parser: argparse.ArgumentParser) -> None:
     # parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers")
     parser.add_argument(
         "--guidance_scale", type=float, default=1.0, help="Embeded classifier free guidance scale (HunyuanVideo only)."
@@ -483,7 +504,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="show timesteps in image or console, and return to console / タイムステップを画像またはコンソールに表示し、コンソールに戻る",
     )
 
-    # network settings
+
+def _add_network_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no_metadata", action="store_true", help="do not save metadata in output model / メタデータを出力先モデルに保存しない"
     )
@@ -550,7 +572,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="multiplier for network weights to merge into the model before training / 学習前にあらかじめモデルにマージするnetworkの重みの倍率",
     )
 
-    # save and load settings
+
+def _add_save_load_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--output_dir", type=str, default=None, help="directory to output trained model / 学習後のモデル出力先ディレクトリ"
     )
@@ -610,6 +633,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         " / --save_stateが未指定時にもoptimizerなど学習状態も含めたstateを学習終了時に保存する",
     )
 
+
+def _add_metadata_args(parser: argparse.ArgumentParser) -> None:
     # SAI Model spec
     parser.add_argument(
         "--metadata_title",
@@ -654,7 +679,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="architecture for model metadata / メタデータに書き込まれるモデルアーキテクチャ",
     )
 
-    # huggingface settings
+
+def _add_huggingface_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--huggingface_repo_id",
         type=str,
@@ -694,10 +720,31 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="upload to huggingface asynchronously / huggingfaceに非同期でアップロードする",
     )
 
+
+def _add_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default depends on model")
 
+
+def setup_parser_common() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    _add_general_args(parser)
+    _add_attention_args(parser)
+    _add_compile_and_dynamo_args(parser)
+    _add_training_args(parser)
+    _add_logging_args(parser)
+    _add_ddp_args(parser)
+    _add_sampling_args(parser)
+    _add_optimizer_args(parser)
+    _add_lr_scheduler_args(parser)
+    _add_memory_args(parser)
+    _add_timestep_args(parser)
+    _add_network_args(parser)
+    _add_save_load_args(parser)
+    _add_metadata_args(parser)
+    _add_huggingface_args(parser)
+    _add_model_args(parser)
     return parser
 
 
