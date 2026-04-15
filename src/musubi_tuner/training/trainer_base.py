@@ -1364,6 +1364,77 @@ class NetworkTrainer:
     # endregion model specific
 
     def train(self, args):
+        if not self._validate_args_and_init(args):
+            return
+
+        session_id, training_started_at = self._init_session(args)
+        train_dataset_group, collator, current_epoch = self._build_dataset(args)
+        accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
+        sample_parameters, vae = self._prepare_sampling(args, accelerator, vae_dtype)
+        transformer = self._load_dit_and_swap(args, accelerator, dit_weight_dtype)
+        network = self._build_network(args, accelerator, transformer, vae, weight_dtype)
+        if network is None:
+            return
+        (
+            optimizer,
+            optimizer_name,
+            optimizer_args,
+            optimizer_train_fn,
+            optimizer_eval_fn,
+            lr_scheduler,
+            lr_descriptions,
+            train_dataloader,
+        ) = self._build_optimizer_and_dataloader(args, accelerator, network, train_dataset_group, collator)
+        (
+            transformer,
+            network,
+            optimizer,
+            train_dataloader,
+            lr_scheduler,
+            training_model,
+            network_dtype,
+        ) = self._prepare_with_accelerator(
+            args,
+            accelerator,
+            transformer,
+            network,
+            optimizer,
+            train_dataloader,
+            lr_scheduler,
+            weight_dtype,
+            dit_dtype,
+            dit_weight_dtype,
+        )
+        self._register_hooks_and_resume(args, accelerator, network)
+        self._run_training_loop(
+            args,
+            accelerator,
+            session_id,
+            training_started_at,
+            train_dataset_group,
+            train_dataloader,
+            current_epoch,
+            transformer,
+            network,
+            training_model,
+            optimizer,
+            optimizer_name,
+            optimizer_args,
+            optimizer_train_fn,
+            optimizer_eval_fn,
+            lr_scheduler,
+            lr_descriptions,
+            vae,
+            sample_parameters,
+            dit_dtype,
+            network_dtype,
+        )
+
+    def _validate_args_and_init(self, args) -> bool:
+        """Validate required args, configure CUDA flags, handle `--show_timesteps`.
+
+        Returns False if training should stop early (e.g. `--show_timesteps`).
+        """
         if torch.cuda.is_available():
             if args.cuda_allow_tf32:
                 torch.backends.cuda.matmul.allow_tf32 = True
@@ -1398,8 +1469,11 @@ class NetworkTrainer:
         # show timesteps for debugging
         if args.show_timesteps:
             self.show_timesteps(args)
-            return
+            return False
 
+        return True
+
+    def _init_session(self, args):
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
         # setup_logging(args, reset=True)
@@ -1407,7 +1481,9 @@ class NetworkTrainer:
         if args.seed is None:
             args.seed = random.randint(0, 2**32)
         set_seed(args.seed)
+        return session_id, training_started_at
 
+    def _build_dataset(self, args):
         # Load dataset config
         if args.num_timestep_buckets is not None:
             logger.info(f"Using timestep bucketing. Number of buckets: {args.num_timestep_buckets}")
@@ -1431,14 +1507,15 @@ class NetworkTrainer:
 
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
         collator = collator_class(current_epoch, ds_for_collator)
+        return train_dataset_group, collator, current_epoch
 
+    def _prepare_accelerator_and_dtypes(self, args):
         # prepare accelerator
         logger.info("preparing accelerator")
         accelerator = prepare_accelerator(args)
         if args.mixed_precision is None:
             args.mixed_precision = accelerator.mixed_precision
             logger.info(f"mixed precision set to {args.mixed_precision} / mixed precisionを{args.mixed_precision}に設定")
-        is_main_process = accelerator.is_main_process
 
         # prepare dtype
         weight_dtype = torch.float32
@@ -1452,8 +1529,11 @@ class NetworkTrainer:
         dit_weight_dtype = (None if args.fp8_scaled else torch.float8_e4m3fn) if args.fp8_base else dit_dtype
         logger.info(f"DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}")
 
-        # get embedding for sampling images
         vae_dtype = torch.float16 if args.vae_dtype is None else model_utils.str_to_dtype(args.vae_dtype)
+        return accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype
+
+    def _prepare_sampling(self, args, accelerator, vae_dtype):
+        # get embedding for sampling images
         sample_parameters = None
         vae = None
         if args.sample_prompts:
@@ -1463,7 +1543,9 @@ class NetworkTrainer:
             vae = self.load_vae(args, vae_dtype=vae_dtype, vae_path=args.vae)
             vae.requires_grad_(False)
             vae.eval()
+        return sample_parameters, vae
 
+    def _load_dit_and_swap(self, args, accelerator, dit_weight_dtype):
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
         self.blocks_to_swap = blocks_to_swap
@@ -1498,8 +1580,10 @@ class NetworkTrainer:
                 blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
             )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
+        return transformer
 
-        # load network model for differential training
+    def _build_network(self, args, accelerator, transformer, vae, weight_dtype):
+        # load network module for differential training
         # Allow short paths like `--network_module networks.lora` by putting the musubi_tuner
         # package dir on sys.path. __file__ is under musubi_tuner/training/, so step up one level.
         sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -1561,7 +1645,7 @@ class NetworkTrainer:
                     **net_kwargs,
                 )
         if network is None:
-            return
+            return None
 
         if hasattr(network_module, "prepare_network"):
             network.prepare_network(args)
@@ -1578,6 +1662,10 @@ class NetworkTrainer:
             transformer.enable_gradient_checkpointing(args.gradient_checkpointing_cpu_offload)
             network.enable_gradient_checkpointing()  # may have no effect
 
+        # net_kwargs is reconstructed in the metadata phase from args.network_args
+        return network
+
+    def _build_optimizer_and_dataloader(self, args, accelerator, network, train_dataset_group, collator):
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
@@ -1615,6 +1703,30 @@ class NetworkTrainer:
         # prepare lr_scheduler
         lr_scheduler = self.get_lr_scheduler(args, optimizer, accelerator.num_processes)
 
+        return (
+            optimizer,
+            optimizer_name,
+            optimizer_args,
+            optimizer_train_fn,
+            optimizer_eval_fn,
+            lr_scheduler,
+            lr_descriptions,
+            train_dataloader,
+        )
+
+    def _prepare_with_accelerator(
+        self,
+        args,
+        accelerator,
+        transformer,
+        network,
+        optimizer,
+        train_dataloader,
+        lr_scheduler,
+        weight_dtype,
+        dit_dtype,
+        dit_weight_dtype,
+    ):
         # prepare training model. accelerator does some magic here
 
         # experimental feature: train the model with gradients in fp16/bf16
@@ -1639,6 +1751,7 @@ class NetworkTrainer:
             logger.info(f"casting model to {dit_weight_dtype}")
             transformer.to(dit_weight_dtype)
 
+        blocks_to_swap = self.blocks_to_swap or 0
         if blocks_to_swap > 0:
             transformer = accelerator.prepare(transformer, device_placement=[not blocks_to_swap > 0])
             accelerator.unwrap_model(transformer).move_to_device_except_swap_blocks(accelerator.device)  # reduce peak memory usage
@@ -1670,6 +1783,9 @@ class NetworkTrainer:
 
             accelerator.scaler._unscale_grads_ = _unscale_grads_replacer
 
+        return transformer, network, optimizer, train_dataloader, lr_scheduler, training_model, network_dtype
+
+    def _register_hooks_and_resume(self, args, accelerator, network):
         # before resuming make hook for saving/loading to save/load the network weights only
         def save_model_hook(models, weights, output_dir):
             # pop weights of other models than network to save only network weights
@@ -1700,6 +1816,32 @@ class NetworkTrainer:
         # resume from local or huggingface. accelerator.step is set
         self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
 
+    def _run_training_loop(
+        self,
+        args,
+        accelerator,
+        session_id,
+        training_started_at,
+        train_dataset_group,
+        train_dataloader,
+        current_epoch,
+        transformer,
+        network,
+        training_model,
+        optimizer,
+        optimizer_name,
+        optimizer_args,
+        optimizer_train_fn,
+        optimizer_eval_fn,
+        lr_scheduler,
+        lr_descriptions,
+        vae,
+        sample_parameters,
+        dit_dtype,
+        network_dtype,
+    ):
+        is_main_process = accelerator.is_main_process
+
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -1717,6 +1859,13 @@ class NetworkTrainer:
         # accelerator.print(f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}")
         accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
         accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+
+        # reconstruct net_kwargs for metadata
+        net_kwargs = {}
+        if args.network_args is not None:
+            for net_arg in args.network_args:
+                key, value = net_arg.split("=")
+                net_kwargs[key] = value
 
         # TODO refactor metadata creation and move to util
         metadata = {
