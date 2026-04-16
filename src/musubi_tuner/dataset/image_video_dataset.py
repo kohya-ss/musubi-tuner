@@ -1,6 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
 import glob
-import math
 import os
 import random
 import time
@@ -24,8 +23,20 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 from musubi_tuner.dataset.architectures import *  # noqa: F401,F403
+from musubi_tuner.dataset.architectures import (  # explicit imports for local use
+    ARCHITECTURE_FLUX_2_DEV,
+    ARCHITECTURE_FLUX_2_KLEIN_4B,
+    ARCHITECTURE_FLUX_2_KLEIN_9B,
+    ARCHITECTURE_FLUX_KONTEXT,
+    ARCHITECTURE_FRAMEPACK,
+    ARCHITECTURE_HUNYUAN_VIDEO,
+    ARCHITECTURE_HUNYUAN_VIDEO_1_5,
+    ARCHITECTURE_KANDINSKY5,
+    ARCHITECTURE_QWEN_IMAGE_EDIT,
+    ARCHITECTURE_WAN,
+)
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
-from musubi_tuner.dataset.media_utils import glob_images, glob_videos, resize_image_to_bucket, load_video  # explicit imports for local use
+from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
 
 
 class ItemInfo:
