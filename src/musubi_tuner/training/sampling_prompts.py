@@ -128,6 +128,7 @@ def load_prompts(prompt_file: str) -> list[Dict]:
 
     return prompts
 
+
 def should_sample_images(args, steps, epoch=None):
     if steps == 0:
         if not args.sample_at_first:
