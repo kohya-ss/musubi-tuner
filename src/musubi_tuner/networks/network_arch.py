@@ -15,6 +15,11 @@ def detect_arch_config(unet):
         module_class_names.add(type(module).__name__)
 
     # Order matters for disambiguation
+    if "ErnieImageSharedAdaLNBlock" in module_class_names:
+        from .lora_ernie_image import ERNIE_IMAGE_TARGET_REPLACE_MODULES
+
+        return ERNIE_IMAGE_TARGET_REPLACE_MODULES, [r".*(adaLN_modulation|norm).*"]
+
     if "WanAttentionBlock" in module_class_names:
         from .lora_wan import WAN_TARGET_REPLACE_MODULES
 

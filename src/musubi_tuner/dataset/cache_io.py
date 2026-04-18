@@ -7,6 +7,7 @@ import torch
 from safetensors.torch import save_file
 
 from musubi_tuner.dataset.architectures import (
+    ARCHITECTURE_ERNIE_IMAGE_FULL,
     ARCHITECTURE_FRAMEPACK_FULL,
     ARCHITECTURE_FLUX_KONTEXT_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_FULL,
@@ -368,6 +369,26 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     sd[f"varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
+
+
+def save_latent_cache_ernie_image(item_info: ItemInfo, latent: torch.Tensor):
+    """ERNIE-Image architecture. latent is patchified+BN-normalized [C, H, W]."""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+
+    _, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_ERNIE_IMAGE_FULL)
+
+
+def save_text_encoder_output_cache_ernie_image(item_info: ItemInfo, embed: torch.Tensor):
+    """ERNIE-Image architecture. embed is variable-length [1, Seq, Dim]."""
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_text_embed_{dtype_str}"] = embed.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_ERNIE_IMAGE_FULL)
 
 
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
