@@ -118,7 +118,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --text_encoder path/to/text_encoder \
     --dataset_config path/to/toml \
     --sdpa --mixed_precision bf16 \
-    --timestep_sampling shift --weighting_scheme none --discrete_flow_shift 1.0 \
+    --timestep_sampling shift --weighting_scheme none --discrete_flow_shift 4.0 \
     --optimizer_type adamw8bit --learning_rate 1e-4 --gradient_checkpointing \
     --max_data_loader_n_workers 2 --persistent_data_loader_workers \
     --network_module networks.lora_ernie_image --network_dim 32 \
@@ -129,7 +129,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - Uses `ernie_image_train_network.py`.
 - **Requires** specifying `--vae` and `--text_encoder`.
 - **Requires** specifying `--network_module networks.lora_ernie_image`.
-- The optimal timestep sampling settings for ERNIE-Image are still unclear because no official training framework has been released. Since the official inference script uses timesteps without shift, starting from `--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 1.0` is recommended; adjust as needed.
+- The optimal timestep sampling settings for ERNIE-Image are still unclear because no official training framework has been released. The official scheduler config (`scheduler/scheduler_config.json`) specifies `shift: 4.0` for inference, so starting training from `--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 4.0` is recommended; adjust as needed.
 - Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT) and `--fp8_llm` (for Text Encoder) are available.
 - `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
@@ -143,7 +143,7 @@ ERNIE-Imageの学習は専用のスクリプト`ernie_image_train_network.py`を
 - `ernie_image_train_network.py`を使用します。
 - `--vae`、`--text_encoder`を指定する必要があります。
 - `--network_module networks.lora_ernie_image`を指定する必要があります。
-- 公式の学習フレームワークが未リリースのため、ERNIE-Imageのタイムステップサンプリング設定は不明です。公式の推論スクリプトはshiftなしのtimestepsで推論しているため、`--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 1.0`をベースに調整することを推奨します。
+- 公式の学習フレームワークが未リリースのため、ERNIE-Imageのタイムステップサンプリング設定は不明です。公式のscheduler設定（`scheduler/scheduler_config.json`）では推論時に`shift: 4.0`が指定されているため、`--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 4.0`をベースに調整することを推奨します。
 - `--fp8_base`、`--fp8_scaled`（DiT用）や`--fp8_llm`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
 - メモリ節約のために`--gradient_checkpointing`および`--gradient_checkpointing_cpu_offload`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
 
@@ -206,6 +206,7 @@ python src/musubi_tuner/ernie_image_generate_image.py \
 - Uses `ernie_image_generate_image.py`.
 - `--guidance_scale` defaults to 4.0 (classifier-free guidance). Specify a value of 1.0 or less to disable CFG.
 - `--infer_steps` defaults to 50.
+- `--flow_shift` defaults to 4.0 (matches the official `scheduler_config.json`). Set to 1.0 to disable shift.
 - `--fp8` and `--fp8_scaled` options are available for DiT.
 - `--fp8_text_encoder` option is available for Text Encoder.
 - `--blocks_to_swap` option is available to offload some blocks to CPU.
@@ -222,6 +223,7 @@ python src/musubi_tuner/ernie_image_generate_image.py \
 - `ernie_image_generate_image.py`を使用します。
 - `--guidance_scale`のデフォルトは4.0（Classifier-Free Guidanceあり）です。1.0以下の値を指定するとCFGを無効化できます。
 - `--infer_steps`のデフォルトは50です。
+- `--flow_shift`のデフォルトは4.0です（公式の`scheduler_config.json`に合わせています）。1.0を指定するとshiftを無効化できます。
 - `--fp8`および`--fp8_scaled`オプションがDiTで利用可能です。
 - `--fp8_text_encoder`オプションがテキストエンコーダーで利用可能です。
 - `--blocks_to_swap`オプションで、一部のブロックをCPUにオフロードできます。

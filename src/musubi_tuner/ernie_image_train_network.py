@@ -141,8 +141,9 @@ class ErnieImageNetworkTrainer(NetworkTrainer):
 
         latents = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
 
-        # Scheduler: linear sigmas from 1.0 to 0.0
-        sigmas = ernie_image_utils.get_sigmas(sample_steps, device)
+        # Scheduler: linear sigmas from 1.0 to 0.0, optionally remapped by flow shift
+        shift = discrete_flow_shift if discrete_flow_shift is not None else 1.0
+        sigmas = ernie_image_utils.get_sigmas(sample_steps, device, shift=shift)
 
         # Pad text for batch (CFG doubles batch)
         if do_cfg:

@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negative_prompt", type=str, default=None, help="negative prompt for generation")
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size, height and width")
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps, default is 50")
+    parser.add_argument(
+        "--flow_shift",
+        type=float,
+        default=4.0,
+        help="flow matching timestep shift (official scheduler_config.json uses 4.0). 1.0 = no shift.",
+    )
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated image(s)")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
 
@@ -411,8 +417,8 @@ def generate(
         text_hiddens_list, device, torch.bfloat16, model.text_in_dim
     )
 
-    # Flow-matching sigmas: linspace(1.0, 0.0, N+1)
-    sigmas = ernie_image_utils.get_sigmas(args.infer_steps, device)
+    # Flow-matching sigmas: linspace(1.0, 0.0, N+1) with optional shift remap
+    sigmas = ernie_image_utils.get_sigmas(args.infer_steps, device, shift=args.flow_shift)
 
     with tqdm(total=args.infer_steps, desc="Denoising steps") as pbar:
         for i in range(args.infer_steps):
@@ -479,6 +485,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
             "width": f"{width}",
             "infer_steps": f"{args.infer_steps}",
             "guidance_scale": f"{args.guidance_scale}",
+            "flow_shift": f"{args.flow_shift}",
         }
         if args.negative_prompt is not None:
             metadata["negative_prompt"] = f"{args.negative_prompt}"

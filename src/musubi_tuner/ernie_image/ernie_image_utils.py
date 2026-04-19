@@ -286,5 +286,8 @@ def unpatchify_latents(latents: torch.Tensor) -> torch.Tensor:
     return latents.reshape(b, c // 4, h * 2, w * 2)
 
 
-def get_sigmas(num_steps: int, device: torch.device) -> torch.Tensor:
-    return torch.linspace(1.0, 0.0, num_steps + 1, device=device)
+def get_sigmas(num_steps: int, device: torch.device, shift: float = 1.0) -> torch.Tensor:
+    sigmas = torch.linspace(1.0, 0.0, num_steps + 1, device=device)
+    if shift != 1.0:
+        sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
+    return sigmas
