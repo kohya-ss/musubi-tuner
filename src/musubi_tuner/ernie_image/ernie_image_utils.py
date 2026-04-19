@@ -198,6 +198,11 @@ def load_text_encoder(
     # Replace "language_model.model." prefix with "language_model."
     sd = {k.replace("language_model.model.", "language_model."): v for k, v in sd.items()}
 
+    # Convert ComfyUI's naming
+    sd = {k if not k.startswith("model.") else k.replace("model.", "language_model."): v for k, v in sd.items()}
+    if "tekken_model" in sd:
+        sd.pop("tekken_model")  # remove tekken_model weights if present
+
     info = text_encoder.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded text encoder: {info}")
     text_encoder.to(device)
