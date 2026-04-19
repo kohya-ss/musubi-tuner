@@ -157,12 +157,14 @@ class ErnieImageNetworkTrainer(NetworkTrainer):
         for i in tqdm(range(sample_steps), desc="Sampling"):
             t = sigmas[i]
 
+            # Model expects timestep in [0, 1000] range (matches training's t * 1000).
+            t_scaled = t.item() * 1000.0
             if do_cfg:
                 latent_model_input = torch.cat([latents, latents], dim=0)
-                t_batch = torch.full((2,), t.item(), device=device, dtype=torch.bfloat16)
+                t_batch = torch.full((2,), t_scaled, device=device, dtype=torch.bfloat16)
             else:
                 latent_model_input = latents
-                t_batch = torch.full((1,), t.item(), device=device, dtype=torch.bfloat16)
+                t_batch = torch.full((1,), t_scaled, device=device, dtype=torch.bfloat16)
 
             latent_model_input = latent_model_input.to(model.dtype if hasattr(model, 'dtype') else dit_dtype)
 
@@ -279,12 +281,14 @@ class ErnieImageNetworkTrainer(NetworkTrainer):
                 text_lens=text_lens,
             )
 
-        # Flow matching target: v = latents - noise (velocity)
+        # Flow matching target: v = noise - latents (dx/dsigma with x = (1-sigma)*latents + sigma*noise).
+        # This matches the Diffusers ERNIE-Image pipeline convention where the scheduler applies
+        # x_new = x + (sigma_next - sigma) * pred. Note this is the OPPOSITE sign of Z-Image.
         # Cast to network_dtype (typically float32) so backward grad dtypes match,
         # regardless of cached latent dtype (cache is bf16 for size reduction).
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         noise = noise.to(device=accelerator.device, dtype=network_dtype)
-        target = latents - noise
+        target = noise - latents
 
         return model_pred, target
 
