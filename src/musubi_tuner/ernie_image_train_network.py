@@ -7,7 +7,7 @@ from accelerate import Accelerator
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_ERNIE_IMAGE, ARCHITECTURE_ERNIE_IMAGE_FULL
 from musubi_tuner.ernie_image import ernie_image_model, ernie_image_utils
-from musubi_tuner.flux_2 import flux2_utils, flux2_models
+from musubi_tuner.flux_2 import flux2_utils
 from musubi_tuner.hv_train_network import (
     NetworkTrainer,
     load_prompts,
@@ -151,9 +151,7 @@ class ErnieImageNetworkTrainer(NetworkTrainer):
         else:
             text_hiddens_list = [embed[0]]
 
-        text_bth, text_lens = ernie_image_utils.pad_text(
-            text_hiddens_list, device, torch.bfloat16, model.text_in_dim
-        )
+        text_bth, text_lens = ernie_image_utils.pad_text(text_hiddens_list, device, torch.bfloat16, model.text_in_dim)
 
         for i in tqdm(range(sample_steps), desc="Sampling"):
             t = sigmas[i]
@@ -167,7 +165,7 @@ class ErnieImageNetworkTrainer(NetworkTrainer):
                 latent_model_input = latents
                 t_batch = torch.full((1,), t_scaled, device=device, dtype=torch.bfloat16)
 
-            latent_model_input = latent_model_input.to(model.dtype if hasattr(model, 'dtype') else dit_dtype)
+            latent_model_input = latent_model_input.to(model.dtype if hasattr(model, "dtype") else dit_dtype)
 
             with accelerator.autocast(), torch.no_grad():
                 pred = transformer(
@@ -231,9 +229,7 @@ class ErnieImageNetworkTrainer(NetworkTrainer):
 
     def compile_transformer(self, args, transformer):
         model: ernie_image_model.ErnieImageTransformer2DModel = transformer
-        return model_utils.compile_transformer(
-            args, model, [model.layers], disable_linear=self.blocks_to_swap > 0
-        )
+        return model_utils.compile_transformer(args, model, [model.layers], disable_linear=self.blocks_to_swap > 0)
 
     def scale_shift_latents(self, latents):
         # ERNIE-Image latents are stored as BN-normalized patchified latents, no additional shift needed

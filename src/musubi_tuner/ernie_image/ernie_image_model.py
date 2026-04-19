@@ -467,9 +467,7 @@ class ErnieImageTransformer2DModel(nn.Module):
             if Tmax > 0
             else torch.zeros((B, 0), device=device, dtype=torch.bool)
         )
-        attn_params = AttentionParams.create_attention_params_from_mask(
-            self.attn_mode, self.split_attn, N_img, valid_text
-        )
+        attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, N_img, valid_text)
 
         # Timestep conditioning
         sample = self.time_proj(timestep)
@@ -508,9 +506,6 @@ class ErnieImageTransformer2DModel(nn.Module):
 
         # Unpatchify
         output = (
-            patches.view(B, Hp, Wp, p, p, self.out_channels)
-            .permute(0, 5, 1, 3, 2, 4)
-            .contiguous()
-            .view(B, self.out_channels, H, W)
+            patches.view(B, Hp, Wp, p, p, self.out_channels).permute(0, 5, 1, 3, 2, 4).contiguous().view(B, self.out_channels, H, W)
         )
         return output

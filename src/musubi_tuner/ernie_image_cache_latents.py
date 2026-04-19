@@ -15,7 +15,6 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 from musubi_tuner.dataset.cache_io import save_latent_cache_ernie_image
 from musubi_tuner.dataset.architectures import ARCHITECTURE_ERNIE_IMAGE
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
-from musubi_tuner.ernie_image import ernie_image_utils
 from musubi_tuner.flux_2 import flux2_utils, flux2_models
 import musubi_tuner.cache_latents as cache_latents
 

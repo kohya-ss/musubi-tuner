@@ -58,9 +58,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # inference
-    parser.add_argument(
-        "--cpu_noise", action="store_true", help="Use CPU to generate noise. Default is False."
-    )
+    parser.add_argument("--cpu_noise", action="store_true", help="Use CPU to generate noise. Default is False.")
     parser.add_argument(
         "--guidance_scale",
         type=float,
@@ -248,9 +246,7 @@ def load_dit_model(
         model.to(device)
 
     if args.compile:
-        model = model_utils.compile_transformer(
-            args, model, [model.layers], disable_linear=args.blocks_to_swap > 0
-        )
+        model = model_utils.compile_transformer(args, model, [model.layers], disable_linear=args.blocks_to_swap > 0)
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
@@ -403,9 +399,7 @@ def generate(
     latent_h = height // ERNIE_IMAGE_VAE_SCALE
     latent_w = width // ERNIE_IMAGE_VAE_SCALE
     shape = (1, model.in_channels, latent_h, latent_w)
-    latents = torch.randn(
-        shape, generator=seed_g, device="cpu" if args.cpu_noise else device, dtype=torch.float32
-    ).to(device)
+    latents = torch.randn(shape, generator=seed_g, device="cpu" if args.cpu_noise else device, dtype=torch.float32).to(device)
 
     # Pad text for batch (CFG doubles batch)
     if do_cfg:
@@ -413,9 +407,7 @@ def generate(
     else:
         text_hiddens_list = [embed[0]]
 
-    text_bth, text_lens = ernie_image_utils.pad_text(
-        text_hiddens_list, device, torch.bfloat16, model.text_in_dim
-    )
+    text_bth, text_lens = ernie_image_utils.pad_text(text_hiddens_list, device, torch.bfloat16, model.text_in_dim)
 
     # Flow-matching sigmas: linspace(1.0, 0.0, N+1) with optional shift remap
     sigmas = ernie_image_utils.get_sigmas(args.infer_steps, device, shift=args.flow_shift)
