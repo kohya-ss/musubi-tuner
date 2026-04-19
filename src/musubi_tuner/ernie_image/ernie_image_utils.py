@@ -19,7 +19,16 @@ logging.basicConfig(level=logging.INFO)
 ERNIE_IMAGE_ID = "baidu/ERNIE-Image"
 
 FP8_OPTIMIZATION_TARGET_KEYS = ["layers."]
-FP8_OPTIMIZATION_EXCLUDE_KEYS = ["adaLN_modulation", ".norm", "time_", "x_embedder", "text_proj", "final_"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = [
+    "adaLN_modulation",
+    "adaLN_sa_ln",
+    "adaLN_mlp_ln",
+    ".norm",
+    "time_",
+    "x_embedder",
+    "text_proj",
+    "final_",
+]
 
 ERNIE_IMAGE_TEXT_ENCODER_CONFIG_JSON = """\
 {
