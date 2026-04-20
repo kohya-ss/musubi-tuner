@@ -271,6 +271,18 @@ class ErnieImageSharedAdaLNBlock(nn.Module):
 # --- Final Layer ---
 
 
+class ErnieImageAdaLNModulation(nn.Sequential):
+    """Shared AdaLN modulation head (SiLU + Linear).
+
+    Subclass of nn.Sequential with the same children (index 0: SiLU, index 1: Linear)
+    so that state_dict keys remain compatible with the original nn.Sequential layout.
+    Exists as a named class so LoRA can target it via TARGET_REPLACE_MODULES.
+    """
+
+    def __init__(self, hidden_size: int):
+        super().__init__(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size))
+
+
 class ErnieImageAdaLNContinuous(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
@@ -326,7 +338,7 @@ class ErnieImageTransformer2DModel(nn.Module):
         self.time_embedding = TimestepEmbedding(hidden_size, hidden_size)
         self.pos_embed = ErnieImageEmbedND3(dim=self.head_dim, theta=rope_theta, axes_dim=rope_axes_dim)
 
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size))
+        self.adaLN_modulation = ErnieImageAdaLNModulation(hidden_size)
         nn.init.zeros_(self.adaLN_modulation[-1].weight)
         nn.init.zeros_(self.adaLN_modulation[-1].bias)
 
