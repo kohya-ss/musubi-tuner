@@ -42,7 +42,7 @@ from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
 
 import logging
 
-from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec, interactive_utils
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1118,8 +1118,20 @@ class FineTuningTrainer:
                         accelerator, args, None, global_step, accelerator.device, vae, transformer, sample_parameters
                     )
 
+                    # check for on-demand save
+                    save_on_demand = False
+                    if accelerator.is_main_process:
+                        if interactive_utils.is_save_requested():
+                            save_on_demand = True
+                    
+                    if accelerator.num_processes > 1:
+                        signal = torch.tensor([1.0 if save_on_demand else 0.0], device=accelerator.device)
+                        signal = accelerator.reduce(signal, reduction="max")
+                        save_on_demand = signal.item() > 0.5
+
                     # 指定ステップごとにモデルを保存
-                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                    should_saving = (args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0) or save_on_demand
+                    if should_saving:
                         accelerator.wait_for_everyone()
                         if accelerator.is_main_process:
                             ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)

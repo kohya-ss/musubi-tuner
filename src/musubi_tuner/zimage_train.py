@@ -33,7 +33,7 @@ from musubi_tuner.hv_train_network import (
 import logging
 
 from musubi_tuner.zimage_train_network import ZImageNetworkTrainer
-from musubi_tuner.utils import huggingface_utils, model_utils, sai_model_spec, train_utils
+from musubi_tuner.utils import huggingface_utils, model_utils, sai_model_spec, train_utils, interactive_utils
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 
 logger = logging.getLogger(__name__)
@@ -569,9 +569,20 @@ class ZImageTrainer(ZImageNetworkTrainer):
                     progress_bar.update(1)
                     global_step += 1
 
+                    # check for on-demand save
+                    save_on_demand = False
+                    if accelerator.is_main_process:
+                         if interactive_utils.is_save_requested():
+                            save_on_demand = True
+                    
+                    if accelerator.num_processes > 1:
+                        signal = torch.tensor([1.0 if save_on_demand else 0.0], device=accelerator.device)
+                        signal = accelerator.reduce(signal, reduction="max")
+                        save_on_demand = signal.item() > 0.5
+
                     # to avoid calling optimizer_eval_fn() too frequently, we call it only when we need to sample images or save the model
                     should_sampling = should_sample_images(args, global_step, epoch=None)
-                    should_saving = args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0
+                    should_saving = (args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0) or save_on_demand
 
                     if should_sampling or should_saving:
                         optimizer_eval_fn()
