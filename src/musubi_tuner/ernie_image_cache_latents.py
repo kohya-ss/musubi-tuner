@@ -53,6 +53,13 @@ def encode_and_save_batch(vae: flux2_models.AutoEncoder, batch: List[ItemInfo]):
         logger.debug(f"Saving cache for {item.item_key}. Latent shape: {latent.shape}")
         save_latent_cache_ernie_image(item_info=item, latent=latent)
 
+    # Release per-batch tensors aggressively to reduce CUDA memory fragmentation
+    # during long cache runs on consumer GPUs.
+    del latents
+    del contents
+    if vae.device.type == "cuda":
+        torch.cuda.empty_cache()
+
 
 def main():
     parser = cache_latents.setup_parser_common()
