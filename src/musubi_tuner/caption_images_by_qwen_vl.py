@@ -55,6 +55,7 @@ def parse_args():
         default="jsonl",
         help="Output format: 'jsonl' for JSONL file or 'text' for individual text files (default: jsonl)",
     )
+    parser.add_argument("--device", type=str, default=None, help="Device to run the model on (default: 'cuda' if available else 'cpu')")
 
     return parser.parse_args()
 
@@ -192,7 +193,8 @@ def process_images(args):
         prompt = DEFAULT_PROMPT
 
     # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device)
     logger.info(f"Using device: {device}")
     logger.info(f"Output format: {args.output_format}")
     if args.fp8_vl:
