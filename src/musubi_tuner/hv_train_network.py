@@ -379,6 +379,7 @@ class NetworkTrainer:
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
+        self._coupling_scheduler = None
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1723,28 +1724,48 @@ class NetworkTrainer:
         self,
         timesteps_teacher: torch.Tensor,  # (B,)
         timesteps_student: torch.Tensor,  # (B,)
-        mask_flat: torch.Tensor,  # (B, N) bool — True = masked = teacher
-    ) -> torch.Tensor:
+        mask_flat: torch.Tensor,  # (B, N) bool — True = masked = teacher noise
+        coupling_prob: float = 0.0,  # per-patch probability of mismatch for masked tokens
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Build per-token timestep map for dual-timestep conditioning (paper §A.3).
 
-        Each token is conditioned on its actual noise level:
-        - Masked tokens (teacher noise): get timesteps_teacher
-        - Unmasked tokens (student noise): get timesteps_student
+        Unmasked tokens always get timesteps_student (correct: student noise level).
+        Masked tokens (teacher noise) get either:
+          - timesteps_teacher (correct, prob 1 - coupling_prob)
+          - timesteps_student (mismatch, prob coupling_prob) — cleaner noise but told
+            it is at the noisier student timestep, encouraging deeper teacher learning.
 
         Args:
             timesteps_teacher: Teacher timesteps, shape (B,)
             timesteps_student: Student timesteps, shape (B,)
             mask_flat: Boolean mask from _apply_per_token_mask, shape (B, N)
+            coupling_prob: Per-patch probability that a masked patch gets student
+                timestep instead of teacher timestep. 0 = paper behaviour.
 
         Returns:
-            Per-token timestep tensor of shape (B, N), same dtype as inputs
+            (per_token_timesteps, mismatch_mask) where:
+              per_token_timesteps: shape (B, N), same dtype as inputs
+              mismatch_mask: (B, N) bool, True where mismatch was applied
         """
         B, N = mask_flat.shape
-        # Start with student timestep everywhere, then fill masked positions with teacher
         t_student_expanded = timesteps_student.unsqueeze(1).expand(B, N)  # (B, N)
         t_teacher_expanded = timesteps_teacher.unsqueeze(1).expand(B, N)  # (B, N)
-        return torch.where(mask_flat, t_teacher_expanded, t_student_expanded)
+
+        if coupling_prob <= 0.0:
+            per_token_t = torch.where(mask_flat, t_teacher_expanded, t_student_expanded)
+            mismatch_mask = torch.zeros_like(mask_flat)
+            return per_token_t, mismatch_mask
+
+        # Among masked tokens, flip a per-patch coin to decide mismatch
+        coin = torch.rand(B, N, device=mask_flat.device)
+        mismatch_mask = mask_flat & (coin < coupling_prob)  # (B, N)
+
+        # Masked + NOT mismatch → teacher timestep (correct)
+        # Masked + mismatch    → student timestep (deliberate mismatch)
+        # Unmasked             → student timestep (always correct)
+        per_token_t = torch.where(mask_flat & ~mismatch_mask, t_teacher_expanded, t_student_expanded)
+        return per_token_t, mismatch_mask
 
     def _update_ema_weights(
         self,
@@ -1848,6 +1869,48 @@ class NetworkTrainer:
             return gamma
         return gamma * min(1.0, global_step / warmup_steps)
 
+    def _create_coupling_prob_scheduler(
+        self, coupling_prob: float, decay_type: str, num_steps: int
+    ) -> None:
+        """
+        Create a dummy optimizer + LR scheduler to decay teacher coupling probability.
+
+        The scheduler starts at coupling_prob and decays to 0 over num_steps.
+        Supported decay_type: "constant", "cosine", "linear", "rex".
+        Stores the scheduler in self._coupling_scheduler (None if constant or prob == 0).
+        """
+        if coupling_prob == 0.0 or decay_type == "constant":
+            self._coupling_scheduler = None
+            return
+
+        dummy_param = torch.nn.Parameter(torch.zeros(1))
+        dummy_optimizer = torch.optim.SGD([dummy_param], lr=coupling_prob)
+
+        if decay_type == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                dummy_optimizer, T_max=max(num_steps, 1), eta_min=0.0
+            )
+        elif decay_type == "linear":
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                dummy_optimizer, start_factor=1.0, end_factor=0.0, total_iters=max(num_steps, 1)
+            )
+        elif decay_type == "rex":
+            scheduler = RexLR(
+                dummy_optimizer, max_lr=coupling_prob, min_lr=0.0, num_steps=max(num_steps, 1)
+            )
+        else:
+            raise ValueError(f"Unknown --self_flow_teacher_coupling_decay: {decay_type!r}. Choose: constant, cosine, linear, rex")
+
+        self._coupling_scheduler = scheduler
+
+    def _get_current_coupling_prob(self, args: argparse.Namespace) -> float:
+        """Return current coupling probability and advance the scheduler by one step."""
+        if self._coupling_scheduler is None:
+            return args.self_flow_teacher_coupling_prob
+        prob = self._coupling_scheduler.get_last_lr()[0]
+        self._coupling_scheduler.step()
+        return prob
+
     def _update_self_flow_logs(
         self,
         L_gen: torch.Tensor,
@@ -1855,10 +1918,14 @@ class NetworkTrainer:
         timesteps_student: torch.Tensor,
         timesteps_teacher: torch.Tensor,
         mask_flat: torch.Tensor,
-        per_token_timesteps_student: torch.Tensor,
+        mismatch_mask: torch.Tensor,
         ema_weight_drift: torch.Tensor,
+        teacher_coupling_prob: float = 0.0,
     ) -> None:
         """Populate self._self_flow_logs with all self-flow training metrics."""
+        masked_count = mask_flat.sum().item()
+        mismatch_count = mismatch_mask.sum().item()
+        mismatch_frac = mismatch_count / masked_count if masked_count > 0 else 0.0
         self._self_flow_logs = {
             "self_flow/L_gen": L_gen.detach().item(),
             "self_flow/L_rep": L_rep.detach().item() if L_rep is not None else 0.0,
@@ -1867,6 +1934,9 @@ class NetworkTrainer:
             "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
             "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
             "self_flow/ema_weight_drift": ema_weight_drift.detach().item(),
+            "self_flow/teacher_coupling_prob": teacher_coupling_prob,
+            "self_flow/mismatch_patch_count": mismatch_count,
+            "self_flow/mismatch_patch_frac": mismatch_frac,
         }
 
     def _compute_combined_loss(
@@ -1932,8 +2002,18 @@ class NetworkTrainer:
         noisy_input_student, mask_flat = self._apply_per_token_mask(
             noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device
         )
-        # Per-token timestep map: masked tokens conditioned on teacher timestep
-        per_token_timesteps_student = self._build_per_token_timestep_map(timesteps_teacher, timesteps_student, mask_flat)
+
+        # Per-token timestep map with optional mismatch.
+        # coupling_prob (decays over training) is a per-step gate: if it fires, mismatch
+        # is applied to masked patches at the rate set by mismatch_ratio.
+        # If the gate doesn't fire this step, all masked patches get the correct teacher
+        # timestep (normal paper behaviour).
+        coupling_prob = self._get_current_coupling_prob(args)
+        gate_open = coupling_prob > 0.0 and torch.rand(1).item() < coupling_prob
+        effective_mismatch_ratio = args.self_flow_teacher_mismatch_ratio if gate_open else 0.0
+        per_token_timesteps_student, mismatch_mask = self._build_per_token_timestep_map(
+            timesteps_teacher, timesteps_student, mask_flat, coupling_prob=effective_mismatch_ratio
+        )
 
         # Feature layer indices: student (l) < teacher (k)
         student_feature_layer = args.student_feature_layer
@@ -2015,8 +2095,9 @@ class NetworkTrainer:
             timesteps_student=timesteps_student,
             timesteps_teacher=timesteps_teacher,
             mask_flat=mask_flat,
-            per_token_timesteps_student=per_token_timesteps_student,
+            mismatch_mask=mismatch_mask,
             ema_weight_drift=ema_drift,
+            teacher_coupling_prob=coupling_prob,
         )
 
         return loss
@@ -2335,6 +2416,11 @@ class NetworkTrainer:
         )
 
         if rep_proj is not None:
+            if args.network_weights_proj is not None:
+                from safetensors.torch import load_file
+                proj_state = load_file(args.network_weights_proj)
+                rep_proj.load_state_dict(proj_state)
+                accelerator.print(f"load projection head weights from {args.network_weights_proj}")
             rep_proj = accelerator.prepare(rep_proj)
 
         # prepare dataloader
@@ -2408,10 +2494,27 @@ class NetworkTrainer:
         if args.self_flow:
             # EMA copy of LoRA weights for self-flow teacher (after accelerator.prepare so weights are on device)
             ema_lora_state = {k: v.detach().clone() for k, v in network.state_dict().items()}
+            if args.network_weights_ema is not None:
+                if args.network_weights is None:
+                    raise ValueError("--network_weights_ema requires --network_weights to be set")
+                unwrapped_nw = accelerator.unwrap_model(network)
+                info = unwrapped_nw.load_weights(args.network_weights_ema)
+                accelerator.print(f"load EMA network weights from {args.network_weights_ema}: {info}")
+                ema_lora_state = {k: v.detach().clone() for k, v in unwrapped_nw.state_dict().items()}
+                unwrapped_nw.load_weights(args.network_weights)  # restore student weights
+            coupling_decay_steps = getattr(args, "self_flow_teacher_coupling_decay_steps", None) or args.max_train_steps
+            self._create_coupling_prob_scheduler(
+                coupling_prob=args.self_flow_teacher_coupling_prob,
+                decay_type=args.self_flow_teacher_coupling_decay,
+                num_steps=coupling_decay_steps,
+            )
             logger.info(
                 f"Self-flow enabled: gamma={args.self_flow_gamma}, mask_ratio={args.mask_ratio}, "
                 f"ema_decay={args.ema_decay}, student_layer={args.student_feature_layer}, "
-                f"teacher_layer={args.teacher_feature_layer}"
+                f"teacher_layer={args.teacher_feature_layer}, "
+                f"teacher_coupling_prob={args.self_flow_teacher_coupling_prob}, "
+                f"teacher_coupling_decay={args.self_flow_teacher_coupling_decay}, "
+                f"teacher_mismatch_ratio={args.self_flow_teacher_mismatch_ratio}"
             )
 
         if args.gradient_checkpointing:
@@ -2530,6 +2633,9 @@ class NetworkTrainer:
             metadata["ss_self_flow_ema_decay"] = args.ema_decay
             metadata["ss_self_flow_student_layer"] = args.student_feature_layer
             metadata["ss_self_flow_teacher_layer"] = args.teacher_feature_layer
+            metadata["ss_self_flow_teacher_coupling_prob"] = args.self_flow_teacher_coupling_prob
+            metadata["ss_self_flow_teacher_coupling_decay"] = args.self_flow_teacher_coupling_decay
+            metadata["ss_self_flow_teacher_mismatch_ratio"] = args.self_flow_teacher_mismatch_ratio
 
         datasets_metadata = []
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
@@ -2638,16 +2744,50 @@ class NetworkTrainer:
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
+            # Save projection head separately when self-flow is active
+            if args.self_flow and rep_proj is not None:
+                from safetensors.torch import save_file
+                proj_ckpt_name = ckpt_name.replace(".safetensors", "-proj.safetensors")
+                proj_ckpt_file = os.path.join(args.output_dir, proj_ckpt_name)
+                accelerator.print(f"saving projection head: {proj_ckpt_file}")
+                proj_state = {k: v.to(save_dtype) if save_dtype is not None else v for k, v in accelerator.unwrap_model(rep_proj).state_dict().items()}
+                save_file(proj_state, proj_ckpt_file)
+                if args.huggingface_repo_id is not None:
+                    huggingface_utils.upload(args, proj_ckpt_file, "/" + proj_ckpt_name, force_sync_upload=force_sync_upload)
+
+            # Save EMA (teacher) weights alongside student when self-flow is active
+            if args.self_flow and ema_lora_state is not None:
+                ema_ckpt_name = ckpt_name.replace(".safetensors", "-ema.safetensors")
+                ema_ckpt_file = os.path.join(args.output_dir, ema_ckpt_name)
+                accelerator.print(f"saving EMA checkpoint: {ema_ckpt_file}")
+                student_state = {k: v.clone() for k, v in unwrapped_nw.state_dict().items()}
+                unwrapped_nw.load_state_dict(ema_lora_state)
+                unwrapped_nw.save_weights(ema_ckpt_file, save_dtype, metadata_to_save)
+                unwrapped_nw.load_state_dict(student_state)
+                if args.huggingface_repo_id is not None:
+                    huggingface_utils.upload(args, ema_ckpt_file, "/" + ema_ckpt_name, force_sync_upload=force_sync_upload)
+
         def remove_model(old_ckpt_name):
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
             if os.path.exists(old_ckpt_file):
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
+        def sample_images_with_ema(epoch, steps):
+            """Sample using EMA (teacher) weights when self-flow is active, else student."""
+            if args.self_flow and ema_lora_state is not None:
+                unwrapped_nw = accelerator.unwrap_model(network)
+                student_state = {k: v.clone() for k, v in unwrapped_nw.state_dict().items()}
+                unwrapped_nw.load_state_dict(ema_lora_state)
+                self.sample_images(accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype)
+                unwrapped_nw.load_state_dict(student_state)
+            else:
+                self.sample_images(accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype)
+
         # For --sample_at_first
         if should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
-            self.sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
+            sample_images_with_ema(0, global_step)
             optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -2772,7 +2912,7 @@ class NetworkTrainer:
                     if should_sampling or should_saving:
                         optimizer_eval_fn()
                         if should_sampling:
-                            self.sample_images(accelerator, args, None, global_step, vae, transformer, sample_parameters, dit_dtype)
+                            sample_images_with_ema(None, global_step)
 
                         if should_saving:
                             accelerator.wait_for_everyone()
@@ -2832,7 +2972,7 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
+            sample_images_with_ema(epoch + 1, global_step)
             optimizer_train_fn()
 
             # end of epoch
@@ -3335,6 +3475,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--network_weights", type=str, default=None, help="pretrained weights for network / 学習するネットワークの初期重み"
     )
     parser.add_argument(
+        "--network_weights_ema", type=str, default=None, help="pretrained EMA (teacher) weights for self-flow network / セルフフロー教師ネットワークの初期EMA重み"
+    )
+    parser.add_argument(
+        "--network_weights_proj", type=str, default=None, help="pretrained projection head weights for self-flow / セルフフロー射影ヘッドの初期重み"
+    )
+    parser.add_argument(
         "--network_module", type=str, default=None, help="network module to train / 学習対象のネットワークのモジュール"
     )
     parser.add_argument(
@@ -3573,7 +3719,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ema_decay",
         type=float,
-        default=0.9999,
+        default=0.999,
         help="EMA decay rate for self-flow teacher LoRA weights. / セルフフロー教師LoRA重みのEMA減衰率。",
     )
     parser.add_argument(
@@ -3589,6 +3735,42 @@ def setup_parser_common() -> argparse.ArgumentParser:
         default=None,
         help="Global block index for teacher feature extraction (k in paper, must be > student_feature_layer). None uses last block. Recommends 0.7D where D is number of blocks"
         " / 教師特徴抽出のグローバルブロックインデックス（論文のk、student_feature_layerより大きい必要あり）。Noneで最終ブロックを使用。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_coupling_prob",
+        type=float,
+        default=0.0,
+        help="Per-step gate probability: this fraction of training steps will apply any mismatch at all."
+        " When the gate fires, --self_flow_teacher_mismatch_ratio controls how many masked patches"
+        " are mismatched. Decays to 0 over training per --self_flow_teacher_coupling_decay."
+        " 0 disables mismatch entirely."
+        " / ミスマッチを行うステップの割合（ゲート確率）。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_coupling_decay",
+        type=str,
+        default="constant",
+        choices=["constant", "cosine", "linear", "rex"],
+        help="Decay schedule for --self_flow_teacher_coupling_prob over training steps."
+        " 'constant' keeps the probability fixed; 'cosine', 'linear', 'rex' decay it to 0."
+        " / self_flow_teacher_coupling_probの減衰スケジュール。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_coupling_decay_steps",
+        type=int,
+        default=None,
+        help="Number of steps over which to decay --self_flow_teacher_coupling_prob to 0."
+        " Defaults to max_train_steps if not set."
+        " / self_flow_teacher_coupling_probを0に減衰させるステップ数。未設定時はmax_train_stepsを使用。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_mismatch_ratio",
+        type=float,
+        default=1.0,
+        help="When the coupling gate fires, the fraction of masked patches that receive the"
+        " timestep mismatch (teacher noise + student timestep). 1.0 = all masked patches"
+        " are mismatched; 0.25 = only a quarter are. Independent per-patch coin flip."
+        " / ゲートが発動した場合に、マスクされたパッチのうちタイムステップのミスマッチを受けるパッチの割合。",
     )
 
     return parser
