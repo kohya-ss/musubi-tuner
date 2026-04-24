@@ -25,6 +25,7 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
 )
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.dit_output import DitOutput
 from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS, CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511
 
 import logging
@@ -580,7 +581,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         target = noise - latents
 
         # print(model_pred.dtype, target.dtype)
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
     # endregion model specific
 

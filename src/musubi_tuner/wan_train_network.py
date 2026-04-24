@@ -18,6 +18,7 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
 )
 from musubi_tuner.utils.device_utils import synchronize_device
+from musubi_tuner.utils.dit_output import DitOutput
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.wan_generate_video import parse_one_frame_inference_args
 
@@ -705,7 +706,7 @@ class WanNetworkTrainer(NetworkTrainer):
         # flow matching loss
         target = noise - latents
 
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
     # endregion model specific
 

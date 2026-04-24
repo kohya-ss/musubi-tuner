@@ -19,6 +19,7 @@ from musubi_tuner.hv_train_network import (
 import logging
 
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.dit_output import DitOutput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -356,7 +357,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         target = noise - latents
 
-        return model_pred, target, features
+        return DitOutput(pred=model_pred, target=target, features=features)
 
     # endregion model specific
 

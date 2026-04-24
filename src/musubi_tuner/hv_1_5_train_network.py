@@ -36,6 +36,7 @@ from musubi_tuner.hv_train_network import (
 )
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.dit_output import DitOutput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -455,7 +456,7 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         # Flow matching target: predict the velocity (noise - clean)
         # This is different from DDPM which predicts noise directly
         target = noise - latents
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
     # endregion model specific
 

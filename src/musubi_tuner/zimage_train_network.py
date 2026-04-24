@@ -16,6 +16,7 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
 )
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.dit_output import DitOutput
 
 import logging
 
@@ -328,7 +329,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         # Target: Opposite of usual Flow matching
         target = latents - noise
 
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

@@ -50,6 +50,7 @@ from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, r
 import logging
 
 from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from musubi_tuner.utils.dit_output import DitOutput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1992,7 +1993,7 @@ class NetworkTrainer:
         student_lora_state = {k: v.clone() for k, v in network.state_dict().items()}
         network.load_state_dict(ema_lora_state)
         with torch.no_grad():
-            result = self.call_dit(
+            output = self.call_dit(
                 args,
                 accelerator,
                 transformer,
@@ -2005,7 +2006,7 @@ class NetworkTrainer:
                 hidden_features=True,
                 feature_layer=teacher_feature_layer,
             )
-            feat_teacher = result[2].detach() if len(result) > 2 and result[2] is not None else None
+            feat_teacher = output.features.detach() if output.features is not None else None
         network.load_state_dict(student_lora_state)
 
         # Reset after teacher forward due to a lack of the backwards
@@ -2015,7 +2016,7 @@ class NetworkTrainer:
         weighting = compute_loss_weighting_for_sd3(
             args.weighting_scheme, noise_scheduler, timesteps_student, accelerator.device, dit_dtype
         )
-        result = self.call_dit(
+        output = self.call_dit(
             args,
             accelerator,
             transformer,
@@ -2029,8 +2030,9 @@ class NetworkTrainer:
             feature_layer=student_feature_layer,
             per_token_timesteps=per_token_timesteps_student,
         )
-        model_pred, target = result[0], result[1]
-        feat_student = result[2] if len(result) > 2 and result[2] is not None else None
+        model_pred = output.pred
+        target = output.target
+        feat_student = output.features
 
         # --- L_gen ---
         loss, _ = self.compute_loss(
@@ -2129,7 +2131,7 @@ class NetworkTrainer:
         # flow matching loss
         target = noise - latents
 
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
     # endregion model specific
 
@@ -2825,9 +2827,11 @@ class NetworkTrainer:
                             args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
                         )
 
-                        model_pred, target = self.call_dit(
+                        output = self.call_dit(
                             args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
-                        )[:2]
+                        )
+                        model_pred = output.pred
+                        target = output.target
                         loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
 
                         if weighting is not None:

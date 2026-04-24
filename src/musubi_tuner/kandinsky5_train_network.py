@@ -33,6 +33,7 @@ from musubi_tuner.modules.fp8_optimization_utils import (
     apply_fp8_monkey_patch,
 )
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.dit_output import DitOutput
 
 import logging
 
@@ -900,7 +901,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
 
         model_pred = torch.stack(preds, dim=0)  # B, F, C, H, W
         target = torch.stack(targets, dim=0)  # B, F, C, H, W
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
     # endregion model specific
 
