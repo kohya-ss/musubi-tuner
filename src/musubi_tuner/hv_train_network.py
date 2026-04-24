@@ -879,45 +879,14 @@ class NetworkTrainer:
                     t = torch.sigmoid(-logsnr / 2)
 
                 elif args.timestep_sampling == "plateau_logit_normal":
-                    shift = args.discrete_flow_shift  # alpha, e.g. 10.0
-                    mu_shifted = math.log(shift)
-                    sigma = args.sigmoid_scale
+                    from musubi_tuner.timestep_samplers import sample_plateau_logit_normal
 
-                    mode_t = torch.sigmoid(torch.tensor(mu_shifted)).item()
-
-                    # PDF at mode (for normalization)
-                    from scipy.stats import norm as sp_norm
-
-                    # logit-normal pdf at mode_t
-                    logit_mode = math.log(mode_t / (1 - mode_t))
-                    pdf_at_mode = (
-                        1
-                        / (sigma * math.sqrt(2 * math.pi))
-                        * 1
-                        / (mode_t * (1 - mode_t))
-                        * math.exp(-((logit_mode - mu_shifted) ** 2) / (2 * sigma**2))
+                    t = sample_plateau_logit_normal(
+                        batch_size=batch_size,
+                        shift=args.discrete_flow_shift,
+                        sigma=args.sigmoid_scale,
+                        device=device,
                     )
-
-                    # CDF has two regions:
-                    # [0, mode_t]: integral of logit-normal
-                    # [mode_t, 1]: pdf_at_mode * (t - mode_t)
-                    cdf_at_mode = sp_norm.cdf((logit_mode - mu_shifted) / sigma)
-                    plateau_mass = pdf_at_mode * (1 - mode_t)
-                    total_mass = cdf_at_mode + plateau_mass
-
-                    # Sample via inverse CDF
-                    u = torch.rand(batch_size, device=device) * total_mass
-                    t = torch.zeros(batch_size, device=device)
-
-                    in_logit_normal = u < cdf_at_mode
-                    if in_logit_normal.any():
-                        # Inverse CDF of logit-normal region
-                        z = torch.tensor(sp_norm.ppf((u[in_logit_normal] / 1.0).cpu().numpy()), device=device)
-                        t[in_logit_normal] = torch.sigmoid(z.float() * sigma + mu_shifted)
-
-                    in_plateau = ~in_logit_normal
-                    if in_plateau.any():
-                        t[in_plateau] = mode_t + (u[in_plateau] - cdf_at_mode) / pdf_at_mode
 
                 elif args.timestep_sampling.startswith("qinglong"):
                     # Qinglong triple hybrid sampling: mid_shift:logsnr:logsnr2 = .80:.075:.125
