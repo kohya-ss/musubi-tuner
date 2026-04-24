@@ -1888,14 +1888,16 @@ class NetworkTrainer:
         timesteps_student: torch.Tensor,
         timesteps_teacher: torch.Tensor,
         mask_flat: torch.Tensor,
-        mismatch_mask: torch.Tensor,
-        ema_weight_drift: torch.Tensor,
+        mismatch_mask: torch.Tensor | None = None,
+        ema_weight_drift: torch.Tensor | None = None,
         teacher_coupling_prob: float = 0.0,
+        per_token_timesteps_student: torch.Tensor | None = None,
     ) -> None:
         """Populate self._self_flow_logs with all self-flow training metrics."""
         masked_count = mask_flat.sum().item()
-        mismatch_count = mismatch_mask.sum().item()
-        mismatch_frac = mismatch_count / masked_count if masked_count > 0 else 0.0
+        if mismatch_mask is not None:
+            mismatch_count = mismatch_mask.sum().item()
+            mismatch_frac = mismatch_count / masked_count if masked_count > 0 else 0.0
         self._self_flow_logs = {
             "self_flow/L_gen": L_gen.detach().item(),
             "self_flow/L_rep": L_rep.detach().item() if L_rep is not None else 0.0,
@@ -1903,11 +1905,13 @@ class NetworkTrainer:
             "self_flow/timestep_student_mean": timesteps_student.float().mean().item(),
             "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
             "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
-            "self_flow/ema_weight_drift": ema_weight_drift.detach().item(),
             "self_flow/teacher_coupling_prob": teacher_coupling_prob,
-            "self_flow/mismatch_patch_count": mismatch_count,
-            "self_flow/mismatch_patch_frac": mismatch_frac,
         }
+        if mismatch_mask is not None:
+            self._self_flow_logs["self_flow/mismatch_patch_count"] = mismatch_count
+            self._self_flow_logs["self_flow/mismatch_patch_frac"] = mismatch_frac
+        if ema_weight_drift is not None:
+            self._self_flow_logs["self_flow/ema_weight_drift"] = ema_weight_drift.detach().item()
 
     def _compute_combined_loss(
         self,

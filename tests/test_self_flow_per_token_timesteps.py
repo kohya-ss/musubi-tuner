@@ -136,7 +136,7 @@ def test_build_per_token_timestep_map_assigns_teacher_to_masked(trainer):
     mask[0, :4] = True  # first 4 tokens masked in batch 0
     mask[1, 8:] = True  # last 8 tokens masked in batch 1
 
-    timestep_map = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
+    timestep_map, _ = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
 
     assert timestep_map.shape == (2, 16)
 
@@ -155,7 +155,7 @@ def test_build_per_token_timestep_map_no_mask_all_student(trainer):
     t_student = torch.tensor([500])
     mask = torch.zeros(1, 32, dtype=torch.bool)
 
-    timestep_map = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
+    timestep_map, _ = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
 
     assert (timestep_map == 500).all()
 
@@ -166,7 +166,7 @@ def test_build_per_token_timestep_map_all_masked_all_teacher(trainer):
     t_student = torch.tensor([500])
     mask = torch.ones(1, 32, dtype=torch.bool)
 
-    timestep_map = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
+    timestep_map, _ = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
 
     assert (timestep_map == 100).all()
 
@@ -177,7 +177,7 @@ def test_build_per_token_timestep_map_dtype_preserved(trainer):
     t_student = torch.tensor([500], dtype=torch.float32)
     mask = torch.zeros(1, 16, dtype=torch.bool)
 
-    timestep_map = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
+    timestep_map, _ = trainer._build_per_token_timestep_map(t_teacher, t_student, mask)
 
     assert timestep_map.dtype == torch.float32
 
