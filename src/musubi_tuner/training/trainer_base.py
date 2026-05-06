@@ -1121,6 +1121,65 @@ class NetworkTrainer:
 
         return loss.mean()
 
+    def on_train_start(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        transformer,
+        optimizer,
+    ) -> None:
+        """Called once after accelerator.prepare and before the training loop starts.
+
+        Use this for initializing extension state that depends on prepared models
+        (EMA copies, decay schedulers, register_forward_hook on the transformer, etc.).
+        """
+
+    def on_post_optimizer_step(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        sync_gradients: bool,
+        global_step: int,
+    ) -> None:
+        """Called after optimizer.step / lr_scheduler.step / zero_grad each inner step.
+
+        ``sync_gradients`` mirrors ``accelerator.sync_gradients`` and is True only
+        on steps where an actual optimizer update occurred (gradient accumulation aware).
+        Use for EMA updates or any post-step bookkeeping.
+        """
+
+    def on_sample_images(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        sample_fn,
+    ) -> None:
+        """Around-hook wrapping ``self.sample_images(...)`` calls.
+
+        Default implementation simply invokes ``sample_fn()``. Override to e.g.
+        temporarily swap student weights for EMA (teacher) weights before sampling
+        and restore them afterwards.
+        """
+        sample_fn()
+
+    def on_post_save(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        ckpt_name: str,
+        save_dtype,
+        metadata: dict,
+    ) -> None:
+        """Called after the main network checkpoint has been saved.
+
+        ``ckpt_name`` is the basename written to ``args.output_dir``. Use this hook
+        to write companion files (EMA weights, projection heads, etc.) alongside.
+        """
+
     # endregion extension seams
 
     def train(self, args):
@@ -1602,6 +1661,8 @@ class NetworkTrainer:
     ):
         is_main_process = accelerator.is_main_process
 
+        self.on_train_start(args, accelerator, network, transformer, optimizer)
+
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -1777,16 +1838,28 @@ class NetworkTrainer:
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
+            self.on_post_save(args, accelerator, network, ckpt_name, save_dtype, metadata_to_save)
+
         def remove_model(old_ckpt_name):
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
             if os.path.exists(old_ckpt_file):
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
+        def _do_sample(epoch_arg, steps_arg):
+            self.on_sample_images(
+                args,
+                accelerator,
+                network,
+                lambda: self.sample_images(
+                    accelerator, args, epoch_arg, steps_arg, vae, transformer, sample_parameters, dit_dtype
+                ),
+            )
+
         # For --sample_at_first
         if should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
-            self.sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
+            _do_sample(0, global_step)
             optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -1858,6 +1931,10 @@ class NetworkTrainer:
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
+                    self.on_post_optimizer_step(
+                        args, accelerator, network, accelerator.sync_gradients, global_step
+                    )
+
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
                         args.scale_weight_norms, accelerator.device
@@ -1880,7 +1957,7 @@ class NetworkTrainer:
                     if should_sampling or should_saving:
                         optimizer_eval_fn()
                         if should_sampling:
-                            self.sample_images(accelerator, args, None, global_step, vae, transformer, sample_parameters, dit_dtype)
+                            _do_sample(None, global_step)
 
                         if should_saving:
                             accelerator.wait_for_everyone()
@@ -1937,7 +2014,7 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
+            _do_sample(epoch + 1, global_step)
             optimizer_train_fn()
 
             # end of epoch
