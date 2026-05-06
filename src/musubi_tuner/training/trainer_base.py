@@ -1077,6 +1077,52 @@ class NetworkTrainer:
 
     # endregion model specific
 
+    # region extension seams
+    # Internal extension points — no API stability guarantees.
+    # Subclasses live in this repo; if you fork, expect breakage on updates.
+
+    def process_batch(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        network,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        vae,
+        global_step: int,
+    ) -> torch.Tensor:
+        """Compute scalar loss for one training batch (pre-backward).
+
+        Default implementation: vanilla flow matching.
+        Override to implement custom training logic (Self-Flow etc.).
+
+        ``latents`` is already scale-shifted; ``noise`` is already sampled.
+        """
+        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
+            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+        )
+
+        weighting = compute_loss_weighting_for_sd3(
+            args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
+        )
+
+        model_pred, target = self.call_dit(
+            args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
+        )
+        loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
+
+        if weighting is not None:
+            loss = loss * weighting
+
+        return loss.mean()
+
+    # endregion extension seams
+
     def train(self, args):
         if not self._validate_args_and_init(args):
             return
@@ -1780,27 +1826,20 @@ class NetworkTrainer:
                     # Sample noise that we'll add to the latents
                     noise = torch.randn_like(latents)
 
-                    # calculate model input and timesteps
-                    noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-                        args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+                    loss = self.process_batch(
+                        args,
+                        accelerator,
+                        transformer,
+                        network,
+                        batch,
+                        latents,
+                        noise,
+                        noise_scheduler,
+                        dit_dtype,
+                        network_dtype,
+                        vae,
+                        global_step,
                     )
-
-                    weighting = compute_loss_weighting_for_sd3(
-                        args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-                    )
-
-                    model_pred, target = self.call_dit(
-                        args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
-                    )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
-
-                    if weighting is not None:
-                        loss = loss * weighting
-                    # loss = loss.mean([1, 2, 3])
-                    # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
-                    # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
-
-                    loss = loss.mean()  # mean loss over all elements in batch
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
