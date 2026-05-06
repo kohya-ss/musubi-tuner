@@ -1180,6 +1180,39 @@ class NetworkTrainer:
         to write companion files (EMA weights, projection heads, etc.) alongside.
         """
 
+    def extra_trainable_params(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        transformer,
+        trainable_params: list,
+    ) -> list:
+        """Optionally augment the param-group list passed to the optimizer.
+
+        Default: pass-through. Override to merge extra modules' parameters
+        (e.g. a representation projection head) into ``trainable_params``.
+        Subclasses are expected to stash any owned modules on ``self`` so
+        ``on_train_start`` and later hooks can use them.
+        """
+        return trainable_params
+
+    def extra_metadata(self, args: argparse.Namespace) -> dict:
+        """Returns extra ``ss_*`` metadata keys to embed in saved safetensors.
+
+        Default: empty dict. Override to add extension-specific metadata.
+        """
+        return {}
+
+    def extra_step_logs(self, args: argparse.Namespace, logs: dict) -> dict:
+        """Returns additional log entries to merge into the per-step log payload.
+
+        Called just before ``accelerator.log`` on logging steps. The returned
+        dict is merged into ``logs`` (existing keys are overwritten on collision).
+        Default: empty dict.
+        """
+        return {}
+
     # endregion extension seams
 
     def train(self, args):
@@ -1203,7 +1236,7 @@ class NetworkTrainer:
             lr_scheduler,
             lr_descriptions,
             train_dataloader,
-        ) = self._build_optimizer_and_dataloader(args, accelerator, network, train_dataset_group, collator)
+        ) = self._build_optimizer_and_dataloader(args, accelerator, network, train_dataset_group, collator, transformer)
         (
             transformer,
             network,
@@ -1484,11 +1517,12 @@ class NetworkTrainer:
         # net_kwargs is reconstructed in the metadata phase from args.network_args
         return network
 
-    def _build_optimizer_and_dataloader(self, args, accelerator, network, train_dataset_group, collator):
+    def _build_optimizer_and_dataloader(self, args, accelerator, network, train_dataset_group, collator, transformer):
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
         trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
+        trainable_params = self.extra_trainable_params(args, accelerator, network, transformer, trainable_params)
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
@@ -1730,6 +1764,7 @@ class NetworkTrainer:
             "ss_sigmoid_scale": args.sigmoid_scale,
             "ss_discrete_flow_shift": args.discrete_flow_shift,
         }
+        metadata.update(self.extra_metadata(args))
 
         datasets_metadata = []
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
@@ -1987,6 +2022,7 @@ class NetworkTrainer:
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
+                    logs.update(self.extra_step_logs(args, logs))
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:
