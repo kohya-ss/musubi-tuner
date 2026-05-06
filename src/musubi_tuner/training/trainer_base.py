@@ -17,6 +17,7 @@ import sys
 import random
 import time
 import json
+from dataclasses import dataclass, field
 from multiprocessing import Value
 from typing import Any, List, Optional
 import accelerate
@@ -79,6 +80,22 @@ SS_METADATA_MINIMUM_KEYS = [
     SS_METADATA_KEY_NETWORK_ALPHA,
     SS_METADATA_KEY_NETWORK_ARGS,
 ]
+
+
+@dataclass
+class DiTOutput:
+    """Return type for ``NetworkTrainer.call_dit``.
+
+    Internal extension point — no API stability guarantees. Fields beyond
+    ``pred`` and ``target`` are optional and used only by extension subclasses
+    (e.g. ``features`` for representation-alignment losses). Use ``extra`` as
+    a typed escape hatch for future fields without breaking signatures.
+    """
+
+    pred: torch.Tensor
+    target: torch.Tensor
+    features: Optional[torch.Tensor] = None
+    extra: dict = field(default_factory=dict)
 
 
 class NetworkTrainer:
@@ -1072,7 +1089,15 @@ class NetworkTrainer:
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
+        """Run the DiT forward and return prediction/target as a ``DiTOutput``.
+
+        ``**kwargs`` is reserved for extension subclasses to pass additional
+        conditioning (e.g. ``per_token_timesteps``) or request side outputs
+        (e.g. ``hidden_features``). Architecture implementations may ignore
+        unknown kwargs.
+        """
         raise NotImplementedError("subclass must implement `call_dit`")
 
     # endregion model specific
@@ -1111,10 +1136,10 @@ class NetworkTrainer:
             args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
         )
 
-        model_pred, target = self.call_dit(
+        output = self.call_dit(
             args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
         )
-        loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
+        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
 
         if weighting is not None:
             loss = loss * weighting
