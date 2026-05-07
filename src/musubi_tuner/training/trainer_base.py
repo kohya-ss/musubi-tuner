@@ -940,7 +940,7 @@ class NetworkTrainer:
         video = self.do_inference(
             ctx.accelerator,
             ctx.args,
-            vars(prompt),  # dict view — do_inference impls access sample_parameter as a dict
+            prompt,
             ctx.vae,
             ctx.dit_dtype,
             transformer,
