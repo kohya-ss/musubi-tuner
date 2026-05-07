@@ -814,9 +814,9 @@ class NetworkTrainer:
 
         distributed_state = PartialState()
 
-        # Use the unwrapped model
-        transformer = ctx.accelerator.unwrap_model(ctx.transformer)
-        transformer.switch_block_swap_for_inference()
+        # Unwrap model once; store back in ctx so sample_image_inference uses the same object
+        ctx.transformer = ctx.accelerator.unwrap_model(ctx.transformer)
+        ctx.transformer.switch_block_swap_for_inference()
 
         save_dir = os.path.join(ctx.args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
@@ -850,7 +850,7 @@ class NetworkTrainer:
             torch.set_rng_state(rng_state)
             if cuda_rng_state is not None:
                 torch.cuda.set_rng_state(cuda_rng_state)
-            transformer.switch_block_swap_for_training()
+            ctx.transformer.switch_block_swap_for_training()
             clean_memory_on_device(ctx.accelerator.device)
 
     def sample_image_inference(self, ctx: "SamplingContext", prompt: "SamplePrompt", save_dir: str) -> None:
@@ -926,8 +926,8 @@ class NetworkTrainer:
         if self.control_training:
             logger.info(f"control video path: {control_video_path}")
 
-        # Unwrap transformer from accelerator
-        transformer = ctx.accelerator.unwrap_model(ctx.transformer)
+        # transformer already unwrapped by sample_images and stored in ctx
+        transformer = ctx.transformer
 
         # inference: architecture dependent
         # Check if transformer has self-referencing _orig_mod (compiled model hack)
@@ -940,7 +940,7 @@ class NetworkTrainer:
         video = self.do_inference(
             ctx.accelerator,
             ctx.args,
-            prompt,
+            vars(prompt),  # dict view — do_inference impls access sample_parameter as a dict
             ctx.vae,
             ctx.dit_dtype,
             transformer,
