@@ -16,6 +16,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 
 import logging
 
@@ -47,7 +48,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         self.default_guidance_scale = 4.0  # CFG scale for inference for base models
         self.default_discrete_flow_shift = None  # Use FLUX.2 shift as default
 
-    def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
+    def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str) -> list[SamplePrompt]:
         device = accelerator.device
 
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
@@ -91,14 +92,48 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            prompt_dict_copy = prompt_dict.copy()
-
             p = prompt_dict.get("prompt", "")
-            prompt_dict_copy["ctx_vec"] = sample_prompts_te_outputs[p]
-            p = prompt_dict.get("negative_prompt", " ")
-            prompt_dict_copy["negative_ctx_vec"] = sample_prompts_te_outputs[p]
+            ctx_vec = sample_prompts_te_outputs[p]
+            p_neg = prompt_dict.get("negative_prompt", " ")
+            negative_ctx_vec = sample_prompts_te_outputs[p_neg]
 
-            sample_parameters.append(prompt_dict_copy)
+            # Extract required fields
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+
+            # Extract optional fields with defaults
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt")
+            enum = prompt_dict.get("enum", 0)
+            image_path = prompt_dict.get("image_path")
+            control_video_path = prompt_dict.get("control_video_path")
+            control_image_path = prompt_dict.get("control_image_path")
+
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                enum=enum,
+                ctx_vec=ctx_vec,
+                negative_ctx_vec=negative_ctx_vec,
+                image_path=image_path,
+                control_video_path=control_video_path,
+                control_image_path=control_image_path,
+            )
+            sample_parameters.append(sample)
 
         clean_memory_on_device(accelerator.device)
 
