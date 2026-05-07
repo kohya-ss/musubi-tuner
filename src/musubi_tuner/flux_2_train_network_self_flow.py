@@ -17,7 +17,7 @@ this repo; if you fork, expect breakage on updates.
 
 import argparse
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 from accelerate import Accelerator
@@ -28,6 +28,10 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.training.sampling import SamplingContext
+
+if TYPE_CHECKING:
+    pass
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +62,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         self._coupling_scheduler = None
         self._feature_extractor = None
         self._self_flow_logs: dict = {}
+        self._saved_student_state: dict | None = None
 
     # region argument validation (existing extension point — handle_model_specific_args)
 
@@ -225,25 +230,22 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         # TODO: in-place lerp_ across floating-point params; copy_ otherwise.
         raise NotImplementedError("Self-Flow EMA update — see PR #913 _update_ema_weights")
 
-    def on_sample_images(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        network,
-        sample_fn,
-    ) -> None:
-        """Sample using EMA (teacher) weights when Self-Flow is active.
+    def on_before_sample_images(self, ctx: "SamplingContext") -> "SamplingContext":
+        """Swap to EMA (teacher) weights before sampling when Self-Flow is active."""
+        if not ctx.args.self_flow or self.ema_lora_state is None:
+            return ctx
+        network = ctx.accelerator.unwrap_model(ctx.network)
+        self._saved_student_state = {k: v.clone() for k, v in network.state_dict().items()}
+        network.load_state_dict(self.ema_lora_state)
+        return ctx
 
-        Swap student state -> EMA -> sample -> swap back. The teacher is
-        what users actually want to use, since the student is intentionally
-        noisier per the dual-timestep schedule.
-        """
-        if not args.self_flow or self.ema_lora_state is None:
-            sample_fn()
+    def on_after_sample_images(self, ctx: "SamplingContext") -> None:
+        """Restore student weights after EMA sampling."""
+        if self._saved_student_state is None:
             return
-        # TODO: load ema_lora_state into accelerator.unwrap_model(network),
-        #       call sample_fn(), restore student state.
-        raise NotImplementedError("Self-Flow sampling weight swap — see PR #913 sample_images_with_ema")
+        network = ctx.accelerator.unwrap_model(ctx.network)
+        network.load_state_dict(self._saved_student_state)
+        self._saved_student_state = None
 
     def on_post_save(
         self,
