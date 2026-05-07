@@ -39,6 +39,7 @@ import musubi_tuner.hunyuan_model.vae as vae_module
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
+from musubi_tuner.training.sampling import SamplePrompt
 
 import logging
 
@@ -303,7 +304,7 @@ class FineTuningTrainer:
         text_encoder1: str,
         text_encoder2: str,
         fp8_llm: bool,
-    ):
+    ) -> list[SamplePrompt]:
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
         prompts = load_prompts(sample_prompts)
 
@@ -343,13 +344,42 @@ class FineTuningTrainer:
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            prompt_dict_copy = prompt_dict.copy()
-            p = prompt_dict.get("prompt", "")
-            prompt_dict_copy["llm_embeds"] = te_outputs_1[p][0]
-            prompt_dict_copy["llm_mask"] = te_outputs_1[p][1]
-            prompt_dict_copy["clipL_embeds"] = te_outputs_2[p][0]
-            prompt_dict_copy["clipL_mask"] = te_outputs_2[p][1]
-            sample_parameters.append(prompt_dict_copy)
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", 5.0)  # Default HunyuanVideo guidance scale
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift")
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt")
+            enum = prompt_dict.get("enum", 0)
+
+            # Get embeddings
+            llm_embeds = te_outputs_1[prompt_text][0]
+            llm_mask = te_outputs_1[prompt_text][1]
+            clipL_embeds = te_outputs_2[prompt_text][0]
+            clipL_mask = te_outputs_2[prompt_text][1]
+
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                enum=enum,
+                llm_embeds=llm_embeds,
+                llm_mask=llm_mask,
+                clipL_embeds=clipL_embeds,
+                clipL_mask=clipL_mask,
+            )
+            sample_parameters.append(sample)
 
         clean_memory_on_device(accelerator.device)
 
