@@ -833,7 +833,7 @@ class NetworkTrainer:
             if distributed_state.num_processes <= 1:
                 with torch.no_grad(), ctx.accelerator.autocast():
                     for prompt in ctx.sample_prompts:
-                        self.sample_image_inference(ctx.accelerator, ctx.args, transformer, ctx.dit_dtype, ctx.vae, save_dir, prompt, ctx.epoch, ctx.steps)
+                        self.sample_image_inference(ctx, prompt, save_dir)
                         clean_memory_on_device(ctx.accelerator.device)
             else:
                 per_process_params = [
@@ -843,7 +843,7 @@ class NetworkTrainer:
                 with torch.no_grad():
                     with distributed_state.split_between_processes(per_process_params) as slices:
                         for prompt in slices[0]:
-                            self.sample_image_inference(ctx.accelerator, ctx.args, transformer, ctx.dit_dtype, ctx.vae, save_dir, prompt, ctx.epoch, ctx.steps)
+                            self.sample_image_inference(ctx, prompt, save_dir)
                             clean_memory_on_device(ctx.accelerator.device)
         finally:
             self.on_after_sample_images(ctx)
@@ -853,18 +853,21 @@ class NetworkTrainer:
             transformer.switch_block_swap_for_training()
             clean_memory_on_device(ctx.accelerator.device)
 
-    def sample_image_inference(self, accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
+    def sample_image_inference(self, ctx: "SamplingContext", prompt: "SamplePrompt", save_dir: str) -> None:
         """architecture independent sample images"""
-        sample_steps = sample_parameter.get("sample_steps", 20)
-        width = sample_parameter.get("width", 256)  # make smaller for faster and memory saving inference
-        height = sample_parameter.get("height", 256)
-        frame_count = sample_parameter.get("frame_count", 1)
-        guidance_scale = sample_parameter.get("guidance_scale", self.default_guidance_scale)
-        discrete_flow_shift = sample_parameter.get("discrete_flow_shift", self.default_discrete_flow_shift)
-        seed = sample_parameter.get("seed")
-        prompt: str = sample_parameter.get("prompt", "")
-        cfg_scale = sample_parameter.get("cfg_scale", None)  # None for architecture default
-        negative_prompt = sample_parameter.get("negative_prompt", None)
+        assert isinstance(prompt, SamplePrompt), f"prompt must be SamplePrompt, got {type(prompt)}"
+
+        # Extract values from prompt and ctx
+        sample_steps = prompt.sample_steps
+        width = prompt.width  # make smaller for faster and memory saving inference
+        height = prompt.height
+        frame_count = prompt.frame_count
+        guidance_scale = prompt.guidance_scale
+        discrete_flow_shift = prompt.discrete_flow_shift
+        seed = prompt.seed
+        prompt_text: str = prompt.prompt
+        cfg_scale = prompt.cfg_scale  # None for architecture default
+        negative_prompt = prompt.negative_prompt
 
         # round width and height to multiples of 8
         width = (width // 8) * 8
@@ -874,7 +877,7 @@ class NetworkTrainer:
         frame_count = (frame_count - 1) // self.vae_frame_stride * self.vae_frame_stride + 1
 
         if self.i2v_training:
-            image_path = sample_parameter.get("image_path", None)
+            image_path = prompt.image_path
             if image_path is None:
                 logger.error("No image_path for i2v model / i2vモデルのサンプル画像生成にはimage_pathが必要です")
                 return
@@ -882,7 +885,7 @@ class NetworkTrainer:
             image_path = None
 
         if self.control_training:
-            control_video_path = sample_parameter.get("control_video_path", None)
+            control_video_path = prompt.control_video_path
             if control_video_path is None:
                 logger.error(
                     "No control_video_path for control model / controlモデルのサンプル画像生成にはcontrol_video_pathが必要です"
@@ -891,7 +894,7 @@ class NetworkTrainer:
         else:
             control_video_path = None
 
-        device = accelerator.device
+        device = ctx.accelerator.device
         if seed is not None:
             torch.manual_seed(seed)
             torch.cuda.manual_seed(seed)
@@ -902,7 +905,7 @@ class NetworkTrainer:
             torch.cuda.seed()
             generator = torch.Generator(device=device).manual_seed(torch.initial_seed())
 
-        logger.info(f"prompt: {prompt}")
+        logger.info(f"prompt: {prompt_text}")
         logger.info(f"height: {height}")
         logger.info(f"width: {width}")
         logger.info(f"frame count: {frame_count}")
@@ -923,6 +926,9 @@ class NetworkTrainer:
         if self.control_training:
             logger.info(f"control video path: {control_video_path}")
 
+        # Unwrap transformer from accelerator
+        transformer = ctx.accelerator.unwrap_model(ctx.transformer)
+
         # inference: architecture dependent
         # Check if transformer has self-referencing _orig_mod (compiled model hack)
         # If so, skip eval/train to avoid infinite recursion
@@ -932,11 +938,11 @@ class NetworkTrainer:
             transformer.eval()
 
         video = self.do_inference(
-            accelerator,
-            args,
-            sample_parameter,
-            vae,
-            dit_dtype,
+            ctx.accelerator,
+            ctx.args,
+            prompt,
+            ctx.vae,
+            ctx.dit_dtype,
             transformer,
             discrete_flow_shift,
             sample_steps,
@@ -960,16 +966,16 @@ class NetworkTrainer:
             return
 
         ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
-        num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+        num_suffix = f"e{ctx.epoch:06d}" if ctx.epoch is not None else f"{ctx.steps:06d}"
         seed_suffix = "" if seed is None else f"_{seed}"
-        prompt_idx = sample_parameter.get("enum", 0)
+        prompt_idx = prompt.enum
         save_path = (
-            f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{prompt_idx:02d}_{ts_str}{seed_suffix}"
+            f"{'' if ctx.args.output_name is None else ctx.args.output_name + '_'}{num_suffix}_{prompt_idx:02d}_{ts_str}{seed_suffix}"
         )
 
         wandb_tracker = None
         try:
-            wandb_tracker = accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
+            wandb_tracker = ctx.accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
             try:
                 import wandb
             except ImportError:
@@ -982,15 +988,15 @@ class NetworkTrainer:
             image_paths = save_images_grid(video, save_dir, save_path, n_rows=video.shape[0], create_subdir=False)
             if wandb_tracker is not None and wandb is not None:
                 for image_path in image_paths:
-                    wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)
+                    wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=ctx.steps)
         else:
             video_path = os.path.join(save_dir, save_path) + ".mp4"
             save_videos_grid(video, video_path)
             if wandb_tracker is not None and wandb is not None:
-                wandb_tracker.log({f"sample_{prompt_idx}": wandb.Video(video_path)}, step=steps)
+                wandb_tracker.log({f"sample_{prompt_idx}": wandb.Video(video_path)}, step=ctx.steps)
 
         # Move models back to initial state
-        vae.to("cpu")
+        ctx.vae.to("cpu")
         clean_memory_on_device(device)
 
     # region model specific (abstract hooks — implemented by architecture-specific subclasses)
