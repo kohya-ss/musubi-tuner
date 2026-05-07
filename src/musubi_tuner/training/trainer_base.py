@@ -801,28 +801,26 @@ class NetworkTrainer:
                 line += "#" * int(w / max_weighting * CONSOLE_WIDTH)
                 print(line)
 
-    def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
-        """architecture independent sample images"""
-        if not should_sample_images(args, steps, epoch):
+    def sample_images(self, ctx: SamplingContext) -> None:
+        """Architecture-independent sample images."""
+        if not should_sample_images(ctx.args, ctx.steps, ctx.epoch):
             return
 
         logger.info("")
-        logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {steps}")
-        if sample_parameters is None:
-            logger.error(f"No prompt file / プロンプトファイルがありません: {args.sample_prompts}")
+        logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {ctx.steps}")
+        if not ctx.sample_prompts:
+            logger.error(f"No prompt file / プロンプトファイルがありません: {ctx.args.sample_prompts}")
             return
 
-        distributed_state = PartialState()  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
+        distributed_state = PartialState()
 
         # Use the unwrapped model
-        transformer = accelerator.unwrap_model(transformer)
+        transformer = ctx.accelerator.unwrap_model(ctx.transformer)
         transformer.switch_block_swap_for_inference()
 
-        # Create a directory to save the samples
-        save_dir = os.path.join(args.output_dir, "sample")
+        save_dir = os.path.join(ctx.args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
 
-        # save random state to restore later
         rng_state = torch.get_rng_state()
         cuda_rng_state = None
         try:
@@ -830,35 +828,32 @@ class NetworkTrainer:
         except Exception:
             pass
 
-        if distributed_state.num_processes <= 1:
-            # If only one device is available, just use the original prompt list. We don't need to care about the distribution of prompts.
-            with torch.no_grad(), accelerator.autocast():
-                for sample_parameter in sample_parameters:
-                    self.sample_image_inference(
-                        accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps
-                    )
-                    clean_memory_on_device(accelerator.device)
-        else:
-            # Creating list with N elements, where each element is a list of prompt_dicts, and N is the number of processes available (number of devices available)
-            # prompt_dicts are assigned to lists based on order of processes, to attempt to time the image creation time to match enum order. Probably only works when steps and sampler are identical.
-            per_process_params = []  # list of lists
-            for i in range(distributed_state.num_processes):
-                per_process_params.append(sample_parameters[i :: distributed_state.num_processes])
-
-            with torch.no_grad():
-                with distributed_state.split_between_processes(per_process_params) as sample_parameter_lists:
-                    for sample_parameter in sample_parameter_lists[0]:
-                        self.sample_image_inference(
-                            accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps
-                        )
-                        clean_memory_on_device(accelerator.device)
+        ctx = self.on_before_sample_images(ctx)
+        try:
+            if distributed_state.num_processes <= 1:
+                with torch.no_grad(), ctx.accelerator.autocast():
+                    for prompt in ctx.sample_prompts:
+                        self.sample_image_inference(ctx.accelerator, ctx.args, transformer, ctx.dit_dtype, ctx.vae, save_dir, prompt, ctx.epoch, ctx.steps)
+                        clean_memory_on_device(ctx.accelerator.device)
+            else:
+                per_process_params = [
+                    ctx.sample_prompts[i :: distributed_state.num_processes]
+                    for i in range(distributed_state.num_processes)
+                ]
+                with torch.no_grad():
+                    with distributed_state.split_between_processes(per_process_params) as slices:
+                        for prompt in slices[0]:
+                            self.sample_image_inference(ctx.accelerator, ctx.args, transformer, ctx.dit_dtype, ctx.vae, save_dir, prompt, ctx.epoch, ctx.steps)
+                            clean_memory_on_device(ctx.accelerator.device)
+        finally:
+            self.on_after_sample_images(ctx)
 
         torch.set_rng_state(rng_state)
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state)
 
         transformer.switch_block_swap_for_training()
-        clean_memory_on_device(accelerator.device)
+        clean_memory_on_device(ctx.accelerator.device)
 
     def sample_image_inference(self, accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
         """architecture independent sample images"""
@@ -1908,14 +1903,18 @@ class NetworkTrainer:
                 os.remove(old_ckpt_file)
 
         def _do_sample(epoch_arg, steps_arg):
-            self.on_sample_images(
-                args,
-                accelerator,
-                network,
-                lambda: self.sample_images(
-                    accelerator, args, epoch_arg, steps_arg, vae, transformer, sample_parameters, dit_dtype
-                ),
+            ctx = SamplingContext(
+                accelerator=accelerator,
+                args=args,
+                epoch=epoch_arg,
+                steps=steps_arg,
+                vae=vae,
+                transformer=transformer,
+                network=network,
+                sample_prompts=sample_parameters or [],
+                dit_dtype=dit_dtype,
             )
+            self.sample_images(ctx)
 
         # For --sample_at_first
         if should_sample_images(args, global_step, epoch=0):
