@@ -85,3 +85,61 @@ def test_sampling_context_epoch_none():
         dit_dtype=torch.float16,
     )
     assert ctx.epoch is None
+
+
+def _make_trainer():
+    """Import and instantiate a minimal concrete subclass for hook testing."""
+    from musubi_tuner.training.trainer_base import NetworkTrainer
+    from musubi_tuner.training.sampling import SamplingContext, SamplePrompt
+
+    class ConcreteTrainer(NetworkTrainer):
+        def process_sample_prompts(self, args, accelerator, sample_prompts):
+            return []
+        def do_inference(self, *a, **kw):
+            raise NotImplementedError
+
+    return ConcreteTrainer(), SamplingContext(
+        accelerator=MagicMock(),
+        args=MagicMock(),
+        epoch=None,
+        steps=0,
+        vae=MagicMock(),
+        transformer=MagicMock(),
+        network=MagicMock(),
+        sample_prompts=[],
+        dit_dtype=torch.bfloat16,
+    )
+
+
+def test_on_before_sample_images_default_returns_ctx():
+    trainer, ctx = _make_trainer()
+    returned = trainer.on_before_sample_images(ctx)
+    assert returned is ctx
+
+
+def test_on_after_sample_images_default_is_noop():
+    trainer, ctx = _make_trainer()
+    trainer.on_after_sample_images(ctx)  # should not raise
+
+
+def test_on_before_sample_images_can_be_overridden():
+    from musubi_tuner.training.trainer_base import NetworkTrainer
+    from musubi_tuner.training.sampling import SamplingContext, SamplePrompt
+
+    class PatchingTrainer(NetworkTrainer):
+        def process_sample_prompts(self, args, accelerator, sample_prompts):
+            return []
+        def do_inference(self, *a, **kw):
+            raise NotImplementedError
+        def on_before_sample_images(self, ctx):
+            ctx.steps = 999
+            return ctx
+
+    trainer = PatchingTrainer()
+    ctx = SamplingContext(
+        accelerator=MagicMock(), args=MagicMock(), epoch=None, steps=0,
+        vae=MagicMock(), transformer=MagicMock(), network=MagicMock(),
+        sample_prompts=[], dit_dtype=torch.bfloat16,
+    )
+    result = trainer.on_before_sample_images(ctx)
+    assert result.steps == 999

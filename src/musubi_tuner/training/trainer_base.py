@@ -44,6 +44,7 @@ from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscret
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid
+from musubi_tuner.training.sampling import SamplePrompt, SamplingContext
 
 import logging
 
@@ -1175,20 +1176,20 @@ class NetworkTrainer:
         Use for EMA updates or any post-step bookkeeping.
         """
 
-    def on_sample_images(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        network,
-        sample_fn,
-    ) -> None:
-        """Around-hook wrapping ``self.sample_images(...)`` calls.
+    def on_before_sample_images(self, ctx: SamplingContext) -> SamplingContext:
+        """Called before the sampling loop. Return ctx, optionally modified.
 
-        Default implementation simply invokes ``sample_fn()``. Override to e.g.
-        temporarily swap student weights for EMA (teacher) weights before sampling
-        and restore them afterwards.
+        Override to e.g. swap student weights for EMA (teacher) weights before
+        sampling begins.
         """
-        sample_fn()
+        return ctx
+
+    def on_after_sample_images(self, ctx: SamplingContext) -> None:
+        """Called after the sampling loop. Restore any state changed in on_before.
+
+        Override to restore student weights after EMA sampling, etc.
+        """
+        pass
 
     def on_post_save(
         self,
