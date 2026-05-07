@@ -53,6 +53,10 @@ class SamplePrompt:
     cap_mask: torch.Tensor | None = None
     negative_cap_feats: torch.Tensor | None = None
     negative_cap_mask: torch.Tensor | None = None
+    # Qwen-Image-specific embeddings
+    vl_embed: torch.Tensor | None = None
+    negative_vl_embed: torch.Tensor | None = None
+    control_image_tensors: list[torch.Tensor] | None = None
 
 
 @dataclass

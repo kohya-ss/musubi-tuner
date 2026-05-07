@@ -25,6 +25,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS, CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511
 
@@ -83,7 +84,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
-    ):
+    ) -> list[SamplePrompt]:
         device = accelerator.device
 
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
@@ -179,22 +180,56 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 256)
+            height = prompt_dict.get("height", 256)
+            width = (width // 8) * 8
+            height = (height // 8) * 8
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt", " ")
+            enum = prompt_dict.get("enum", 0)
+            control_image_path = prompt_dict.get("control_image_path")
+
             is_edit = self.is_edit
             if is_edit:
-                if "control_image_path" not in prompt_dict or len(prompt_dict["control_image_path"]) == 0:
+                if control_image_path is None or len(control_image_path) == 0:
                     is_edit = False
-            prompt_dict_copy = prompt_dict.copy()
-            control_image_paths = None if not is_edit else prompt_dict_copy["control_image_path"]
 
-            p = prompt_dict.get("prompt", "")
+            control_image_paths = None if not is_edit else control_image_path
+            control_image_tensors = prompt_dict.get("control_image_tensors")
+
+            # Get embeddings
+            p = prompt_text
             embed_key = embed_key_fn(p, control_image_paths)
-            prompt_dict_copy["vl_embed"] = sample_prompts_te_outputs[embed_key]
+            vl_embed = sample_prompts_te_outputs[embed_key]
 
-            p = prompt_dict.get("negative_prompt", " ")
+            p = negative_prompt
             embed_key = embed_key_fn(p, control_image_paths)
-            prompt_dict_copy["negative_vl_embed"] = sample_prompts_te_outputs[embed_key]
+            negative_vl_embed = sample_prompts_te_outputs[embed_key]
 
-            sample_parameters.append(prompt_dict_copy)
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt if negative_prompt.strip() else None,
+                enum=enum,
+                control_image_path=control_image_path,
+                vl_embed=vl_embed,
+                negative_vl_embed=negative_vl_embed,
+                control_image_tensors=control_image_tensors,
+            )
+            sample_parameters.append(sample)
 
         clean_memory_on_device(accelerator.device)
 
@@ -231,9 +266,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             cfg_scale = 4.0
 
         # Get embeddings
-        vl_embed = sample_parameter["vl_embed"].to(device=device, dtype=torch.bfloat16)
+        vl_embed = sample_parameter.vl_embed.to(device=device, dtype=torch.bfloat16)
         txt_seq_lens = [vl_embed.shape[1]]
-        negative_vl_embed = sample_parameter["negative_vl_embed"].to(device=device, dtype=torch.bfloat16)
+        negative_vl_embed = sample_parameter.negative_vl_embed.to(device=device, dtype=torch.bfloat16)
         negative_txt_seq_lens = [negative_vl_embed.shape[1]]
 
         # 4. Prepare latent variables
@@ -248,13 +283,13 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             img_shapes = img_shapes * (num_layers + 1)
 
         if is_edit:
-            if "control_image_path" not in sample_parameter or len(sample_parameter["control_image_path"]) == 0:
+            if sample_parameter.control_image_path is None or len(sample_parameter.control_image_path) == 0:
                 is_edit = False
 
         if is_edit or self.is_layered:
             # 4.1 Prepare control latents
             logger.info("Preparing control latents from control image")
-            control_image_tensors = sample_parameter.get("control_image_tensors")  # list of tensors
+            control_image_tensors = sample_parameter.control_image_tensors  # list of tensors
             vae.to(device)
             vae.eval()
 
