@@ -17,6 +17,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 
 import logging
 
@@ -51,7 +52,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
-    ):
+    ) -> list[SamplePrompt]:
         device = accelerator.device
 
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
@@ -110,13 +111,40 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            prompt_dict_copy = prompt_dict.copy()
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt")
+            enum = prompt_dict.get("enum", 0)
+            control_image_path = prompt_dict.get("control_image_path")
 
-            prompt = prompt_dict.get("prompt", "")
-            prompt_dict_copy["t5_vec"] = sample_prompts_te_outputs[prompt][0]
-            prompt_dict_copy["clip_l_pooler"] = sample_prompts_te_outputs[prompt][1]
+            # Get embeddings
+            t5_vec_val = sample_prompts_te_outputs[prompt_text][0]
+            clip_l_pooler_val = sample_prompts_te_outputs[prompt_text][1]
 
-            sample_parameters.append(prompt_dict_copy)
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                enum=enum,
+                control_image_path=control_image_path,
+                t5_vec=t5_vec_val,
+                clip_l_pooler=clip_l_pooler_val,
+            )
+            sample_parameters.append(sample)
 
         clean_memory_on_device(accelerator.device)
 
@@ -147,8 +175,8 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         device = accelerator.device
 
         # Get embeddings
-        t5_vec = sample_parameter["t5_vec"].to(device=device, dtype=torch.bfloat16)
-        clip_l_pooler = sample_parameter["clip_l_pooler"].to(device=device, dtype=torch.bfloat16)
+        t5_vec = sample_parameter.t5_vec.to(device=device, dtype=torch.bfloat16)
+        clip_l_pooler = sample_parameter.clip_l_pooler.to(device=device, dtype=torch.bfloat16)
 
         txt_ids = torch.zeros(t5_vec.shape[0], t5_vec.shape[1], 3, device=t5_vec.device)
 

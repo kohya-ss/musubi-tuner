@@ -57,6 +57,9 @@ class SamplePrompt:
     vl_embed: torch.Tensor | None = None
     negative_vl_embed: torch.Tensor | None = None
     control_image_tensors: list[torch.Tensor] | None = None
+    # FLUX Kontext-specific embeddings
+    t5_vec: torch.Tensor | None = None
+    clip_l_pooler: torch.Tensor | None = None
 
 
 @dataclass
