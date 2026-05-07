@@ -46,6 +46,7 @@ from musubi_tuner.training.parser_common import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 
 from musubi_tuner.hunyuan_model.models import (
     load_transformer as hv_load_transformer,
@@ -138,7 +139,7 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
-    ):
+    ) -> list[SamplePrompt]:
         text_encoder1, text_encoder2, fp8_llm = args.text_encoder1, args.text_encoder2, args.fp8_llm
 
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
@@ -182,22 +183,60 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            prompt_dict_copy = prompt_dict.copy()
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt")
+            enum = prompt_dict.get("enum", 0)
+            image_path = prompt_dict.get("image_path")
 
-            p = prompt_dict.get("prompt", "")
-            prompt_dict_copy["llm_embeds"] = te_outputs_1[p][0]
-            prompt_dict_copy["llm_mask"] = te_outputs_1[p][1]
-            prompt_dict_copy["clipL_embeds"] = te_outputs_2[p][0]
-            prompt_dict_copy["clipL_mask"] = te_outputs_2[p][1]
+            # Get embeddings
+            llm_embeds = te_outputs_1[prompt_text][0]
+            llm_mask = te_outputs_1[prompt_text][1]
+            clipL_embeds = te_outputs_2[prompt_text][0]
+            clipL_mask = te_outputs_2[prompt_text][1]
 
-            p = prompt_dict.get("negative_prompt", None)
-            if p is not None:
-                prompt_dict_copy["negative_llm_embeds"] = te_outputs_1[p][0]
-                prompt_dict_copy["negative_llm_mask"] = te_outputs_1[p][1]
-                prompt_dict_copy["negative_clipL_embeds"] = te_outputs_2[p][0]
-                prompt_dict_copy["negative_clipL_mask"] = te_outputs_2[p][1]
+            p_neg = prompt_dict.get("negative_prompt", None)
+            if p_neg is not None:
+                negative_llm_embeds = te_outputs_1[p_neg][0]
+                negative_llm_mask = te_outputs_1[p_neg][1]
+                negative_clipL_embeds = te_outputs_2[p_neg][0]
+                negative_clipL_mask = te_outputs_2[p_neg][1]
+            else:
+                negative_llm_embeds = None
+                negative_llm_mask = None
+                negative_clipL_embeds = None
+                negative_clipL_mask = None
 
-            sample_parameters.append(prompt_dict_copy)
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                enum=enum,
+                image_path=image_path,
+                llm_embeds=llm_embeds,
+                llm_mask=llm_mask,
+                clipL_embeds=clipL_embeds,
+                clipL_mask=clipL_mask,
+                negative_llm_embeds=negative_llm_embeds,
+                negative_llm_mask=negative_llm_mask,
+                negative_clipL_embeds=negative_clipL_embeds,
+                negative_clipL_mask=negative_clipL_mask,
+            )
+            sample_parameters.append(sample)
 
         clean_memory_on_device(accelerator.device)
 
@@ -245,14 +284,14 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
             latent_video_length = frame_count
 
         # Get embeddings
-        prompt_embeds = sample_parameter["llm_embeds"].to(device=device, dtype=dit_dtype)
-        prompt_mask = sample_parameter["llm_mask"].to(device=device)
-        prompt_embeds_2 = sample_parameter["clipL_embeds"].to(device=device, dtype=dit_dtype)
+        prompt_embeds = sample_parameter.llm_embeds.to(device=device, dtype=dit_dtype)
+        prompt_mask = sample_parameter.llm_mask.to(device=device)
+        prompt_embeds_2 = sample_parameter.clipL_embeds.to(device=device, dtype=dit_dtype)
 
         if do_classifier_free_guidance:
-            negative_prompt_embeds = sample_parameter["negative_llm_embeds"].to(device=device, dtype=dit_dtype)
-            negative_prompt_mask = sample_parameter["negative_llm_mask"].to(device=device)
-            negative_prompt_embeds_2 = sample_parameter["negative_clipL_embeds"].to(device=device, dtype=dit_dtype)
+            negative_prompt_embeds = sample_parameter.negative_llm_embeds.to(device=device, dtype=dit_dtype)
+            negative_prompt_mask = sample_parameter.negative_llm_mask.to(device=device)
+            negative_prompt_embeds_2 = sample_parameter.negative_clipL_embeds.to(device=device, dtype=dit_dtype)
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             prompt_mask = torch.cat([negative_prompt_mask, prompt_mask], dim=0)
             prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2], dim=0)
@@ -305,7 +344,7 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
         freqs_sin = freqs_sin.to(device=device, dtype=dit_dtype)
 
         # Wrap the inner loop with tqdm to track progress over timesteps
-        prompt_idx = sample_parameter.get("enum", 0)
+        prompt_idx = sample_parameter.enum
         with torch.no_grad():
             for i, t in enumerate(tqdm(timesteps, desc=f"Sampling timesteps for prompt {prompt_idx + 1}")):
                 latents_input = scheduler.scale_model_input(latents, t)

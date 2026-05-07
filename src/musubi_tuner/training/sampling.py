@@ -32,6 +32,15 @@ class SamplePrompt:
     image_path: str | None = None
     control_video_path: str | None = None
     control_image_path: list[str] | None = None
+    # HunyuanVideo-specific embeddings
+    llm_embeds: torch.Tensor | None = None
+    llm_mask: torch.Tensor | None = None
+    clipL_embeds: torch.Tensor | None = None
+    clipL_mask: torch.Tensor | None = None
+    negative_llm_embeds: torch.Tensor | None = None
+    negative_llm_mask: torch.Tensor | None = None
+    negative_clipL_embeds: torch.Tensor | None = None
+    negative_clipL_mask: torch.Tensor | None = None
 
 
 @dataclass
