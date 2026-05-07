@@ -847,13 +847,11 @@ class NetworkTrainer:
                             clean_memory_on_device(ctx.accelerator.device)
         finally:
             self.on_after_sample_images(ctx)
-
-        torch.set_rng_state(rng_state)
-        if cuda_rng_state is not None:
-            torch.cuda.set_rng_state(cuda_rng_state)
-
-        transformer.switch_block_swap_for_training()
-        clean_memory_on_device(ctx.accelerator.device)
+            torch.set_rng_state(rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state(cuda_rng_state)
+            transformer.switch_block_swap_for_training()
+            clean_memory_on_device(ctx.accelerator.device)
 
     def sample_image_inference(self, accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
         """architecture independent sample images"""
