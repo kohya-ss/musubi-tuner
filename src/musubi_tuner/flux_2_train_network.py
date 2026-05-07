@@ -163,9 +163,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         device = accelerator.device
 
         # Get embeddings
-        ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
+        ctx = sample_parameter.ctx_vec.to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
         ctx, ctx_ids = flux2_utils.prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
-        negative_ctx = sample_parameter.get("negative_ctx_vec").to(device=device, dtype=torch.bfloat16)
+        negative_ctx = sample_parameter.negative_ctx_vec.to(device=device, dtype=torch.bfloat16)
         negative_ctx, negative_ctx_ids = flux2_utils.prc_txt(negative_ctx)
 
         # Initialize latents
@@ -181,11 +181,11 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # prepare control latent
         ref_tokens = None
         ref_ids = None
-        if "control_image_path" in sample_parameter:
+        if sample_parameter.control_image_path is not None:
             vae.to(device)
             vae.eval()
 
-            control_image_paths = sample_parameter["control_image_path"]
+            control_image_paths = sample_parameter.control_image_path
             limit_size = (2024, 2024) if len(control_image_paths) == 1 else (1024, 1024)
             control_latent_list = []
             with torch.no_grad():

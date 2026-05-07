@@ -325,8 +325,8 @@ class WanNetworkTrainer(NetworkTrainer):
 
             control_latents = []
             control_alphas = []
-            if "control_image_path" in sample_parameter:
-                for control_image_path in sample_parameter["control_image_path"]:
+            if sample_parameter.control_image_path is not None:
+                for control_image_path in sample_parameter.control_image_path:
                     control_latent, control_alpha = encode_image(control_image_path)
                     control_latents.append(control_latent)
                     control_alphas.append(control_alpha)
@@ -419,17 +419,17 @@ class WanNetworkTrainer(NetworkTrainer):
 
         if self.i2v_training and not one_frame_mode:
             if not self.config.v2_2:
-                arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
+                arg_c["clip_fea"] = sample_parameter.clip_embeds.to(device=device, dtype=dit_dtype)
                 arg_null["clip_fea"] = arg_c["clip_fea"]
 
         if one_frame_mode:
             if not self.config.v2_2:
-                if "end_image_clip_embeds" in sample_parameter:
+                if sample_parameter.end_image_clip_embeds is not None:
                     arg_c["clip_fea"] = torch.cat(
-                        [sample_parameter["clip_embeds"], sample_parameter["end_image_clip_embeds"]], dim=0
+                        [sample_parameter.clip_embeds, sample_parameter.end_image_clip_embeds], dim=0
                     ).to(device=device, dtype=dit_dtype)
                 else:
-                    arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
+                    arg_c["clip_fea"] = sample_parameter.clip_embeds.to(device=device, dtype=dit_dtype)
                 arg_null["clip_fea"] = arg_c["clip_fea"]
 
             arg_c["f_indices"] = [f_indices]
@@ -441,7 +441,7 @@ class WanNetworkTrainer(NetworkTrainer):
             arg_null["y"] = image_latents
 
         # Wrap the inner loop with tqdm to track progress over timesteps
-        prompt_idx = sample_parameter.get("enum", 0)
+        prompt_idx = sample_parameter.enum
         latent = noise
         with torch.no_grad():
             for i, t in enumerate(tqdm(timesteps, desc=f"Sampling timesteps for prompt {prompt_idx + 1}")):
