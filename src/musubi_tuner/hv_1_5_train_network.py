@@ -35,6 +35,7 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
     setup_parser_common,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
 
@@ -89,7 +90,7 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
-    ):
+    ) -> list[SamplePrompt]:
         device = accelerator.device
         logger.info("cache Text Encoder outputs for sample prompt: %s", sample_prompts)
         prompts = load_prompts(sample_prompts)
@@ -160,26 +161,53 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            prompt_dict_copy = prompt_dict.copy()
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt", "")
+            enum = prompt_dict.get("enum", 0)
+            image_path = prompt_dict.get("image_path")
 
-            p = prompt_dict_copy.get("prompt", "")
+            # Get embeddings
+            p = prompt_text
             embed_vlm, mask_vlm, embed_byt5, mask_byt5 = sample_prompts_te_outputs[p]
-            prompt_dict_copy["vl_embed"] = embed_vlm
-            prompt_dict_copy["vl_mask"] = mask_vlm
-            prompt_dict_copy["byt5_embed"] = embed_byt5
-            prompt_dict_copy["byt5_mask"] = mask_byt5
 
-            p = prompt_dict_copy.get("negative_prompt", "")
-            neg_embed_vlm, neg_mask_vlm, neg_embed_byt5, neg_mask_byt5 = sample_prompts_te_outputs[p]
-            prompt_dict_copy["negative_vl_embed"] = neg_embed_vlm
-            prompt_dict_copy["negative_vl_mask"] = neg_mask_vlm
-            prompt_dict_copy["negative_byt5_embed"] = neg_embed_byt5
-            prompt_dict_copy["negative_byt5_mask"] = neg_mask_byt5
+            p_neg = negative_prompt
+            neg_embed_vlm, neg_mask_vlm, neg_embed_byt5, neg_mask_byt5 = sample_prompts_te_outputs[p_neg]
 
-            p = prompt_dict_copy.get("image_path", None)  # for I2V, None for T2V
-            prompt_dict_copy["image_encoder_last_hidden_state"] = sample_prompts_image_embs.get(p, None)
+            # Get image embeddings
+            image_encoder_last_hidden_state = sample_prompts_image_embs.get(image_path, None)
 
-            sample_parameters.append(prompt_dict_copy)
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt if negative_prompt else None,
+                enum=enum,
+                image_path=image_path,
+                vl_embed=embed_vlm,
+                vl_mask=mask_vlm,
+                byt5_embed=embed_byt5,
+                byt5_mask=mask_byt5,
+                negative_vl_embed=neg_embed_vlm,
+                negative_vl_mask=neg_mask_vlm,
+                negative_byt5_embed=neg_embed_byt5,
+                negative_byt5_mask=neg_mask_byt5,
+                image_encoder_last_hidden_state=image_encoder_last_hidden_state,
+            )
+            sample_parameters.append(sample)
 
         return sample_parameters
 
@@ -262,20 +290,20 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
             (1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w), generator=generator, device=device, dtype=dit_dtype
         )
 
-        vl_embed = sample_parameter["vl_embed"].to(device, dtype=torch.bfloat16)
-        vl_mask = sample_parameter["vl_mask"].to(device, dtype=torch.bool)
-        byt5_embed = sample_parameter["byt5_embed"].to(device, dtype=torch.bfloat16)
-        byt5_mask = sample_parameter["byt5_mask"].to(device, dtype=torch.bool)
+        vl_embed = sample_parameter.vl_embed.to(device, dtype=torch.bfloat16)
+        vl_mask = sample_parameter.vl_mask.to(device, dtype=torch.bool)
+        byt5_embed = sample_parameter.byt5_embed.to(device, dtype=torch.bfloat16)
+        byt5_mask = sample_parameter.byt5_mask.to(device, dtype=torch.bool)
 
         if do_cfg:
-            negative_vl_embed = sample_parameter["negative_vl_embed"].to(device, dtype=torch.bfloat16)
-            negative_vl_mask = sample_parameter["negative_vl_mask"].to(device, dtype=torch.bool)
-            negative_byt5_embed = sample_parameter["negative_byt5_embed"].to(device, dtype=torch.bfloat16)
-            negative_byt5_mask = sample_parameter["negative_byt5_mask"].to(device, dtype=torch.bool)
+            negative_vl_embed = sample_parameter.negative_vl_embed.to(device, dtype=torch.bfloat16)
+            negative_vl_mask = sample_parameter.negative_vl_mask.to(device, dtype=torch.bool)
+            negative_byt5_embed = sample_parameter.negative_byt5_embed.to(device, dtype=torch.bfloat16)
+            negative_byt5_mask = sample_parameter.negative_byt5_mask.to(device, dtype=torch.bool)
         else:
             negative_vl_embed = negative_vl_mask = negative_byt5_embed = negative_byt5_mask = None
 
-        image_encoder_last_hidden_state = sample_parameter["image_encoder_last_hidden_state"]
+        image_encoder_last_hidden_state = sample_parameter.image_encoder_last_hidden_state
         if image_encoder_last_hidden_state is not None:
             image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(device)
 

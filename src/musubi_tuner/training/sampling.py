@@ -67,6 +67,15 @@ class SamplePrompt:
     negative_llama_attention_mask: torch.Tensor | None = None
     negative_clip_l_pooler: torch.Tensor | None = None
     image_encoder_last_hidden_state: torch.Tensor | None = None
+    # HunyuanVideo1.5-specific embeddings
+    vl_embed: torch.Tensor | None = None
+    vl_mask: torch.Tensor | None = None
+    byt5_embed: torch.Tensor | None = None
+    byt5_mask: torch.Tensor | None = None
+    negative_vl_embed: torch.Tensor | None = None
+    negative_vl_mask: torch.Tensor | None = None
+    negative_byt5_embed: torch.Tensor | None = None
+    negative_byt5_mask: torch.Tensor | None = None
 
 
 @dataclass
