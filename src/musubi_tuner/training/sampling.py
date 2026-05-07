@@ -21,7 +21,7 @@ class SamplePrompt:
     sample_steps: int = 20
     seed: int | None = None
     guidance_scale: float = 5.0
-    discrete_flow_shift: float = 1.0
+    discrete_flow_shift: float | None = None
     cfg_scale: float | None = None
     negative_prompt: str | None = None
     enum: int = 0

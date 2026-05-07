@@ -92,13 +92,12 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            p = prompt_dict.get("prompt", "")
-            ctx_vec = sample_prompts_te_outputs[p]
+            prompt_text = prompt_dict.get("prompt", "")
+            ctx_vec = sample_prompts_te_outputs[prompt_text]
             p_neg = prompt_dict.get("negative_prompt", " ")
             negative_ctx_vec = sample_prompts_te_outputs[p_neg]
 
             # Extract required fields
-            prompt_text = prompt_dict.get("prompt", "")
             width = prompt_dict.get("width", 512)
             height = prompt_dict.get("height", 512)
 
