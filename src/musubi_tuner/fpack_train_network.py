@@ -29,6 +29,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 
 import logging
 
@@ -62,7 +63,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
-    ):
+    ) -> list[SamplePrompt]:
         device = accelerator.device
 
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
@@ -124,24 +125,53 @@ class FramePackNetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            prompt_dict_copy = prompt_dict.copy()
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt", "")
+            enum = prompt_dict.get("enum", 0)
+            image_path = prompt_dict.get("image_path")
+            one_frame = prompt_dict.get("one_frame")
 
-            p = prompt_dict.get("prompt", "")
+            # Get text embeddings
+            p = prompt_text
             llama_vec, llama_attention_mask, clip_l_pooler = sample_prompts_te_outputs[p]
-            prompt_dict_copy["llama_vec"] = llama_vec
-            prompt_dict_copy["llama_attention_mask"] = llama_attention_mask
-            prompt_dict_copy["clip_l_pooler"] = clip_l_pooler
 
-            p = prompt_dict.get("negative_prompt", "")
-            llama_vec, llama_attention_mask, clip_l_pooler = sample_prompts_te_outputs[p]
-            prompt_dict_copy["negative_llama_vec"] = llama_vec
-            prompt_dict_copy["negative_llama_attention_mask"] = llama_attention_mask
-            prompt_dict_copy["negative_clip_l_pooler"] = clip_l_pooler
+            p_neg = negative_prompt
+            negative_llama_vec, negative_llama_attention_mask, negative_clip_l_pooler = sample_prompts_te_outputs[p_neg]
 
-            p = prompt_dict.get("image_path", None)
-            prompt_dict_copy["image_encoder_last_hidden_state"] = sample_prompts_image_embs[p]
+            # Get image embeddings
+            image_encoder_last_hidden_state = sample_prompts_image_embs[image_path]
 
-            sample_parameters.append(prompt_dict_copy)
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt if negative_prompt else None,
+                enum=enum,
+                image_path=image_path,
+                llama_vec=llama_vec,
+                llama_attention_mask=llama_attention_mask,
+                clip_l_pooler=clip_l_pooler,
+                negative_llama_vec=negative_llama_vec,
+                negative_llama_attention_mask=negative_llama_attention_mask,
+                negative_clip_l_pooler=negative_clip_l_pooler,
+                image_encoder_last_hidden_state=image_encoder_last_hidden_state,
+                one_frame=one_frame,
+            )
+            sample_parameters.append(sample)
 
         clean_memory_on_device(accelerator.device)
         return sample_parameters
@@ -177,7 +207,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
         one_frame_mode = args.one_frame
         if one_frame_mode:
             one_frame_inference = set()
-            for mode in sample_parameter["one_frame"].split(","):
+            for mode in sample_parameter.one_frame.split(","):
                 one_frame_inference.add(mode.strip())
         else:
             one_frame_inference = None
@@ -220,8 +250,8 @@ class FramePackNetworkTrainer(NetworkTrainer):
         if one_frame_mode:
             control_latents = []
             control_alphas = []
-            if "control_image_path" in sample_parameter:
-                for control_image_path in sample_parameter["control_image_path"]:
+            if sample_parameter.control_image_path is not None:
+                for control_image_path in sample_parameter.control_image_path:
                     control_latent, control_alpha = encode_image(control_image_path)
                     control_latents.append(control_latent)
                     control_alphas.append(control_alpha)
@@ -295,17 +325,17 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 # else:
                 #     transformer.initialize_teacache(enable_teacache=False)
 
-                llama_vec = sample_parameter["llama_vec"].to(device, dtype=torch.bfloat16)
-                llama_attention_mask = sample_parameter["llama_attention_mask"].to(device)
-                clip_l_pooler = sample_parameter["clip_l_pooler"].to(device, dtype=torch.bfloat16)
+                llama_vec = sample_parameter.llama_vec.to(device, dtype=torch.bfloat16)
+                llama_attention_mask = sample_parameter.llama_attention_mask.to(device)
+                clip_l_pooler = sample_parameter.clip_l_pooler.to(device, dtype=torch.bfloat16)
                 if cfg_scale == 1.0:
                     llama_vec_n, clip_l_pooler_n = torch.zeros_like(llama_vec), torch.zeros_like(clip_l_pooler)
                     llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
                 else:
-                    llama_vec_n = sample_parameter["negative_llama_vec"].to(device, dtype=torch.bfloat16)
-                    llama_attention_mask_n = sample_parameter["negative_llama_attention_mask"].to(device)
-                    clip_l_pooler_n = sample_parameter["negative_clip_l_pooler"].to(device, dtype=torch.bfloat16)
-                image_encoder_last_hidden_state = sample_parameter["image_encoder_last_hidden_state"].to(
+                    llama_vec_n = sample_parameter.negative_llama_vec.to(device, dtype=torch.bfloat16)
+                    llama_attention_mask_n = sample_parameter.negative_llama_attention_mask.to(device)
+                    clip_l_pooler_n = sample_parameter.negative_clip_l_pooler.to(device, dtype=torch.bfloat16)
+                image_encoder_last_hidden_state = sample_parameter.image_encoder_last_hidden_state.to(
                     device, dtype=torch.bfloat16
                 )
 
@@ -436,7 +466,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 llama_vec_n = sample_parameter["negative_llama_vec"].to(device, dtype=torch.bfloat16)
                 llama_attention_mask_n = sample_parameter["negative_llama_attention_mask"].to(device)
                 clip_l_pooler_n = sample_parameter["negative_clip_l_pooler"].to(device, dtype=torch.bfloat16)
-            image_encoder_last_hidden_state = sample_parameter["image_encoder_last_hidden_state"].to(device, dtype=torch.bfloat16)
+            image_encoder_last_hidden_state = sample_parameter.image_encoder_last_hidden_state.to(device, dtype=torch.bfloat16)
 
             generated_latents = sample_hunyuan(
                 transformer=model,

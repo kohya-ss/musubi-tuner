@@ -60,6 +60,13 @@ class SamplePrompt:
     # FLUX Kontext-specific embeddings
     t5_vec: torch.Tensor | None = None
     clip_l_pooler: torch.Tensor | None = None
+    # FramePack-specific embeddings
+    llama_vec: torch.Tensor | None = None
+    llama_attention_mask: torch.Tensor | None = None
+    negative_llama_vec: torch.Tensor | None = None
+    negative_llama_attention_mask: torch.Tensor | None = None
+    negative_clip_l_pooler: torch.Tensor | None = None
+    image_encoder_last_hidden_state: torch.Tensor | None = None
 
 
 @dataclass
