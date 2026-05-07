@@ -48,6 +48,11 @@ class SamplePrompt:
     end_image_clip_embeds: torch.Tensor | None = None
     # Wan-specific fields
     one_frame: str | None = None
+    # ZImage-specific embeddings
+    cap_feats: torch.Tensor | None = None
+    cap_mask: torch.Tensor | None = None
+    negative_cap_feats: torch.Tensor | None = None
+    negative_cap_mask: torch.Tensor | None = None
 
 
 @dataclass
