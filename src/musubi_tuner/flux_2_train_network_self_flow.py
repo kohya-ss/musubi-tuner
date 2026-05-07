@@ -17,7 +17,7 @@ this repo; if you fork, expect breakage on updates.
 
 import argparse
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 from accelerate import Accelerator
@@ -30,8 +30,6 @@ from musubi_tuner.hv_train_network import (
 )
 from musubi_tuner.training.sampling import SamplingContext
 
-if TYPE_CHECKING:
-    pass
 
 
 logger = logging.getLogger(__name__)
@@ -230,7 +228,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         # TODO: in-place lerp_ across floating-point params; copy_ otherwise.
         raise NotImplementedError("Self-Flow EMA update — see PR #913 _update_ema_weights")
 
-    def on_before_sample_images(self, ctx: "SamplingContext") -> "SamplingContext":
+    def on_before_sample_images(self, ctx: SamplingContext) -> SamplingContext:
         """Swap to EMA (teacher) weights before sampling when Self-Flow is active."""
         if not ctx.args.self_flow or self.ema_lora_state is None:
             return ctx
@@ -239,7 +237,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         network.load_state_dict(self.ema_lora_state)
         return ctx
 
-    def on_after_sample_images(self, ctx: "SamplingContext") -> None:
+    def on_after_sample_images(self, ctx: SamplingContext) -> None:
         """Restore student weights after EMA sampling."""
         if self._saved_student_state is None:
             return
