@@ -41,6 +41,13 @@ class SamplePrompt:
     negative_llm_mask: torch.Tensor | None = None
     negative_clipL_embeds: torch.Tensor | None = None
     negative_clipL_mask: torch.Tensor | None = None
+    # Wan-specific embeddings
+    t5_embeds: torch.Tensor | None = None
+    negative_t5_embeds: torch.Tensor | None = None
+    clip_embeds: torch.Tensor | None = None
+    end_image_clip_embeds: torch.Tensor | None = None
+    # Wan-specific fields
+    one_frame: str | None = None
 
 
 @dataclass

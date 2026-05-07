@@ -18,6 +18,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 from musubi_tuner.utils.device_utils import synchronize_device
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.wan_generate_video import parse_one_frame_inference_args
@@ -108,7 +109,7 @@ class WanNetworkTrainer(NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
-    ):
+    ) -> list[SamplePrompt]:
         config = self.config
         device = accelerator.device
         t5_path, clip_path, fp8_t5 = args.t5, args.clip, args.fp8_t5
@@ -173,24 +174,59 @@ class WanNetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
-            prompt_dict_copy = prompt_dict.copy()
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt")
+            enum = prompt_dict.get("enum", 0)
+            image_path = prompt_dict.get("image_path")
+            end_image_path = prompt_dict.get("end_image_path")
+            one_frame = prompt_dict.get("one_frame")
 
-            p = prompt_dict.get("prompt", "")
-            prompt_dict_copy["t5_embeds"] = te_outputs_1[p][0]
+            # Get embeddings
+            t5_embeds = te_outputs_1[prompt_text][0]
 
-            p = prompt_dict.get("negative_prompt", None)
-            if p is not None:
-                prompt_dict_copy["negative_t5_embeds"] = te_outputs_1[p][0]
+            p_neg = prompt_dict.get("negative_prompt", None)
+            if p_neg is not None:
+                negative_t5_embeds = te_outputs_1[p_neg][0]
+            else:
+                negative_t5_embeds = None
 
-            p = prompt_dict.get("image_path", None)
-            if p is not None and self.i2v_training:
-                prompt_dict_copy["clip_embeds"] = sample_prompts_image_embs[p]
+            # Get image embeddings
+            clip_embeds = None
+            if image_path is not None and self.i2v_training:
+                clip_embeds = sample_prompts_image_embs.get(image_path)
 
-            p = prompt_dict.get("end_image_path", None)
-            if p is not None and self.i2v_training:
-                prompt_dict_copy["end_image_clip_embeds"] = sample_prompts_image_embs[p]
+            end_image_clip_embeds = None
+            if end_image_path is not None and self.i2v_training:
+                end_image_clip_embeds = sample_prompts_image_embs.get(end_image_path)
 
-            sample_parameters.append(prompt_dict_copy)
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                enum=enum,
+                image_path=image_path,
+                t5_embeds=t5_embeds,
+                negative_t5_embeds=negative_t5_embeds,
+                clip_embeds=clip_embeds,
+                end_image_clip_embeds=end_image_clip_embeds,
+                one_frame=one_frame,
+            )
+            sample_parameters.append(sample)
 
         clean_memory_on_device(accelerator.device)
 
@@ -233,7 +269,7 @@ class WanNetworkTrainer(NetworkTrainer):
         one_frame_mode = args.one_frame
         if one_frame_mode:
             target_index, control_indices, f_indices, one_frame_inference_index = parse_one_frame_inference_args(
-                sample_parameter["one_frame"]
+                sample_parameter.one_frame
             )
             latent_video_length = len(f_indices)  # number of frames in the video
         else:
@@ -243,9 +279,9 @@ class WanNetworkTrainer(NetworkTrainer):
             latent_video_length = (frame_count - 1) // self.config["vae_stride"][0] + 1
 
         # Get embeddings
-        context = sample_parameter["t5_embeds"].to(device=device)
+        context = sample_parameter.t5_embeds.to(device=device)
         if do_classifier_free_guidance:
-            context_null = sample_parameter["negative_t5_embeds"].to(device=device)
+            context_null = sample_parameter.negative_t5_embeds.to(device=device)
         else:
             context_null = None
 
