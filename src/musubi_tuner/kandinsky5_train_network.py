@@ -20,6 +20,7 @@ from musubi_tuner.hv_train_network import (
     should_sample_images,
     load_prompts,
 )
+from musubi_tuner.training.sampling import SamplePrompt
 from musubi_tuner.kandinsky5.configs import TASK_CONFIGS, TaskConfig
 from musubi_tuner.kandinsky5.models.dit import DiffusionTransformer3D, get_dit
 from musubi_tuner.kandinsky5.models.vae import build_vae
@@ -425,9 +426,41 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
-    ):
+    ) -> list[SamplePrompt]:
         logger.info(f"Loading Kandinsky5 sample prompts from {sample_prompts}")
-        return load_prompts(sample_prompts)
+        prompts = load_prompts(sample_prompts)
+
+        # Convert prompt dicts to SamplePrompt objects
+        sample_parameters = []
+        for prompt_dict in prompts:
+            prompt_text = prompt_dict.get("prompt", "")
+            width = prompt_dict.get("width", 512)
+            height = prompt_dict.get("height", 512)
+            frame_count = prompt_dict.get("frame_count", 1)
+            sample_steps = prompt_dict.get("sample_steps", 20)
+            seed = prompt_dict.get("seed")
+            guidance_scale = prompt_dict.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = prompt_dict.get("discrete_flow_shift", self.default_discrete_flow_shift)
+            cfg_scale = prompt_dict.get("cfg_scale")
+            negative_prompt = prompt_dict.get("negative_prompt")
+            enum = prompt_dict.get("enum", 0)
+
+            sample = SamplePrompt(
+                prompt=prompt_text,
+                width=width,
+                height=height,
+                frame_count=frame_count,
+                sample_steps=sample_steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                enum=enum,
+            )
+            sample_parameters.append(sample)
+
+        return sample_parameters
 
     def do_inference(
         self,
@@ -449,8 +482,8 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         image_path=None,
         control_video_path=None,
     ):
-        prompt = sample_parameter.get("prompt", "")
-        neg_prompt = sample_parameter.get("negative_prompt", "")
+        prompt = sample_parameter.prompt
+        neg_prompt = sample_parameter.negative_prompt or ""
         duration = frame_count if frame_count is not None else 1
         # convert pixel dims to latent dims
         latent_h = height // 8
@@ -483,7 +516,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
             guidance_weight=guidance_scale or self.task_conf.guidance_weight,
             scheduler_scale=self.task_conf.scheduler_scale or 1,
             negative_caption=neg_prompt,
-            seed=sample_parameter.get("seed", 42),
+            seed=sample_parameter.seed if sample_parameter.seed is not None else 42,
             device=accelerator.device,
             vae_device=accelerator.device,
             text_embedder_device=accelerator.device,
