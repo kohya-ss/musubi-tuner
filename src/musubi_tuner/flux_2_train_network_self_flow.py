@@ -225,25 +225,21 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         # TODO: in-place lerp_ across floating-point params; copy_ otherwise.
         raise NotImplementedError("Self-Flow EMA update — see PR #913 _update_ema_weights")
 
-    def on_sample_images(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        network,
-        sample_fn,
-    ) -> None:
-        """Sample using EMA (teacher) weights when Self-Flow is active.
-
-        Swap student state -> EMA -> sample -> swap back. The teacher is
-        what users actually want to use, since the student is intentionally
-        noisier per the dual-timestep schedule.
-        """
+    def on_before_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+        """Swap to EMA (teacher) weights before sampling when Self-Flow is active."""
         if not args.self_flow or self.ema_lora_state is None:
-            sample_fn()
             return
-        # TODO: load ema_lora_state into accelerator.unwrap_model(network),
-        #       call sample_fn(), restore student state.
-        raise NotImplementedError("Self-Flow sampling weight swap — see PR #913 sample_images_with_ema")
+        network = accelerator.unwrap_model(network)
+        self._saved_student_state = {k: v.clone() for k, v in network.state_dict().items()}
+        network.load_state_dict(self.ema_lora_state)
+
+    def on_after_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+        """Restore student weights after EMA sampling."""
+        if self._saved_student_state is None:
+            return
+        network = accelerator.unwrap_model(network)
+        network.load_state_dict(self._saved_student_state)
+        self._saved_student_state = None
 
     def on_post_save(
         self,
