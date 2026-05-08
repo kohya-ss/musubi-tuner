@@ -419,14 +419,40 @@ def save_latent_cache_hunyuan_video_1_5(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
-def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
-    """Z-Image architecture. No control latent is supported."""
+def save_latent_cache_z_image(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    control_latent: Optional[list[Optional[torch.Tensor]]] = None,
+    siglip_feature: Optional[Union[torch.Tensor, list[Optional[torch.Tensor]]]] = None,
+):
+    """Z-Image architecture."""
     assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
 
     C, H, W = latent.shape
     F = 1
     dtype_str = dtype_to_str(latent.dtype)
-    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+    sd: dict[str, torch.Tensor] = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    if control_latent is not None:
+        for i, cl in enumerate(control_latent):
+            if cl is None:
+                continue
+            assert cl.dim() == 3, "control latent should be 3D tensor (channel, height, width)"
+            cC, cH, cW = cl.shape
+            assert cC == C, "control latent channel mismatch"
+            cl_dtype_str = dtype_to_str(cl.dtype)
+            sd[f"latents_control_{i}_{F}x{cH}x{cW}_{cl_dtype_str}"] = cl.detach().cpu().contiguous()
+
+    if siglip_feature is not None:
+        if isinstance(siglip_feature, list):
+            for i, sf in enumerate(siglip_feature):
+                if sf is None:
+                    continue
+                siglip_dtype_str = dtype_to_str(sf.dtype)
+                sd[f"siglip_{i}_{siglip_dtype_str}"] = sf.detach().cpu()
+        else:
+            siglip_dtype_str = dtype_to_str(siglip_feature.dtype)
+            sd[f"siglip_{siglip_dtype_str}"] = siglip_feature.detach().cpu()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
@@ -442,7 +468,6 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
         metadata["frame_count"] = f"{item_info.frame_count}"
 
     for key, value in sd.items():
-        # NaN check and show warning, replace NaN with 0
         if torch.isnan(value).any():
             logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
             value[torch.isnan(value)] = 0
