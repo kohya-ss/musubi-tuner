@@ -1145,6 +1145,20 @@ class NetworkTrainer:
 
         return loss.mean()
 
+    def on_transformer_loaded(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+    ) -> None:
+        """Called immediately after ``self.load_transformer(...)`` returns.
+
+        At this point the transformer is on its loading device but not yet wrapped
+        by the accelerator and not yet in eval mode. Use this hook for one-time
+        post-load setup that needs the raw module (e.g. ``register_forward_hook``
+        for feature extraction).
+        """
+
     def on_train_start(
         self,
         args: argparse.Namespace,
@@ -1450,6 +1464,7 @@ class NetworkTrainer:
         transformer = self.load_transformer(
             accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
         )
+        self.on_transformer_loaded(args, accelerator, transformer)
         transformer.eval()
         transformer.requires_grad_(False)
 

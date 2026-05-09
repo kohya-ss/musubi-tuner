@@ -46,7 +46,8 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
     - ``self._coupling_scheduler``: dummy LR scheduler whose "lr" is the
       teacher coupling probability (decays over training).
     - ``self._feature_extractor``: holds DiT layer outputs captured via
-      ``register_forward_hook`` (no DiT model edit required).
+      ``register_forward_hook`` (no DiT model edit required). Hooks are
+      registered in ``on_transformer_loaded``.
     - ``self._self_flow_logs``: per-step metrics dict drained by
       ``extra_step_logs``.
     """
@@ -103,6 +104,26 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         #       See PR #913 hv_train_network.py around line 2395.
         raise NotImplementedError("Self-Flow rep_proj construction — see PR #913")
 
+    def on_transformer_loaded(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+    ) -> None:
+        """Register feature-extraction forward hooks on the raw transformer.
+
+        Done here (rather than in ``on_train_start``) so the hooks attach
+        before ``accelerator.prepare`` / block-swap rewrap, which keeps the
+        captured tensors aligned with the unwrapped block indices the user
+        supplied via ``--student_feature_layer`` / ``--teacher_feature_layer``.
+        """
+        if not args.self_flow:
+            return
+        # TODO: register forward_hook on transformer.double_blocks[student_layer]
+        #       and transformer.double_blocks[teacher_layer], stashing outputs
+        #       into self._feature_extractor for call_dit to drain.
+        raise NotImplementedError("Self-Flow forward-hook registration — see PR #913")
+
     def on_train_start(
         self,
         args: argparse.Namespace,
@@ -120,9 +141,9 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         3. ``self.rep_proj = accelerator.prepare(self.rep_proj)``.
         4. Optionally load ``--network_weights_proj`` into ``self.rep_proj``.
         5. Build ``self._coupling_scheduler`` (constant / cosine / linear / rex).
-        6. Register forward hooks on transformer blocks at indices
-           ``args.student_feature_layer`` and ``args.teacher_feature_layer``
-           via ``register_forward_hook`` — no edit to the FLUX.2 model code.
+
+        Forward-hook registration for feature extraction lives in
+        ``on_transformer_loaded`` (runs earlier, before accelerator.prepare).
         """
         if not args.self_flow:
             return
