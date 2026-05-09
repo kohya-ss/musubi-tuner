@@ -48,8 +48,10 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
     - ``self._feature_extractor``: holds DiT layer outputs captured via
       ``register_forward_hook`` (no DiT model edit required). Hooks are
       registered in ``on_transformer_loaded``.
-    - ``self._self_flow_logs``: per-step metrics dict drained by
-      ``extra_step_logs``.
+    - ``self._self_flow_logs``: per-step state metrics dict drained by
+      ``extra_step_logs`` (e.g. coupling-scheduler value). Loss decomposition
+      itself (``loss/gen``, ``loss/rep``) flows through ``process_batch``'s
+      ``loss_metrics`` return, not through here.
     """
 
     def __init__(self) -> None:
@@ -196,7 +198,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         network_dtype: torch.dtype,
         vae,
         global_step: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         """Self-Flow step replacing vanilla flow matching.
 
         Outline (mirrors PR #913's ``_self_flow_step``):
@@ -210,8 +212,9 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
           5. Student forward (gradients flow); collect features.
           6. ``L_gen`` (MSE w/ flow weighting) + ``gamma * L_rep`` (negative
              cosine similarity through ``self.rep_proj``).
-          7. Populate ``self._self_flow_logs`` for ``extra_step_logs``.
-          8. Return scalar combined loss.
+          7. Return ``(L_gen + gamma * L_rep, {"loss/gen": ..., "loss/rep": ...,
+             "self_flow/gamma": ...})`` so the loss decomposition lands in the
+             per-step logs.
 
         Vanilla path (when ``--self_flow`` is off) falls through to the base
         implementation so this trainer can be used for non-Self-Flow runs too.

@@ -1119,11 +1119,17 @@ class NetworkTrainer:
         network_dtype: torch.dtype,
         vae,
         global_step: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute scalar loss for one training batch (pre-backward).
 
-        Default implementation: vanilla flow matching.
-        Override to implement custom training logic (Self-Flow etc.).
+        Default implementation: vanilla flow matching, delegating the loss
+        formulation itself to ``compute_loss``. Override either method:
+        ``process_batch`` to change what gets fed to the model (Self-Flow's
+        dual-timestep dance, etc.), or ``compute_loss`` to swap the loss
+        formulation while keeping the standard data flow.
+
+        Returns ``(scalar_loss, loss_metrics)`` — ``loss_metrics`` is merged
+        into the per-step log dict alongside ``extra_step_logs``.
 
         ``latents`` is already scale-shifted; ``noise`` is already sampled.
         """
@@ -1131,19 +1137,40 @@ class NetworkTrainer:
             args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
         )
 
-        weighting = compute_loss_weighting_for_sd3(
-            args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-        )
-
         output = self.call_dit(
             args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
         )
-        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
 
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype)
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
+
+        Default implementation: weighted MSE between ``output.pred`` and
+        ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
+        then ``.mean()``. Override to swap the loss formulation entirely
+        (e.g. Self-Flow's L_gen + gamma * L_rep). Subclasses are responsible
+        for whatever weighting/reduction they need — this hook owns the
+        full loss computation, not just the per-element MSE.
+
+        ``loss_metrics`` defaults to empty; populate with named scalars for
+        loss-decomposition logging (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
+        """
+        weighting = compute_loss_weighting_for_sd3(
+            args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype
+        )
+        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
             loss = loss * weighting
-
-        return loss.mean()
+        return loss.mean(), {}
 
     def on_transformer_loaded(
         self,
@@ -1983,7 +2010,7 @@ class NetworkTrainer:
                     # Sample noise that we'll add to the latents
                     noise = torch.randn_like(latents)
 
-                    loss = self.process_batch(
+                    loss, loss_metrics = self.process_batch(
                         args,
                         accelerator,
                         transformer,
@@ -2071,6 +2098,7 @@ class NetworkTrainer:
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
+                    logs.update(loss_metrics)
                     logs.update(self.extra_step_logs(args, logs))
                     accelerator.log(logs, step=global_step)
 
