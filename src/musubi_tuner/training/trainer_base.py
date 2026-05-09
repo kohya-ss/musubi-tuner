@@ -1137,9 +1137,7 @@ class NetworkTrainer:
             args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
         )
 
-        output = self.call_dit(
-            args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
-        )
+        output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
 
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype)
 
@@ -1164,9 +1162,7 @@ class NetworkTrainer:
         ``loss_metrics`` defaults to empty; populate with named scalars for
         loss-decomposition logging (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
-        weighting = compute_loss_weighting_for_sd3(
-            args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype
-        )
+        weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
         loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
             loss = loss * weighting
@@ -1233,7 +1229,9 @@ class NetworkTrainer:
         so subclasses uploading companion files can match the same behaviour.
         """
 
-    def on_before_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+    def on_before_sample_images(
+        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+    ) -> None:
         """Called just before sample image generation begins, while the transformer is still in training mode.
 
         The transformer is still wrapped by the accelerator at this point. Use this hook for
@@ -1241,7 +1239,9 @@ class NetworkTrainer:
         """
         pass
 
-    def on_after_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+    def on_after_sample_images(
+        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+    ) -> None:
         """Called after sample image generation completes and the transformer has been switched back to training mode.
 
         Memory has already been cleaned via ``clean_memory_on_device``. Use this hook for
@@ -1959,9 +1959,7 @@ class NetworkTrainer:
                 accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
             )
             try:
-                self.sample_images(
-                    accelerator, args, epoch_arg, steps_arg, vae, transformer, sample_parameters, dit_dtype
-                )
+                self.sample_images(accelerator, args, epoch_arg, steps_arg, vae, transformer, sample_parameters, dit_dtype)
             finally:
                 self.on_after_sample_images(
                     accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
@@ -2042,9 +2040,7 @@ class NetworkTrainer:
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
-                    self.on_post_optimizer_step(
-                        args, accelerator, network, accelerator.sync_gradients, global_step
-                    )
+                    self.on_post_optimizer_step(args, accelerator, network, accelerator.sync_gradients, global_step)
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(

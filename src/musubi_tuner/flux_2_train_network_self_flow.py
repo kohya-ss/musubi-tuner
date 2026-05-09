@@ -221,8 +221,18 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         """
         if not args.self_flow:
             return super().process_batch(
-                args, accelerator, transformer, network, batch, latents, noise,
-                noise_scheduler, dit_dtype, network_dtype, vae, global_step,
+                args,
+                accelerator,
+                transformer,
+                network,
+                batch,
+                latents,
+                noise,
+                noise_scheduler,
+                dit_dtype,
+                network_dtype,
+                vae,
+                global_step,
             )
         # TODO: port PR #913's _self_flow_step body here, calling
         #       ``self.call_dit(..., hidden_features=True, feature_layer=...)``
@@ -249,7 +259,9 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         # TODO: in-place lerp_ across floating-point params; copy_ otherwise.
         raise NotImplementedError("Self-Flow EMA update — see PR #913 _update_ema_weights")
 
-    def on_before_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+    def on_before_sample_images(
+        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+    ) -> None:
         """Swap to EMA (teacher) weights before sampling when Self-Flow is active."""
         if not args.self_flow or self.ema_lora_state is None:
             return
@@ -257,7 +269,9 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         self._saved_student_state = {k: v.clone() for k, v in network.state_dict().items()}
         network.load_state_dict(self.ema_lora_state)
 
-    def on_after_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+    def on_after_sample_images(
+        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+    ) -> None:
         """Restore student weights after EMA sampling."""
         if self._saved_student_state is None:
             return
