@@ -800,7 +800,7 @@ class NetworkTrainer:
                 line += "#" * int(w / max_weighting * CONSOLE_WIDTH)
                 print(line)
 
-    def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
+    def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype):
         """architecture independent sample images"""
         if not should_sample_images(args, steps, epoch):
             return
@@ -810,6 +810,8 @@ class NetworkTrainer:
         if sample_parameters is None:
             logger.error(f"No prompt file / プロンプトファイルがありません: {args.sample_prompts}")
             return
+
+        self.on_before_sample_images(accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype)
 
         distributed_state = PartialState()  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
 
@@ -858,6 +860,8 @@ class NetworkTrainer:
 
         transformer.switch_block_swap_for_training()
         clean_memory_on_device(accelerator.device)
+
+        self.on_after_sample_images(accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype)
 
     def sample_image_inference(self, accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
         """architecture independent sample images"""
@@ -1175,21 +1179,6 @@ class NetworkTrainer:
         Use for EMA updates or any post-step bookkeeping.
         """
 
-    def on_sample_images(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        network,
-        sample_fn,
-    ) -> None:
-        """Around-hook wrapping ``self.sample_images(...)`` calls.
-
-        Default implementation simply invokes ``sample_fn()``. Override to e.g.
-        temporarily swap student weights for EMA (teacher) weights before sampling
-        and restore them afterwards.
-        """
-        sample_fn()
-
     def on_post_save(
         self,
         args: argparse.Namespace,
@@ -1204,6 +1193,24 @@ class NetworkTrainer:
         ``ckpt_name`` is the basename written to ``args.output_dir``. Use this hook
         to write companion files (EMA weights, projection heads, etc.) alongside.
         """
+
+    def on_before_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+        """Called just before sample image generation begins, while the transformer is still in training mode.
+
+        The transformer is still wrapped by the accelerator at this point. Use this hook for
+        pre-inference setup such as switching auxiliary modules to eval mode or stashing training state.
+        """
+        pass
+
+    def on_after_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
+        """Called after sample image generation completes and the transformer has been switched back to training mode.
+
+        Memory has already been cleaned via ``clean_memory_on_device``. Use this hook for
+        post-inference cleanup such as restoring auxiliary modules to train mode or updating state
+        based on the generated samples.
+        """
+        pass
+
 
     def extra_trainable_params(
         self,
@@ -1907,13 +1914,8 @@ class NetworkTrainer:
                 os.remove(old_ckpt_file)
 
         def _do_sample(epoch_arg, steps_arg):
-            self.on_sample_images(
-                args,
-                accelerator,
-                network,
-                lambda: self.sample_images(
-                    accelerator, args, epoch_arg, steps_arg, vae, transformer, sample_parameters, dit_dtype
-                ),
+            self.sample_images(
+                accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
             )
 
         # For --sample_at_first
