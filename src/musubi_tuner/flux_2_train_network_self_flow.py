@@ -146,7 +146,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
 
         Recognised kwargs:
         - ``hidden_features`` (bool): when True, return captured features in
-          ``DiTOutput.features`` (drained from ``self._feature_extractor``).
+          ``DiTOutput.extra["features"]`` (drained from ``self._feature_extractor``).
         - ``feature_layer`` (int): which registered layer's output to return.
         - ``per_token_timesteps`` (Tensor): per-token timestep map for
           dual-timestep conditioning (paper §A.3). Requires per-token
@@ -249,6 +249,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         ckpt_name: str,
         save_dtype,
         metadata: dict,
+        force_sync_upload: bool,
     ) -> None:
         """Save EMA (teacher) and projection-head companion files.
 

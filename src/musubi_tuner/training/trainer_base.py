@@ -86,15 +86,14 @@ SS_METADATA_MINIMUM_KEYS = [
 class DiTOutput:
     """Return type for ``NetworkTrainer.call_dit``.
 
-    Internal extension point — no API stability guarantees. Fields beyond
-    ``pred`` and ``target`` are optional and used only by extension subclasses
-    (e.g. ``features`` for representation-alignment losses). Use ``extra`` as
-    a typed escape hatch for future fields without breaking signatures.
+    Internal extension point — no API stability guarantees. Vanilla flow only
+    needs ``pred`` and ``target``; extension subclasses can stash arbitrary
+    additional outputs (e.g. hidden features for representation-alignment
+    losses) in the ``extra`` dict without breaking the base signature.
     """
 
     pred: torch.Tensor
     target: torch.Tensor
-    features: Optional[torch.Tensor] = None
     extra: dict = field(default_factory=dict)
 
 
@@ -1183,11 +1182,14 @@ class NetworkTrainer:
         ckpt_name: str,
         save_dtype,
         metadata: dict,
+        force_sync_upload: bool,
     ) -> None:
         """Called after the main network checkpoint has been saved.
 
         ``ckpt_name`` is the basename written to ``args.output_dir``. Use this hook
         to write companion files (EMA weights, projection heads, etc.) alongside.
+        ``force_sync_upload`` mirrors the flag passed to the main HuggingFace upload
+        so subclasses uploading companion files can match the same behaviour.
         """
 
     def on_before_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype) -> None:
@@ -1900,7 +1902,7 @@ class NetworkTrainer:
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
-            self.on_post_save(args, accelerator, network, ckpt_name, save_dtype, metadata_to_save)
+            self.on_post_save(args, accelerator, network, ckpt_name, save_dtype, metadata_to_save, force_sync_upload)
 
         def remove_model(old_ckpt_name):
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
