@@ -158,6 +158,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [FLUX.1 Kontext](./docs/flux_kontext.md)
 - [Qwen-Image](./docs/qwen_image.md)
 - [Z-Image](./docs/zimage.md)
+- [HiDream-O1-Image](./docs/hidream_o1.md)
 - [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
 - [Kandinsky 5](./docs/kandinsky5.md)
 - [FLUX.2](./docs/flux_2.md)
