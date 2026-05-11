@@ -98,6 +98,15 @@ class LoRAModule(torch.nn.Module):
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
+        # Snapshot the wrapped layer's device so model-parallel paths (e.g.,
+        # the FLUX.2 dual-GPU split) can re-place this LoRA on the correct
+        # device after network.to(...) has flattened everything onto one
+        # GPU. Harmless on single-device setups — the routing pass becomes
+        # a no-op when devices already match.
+        try:
+            self._wrapped_device = next(self.org_module.parameters()).device
+        except StopIteration:
+            self._wrapped_device = None
         del self.org_module
 
     def forward(self, x):
@@ -660,6 +669,21 @@ class LoRANetwork(torch.nn.Module):
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.apply_to()
             self.add_module(lora.lora_name, lora)
+
+        # Model-parallel paths (FLUX.2 dual-GPU split etc.) need each LoRA
+        # to live on the device of its wrapped layer. Re-place after
+        # apply_to, and install a per-LoRA forward shim as a safety net in
+        # case anything moves params off the wrapped device later.
+        try:
+            from musubi_tuner.flux_2.flux2_dual_gpu import (
+                is_dual_gpu_enabled,
+                route_loras_to_wrapped_devices,
+            )
+            if is_dual_gpu_enabled():
+                route_loras_to_wrapped_devices(self)
+        except ImportError:
+            # flux_2 package not installed / not on path — fine.
+            pass
 
     # マージできるかどうかを返す
     def is_mergeable(self):

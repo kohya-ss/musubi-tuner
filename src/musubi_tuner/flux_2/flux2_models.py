@@ -498,6 +498,8 @@ class Flux2(nn.Module):
         print("FLUX2: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+        from musubi_tuner.flux_2.flux2_dual_gpu import assert_no_block_swap_in_dual_gpu
+        assert_no_block_swap_in_dual_gpu(num_blocks)
         self.blocks_to_swap = num_blocks
         if num_blocks <= 0:
             double_blocks_to_swap = 0
@@ -573,6 +575,21 @@ class Flux2(nn.Module):
             print("FLUX: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
+        # FLUX2_DUAL_GPU=true: distribute the transformer across cuda:0 and
+        # cuda:1 instead of moving everything to a single device. The
+        # caller-provided `device` is ignored in this path (the split layout
+        # uses cuda:0 + cuda:1 explicitly). Mutually exclusive with
+        # blocks_to_swap, enforced inside enable_block_swap.
+        from musubi_tuner.flux_2.flux2_dual_gpu import (
+            distribute_flux2_transformer,
+            install_split_forward,
+            is_dual_gpu_enabled,
+        )
+        if is_dual_gpu_enabled():
+            distribute_flux2_transformer(self, dtype=self.dtype)
+            install_split_forward(self)
+            return
+
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
         if self.blocks_to_swap:
             save_double_blocks = self.double_blocks
