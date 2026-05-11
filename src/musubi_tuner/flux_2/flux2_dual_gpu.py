@@ -169,89 +169,118 @@ def install_split_forward(model: "Flux2") -> None:
         ctx_ids: torch.Tensor,
         guidance: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        num_txt_tokens = ctx.shape[1]
+        # accelerator.prepare(model, ...) under mixed_precision=bf16 wraps
+        # model.forward in an autocast(bf16) context. We overwrite forward
+        # below via types.MethodType, which shadows that wrapper — so we
+        # have to re-enter autocast here ourselves. Autocast contexts nest
+        # cleanly, so this is a no-op when one is already active outside.
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            num_txt_tokens = ctx.shape[1]
 
-        timestep_emb = timestep_embedding(timesteps, 256)
-        del timesteps
-        vec = self.time_in(timestep_emb)
-        del timestep_emb
-        if self.use_guidance_embed:
-            guidance_emb = timestep_embedding(guidance, 256)
-            vec = vec + self.guidance_in(guidance_emb)
-            del guidance_emb
+            timestep_emb = timestep_embedding(timesteps, 256)
+            del timesteps
+            vec = self.time_in(timestep_emb)
+            del timestep_emb
+            if self.use_guidance_embed:
+                guidance_emb = timestep_embedding(guidance, 256)
+                vec = vec + self.guidance_in(guidance_emb)
+                del guidance_emb
 
-        double_block_mod_img = self.double_stream_modulation_img(vec)
-        double_block_mod_txt = self.double_stream_modulation_txt(vec)
-        single_block_mod, _ = self.single_stream_modulation(vec)
+            double_block_mod_img = self.double_stream_modulation_img(vec)
+            double_block_mod_txt = self.double_stream_modulation_txt(vec)
+            single_block_mod, _ = self.single_stream_modulation(vec)
 
-        img = self.img_in(x)
-        del x
-        txt = self.txt_in(ctx)
-        del ctx
-        pe_x = self.pe_embedder(x_ids)
-        del x_ids
-        pe_ctx = self.pe_embedder(ctx_ids)
-        del ctx_ids
+            img = self.img_in(x)
+            del x
+            txt = self.txt_in(ctx)
+            del ctx
+            pe_x = self.pe_embedder(x_ids)
+            del x_ids
+            pe_ctx = self.pe_embedder(ctx_ids)
+            del ctx_ids
 
-        attn_params = AttentionParams.create_attention_params(
-            self.attn_mode, self.split_attn
-        )
-
-        for block in self.double_blocks:
-            img, txt = block(
-                img,
-                txt,
-                pe_x,
-                pe_ctx,
-                double_block_mod_img,
-                double_block_mod_txt,
-                attn_params,
+            attn_params = AttentionParams.create_attention_params(
+                self.attn_mode, self.split_attn
             )
 
-        del double_block_mod_img, double_block_mod_txt
+            for block in self.double_blocks:
+                img, txt = block(
+                    img,
+                    txt,
+                    pe_x,
+                    pe_ctx,
+                    double_block_mod_img,
+                    double_block_mod_txt,
+                    attn_params,
+                )
 
-        img = torch.cat((txt, img), dim=1)
-        del txt
-        pe = torch.cat((pe_ctx, pe_x), dim=2)
-        del pe_ctx, pe_x
+            del double_block_mod_img, double_block_mod_txt
 
-        for block_idx, block in enumerate(self.single_blocks):
-            # Cross the PCIe boundary at the split point.
-            if block_idx == split_at:
-                img = img.to(cuda1)
-                pe = pe.to(cuda1)
-                single_block_mod = single_block_mod.to(cuda1)
-            img = block(img, pe, single_block_mod, attn_params)
+            img = torch.cat((txt, img), dim=1)
+            del txt
+            pe = torch.cat((pe_ctx, pe_x), dim=2)
+            del pe_ctx, pe_x
 
-        del single_block_mod, pe
+            for block_idx, block in enumerate(self.single_blocks):
+                # Cross the PCIe boundary at the split point. Note that
+                # single_block_mod is a 2-tuple (see SingleStreamBlock.forward
+                # in flux2_models.py: `mod: tuple[Tensor, Tensor]`), so we
+                # have to map .to() across both elements.
+                if block_idx == split_at:
+                    img = img.to(cuda1)
+                    pe = pe.to(cuda1)
+                    single_block_mod = tuple(t.to(cuda1) for t in single_block_mod)
+                img = block(img, pe, single_block_mod, attn_params)
 
-        # Move the result back to cuda:0 for final_layer + caller.
-        img = img.to(cuda0)
-        img = img[:, num_txt_tokens:, ...]
-        img = self.final_layer(img, vec)
-        return img
+            del single_block_mod, pe
+
+            # Move the result back to cuda:0 for final_layer + caller.
+            img = img.to(cuda0)
+            img = img[:, num_txt_tokens:, ...]
+            img = self.final_layer(img, vec)
+            return img
 
     # Bind as a method on the instance.
     import types
     model.forward = types.MethodType(forward, model)
 
 
+def _get_wrapped_device(lora: "LoRAModule") -> Optional[torch.device]:
+    """Read the wrapped module's CURRENT device.
+
+    LoRAModule.apply_to stores ``self.org_forward = self.org_module.forward``
+    — a bound method whose ``__self__`` is the wrapped layer. Reading the
+    device through that reference each time gives us the *current* placement
+    even after the model has been re-distributed (e.g., dual-GPU split).
+
+    Falls back to the static ``_wrapped_device`` snapshot if the bound-method
+    trick fails (e.g., user installed a callable that isn't a bound method).
+    """
+    bound = getattr(lora, "org_forward", None)
+    wrapped_module = getattr(bound, "__self__", None)
+    if wrapped_module is not None:
+        try:
+            return next(wrapped_module.parameters()).device
+        except StopIteration:
+            pass
+    return getattr(lora, "_wrapped_device", None)
+
+
 def route_loras_to_wrapped_devices(network: "LoRANetwork") -> None:
     """Place each LoRA module on the device of the layer it wraps.
 
-    Requires that ``LoRAModule.apply_to`` has snapshotted
-    ``_wrapped_device`` (see the modification to ``networks/lora.py``).
-    A no-op when devices already match (``Tensor.to(same_device)`` is a
-    free identity).
+    Reads the wrapped device DYNAMICALLY via the org_forward bound method —
+    safe to call at any point in the training-setup lifecycle, including
+    after the dual-GPU distribute has moved blocks to cuda:1.
 
     Also installs a per-LoRA forward shim as a safety net: if anything
     moves the LoRA off the wrapped layer's device after this point
-    (e.g., ``accelerator.prepare`` re-collecting params), the shim
-    silently re-places it on the wrapped device on the next forward.
+    (e.g., ``accelerator.prepare(network)`` flattening everything onto
+    cuda:0), the shim silently re-places it on the next forward.
     """
     loras = list(network.text_encoder_loras) + list(network.unet_loras)
     for lora in loras:
-        wrapped_device = getattr(lora, "_wrapped_device", None)
+        wrapped_device = _get_wrapped_device(lora)
         if wrapped_device is None:
             continue
         lora.to(wrapped_device)
@@ -259,21 +288,26 @@ def route_loras_to_wrapped_devices(network: "LoRANetwork") -> None:
 
 
 def _install_lora_forward_pin(lora: "LoRAModule") -> None:
-    """Wrap ``lora.forward`` to re-pin params to ``_wrapped_device`` if drifted.
+    """Wrap ``lora.forward`` to re-pin params to the wrapped layer's
+    *current* device on each call.
 
-    Called once per LoRA. The shim is a no-op on the hot path when
-    devices already match.
+    Looking up the device dynamically (vs. capturing it in the closure)
+    is what makes this robust to a distribute-after-apply_to ordering:
+    even if route_loras_to_wrapped_devices ran when the wrapped layer
+    was on CPU, the next forward call will see it on cuda:1 (say) and
+    move the LoRA accordingly.
     """
     orig_forward = lora.forward
-    wrapped_device = lora._wrapped_device  # type: ignore[attr-defined]
 
     def pinned_forward(x: torch.Tensor) -> torch.Tensor:
-        try:
-            current = next(lora.parameters()).device
-        except StopIteration:
-            current = wrapped_device
-        if current != wrapped_device:
-            lora.to(wrapped_device)
+        target = _get_wrapped_device(lora)
+        if target is not None:
+            try:
+                current = next(lora.parameters()).device
+            except StopIteration:
+                current = target
+            if current != target:
+                lora.to(target)
         return orig_forward(x)
 
     lora.forward = pinned_forward  # type: ignore[method-assign]

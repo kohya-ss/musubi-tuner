@@ -110,6 +110,22 @@ class LoRAModule(torch.nn.Module):
         del self.org_module
 
     def forward(self, x):
+        # Dual-GPU model-parallel pin: when FLUX2_DUAL_GPU=true, the
+        # wrapped layer may live on a different device than this LoRA
+        # (e.g., layer on cuda:1, LoRA was prepared on cuda:0 by
+        # accelerator.prepare(network)). The bound-method indirection
+        # in apply_to makes instance-level forward-shimming unreliable,
+        # so we do the pin inline here.
+        import os as _os
+        if _os.environ.get("FLUX2_DUAL_GPU", "false").lower() == "true":
+            try:
+                _wrapped_module = self.org_forward.__self__
+                _target_device = next(_wrapped_module.parameters()).device
+                _current_device = next(self.parameters()).device
+                if _current_device != _target_device:
+                    self.to(_target_device)
+            except (AttributeError, StopIteration):
+                pass
         org_forwarded = self.org_forward(x)
 
         # module dropout

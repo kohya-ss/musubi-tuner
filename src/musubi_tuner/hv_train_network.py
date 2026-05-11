@@ -146,7 +146,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
                 ),
                 timeout=timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
             )
-            if torch.cuda.device_count() > 1
+            if torch.cuda.device_count() > 1 and os.environ.get("FLUX2_DUAL_GPU", "false").lower() != "true"
             else None
         ),
         (
@@ -1744,7 +1744,7 @@ class NetworkTrainer:
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
         self.blocks_to_swap = blocks_to_swap
-        loading_device = "cpu" if blocks_to_swap > 0 else accelerator.device
+        loading_device = "cpu" if (blocks_to_swap > 0 or os.environ.get("FLUX2_DUAL_GPU", "false").lower() == "true") else accelerator.device
 
         logger.info(f"Loading DiT model from {args.dit}")
         if args.sdpa:
@@ -1918,6 +1918,12 @@ class NetworkTrainer:
             transformer = accelerator.prepare(transformer, device_placement=[not blocks_to_swap > 0])
             accelerator.unwrap_model(transformer).move_to_device_except_swap_blocks(accelerator.device)  # reduce peak memory usage
             accelerator.unwrap_model(transformer).prepare_block_swap_before_forward()
+        elif os.environ.get("FLUX2_DUAL_GPU", "false").lower() == "true":
+            # Dual-GPU model-parallel: prepare without device move, then run our
+            # split-aware placement via move_to_device_except_swap_blocks (which
+            # routes to distribute_flux2_transformer + install_split_forward).
+            transformer = accelerator.prepare(transformer, device_placement=[False])
+            accelerator.unwrap_model(transformer).move_to_device_except_swap_blocks(accelerator.device)
         else:
             transformer = accelerator.prepare(transformer)
 
