@@ -26,7 +26,7 @@ Env vars:
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
@@ -67,7 +67,9 @@ def assert_no_block_swap_in_dual_gpu(blocks_to_swap: Optional[int]) -> None:
         )
 
 
-def distribute_flux2_transformer(model: "Flux2", dtype: torch.dtype) -> None:
+def distribute_flux2_transformer(
+    model: "Flux2", dtype: Optional[torch.dtype] = None
+) -> None:
     """Distribute the FLUX.2 transformer across cuda:0 and cuda:1.
 
     Layout:
@@ -79,6 +81,11 @@ def distribute_flux2_transformer(model: "Flux2", dtype: torch.dtype) -> None:
     one ``.to(cuda:1)`` boundary at the split point and ``.to(cuda:0)``
     on the way back to ``final_layer`` (we keep final_layer on cuda:0 so
     the returned tensor matches ``vec.device`` for the caller).
+
+    ``dtype`` is optional and defaults to None (preserve current dtype).
+    Passing an explicit dtype will trigger conversion during the move,
+    which can balloon memory if the model is already quantized
+    (e.g., fp8 → bf16 conversion ~2× the per-block footprint).
     """
     if torch.cuda.device_count() < 2:
         raise RuntimeError(
@@ -96,26 +103,35 @@ def distribute_flux2_transformer(model: "Flux2", dtype: torch.dtype) -> None:
     cuda0 = torch.device("cuda:0")
     cuda1 = torch.device("cuda:1")
 
+    def _move(mod, device):
+        # Preserve existing dtype unless caller explicitly asked for one.
+        # Passing dtype when the model is already quantized (fp8) would
+        # expand weights back to bf16 during the move and balloon memory.
+        if dtype is None:
+            mod.to(device)
+        else:
+            mod.to(device, dtype=dtype)
+
     # Pre-blocks scaffolding + all double_blocks + first half single_blocks
     # land on cuda:0. Final layer also lives on cuda:0 (see forward).
-    model.img_in.to(cuda0, dtype=dtype)
-    model.txt_in.to(cuda0, dtype=dtype)
-    model.time_in.to(cuda0, dtype=dtype)
+    _move(model.img_in, cuda0)
+    _move(model.txt_in, cuda0)
+    _move(model.time_in, cuda0)
     model.pe_embedder.to(cuda0)
     if model.use_guidance_embed and not isinstance(model.guidance_in, nn.Identity):
-        model.guidance_in.to(cuda0, dtype=dtype)
-    model.double_stream_modulation_img.to(cuda0, dtype=dtype)
-    model.double_stream_modulation_txt.to(cuda0, dtype=dtype)
-    model.single_stream_modulation.to(cuda0, dtype=dtype)
+        _move(model.guidance_in, cuda0)
+    _move(model.double_stream_modulation_img, cuda0)
+    _move(model.double_stream_modulation_txt, cuda0)
+    _move(model.single_stream_modulation, cuda0)
     for block in model.double_blocks:
-        block.to(cuda0, dtype=dtype)
+        _move(block, cuda0)
     for block in model.single_blocks[:split_at]:
-        block.to(cuda0, dtype=dtype)
+        _move(block, cuda0)
     for block in model.single_blocks[split_at:]:
-        block.to(cuda1, dtype=dtype)
+        _move(block, cuda1)
     # final_layer stays on cuda:0 — the forward moves img back before
     # calling it, and final_layer's output matches vec.device (cuda:0).
-    model.final_layer.to(cuda0, dtype=dtype)
+    _move(model.final_layer, cuda0)
 
     # Stash the split index for the patched forward.
     model._flux2_dual_gpu_split_at = split_at  # type: ignore[attr-defined]
