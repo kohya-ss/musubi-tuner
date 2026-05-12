@@ -16,7 +16,9 @@ logging.basicConfig(level=logging.INFO)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="HiDream-O1-Image inference script")
-    parser.add_argument("--dit", type=str, required=True, help="HiDream-O1 single checkpoint (.safetensors) or model weights directory")
+    parser.add_argument(
+        "--dit", type=str, required=True, help="HiDream-O1 single checkpoint (.safetensors) or model weights directory"
+    )
     parser.add_argument("--prompt", type=str, required=True, help="Prompt for generation")
     parser.add_argument("--ref_images", nargs="*", default=[], help="Reference image path(s) for editing or subject guidance")
     parser.add_argument("--save_path", "--output_image", dest="save_path", type=str, required=True, help="Path to save image")

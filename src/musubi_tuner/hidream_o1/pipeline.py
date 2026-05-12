@@ -15,16 +15,45 @@ T_EPS = 0.001
 CONDITION_IMAGE_SIZE = 384
 PATCH_SIZE = 32
 
-TENSOR_TRANSFORM = transforms.Compose([
-    transforms.ToImage(),
-    transforms.ToDtype(torch.float32, scale=True),
-    transforms.Normalize([0.5], [0.5]),
-])
+TENSOR_TRANSFORM = transforms.Compose(
+    [
+        transforms.ToImage(),
+        transforms.ToDtype(torch.float32, scale=True),
+        transforms.Normalize([0.5], [0.5]),
+    ]
+)
 
 DEFAULT_TIMESTEPS = [
-    999, 987, 974, 960, 945, 929, 913, 895, 877, 857, 836, 814, 790, 764, 737,
-    707, 675, 640, 602, 560, 515, 464, 409, 347, 278, 199, 110, 8,
+    999,
+    987,
+    974,
+    960,
+    945,
+    929,
+    913,
+    895,
+    877,
+    857,
+    836,
+    814,
+    790,
+    764,
+    737,
+    707,
+    675,
+    640,
+    602,
+    560,
+    515,
+    464,
+    409,
+    347,
+    278,
+    199,
+    110,
+    8,
 ]
+
 
 def build_t2i_text_sample(prompt, height, width, tokenizer, processor, model_config):
     image_token_id = model_config.image_token_id
@@ -37,24 +66,28 @@ def build_t2i_text_sample(prompt, height, width, tokenizer, processor, model_con
 
     messages = [{"role": "user", "content": prompt}]
     template_caption = (
-            processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            + boi_token
-            + tms_token * TIMESTEP_TOKEN_NUM
+        processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        + boi_token
+        + tms_token * TIMESTEP_TOKEN_NUM
     )
     input_ids = tokenizer.encode(template_caption, return_tensors="pt", add_special_tokens=False)
 
-    image_grid_thw = torch.tensor(
-        [1, height // PATCH_SIZE, width // PATCH_SIZE], dtype=torch.int64
-    ).unsqueeze(0)
+    image_grid_thw = torch.tensor([1, height // PATCH_SIZE, width // PATCH_SIZE], dtype=torch.int64).unsqueeze(0)
 
     vision_tokens = torch.zeros((1, image_len), dtype=input_ids.dtype) + image_token_id
     vision_tokens[0, 0] = vision_start_token_id
     input_ids_pad = torch.cat([input_ids, vision_tokens], dim=-1)
 
     position_ids, _ = get_rope_index_fix_point(
-        1, image_token_id, video_token_id, vision_start_token_id,
-        input_ids=input_ids_pad, image_grid_thw=image_grid_thw,
-        video_grid_thw=None, attention_mask=None, skip_vision_start_token=[1],
+        1,
+        image_token_id,
+        video_token_id,
+        vision_start_token_id,
+        input_ids=input_ids_pad,
+        image_grid_thw=image_grid_thw,
+        video_grid_thw=None,
+        attention_mask=None,
+        skip_vision_start_token=[1],
     )
 
     txt_seq_len = input_ids.shape[-1]
@@ -62,23 +95,23 @@ def build_t2i_text_sample(prompt, height, width, tokenizer, processor, model_con
 
     token_types = torch.zeros((1, all_seq_len), dtype=input_ids.dtype)
     bgn = txt_seq_len - TIMESTEP_TOKEN_NUM
-    token_types[0, bgn: bgn + image_len + TIMESTEP_TOKEN_NUM] = 1
-    token_types[0, txt_seq_len - TIMESTEP_TOKEN_NUM: txt_seq_len] = 3
+    token_types[0, bgn : bgn + image_len + TIMESTEP_TOKEN_NUM] = 1
+    token_types[0, txt_seq_len - TIMESTEP_TOKEN_NUM : txt_seq_len] = 3
 
-    vinput_mask = (token_types == 1)
+    vinput_mask = token_types == 1
     token_types_bin = (token_types > 0).to(token_types.dtype)
 
     return {
-        'input_ids': input_ids,
-        'position_ids': position_ids,
-        'token_types': token_types_bin,
-        'vinput_mask': vinput_mask,
+        "input_ids": input_ids,
+        "position_ids": position_ids,
+        "token_types": token_types_bin,
+        "vinput_mask": vinput_mask,
     }
+
 
 def build_scheduler(num_inference_steps, timesteps_list, shift, device, scheduler_name="default"):
     if scheduler_name == "flash":
-        sched = FlashFlowMatchEulerDiscreteScheduler(
-            num_train_timesteps=1000, shift=shift, use_dynamic_shifting=False)
+        sched = FlashFlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=shift, use_dynamic_shifting=False)
     elif scheduler_name == "default":
         sched = FlowUniPCMultistepScheduler(use_dynamic_shifting=False, shift=shift)
     else:
@@ -92,7 +125,7 @@ def build_scheduler(num_inference_steps, timesteps_list, shift, device, schedule
     return sched
 
 
-def clamp_tensor(tensor, percentage = 0.1):
+def clamp_tensor(tensor, percentage=0.1):
     lower_bound = torch.quantile(tensor.float(), percentage)
     upper_bound = torch.quantile(tensor.float(), 1 - percentage)
     src_dtype = tensor.dtype
@@ -101,29 +134,29 @@ def clamp_tensor(tensor, percentage = 0.1):
 
 @torch.no_grad()
 def generate_image(
-        model,
-        processor,
-        prompt: str,
-        ref_image_paths: list = None,
-        height: int = 1440,
-        width: int = 2560,
-        num_inference_steps: int = 50,
-        guidance_scale: float = 5.0,
-        shift: float = 3.0,
-        timesteps_list=None,
-        scheduler_name: str = "default",
-        seed: int = 42,
-        noise_scale_start: float = NOISE_SCALE,
-        noise_scale_end: float = NOISE_SCALE,
-        noise_clip_std: float = 0.0,
-        keep_original_aspect: bool = False,
-        use_flash_attn: bool = False,
-        callback=None,
+    model,
+    processor,
+    prompt: str,
+    ref_image_paths: list = None,
+    height: int = 1440,
+    width: int = 2560,
+    num_inference_steps: int = 50,
+    guidance_scale: float = 5.0,
+    shift: float = 3.0,
+    timesteps_list=None,
+    scheduler_name: str = "default",
+    seed: int = 42,
+    noise_scale_start: float = NOISE_SCALE,
+    noise_scale_end: float = NOISE_SCALE,
+    noise_clip_std: float = 0.0,
+    keep_original_aspect: bool = False,
+    use_flash_attn: bool = False,
+    callback=None,
 ) -> Image.Image:
     device = model.device
     dtype = torch.bfloat16
     model_config = model.config
-    tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
 
     # When `keep_original_aspect` is enabled and exactly one reference image is
     # provided, resize the reference to max_size=2048 (patch-aligned) and derive
@@ -135,15 +168,11 @@ def generate_image(
         pil_orig = Image.open(ref_image_paths[0]).convert("RGB")
         preresized_ref_pil = resize_pilimage(pil_orig, 2048, PATCH_SIZE)
         width, height = preresized_ref_pil.size
-        print(
-            f"[info] keep_original_aspect: target size set to {width}x{height} "
-            f"from reference image"
-        )
+        print(f"[info] keep_original_aspect: target size set to {width}x{height} from reference image")
     else:
         if keep_original_aspect:
             print(
-                "[warning] keep_original_aspect requires exactly one reference "
-                "image; falling back to default resolution snapping."
+                "[warning] keep_original_aspect requires exactly one reference image; falling back to default resolution snapping."
             )
         w, h = find_closest_resolution(width, height)
         if w != width or h != height:
@@ -158,14 +187,14 @@ def generate_image(
         uncond_sample = None
         if guidance_scale > 1.0:
             uncond_sample = build_t2i_text_sample(" ", height, width, tokenizer, processor, model_config)
-        
+
         def to_device(s):
             return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in s.items()}
-        
+
         cond_sample = to_device(cond_sample)
         if uncond_sample is not None:
             uncond_sample = to_device(uncond_sample)
-            
+
         ref_patches = None
         tgt_image_len = (height // PATCH_SIZE) * (width // PATCH_SIZE)
         samples = [cond_sample]
@@ -176,18 +205,23 @@ def generate_image(
         video_token_id = model_config.video_token_id
         vision_start_token_id = model_config.vision_start_token_id
         spatial_merge_size = model_config.vision_config.spatial_merge_size
-        
+
         if preresized_ref_pil is not None:
             ref_pils = [preresized_ref_pil]
         else:
             ref_pils = [Image.open(p).convert("RGB") for p in ref_image_paths]
         K = len(ref_pils)
 
-        if K == 1: max_size = max(height, width)
-        elif K == 2: max_size = max(height, width) * 48 // 64
-        elif K <= 4: max_size = max(height, width) // 2
-        elif K <= 8: max_size = max(height, width) * 24 // 64
-        else: max_size = max(height, width) // 4
+        if K == 1:
+            max_size = max(height, width)
+        elif K == 2:
+            max_size = max(height, width) * 48 // 64
+        elif K <= 4:
+            max_size = max(height, width) // 2
+        elif K <= 8:
+            max_size = max(height, width) * 24 // 64
+        else:
+            max_size = max(height, width) // 4
 
         ref_pils_resized, ref_images = [], []
         for pil in ref_pils:
@@ -211,9 +245,12 @@ def generate_image(
         h_patches = height // PATCH_SIZE
         w_patches = width // PATCH_SIZE
 
-        if K <= 4: cond_img_size = CONDITION_IMAGE_SIZE
-        elif K <= 8: cond_img_size = CONDITION_IMAGE_SIZE * 48 // 64
-        else: cond_img_size = CONDITION_IMAGE_SIZE // 2
+        if K <= 4:
+            cond_img_size = CONDITION_IMAGE_SIZE
+        elif K <= 8:
+            cond_img_size = CONDITION_IMAGE_SIZE * 48 // 64
+        else:
+            cond_img_size = CONDITION_IMAGE_SIZE // 2
 
         ref_pils_vlm = []
         for pil_r in ref_pils_resized:
@@ -230,17 +267,19 @@ def generate_image(
         captions = [prompt]
         if guidance_scale > 1.0:
             captions.append(" ")
-            
+
         for caption in captions:
             boi_token = getattr(tokenizer, "boi_token", "<|boi_token|>")
             tms_token = getattr(tokenizer, "tms_token", "<|tms_token|>")
-            
+
             content = [{"type": "image"} for _ in range(K)]
             content.append({"type": "text", "text": caption})
             messages = [{"role": "user", "content": content}]
             template_caption = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             proc = processor(text=[template_caption], images=ref_pils_vlm, padding="longest", return_tensors="pt")
-            input_ids_2 = tokenizer.encode(boi_token + tms_token * TIMESTEP_TOKEN_NUM, return_tensors="pt", add_special_tokens=False)
+            input_ids_2 = tokenizer.encode(
+                boi_token + tms_token * TIMESTEP_TOKEN_NUM, return_tensors="pt", add_special_tokens=False
+            )
             input_ids = torch.cat([proc.input_ids, input_ids_2], dim=-1)
 
             igthw_cond = proc.image_grid_thw.clone()
@@ -261,9 +300,14 @@ def generate_image(
             input_ids_pad = torch.cat([input_ids, vision_tokens], dim=-1)
 
             position_ids, _ = get_rope_index_fix_point(
-                1, image_token_id, video_token_id, vision_start_token_id,
-                input_ids=input_ids_pad, image_grid_thw=igthw_all,
-                video_grid_thw=None, attention_mask=None,
+                1,
+                image_token_id,
+                video_token_id,
+                vision_start_token_id,
+                input_ids=input_ids_pad,
+                image_grid_thw=igthw_all,
+                video_grid_thw=None,
+                attention_mask=None,
                 skip_vision_start_token=[0] * K + [1] + [1] * K,
             )
             txt_seq_len = input_ids.shape[-1]
@@ -273,69 +317,77 @@ def generate_image(
             bgn = txt_seq_len - TIMESTEP_TOKEN_NUM
             end = bgn + tgt_image_len + TIMESTEP_TOKEN_NUM
             token_types_raw[0, bgn:end] = 1
-            token_types_raw[0, end: end + total_ref_len] = 2
-            token_types_raw[0, txt_seq_len - TIMESTEP_TOKEN_NUM: txt_seq_len] = 3
+            token_types_raw[0, end : end + total_ref_len] = 2
+            token_types_raw[0, txt_seq_len - TIMESTEP_TOKEN_NUM : txt_seq_len] = 3
 
             vinput_mask = torch.logical_or(token_types_raw == 1, token_types_raw == 2)
             token_types_bin = (token_types_raw > 0).to(token_types_raw.dtype)
 
-            samples.append({
-                "input_ids": input_ids.to(device),
-                "position_ids": position_ids.to(device),
-                "token_types": token_types_bin.to(device),
-                "vinput_mask": vinput_mask.to(device),
-                "pixel_values": proc.pixel_values.to(device, dtype),
-                "image_grid_thw": proc.image_grid_thw.to(device),
-            })
+            samples.append(
+                {
+                    "input_ids": input_ids.to(device),
+                    "position_ids": position_ids.to(device),
+                    "token_types": token_types_bin.to(device),
+                    "vinput_mask": vinput_mask.to(device),
+                    "pixel_values": proc.pixel_values.to(device, dtype),
+                    "image_grid_thw": proc.image_grid_thw.to(device),
+                }
+            )
 
     noise = noise_scale_start * torch.randn(
         (1, 3, height, width),
-        generator=torch.Generator('cpu').manual_seed(seed + 1),
+        generator=torch.Generator("cpu").manual_seed(seed + 1),
     ).to(device, dtype)
-    z = einops.rearrange(noise, 'B C (H p1) (W p2) -> B (H W) (C p1 p2)', p1=PATCH_SIZE, p2=PATCH_SIZE)
+    z = einops.rearrange(noise, "B C (H p1) (W p2) -> B (H W) (C p1 p2)", p1=PATCH_SIZE, p2=PATCH_SIZE)
 
     sched = build_scheduler(num_inference_steps, timesteps_list, shift, device, scheduler_name)
 
     num_steps = len(sched.timesteps)
     if num_steps > 1:
         noise_scale_schedule = [
-            noise_scale_start + (noise_scale_end - noise_scale_start) * i / (num_steps - 1)
-            for i in range(num_steps)
+            noise_scale_start + (noise_scale_end - noise_scale_start) * i / (num_steps - 1) for i in range(num_steps)
         ]
     else:
         noise_scale_schedule = [noise_scale_start]
 
     torch.manual_seed(seed + 1)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed + 1)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed + 1)
 
     def forward_once(sample, z_in, t_pixeldit):
         with torch.autocast(device.type, dtype=dtype):
             kwargs = {
-                "input_ids": sample['input_ids'],
-                "position_ids": sample['position_ids'],
+                "input_ids": sample["input_ids"],
+                "position_ids": sample["position_ids"],
                 "vinputs": z_in,
                 "timestep": t_pixeldit.reshape(-1).to(device),
-                "token_types": sample['token_types'],
+                "token_types": sample["token_types"],
                 "use_flash_attn": use_flash_attn,
             }
-            if "pixel_values" in sample: kwargs["pixel_values"] = sample["pixel_values"]
-            if "image_grid_thw" in sample: kwargs["image_grid_thw"] = sample["image_grid_thw"]
+            if "pixel_values" in sample:
+                kwargs["pixel_values"] = sample["pixel_values"]
+            if "image_grid_thw" in sample:
+                kwargs["image_grid_thw"] = sample["image_grid_thw"]
 
             outputs = model(**kwargs)
-            
+
         x_pred = outputs.x_pred
         # x_pred = clamp_tensor(x_pred, percentage = 0.01)
         if ref_patches is None:
-            return x_pred[0, sample['vinput_mask'][0]].unsqueeze(0)
+            return x_pred[0, sample["vinput_mask"][0]].unsqueeze(0)
         else:
-            return x_pred[0, sample['vinput_mask'][0]][:tgt_image_len].unsqueeze(0)
+            return x_pred[0, sample["vinput_mask"][0]][:tgt_image_len].unsqueeze(0)
 
     def _decode_x0_preview(x0_pred):
         """Convert a model-predicted x_0 (patch layout, [-1,1]) to a PIL image."""
         img_t = (x0_pred.float() + 1) / 2
         img_t = einops.rearrange(
-            img_t.cpu(), 'B (H W) (C p1 p2) -> B C (H p1) (W p2)',
-            H=h_patches, W=w_patches, p1=PATCH_SIZE, p2=PATCH_SIZE,
+            img_t.cpu(),
+            "B (H W) (C p1 p2) -> B C (H p1) (W p2)",
+            H=h_patches,
+            W=w_patches,
+            p1=PATCH_SIZE,
+            p2=PATCH_SIZE,
         )
         arr_p = np.round(np.clip(img_t[0].numpy().transpose(1, 2, 0) * 255, 0, 255)).astype(np.uint8)
         return Image.fromarray(arr_p).convert("RGB")
@@ -359,7 +411,7 @@ def generate_image(
             vinputs = torch.cat([z, ref_patches], dim=1)
             x_vis_list = [forward_once(sample, vinputs, t_pixeldit) for sample in samples]
             x_vis_stacked = torch.cat(x_vis_list, dim=0)
-            
+
             z_rep = z.expand(len(samples), -1, -1)
             v_pred = (x_vis_stacked.to(dtype=torch.float32) - z_rep.to(dtype=torch.float32)) / sigma
 
@@ -374,7 +426,14 @@ def generate_image(
         model_output = -v_guided
         # model_output = clamp_tensor(model_output, percentage = 0.05)
         if scheduler_name == "flash":
-            z = sched.step(model_output.float(), step_t.to(dtype=torch.float32), z.float(), s_noise=noise_scale_schedule[step_idx], noise_clip_std=noise_clip_std, return_dict=False)[0].to(dtype)
+            z = sched.step(
+                model_output.float(),
+                step_t.to(dtype=torch.float32),
+                z.float(),
+                s_noise=noise_scale_schedule[step_idx],
+                noise_clip_std=noise_clip_std,
+                return_dict=False,
+            )[0].to(dtype)
         else:
             z = sched.step(model_output.float(), step_t.to(dtype=torch.float32), z.float(), return_dict=False)[0].to(dtype)
 
@@ -382,12 +441,13 @@ def generate_image(
             try:
                 # Pass a closure that captures the current step's x0 prediction.
                 # Use a default-arg binding to avoid late-binding issues.
-                callback(step_idx, len(sched.timesteps),
-                         lambda x0=preview_x0: _decode_x0_preview(x0))
+                callback(step_idx, len(sched.timesteps), lambda x0=preview_x0: _decode_x0_preview(x0))
             except Exception:
                 pass
 
     img = (z + 1) / 2
-    img = einops.rearrange(img.cpu().float(), 'B (H W) (C p1 p2) -> B C (H p1) (W p2)', H=h_patches, W=w_patches, p1=PATCH_SIZE, p2=PATCH_SIZE)
+    img = einops.rearrange(
+        img.cpu().float(), "B (H W) (C p1 p2) -> B C (H p1) (W p2)", H=h_patches, W=w_patches, p1=PATCH_SIZE, p2=PATCH_SIZE
+    )
     arr = np.round(np.clip(img[0].numpy().transpose(1, 2, 0) * 255, 0, 255)).astype(np.uint8)
     return Image.fromarray(arr).convert("RGB")

@@ -1,4 +1,4 @@
-﻿import math
+import math
 import torch
 from typing import Optional
 from PIL import Image
@@ -17,6 +17,7 @@ PREDEFINED_RESOLUTIONS = [
     (1792, 2304),
 ]
 
+
 def find_closest_resolution(width, height):
     img_ratio = width / height
     best_res = None
@@ -29,11 +30,10 @@ def find_closest_resolution(width, height):
             best_res = (w, h)
     return best_res
 
+
 def resize_pilimage(pil_image, image_size, patch_size=16, resampler=Image.BICUBIC):
     while min(*pil_image.size) >= 2 * image_size:
-        pil_image = pil_image.resize(
-            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
-        )
+        pil_image = pil_image.resize(tuple(x // 2 for x in pil_image.size), resample=Image.BOX)
 
     m = patch_size
     width, height = pil_image.width, pil_image.height
@@ -66,6 +66,7 @@ def resize_pilimage(pil_image, image_size, patch_size=16, resampler=Image.BICUBI
 
     return pil_image
 
+
 def calculate_dimensions(max_size, ratio):
     width = math.sqrt(max_size * max_size * ratio)
     height = width / ratio
@@ -73,17 +74,18 @@ def calculate_dimensions(max_size, ratio):
     height = int(height / 32) * 32
     return width, height
 
+
 def get_rope_index_fix_point(
-        spatial_merge_size,
-        image_token_id,
-        video_token_id,
-        vision_start_token_id,
-        input_ids: Optional[torch.LongTensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        skip_vision_start_token=None,
-        fix_point=4096,
+    spatial_merge_size,
+    image_token_id,
+    video_token_id,
+    vision_start_token_id,
+    input_ids: Optional[torch.LongTensor] = None,
+    image_grid_thw: Optional[torch.LongTensor] = None,
+    video_grid_thw: Optional[torch.LongTensor] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    skip_vision_start_token=None,
+    fix_point=4096,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if video_grid_thw is not None:
         video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
@@ -186,9 +188,7 @@ def get_rope_index_fix_point(
             mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
         else:
             position_ids = (
-                torch.arange(input_ids.shape[1], device=input_ids.device)
-                .view(1, 1, -1)
-                .expand(3, input_ids.shape[0], -1)
+                torch.arange(input_ids.shape[1], device=input_ids.device).view(1, 1, -1).expand(3, input_ids.shape[0], -1)
             )
             mrope_position_deltas = torch.zeros(
                 [input_ids.shape[0], 1],
