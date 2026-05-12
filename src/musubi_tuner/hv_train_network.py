@@ -1783,7 +1783,7 @@ class NetworkTrainer:
         num_tokens = H * W
         num_masked = int(mask_ratio * num_tokens)
 
-        if num_masked == 0:
+        if num_masked == 0 or seed_count <= 0:
             return torch.zeros(B, H, W, dtype=torch.bool, device=device)
 
         # Coordinate grids: (H, W) each
@@ -1791,37 +1791,33 @@ class NetworkTrainer:
         w_coords = torch.arange(W, dtype=torch.float32, device=device)
         grid_h, grid_w = torch.meshgrid(h_coords, w_coords, indexing="ij")  # (H, W)
 
-        mask_hw = torch.zeros(B, H, W, dtype=torch.bool, device=device)
+        # Random seed points: (B, K)
+        seeds_h = torch.randint(0, H, (B, seed_count), device=device).float()
+        seeds_w = torch.randint(0, W, (B, seed_count), device=device).float()
 
-        for b in range(B):
-            # Random seed points: (K, 2)
-            seeds_h = torch.randint(0, H, (seed_count,), device=device).float()
-            seeds_w = torch.randint(0, W, (seed_count,), device=device).float()
+        # Distance from every position to every seed: (B, K, H, W)
+        dh = grid_h[None, None] - seeds_h.view(B, seed_count, 1, 1)
+        dw = grid_w[None, None] - seeds_w.view(B, seed_count, 1, 1)
 
-            # Distance from every position to every seed: (K, H, W)
-            dh = grid_h.unsqueeze(0) - seeds_h.view(-1, 1, 1)  # (K, H, W)
-            dw = grid_w.unsqueeze(0) - seeds_w.view(-1, 1, 1)  # (K, H, W)
+        if seed_shape == "square":
+            dist = torch.max(dh.abs(), dw.abs())  # L∞
+        elif seed_shape == "circle":
+            dist = torch.sqrt(dh ** 2 + dw ** 2)  # L2
+        elif seed_shape == "diamond":
+            dist = dh.abs() + dw.abs()  # L1
+        else:
+            raise ValueError(f"Unknown seed_shape: {seed_shape}")
 
-            if seed_shape == "square":
-                dist = torch.max(dh.abs(), dw.abs())  # L∞
-            elif seed_shape == "circle":
-                dist = torch.sqrt(dh ** 2 + dw ** 2)  # L2
-            elif seed_shape == "diamond":
-                dist = dh.abs() + dw.abs()  # L1
-            else:
-                raise ValueError(f"Unknown seed_shape: {seed_shape}")
+        # Min distance to nearest seed: (B, H, W)
+        min_dist = dist.min(dim=1).values
 
-            # Min distance to nearest seed: (H, W)
-            min_dist = dist.min(dim=0).values  # (H, W)
+        # Select the closest num_masked tokens per batch element
+        flat_dist = min_dist.view(B, -1)  # (B, H*W)
+        _, indices = flat_dist.topk(num_masked, dim=1, largest=False)  # (B, num_masked)
+        mask_flat = torch.zeros(B, num_tokens, dtype=torch.bool, device=device)
+        mask_flat.scatter_(1, indices, True)
 
-            # Select the closest num_masked tokens
-            flat_dist = min_dist.view(-1)  # (H*W,)
-            _, indices = flat_dist.topk(num_masked, largest=False)
-            flat_mask = torch.zeros(num_tokens, dtype=torch.bool, device=device)
-            flat_mask[indices] = True
-            mask_hw[b] = flat_mask.view(H, W)
-
-        return mask_hw
+        return mask_flat.view(B, H, W)
 
     def _build_per_token_timestep_map(
         self,
