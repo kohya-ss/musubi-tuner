@@ -4,12 +4,22 @@
 
 This document describes the minimal workflow for HiDream-O1-Image support in Musubi Tuner.
 
-HiDream-O1-Image uses separate command line arguments for model weights and text encoder assets:
+HiDream-O1-Image uses a single required model-weight argument for training and inference:
 
-- `--dit`: HiDream-O1 model weights.
-- `--text_encoder`: Qwen3VL text encoder / processor directory.
+- `--dit`: HiDream-O1 single checkpoint (`.safetensors`) or a compatible model weights directory.
 
-If the upstream checkpoint is packaged as a single Hugging Face directory, pass that directory to both arguments. This support is experimental.
+For the base model, use the single checkpoints from Comfy-Org:
+
+- https://huggingface.co/Comfy-Org/HiDream-O1-Image/tree/main/checkpoints
+- `hidream_o1_image_bf16.safetensors`
+- `hidream_o1_image_dev_bf16.safetensors`
+
+The Comfy-Org fp8 and mxfp8 files are intended for the ComfyUI HiDream-O1 implementation and are not the default training path here. This support is experimental.
+
+Tokenizer, processor, and config assets are loaded automatically from the official HiDream repositories:
+
+- `HiDream-ai/HiDream-O1-Image` for `--model_type full`
+- `HiDream-ai/HiDream-O1-Image-Dev` for `--model_type dev`
 
 The workflow has three steps:
 
@@ -23,7 +33,7 @@ Download the HiDream-O1-Image model from the official repository:
 
 - https://github.com/HiDream-ai/HiDream-O1-Image
 
-Use the local paths as `path/to/hidream_o1_dit` and `path/to/hidream_o1_text_encoder` in the examples below.
+Use the local checkpoint path as `path/to/checkpoints/hidream_o1_image_bf16.safetensors` in the examples below.
 
 ## Pre-caching
 
@@ -45,31 +55,39 @@ Notes:
 
 ### Prompt Token Cache
 
-The text cache stores tokenized prompts and initial text token embeddings for the HiDream-O1 processor / Qwen3VL embedding layer.
+The text cache stores tokenized prompts using the official HiDream-O1 tokenizer. If `--dit` is also passed, it can additionally cache initial text token embeddings from the single checkpoint.
 
 ```bash
 python src/musubi_tuner/hidream_o1_cache_text_encoder_outputs.py \
     --dataset_config path/to/dataset.toml \
-    --text_encoder path/to/hidream_o1_text_encoder \
-    --fp8_te \
     --batch_size 16
 ```
 
 Notes:
 
-- `--fp8_te` caches the initial text token embeddings in fp8 precision to reduce cache size and text-cache memory usage.
+- No separate text encoder path is required. Tokenizer assets are loaded from the official HiDream-O1 repository for the selected `--model_type`.
+- `--fp8_te` caches the initial text token embeddings in fp8 precision and requires `--dit`.
 - Cache files use the `ho1` text encoder suffix, for example `*_ho1_te.safetensors`.
 - Safetensors metadata records fields such as architecture, caption, width, and height, but dataset cache discovery still uses the filename suffix.
 - HiDream-O1 does not precompute full decoder hidden states here. The Qwen3VL decoder is also part of the denoising model, so it still runs during training and inference.
 
+Optional fp8 text-embedding cache:
+
+```bash
+python src/musubi_tuner/hidream_o1_cache_text_encoder_outputs.py \
+    --dataset_config path/to/dataset.toml \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
+    --fp8_te \
+    --batch_size 16
+```
+
 ## LoRA Training
 
-Use `hidream_o1_train_network.py` with the HiDream-O1 model weights passed as `--dit` and the text encoder / processor path passed as `--text_encoder`.
+Use `hidream_o1_train_network.py` with the HiDream-O1 single checkpoint passed as `--dit`.
 
 ```bash
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train_network.py \
-    --dit path/to/hidream_o1_dit \
-    --text_encoder path/to/hidream_o1_text_encoder \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
     --mixed_precision bf16 \
     --timestep_sampling sigma --weighting_scheme none \
@@ -90,8 +108,7 @@ Example with memory saving enabled:
 
 ```bash
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train_network.py \
-    --dit path/to/hidream_o1_dit \
-    --text_encoder path/to/hidream_o1_text_encoder \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
     --mixed_precision bf16 \
     --timestep_sampling sigma --weighting_scheme none \
@@ -109,8 +126,7 @@ Use `hidream_o1_generate_image.py` for standalone inference.
 
 ```bash
 python src/musubi_tuner/hidream_o1_generate_image.py \
-    --dit path/to/hidream_o1_dit \
-    --text_encoder path/to/hidream_o1_text_encoder \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --prompt "a cinematic portrait of a woman in a red coat" \
     --save_path path/to/output.png \
     --image_size 2048 2048 \
@@ -123,8 +139,7 @@ LoRA weights can be merged for inference:
 
 ```bash
 python src/musubi_tuner/hidream_o1_generate_image.py \
-    --dit path/to/hidream_o1_dit \
-    --text_encoder path/to/hidream_o1_text_encoder \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --prompt "a cinematic portrait of a woman in a red coat" \
     --save_path path/to/output.png \
     --image_size 2048 2048 \

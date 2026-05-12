@@ -16,8 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="HiDream-O1-Image inference script")
-    parser.add_argument("--dit", type=str, required=True, help="HiDream-O1 DiT / model weights directory")
-    parser.add_argument("--text_encoder", type=str, required=True, help="HiDream-O1 Qwen3VL text encoder / processor directory")
+    parser.add_argument("--dit", type=str, required=True, help="HiDream-O1 single checkpoint (.safetensors) or model weights directory")
     parser.add_argument("--prompt", type=str, required=True, help="Prompt for generation")
     parser.add_argument("--ref_images", nargs="*", default=[], help="Reference image path(s) for editing or subject guidance")
     parser.add_argument("--save_path", "--output_image", dest="save_path", type=str, required=True, help="Path to save image")
@@ -84,11 +83,11 @@ def main():
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = str_to_dtype(args.dtype)
 
-    logger.info(f"Loading HiDream-O1 processor from {args.text_encoder}")
-    processor = hidream_o1_utils.load_processor(args.text_encoder)
+    logger.info(f"Loading HiDream-O1 processor for model_type={args.model_type}")
+    processor = hidream_o1_utils.load_processor(model_type=args.model_type)
     loading_device = "cpu" if args.blocks_to_swap else device
     logger.info(f"Loading HiDream-O1 model from {args.dit}")
-    model = hidream_o1_utils.load_model(args.dit, dtype=dtype, device=loading_device)
+    model = hidream_o1_utils.load_model(args.dit, dtype=dtype, device=loading_device, model_type=args.model_type)
     if args.blocks_to_swap:
         model.enable_block_swap(
             args.blocks_to_swap,

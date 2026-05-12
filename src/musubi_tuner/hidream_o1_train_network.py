@@ -25,7 +25,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
         self.processor = None
-        self.text_encoder_path = None
         self.use_flash_attn = False
         self.model_type = "full"
 
@@ -46,7 +45,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.default_discrete_flow_shift = 3.0
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
-        self.text_encoder_path = args.text_encoder
 
         if args.timestep_sampling != "sigma":
             raise ValueError("HiDream-O1 currently supports --timestep_sampling sigma only.")
@@ -79,7 +77,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         control_video_path=None,
     ):
         model = accelerator.unwrap_model(transformer)
-        processor = self.processor or hidream_o1_utils.load_processor(args.text_encoder)
+        processor = self.processor or hidream_o1_utils.load_processor(model_type=self.model_type)
 
         prompt = sample_parameter.get("prompt", "")
         ref_image_paths = sample_parameter.get("control_image_path", None)
@@ -134,9 +132,9 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        self.processor = hidream_o1_utils.load_processor(args.text_encoder)
+        self.processor = hidream_o1_utils.load_processor(model_type=args.model_type)
         dtype = dit_weight_dtype or torch.bfloat16
-        model = hidream_o1_utils.load_model(dit_path, dtype=dtype, device=loading_device)
+        model = hidream_o1_utils.load_model(dit_path, dtype=dtype, device=loading_device, model_type=args.model_type)
 
         if not hasattr(model, "enable_gradient_checkpointing"):
             model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable()
@@ -257,7 +255,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--model_type", type=str, default="full", choices=["full", "dev"], help="HiDream-O1 model variant")
-    parser.add_argument("--text_encoder", type=str, required=True, help="HiDream-O1 Qwen3VL text encoder / processor directory")
     return parser
 
 

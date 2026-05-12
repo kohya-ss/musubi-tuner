@@ -17,15 +17,18 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def encode_and_save_batch(processor, embedding_weight: torch.Tensor, device: torch.device, batch: list[ItemInfo]):
+def encode_and_save_batch(processor, embedding_weight: torch.Tensor | None, device: torch.device, batch: list[ItemInfo]):
     for item in batch:
         input_ids = hidream_o1_utils.build_t2i_input_ids(item.caption, processor)
-        input_embeds = hidream_o1_utils.build_text_input_embeds(input_ids, embedding_weight, device)
-        save_text_encoder_output_cache_hidream_o1(item, input_ids, input_embeds.cpu())
+        input_embeds = None
+        if embedding_weight is not None:
+            input_embeds = hidream_o1_utils.build_text_input_embeds(input_ids, embedding_weight, device).cpu()
+        save_text_encoder_output_cache_hidream_o1(item, input_ids, input_embeds)
 
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--text_encoder", type=str, required=True, help="HiDream-O1 Qwen3VL text encoder / processor directory")
+    parser.add_argument("--model_type", type=str, default="full", choices=["full", "dev"], help="HiDream-O1 model variant")
+    parser.add_argument("--dit", type=str, default=None, help="HiDream-O1 single checkpoint for optional cached text embeddings")
     parser.add_argument("--fp8_te", action="store_true", help="Cache HiDream-O1 text token embeddings in fp8 precision")
     return parser
 
@@ -47,13 +50,18 @@ def main():
     datasets = train_dataset_group.datasets
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
 
-    logger.info(f"Loading HiDream-O1 processor from {args.text_encoder}")
-    processor = hidream_o1_utils.load_processor(args.text_encoder)
-    te_dtype = torch.float8_e4m3fn if args.fp8_te else torch.bfloat16
-    logger.info(f"Loading HiDream-O1 text embedding weight from {args.text_encoder}, dtype={te_dtype}")
-    embedding_weight = hidream_o1_utils.load_text_embedding_weight(args.text_encoder, te_dtype, device)
+    logger.info(f"Loading HiDream-O1 processor for model_type={args.model_type}")
+    processor = hidream_o1_utils.load_processor(model_type=args.model_type)
+    if args.fp8_te and args.dit is None:
+        raise ValueError("--fp8_te requires --dit so text embeddings can be cached from the single checkpoint.")
 
-    def encode_for_text_encoder(batch: list[ItemInfo], embedding_weight: torch.Tensor = embedding_weight):
+    embedding_weight = None
+    if args.dit is not None:
+        te_dtype = torch.float8_e4m3fn if args.fp8_te else torch.bfloat16
+        logger.info(f"Loading HiDream-O1 text embedding weight from {args.dit}, dtype={te_dtype}")
+        embedding_weight = hidream_o1_utils.load_text_embedding_weight(args.dit, te_dtype, device)
+
+    def encode_for_text_encoder(batch: list[ItemInfo], embedding_weight: torch.Tensor | None = embedding_weight):
         encode_and_save_batch(processor, embedding_weight, device, batch)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
@@ -70,7 +78,8 @@ def main():
         datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache
     )
 
-    del embedding_weight
+    if embedding_weight is not None:
+        del embedding_weight
     logger.info("Done!")
 
 
