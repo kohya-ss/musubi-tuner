@@ -71,6 +71,8 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
+        if args.fp8_base and not getattr(args, "fp8_scaled", False):
+            raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         return load_prompts(sample_prompts)
