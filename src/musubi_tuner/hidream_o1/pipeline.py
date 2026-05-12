@@ -5,10 +5,9 @@ import tqdm
 from PIL import Image
 import torchvision.transforms.v2 as transforms
 
-from diffusers import FlowMatchEulerDiscreteScheduler
-
 from musubi_tuner.hidream_o1.flash_scheduler import FlashFlowMatchEulerDiscreteScheduler
 from musubi_tuner.hidream_o1.utils import resize_pilimage, calculate_dimensions, get_rope_index_fix_point, find_closest_resolution
+from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 TIMESTEP_TOKEN_NUM = 1
 NOISE_SCALE = 8.0
@@ -81,7 +80,7 @@ def build_scheduler(num_inference_steps, timesteps_list, shift, device, schedule
         sched = FlashFlowMatchEulerDiscreteScheduler(
             num_train_timesteps=1000, shift=shift, use_dynamic_shifting=False)
     elif scheduler_name == "default":
-        sched = FlowMatchEulerDiscreteScheduler(use_dynamic_shifting=False, shift=shift)
+        sched = FlowUniPCMultistepScheduler(use_dynamic_shifting=False, shift=shift)
     else:
         raise ValueError(f"Unknown scheduler_name={scheduler_name!r}")
     sched.set_timesteps(num_inference_steps, device=device)
