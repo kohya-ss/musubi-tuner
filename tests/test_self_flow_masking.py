@@ -231,3 +231,45 @@ def test_seed_mask_shapes(trainer, shape):
     expected_count = int(0.25 * 16 * 16)
     actual_count = mask_flat[0].sum().item()
     assert actual_count == expected_count
+
+
+def test_none_mode_matches_no_args(trainer):
+    """Passing args with mode=none produces same result as args=None."""
+    student = torch.ones(2, 4, 16, 16)
+    teacher = torch.zeros(2, 4, 16, 16)
+
+    torch.manual_seed(99)
+    _, mask_no_args = trainer._apply_per_token_mask(
+        student, teacher, 0.25, torch.device("cpu")
+    )
+
+    torch.manual_seed(99)
+    args = argparse.Namespace(self_flow_patch_locality_mode="none")
+    _, mask_with_args = trainer._apply_per_token_mask(
+        student, teacher, 0.25, torch.device("cpu"), args=args
+    )
+
+    assert torch.equal(mask_no_args, mask_with_args)
+
+
+def test_5d_grid_mask_applies_per_frame(trainer):
+    """For 5D tensors, grid mask applies same H,W pattern to every frame."""
+    torch.manual_seed(42)
+    student = torch.ones(1, 4, 4, 16, 16)  # (B, C, T, H, W)
+    teacher = torch.zeros(1, 4, 4, 16, 16)
+
+    args = argparse.Namespace(
+        self_flow_patch_locality_mode="grid",
+        self_flow_patch_block_size=4,
+        mask_ratio=0.25,
+    )
+    _, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+    # mask_flat is (B, T*H*W) — reshape to (B, T, H, W)
+    mask_thw = mask_flat.view(1, 4, 16, 16)
+    # Every frame should have the same H,W mask
+    for t in range(1, 4):
+        assert torch.equal(mask_thw[0, 0], mask_thw[0, t]), (
+            f"Frame {t} mask differs from frame 0"
+        )
