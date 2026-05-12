@@ -211,11 +211,32 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         dtype: torch.dtype,
     ):
         noise_scale = getattr(args, "hidream_train_noise_scale", 1.0)
-        if noise_scale != 1.0:
+        noise_scale_power = getattr(args, "hidream_train_noise_scale_power", 0.0)
+        if noise_scale != 1.0 and noise_scale_power == 0.0:
             noise = noise * noise_scale
-        return super().get_noisy_model_input_and_timesteps(
+            return super().get_noisy_model_input_and_timesteps(
+                args, noise, latents, timesteps, noise_scheduler, device, dtype
+            )
+
+        noisy_model_input, timesteps = super().get_noisy_model_input_and_timesteps(
             args, noise, latents, timesteps, noise_scheduler, device, dtype
         )
+
+        if noise_scale == 1.0:
+            return noisy_model_input, timesteps
+
+        if args.timestep_sampling in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+            sigma = ((timesteps.to(device=device, dtype=dtype) - 1.0) / 1000.0).clamp(0.0, 1.0)
+        else:
+            sigma = (timesteps.to(device=device, dtype=dtype) / 1000.0).clamp(0.0, 1.0)
+
+        scale = 1.0 + (noise_scale - 1.0) * sigma.pow(noise_scale_power)
+        while len(scale.shape) < latents.ndim:
+            scale = scale.unsqueeze(-1)
+        noisy_model_input = (1.0 - sigma.reshape(scale.shape[0], *([1] * (latents.ndim - 1)))) * latents + (
+            sigma.reshape(scale.shape[0], *([1] * (latents.ndim - 1))) * noise * scale
+        )
+        return noisy_model_input, timesteps
 
     def _build_layout_tensors(
         self,
@@ -421,6 +442,12 @@ def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         type=float,
         default=1.0,
         help="Scale the Gaussian noise used for HiDream-O1 training inputs. Default 1.0 follows the paper; 8.0 matches the official inference initial-noise scale.",
+    )
+    parser.add_argument(
+        "--hidream_train_noise_scale_power",
+        type=float,
+        default=0.0,
+        help="If >0, decay --hidream_train_noise_scale by sigma**power so late denoising timesteps stay closer to normal training noise. Try 2.0 with scale 8.0.",
     )
     parser.add_argument(
         "--fp8_scaled",
