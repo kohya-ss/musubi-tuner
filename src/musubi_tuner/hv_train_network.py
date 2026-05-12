@@ -2104,7 +2104,7 @@ class NetworkTrainer:
 
         # Per-token masking (paper Eq. 4-5) — returns (masked_input, mask_flat)
         noisy_input_student, mask_flat = self._apply_per_token_mask(
-            noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device
+            noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device, args=args
         )
 
         # Per-token timestep map with optional mismatch.
@@ -2619,7 +2619,11 @@ class NetworkTrainer:
                 f"teacher_layer={args.teacher_feature_layer}, "
                 f"teacher_coupling_prob={args.self_flow_teacher_coupling_prob}, "
                 f"teacher_coupling_decay={args.self_flow_teacher_coupling_decay}, "
-                f"teacher_mismatch_ratio={args.self_flow_teacher_mismatch_ratio}"
+                f"teacher_mismatch_ratio={args.self_flow_teacher_mismatch_ratio}, "
+                f"patch_locality_mode={args.self_flow_patch_locality_mode}, "
+                f"patch_block_size={args.self_flow_patch_block_size}, "
+                f"patch_seed_count={args.self_flow_patch_seed_count}, "
+                f"patch_seed_shape={args.self_flow_patch_seed_shape}"
             )
 
         if args.gradient_checkpointing:
@@ -2741,6 +2745,10 @@ class NetworkTrainer:
             metadata["ss_self_flow_teacher_coupling_prob"] = args.self_flow_teacher_coupling_prob
             metadata["ss_self_flow_teacher_coupling_decay"] = args.self_flow_teacher_coupling_decay
             metadata["ss_self_flow_teacher_mismatch_ratio"] = args.self_flow_teacher_mismatch_ratio
+            metadata["ss_self_flow_patch_locality_mode"] = args.self_flow_patch_locality_mode
+            metadata["ss_self_flow_patch_block_size"] = args.self_flow_patch_block_size
+            metadata["ss_self_flow_patch_seed_count"] = args.self_flow_patch_seed_count
+            metadata["ss_self_flow_patch_seed_shape"] = args.self_flow_patch_seed_shape
 
         datasets_metadata = []
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
