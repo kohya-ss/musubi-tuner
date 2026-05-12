@@ -90,7 +90,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
     --mixed_precision bf16 \
-    --timestep_sampling sigma --weighting_scheme none \
+    --timestep_sampling uniform --weighting_scheme none \
     --optimizer_type adamw8bit --learning_rate 1e-4 \
     --gradient_checkpointing \
     --network_module networks.lora_hidream_o1 --network_dim 32 \
@@ -103,6 +103,7 @@ Memory related options:
 - `--blocks_to_swap N` offloads Qwen3VL decoder blocks to CPU. This is recommended for high resolutions such as 2048x2048.
 - `--use_pinned_memory_for_block_swap` can improve transfer speed, but may increase shared GPU memory usage on Windows.
 - `--flash_attn` enables the HiDream-O1 flash attention path. This is recommended for 2K resolution if FlashAttention is installed.
+- `--timestep_sampling uniform --weighting_scheme none` matches the uniform timestep sampling described for HiDream-O1 post-training/SFT in the paper.
 
 Example with memory saving enabled:
 
@@ -111,7 +112,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
     --mixed_precision bf16 \
-    --timestep_sampling sigma --weighting_scheme none \
+    --timestep_sampling uniform --weighting_scheme none \
     --optimizer_type adamw8bit --learning_rate 1e-4 \
     --gradient_checkpointing --flash_attn \
     --blocks_to_swap 24 --use_pinned_memory_for_block_swap \

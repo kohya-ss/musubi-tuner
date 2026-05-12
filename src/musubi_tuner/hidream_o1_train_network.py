@@ -16,6 +16,18 @@ from musubi_tuner.utils import model_utils
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS = {
+    "uniform",
+    "sigmoid",
+    "shift",
+    "flux_shift",
+    "qwen_shift",
+    "logsnr",
+    "qinglong_flux",
+    "qinglong_qwen",
+    "flux2_shift",
+}
+
 
 class _NoVAE(torch.nn.Module):
     pass
@@ -46,8 +58,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
 
-        if args.timestep_sampling != "sigma":
-            raise ValueError("HiDream-O1 currently supports --timestep_sampling sigma only.")
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
         if args.fp8_base or args.fp8_scaled:
@@ -227,7 +237,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 accelerator.device,
             )
             vinputs = noisy_model_input_seq[i : i + 1].to(device=accelerator.device, dtype=network_dtype)
-            timestep = (1.0 - timesteps[i : i + 1].to(device=accelerator.device, dtype=network_dtype) / 1000.0).reshape(-1)
+            raw_timestep = timesteps[i : i + 1].to(device=accelerator.device, dtype=network_dtype)
+            if args.timestep_sampling in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+                timestep = ((1001.0 - raw_timestep) / 1000.0).clamp(0.0, 1.0).reshape(-1)
+            else:
+                timestep = (1.0 - raw_timestep / 1000.0).clamp(0.0, 1.0).reshape(-1)
 
             if args.gradient_checkpointing:
                 vinputs.requires_grad_(True)
