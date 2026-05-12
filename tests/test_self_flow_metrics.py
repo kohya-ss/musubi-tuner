@@ -127,3 +127,19 @@ def test_self_flow_logs_feat_cosine_sim_none_when_no_rep(trainer):
     )
 
     assert trainer._self_flow_logs["self_flow/feat_cosine_sim"] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_actual_mask_ratio_logged(trainer):
+    """actual_mask_ratio is logged in self_flow_logs."""
+    mask_flat = torch.zeros(2, 64, dtype=torch.bool)
+    mask_flat[:, :16] = True  # 25% masked
+
+    trainer._update_self_flow_logs(
+        L_gen=torch.tensor(0.5),
+        L_rep=None,
+        timesteps_student=torch.tensor([500.0, 600.0]),
+        timesteps_teacher=torch.tensor([200.0, 300.0]),
+        mask_flat=mask_flat,
+    )
+    assert "self_flow/actual_mask_ratio" in trainer._self_flow_logs
+    assert abs(trainer._self_flow_logs["self_flow/actual_mask_ratio"] - 0.25) < 1e-6

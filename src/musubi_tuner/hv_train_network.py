@@ -2035,6 +2035,7 @@ class NetworkTrainer:
             "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
             "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
             "self_flow/teacher_coupling_prob": teacher_coupling_prob,
+            "self_flow/actual_mask_ratio": mask_flat.float().mean().item(),
         }
         if mismatch_mask is not None:
             self._self_flow_logs["self_flow/mismatch_patch_count"] = mismatch_count
