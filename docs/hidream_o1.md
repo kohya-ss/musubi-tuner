@@ -108,8 +108,9 @@ Memory related options:
 - `--use_pinned_memory_for_block_swap` can improve transfer speed, but may increase shared GPU memory usage on Windows.
 - `--flash_attn` enables the HiDream-O1 flash attention path. This is recommended for 2K resolution if FlashAttention is installed.
 - `--timestep_sampling uniform --weighting_scheme none` matches the uniform timestep sampling described for HiDream-O1 post-training/SFT in the paper.
-- `--hidream_train_noise_scale N` scales the Gaussian noise used to build training inputs. The default `1.0` follows the paper; try `4.0` or `8.0` to test whether matching the official inference noise scale improves LoRA fitting.
-- `--hidream_train_noise_scale_power P` makes that scale timestep-dependent as `1 + (N - 1) * sigma**P`. Try `--hidream_train_noise_scale=8 --hidream_train_noise_scale_power=2` if fixed `8x` fits faster but shifts colors.
+- `--noise_scale_start/end` scale the Gaussian noise used to build training inputs and training samples. Defaults follow the official inference code: full uses `8.0/8.0`, dev uses `7.5/7.5`.
+- `--noise_clip_std` clips Gaussian noise before applying the scale. Defaults follow the official scheduler branch: full uses `0.0`, dev uses `2.5`.
+- `--dino_loss_weight N` enables the common SenseCraft DINOv3 auxiliary perceptual loss. HiDream-O1 converts predicted and target pixel patch tokens back to RGB before computing this loss. See `docs/advanced_config.md`.
 - HiDream-O1 LoRA targets are selected from the dataset automatically. Datasets without `control_directory` use decoder + pixel patch input/output layers. Datasets with control/reference inputs also select Qwen3-VL visual encoder layers.
 - Control/reference datasets use `conv_dim=4 conv_alpha=4` by default for LoRA on the Conv3d visual patch embedding. Set `--network_args conv_dim=0` to skip that layer, or pass a larger value to increase its rank.
 - The Qwen3VL decoder blocks are the shared generation backbone for text and image tokens. Token embeddings and the LM head remain excluded.

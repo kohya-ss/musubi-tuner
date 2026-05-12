@@ -11,7 +11,7 @@ from musubi_tuner.hidream_o1 import hidream_o1_utils
 from musubi_tuner.hidream_o1.pipeline import DEFAULT_TIMESTEPS, TIMESTEP_TOKEN_NUM, generate_image
 from musubi_tuner.hidream_o1.utils import get_rope_index_fix_point
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from musubi_tuner.hv_train_network import NetworkTrainer, load_prompts, read_config_from_file, setup_parser_common
+from musubi_tuner.hv_train_network import NetworkTrainer, get_sigmas, load_prompts, read_config_from_file, setup_parser_common
 from musubi_tuner.utils import model_utils
 
 logger = logging.getLogger(__name__)
@@ -64,10 +64,20 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
         self._control_training = False
-        self.default_guidance_scale = 5.0
-        self.default_discrete_flow_shift = 3.0
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
+        self.default_guidance_scale = 0.0 if self.model_type == "dev" else 5.0
+        self.default_discrete_flow_shift = 1.0 if self.model_type == "dev" else 3.0
+        if args.noise_scale_start is None:
+            args.noise_scale_start = 7.5 if self.model_type == "dev" else 8.0
+        if args.noise_scale_end is None:
+            args.noise_scale_end = args.noise_scale_start
+        if args.noise_clip_std is None:
+            args.noise_clip_std = 2.5 if self.model_type == "dev" else 0.0
+        logger.info(
+            f"HiDream-O1 {self.model_type} noise settings: "
+            f"scale_start={args.noise_scale_start}, scale_end={args.noise_scale_end}, clip_std={args.noise_clip_std}"
+        )
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
@@ -136,6 +146,12 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             timesteps_list = None
             scheduler_name = "default"
 
+        noise_kwargs = {
+            "noise_scale_start": args.noise_scale_start,
+            "noise_scale_end": args.noise_scale_end,
+            "noise_clip_std": args.noise_clip_std,
+        }
+
         seed = int(generator.initial_seed()) if generator is not None else int(sample_parameter.get("seed", 42))
         image = generate_image(
             model=model,
@@ -151,6 +167,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             scheduler_name=scheduler_name,
             seed=seed,
             use_flash_attn=self.use_flash_attn,
+            **noise_kwargs,
         )
 
         pixels = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
@@ -210,32 +227,47 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         device: torch.device,
         dtype: torch.dtype,
     ):
-        noise_scale = getattr(args, "hidream_train_noise_scale", 1.0)
-        noise_scale_power = getattr(args, "hidream_train_noise_scale_power", 0.0)
-        if noise_scale != 1.0 and noise_scale_power == 0.0:
-            noise = noise * noise_scale
-            return super().get_noisy_model_input_and_timesteps(
+        if getattr(args, "show_timesteps", None):
+            return super().get_noisy_model_input_and_timesteps(args, noise, latents, timesteps, noise_scheduler, device, dtype)
+
+        if args.timestep_sampling == "uniform" and not getattr(args, "preserve_distribution_shape", False):
+            sigma = (
+                torch.rand((noise.shape[0],), device=device, dtype=dtype)
+                if timesteps is None
+                else torch.as_tensor(timesteps, device=device, dtype=dtype)
+            )
+            t_min = (args.min_timestep if args.min_timestep is not None else 0.0) / 1000.0
+            t_max = (args.max_timestep if args.max_timestep is not None else 1000.0) / 1000.0
+            sigma = sigma * (t_max - t_min) + t_min
+            timesteps = sigma * 1000.0 + 1.0
+            sigma_ndim = sigma.view(noise.shape[0], *([1] * (latents.ndim - 1)))
+        else:
+            _, timesteps = super().get_noisy_model_input_and_timesteps(
                 args, noise, latents, timesteps, noise_scheduler, device, dtype
             )
+            if args.timestep_sampling not in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+                sigma_ndim = get_sigmas(noise_scheduler, timesteps, device, n_dim=latents.ndim, dtype=dtype)
+                sigma = sigma_ndim.flatten()
+            else:
+                sigma = ((timesteps.to(device=device, dtype=dtype) - 1.0) / 1000.0).clamp(0.0, 1.0)
+                sigma_ndim = sigma.view(noise.shape[0], *([1] * (latents.ndim - 1)))
 
-        noisy_model_input, timesteps = super().get_noisy_model_input_and_timesteps(
-            args, noise, latents, timesteps, noise_scheduler, device, dtype
-        )
+        noise_clip_std = getattr(args, "noise_clip_std", 0.0) or 0.0
+        if noise_clip_std > 0.0:
+            noise_std = noise.float().std().to(device=noise.device, dtype=noise.dtype)
+            clip_val = noise_clip_std * noise_std
+            noise = noise.clamp(min=-clip_val, max=clip_val)
 
-        if noise_scale == 1.0:
-            return noisy_model_input, timesteps
+        noise_scale_start = getattr(args, "noise_scale_start", None)
+        if noise_scale_start is None:
+            noise_scale_start = 7.5 if getattr(args, "model_type", "full") == "dev" else 8.0
+        noise_scale_end = getattr(args, "noise_scale_end", None)
+        if noise_scale_end is None:
+            noise_scale_end = noise_scale_start
+        noise_scale = noise_scale_start + (noise_scale_end - noise_scale_start) * (1.0 - sigma)
+        noise_scale_ndim = noise_scale.view(noise.shape[0], *([1] * (latents.ndim - 1)))
 
-        if args.timestep_sampling in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
-            sigma = ((timesteps.to(device=device, dtype=dtype) - 1.0) / 1000.0).clamp(0.0, 1.0)
-        else:
-            sigma = (timesteps.to(device=device, dtype=dtype) / 1000.0).clamp(0.0, 1.0)
-
-        scale = 1.0 + (noise_scale - 1.0) * sigma.pow(noise_scale_power)
-        while len(scale.shape) < latents.ndim:
-            scale = scale.unsqueeze(-1)
-        noisy_model_input = (1.0 - sigma.reshape(scale.shape[0], *([1] * (latents.ndim - 1)))) * latents + (
-            sigma.reshape(scale.shape[0], *([1] * (latents.ndim - 1))) * noise * scale
-        )
+        noisy_model_input = (1.0 - sigma_ndim) * latents + sigma_ndim * noise * noise_scale_ndim
         return noisy_model_input, timesteps
 
     def _build_layout_tensors(
@@ -434,20 +466,45 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
         return model_pred, target
 
+    def prepare_dino_loss_images(
+        self,
+        args: argparse.Namespace,
+        model_pred: torch.Tensor,
+        target: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if model_pred.ndim == 3 and target.ndim == 3 and latents.ndim == 4:
+            height = latents.shape[1] * hidream_o1_utils.PATCH_SIZE
+            width = latents.shape[2] * hidream_o1_utils.PATCH_SIZE
+            pred_images = hidream_o1_utils.unpatchify_pixels(model_pred, height, width)
+            target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
+            return pred_images, target_images
+
+        return super().prepare_dino_loss_images(args, model_pred, target, batch, latents, timesteps, network_dtype)
+
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--model_type", type=str, default="full", choices=["full", "dev"], help="HiDream-O1 model variant")
     parser.add_argument(
-        "--hidream_train_noise_scale",
+        "--noise_scale_start",
         type=float,
-        default=1.0,
-        help="Scale the Gaussian noise used for HiDream-O1 training inputs. Default 1.0 follows the paper; 8.0 matches the official inference initial-noise scale.",
+        default=None,
+        help="HiDream-O1 noise scale at the first denoising/noisiest step. Defaults to 8.0 for full and 7.5 for dev.",
     )
     parser.add_argument(
-        "--hidream_train_noise_scale_power",
+        "--noise_scale_end",
         type=float,
-        default=0.0,
-        help="If >0, decay --hidream_train_noise_scale by sigma**power so late denoising timesteps stay closer to normal training noise. Try 2.0 with scale 8.0.",
+        default=None,
+        help="HiDream-O1 noise scale at the final denoising/cleanest step. Defaults to --noise_scale_start.",
+    )
+    parser.add_argument(
+        "--noise_clip_std",
+        type=float,
+        default=None,
+        help="Clip Gaussian noise by this many standard deviations before building HiDream-O1 training inputs. Defaults to 0.0 for full and 2.5 for dev.",
     )
     parser.add_argument(
         "--fp8_scaled",
