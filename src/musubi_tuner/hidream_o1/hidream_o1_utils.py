@@ -8,11 +8,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import init_empty_weights
+from PIL import Image
 from safetensors import safe_open
 from safetensors.torch import load_file
 from transformers import AutoProcessor, PreTrainedTokenizerBase
 
-from musubi_tuner.hidream_o1.pipeline import PATCH_SIZE, build_t2i_text_sample
+from musubi_tuner.hidream_o1.pipeline import CONDITION_IMAGE_SIZE, PATCH_SIZE, TIMESTEP_TOKEN_NUM, build_t2i_text_sample
+from musubi_tuner.hidream_o1.utils import calculate_dimensions
 
 
 logger = logging.getLogger(__name__)
@@ -223,6 +225,53 @@ def build_t2i_input_ids(prompt: str, processor) -> torch.Tensor:
     messages = [{"role": "user", "content": prompt}]
     template_caption = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) + boi_token + tms_token
     return tokenizer.encode(template_caption, return_tensors="pt", add_special_tokens=False).squeeze(0).to(torch.long)
+
+
+def _control_to_rgb_pil(control) -> Image.Image:
+    if isinstance(control, Image.Image):
+        pil = control
+    else:
+        if control.shape[-1] == 4:
+            control = control[..., :3]
+        pil = Image.fromarray(control)
+    if pil.mode != "RGB":
+        pil = pil.convert("RGB")
+    return pil
+
+
+def _condition_image_size(num_images: int) -> int:
+    if num_images <= 4:
+        return CONDITION_IMAGE_SIZE
+    if num_images <= 8:
+        return CONDITION_IMAGE_SIZE * 48 // 64
+    return CONDITION_IMAGE_SIZE // 2
+
+
+def build_i2i_input_tensors(prompt: str, controls, processor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    controls = controls if isinstance(controls, list) else [controls]
+    cond_img_size = _condition_image_size(len(controls))
+
+    ref_pils_vlm = []
+    for control in controls:
+        pil = _control_to_rgb_pil(control)
+        cond_w, cond_h = calculate_dimensions(cond_img_size, pil.width / pil.height)
+        ref_pils_vlm.append(pil.resize((cond_w, cond_h), resample=Image.LANCZOS))
+
+    tokenizer = get_tokenizer(processor)
+    add_special_tokens(tokenizer)
+    boi_token = getattr(tokenizer, "boi_token", "<|boi_token|>")
+    tms_token = getattr(tokenizer, "tms_token", "<|tms_token|>")
+
+    content = [{"type": "image"} for _ in ref_pils_vlm]
+    content.append({"type": "text", "text": prompt})
+    messages = [{"role": "user", "content": content}]
+    template_caption = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    proc = processor(text=[template_caption], images=ref_pils_vlm, padding="longest", return_tensors="pt")
+    input_ids_2 = tokenizer.encode(
+        boi_token + tms_token * TIMESTEP_TOKEN_NUM, return_tensors="pt", add_special_tokens=False
+    )
+    input_ids = torch.cat([proc.input_ids, input_ids_2], dim=-1).squeeze(0).to(torch.long)
+    return input_ids, proc.pixel_values, proc.image_grid_thw.to(torch.long)
 
 
 def build_t2i_cache_tensors(prompt: str, height: int, width: int, processor, model_config):

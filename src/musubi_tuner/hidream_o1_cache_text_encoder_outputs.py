@@ -19,11 +19,20 @@ logging.basicConfig(level=logging.INFO)
 
 def encode_and_save_batch(processor, embedding_weight: torch.Tensor | None, device: torch.device, batch: list[ItemInfo]):
     for item in batch:
-        input_ids = hidream_o1_utils.build_t2i_input_ids(item.caption, processor)
+        pixel_values = None
+        image_grid_thw = None
+        if item.control_content is not None:
+            input_ids, pixel_values, image_grid_thw = hidream_o1_utils.build_i2i_input_tensors(
+                item.caption, item.control_content, processor
+            )
+        else:
+            input_ids = hidream_o1_utils.build_t2i_input_ids(item.caption, processor)
         input_embeds = None
         if embedding_weight is not None:
             input_embeds = hidream_o1_utils.build_text_input_embeds(input_ids, embedding_weight, device).cpu()
-        save_text_encoder_output_cache_hidream_o1(item, input_ids, input_embeds)
+        save_text_encoder_output_cache_hidream_o1(
+            item, input_ids, input_embeds, pixel_values=pixel_values, image_grid_thw=image_grid_thw
+        )
 
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -72,6 +81,7 @@ def main():
         all_cache_files_for_dataset,
         all_cache_paths_for_dataset,
         encode_for_text_encoder,
+        requires_content=any(getattr(dataset, "has_control", False) for dataset in datasets),
     )
 
     cache_text_encoder_outputs.post_process_cache_files(

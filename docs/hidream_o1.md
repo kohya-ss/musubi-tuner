@@ -27,6 +27,8 @@ The workflow has three steps:
 2. Cache prompt token IDs.
 3. Train or run inference.
 
+See `docs/hidream_o1_i2i_training_spec.md` for the control/reference training contract.
+
 ## Model
 
 Download the HiDream-O1-Image model from the official repository:
@@ -51,6 +53,7 @@ Notes:
 
 - Image width and height must be divisible by 32.
 - The dataset should be an image dataset.
+- If the dataset has `control_directory` or JSONL `control_path_*` entries, control/reference images are cached as `latents_control_*` pixel patch tokens.
 - Cache files use the `ho1` architecture suffix, for example `*_ho1.safetensors`.
 
 ### Prompt Token Cache
@@ -70,6 +73,7 @@ Notes:
 - Cache files use the `ho1` text encoder suffix, for example `*_ho1_te.safetensors`.
 - Safetensors metadata records fields such as architecture, caption, width, and height, but dataset cache discovery still uses the filename suffix.
 - HiDream-O1 does not precompute full decoder hidden states here. The Qwen3VL decoder is also part of the denoising model, so it still runs during training and inference.
+- For control/reference datasets, the text cache also stores Qwen3-VL processor `pixel_values` and `image_grid_thw` so training can run the same vision-input path as inference.
 
 Optional fp8 text-embedding cache:
 
@@ -104,9 +108,11 @@ Memory related options:
 - `--use_pinned_memory_for_block_swap` can improve transfer speed, but may increase shared GPU memory usage on Windows.
 - `--flash_attn` enables the HiDream-O1 flash attention path. This is recommended for 2K resolution if FlashAttention is installed.
 - `--timestep_sampling uniform --weighting_scheme none` matches the uniform timestep sampling described for HiDream-O1 post-training/SFT in the paper.
+- `--hidream_train_noise_scale N` scales the Gaussian noise used to build training inputs. The default `1.0` follows the paper; try `4.0` or `8.0` to test whether matching the official inference noise scale improves LoRA fitting.
 - HiDream-O1 LoRA targets are selected from the dataset automatically. Datasets without `control_directory` use decoder + pixel patch input/output layers. Datasets with control/reference inputs also select Qwen3-VL visual encoder layers.
 - Control/reference datasets use `conv_dim=4 conv_alpha=4` by default for LoRA on the Conv3d visual patch embedding. Set `--network_args conv_dim=0` to skip that layer, or pass a larger value to increase its rank.
 - The Qwen3VL decoder blocks are the shared generation backbone for text and image tokens. Token embeddings and the LM head remain excluded.
+- After changing a T2I dataset to a control/reference dataset, rebuild both pixel and text caches. Older caches do not contain the required `latents_control_*`, `pixel_values`, or `image_grid_thw` tensors.
 
 Example with memory saving enabled:
 

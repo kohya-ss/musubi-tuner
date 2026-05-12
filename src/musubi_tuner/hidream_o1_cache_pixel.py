@@ -19,8 +19,14 @@ def encode_and_save_batch(batch: List[ItemInfo]):
     pixel_tokens = hidream_o1_utils.patchify_pixels_grid(pixels)
 
     for item, tokens in zip(batch, pixel_tokens):
+        control_tokens = None
+        if item.control_content is not None:
+            controls = item.control_content if isinstance(item.control_content, list) else [item.control_content]
+            control_contents = torch.stack([torch.from_numpy(control) for control in controls], dim=0)
+            control_pixels = hidream_o1_utils.preprocess_image_tensor(control_contents)
+            control_tokens = hidream_o1_utils.patchify_pixels_grid(control_pixels).to(torch.bfloat16)
         logger.debug(f"Saving HiDream-O1 pixel-token cache for item {item.item_key}: {tuple(tokens.shape)}")
-        save_pixel_cache_hidream_o1(item, tokens.to(torch.bfloat16))
+        save_pixel_cache_hidream_o1(item, tokens.to(torch.bfloat16), control_tokens)
 
 
 def main():
