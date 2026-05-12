@@ -1,6 +1,6 @@
 import argparse
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -73,6 +73,20 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
         if args.fp8_base and not getattr(args, "fp8_scaled", False):
             raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
+
+    def prepare_network_kwargs(
+        self,
+        args: argparse.Namespace,
+        train_dataset_group: Any,
+        network_module: Any,
+        net_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        has_control = any(getattr(dataset, "has_control", False) for dataset in train_dataset_group.datasets)
+        net_kwargs = dict(net_kwargs)
+        net_kwargs["hidream_has_control"] = str(has_control)
+        target = "I2I/control" if has_control else "T2I"
+        logger.info(f"HiDream-O1 LoRA target is selected from dataset: {target}")
+        return net_kwargs
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         return load_prompts(sample_prompts)

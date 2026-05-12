@@ -1302,6 +1302,15 @@ class NetworkTrainer:
     def control_training(self) -> bool:
         return self._control_training
 
+    def prepare_network_kwargs(
+        self,
+        args: argparse.Namespace,
+        train_dataset_group: Any,
+        network_module: Any,
+        net_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        return net_kwargs
+
     def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module: lora_module):
         keys = list(weights_sd.keys())
         if keys[0].startswith("lora_"):
@@ -1806,6 +1815,7 @@ class NetworkTrainer:
             for net_arg in args.network_args:
                 key, value = net_arg.split("=")
                 net_kwargs[key] = value
+        net_kwargs = self.prepare_network_kwargs(args, train_dataset_group, network_module, net_kwargs)
 
         if args.dim_from_weights:
             logger.info(f"Loading network from weights: {args.dim_from_weights}")

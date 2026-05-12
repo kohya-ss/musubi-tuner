@@ -104,6 +104,9 @@ Memory related options:
 - `--use_pinned_memory_for_block_swap` can improve transfer speed, but may increase shared GPU memory usage on Windows.
 - `--flash_attn` enables the HiDream-O1 flash attention path. This is recommended for 2K resolution if FlashAttention is installed.
 - `--timestep_sampling uniform --weighting_scheme none` matches the uniform timestep sampling described for HiDream-O1 post-training/SFT in the paper.
+- HiDream-O1 LoRA targets are selected from the dataset automatically. Datasets without `control_directory` use decoder + pixel patch input/output layers. Datasets with control/reference inputs also select Qwen3-VL visual encoder layers.
+- Control/reference datasets use `conv_dim=4 conv_alpha=4` by default for LoRA on the Conv3d visual patch embedding. Set `--network_args conv_dim=0` to skip that layer, or pass a larger value to increase its rank.
+- The Qwen3VL decoder blocks are the shared generation backbone for text and image tokens. Token embeddings and the LM head remain excluded.
 
 Example with memory saving enabled:
 

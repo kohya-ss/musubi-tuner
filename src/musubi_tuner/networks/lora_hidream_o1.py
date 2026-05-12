@@ -9,7 +9,27 @@ import torch.nn as nn
 import musubi_tuner.networks.lora as lora
 
 
-HIDREAM_O1_TARGET_REPLACE_MODULES = ["Qwen3VLTextDecoderLayer"]
+HIDREAM_O1_DECODER_TARGET_REPLACE_MODULES = ["Qwen3VLTextDecoderLayer"]
+HIDREAM_O1_PIXEL_TARGET_REPLACE_MODULES = ["BottleneckPatchEmbed", "FinalLayer"]
+HIDREAM_O1_TIMESTEP_TARGET_REPLACE_MODULES = ["TimestepEmbedder"]
+HIDREAM_O1_VISUAL_TARGET_REPLACE_MODULES = [
+    "Qwen3VLVisionPatchEmbed",
+    "Qwen3VLVisionBlock",
+    "Qwen3VLVisionPatchMerger",
+]
+
+HIDREAM_O1_T2I_TARGET_REPLACE_MODULES = HIDREAM_O1_DECODER_TARGET_REPLACE_MODULES + HIDREAM_O1_PIXEL_TARGET_REPLACE_MODULES
+HIDREAM_O1_I2I_TARGET_REPLACE_MODULES = HIDREAM_O1_T2I_TARGET_REPLACE_MODULES + HIDREAM_O1_VISUAL_TARGET_REPLACE_MODULES
+HIDREAM_O1_TARGET_REPLACE_MODULES = (
+    HIDREAM_O1_I2I_TARGET_REPLACE_MODULES
+    + HIDREAM_O1_TIMESTEP_TARGET_REPLACE_MODULES
+)
+
+
+def _to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def create_arch_network(
@@ -22,23 +42,24 @@ def create_arch_network(
     neuron_dropout: Optional[float] = None,
     **kwargs,
 ):
-    exclude_patterns = kwargs.get("exclude_patterns", None)
-    if exclude_patterns is None:
-        exclude_patterns = []
-    else:
-        exclude_patterns = ast.literal_eval(exclude_patterns)
+    has_control = _to_bool(kwargs.pop("hidream_has_control", False))
 
-    exclude_patterns.extend(
-        [
-            r".*(embed_tokens|lm_head).*",
-            r".*(t_embedder|x_embedder|final_layer).*",
-            r".*(visual|patch_embed|merger).*",
-        ]
+    target_replace_modules = (
+        HIDREAM_O1_I2I_TARGET_REPLACE_MODULES if has_control else HIDREAM_O1_T2I_TARGET_REPLACE_MODULES
     )
+
+    if has_control and kwargs.get("conv_dim", None) is None:
+        kwargs["conv_dim"] = 4
+        kwargs.setdefault("conv_alpha", 4)
+
+    exclude_patterns = kwargs.get("exclude_patterns", None) or []
+    if isinstance(exclude_patterns, str):
+        exclude_patterns = ast.literal_eval(exclude_patterns)
+    exclude_patterns.append(r".*(embed_tokens|lm_head).*")
     kwargs["exclude_patterns"] = exclude_patterns
 
     return lora.create_network(
-        HIDREAM_O1_TARGET_REPLACE_MODULES,
+        target_replace_modules,
         "lora_unet",
         multiplier,
         network_dim,
