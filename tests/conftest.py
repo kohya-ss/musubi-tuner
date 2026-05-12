@@ -16,6 +16,10 @@ def mock_args():
     args.ema_decay = 0.9999
     args.student_feature_layer = 5
     args.teacher_feature_layer = 15
+    args.self_flow_patch_locality_mode = "none"
+    args.self_flow_patch_block_size = 2
+    args.self_flow_patch_seed_count = 3
+    args.self_flow_patch_seed_shape = "square"
     return args
 
 

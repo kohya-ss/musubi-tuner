@@ -3880,6 +3880,36 @@ def setup_parser_common() -> argparse.ArgumentParser:
         " / ゲートが発動した場合に、マスクされたパッチのうちタイムステップのミスマッチを受けるパッチの割合。",
     )
 
+    # self-flow patch locality settings
+    parser.add_argument(
+        "--self_flow_patch_locality_mode",
+        type=str,
+        default="none",
+        choices=["none", "grid", "seed"],
+        help="Patch locality mode for self-flow masking. 'none' = random (paper default),"
+        " 'grid' = block-aligned groups, 'seed' = organic blobs around seed points.",
+    )
+    parser.add_argument(
+        "--self_flow_patch_block_size",
+        type=int,
+        default=2,
+        choices=[2, 4, 8, 16, 32],
+        help="Block size for grid locality mode. Each meta-cell covers block_size x block_size tokens.",
+    )
+    parser.add_argument(
+        "--self_flow_patch_seed_count",
+        type=int,
+        default=3,
+        help="Number of seed points for seed locality mode.",
+    )
+    parser.add_argument(
+        "--self_flow_patch_seed_shape",
+        type=str,
+        default="square",
+        choices=["square", "circle", "diamond"],
+        help="Distance metric for seed locality mode. 'square' = L-inf, 'circle' = L2, 'diamond' = L1.",
+    )
+
     return parser
 
 
