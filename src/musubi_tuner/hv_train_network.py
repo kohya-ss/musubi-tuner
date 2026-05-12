@@ -2648,6 +2648,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--fp8_base", action="store_true", help="use fp8 for base model / base modelにfp8を使う")
+    parser.set_defaults(fp8_scaled=False)
     # parser.add_argument("--full_fp16", action="store_true", help="fp16 training including gradients / 勾配も含めてfp16で学習する")
     # parser.add_argument("--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する")
 

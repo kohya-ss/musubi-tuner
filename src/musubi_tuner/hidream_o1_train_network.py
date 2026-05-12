@@ -10,12 +10,23 @@ from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HIDREAM_O1, AR
 from musubi_tuner.hidream_o1 import hidream_o1_utils
 from musubi_tuner.hidream_o1.pipeline import DEFAULT_TIMESTEPS, generate_image
 from musubi_tuner.hidream_o1.utils import get_rope_index_fix_point
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from musubi_tuner.hv_train_network import NetworkTrainer, load_prompts, read_config_from_file, setup_parser_common
 from musubi_tuner.utils import model_utils
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+FP8_OPTIMIZATION_TARGET_KEYS = [
+    "model.language_model.layers",
+    "model.visual.blocks",
+    "model.visual.merger",
+    "model.visual.deepstack_merger_list",
+    "model.t_embedder1",
+    "model.x_embedder",
+    "model.final_layer2",
+]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "rotary", "pos_embed", "embed_tokens", "lm_head"]
 NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS = {
     "uniform",
     "sigmoid",
@@ -60,8 +71,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
-        if args.fp8_base or args.fp8_scaled:
-            raise ValueError("HiDream-O1 fp8 model loading is not supported yet.")
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         return load_prompts(sample_prompts)
@@ -147,6 +156,22 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.processor = hidream_o1_utils.load_processor(model_type=args.model_type)
         dtype = dit_weight_dtype or torch.bfloat16
         model = hidream_o1_utils.load_model(dit_path, dtype=dtype, device=loading_device, model_type=args.model_type)
+
+        if getattr(args, "fp8_scaled", False):
+            logger.info("Applying HiDream-O1 scaled fp8 optimization.")
+            state_dict = model.state_dict()
+            quant_device = accelerator.device
+            move_to_device = str(loading_device) != "cpu"
+            state_dict = optimize_state_dict_with_fp8(
+                state_dict,
+                quant_device,
+                FP8_OPTIMIZATION_TARGET_KEYS,
+                FP8_OPTIMIZATION_EXCLUDE_KEYS,
+                move_to_device=move_to_device,
+            )
+            apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)
+            info = model.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded HiDream-O1 scaled fp8 optimized weights: {info}")
 
         if not hasattr(model, "enable_gradient_checkpointing"):
             model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable()
@@ -271,6 +296,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--model_type", type=str, default="full", choices=["full", "dev"], help="HiDream-O1 model variant")
+    parser.add_argument(
+        "--fp8_scaled",
+        action="store_true",
+        help="use scaled fp8 for HiDream-O1 DiT weights / HiDream-O1 DiTにスケーリングされたfp8を使う",
+    )
     return parser
 
 
