@@ -1691,7 +1691,9 @@ class NetworkTrainer:
             block_size = args.self_flow_patch_block_size
             mask_hw = self._apply_grid_mask(B, H, W, mask_ratio, block_size, device)
         elif locality_mode == "seed":
-            raise NotImplementedError("seed locality mode not yet implemented")
+            seed_count = args.self_flow_patch_seed_count
+            seed_shape = args.self_flow_patch_seed_shape
+            mask_hw = self._apply_seed_mask(B, H, W, mask_ratio, seed_count, seed_shape, device)
         else:
             # Default: independent per-token random masking
             mask_hw = torch.rand(B, H * W, device=device) < mask_ratio
@@ -1754,6 +1756,72 @@ class NetworkTrainer:
                 self._grid_mask_warned_shapes.add(shape_key)
 
         return expanded[:, :H, :W]
+
+    def _apply_seed_mask(
+        self,
+        B: int,
+        H: int,
+        W: int,
+        mask_ratio: float,
+        seed_count: int,
+        seed_shape: str,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Seed-point locality masking.
+
+        Picks K seed points, computes distance from every position to its
+        nearest seed, then masks the closest floor(mask_ratio * H * W) tokens.
+
+        Args:
+            seed_count: Number of seed points (K)
+            seed_shape: Distance metric — "square" (L∞), "circle" (L2), "diamond" (L1)
+
+        Returns:
+            mask_hw: (B, H, W) bool tensor
+        """
+        num_tokens = H * W
+        num_masked = int(mask_ratio * num_tokens)
+
+        if num_masked == 0:
+            return torch.zeros(B, H, W, dtype=torch.bool, device=device)
+
+        # Coordinate grids: (H, W) each
+        h_coords = torch.arange(H, dtype=torch.float32, device=device)
+        w_coords = torch.arange(W, dtype=torch.float32, device=device)
+        grid_h, grid_w = torch.meshgrid(h_coords, w_coords, indexing="ij")  # (H, W)
+
+        mask_hw = torch.zeros(B, H, W, dtype=torch.bool, device=device)
+
+        for b in range(B):
+            # Random seed points: (K, 2)
+            seeds_h = torch.randint(0, H, (seed_count,), device=device).float()
+            seeds_w = torch.randint(0, W, (seed_count,), device=device).float()
+
+            # Distance from every position to every seed: (K, H, W)
+            dh = grid_h.unsqueeze(0) - seeds_h.view(-1, 1, 1)  # (K, H, W)
+            dw = grid_w.unsqueeze(0) - seeds_w.view(-1, 1, 1)  # (K, H, W)
+
+            if seed_shape == "square":
+                dist = torch.max(dh.abs(), dw.abs())  # L∞
+            elif seed_shape == "circle":
+                dist = torch.sqrt(dh ** 2 + dw ** 2)  # L2
+            elif seed_shape == "diamond":
+                dist = dh.abs() + dw.abs()  # L1
+            else:
+                raise ValueError(f"Unknown seed_shape: {seed_shape}")
+
+            # Min distance to nearest seed: (H, W)
+            min_dist = dist.min(dim=0).values  # (H, W)
+
+            # Select the closest num_masked tokens
+            flat_dist = min_dist.view(-1)  # (H*W,)
+            _, indices = flat_dist.topk(num_masked, largest=False)
+            flat_mask = torch.zeros(num_tokens, dtype=torch.bool, device=device)
+            flat_mask[indices] = True
+            mask_hw[b] = flat_mask.view(H, W)
+
+        return mask_hw
 
     def _build_per_token_timestep_map(
         self,

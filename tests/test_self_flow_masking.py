@@ -155,3 +155,79 @@ def test_grid_mask_remainder_handling(trainer):
     )
     assert mask_flat.shape == (1, 17 * 17)
     assert result.shape == student.shape
+
+
+def test_seed_mask_exact_count(trainer):
+    """Seed mode masks exactly floor(mask_ratio * H * W) tokens."""
+    torch.manual_seed(42)
+    student = torch.ones(2, 4, 16, 16)
+    teacher = torch.zeros(2, 4, 16, 16)
+
+    args = argparse.Namespace(
+        self_flow_patch_locality_mode="seed",
+        self_flow_patch_seed_count=3,
+        self_flow_patch_seed_shape="square",
+        mask_ratio=0.25,
+    )
+    _, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+    expected_count = int(0.25 * 16 * 16)  # 64
+    for b in range(2):
+        actual_count = mask_flat[b].sum().item()
+        assert actual_count == expected_count, (
+            f"Batch {b}: expected {expected_count} masked, got {int(actual_count)}"
+        )
+
+
+def test_seed_mask_spatial_locality(trainer):
+    """Seed mode produces spatially clustered masks, not scattered."""
+    torch.manual_seed(42)
+    student = torch.ones(1, 4, 32, 32)
+    teacher = torch.zeros(1, 4, 32, 32)
+
+    args = argparse.Namespace(
+        self_flow_patch_locality_mode="seed",
+        self_flow_patch_seed_count=2,
+        self_flow_patch_seed_shape="square",
+        mask_ratio=0.25,
+    )
+    _, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+    mask_2d = mask_flat.view(1, 32, 32)[0]
+
+    # Count horizontal adjacency: masked tokens next to other masked tokens
+    # Locality should produce more adjacency than random
+    h_adj = (mask_2d[:, :-1] & mask_2d[:, 1:]).sum().item()
+    v_adj = (mask_2d[:-1, :] & mask_2d[1:, :]).sum().item()
+    total_adj = h_adj + v_adj
+    masked_count = mask_2d.sum().item()
+
+    # For truly random 25% mask on 32x32, expected adjacency is ~0.25 * masked_count * 2
+    # For clustered masks, adjacency should be much higher
+    random_expected_adj = masked_count * 2 * 0.25
+    assert total_adj > random_expected_adj * 1.5, (
+        f"Adjacency {total_adj} not significantly above random expectation {random_expected_adj:.0f}"
+    )
+
+
+@pytest.mark.parametrize("shape", ["square", "circle", "diamond"])
+def test_seed_mask_shapes(trainer, shape):
+    """All seed shapes produce valid masks with correct count."""
+    torch.manual_seed(42)
+    student = torch.ones(1, 4, 16, 16)
+    teacher = torch.zeros(1, 4, 16, 16)
+
+    args = argparse.Namespace(
+        self_flow_patch_locality_mode="seed",
+        self_flow_patch_seed_count=2,
+        self_flow_patch_seed_shape=shape,
+        mask_ratio=0.25,
+    )
+    _, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+    expected_count = int(0.25 * 16 * 16)
+    actual_count = mask_flat[0].sum().item()
+    assert actual_count == expected_count
