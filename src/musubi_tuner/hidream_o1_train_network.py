@@ -86,6 +86,8 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         elif isinstance(ref_image_paths, str):
             ref_image_paths = [ref_image_paths]
 
+        sample_steps = sample_steps if "sample_steps" in sample_parameter else None
+
         if self.model_type == "dev":
             num_inference_steps = sample_steps if sample_steps is not None else 28
             guidance = 0.0
