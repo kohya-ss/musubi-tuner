@@ -273,3 +273,30 @@ def test_5d_grid_mask_applies_per_frame(trainer):
         assert torch.equal(mask_thw[0, 0], mask_thw[0, t]), (
             f"Frame {t} mask differs from frame 0"
         )
+
+
+@pytest.mark.parametrize(
+    "mode,extra_args",
+    [
+        ("none", {}),
+        ("grid", {"self_flow_patch_block_size": 4}),
+        ("seed", {"self_flow_patch_seed_count": 3, "self_flow_patch_seed_shape": "circle"}),
+    ],
+)
+def test_all_modes_produce_valid_mask(trainer, mode, extra_args):
+    """All locality modes produce masks with correct shape and reasonable ratio."""
+    torch.manual_seed(42)
+    student = torch.ones(2, 4, 16, 16)
+    teacher = torch.zeros(2, 4, 16, 16)
+
+    ns = {"self_flow_patch_locality_mode": mode, "mask_ratio": 0.25}
+    ns.update(extra_args)
+    args = argparse.Namespace(**ns)
+
+    result, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+    assert result.shape == student.shape
+    assert mask_flat.shape == (2, 16 * 16)
+    actual = mask_flat.float().mean().item()
+    assert 0.10 < actual < 0.40, f"Mode {mode}: ratio {actual:.3f} out of bounds"
