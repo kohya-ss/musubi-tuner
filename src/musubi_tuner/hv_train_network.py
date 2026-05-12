@@ -381,6 +381,7 @@ class NetworkTrainer:
         self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
         self._coupling_scheduler = None
+        self._grid_mask_warned_shapes: set = set()
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1658,7 +1659,7 @@ class NetworkTrainer:
         noisy_input_teacher: torch.Tensor,  # same shape as student
         mask_ratio: float,  # R_M in [0, 0.5] from paper
         device: torch.device,
-        args: "argparse.Namespace | None" = None,
+        args: argparse.Namespace | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply per-token masking (paper Eq. 4-5).
@@ -1690,9 +1691,7 @@ class NetworkTrainer:
             block_size = args.self_flow_patch_block_size
             mask_hw = self._apply_grid_mask(B, H, W, mask_ratio, block_size, device)
         elif locality_mode == "seed":
-            seed_count = args.self_flow_patch_seed_count
-            seed_shape = args.self_flow_patch_seed_shape
-            mask_hw = self._apply_seed_mask(B, H, W, mask_ratio, seed_count, seed_shape, device)
+            raise NotImplementedError("seed locality mode not yet implemented")
         else:
             # Default: independent per-token random masking
             mask_hw = torch.rand(B, H * W, device=device) < mask_ratio
@@ -1746,13 +1745,11 @@ class NetworkTrainer:
 
         # Truncate to actual dims if remainder exists
         if expanded.shape[1] != H or expanded.shape[2] != W:
-            if not hasattr(self, "_grid_mask_warned_shapes"):
-                self._grid_mask_warned_shapes = set()
             shape_key = (H, W, block_size)
             if shape_key not in self._grid_mask_warned_shapes:
                 logger.warning(
                     f"Grid mask: ({H}, {W}) not divisible by block_size={block_size}, "
-                    f"edge tokens will not be masked"
+                    f"edge tokens share a partial block (smaller than {block_size}x{block_size})"
                 )
                 self._grid_mask_warned_shapes.add(shape_key)
 
