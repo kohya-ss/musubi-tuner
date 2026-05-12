@@ -1,5 +1,6 @@
 """Tests for self-flow per-token masking (R_M <= 0.5 constraint)."""
 
+import argparse
 import torch
 import pytest
 from musubi_tuner.hv_train_network import NetworkTrainer
@@ -91,3 +92,66 @@ def test_mask_broadcasts_across_channels(trainer):
     for c in range(1, 4):
         masked_c = result[0, c] == 0
         assert torch.equal(masked_c0, masked_c), "Mask should be same across channels"
+
+
+def test_grid_mask_block_structure(trainer):
+    """Grid mode produces block_size x block_size aligned blocks."""
+    torch.manual_seed(42)
+    student = torch.ones(1, 4, 16, 16)
+    teacher = torch.zeros(1, 4, 16, 16)
+
+    args = argparse.Namespace(
+        self_flow_patch_locality_mode="grid",
+        self_flow_patch_block_size=4,
+        mask_ratio=0.25,
+    )
+    result, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+
+    # Reshape mask to spatial dims and check block alignment
+    mask_2d = mask_flat.view(1, 16, 16)
+    # Each 4x4 block should be all-True or all-False
+    for bh in range(0, 16, 4):
+        for bw in range(0, 16, 4):
+            block = mask_2d[0, bh : bh + 4, bw : bw + 4]
+            assert block.all() or not block.any(), (
+                f"Block at ({bh},{bw}) is partially masked: {block.sum()}/{block.numel()}"
+            )
+
+
+def test_grid_mask_preserves_ratio(trainer):
+    """Grid mode achieves approximately the target mask ratio."""
+    torch.manual_seed(0)
+    student = torch.ones(4, 4, 32, 32)
+    teacher = torch.zeros(4, 4, 32, 32)
+
+    args = argparse.Namespace(
+        self_flow_patch_locality_mode="grid",
+        self_flow_patch_block_size=2,
+        mask_ratio=0.25,
+    )
+    _, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+    actual = mask_flat.float().mean().item()
+    assert 0.15 < actual < 0.35, f"Expected ~0.25, got {actual:.3f}"
+
+
+def test_grid_mask_remainder_handling(trainer):
+    """Grid mode handles H,W not divisible by block_size."""
+    torch.manual_seed(42)
+    # 17 is not divisible by 4
+    student = torch.ones(1, 4, 17, 17)
+    teacher = torch.zeros(1, 4, 17, 17)
+
+    args = argparse.Namespace(
+        self_flow_patch_locality_mode="grid",
+        self_flow_patch_block_size=4,
+        mask_ratio=0.25,
+    )
+    result, mask_flat = trainer._apply_per_token_mask(
+        student, teacher, args.mask_ratio, torch.device("cpu"), args=args
+    )
+    assert mask_flat.shape == (1, 17 * 17)
+    assert result.shape == student.shape

@@ -1658,6 +1658,7 @@ class NetworkTrainer:
         noisy_input_teacher: torch.Tensor,  # same shape as student
         mask_ratio: float,  # R_M in [0, 0.5] from paper
         device: torch.device,
+        args: "argparse.Namespace | None" = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply per-token masking (paper Eq. 4-5).
@@ -1669,26 +1670,93 @@ class NetworkTrainer:
             noisy_input_teacher: Teacher noisy input (cleaner)
             mask_ratio: Fraction of tokens to mask, must be <= 0.5
             device: Device for mask tensor
+            args: Training args (optional, for locality mode dispatch)
 
         Returns:
             (masked_input, mask_flat) where mask_flat is (B, N) bool tensor,
             True = masked (uses teacher value). Returned so callers can build
             per-token timestep maps.
         """
+        # Extract spatial dims (H, W only — T is left alone)
         if noisy_input_student.ndim == 5:
             B, _C, T, H, W = noisy_input_student.shape
-            num_tokens = T * H * W
-            mask_flat = torch.rand(B, num_tokens, device=device) < mask_ratio
-            mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
         else:
             B, _C, H, W = noisy_input_student.shape
-            num_tokens = H * W
-            mask_flat = torch.rand(B, num_tokens, device=device) < mask_ratio
+            T = None
+
+        locality_mode = getattr(args, "self_flow_patch_locality_mode", "none") if args else "none"
+
+        if locality_mode == "grid":
+            block_size = args.self_flow_patch_block_size
+            mask_hw = self._apply_grid_mask(B, H, W, mask_ratio, block_size, device)
+        elif locality_mode == "seed":
+            seed_count = args.self_flow_patch_seed_count
+            seed_shape = args.self_flow_patch_seed_shape
+            mask_hw = self._apply_seed_mask(B, H, W, mask_ratio, seed_count, seed_shape, device)
+        else:
+            # Default: independent per-token random masking
+            mask_hw = torch.rand(B, H * W, device=device) < mask_ratio
+            mask_hw = mask_hw.view(B, H, W)
+
+        # Expand mask to full tensor shape
+        if T is not None:
+            # For 5D: apply same H,W mask to every frame
+            mask_flat = mask_hw.unsqueeze(1).expand(B, T, H, W).reshape(B, T * H * W)
+            mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
+        else:
+            mask_flat = mask_hw.reshape(B, H * W)
             mask_spatial = mask_flat.view(B, 1, H, W).expand_as(noisy_input_student)
 
-        # Masked positions get teacher (cleaner) value
         masked_input = torch.where(mask_spatial, noisy_input_teacher, noisy_input_student)
         return masked_input, mask_flat
+
+    def _apply_grid_mask(
+        self,
+        B: int,
+        H: int,
+        W: int,
+        mask_ratio: float,
+        block_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Grid-based locality masking.
+
+        Divides H x W into a coarser meta-grid, flips one coin per meta-cell,
+        then expands back to full resolution.
+
+        Returns:
+            mask_hw: (B, H, W) bool tensor
+        """
+        mH = (H + block_size - 1) // block_size  # Ceiling division
+        mW = (W + block_size - 1) // block_size
+
+        if mH == 0 or mW == 0:
+            logger.warning(
+                f"block_size={block_size} is larger than spatial dims ({H}, {W}), "
+                "falling back to random masking"
+            )
+            return torch.rand(B, H, W, device=device) < mask_ratio
+
+        meta_mask = torch.rand(B, mH, mW, device=device) < mask_ratio
+
+        # Expand each meta-cell to block_size x block_size using repeat_interleave
+        # (B, mH, mW) -> (B, mH*block_size, mW*block_size)
+        expanded = meta_mask.repeat_interleave(block_size, dim=1).repeat_interleave(block_size, dim=2)
+
+        # Truncate to actual dims if remainder exists
+        if expanded.shape[1] != H or expanded.shape[2] != W:
+            if not hasattr(self, "_grid_mask_warned_shapes"):
+                self._grid_mask_warned_shapes = set()
+            shape_key = (H, W, block_size)
+            if shape_key not in self._grid_mask_warned_shapes:
+                logger.warning(
+                    f"Grid mask: ({H}, {W}) not divisible by block_size={block_size}, "
+                    f"edge tokens will not be masked"
+                )
+                self._grid_mask_warned_shapes.add(shape_key)
+
+        return expanded[:, :H, :W]
 
     def _build_per_token_timestep_map(
         self,
