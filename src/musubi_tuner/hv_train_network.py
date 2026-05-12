@@ -1696,12 +1696,19 @@ class NetworkTrainer:
             mask_hw = self._apply_seed_mask(B, H, W, mask_ratio, seed_count, seed_shape, device)
         else:
             # Default: independent per-token random masking
+            if T is not None:
+                # 5D: preserve original behavior — independent draw per (t, h, w)
+                num_tokens = T * H * W
+                mask_flat = torch.rand(B, num_tokens, device=device) < mask_ratio
+                mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
+                masked_input = torch.where(mask_spatial, noisy_input_teacher, noisy_input_student)
+                return masked_input, mask_flat
             mask_hw = torch.rand(B, H * W, device=device) < mask_ratio
             mask_hw = mask_hw.view(B, H, W)
 
         # Expand mask to full tensor shape
         if T is not None:
-            # For 5D: apply same H,W mask to every frame
+            # For 5D locality modes: apply same H,W mask to every frame
             mask_flat = mask_hw.unsqueeze(1).expand(B, T, H, W).reshape(B, T * H * W)
             mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
         else:
