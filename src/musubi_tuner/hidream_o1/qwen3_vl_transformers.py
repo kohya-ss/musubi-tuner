@@ -1100,6 +1100,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.language_model = Qwen3VLTextModel._from_config(config.text_config)
         self.rope_deltas = None  # cache rope_deltas here
+        self.skip_t2i_visual_dummy = False
 
         self.patch_size = 32
         self.in_channels = 3
@@ -1527,7 +1528,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
             cond_image_embeds_out = image_embeds
             cond_deepstack_image_embeds_out = deepstack_image_embeds
-        elif torch.is_grad_enabled():
+        elif torch.is_grad_enabled() and not self.skip_t2i_visual_dummy:
             # t2i task: no pixel_values, but we must run the vision encoder with a
             # tiny dummy input so that EVERY rank has non-None (zero) gradients for
             # vision-encoder parameters.  This keeps the FSDP reduce-scatter and the

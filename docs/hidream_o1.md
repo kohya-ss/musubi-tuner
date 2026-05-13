@@ -137,6 +137,41 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --output_dir path/to/output_dir --output_name hidream_o1_lora
 ```
 
+## Full Finetuning
+
+Full finetuning uses `hidream_o1_train.py`. This trains the full HiDream-O1 single-checkpoint model, not a LoRA adapter.
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train.py \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
+    --dataset_config path/to/dataset.toml \
+    --model_type full \
+    --timestep_sampling uniform --weighting_scheme none \
+    --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0 \
+    --full_bf16 \
+    --optimizer_type adafactor --learning_rate 1e-6 --fused_backward_pass \
+    --optimizer_args "relative_step=False" "scale_parameter=False" "warmup_init=False" \
+    --max_grad_norm 0 --lr_scheduler constant_with_warmup --lr_warmup_steps 10 \
+    --gradient_checkpointing --flash_attn \
+    --blocks_to_swap 24 --use_pinned_memory_for_block_swap \
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers \
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
+    --output_dir path/to/output_dir --output_name hidream_o1_full_finetune
+```
+
+Notes:
+
+- `--full_bf16` is strongly recommended for memory-limited systems. Without it, model weights are trained in float32.
+- Pure T2I datasets automatically freeze the Qwen3-VL visual encoder and skip its dummy zero-gradient pass.
+- `--fp8_base` is experimental: trainable tensors are promoted back to the training dtype, so only frozen inactive modules may
+  stay FP8. This still starts trainable tensors from FP8-quantized initial values. `--fp8_scaled` is still rejected for full
+  finetuning.
+- `--fused_backward_pass` is intended for Adafactor and should be used with `--max_grad_norm 0`.
+- `--mem_eff_save` can reduce RAM usage when saving model checkpoints.
+- `--block_swap_optimizer_patch_params` is available when using block swap without `--fused_backward_pass`.
+- Dev models should use `--model_type dev --noise_scale_start 7.5 --noise_scale_end 7.5 --noise_clip_std 2.5`.
+- The design notes are in `docs/hidream_o1_full_finetune_spec.md`.
+
 ## Inference
 
 Use `hidream_o1_generate_image.py` for standalone inference.
