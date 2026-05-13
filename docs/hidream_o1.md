@@ -93,9 +93,11 @@ Use `hidream_o1_train_network.py` with the HiDream-O1 single checkpoint passed a
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train_network.py \
     --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
+    --model_type full \
     --mixed_precision bf16 \
     --timestep_sampling uniform --weighting_scheme none \
-    --optimizer_type adamw8bit --learning_rate 1e-4 \
+    --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0 \
+    --optimizer_type adamw8bit --learning_rate 4e-5 \
     --gradient_checkpointing \
     --network_module networks.lora_hidream_o1 --network_dim 32 \
     --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
@@ -108,9 +110,8 @@ Memory related options:
 - `--use_pinned_memory_for_block_swap` can improve transfer speed, but may increase shared GPU memory usage on Windows.
 - `--flash_attn` enables the HiDream-O1 flash attention path. This is recommended for 2K resolution if FlashAttention is installed.
 - `--timestep_sampling uniform --weighting_scheme none` matches the uniform timestep sampling described for HiDream-O1 post-training/SFT in the paper.
-- `--noise_scale_start/end` scale the Gaussian noise used to build training inputs and flash-scheduler samples. Defaults follow the official inference code: full uses `8.0/8.0`, dev flash uses `7.5/7.5`.
-- `--noise_clip_std` clips Gaussian noise before applying the scale. Defaults follow the official scheduler branch: full uses `0.0`, dev flash uses `2.5`.
-- `--dino_loss_weight N` enables the common SenseCraft DINOv3 auxiliary perceptual loss. HiDream-O1 converts predicted and target pixel patch tokens back to RGB before computing this loss. See `docs/advanced_config.md`.
+- Set `--model_type` and the matching noise parameters explicitly. Full uses `--model_type full --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0`; dev uses `--model_type dev --noise_scale_start 7.5 --noise_scale_end 7.5 --noise_clip_std 2.5`.
+- `--dino_loss_weight N` enables the optional SenseCraft DINOv3 auxiliary perceptual loss. Install the `hidream_o1` extra first. HiDream-O1 converts predicted and target pixel patch tokens back to RGB before computing this loss. See `docs/advanced_config.md`.
 - HiDream-O1 LoRA targets are selected from the dataset automatically. Datasets without `control_directory` use decoder + pixel patch input/output layers. Datasets with control/reference inputs also select Qwen3-VL visual encoder layers.
 - Control/reference datasets use `conv_dim=4 conv_alpha=4` by default for LoRA on the Conv3d visual patch embedding. Set `--network_args conv_dim=0` to skip that layer, or pass a larger value to increase its rank.
 - The Qwen3VL decoder blocks are the shared generation backbone for text and image tokens. Token embeddings and the LM head remain excluded.
@@ -124,9 +125,11 @@ Example with memory saving enabled:
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train_network.py \
     --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
+    --model_type full \
     --mixed_precision bf16 \
     --timestep_sampling uniform --weighting_scheme none \
-    --optimizer_type adamw8bit --learning_rate 1e-4 \
+    --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0 \
+    --optimizer_type adamw8bit --learning_rate 4e-5 \
     --gradient_checkpointing --flash_attn \
     --blocks_to_swap 24 --use_pinned_memory_for_block_swap \
     --network_module networks.lora_hidream_o1 --network_dim 32 \

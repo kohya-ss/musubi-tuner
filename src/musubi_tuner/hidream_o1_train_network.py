@@ -50,6 +50,8 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.processor = None
         self.use_flash_attn = False
         self.model_type = "full"
+        self.dino_loss_fn = None
+        self._latest_aux_loss_logs: dict[str, float] = {}
 
     @property
     def architecture(self) -> str:
@@ -100,6 +102,116 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         return load_prompts(sample_prompts)
+
+    def _resolve_dino_model_type(self, enum_class, model_type: Optional[str]):
+        if model_type is None:
+            return None
+        normalized = model_type.replace("-", "_").upper()
+        try:
+            return enum_class[normalized]
+        except KeyError:
+            choices = ", ".join(name.lower() for name in enum_class.__members__.keys())
+            raise ValueError(f"Invalid DINO model type '{model_type}'. Available choices: {choices}")
+
+    def _get_dino_loss_fn(self, args: argparse.Namespace, accelerator: Accelerator) -> torch.nn.Module:
+        if self.dino_loss_fn is not None:
+            return self.dino_loss_fn
+
+        try:
+            if args.dino_loss_backend == "vit":
+                from sensecraft.loss import ViTDinoV3PerceptualLoss
+                from sensecraft.loss.gram_dinov3 import ModelType
+
+                model_type = self._resolve_dino_model_type(ModelType, args.dino_loss_model_type or "small")
+                loss_layer = args.dino_loss_layer if args.dino_loss_layer is not None else -4
+                self.dino_loss_fn = ViTDinoV3PerceptualLoss(
+                    model_type=model_type,
+                    loss_layer=loss_layer,
+                    use_norm=args.dino_loss_use_norm,
+                    use_gram=args.dino_loss_use_gram,
+                    input_range=(-1, 1),
+                )
+            elif args.dino_loss_backend == "convnext":
+                from sensecraft.loss import ConvNextDinoV3PerceptualLoss
+                from sensecraft.loss.convnext_dinov3 import ConvNextType
+
+                model_type = self._resolve_dino_model_type(ConvNextType, args.dino_loss_model_type or "tiny")
+                loss_layer = args.dino_loss_layer if args.dino_loss_layer is not None else -1
+                self.dino_loss_fn = ConvNextDinoV3PerceptualLoss(
+                    model_type=model_type,
+                    loss_layer=loss_layer,
+                    use_norm=args.dino_loss_use_norm,
+                    use_gram=args.dino_loss_use_gram,
+                    input_range=(-1, 1),
+                )
+            else:
+                raise ValueError(f"Unknown DINO loss backend: {args.dino_loss_backend}")
+        except ImportError as e:
+            raise ImportError(
+                'HiDream-O1 DINO auxiliary loss requires SenseCraft with DINOv3 support. Install it with: uv pip install ".[hidream_o1]"'
+            ) from e
+
+        self.dino_loss_fn.requires_grad_(False).eval().to(accelerator.device)
+        logger.info(
+            "HiDream-O1 DINO auxiliary loss enabled: "
+            "backend=%s, model_type=%s, layer=%s, feature_mode=%s, weight=%s, resize=%s, use_norm=%s, use_gram=%s",
+            args.dino_loss_backend,
+            args.dino_loss_model_type or ("small" if args.dino_loss_backend == "vit" else "tiny"),
+            args.dino_loss_layer if args.dino_loss_layer is not None else (-4 if args.dino_loss_backend == "vit" else -1),
+            args.dino_loss_feature_mode if args.dino_loss_backend == "vit" else "n/a",
+            args.dino_loss_weight,
+            args.dino_loss_resize,
+            args.dino_loss_use_norm,
+            args.dino_loss_use_gram,
+        )
+        return self.dino_loss_fn
+
+    def _select_vit_dino_features(self, loss_fn: torch.nn.Module, features: torch.Tensor, feature_mode: str) -> torch.Tensor:
+        if feature_mode == "all":
+            return features
+
+        num_register_tokens = getattr(loss_fn.model.config, "num_register_tokens", 0)
+        cls_token = features[:, 0:1, :]
+        patch_tokens = features[:, 1 + num_register_tokens :, :]
+
+        if feature_mode == "cls":
+            return cls_token
+        if feature_mode == "patch":
+            return patch_tokens
+        if feature_mode == "both":
+            return torch.cat([cls_token, patch_tokens], dim=1)
+        raise ValueError(f"Unknown DINO ViT feature mode: {feature_mode}")
+
+    def _compute_vit_dino_feature_loss(
+        self,
+        loss_fn: torch.nn.Module,
+        pred_images: torch.Tensor,
+        target_images: torch.Tensor,
+        feature_mode: str,
+        use_norm: bool,
+        use_gram: bool,
+    ) -> torch.Tensor:
+        pred_images = loss_fn.normalize_input(pred_images)
+        target_images = loss_fn.normalize_input(target_images)
+
+        with torch.enable_grad() if pred_images.requires_grad else torch.no_grad():
+            pred_features = loss_fn.dinov3_fwd(pred_images)
+        with torch.no_grad():
+            target_features = loss_fn.dinov3_fwd(target_images)
+
+        pred_features = self._select_vit_dino_features(loss_fn, pred_features, feature_mode)
+        target_features = self._select_vit_dino_features(loss_fn, target_features, feature_mode)
+
+        if use_norm:
+            pred_features = torch.nn.functional.normalize(pred_features, dim=-1)
+            target_features = torch.nn.functional.normalize(target_features, dim=-1)
+
+        if use_gram:
+            pred_gram = loss_fn.gram_matrix(pred_features)
+            target_gram = loss_fn.gram_matrix(target_features)
+            return torch.nn.functional.l1_loss(pred_gram, target_gram)
+
+        return torch.nn.functional.mse_loss(pred_features, target_features)
 
     def do_inference(
         self,
@@ -484,7 +596,67 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
             return pred_images, target_images
 
-        return super().prepare_dino_loss_images(args, model_pred, target, batch, latents, timesteps, network_dtype)
+        return None
+
+    def apply_auxiliary_losses(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        loss: torch.Tensor,
+        model_pred: torch.Tensor,
+        target: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> torch.Tensor:
+        self._latest_aux_loss_logs = {}
+        if args.dino_loss_weight <= 0:
+            return loss
+        if args.dino_loss_every_n_steps < 1:
+            raise ValueError("--dino_loss_every_n_steps must be >= 1")
+        if args.dino_loss_every_n_steps > 1 and global_step % args.dino_loss_every_n_steps != 0:
+            return loss
+
+        images = self.prepare_dino_loss_images(args, model_pred, target, batch, latents, timesteps, network_dtype)
+        if images is None:
+            raise ValueError(
+                "HiDream-O1 DINO auxiliary loss is enabled, but RGB image tensors could not be prepared. "
+                f"model_pred shape={tuple(model_pred.shape)}, target shape={tuple(target.shape)}, "
+                f"latents shape={tuple(latents.shape)}."
+            )
+
+        pred_images, target_images = images
+        pred_images = pred_images.float().clamp(-1.0, 1.0)
+        target_images = target_images.detach().float().clamp(-1.0, 1.0)
+
+        if args.dino_loss_resize is not None and args.dino_loss_resize > 0:
+            size = (args.dino_loss_resize, args.dino_loss_resize)
+            pred_images = torch.nn.functional.interpolate(pred_images, size=size, mode="bilinear", align_corners=False)
+            target_images = torch.nn.functional.interpolate(target_images, size=size, mode="bilinear", align_corners=False)
+
+        dino_loss_fn = self._get_dino_loss_fn(args, accelerator)
+        if args.dino_loss_backend == "vit" and args.dino_loss_feature_mode != "all":
+            dino_loss = self._compute_vit_dino_feature_loss(
+                dino_loss_fn,
+                pred_images,
+                target_images,
+                args.dino_loss_feature_mode,
+                args.dino_loss_use_norm,
+                args.dino_loss_use_gram,
+            )
+        else:
+            dino_loss = dino_loss_fn(pred_images, target_images)
+        weighted_dino_loss = dino_loss * args.dino_loss_weight
+        total_loss = loss + weighted_dino_loss.to(dtype=loss.dtype)
+
+        self._latest_aux_loss_logs = {
+            "loss/base": float(loss.detach().item()),
+            "loss/dino": float(dino_loss.detach().item()),
+            "loss/dino_weighted": float(weighted_dino_loss.detach().item()),
+        }
+        return total_loss
 
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -511,6 +683,65 @@ def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--fp8_scaled",
         action="store_true",
         help="use scaled fp8 for HiDream-O1 DiT weights / HiDream-O1 DiTにスケーリングされたfp8を使う",
+    )
+    parser.add_argument(
+        "--dino_loss_weight",
+        type=float,
+        default=0.0,
+        help="weight for optional SenseCraft DINOv3 auxiliary perceptual loss. 0 disables it",
+    )
+    parser.add_argument(
+        "--dino_loss_backend",
+        type=str,
+        default="vit",
+        choices=["vit", "convnext"],
+        help="DINOv3 perceptual loss backend from SenseCraft",
+    )
+    parser.add_argument(
+        "--dino_loss_model_type",
+        type=str,
+        default=None,
+        help="DINOv3 model type. Defaults to small for vit, tiny for convnext",
+    )
+    parser.add_argument(
+        "--dino_loss_layer",
+        type=int,
+        default=None,
+        help="DINOv3 feature layer. Defaults to -4 for vit, -1 for convnext",
+    )
+    parser.add_argument(
+        "--dino_loss_feature_mode",
+        type=str,
+        default="patch",
+        choices=["all", "patch", "cls", "both"],
+        help=(
+            "ViT DINOv3 token selection: all keeps SenseCraft default, patch drops CLS/register tokens, "
+            "cls uses CLS only, both uses CLS+patch. Ignored for convnext"
+        ),
+    )
+    parser.add_argument(
+        "--dino_loss_resize",
+        type=int,
+        default=224,
+        help="resize RGB tensors to this square size before DINO loss. <=0 disables resizing",
+    )
+    parser.add_argument(
+        "--dino_loss_use_gram",
+        action="store_true",
+        help="use Gram-matrix style loss on DINO features instead of direct feature MSE",
+    )
+    parser.add_argument(
+        "--dino_loss_no_norm",
+        action="store_false",
+        dest="dino_loss_use_norm",
+        help="disable L2 normalization of DINO features before computing perceptual loss",
+    )
+    parser.set_defaults(dino_loss_use_norm=True)
+    parser.add_argument(
+        "--dino_loss_every_n_steps",
+        type=int,
+        default=1,
+        help="compute DINO auxiliary loss every N optimizer steps. 1 computes it every step",
     )
     return parser
 

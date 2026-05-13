@@ -43,7 +43,7 @@ cu130 = [
 gui = [
     "gradio>=4.0.0, <6.0.0",
 ]
-perceptual = [
+hidream_o1 = [
     "sensecraft[dinov3]>=0.3.11",
 ]
 

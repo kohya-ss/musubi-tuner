@@ -23,12 +23,12 @@
 
 ## DINOv3 auxiliary perceptual loss / DINOv3補助知覚Loss
 
-Training can add an optional SenseCraft DINOv3 perceptual loss on top of the normal model loss. This is disabled by default and is only available for trainers that can provide predicted and target RGB images in BCHW format and `[-1, 1]` range. HiDream-O1 supports this through its pixel-patch adapter.
+HiDream-O1 training can add an optional SenseCraft DINOv3 perceptual loss on top of the normal model loss. This is disabled by default. The shared base trainer only keeps an auxiliary-loss hook; the DINO implementation and CLI options are HiDream-O1-specific because they depend on converting predicted pixel patch tokens back to RGB images.
 
 Install the optional dependency before enabling it:
 
 ```bash
-uv pip install "sensecraft[dinov3]"
+uv pip install ".[hidream_o1]"
 ```
 
 Basic options:
