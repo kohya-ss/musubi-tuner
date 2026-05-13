@@ -19,6 +19,7 @@ from musubi_tuner.hv_train_network import (
 import logging
 
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.dit_output import DitOutput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -266,6 +267,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
+        hidden_features: bool = False,
+        feature_layer: int | None = None,
+        per_token_timesteps: torch.Tensor | None = None,
+        **kwargs,
     ):
         model: flux2_models.Flux2 = transformer
 
@@ -319,8 +324,30 @@ class Flux2NetworkTrainer(NetworkTrainer):
             img_input = torch.cat((img_input, ref_tokens), dim=1)
             img_input_ids = torch.cat((img_input_ids, ref_ids), dim=1)
 
-        timesteps = timesteps / 1000.0
-        model_pred = model(x=img_input, x_ids=img_input_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+        if per_token_timesteps is not None:
+            # Self-flow: per-token timesteps (B, N_img) — each token conditioned on its noise level
+            model_timesteps = per_token_timesteps.to(device=accelerator.device) / 1000.0
+            if ref_tokens is not None:
+                # Ref/control tokens are clean (t=0); extend to cover full sequence
+                ref_ts = torch.zeros(bsize, ref_tokens.shape[1], device=accelerator.device, dtype=model_timesteps.dtype)
+                model_timesteps = torch.cat([model_timesteps, ref_ts], dim=1)
+        else:
+            model_timesteps = timesteps / 1000.0
+        model_output = model(
+            x=img_input,
+            x_ids=img_input_ids,
+            timesteps=model_timesteps,
+            ctx=ctx,
+            ctx_ids=ctx_ids,
+            guidance=guidance_vec,
+            hidden_features=hidden_features,
+            feature_layer=feature_layer,
+        )
+        if hidden_features:
+            model_pred, features = model_output
+        else:
+            model_pred = model_output
+            features = None
         model_pred = model_pred[:, : noisy_model_input.shape[1]]  # [B, 4096, 128]
 
         # unpack height/width latents
@@ -330,7 +357,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         target = noise - latents
 
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target, features=features)
 
     # endregion model specific
 

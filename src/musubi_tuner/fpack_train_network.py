@@ -32,6 +32,7 @@ from musubi_tuner.hv_train_network import (
 import logging
 
 from musubi_tuner.utils import model_utils
+from musubi_tuner.utils.dit_output import DitOutput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -587,7 +588,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
         # flow matching loss
         target = noise - latents
 
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
     # endregion model specific
 

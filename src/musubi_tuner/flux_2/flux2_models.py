@@ -592,21 +592,64 @@ class Flux2(nn.Module):
         self.offloader_double.prepare_block_devices_before_forward(self.double_blocks)
         self.offloader_single.prepare_block_devices_before_forward(self.single_blocks)
 
-    def forward(self, x: Tensor, x_ids: Tensor, timesteps: Tensor, ctx: Tensor, ctx_ids: Tensor, guidance: Tensor | None) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        x_ids: Tensor,
+        timesteps: Tensor,
+        ctx: Tensor,
+        ctx_ids: Tensor,
+        guidance: Tensor | None,
+        hidden_features: bool = False,
+        feature_layer: int | None = None,
+    ) -> Tensor:
         num_txt_tokens = ctx.shape[1]
 
-        timestep_emb = timestep_embedding(timesteps, 256)
-        del timesteps
-        vec = self.time_in(timestep_emb)
-        del timestep_emb
-        if self.use_guidance_embed:
-            guidance_emb = timestep_embedding(guidance, 256)
-            vec = vec + self.guidance_in(guidance_emb)
-            del guidance_emb
+        if timesteps.ndim == 1:
+            # Standard global conditioning: one timestep per batch item
+            timestep_emb = timestep_embedding(timesteps, 256)
+            del timesteps
+            vec = self.time_in(timestep_emb)
+            del timestep_emb
+            if self.use_guidance_embed:
+                guidance_emb = timestep_embedding(guidance, 256)
+                vec = vec + self.guidance_in(guidance_emb)
+                del guidance_emb
 
-        double_block_mod_img = self.double_stream_modulation_img(vec)
-        double_block_mod_txt = self.double_stream_modulation_txt(vec)
-        single_block_mod, _ = self.single_stream_modulation(vec)
+            double_block_mod_img = self.double_stream_modulation_img(vec)
+            double_block_mod_txt = self.double_stream_modulation_txt(vec)
+            single_block_mod, _ = self.single_stream_modulation(vec)
+            vec_for_final = vec
+        else:
+            # Per-token conditioning: one timestep per image token (self-flow training)
+            # timesteps: (B, N_img) — each token has its own noise level
+            B, N_img = timesteps.shape
+            timestep_emb_flat = timestep_embedding(timesteps.reshape(-1), 256)  # (B*N_img, 256)
+            del timesteps
+            vec_img = self.time_in(timestep_emb_flat).reshape(B, N_img, -1)  # (B, N_img, D)
+            del timestep_emb_flat
+            if self.use_guidance_embed:
+                guidance_emb = timestep_embedding(guidance, 256)  # (B, 256)
+                guidance_vec = self.guidance_in(guidance_emb).unsqueeze(1)  # (B, 1, D)
+                del guidance_emb
+                vec_img = vec_img + guidance_vec  # (B, N_img, D)
+
+            # Text tokens are not noised; use mean of per-token vecs as global representative
+            vec_global = vec_img.mean(dim=1)  # (B, D)
+
+            # Image tokens: per-token modulation (B, N_img, D*6)
+            double_block_mod_img = self.double_stream_modulation_img(vec_img)
+            # Text tokens: global modulation (B, 1, D*6) — broadcasts to all txt tokens
+            double_block_mod_txt = self.double_stream_modulation_txt(vec_global)
+
+            # Single blocks process txt+img together — combine per-token vecs
+            vec_txt_expanded = vec_global.unsqueeze(1).expand(-1, num_txt_tokens, -1)  # (B, N_txt, D)
+            vec_combined = torch.cat([vec_txt_expanded, vec_img], dim=1)  # (B, N_txt+N_img, D)
+            single_block_mod, _ = self.single_stream_modulation(vec_combined)
+            del vec_combined, vec_txt_expanded, vec_global
+
+            vec_for_final = vec_img  # per-token conditioning for final layer
+            vec = vec_img  # keep reference for device move below
 
         img = self.img_in(x)
         del x
@@ -619,11 +662,19 @@ class Flux2(nn.Module):
 
         attn_params = AttentionParams.create_attention_params(self.attn_mode, self.split_attn)  # No attention mask
 
+        features = None
+        global_block_idx = 0
+
         for block_idx, block in enumerate(self.double_blocks):
             if self.blocks_to_swap:
                 self.offloader_double.wait_for_block(block_idx)
 
             img, txt = block(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt, attn_params)
+
+            if hidden_features and feature_layer is not None and global_block_idx == feature_layer:
+                features = img.clone()
+
+            global_block_idx += 1
 
             if self.blocks_to_swap:
                 self.offloader_double.submit_move_blocks_forward(self.double_blocks, block_idx)
@@ -641,6 +692,11 @@ class Flux2(nn.Module):
 
             img = block(img, pe, single_block_mod, attn_params)
 
+            if hidden_features and feature_layer is not None and global_block_idx == feature_layer:
+                features = img[:, num_txt_tokens:, ...].clone()
+
+            global_block_idx += 1
+
             if self.blocks_to_swap:
                 self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
 
@@ -650,7 +706,14 @@ class Flux2(nn.Module):
 
         img = img[:, num_txt_tokens:, ...]
 
-        img = self.final_layer(img, vec)
+        # Default: features from last block before final_layer
+        if hidden_features and features is None:
+            features = img.clone()
+
+        img = self.final_layer(img, vec_for_final)
+
+        if hidden_features:
+            return img, features
         return img
 
 

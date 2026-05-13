@@ -50,6 +50,7 @@ from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, r
 import logging
 
 from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from musubi_tuner.utils.dit_output import DitOutput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -379,6 +380,8 @@ class NetworkTrainer:
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
+        self._coupling_scheduler = None
+        self._grid_mask_warned_shapes: set = set()
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -876,6 +879,16 @@ class NetworkTrainer:
                     # https://arxiv.org/abs/2411.14793v3
                     logsnr = rand_logsnr(batch_size, args.logit_mean, args.logit_std, org_timesteps)
                     t = torch.sigmoid(-logsnr / 2)
+
+                elif args.timestep_sampling == "plateau_logit_normal":
+                    from musubi_tuner.timestep_samplers import sample_plateau_logit_normal
+
+                    t = sample_plateau_logit_normal(
+                        batch_size=batch_size,
+                        shift=args.discrete_flow_shift,
+                        sigma=args.sigmoid_scale,
+                        device=device,
+                    )
 
                 elif args.timestep_sampling.startswith("qinglong"):
                     # Qinglong triple hybrid sampling: mid_shift:logsnr:logsnr2 = .80:.075:.125
@@ -1579,6 +1592,628 @@ class NetworkTrainer:
         latents = latents * vae_module.SCALING_FACTOR
         return latents
 
+    def compute_loss(
+        self, pred: torch.Tensor, target: torch.Tensor, weighting: float | None, **kwargs
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Returns loss and loss metrics"""
+        loss = torch.nn.functional.mse_loss(pred, target, reduction="none")
+
+        if weighting is not None:
+            loss = loss * weighting
+        return loss, {}
+
+    def _assign_teacher_student_timesteps(
+        self,
+        timesteps_a: torch.Tensor,  # (B,) - timesteps in [1, 1001]
+        timesteps_b: torch.Tensor,  # (B,) - timesteps in [1, 1001]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Per-sample teacher/student assignment (paper Eq. 4-5).
+
+        Teacher gets cleaner (lower) timestep, student gets noisier (higher) timestep.
+
+        Args:
+            timesteps_a: First sampled timesteps, shape (B,)
+            timesteps_b: Second sampled timesteps, shape (B,)
+
+        Returns:
+            (timesteps_teacher, timesteps_student): Both shape (B,)
+        """
+        t_a = timesteps_a.float()  # (B,)
+        t_b = timesteps_b.float()  # (B,)
+        timesteps_teacher = torch.min(t_a, t_b).to(timesteps_a.dtype)  # (B,)
+        timesteps_student = torch.max(t_a, t_b).to(timesteps_a.dtype)  # (B,)
+        return timesteps_teacher, timesteps_student
+
+    def _reconstruct_noisy_input(
+        self,
+        latents: torch.Tensor,  # (B, C, H, W) or (B, C, T, H, W)
+        noise: torch.Tensor,  # same shape as latents
+        timesteps: torch.Tensor,  # (B,) - timesteps in [1, 1001]
+    ) -> torch.Tensor:
+        """
+        Reconstruct noisy input using flow matching formula: (1-t)*latents + t*noise
+
+        Args:
+            latents: Clean latents
+            noise: Sampled noise (same shape as latents)
+            timesteps: Timesteps in [1, 1001] range, shape (B,)
+
+        Returns:
+            Noisy input with same shape as latents
+        """
+        # Convert timesteps to [0, 1]: t = (timestep - 1) / 1000
+        t = (timesteps.float() - 1.0) / 1000.0  # (B,)
+
+        # Expand for broadcasting
+        if latents.ndim == 5:
+            t_exp = t.view(-1, 1, 1, 1, 1)  # (B, 1, 1, 1, 1)
+        else:
+            t_exp = t.view(-1, 1, 1, 1)  # (B, 1, 1, 1)
+
+        return (1 - t_exp) * latents + t_exp * noise
+
+    def _apply_per_token_mask(
+        self,
+        noisy_input_student: torch.Tensor,  # (B, C, H, W) or (B, C, T, H, W)
+        noisy_input_teacher: torch.Tensor,  # same shape as student
+        mask_ratio: float,  # R_M in [0, 0.5] from paper
+        device: torch.device,
+        args: argparse.Namespace | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply per-token masking (paper Eq. 4-5).
+
+        Masked tokens in student input get replaced with teacher (cleaner) noise level.
+
+        Args:
+            noisy_input_student: Student noisy input
+            noisy_input_teacher: Teacher noisy input (cleaner)
+            mask_ratio: Fraction of tokens to mask, must be <= 0.5
+            device: Device for mask tensor
+            args: Training args (optional, for locality mode dispatch)
+
+        Returns:
+            (masked_input, mask_flat) where mask_flat is (B, N) bool tensor,
+            True = masked (uses teacher value). Returned so callers can build
+            per-token timestep maps.
+        """
+        # Extract spatial dims (H, W only — T is left alone)
+        if noisy_input_student.ndim == 5:
+            B, _C, T, H, W = noisy_input_student.shape
+        else:
+            B, _C, H, W = noisy_input_student.shape
+            T = None
+
+        locality_mode = getattr(args, "self_flow_patch_locality_mode", "none") if args else "none"
+
+        if locality_mode == "grid":
+            block_size = args.self_flow_patch_block_size
+            mask_hw = self._apply_grid_mask(B, H, W, mask_ratio, block_size, device)
+        elif locality_mode == "seed":
+            seed_count = args.self_flow_patch_seed_count
+            seed_shape = args.self_flow_patch_seed_shape
+            mask_hw = self._apply_seed_mask(B, H, W, mask_ratio, seed_count, seed_shape, device)
+        else:
+            # Default: independent per-token random masking
+            if T is not None:
+                # 5D: preserve original behavior — independent draw per (t, h, w)
+                num_tokens = T * H * W
+                mask_flat = torch.rand(B, num_tokens, device=device) < mask_ratio
+                mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
+                masked_input = torch.where(mask_spatial, noisy_input_teacher, noisy_input_student)
+                return masked_input, mask_flat
+            mask_hw = torch.rand(B, H * W, device=device) < mask_ratio
+            mask_hw = mask_hw.view(B, H, W)
+
+        # Expand mask to full tensor shape
+        if T is not None:
+            # For 5D locality modes: apply same H,W mask to every frame
+            mask_flat = mask_hw.unsqueeze(1).expand(B, T, H, W).reshape(B, T * H * W)
+            mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
+        else:
+            mask_flat = mask_hw.reshape(B, H * W)
+            mask_spatial = mask_flat.view(B, 1, H, W).expand_as(noisy_input_student)
+
+        masked_input = torch.where(mask_spatial, noisy_input_teacher, noisy_input_student)
+        return masked_input, mask_flat
+
+    def _apply_grid_mask(
+        self,
+        B: int,
+        H: int,
+        W: int,
+        mask_ratio: float,
+        block_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Grid-based locality masking.
+
+        Divides H x W into a coarser meta-grid, flips one coin per meta-cell,
+        then expands back to full resolution.
+
+        Returns:
+            mask_hw: (B, H, W) bool tensor
+        """
+        mH = (H + block_size - 1) // block_size  # Ceiling division
+        mW = (W + block_size - 1) // block_size
+
+        if mH == 0 or mW == 0:
+            logger.warning(
+                f"block_size={block_size} is larger than spatial dims ({H}, {W}), "
+                "falling back to random masking"
+            )
+            return torch.rand(B, H, W, device=device) < mask_ratio
+
+        meta_mask = torch.rand(B, mH, mW, device=device) < mask_ratio
+
+        # Expand each meta-cell to block_size x block_size using repeat_interleave
+        # (B, mH, mW) -> (B, mH*block_size, mW*block_size)
+        expanded = meta_mask.repeat_interleave(block_size, dim=1).repeat_interleave(block_size, dim=2)
+
+        # Truncate to actual dims if remainder exists
+        if expanded.shape[1] != H or expanded.shape[2] != W:
+            shape_key = (H, W, block_size)
+            if shape_key not in self._grid_mask_warned_shapes:
+                logger.warning(
+                    f"Grid mask: ({H}, {W}) not divisible by block_size={block_size}, "
+                    f"edge tokens share a partial block (smaller than {block_size}x{block_size})"
+                )
+                self._grid_mask_warned_shapes.add(shape_key)
+
+        return expanded[:, :H, :W]
+
+    def _apply_seed_mask(
+        self,
+        B: int,
+        H: int,
+        W: int,
+        mask_ratio: float,
+        seed_count: int,
+        seed_shape: str,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Seed-point locality masking.
+
+        Picks K seed points, computes distance from every position to its
+        nearest seed, then masks the closest floor(mask_ratio * H * W) tokens.
+
+        Args:
+            seed_count: Number of seed points (K)
+            seed_shape: Distance metric — "square" (L∞), "circle" (L2), "diamond" (L1)
+
+        Returns:
+            mask_hw: (B, H, W) bool tensor
+        """
+        num_tokens = H * W
+        num_masked = int(mask_ratio * num_tokens)
+
+        if num_masked == 0 or seed_count <= 0:
+            return torch.zeros(B, H, W, dtype=torch.bool, device=device)
+
+        # Coordinate grids: (H, W) each
+        h_coords = torch.arange(H, dtype=torch.float32, device=device)
+        w_coords = torch.arange(W, dtype=torch.float32, device=device)
+        grid_h, grid_w = torch.meshgrid(h_coords, w_coords, indexing="ij")  # (H, W)
+
+        # Random seed points: (B, K)
+        seeds_h = torch.randint(0, H, (B, seed_count), device=device).float()
+        seeds_w = torch.randint(0, W, (B, seed_count), device=device).float()
+
+        # Distance from every position to every seed: (B, K, H, W)
+        dh = grid_h[None, None] - seeds_h.view(B, seed_count, 1, 1)
+        dw = grid_w[None, None] - seeds_w.view(B, seed_count, 1, 1)
+
+        if seed_shape == "square":
+            dist = torch.max(dh.abs(), dw.abs())  # L∞
+        elif seed_shape == "circle":
+            dist = torch.sqrt(dh ** 2 + dw ** 2)  # L2
+        elif seed_shape == "diamond":
+            dist = dh.abs() + dw.abs()  # L1
+        else:
+            raise ValueError(f"Unknown seed_shape: {seed_shape}")
+
+        # Min distance to nearest seed: (B, H, W)
+        min_dist = dist.min(dim=1).values
+
+        # Select the closest num_masked tokens per batch element
+        flat_dist = min_dist.view(B, -1)  # (B, H*W)
+        _, indices = flat_dist.topk(num_masked, dim=1, largest=False)  # (B, num_masked)
+        mask_flat = torch.zeros(B, num_tokens, dtype=torch.bool, device=device)
+        mask_flat.scatter_(1, indices, True)
+
+        return mask_flat.view(B, H, W)
+
+    def _build_per_token_timestep_map(
+        self,
+        timesteps_teacher: torch.Tensor,  # (B,)
+        timesteps_student: torch.Tensor,  # (B,)
+        mask_flat: torch.Tensor,  # (B, N) bool — True = masked = teacher noise
+        coupling_prob: float = 0.0,  # per-patch probability of mismatch for masked tokens
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Build per-token timestep map for dual-timestep conditioning (paper §A.3).
+
+        Unmasked tokens always get timesteps_student (correct: student noise level).
+        Masked tokens (teacher noise) get either:
+          - timesteps_teacher (correct, prob 1 - coupling_prob)
+          - timesteps_student (mismatch, prob coupling_prob) — cleaner noise but told
+            it is at the noisier student timestep, encouraging deeper teacher learning.
+
+        Args:
+            timesteps_teacher: Teacher timesteps, shape (B,)
+            timesteps_student: Student timesteps, shape (B,)
+            mask_flat: Boolean mask from _apply_per_token_mask, shape (B, N)
+            coupling_prob: Per-patch probability that a masked patch gets student
+                timestep instead of teacher timestep. 0 = paper behaviour.
+
+        Returns:
+            (per_token_timesteps, mismatch_mask) where:
+              per_token_timesteps: shape (B, N), same dtype as inputs
+              mismatch_mask: (B, N) bool, True where mismatch was applied
+        """
+        B, N = mask_flat.shape
+        t_student_expanded = timesteps_student.unsqueeze(1).expand(B, N)  # (B, N)
+        t_teacher_expanded = timesteps_teacher.unsqueeze(1).expand(B, N)  # (B, N)
+
+        if coupling_prob <= 0.0:
+            per_token_t = torch.where(mask_flat, t_teacher_expanded, t_student_expanded)
+            mismatch_mask = torch.zeros_like(mask_flat)
+            return per_token_t, mismatch_mask
+
+        # Among masked tokens, flip a per-patch coin to decide mismatch
+        coin = torch.rand(B, N, device=mask_flat.device)
+        mismatch_mask = mask_flat & (coin < coupling_prob)  # (B, N)
+
+        # Masked + NOT mismatch → teacher timestep (correct)
+        # Masked + mismatch    → student timestep (deliberate mismatch)
+        # Unmasked             → student timestep (always correct)
+        per_token_t = torch.where(mask_flat & ~mismatch_mask, t_teacher_expanded, t_student_expanded)
+        return per_token_t, mismatch_mask
+
+    def _update_ema_weights(
+        self,
+        ema_state: dict[str, torch.Tensor],  # EMA copy of weights
+        current_state: dict[str, torch.Tensor],  # Current model weights
+        decay: float,  # EMA decay rate (e.g., 0.9999)
+    ) -> None:
+        """
+        Update EMA weights in-place: ema = decay * ema + (1 - decay) * current
+
+        Args:
+            ema_state: EMA weight dictionary (modified in-place)
+            current_state: Current model weights
+            decay: EMA decay rate, typically 0.9999
+        """
+        with torch.no_grad():
+            for k, v in current_state.items():
+                if v.is_floating_point():
+                    # ema_state[k] = decay * ema_state[k] + (1 - decay) * v
+                    ema_state[k].lerp_(v, 1 - decay)
+                else:
+                    # For non-floating point (e.g., int buffers), just copy
+                    ema_state[k].copy_(v)
+
+    def _compute_representation_loss(
+        self,
+        student_features: torch.Tensor,  # (B, N, D) - student layer features
+        teacher_features: torch.Tensor,  # (B, N, D) - teacher layer features
+        rep_proj: torch.nn.Module,  # Projection network
+    ) -> torch.Tensor:
+        """
+        Compute representation alignment loss L_rep (paper Eq. 6).
+
+        L_rep = -cosine_similarity(proj(f_student), f_teacher)
+
+        Args:
+            student_features: Features from student layer l, shape (B, N, D)
+            teacher_features: Features from teacher layer k, shape (B, N, D)
+            rep_proj: Projection network (maps D -> D)
+
+        Returns:
+            Scalar loss (negative mean cosine similarity)
+        """
+        # Project student features: (B, N, D) -> (B, N, D)
+        student_proj = rep_proj(student_features)
+
+        # Cosine similarity along feature dim: (B, N, D) -> scalar
+        cos_sim = torch.nn.functional.cosine_similarity(student_proj, teacher_features, dim=-1)  # (B, N)
+
+        # Negative mean (we want to maximize similarity = minimize negative)
+        return -cos_sim.mean()
+
+    def _compute_ema_weight_drift(
+        self,
+        ema_state: dict[str, torch.Tensor],
+        current_state: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Compute mean L2 distance between EMA and current weights (floating-point only).
+
+        Healthy training shows a stable moderate drift — too low means the teacher
+        has collapsed into the student; a sudden spike indicates a training problem.
+
+        Returns:
+            Scalar tensor: mean L2 norm across all floating-point parameter differences
+        """
+        diffs = []
+        for k, ema_v in ema_state.items():
+            if ema_v.is_floating_point():
+                diffs.append((ema_v - current_state[k]).norm())
+        if not diffs:
+            return torch.tensor(0.0)
+        return torch.stack(diffs).mean()
+
+    def collect_grad_metrics(self, params) -> dict:
+        """Collect gradient diagnostics for logging.
+
+        Returns grad/norm (total L2, pre-clip) and grad/max (max absolute element).
+        Returns empty dict if no parameters have gradients.
+        """
+        grads = [p.grad.detach() for p in params if p.grad is not None]
+        if not grads:
+            return {}
+        per_norm = torch.stack([g.norm() for g in grads])
+        total_norm = per_norm.norm()
+        mean_norm = per_norm.mean()
+        max_grad = torch.stack([g.abs().max() for g in grads]).max()
+        return {
+            "grad/norm": total_norm.item(),
+            "grad/mean_norm": mean_norm.item(),
+            "grad/max": max_grad.item(),
+        }
+
+    def effective_gamma(self, gamma: float, global_step: int, warmup_steps: int) -> float:
+        """Return the gamma weight for L_rep after applying linear warmup.
+
+        Linearly ramps from 0 to gamma over warmup_steps steps, then holds at gamma.
+        Set warmup_steps=0 to disable warmup (gamma applied immediately).
+        """
+        if warmup_steps <= 0:
+            return gamma
+        return gamma * min(1.0, global_step / warmup_steps)
+
+    def _create_coupling_prob_scheduler(
+        self, coupling_prob: float, decay_type: str, num_steps: int
+    ) -> None:
+        """
+        Create a dummy optimizer + LR scheduler to decay teacher coupling probability.
+
+        The scheduler starts at coupling_prob and decays to 0 over num_steps.
+        Supported decay_type: "constant", "cosine", "linear", "rex".
+        Stores the scheduler in self._coupling_scheduler (None if constant or prob == 0).
+        """
+        if coupling_prob == 0.0 or decay_type == "constant":
+            self._coupling_scheduler = None
+            return
+
+        dummy_param = torch.nn.Parameter(torch.zeros(1))
+        dummy_optimizer = torch.optim.SGD([dummy_param], lr=coupling_prob)
+
+        if decay_type == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                dummy_optimizer, T_max=max(num_steps, 1), eta_min=0.0
+            )
+        elif decay_type == "linear":
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                dummy_optimizer, start_factor=1.0, end_factor=0.0, total_iters=max(num_steps, 1)
+            )
+        elif decay_type == "rex":
+            scheduler = RexLR(
+                dummy_optimizer, max_lr=coupling_prob, min_lr=0.0, num_steps=max(num_steps, 1)
+            )
+        else:
+            raise ValueError(f"Unknown --self_flow_teacher_coupling_decay: {decay_type!r}. Choose: constant, cosine, linear, rex")
+
+        self._coupling_scheduler = scheduler
+
+    def _get_current_coupling_prob(self, args: argparse.Namespace) -> float:
+        """Return current coupling probability and advance the scheduler by one step."""
+        if self._coupling_scheduler is None:
+            return args.self_flow_teacher_coupling_prob
+        prob = self._coupling_scheduler.get_last_lr()[0]
+        self._coupling_scheduler.step()
+        return prob
+
+    def _update_self_flow_logs(
+        self,
+        L_gen: torch.Tensor,
+        L_rep: torch.Tensor | None,
+        timesteps_student: torch.Tensor,
+        timesteps_teacher: torch.Tensor,
+        mask_flat: torch.Tensor,
+        mismatch_mask: torch.Tensor | None = None,
+        ema_weight_drift: torch.Tensor | None = None,
+        teacher_coupling_prob: float = 0.0,
+        per_token_timesteps_student: torch.Tensor | None = None,
+    ) -> None:
+        """Populate self._self_flow_logs with all self-flow training metrics."""
+        masked_count = mask_flat.sum().item()
+        if mismatch_mask is not None:
+            mismatch_count = mismatch_mask.sum().item()
+            mismatch_frac = mismatch_count / masked_count if masked_count > 0 else 0.0
+        self._self_flow_logs = {
+            "self_flow/L_gen": L_gen.detach().item(),
+            "self_flow/L_rep": L_rep.detach().item() if L_rep is not None else 0.0,
+            "self_flow/feat_cosine_sim": (-L_rep.detach().item()) if L_rep is not None else 0.0,
+            "self_flow/timestep_student_mean": timesteps_student.float().mean().item(),
+            "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
+            "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
+            "self_flow/teacher_coupling_prob": teacher_coupling_prob,
+            "self_flow/actual_mask_ratio": mask_flat.float().mean().item(),
+        }
+        if mismatch_mask is not None:
+            self._self_flow_logs["self_flow/mismatch_patch_count"] = mismatch_count
+            self._self_flow_logs["self_flow/mismatch_patch_frac"] = mismatch_frac
+        if ema_weight_drift is not None:
+            self._self_flow_logs["self_flow/ema_weight_drift"] = ema_weight_drift.detach().item()
+
+    def _compute_combined_loss(
+        self,
+        l_gen: torch.Tensor,  # Scalar generation loss
+        l_rep: torch.Tensor | None,  # Scalar representation loss (or None)
+        gamma: float,  # Weight for L_rep (paper default: 0.8)
+    ) -> torch.Tensor:
+        """
+        Compute combined self-flow loss (paper Eq. 7).
+
+        L_total = L_gen + gamma * L_rep
+
+        Args:
+            l_gen: Generation loss (MSE between prediction and target)
+            l_rep: Representation alignment loss (or None if features unavailable)
+            gamma: Weight for representation loss
+
+        Returns:
+            Combined scalar loss
+        """
+        if l_rep is None:
+            return l_gen
+        return l_gen + gamma * l_rep
+
+    def _self_flow_step(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer: torch.nn.Module,
+        network: torch.nn.Module,
+        latents: torch.Tensor,
+        batch: dict,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        vae: torch.nn.Module,
+        rep_proj: torch.nn.Module,
+        ema_lora_state: dict,
+        global_step: int = 0,
+    ) -> torch.Tensor:
+        """Self-flow training step: dual-timestep scheduling + representation alignment."""
+        # Sample two timesteps per sample (noisy inputs are reconstructed below with per-sample min/max)
+        _, timesteps_a = self.get_noisy_model_input_and_timesteps(
+            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+        )
+        assert isinstance(timesteps_a, torch.Tensor), "timesteps_a must be a tensor"
+        _, timesteps_b = self.get_noisy_model_input_and_timesteps(
+            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+        )
+        assert isinstance(timesteps_b, torch.Tensor), "timesteps_b must be a tensor"
+
+        # Per-sample: teacher = min(t, s), student = max(t, s)
+        # timesteps shape: (B,), values in [1, 1001], higher = noisier
+        timesteps_teacher, timesteps_student = self._assign_teacher_student_timesteps(timesteps_a, timesteps_b)
+
+        # Reconstruct noisy inputs using per-sample teacher/student timesteps
+        noisy_input_teacher = self._reconstruct_noisy_input(latents, noise, timesteps_teacher)
+        noisy_input_student = self._reconstruct_noisy_input(latents, noise, timesteps_student)
+
+        # Per-token masking (paper Eq. 4-5) — returns (masked_input, mask_flat)
+        noisy_input_student, mask_flat = self._apply_per_token_mask(
+            noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device, args=args
+        )
+
+        # Per-token timestep map with optional mismatch.
+        # coupling_prob (decays over training) is a per-step gate: if it fires, mismatch
+        # is applied to masked patches at the rate set by mismatch_ratio.
+        # If the gate doesn't fire this step, all masked patches get the correct teacher
+        # timestep (normal paper behaviour).
+        coupling_prob = self._get_current_coupling_prob(args)
+        gate_open = coupling_prob > 0.0 and torch.rand(1).item() < coupling_prob
+        effective_mismatch_ratio = args.self_flow_teacher_mismatch_ratio if gate_open else 0.0
+        per_token_timesteps_student, mismatch_mask = self._build_per_token_timestep_map(
+            timesteps_teacher, timesteps_student, mask_flat, coupling_prob=effective_mismatch_ratio
+        )
+
+        # Feature layer indices: student (l) < teacher (k)
+        student_feature_layer = args.student_feature_layer
+        teacher_feature_layer = args.teacher_feature_layer
+
+        # Teacher forward (no grad, EMA weights)
+        student_lora_state = {k: v.clone() for k, v in network.state_dict().items()}
+        network.load_state_dict(ema_lora_state)
+        with torch.no_grad():
+            output = self.call_dit(
+                args,
+                accelerator,
+                transformer,
+                latents,
+                batch,
+                noise,
+                noisy_input_teacher,
+                timesteps_teacher,
+                network_dtype,
+                hidden_features=True,
+                feature_layer=teacher_feature_layer,
+            )
+            feat_teacher = output.features.detach() if output.features is not None else None
+        network.load_state_dict(student_lora_state)
+
+        # Reset after teacher forward due to a lack of the backwards
+        accelerator.unwrap_model(transformer).prepare_block_swap_before_forward()
+
+        # Student forward (gradients flow)
+        weighting = compute_loss_weighting_for_sd3(
+            args.weighting_scheme, noise_scheduler, timesteps_student, accelerator.device, dit_dtype
+        )
+        output = self.call_dit(
+            args,
+            accelerator,
+            transformer,
+            latents,
+            batch,
+            noise,
+            noisy_input_student,
+            timesteps_student,
+            network_dtype,
+            hidden_features=True,
+            feature_layer=student_feature_layer,
+            per_token_timesteps=per_token_timesteps_student,
+        )
+        model_pred = output.pred
+        target = output.target
+        feat_student = output.features
+
+        # --- L_gen ---
+        loss, _ = self.compute_loss(
+            model_pred.to(network_dtype),
+            target,
+            weighting=weighting,
+            args=args,
+            noise=noise,
+            timesteps=timesteps_student,
+            noisy_model_input=noisy_input_student,
+            vae=vae,
+            accelerator=accelerator,
+            noise_scheduler=noise_scheduler,
+        )
+        L_gen = loss.mean()
+
+        # --- L_rep (Eq. 6) ---
+        gamma = self.effective_gamma(args.self_flow_gamma, global_step, args.self_flow_gamma_warmup_steps)
+        if feat_student is not None and feat_teacher is not None:
+            L_rep = self._compute_representation_loss(feat_student, feat_teacher, rep_proj)
+            loss = self._compute_combined_loss(L_gen, L_rep, gamma)
+        else:
+            L_rep = None
+            loss = self._compute_combined_loss(L_gen, None, gamma)
+
+        # --- Self-flow metrics ---
+        ema_drift = self._compute_ema_weight_drift(ema_lora_state, network.state_dict())
+        self._update_self_flow_logs(
+            L_gen=L_gen,
+            L_rep=L_rep,
+            timesteps_student=timesteps_student,
+            timesteps_teacher=timesteps_teacher,
+            mask_flat=mask_flat,
+            mismatch_mask=mismatch_mask,
+            ema_weight_drift=ema_drift,
+            teacher_coupling_prob=coupling_prob,
+        )
+
+        return loss
+
     def call_dit(
         self,
         args: argparse.Namespace,
@@ -1590,6 +2225,7 @@ class NetworkTrainer:
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
+        **kwargs,
     ):
         transformer: HYVideoDiffusionTransformer = transformer_arg
         bsz = latents.shape[0]
@@ -1636,7 +2272,7 @@ class NetworkTrainer:
         # flow matching loss
         target = noise - latents
 
-        return model_pred, target
+        return DitOutput(pred=model_pred, target=target)
 
     # endregion model specific
 
@@ -1662,6 +2298,20 @@ class NetworkTrainer:
                 "SageAttention doesn't support training currently. Please use `--sdpa` or `--xformers` etc. instead."
                 " / SageAttentionは現在学習をサポートしていないようです。`--sdpa`や`--xformers`などの他のオプションを使ってください"
             )
+
+        if args.self_flow:
+            if (
+                args.student_feature_layer is not None
+                and args.teacher_feature_layer is not None
+                and args.student_feature_layer >= args.teacher_feature_layer
+            ):
+                raise ValueError(
+                    f"--student_feature_layer ({args.student_feature_layer}) must be less than "
+                    f"--teacher_feature_layer ({args.teacher_feature_layer}). "
+                    "The paper requires l < k for the representation alignment loss."
+                )
+            if args.mask_ratio > 0.5:
+                raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)")
 
         if args.disable_numpy_memmap:
             logger.info(
@@ -1857,9 +2507,33 @@ class NetworkTrainer:
         accelerator.print("prepare optimizer, data loader etc.")
 
         trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
+
+        rep_proj = None
+        if args.self_flow:
+            rep_proj = torch.nn.Sequential(
+                torch.nn.Linear(transformer.hidden_size, transformer.hidden_size),
+                torch.nn.GELU(),
+                torch.nn.Linear(transformer.hidden_size, transformer.hidden_size),
+            )
+            # Merge rep_proj params into the first param group so they share the main
+            # optimizer's LR schedule (Prodigy and similar optimizers don't support
+            # per-group LRs, so a separate group/optimizer would be incompatible).
+            if trainable_params:
+                trainable_params[0]["params"] = list(trainable_params[0]["params"]) + list(rep_proj.parameters())
+            else:
+                trainable_params = [{"params": list(rep_proj.parameters())}]
+
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
+
+        if rep_proj is not None:
+            if args.network_weights_proj is not None:
+                from safetensors.torch import load_file
+                proj_state = load_file(args.network_weights_proj)
+                rep_proj.load_state_dict(proj_state)
+                accelerator.print(f"load projection head weights from {args.network_weights_proj}")
+            rep_proj = accelerator.prepare(rep_proj)
 
         # prepare dataloader
 
@@ -1927,6 +2601,37 @@ class NetworkTrainer:
 
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
         training_model = network
+
+        ema_lora_state = None
+        if args.self_flow:
+            # EMA copy of LoRA weights for self-flow teacher (after accelerator.prepare so weights are on device)
+            ema_lora_state = {k: v.detach().clone() for k, v in network.state_dict().items()}
+            if args.network_weights_ema is not None:
+                if args.network_weights is None:
+                    raise ValueError("--network_weights_ema requires --network_weights to be set")
+                unwrapped_nw = accelerator.unwrap_model(network)
+                info = unwrapped_nw.load_weights(args.network_weights_ema)
+                accelerator.print(f"load EMA network weights from {args.network_weights_ema}: {info}")
+                ema_lora_state = {k: v.detach().clone() for k, v in unwrapped_nw.state_dict().items()}
+                unwrapped_nw.load_weights(args.network_weights)  # restore student weights
+            coupling_decay_steps = getattr(args, "self_flow_teacher_coupling_decay_steps", None) or args.max_train_steps
+            self._create_coupling_prob_scheduler(
+                coupling_prob=args.self_flow_teacher_coupling_prob,
+                decay_type=args.self_flow_teacher_coupling_decay,
+                num_steps=coupling_decay_steps,
+            )
+            logger.info(
+                f"Self-flow enabled: gamma={args.self_flow_gamma}, mask_ratio={args.mask_ratio}, "
+                f"ema_decay={args.ema_decay}, student_layer={args.student_feature_layer}, "
+                f"teacher_layer={args.teacher_feature_layer}, "
+                f"teacher_coupling_prob={args.self_flow_teacher_coupling_prob}, "
+                f"teacher_coupling_decay={args.self_flow_teacher_coupling_decay}, "
+                f"teacher_mismatch_ratio={args.self_flow_teacher_mismatch_ratio}, "
+                f"patch_locality_mode={args.self_flow_patch_locality_mode}, "
+                f"patch_block_size={args.self_flow_patch_block_size}, "
+                f"patch_seed_count={args.self_flow_patch_seed_count}, "
+                f"patch_seed_shape={args.self_flow_patch_seed_shape}"
+            )
 
         if args.gradient_checkpointing:
             transformer.train()
@@ -2036,6 +2741,22 @@ class NetworkTrainer:
             "ss_discrete_flow_shift": args.discrete_flow_shift,
         }
 
+        if args.self_flow:
+            metadata["ss_self_flow"] = True
+            metadata["ss_self_flow_gamma"] = args.self_flow_gamma
+            metadata["ss_self_flow_gamma_warmup_steps"] = args.self_flow_gamma_warmup_steps
+            metadata["ss_self_flow_mask_ratio"] = args.mask_ratio
+            metadata["ss_self_flow_ema_decay"] = args.ema_decay
+            metadata["ss_self_flow_student_layer"] = args.student_feature_layer
+            metadata["ss_self_flow_teacher_layer"] = args.teacher_feature_layer
+            metadata["ss_self_flow_teacher_coupling_prob"] = args.self_flow_teacher_coupling_prob
+            metadata["ss_self_flow_teacher_coupling_decay"] = args.self_flow_teacher_coupling_decay
+            metadata["ss_self_flow_teacher_mismatch_ratio"] = args.self_flow_teacher_mismatch_ratio
+            metadata["ss_self_flow_patch_locality_mode"] = args.self_flow_patch_locality_mode
+            metadata["ss_self_flow_patch_block_size"] = args.self_flow_patch_block_size
+            metadata["ss_self_flow_patch_seed_count"] = args.self_flow_patch_seed_count
+            metadata["ss_self_flow_patch_seed_shape"] = args.self_flow_patch_seed_shape
+
         datasets_metadata = []
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
         for dataset in train_dataset_group.datasets:
@@ -2143,16 +2864,50 @@ class NetworkTrainer:
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
+            # Save projection head separately when self-flow is active
+            if args.self_flow and rep_proj is not None:
+                from safetensors.torch import save_file
+                proj_ckpt_name = ckpt_name.replace(".safetensors", "-proj.safetensors")
+                proj_ckpt_file = os.path.join(args.output_dir, proj_ckpt_name)
+                accelerator.print(f"saving projection head: {proj_ckpt_file}")
+                proj_state = {k: v.to(save_dtype) if save_dtype is not None else v for k, v in accelerator.unwrap_model(rep_proj).state_dict().items()}
+                save_file(proj_state, proj_ckpt_file)
+                if args.huggingface_repo_id is not None:
+                    huggingface_utils.upload(args, proj_ckpt_file, "/" + proj_ckpt_name, force_sync_upload=force_sync_upload)
+
+            # Save EMA (teacher) weights alongside student when self-flow is active
+            if args.self_flow and ema_lora_state is not None:
+                ema_ckpt_name = ckpt_name.replace(".safetensors", "-ema.safetensors")
+                ema_ckpt_file = os.path.join(args.output_dir, ema_ckpt_name)
+                accelerator.print(f"saving EMA checkpoint: {ema_ckpt_file}")
+                student_state = {k: v.clone() for k, v in unwrapped_nw.state_dict().items()}
+                unwrapped_nw.load_state_dict(ema_lora_state)
+                unwrapped_nw.save_weights(ema_ckpt_file, save_dtype, metadata_to_save)
+                unwrapped_nw.load_state_dict(student_state)
+                if args.huggingface_repo_id is not None:
+                    huggingface_utils.upload(args, ema_ckpt_file, "/" + ema_ckpt_name, force_sync_upload=force_sync_upload)
+
         def remove_model(old_ckpt_name):
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
             if os.path.exists(old_ckpt_file):
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
+        def sample_images_with_ema(epoch, steps):
+            """Sample using EMA (teacher) weights when self-flow is active, else student."""
+            if args.self_flow and ema_lora_state is not None:
+                unwrapped_nw = accelerator.unwrap_model(network)
+                student_state = {k: v.clone() for k, v in unwrapped_nw.state_dict().items()}
+                unwrapped_nw.load_state_dict(ema_lora_state)
+                self.sample_images(accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype)
+                unwrapped_nw.load_state_dict(student_state)
+            else:
+                self.sample_images(accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype)
+
         # For --sample_at_first
         if should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
-            self.sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
+            sample_images_with_ema(0, global_step)
             optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -2192,29 +2947,49 @@ class NetworkTrainer:
                     # Sample noise that we'll add to the latents
                     noise = torch.randn_like(latents)
 
-                    # calculate model input and timesteps
-                    noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-                        args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
-                    )
+                    if args.self_flow:
+                        assert rep_proj is not None
+                        assert ema_lora_state is not None
+                        loss = self._self_flow_step(
+                            args,
+                            accelerator,
+                            transformer,
+                            network,
+                            latents,
+                            batch,
+                            noise,
+                            noise_scheduler,
+                            dit_dtype,
+                            network_dtype,
+                            vae,
+                            rep_proj,
+                            ema_lora_state,
+                            global_step=global_step,
+                        )
+                    else:
+                        # --- Vanilla flow matching ---
+                        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
+                            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+                        )
 
-                    weighting = compute_loss_weighting_for_sd3(
-                        args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-                    )
+                        weighting = compute_loss_weighting_for_sd3(
+                            args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
+                        )
 
-                    model_pred, target = self.call_dit(
-                        args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
-                    )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
+                        output = self.call_dit(
+                            args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
+                        )
+                        model_pred = output.pred
+                        target = output.target
+                        loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
 
-                    if weighting is not None:
-                        loss = loss * weighting
-                    # loss = loss.mean([1, 2, 3])
-                    # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
-                    # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+                        if weighting is not None:
+                            loss = loss * weighting
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                        loss = loss.mean()
 
                     accelerator.backward(loss)
+                    grad_metrics = {}
                     if accelerator.sync_gradients:
                         # self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         state = accelerate.PartialState()
@@ -2223,6 +2998,7 @@ class NetworkTrainer:
                                 if param.grad is not None:
                                     param.grad = accelerator.reduce(param.grad, reduction="mean")
 
+                        grad_metrics = self.collect_grad_metrics(network.parameters())
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
@@ -2230,6 +3006,11 @@ class NetworkTrainer:
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
+
+                    if args.self_flow and accelerator.sync_gradients:
+                        assert ema_lora_state is not None
+                        # Update EMA of LoRA weights (only after actual optimizer step)
+                        self._update_ema_weights(ema_lora_state, network.state_dict(), args.ema_decay)
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
@@ -2253,7 +3034,7 @@ class NetworkTrainer:
                     if should_sampling or should_saving:
                         optimizer_eval_fn()
                         if should_sampling:
-                            self.sample_images(accelerator, args, None, global_step, vae, transformer, sample_parameters, dit_dtype)
+                            sample_images_with_ema(None, global_step)
 
                         if should_saving:
                             accelerator.wait_for_everyone()
@@ -2283,6 +3064,9 @@ class NetworkTrainer:
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
+                    if hasattr(self, "_self_flow_logs"):
+                        logs.update(self._self_flow_logs)
+                    logs.update(grad_metrics)
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:
@@ -2310,7 +3094,7 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
+            sample_images_with_ema(epoch + 1, global_step)
             optimizer_train_fn()
 
             # end of epoch
@@ -2813,6 +3597,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--network_weights", type=str, default=None, help="pretrained weights for network / 学習するネットワークの初期重み"
     )
     parser.add_argument(
+        "--network_weights_ema", type=str, default=None, help="pretrained EMA (teacher) weights for self-flow network / セルフフロー教師ネットワークの初期EMA重み"
+    )
+    parser.add_argument(
+        "--network_weights_proj", type=str, default=None, help="pretrained projection head weights for self-flow / セルフフロー射影ヘッドの初期重み"
+    )
+    parser.add_argument(
         "--network_module", type=str, default=None, help="network module to train / 学習対象のネットワークのモジュール"
     )
     parser.add_argument(
@@ -3019,6 +3809,121 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default depends on model")
+
+    # self-flow settings (Self-Supervised Flow Matching)
+    parser.add_argument(
+        "--self_flow",
+        action="store_true",
+        help="Enable self-flow training (dual-timestep scheduling + representation alignment)."
+        " / セルフフロー学習を有効にする（デュアルタイムステップスケジューリング+表現アライメント）。",
+    )
+    parser.add_argument(
+        "--self_flow_gamma",
+        type=float,
+        default=0.8,
+        help="Weight for representation alignment loss L_rep (paper Eq. 7). 0 disables L_rep."
+        " / 表現アライメント損失L_repの重み（論文のEq. 7）。0でL_repを無効化。",
+    )
+    parser.add_argument(
+        "--self_flow_gamma_warmup_steps",
+        type=int,
+        default=0,
+        help="Linearly ramp gamma from 0 to --self_flow_gamma over this many steps. 0 disables warmup."
+        " / このステップ数かけてgammaを0から目標値に線形ランプアップする。0でウォームアップ無効。",
+    )
+    parser.add_argument(
+        "--mask_ratio",
+        type=float,
+        default=0.25,
+        help="Ratio of tokens to mask with cleaner (teacher) noise level for dual-timestep scheduling (paper Eq. 4, R_M <= 0.5)."
+        " / デュアルタイムステップスケジューリングでクリーン（教師）ノイズレベルでマスクするトークンの割合（論文Eq. 4、R_M <= 0.5）。",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.999,
+        help="EMA decay rate for self-flow teacher LoRA weights. / セルフフロー教師LoRA重みのEMA減衰率。",
+    )
+    parser.add_argument(
+        "--student_feature_layer",
+        type=int,
+        default=None,
+        help="Global block index for student feature extraction (l in paper, must be < teacher_feature_layer). None uses last block. Recommends 0.3D where D is number of blocks"
+        " / 学生特徴抽出のグローバルブロックインデックス（論文のl、teacher_feature_layerより小さい必要あり）。Noneで最終ブロックを使用。",
+    )
+    parser.add_argument(
+        "--teacher_feature_layer",
+        type=int,
+        default=None,
+        help="Global block index for teacher feature extraction (k in paper, must be > student_feature_layer). None uses last block. Recommends 0.7D where D is number of blocks"
+        " / 教師特徴抽出のグローバルブロックインデックス（論文のk、student_feature_layerより大きい必要あり）。Noneで最終ブロックを使用。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_coupling_prob",
+        type=float,
+        default=0.0,
+        help="Per-step gate probability: this fraction of training steps will apply any mismatch at all."
+        " When the gate fires, --self_flow_teacher_mismatch_ratio controls how many masked patches"
+        " are mismatched. Decays to 0 over training per --self_flow_teacher_coupling_decay."
+        " 0 disables mismatch entirely."
+        " / ミスマッチを行うステップの割合（ゲート確率）。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_coupling_decay",
+        type=str,
+        default="constant",
+        choices=["constant", "cosine", "linear", "rex"],
+        help="Decay schedule for --self_flow_teacher_coupling_prob over training steps."
+        " 'constant' keeps the probability fixed; 'cosine', 'linear', 'rex' decay it to 0."
+        " / self_flow_teacher_coupling_probの減衰スケジュール。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_coupling_decay_steps",
+        type=int,
+        default=None,
+        help="Number of steps over which to decay --self_flow_teacher_coupling_prob to 0."
+        " Defaults to max_train_steps if not set."
+        " / self_flow_teacher_coupling_probを0に減衰させるステップ数。未設定時はmax_train_stepsを使用。",
+    )
+    parser.add_argument(
+        "--self_flow_teacher_mismatch_ratio",
+        type=float,
+        default=1.0,
+        help="When the coupling gate fires, the fraction of masked patches that receive the"
+        " timestep mismatch (teacher noise + student timestep). 1.0 = all masked patches"
+        " are mismatched; 0.25 = only a quarter are. Independent per-patch coin flip."
+        " / ゲートが発動した場合に、マスクされたパッチのうちタイムステップのミスマッチを受けるパッチの割合。",
+    )
+
+    # self-flow patch locality settings
+    parser.add_argument(
+        "--self_flow_patch_locality_mode",
+        type=str,
+        default="none",
+        choices=["none", "grid", "seed"],
+        help="Patch locality mode for self-flow masking. 'none' = random (paper default),"
+        " 'grid' = block-aligned groups, 'seed' = organic blobs around seed points.",
+    )
+    parser.add_argument(
+        "--self_flow_patch_block_size",
+        type=int,
+        default=2,
+        choices=[2, 4, 8, 16, 32],
+        help="Block size for grid locality mode. Each meta-cell covers block_size x block_size tokens.",
+    )
+    parser.add_argument(
+        "--self_flow_patch_seed_count",
+        type=int,
+        default=3,
+        help="Number of seed points for seed locality mode.",
+    )
+    parser.add_argument(
+        "--self_flow_patch_seed_shape",
+        type=str,
+        default="square",
+        choices=["square", "circle", "diamond"],
+        help="Distance metric for seed locality mode. 'square' = L-inf, 'circle' = L2, 'diamond' = L1.",
+    )
 
     return parser
 
