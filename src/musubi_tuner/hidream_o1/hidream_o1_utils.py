@@ -13,7 +13,13 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 from transformers import AutoProcessor, PreTrainedTokenizerBase
 
-from musubi_tuner.hidream_o1.pipeline import CONDITION_IMAGE_SIZE, PATCH_SIZE, TIMESTEP_TOKEN_NUM, build_t2i_text_sample
+from musubi_tuner.hidream_o1.pipeline import (
+    CONDITION_IMAGE_SIZE,
+    DEFAULT_TIMESTEPS,
+    PATCH_SIZE,
+    TIMESTEP_TOKEN_NUM,
+    build_t2i_text_sample,
+)
 from musubi_tuner.hidream_o1.utils import calculate_dimensions
 
 
@@ -272,6 +278,27 @@ def build_i2i_input_tensors(prompt: str, controls, processor) -> tuple[torch.Ten
     )
     input_ids = torch.cat([proc.input_ids, input_ids_2], dim=-1).squeeze(0).to(torch.long)
     return input_ids, proc.pixel_values, proc.image_grid_thw.to(torch.long)
+
+
+def select_inference_schedule(
+    model_type: str,
+    num_ref_images: int,
+    requested_steps: int | None,
+    guidance_scale: float,
+    shift: float,
+    editing_scheduler: str = "flow_match",
+) -> tuple[int, float, float, list[int] | None, str]:
+    if editing_scheduler not in {"flow_match", "flash"}:
+        raise ValueError(f"Unknown HiDream-O1 editing_scheduler: {editing_scheduler}")
+
+    if model_type == "dev":
+        num_inference_steps = requested_steps if requested_steps is not None else 28
+        scheduler_name = "flow_match" if num_ref_images == 1 and editing_scheduler == "flow_match" else "flash"
+        timesteps_list = DEFAULT_TIMESTEPS if num_inference_steps == 28 else None
+        return num_inference_steps, 0.0, 1.0, timesteps_list, scheduler_name
+
+    num_inference_steps = requested_steps if requested_steps is not None else 50
+    return num_inference_steps, guidance_scale, shift, None, "default"
 
 
 def build_t2i_cache_tensors(prompt: str, height: int, width: int, processor, model_config):

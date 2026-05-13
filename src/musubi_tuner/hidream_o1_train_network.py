@@ -8,7 +8,7 @@ from accelerate import Accelerator
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HIDREAM_O1, ARCHITECTURE_HIDREAM_O1_FULL
 from musubi_tuner.hidream_o1 import hidream_o1_utils
-from musubi_tuner.hidream_o1.pipeline import DEFAULT_TIMESTEPS, TIMESTEP_TOKEN_NUM, generate_image
+from musubi_tuner.hidream_o1.pipeline import TIMESTEP_TOKEN_NUM, generate_image
 from musubi_tuner.hidream_o1.utils import get_rope_index_fix_point
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from musubi_tuner.hv_train_network import NetworkTrainer, get_sigmas, load_prompts, read_config_from_file, setup_parser_common
@@ -133,24 +133,24 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         sample_steps = sample_steps if "sample_steps" in sample_parameter else None
 
-        if self.model_type == "dev":
-            num_inference_steps = sample_steps if sample_steps is not None else 28
-            guidance = 0.0
-            shift = 1.0
-            timesteps_list = DEFAULT_TIMESTEPS if sample_steps in (None, 28) else None
-            scheduler_name = "flash"
-        else:
-            num_inference_steps = sample_steps if sample_steps is not None else 50
-            guidance = cfg_scale if cfg_scale is not None else guidance_scale
-            shift = discrete_flow_shift
-            timesteps_list = None
-            scheduler_name = "default"
+        editing_scheduler = sample_parameter.get("editing_scheduler", "flow_match")
+        base_guidance = cfg_scale if cfg_scale is not None else guidance_scale
+        num_inference_steps, guidance, shift, timesteps_list, scheduler_name = hidream_o1_utils.select_inference_schedule(
+            self.model_type,
+            len(ref_image_paths),
+            sample_steps,
+            base_guidance,
+            discrete_flow_shift,
+            editing_scheduler,
+        )
 
-        noise_kwargs = {
-            "noise_scale_start": args.noise_scale_start,
-            "noise_scale_end": args.noise_scale_end,
-            "noise_clip_std": args.noise_clip_std,
-        }
+        noise_kwargs = {}
+        if scheduler_name == "flash":
+            noise_kwargs = {
+                "noise_scale_start": args.noise_scale_start,
+                "noise_scale_end": args.noise_scale_end,
+                "noise_clip_std": args.noise_clip_std,
+            }
 
         seed = int(generator.initial_seed()) if generator is not None else int(sample_parameter.get("seed", 42))
         image = generate_image(
@@ -167,6 +167,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             scheduler_name=scheduler_name,
             seed=seed,
             use_flash_attn=self.use_flash_attn,
+            layout_bboxes=sample_parameter.get("layout_bboxes", None),
             **noise_kwargs,
         )
 

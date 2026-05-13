@@ -7,7 +7,7 @@ import torch
 from safetensors.torch import load_file
 
 from musubi_tuner.hidream_o1 import hidream_o1_utils
-from musubi_tuner.hidream_o1.pipeline import DEFAULT_TIMESTEPS, generate_image
+from musubi_tuner.hidream_o1.pipeline import generate_image
 from musubi_tuner.networks import lora_hidream_o1
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noise_scale_start", type=float, default=7.5, help="Dev scheduler start noise scale")
     parser.add_argument("--noise_scale_end", type=float, default=7.5, help="Dev scheduler end noise scale")
     parser.add_argument("--noise_clip_std", type=float, default=2.5, help="Dev scheduler noise clipping std")
+    parser.add_argument(
+        "--editing_scheduler",
+        type=str,
+        default="flow_match",
+        choices=["flow_match", "flash"],
+        help="Scheduler for dev-model editing with exactly one reference image",
+    )
     parser.add_argument("--keep_original_aspect", action="store_true", help="Preserve one reference image aspect ratio")
+    parser.add_argument("--layout_bboxes", type=str, default=None, help="Layout boxes as a JSON string or JSON file path")
     parser.add_argument("--flash_attn", action="store_true", help="Use HiDream-O1 two-pass flash attention")
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="Number of Qwen3VL decoder blocks to swap to CPU")
     parser.add_argument(
@@ -102,23 +110,21 @@ def main():
 
     merge_lora_weights(model, args, device)
 
-    if args.model_type == "dev":
-        num_inference_steps = args.infer_steps or 28
-        guidance_scale = 0.0
-        shift = 1.0
-        timesteps_list = DEFAULT_TIMESTEPS if num_inference_steps == 28 else None
-        scheduler_name = "flash"
+    num_inference_steps, guidance_scale, shift, timesteps_list, scheduler_name = hidream_o1_utils.select_inference_schedule(
+        args.model_type,
+        len(args.ref_images),
+        args.infer_steps,
+        args.guidance_scale,
+        args.flow_shift,
+        args.editing_scheduler,
+    )
+    if scheduler_name == "flash":
         extra_kwargs = {
             "noise_scale_start": args.noise_scale_start,
             "noise_scale_end": args.noise_scale_end,
             "noise_clip_std": args.noise_clip_std,
         }
     else:
-        num_inference_steps = args.infer_steps or 50
-        guidance_scale = args.guidance_scale
-        shift = args.flow_shift
-        timesteps_list = None
-        scheduler_name = "default"
         extra_kwargs = {}
 
     height, width = args.image_size
@@ -136,6 +142,7 @@ def main():
         scheduler_name=scheduler_name,
         seed=args.seed,
         keep_original_aspect=args.keep_original_aspect,
+        layout_bboxes=args.layout_bboxes,
         use_flash_attn=args.flash_attn,
         **extra_kwargs,
     )

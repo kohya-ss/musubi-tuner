@@ -582,6 +582,8 @@ class Qwen3VLModelOutputWithPast(ModelOutput):
     rope_deltas: Optional[torch.LongTensor] = None
     x_pred: Optional[torch.FloatTensor] = None
     mid_results: Optional[list] = None
+    cond_image_embeds: Optional[torch.FloatTensor] = None
+    cond_deepstack_image_embeds: Optional[list[torch.Tensor]] = None
 
 
 @auto_docstring
@@ -1317,7 +1319,15 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
 
         return special_image_mask, special_video_mask
 
-    def _run_decoder_flash(self, inputs_embeds, position_ids, token_types, return_mid_results_layers=None):
+    def _run_decoder_flash(
+        self,
+        inputs_embeds,
+        position_ids,
+        token_types,
+        visual_pos_masks=None,
+        deepstack_visual_embeds=None,
+        return_mid_results_layers=None,
+    ):
         """Run decoder layers with flash attention two-pass approach.
 
         Replicates the Megatron attention pattern:
@@ -1332,6 +1342,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             inputs_embeds: [batch, total_seq_len, hidden]
             position_ids: [3, batch, total_seq_len] - 3D RoPE positions
             token_types: [batch, total_seq_len] - 0=AR, 1=gen
+            visual_pos_masks: [batch, total_seq_len] visual placeholder positions for DeepStack
+            deepstack_visual_embeds: visual features injected into decoder layers
         """
         assert _flash_attn_func is not None, (
             "Flash attention is not available. Install flash_attn_interface (FA3) or flash_attn (FA2).")
@@ -1438,6 +1450,17 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                     hidden_states, decoder_layer, cos, sin, idx_ar,
                 )
 
+            if (
+                deepstack_visual_embeds is not None
+                and visual_pos_masks is not None
+                and layer_idx < len(deepstack_visual_embeds)
+            ):
+                hidden_states = text_model._deepstack_process(
+                    hidden_states,
+                    visual_pos_masks,
+                    deepstack_visual_embeds[layer_idx],
+                )
+
             if return_mid_results_layers is not None and layer_idx in return_mid_results_layers:
                 mid_results.append(hidden_states)
 
@@ -1472,19 +1495,38 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         Returns:
             Qwen3VLModelOutputWithPast with x_pred field set.
         """
+        precomputed_image_embeds = kwargs.pop("precomputed_image_embeds", None)
+        precomputed_deepstack_image_embeds = kwargs.pop("precomputed_deepstack_image_embeds", None)
+        cond_image_embeds_out: Optional[torch.FloatTensor] = None
+        cond_deepstack_image_embeds_out: Optional[list[torch.Tensor]] = None
+
         # 1. Get text token embeddings
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)  # [batch, txt_seq_len, hidden]
         else:
             inputs_embeds = inputs_embeds.to(self.get_input_embeddings().weight.device)
 
+        image_mask = None
+        video_mask = None
+        deepstack_image_embeds = None
+        deepstack_video_embeds = None
+
         # 2. Process image/video embeddings if present (for image-conditioned generation)
         if pixel_values is not None:
-            image_embeds, _ = self.get_image_features(pixel_values, image_grid_thw)
-            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            if precomputed_image_embeds is not None and precomputed_deepstack_image_embeds is not None:
+                image_embeds = precomputed_image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                deepstack_image_embeds = [
+                    deepstack_image_embed.to(inputs_embeds.device, inputs_embeds.dtype)
+                    for deepstack_image_embed in precomputed_deepstack_image_embeds
+                ]
+            else:
+                image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
+                image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             image_mask, _ = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+            cond_image_embeds_out = image_embeds
+            cond_deepstack_image_embeds_out = deepstack_image_embeds
         elif torch.is_grad_enabled():
             # t2i task: no pixel_values, but we must run the vision encoder with a
             # tiny dummy input so that EVERY rank has non-None (zero) gradients for
@@ -1503,18 +1545,42 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                                     dtype=pe.proj.weight.dtype)
             fake_grid = torch.tensor([[t_sz, m_sz, m_sz]],
                                      dtype=torch.long, device=inputs_embeds.device)
-            fake_embs, _ = self.get_image_features(fake_pv, fake_grid)
+            fake_embs, fake_deepstack = self.get_image_features(fake_pv, fake_grid)
             fake_embs = torch.cat(fake_embs, dim=0).to(inputs_embeds.dtype)
-            # Multiply by a zero tensor (same dtype/device) so the gradient path
-            # through the vision encoder is live but the numerical contribution is 0.
-            inputs_embeds = inputs_embeds + fake_embs.sum() * inputs_embeds.new_zeros([])
+            fake_total = fake_embs.sum()
+            for fake_deepstack_embed in fake_deepstack:
+                fake_total = fake_total + fake_deepstack_embed.to(inputs_embeds.dtype).sum()
+            inputs_embeds = inputs_embeds + fake_total * inputs_embeds.new_zeros([])
 
         if pixel_values_videos is not None:
-            video_embeds, _ = self.get_video_features(pixel_values_videos, video_grid_thw)
+            video_embeds, deepstack_video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
             video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             _, video_mask = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+        visual_pos_masks = None
+        deepstack_visual_embeds = None
+        if image_mask is not None and video_mask is not None:
+            image_mask = image_mask[..., 0]
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = image_mask | video_mask
+            deepstack_visual_embeds = []
+            image_mask_joint = image_mask[visual_pos_masks]
+            video_mask_joint = video_mask[visual_pos_masks]
+            for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
+                embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1]).to(img_embed.device)
+                embed_joint[image_mask_joint, :] = img_embed
+                embed_joint[video_mask_joint, :] = vid_embed
+                deepstack_visual_embeds.append(embed_joint)
+        elif image_mask is not None:
+            image_mask = image_mask[..., 0]
+            visual_pos_masks = image_mask
+            deepstack_visual_embeds = deepstack_image_embeds
+        elif video_mask is not None:
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = video_mask
+            deepstack_visual_embeds = deepstack_video_embeds
 
         # 3. Embed timestep and replace tms_token positions
         if isinstance(timestep, list):
@@ -1535,6 +1601,18 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         inputs_embeds = torch.cat([inputs_embeds, vinputs_embedded], dim=1)  # [batch, total_seq_len, hidden]
 
         batch_size, total_seq_len, _ = inputs_embeds.shape
+
+        if visual_pos_masks is not None:
+            vinputs_seq_len = vinputs_embedded.shape[1]
+            if visual_pos_masks.shape[0] != batch_size:
+                visual_pos_masks = visual_pos_masks.expand(batch_size, -1)
+            vinputs_pad = torch.zeros(
+                visual_pos_masks.shape[0],
+                vinputs_seq_len,
+                dtype=visual_pos_masks.dtype,
+                device=visual_pos_masks.device,
+            )
+            visual_pos_masks = torch.cat([visual_pos_masks, vinputs_pad], dim=1)
 
         # 5. Parse token_types to [batch, total_seq_len]
         if isinstance(token_types, list):
@@ -1563,6 +1641,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             # Flash attention: two-pass approach (causal on AR + full on all → index_copy)
             hidden_states, mid_results = self._run_decoder_flash(
                 inputs_embeds, position_ids, token_types,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_visual_embeds=deepstack_visual_embeds,
                 return_mid_results_layers=return_mid_results_layers)
         else:
             # Standard path: 4D attention mask (causal for AR, full for gen tokens)
@@ -1592,6 +1672,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 attention_mask=attention_mask_4d,
                 inputs_embeds=inputs_embeds,
                 use_cache=False,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_visual_embeds=deepstack_visual_embeds,
                 return_mid_results_layers=return_mid_results_layers,
             )
             hidden_states = outputs.last_hidden_state
@@ -1605,6 +1687,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             last_hidden_state=hidden_states,
             x_pred=x_pred,
             mid_results=mid_results,
+            cond_image_embeds=cond_image_embeds_out,
+            cond_deepstack_image_embeds=cond_deepstack_image_embeds_out,
         )
 
     @auto_docstring
@@ -1790,6 +1874,8 @@ class Qwen3VLCausalLMOutputWithPast(ModelOutput):
     rope_deltas: Optional[torch.LongTensor] = None
     x_pred: Optional[torch.FloatTensor] = None
     mid_results: Optional[list] = None
+    cond_image_embeds: Optional[torch.FloatTensor] = None
+    cond_deepstack_image_embeds: Optional[list[torch.Tensor]] = None
 
 class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     _checkpoint_conversion_mapping = {}
@@ -1920,6 +2006,8 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
             return Qwen3VLCausalLMOutputWithPast(
                 x_pred=outputs.x_pred,
                 mid_results=outputs.mid_results if hasattr(outputs, 'mid_results') else None,
+                cond_image_embeds=getattr(outputs, "cond_image_embeds", None),
+                cond_deepstack_image_embeds=getattr(outputs, "cond_deepstack_image_embeds", None),
             )
 
         hidden_states = outputs[0]

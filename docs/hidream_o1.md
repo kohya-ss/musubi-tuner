@@ -108,13 +108,15 @@ Memory related options:
 - `--use_pinned_memory_for_block_swap` can improve transfer speed, but may increase shared GPU memory usage on Windows.
 - `--flash_attn` enables the HiDream-O1 flash attention path. This is recommended for 2K resolution if FlashAttention is installed.
 - `--timestep_sampling uniform --weighting_scheme none` matches the uniform timestep sampling described for HiDream-O1 post-training/SFT in the paper.
-- `--noise_scale_start/end` scale the Gaussian noise used to build training inputs and training samples. Defaults follow the official inference code: full uses `8.0/8.0`, dev uses `7.5/7.5`.
-- `--noise_clip_std` clips Gaussian noise before applying the scale. Defaults follow the official scheduler branch: full uses `0.0`, dev uses `2.5`.
+- `--noise_scale_start/end` scale the Gaussian noise used to build training inputs and flash-scheduler samples. Defaults follow the official inference code: full uses `8.0/8.0`, dev flash uses `7.5/7.5`.
+- `--noise_clip_std` clips Gaussian noise before applying the scale. Defaults follow the official scheduler branch: full uses `0.0`, dev flash uses `2.5`.
 - `--dino_loss_weight N` enables the common SenseCraft DINOv3 auxiliary perceptual loss. HiDream-O1 converts predicted and target pixel patch tokens back to RGB before computing this loss. See `docs/advanced_config.md`.
 - HiDream-O1 LoRA targets are selected from the dataset automatically. Datasets without `control_directory` use decoder + pixel patch input/output layers. Datasets with control/reference inputs also select Qwen3-VL visual encoder layers.
 - Control/reference datasets use `conv_dim=4 conv_alpha=4` by default for LoRA on the Conv3d visual patch embedding. Set `--network_args conv_dim=0` to skip that layer, or pass a larger value to increase its rank.
 - The Qwen3VL decoder blocks are the shared generation backbone for text and image tokens. Token embeddings and the LM head remain excluded.
 - After changing a T2I dataset to a control/reference dataset, rebuild both pixel and text caches. Older caches do not contain the required `latents_control_*`, `pixel_values`, or `image_grid_thw` tensors.
+- For `--model_type dev`, training samples with exactly one `control_image_path` default to the official `flow_match` editing scheduler. Use `editing_scheduler = "flash"` in the sample prompt config to force the flash scheduler.
+- Training sample prompt configs can include `layout_bboxes` to use the official layout conditioning path during sampling.
 
 Example with memory saving enabled:
 
@@ -165,3 +167,25 @@ python src/musubi_tuner/hidream_o1_generate_image.py \
 For the dev model variant, specify `--model_type dev`.
 
 Reference images can be passed with `--ref_images path/to/ref1.png path/to/ref2.png`.
+
+For the dev model, exactly one reference image uses the official editing recipe by default:
+
+```bash
+python src/musubi_tuner/hidream_o1_generate_image.py \
+    --dit path/to/checkpoints/hidream_o1_image_dev_bf16.safetensors \
+    --model_type dev \
+    --prompt "remove the earphones" \
+    --ref_images path/to/reference.png \
+    --save_path path/to/output.png
+```
+
+Pass `--editing_scheduler flash` to force the flash scheduler for dev editing. Layout conditioning can be used with multiple references:
+
+```bash
+python src/musubi_tuner/hidream_o1_generate_image.py \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
+    --prompt "City council members pose on a sunlit terrace" \
+    --ref_images path/to/ref1.png path/to/ref2.png \
+    --layout_bboxes "[[0.205, 0.488, 0.439, 0.742], [0.576, 0.801, 0.088, 0.342]]" \
+    --save_path path/to/output.png
+```
