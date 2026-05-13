@@ -236,9 +236,7 @@ class LoRAInfModule(LoRAModule):
                         * self.scale
                     )
                 else:
-                    conved = torch.nn.functional.conv3d(down_weight.permute(1, 0, 2, 3, 4), up_weight).permute(
-                        1, 0, 2, 3, 4
-                    )
+                    conved = torch.nn.functional.conv3d(down_weight.permute(1, 0, 2, 3, 4), up_weight).permute(1, 0, 2, 3, 4)
                     weight = weight + self.multiplier * conved * self.scale
             else:
                 raise ValueError(f"Unsupported LoRA target weight shape: {weight.size()}")
@@ -302,9 +300,7 @@ class LoRAInfModule(LoRAModule):
                     * self.scale
                 )
             else:
-                conved = torch.nn.functional.conv3d(down_weight.permute(1, 0, 2, 3, 4), up_weight).permute(
-                    1, 0, 2, 3, 4
-                )
+                conved = torch.nn.functional.conv3d(down_weight.permute(1, 0, 2, 3, 4), up_weight).permute(1, 0, 2, 3, 4)
                 weight = self.multiplier * conved * self.scale
         else:
             raise ValueError(f"Unsupported LoRA weight shape: {down_weight.size()}")

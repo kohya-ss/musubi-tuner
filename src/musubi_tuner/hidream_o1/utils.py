@@ -189,7 +189,9 @@ def create_layout_reference_images(
     for idx, ref in enumerate(ref_pils):
         if ref_max_size is not None:
             ref = resize_pilimage(ref, ref_max_size, patch_size)
-        color = color_list[idx] if idx < len(color_list) and color_list[idx] is not None else DEFAULT_COLORS[idx % len(DEFAULT_COLORS)]
+        color = (
+            color_list[idx] if idx < len(color_list) and color_list[idx] is not None else DEFAULT_COLORS[idx % len(DEFAULT_COLORS)]
+        )
         line_width = int(math.sqrt(ref.width * ref.height) * 0.04)
         output_refs.append(add_outer_border_keep_size(ref, color, line_width))
     output_refs.append(layout_image)

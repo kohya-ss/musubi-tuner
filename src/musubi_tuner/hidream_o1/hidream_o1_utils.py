@@ -273,9 +273,7 @@ def build_i2i_input_tensors(prompt: str, controls, processor) -> tuple[torch.Ten
     messages = [{"role": "user", "content": content}]
     template_caption = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     proc = processor(text=[template_caption], images=ref_pils_vlm, padding="longest", return_tensors="pt")
-    input_ids_2 = tokenizer.encode(
-        boi_token + tms_token * TIMESTEP_TOKEN_NUM, return_tensors="pt", add_special_tokens=False
-    )
+    input_ids_2 = tokenizer.encode(boi_token + tms_token * TIMESTEP_TOKEN_NUM, return_tensors="pt", add_special_tokens=False)
     input_ids = torch.cat([proc.input_ids, input_ids_2], dim=-1).squeeze(0).to(torch.long)
     return input_ids, proc.pixel_values, proc.image_grid_thw.to(torch.long)
 
