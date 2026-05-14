@@ -724,6 +724,17 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             print("HYVideoDiffusionTransformer: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
+        # HV_DUAL_GPU=true: distribute the transformer across cuda:0 and
+        # cuda:1 instead of moving everything to a single device. The
+        # caller-provided `device` is ignored in this path (the split layout
+        # uses cuda:0 + cuda:1 explicitly). Mutually exclusive with
+        # blocks_to_swap, enforced inside enable_hv_dual_gpu.
+        from musubi_tuner.hunyuan_video_dual_gpu import enable_hv_dual_gpu, is_dual_gpu_enabled
+
+        if is_dual_gpu_enabled():
+            enable_hv_dual_gpu(self)
+            return
+
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage
         if self.blocks_to_swap:
             save_double_blocks = self.double_blocks

@@ -146,11 +146,13 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
                 ),
                 timeout=timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
             )
-            # Dual-GPU model-parallel (FLUX2_DUAL_GPU / WAN_DUAL_GPU) uses both
-            # GPUs for a single training step, so skip DDP data-parallel setup.
+            # Dual-GPU model-parallel (FLUX2_DUAL_GPU / WAN_DUAL_GPU /
+            # HV_DUAL_GPU) uses both GPUs for a single training step, so skip
+            # DDP data-parallel setup.
             if torch.cuda.device_count() > 1
             and os.environ.get("FLUX2_DUAL_GPU", "false").lower() != "true"
             and os.environ.get("WAN_DUAL_GPU", "false").lower() != "true"
+            and os.environ.get("HV_DUAL_GPU", "false").lower() != "true"
             else None
         ),
         (
@@ -1748,11 +1750,13 @@ class NetworkTrainer:
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
         self.blocks_to_swap = blocks_to_swap
-        # Dual-GPU (FLUX2_DUAL_GPU / WAN_DUAL_GPU): load to CPU so the split
-        # placement (enable_wan_dual_gpu etc.) can distribute across cuda:0+1.
+        # Dual-GPU (FLUX2_DUAL_GPU / WAN_DUAL_GPU / HV_DUAL_GPU): load to CPU
+        # so the split placement (enable_hv_dual_gpu etc.) can distribute
+        # across cuda:0+1.
         _dual_gpu = (
             os.environ.get("FLUX2_DUAL_GPU", "false").lower() == "true"
             or os.environ.get("WAN_DUAL_GPU", "false").lower() == "true"
+            or os.environ.get("HV_DUAL_GPU", "false").lower() == "true"
         )
         loading_device = "cpu" if (blocks_to_swap > 0 or _dual_gpu) else accelerator.device
 
@@ -1931,7 +1935,8 @@ class NetworkTrainer:
         elif _dual_gpu:
             # Dual-GPU model-parallel: prepare without device move, then run
             # the split-aware placement via move_to_device_except_swap_blocks
-            # (routes to enable_wan_dual_gpu / distribute_flux2_transformer).
+            # (routes to enable_hv_dual_gpu / enable_wan_dual_gpu /
+            # distribute_flux2_transformer).
             transformer = accelerator.prepare(transformer, device_placement=[False])
             accelerator.unwrap_model(transformer).move_to_device_except_swap_blocks(accelerator.device)
         else:
