@@ -1,4 +1,5 @@
 import argparse
+import os
 from typing import List, Optional
 from PIL import Image
 
@@ -469,6 +470,17 @@ class WanNetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
+        # WAN_DUAL_GPU=true: the model is loaded to CPU (loading_device is
+        # forced to "cpu" upstream in hv_train_network.py) and NOT moved to a
+        # single device here -- enable_wan_dual_gpu() distributes it across
+        # cuda:0 + cuda:1 later, via move_to_device_except_swap_blocks().
+        # Fail fast with a clear error before the (slow) checkpoint load if
+        # the machine doesn't actually have two GPUs.
+        if os.environ.get("WAN_DUAL_GPU", "false").lower() == "true" and torch.cuda.device_count() < 2:
+            raise RuntimeError(
+                f"WAN_DUAL_GPU=true requires >=2 CUDA devices, found {torch.cuda.device_count()}."
+            )
+
         model = load_wan_model(
             self.config,
             accelerator.device,

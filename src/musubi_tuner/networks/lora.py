@@ -98,11 +98,11 @@ class LoRAModule(torch.nn.Module):
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
-        # Snapshot the wrapped layer's device so model-parallel paths (e.g.,
-        # the FLUX.2 dual-GPU split) can re-place this LoRA on the correct
-        # device after network.to(...) has flattened everything onto one
-        # GPU. Harmless on single-device setups — the routing pass becomes
-        # a no-op when devices already match.
+        # Snapshot the wrapped layer's device so model-parallel paths (the
+        # FLUX.2 / Wan dual-GPU splits) can re-place this LoRA on the correct
+        # device after network.to(...) has flattened everything onto one GPU.
+        # Harmless on single-device setups -- the pin below becomes a no-op
+        # when devices already match.
         try:
             self._wrapped_device = next(self.org_module.parameters()).device
         except StopIteration:
@@ -110,14 +110,18 @@ class LoRAModule(torch.nn.Module):
         del self.org_module
 
     def forward(self, x):
-        # Dual-GPU model-parallel pin: when FLUX2_DUAL_GPU=true, the
-        # wrapped layer may live on a different device than this LoRA
-        # (e.g., layer on cuda:1, LoRA was prepared on cuda:0 by
-        # accelerator.prepare(network)). The bound-method indirection
-        # in apply_to makes instance-level forward-shimming unreliable,
-        # so we do the pin inline here.
+        # Dual-GPU model-parallel pin: when FLUX2_DUAL_GPU / WAN_DUAL_GPU is
+        # true, the wrapped layer may live on a different device than this
+        # LoRA (e.g. layer on cuda:1, LoRA prepared on cuda:0 by
+        # accelerator.prepare(network)). The bound-method indirection in
+        # apply_to makes instance-level forward-shimming unreliable, so we do
+        # the pin inline here. This also lazily re-places LoRA params after an
+        # A14B high/low expert swap, which rebinds the base weights' devices.
         import os as _os
-        if _os.environ.get("FLUX2_DUAL_GPU", "false").lower() == "true":
+        if (
+            _os.environ.get("FLUX2_DUAL_GPU", "false").lower() == "true"
+            or _os.environ.get("WAN_DUAL_GPU", "false").lower() == "true"
+        ):
             try:
                 _wrapped_module = self.org_forward.__self__
                 _target_device = next(_wrapped_module.parameters()).device
@@ -689,7 +693,9 @@ class LoRANetwork(torch.nn.Module):
         # Model-parallel paths (FLUX.2 dual-GPU split etc.) need each LoRA
         # to live on the device of its wrapped layer. Re-place after
         # apply_to, and install a per-LoRA forward shim as a safety net in
-        # case anything moves params off the wrapped device later.
+        # case anything moves params off the wrapped device later. The Wan
+        # dual-GPU path relies on the inline pin in LoRAModule.forward
+        # instead, so this flux2-gated eager pass is a no-op for Wan runs.
         try:
             from musubi_tuner.flux_2.flux2_dual_gpu import (
                 is_dual_gpu_enabled,
