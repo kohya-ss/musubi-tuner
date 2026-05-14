@@ -25,16 +25,26 @@ helper; the differences come from WanModel's API:
   intercept transformer-wide device placement, same as FLUX.2's
   ``Flux2.move_to_device_except_swap_blocks``.
 
-A14B limitation: musubi's A14B (high/low expert) support swaps the full
-model ``state_dict`` between experts at ``swap_high_low_weights()`` via
-``load_state_dict(..., assign=True)``. ``assign=True`` rebinds parameter
-tensors, so a swap moves the freshly-assigned weights to whatever device
-the incoming ``state_dict`` lived on — it does NOT preserve our split.
-:func:`enable_wan_dual_gpu` is idempotent (safe to call again after a
-swap) but the trainer does not currently re-invoke it post-swap; the
-inline ``WAN_DUAL_GPU`` LoRA device-pin in ``networks/lora.py`` handles
-lazy re-placement of LoRA params on the first forward after a swap, which
-is sufficient for LoRA training (only LoRA params receive gradients).
+A14B dual-expert limitation — NOT YET SUPPORTED with the dual-GPU split.
+Single-expert training (one ``--dit``, no ``--dit_high_noise``) works and
+is validated. The dual-expert path (``--dit`` + ``--dit_high_noise`` +
+``--timestep_boundary``) does NOT: musubi swaps the full model
+``state_dict`` between the high/low experts at ``swap_high_low_weights()``
+via ``load_state_dict(..., assign=True)``. ``assign=True`` rebinds
+parameter tensors, so the swap (a) collapses our cuda:0/cuda:1 split back
+onto one device and (b) brings in the incoming expert's raw weights
+*bypassing musubi's own fp8-optimization exclude logic* — base modules
+that should stay bf16 (e.g. ``patch_embedding``, a Conv3d) end up with
+fp8 bias against bf16 input, raising
+``RuntimeError: Input type (BFloat16) and bias type (Float8_e4m3fn)
+should be the same`` on the first forward after the swap. Validated
+2026-05-14: an i2v-A14B run trains cleanly for 14/20 steps on the first
+(distributed) expert, then crashes the step the swap fires. The inline
+``WAN_DUAL_GPU`` LoRA device-pin only re-places LoRA params — it cannot
+fix base-module dtype/device, so it is insufficient here. A proper fix
+needs a re-distribution + dtype-fixup hook at the ``swap_high_low_weights``
+site (``enable_wan_dual_gpu`` is idempotent, so re-invoking it is safe —
+but the dtype mismatch also needs handling). Tracked as follow-up.
 
 Env vars:
     WAN_DUAL_GPU=true                      enable the dual-GPU path
