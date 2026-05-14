@@ -43,6 +43,7 @@ Env vars:
 """
 from __future__ import annotations
 
+import logging
 import os
 import types
 from typing import TYPE_CHECKING
@@ -51,6 +52,8 @@ import torch
 
 if TYPE_CHECKING:
     from musubi_tuner.wan.modules.model import WanModel
+
+logger = logging.getLogger(__name__)
 
 
 def is_dual_gpu_enabled() -> bool:
@@ -144,6 +147,11 @@ def enable_wan_dual_gpu(model: "WanModel") -> "WanModel":
     _install_split_forward(model, split_at)
 
     model._wan_dual_gpu_split_at = split_at  # type: ignore[attr-defined]
+    logger.info(
+        f"WAN_DUAL_GPU: distributed {num_blocks} blocks across cuda:0/cuda:1 "
+        f"({split_at} on cuda:0, {num_blocks - split_at} on cuda:1); "
+        f"scaffolding + head on cuda:0"
+    )
     return model
 
 
