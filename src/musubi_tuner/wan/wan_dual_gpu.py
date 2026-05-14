@@ -25,26 +25,26 @@ helper; the differences come from WanModel's API:
   intercept transformer-wide device placement, same as FLUX.2's
   ``Flux2.move_to_device_except_swap_blocks``.
 
-A14B dual-expert limitation — NOT YET SUPPORTED with the dual-GPU split.
-Single-expert training (one ``--dit``, no ``--dit_high_noise``) works and
-is validated. The dual-expert path (``--dit`` + ``--dit_high_noise`` +
-``--timestep_boundary``) does NOT: musubi swaps the full model
+A14B dual-expert support — handled at the swap site, see below.
+Single-expert training (one ``--dit``, no ``--dit_high_noise``) and the
+dual-expert path (``--dit`` + ``--dit_high_noise`` + ``--timestep_boundary``)
+both work. The dual-expert case needs care: musubi swaps the full model
 ``state_dict`` between the high/low experts at ``swap_high_low_weights()``
 via ``load_state_dict(..., assign=True)``. ``assign=True`` rebinds
-parameter tensors, so the swap (a) collapses our cuda:0/cuda:1 split back
-onto one device and (b) brings in the incoming expert's raw weights
-*bypassing musubi's own fp8-optimization exclude logic* — base modules
-that should stay bf16 (e.g. ``patch_embedding``, a Conv3d) end up with
-fp8 bias against bf16 input, raising
+parameter tensors, so a naive swap (a) collapses our cuda:0/cuda:1 split
+back onto one device and (b) brings in the incoming expert's raw weights
+straight out of ``load_wan_model`` — CPU-resident and with a per-module
+dtype layout that diverges from the active model (which has been through
+``accelerator.prepare`` + :func:`enable_wan_dual_gpu`). Left unhandled,
+base modules end up with fp8 bias against bf16 input, raising
 ``RuntimeError: Input type (BFloat16) and bias type (Float8_e4m3fn)
-should be the same`` on the first forward after the swap. Validated
-2026-05-14: an i2v-A14B run trains cleanly for 14/20 steps on the first
-(distributed) expert, then crashes the step the swap fires. The inline
-``WAN_DUAL_GPU`` LoRA device-pin only re-places LoRA params — it cannot
-fix base-module dtype/device, so it is insufficient here. A proper fix
-needs a re-distribution + dtype-fixup hook at the ``swap_high_low_weights``
-site (``enable_wan_dual_gpu`` is idempotent, so re-invoking it is safe —
-but the dtype mismatch also needs handling). Tracked as follow-up.
+should be the same`` on the first forward after the swap (validated
+2026-05-14: an i2v-A14B run trained cleanly for 14/20 steps then crashed
+the step the swap fired). ``WanNetworkTrainer.swap_high_low_weights``
+fixes this for the ``WAN_DUAL_GPU`` path: after the ``assign=True`` load
+it casts the incoming tensors back to the outgoing model's dtype layout
+and re-invokes :func:`enable_wan_dual_gpu` (idempotent) to restore the
+cuda:0/cuda:1 split and reinstall the split-aware forward.
 
 Env vars:
     WAN_DUAL_GPU=true                      enable the dual-GPU path

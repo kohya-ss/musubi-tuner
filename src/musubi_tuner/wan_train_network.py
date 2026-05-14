@@ -602,6 +602,25 @@ class WanNetworkTrainer(NetworkTrainer):
                         state_dict[new_key] = state_dict.pop(key)
                 return state_dict
 
+            # WAN_DUAL_GPU=true: the inactive expert's state_dict was snapshotted
+            # raw out of load_wan_model -- CPU-resident and un-distributed, never
+            # routed through enable_wan_dual_gpu (load_transformer only does that
+            # for the active --dit). load_state_dict(assign=True) below rebinds
+            # the active model's parameter tensors to those raw tensors, so the
+            # swapped-in expert (a) loses the cuda:0/cuda:1 split and (b) carries
+            # whatever per-module dtype layout load_wan_model left it in, which
+            # diverges from the active model that has been through accelerator
+            # .prepare + enable_wan_dual_gpu (e.g. patch_embedding.bias ends up
+            # fp8 against bf16 input -> "Input type BFloat16 and bias type
+            # Float8_e4m3fn should be the same" on the first forward after the
+            # swap). We capture the outgoing model's device+dtype layout from the
+            # state_dict snapshot taken just below, then after the swap cast the
+            # incoming tensors back to that layout and re-run enable_wan_dual_gpu
+            # (idempotent) to restore the split + reinstall the split forward.
+            from musubi_tuner.wan.wan_dual_gpu import enable_wan_dual_gpu, is_dual_gpu_enabled
+
+            wan_dual_gpu = is_dual_gpu_enabled()
+
             if self.blocks_to_swap == 0:
                 # If offloading inactive DiT, move the model to CPU first
                 if args.offload_inactive_dit:
@@ -615,7 +634,23 @@ class WanNetworkTrainer(NetworkTrainer):
                 assert len(info.missing_keys) == 0, f"Missing keys: {info.missing_keys}"
                 assert len(info.unexpected_keys) == 0, f"Unexpected keys: {info.unexpected_keys}"
 
-                if args.offload_inactive_dit:
+                if wan_dual_gpu:
+                    # Restore the per-tensor dtype layout of the model that was
+                    # just swapped out (state_dict, captured above) onto the
+                    # freshly-assigned incoming tensors, then re-distribute
+                    # across cuda:0/cuda:1. enable_wan_dual_gpu handles device
+                    # placement (incl. freqs/freqs_fhw) and reinstalls the
+                    # split-aware forward; the cast here only fixes dtype.
+                    for name, param in model.named_parameters():
+                        prev = state_dict.get(name)
+                        if prev is not None and param.dtype != prev.dtype:
+                            param.data = param.data.to(prev.dtype)
+                    for name, buf in model.named_buffers():
+                        prev = state_dict.get(name)
+                        if prev is not None and buf.dtype != prev.dtype:
+                            buf.data = buf.data.to(prev.dtype)
+                    enable_wan_dual_gpu(model)
+                elif args.offload_inactive_dit:
                     model.to(accelerator.device, non_blocking=True)
                     synchronize_device(accelerator.device)
 
