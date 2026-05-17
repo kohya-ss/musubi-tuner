@@ -17,6 +17,7 @@ import sys
 import random
 import time
 import json
+from dataclasses import dataclass, field
 from multiprocessing import Value
 from typing import Any, List, Optional
 import accelerate
@@ -79,6 +80,21 @@ SS_METADATA_MINIMUM_KEYS = [
     SS_METADATA_KEY_NETWORK_ALPHA,
     SS_METADATA_KEY_NETWORK_ARGS,
 ]
+
+
+@dataclass
+class DiTOutput:
+    """Return type for ``NetworkTrainer.call_dit``.
+
+    Internal extension point — no API stability guarantees. Vanilla flow only
+    needs ``pred`` and ``target``; extension subclasses can stash arbitrary
+    additional outputs (e.g. hidden features for representation-alignment
+    losses) in the ``extra`` dict without breaking the base signature.
+    """
+
+    pred: torch.Tensor
+    target: torch.Tensor
+    extra: dict = field(default_factory=dict)
 
 
 class NetworkTrainer:
@@ -1072,10 +1088,209 @@ class NetworkTrainer:
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
+        """Run the DiT forward and return prediction/target as a ``DiTOutput``.
+
+        ``**kwargs`` is reserved for extension subclasses to pass additional
+        conditioning (e.g. ``per_token_timesteps``) or request side outputs
+        (e.g. ``hidden_features``). Architecture implementations may ignore
+        unknown kwargs.
+        """
         raise NotImplementedError("subclass must implement `call_dit`")
 
     # endregion model specific
+
+    # region extension seams
+    # Internal extension points — no API stability guarantees.
+    # Subclasses live in this repo; if you fork, expect breakage on updates.
+
+    def process_batch(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        network,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        vae,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute scalar loss for one training batch (pre-backward).
+
+        Default implementation: vanilla flow matching, delegating the loss
+        formulation itself to ``compute_loss``. Override either method:
+        ``process_batch`` to change what gets fed to the model (Self-Flow's
+        dual-timestep dance, etc.), or ``compute_loss`` to swap the loss
+        formulation while keeping the standard data flow.
+
+        Returns ``(scalar_loss, loss_metrics)`` — ``loss_metrics`` is merged
+        into the per-step log dict alongside ``extra_step_logs``.
+
+        ``latents`` is already scale-shifted; ``noise`` is already sampled.
+        """
+        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
+            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+        )
+
+        output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
+
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype)
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
+
+        Default implementation: weighted MSE between ``output.pred`` and
+        ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
+        then ``.mean()``. Override to swap the loss formulation entirely
+        (e.g. Self-Flow's L_gen + gamma * L_rep). Subclasses are responsible
+        for whatever weighting/reduction they need — this hook owns the
+        full loss computation, not just the per-element MSE.
+
+        ``loss_metrics`` defaults to empty; populate with named scalars for
+        loss-decomposition logging (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
+        """
+        weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
+        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
+        if weighting is not None:
+            loss = loss * weighting
+        return loss.mean(), {}
+
+    def on_transformer_loaded(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+    ) -> None:
+        """Called immediately after ``self.load_transformer(...)`` returns.
+
+        At this point the transformer is on its loading device but not yet wrapped
+        by the accelerator and not yet in eval mode. Use this hook for one-time
+        post-load setup that needs the raw module (e.g. ``register_forward_hook``
+        for feature extraction).
+        """
+
+    def on_train_start(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        transformer,
+        optimizer,
+    ) -> None:
+        """Called once after accelerator.prepare and before the training loop starts.
+
+        Use this for initializing extension state that depends on prepared models
+        (EMA copies, decay schedulers, register_forward_hook on the transformer, etc.).
+        """
+
+    def on_post_optimizer_step(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        transformer,
+        sync_gradients: bool,
+        global_step: int,
+    ) -> None:
+        """Called after optimizer.step / lr_scheduler.step / zero_grad each inner step.
+
+        ``sync_gradients`` mirrors ``accelerator.sync_gradients`` and is True only
+        on steps where an actual optimizer update occurred (gradient accumulation aware).
+        ``transformer`` is the accelerator-wrapped DiT — passed so subclasses doing
+        non-network (full fine-tuning) bookkeeping or EMA on transformer weights can
+        reach it without stashing a reference in ``on_train_start``.
+        Use for EMA updates or any post-step bookkeeping.
+        """
+
+    def on_post_save(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        transformer,
+        ckpt_name: str,
+        save_dtype,
+        metadata: dict,
+        force_sync_upload: bool,
+    ) -> None:
+        """Called after the main network checkpoint has been saved.
+
+        ``ckpt_name`` is the basename written to ``args.output_dir``. Use this hook
+        to write companion files (EMA weights, projection heads, etc.) alongside.
+        ``transformer`` is the accelerator-wrapped DiT — provided so non-network
+        (full fine-tuning) subclasses can save companion artifacts derived from it.
+        ``force_sync_upload`` mirrors the flag passed to the main HuggingFace upload
+        so subclasses uploading companion files can match the same behaviour.
+        """
+
+    def on_before_sample_images(
+        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+    ) -> None:
+        """Called just before sample image generation begins, while the transformer is still in training mode.
+
+        The transformer is still wrapped by the accelerator at this point. Use this hook for
+        pre-inference setup such as switching auxiliary modules to eval mode or stashing training state.
+        """
+        pass
+
+    def on_after_sample_images(
+        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+    ) -> None:
+        """Called after sample image generation completes and the transformer has been switched back to training mode.
+
+        Memory has already been cleaned via ``clean_memory_on_device``. Use this hook for
+        post-inference cleanup such as restoring auxiliary modules to train mode or updating state
+        based on the generated samples.
+        """
+        pass
+
+    def extra_trainable_params(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        transformer,
+        trainable_params: list,
+    ) -> list:
+        """Optionally augment the param-group list passed to the optimizer.
+
+        Default: pass-through. Override to merge extra modules' parameters
+        (e.g. a representation projection head) into ``trainable_params``.
+        Subclasses are expected to stash any owned modules on ``self`` so
+        ``on_train_start`` and later hooks can use them.
+        """
+        return trainable_params
+
+    def extra_metadata(self, args: argparse.Namespace) -> dict:
+        """Returns extra ``ss_*`` metadata keys to embed in saved safetensors.
+
+        Default: empty dict. Override to add extension-specific metadata.
+        """
+        return {}
+
+    def extra_step_logs(self, args: argparse.Namespace, logs: dict) -> dict:
+        """Returns additional log entries to merge into the per-step log payload.
+
+        Called just before ``accelerator.log`` on logging steps. The returned
+        dict is merged into ``logs`` (existing keys are overwritten on collision).
+        Default: empty dict.
+        """
+        return {}
+
+    # endregion extension seams
 
     def train(self, args):
         if not self._validate_args_and_init(args):
@@ -1098,7 +1313,7 @@ class NetworkTrainer:
             lr_scheduler,
             lr_descriptions,
             train_dataloader,
-        ) = self._build_optimizer_and_dataloader(args, accelerator, network, train_dataset_group, collator)
+        ) = self._build_optimizer_and_dataloader(args, accelerator, network, train_dataset_group, collator, transformer)
         (
             transformer,
             network,
@@ -1283,6 +1498,7 @@ class NetworkTrainer:
         transformer = self.load_transformer(
             accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
         )
+        self.on_transformer_loaded(args, accelerator, transformer)
         transformer.eval()
         transformer.requires_grad_(False)
 
@@ -1379,11 +1595,12 @@ class NetworkTrainer:
         # net_kwargs is reconstructed in the metadata phase from args.network_args
         return network
 
-    def _build_optimizer_and_dataloader(self, args, accelerator, network, train_dataset_group, collator):
+    def _build_optimizer_and_dataloader(self, args, accelerator, network, train_dataset_group, collator, transformer):
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
         trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
+        trainable_params = self.extra_trainable_params(args, accelerator, network, transformer, trainable_params)
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
@@ -1556,6 +1773,8 @@ class NetworkTrainer:
     ):
         is_main_process = accelerator.is_main_process
 
+        self.on_train_start(args, accelerator, network, transformer, optimizer)
+
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -1623,6 +1842,7 @@ class NetworkTrainer:
             "ss_sigmoid_scale": args.sigmoid_scale,
             "ss_discrete_flow_shift": args.discrete_flow_shift,
         }
+        metadata.update(self.extra_metadata(args))
 
         datasets_metadata = []
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
@@ -1731,16 +1951,31 @@ class NetworkTrainer:
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
+            self.on_post_save(args, accelerator, network, transformer, ckpt_name, save_dtype, metadata_to_save, force_sync_upload)
+
         def remove_model(old_ckpt_name):
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
             if os.path.exists(old_ckpt_file):
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
+        def _do_sample(epoch_arg, steps_arg):
+            if not should_sample_images(args, steps_arg, epoch_arg):
+                return
+            self.on_before_sample_images(
+                accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
+            )
+            try:
+                self.sample_images(accelerator, args, epoch_arg, steps_arg, vae, transformer, sample_parameters, dit_dtype)
+            finally:
+                self.on_after_sample_images(
+                    accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
+                )
+
         # For --sample_at_first
         if should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
-            self.sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
+            _do_sample(0, global_step)
             optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
@@ -1780,27 +2015,20 @@ class NetworkTrainer:
                     # Sample noise that we'll add to the latents
                     noise = torch.randn_like(latents)
 
-                    # calculate model input and timesteps
-                    noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-                        args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+                    loss, loss_metrics = self.process_batch(
+                        args,
+                        accelerator,
+                        transformer,
+                        network,
+                        batch,
+                        latents,
+                        noise,
+                        noise_scheduler,
+                        dit_dtype,
+                        network_dtype,
+                        vae,
+                        global_step,
                     )
-
-                    weighting = compute_loss_weighting_for_sd3(
-                        args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-                    )
-
-                    model_pred, target = self.call_dit(
-                        args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
-                    )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
-
-                    if weighting is not None:
-                        loss = loss * weighting
-                    # loss = loss.mean([1, 2, 3])
-                    # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
-                    # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
-
-                    loss = loss.mean()  # mean loss over all elements in batch
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
@@ -1818,6 +2046,8 @@ class NetworkTrainer:
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
+
+                    self.on_post_optimizer_step(args, accelerator, network, transformer, accelerator.sync_gradients, global_step)
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
@@ -1841,7 +2071,7 @@ class NetworkTrainer:
                     if should_sampling or should_saving:
                         optimizer_eval_fn()
                         if should_sampling:
-                            self.sample_images(accelerator, args, None, global_step, vae, transformer, sample_parameters, dit_dtype)
+                            _do_sample(None, global_step)
 
                         if should_saving:
                             accelerator.wait_for_everyone()
@@ -1871,6 +2101,8 @@ class NetworkTrainer:
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
+                    logs.update(loss_metrics)
+                    logs.update(self.extra_step_logs(args, logs))
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:
@@ -1898,7 +2130,7 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
+            _do_sample(epoch + 1, global_step)
             optimizer_train_fn()
 
             # end of epoch

@@ -18,6 +18,7 @@ from accelerate import Accelerator
 
 from musubi_tuner import convert_lora
 from musubi_tuner.training.trainer_base import (
+    DiTOutput,
     NetworkTrainer,
     SS_METADATA_KEY_BASE_MODEL_VERSION,
     SS_METADATA_KEY_NETWORK_MODULE,
@@ -69,6 +70,7 @@ from accelerate.utils import set_seed
 
 __all__ = [
     # trainer_base
+    "DiTOutput",
     "NetworkTrainer",
     "HunyuanVideoNetworkTrainer",
     "SS_METADATA_KEY_BASE_MODEL_VERSION",
@@ -409,7 +411,8 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
         transformer: HYVideoDiffusionTransformer = transformer_arg
         bsz = latents.shape[0]
 
@@ -455,7 +458,7 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
         # flow matching loss
         target = noise - latents
 
-        return model_pred, target
+        return DiTOutput(pred=model_pred, target=target)
 
     # endregion model specific
 

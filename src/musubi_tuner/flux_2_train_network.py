@@ -9,6 +9,7 @@ from diffusers.utils.torch_utils import randn_tensor
 
 from musubi_tuner.flux_2 import flux2_models, flux2_utils
 from musubi_tuner.hv_train_network import (
+    DiTOutput,
     NetworkTrainer,
     load_prompts,
     clean_memory_on_device,
@@ -266,7 +267,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
         model: flux2_models.Flux2 = transformer
 
         bsize = latents.shape[0]
@@ -330,7 +332,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         target = noise - latents
 
-        return model_pred, target
+        return DiTOutput(pred=model_pred, target=target)
 
     # endregion model specific
 
