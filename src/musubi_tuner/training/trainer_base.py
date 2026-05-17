@@ -1201,6 +1201,7 @@ class NetworkTrainer:
         args: argparse.Namespace,
         accelerator: Accelerator,
         network,
+        transformer,
         sync_gradients: bool,
         global_step: int,
     ) -> None:
@@ -1208,6 +1209,9 @@ class NetworkTrainer:
 
         ``sync_gradients`` mirrors ``accelerator.sync_gradients`` and is True only
         on steps where an actual optimizer update occurred (gradient accumulation aware).
+        ``transformer`` is the accelerator-wrapped DiT — passed so subclasses doing
+        non-network (full fine-tuning) bookkeeping or EMA on transformer weights can
+        reach it without stashing a reference in ``on_train_start``.
         Use for EMA updates or any post-step bookkeeping.
         """
 
@@ -1216,6 +1220,7 @@ class NetworkTrainer:
         args: argparse.Namespace,
         accelerator: Accelerator,
         network,
+        transformer,
         ckpt_name: str,
         save_dtype,
         metadata: dict,
@@ -1225,6 +1230,8 @@ class NetworkTrainer:
 
         ``ckpt_name`` is the basename written to ``args.output_dir``. Use this hook
         to write companion files (EMA weights, projection heads, etc.) alongside.
+        ``transformer`` is the accelerator-wrapped DiT — provided so non-network
+        (full fine-tuning) subclasses can save companion artifacts derived from it.
         ``force_sync_upload`` mirrors the flag passed to the main HuggingFace upload
         so subclasses uploading companion files can match the same behaviour.
         """
@@ -1944,7 +1951,7 @@ class NetworkTrainer:
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
-            self.on_post_save(args, accelerator, network, ckpt_name, save_dtype, metadata_to_save, force_sync_upload)
+            self.on_post_save(args, accelerator, network, transformer, ckpt_name, save_dtype, metadata_to_save, force_sync_upload)
 
         def remove_model(old_ckpt_name):
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
@@ -2040,7 +2047,7 @@ class NetworkTrainer:
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
-                    self.on_post_optimizer_step(args, accelerator, network, accelerator.sync_gradients, global_step)
+                    self.on_post_optimizer_step(args, accelerator, network, transformer, accelerator.sync_gradients, global_step)
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(

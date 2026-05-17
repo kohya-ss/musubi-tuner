@@ -245,6 +245,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         network,
+        transformer,
         sync_gradients: bool,
         global_step: int,
     ) -> None:
@@ -284,6 +285,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         args: argparse.Namespace,
         accelerator: Accelerator,
         network,
+        transformer,
         ckpt_name: str,
         save_dtype,
         metadata: dict,
