@@ -1,103 +1,55 @@
 # overview.md
 
-This file provides guidance to developers when working with code in this repository.
+This file provides guidance to AI agents and developers working with this repository.
 
 ## Project Overview
 
-Musubi Tuner is a Python-based training framework for LoRA (Low-Rank Adaptation) models with multiple video generation architectures including HunyuanVideo, HunyuanVideo 1.5, Wan2.1/2.2, FramePack, FLUX.1 Kontext/FLUX.2, Z-Image and Qwen-Image/Qwen-Image-Edit series/Qwen-Image-Layered. The project focuses on memory-efficient training and inference for video generation models.
+Musubi Tuner is a training and inference framework for LoRA (and LoHa/LoKr) fine-tuning of video/image generation models. It supports multiple architectures: HunyuanVideo, HunyuanVideo 1.5, Wan2.1/2.2, FramePack, FLUX.1 Kontext, FLUX.2, Kandinsky 5, Z-Image, and Qwen-Image series. Some architectures also support full fine-tuning.
 
-## Installation and Environment
+The project prioritizes memory-efficient training through fp8 precision, block swapping (CPU offloading), gradient checkpointing, and VAE tiling/chunking.
 
-The project uses `pyproject.toml` for dependency management with both pip and uv (experimental) installation methods:
+## Installation
 
-- **pip installation**: `pip install -e .` after installing PyTorch with CUDA support
-- **uv installation**: `uv run --extra cu124` (or `cu128`, `cu130`) (uv installation is experimental)
-- **Python requirement**: 3.10 or later (verified with 3.10)
-- **PyTorch requirement**: 2.5.1 or later
+See `pyproject.toml` for dependencies. Requires Python 3.10+ and PyTorch 2.5.1+ with CUDA. Install via `pip install -e .` or `uv run --extra cu124` (experimental).
 
-Optional dependencies include `ascii-magic`, `matplotlib`, `tensorboard`, and `prompt-toolkit`.
+## Workflow
 
-## Common Development Commands
+Training follows a three-step pipeline, each with per-architecture scripts:
 
-### Dataset Preparation
-```bash
-# Cache latents (required before training)
-python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/vae --vae_chunk_size 32 --vae_tiling
+1. **Cache latents** — `cache_latents.py`, `wan_cache_latents.py`, etc.
+2. **Cache text encoder outputs** — `cache_text_encoder_outputs.py`, `wan_cache_text_encoder_outputs.py`, etc.
+3. **Train** — `hv_train_network.py`, `wan_train_network.py`, etc. (launched via `accelerate launch`)
 
-# Cache text encoder outputs (required before training)
-python src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml --text_encoder1 path/to/te1 --text_encoder2 path/to/te2 --batch_size 16
-```
+Inference scripts follow the same naming pattern: `hv_generate_video.py`, `wan_generate_video.py`, etc.
 
-`wan_cache_latents.py`, `qwen_image_cache_latents.py` etc. are similar for other architectures.
-
-### Training Commands
-```bash
-# HunyuanVideo training
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --dit path/to/dit --dataset_config path/to/toml --network_module networks.lora --network_dim 32
-```
-
-`wan_train_network.py`, `qwen_image_train_network.py` etc. are similar for other architectures.
-
-Full fine-tuning is also supported for Qwen-Image series with a separate script `qwen_image_train.py` and appropriate arguments.
-
-### Inference Commands
-```bash
-# HunyuanVideo inference
-python src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --prompt "text" --dit path/to/dit --vae path/to/vae
-```
-
-`wan_generate_video.py`, `qwen_image_generate.py` etc. are similar for other architectures.
-
-### Utility Commands
-```bash
-# Merge LoRA weights
-python src/musubi_tuner/merge_lora.py --dit path/to/dit --lora_weight path/to/lora.safetensors --save_merged_model path/to/output
-
-# Convert LoRA formats
-python src/musubi_tuner/convert_lora.py --input path/to/lora.safetensors --output path/to/converted.safetensors --target other
-
-# Post-hoc EMA for LoRA
-python src/musubi_tuner/lora_post_hoc_ema.py [args]
-```
-
-### Testing and Development
-No formal test suite is present in this repository. The project relies on manual testing through the training and inference scripts.
+Utility scripts: `merge_lora.py`, `convert_lora.py`, `lora_post_hoc_ema.py`.
 
 ## Code Architecture
 
-### Core Structure
-- `src/musubi_tuner/`: Main package containing all training and inference scripts
-- `src/musubi_tuner/dataset/`: Dataset configuration and loading utilities
-- `src/musubi_tuner/modules/`: Model architectures and components
-- `src/musubi_tuner/networks/`: LoRA network implementations for different architectures
-- `src/musubi_tuner/utils/`: Common utilities for model handling, device management, etc.
+```
+src/musubi_tuner/
+├── training/          # Shared training infrastructure (trainer base class, accelerator setup, timesteps, etc.)
+├── dataset/           # Dataset configuration, loading, bucketing, caching I/O
+├── networks/          # LoRA/LoHa/LoKr network implementations per architecture
+├── modules/           # Shared modules (attention, LR schedulers, fp8 optimization, offloading)
+├── utils/             # Common utilities (model loading, device management, safetensors, etc.)
+├── hunyuan_model/     # HunyuanVideo model implementation
+├── hunyuan_video_1_5/ # HunyuanVideo 1.5 model implementation
+├── wan/               # Wan2.1/2.2 model implementation
+├── frame_pack/        # FramePack model implementation
+├── flux/              # FLUX.1 Kontext model implementation
+├── flux_2/            # FLUX.2 model implementation
+├── kandinsky5/        # Kandinsky 5 model implementation
+├── qwen_image/        # Qwen-Image model implementation
+├── zimage/            # Z-Image model implementation
+└── *_train_network.py, *_cache_*.py, *_generate_*.py  # Per-architecture entry points
+```
 
-### Architecture-Specific Modules
-- `hunyuan_model/`: HunyuanVideo model implementation and utilities
-- `wan/`: Wan2.1/2.2 model configurations and modules
-- `qwen_image/`: Qwen-Image model utilities
-- ... and others for FramePack, FLUX, Z-Image
-
-### Key Components
-- **Dataset Configuration**: Uses TOML files for complex dataset setups supporting images, videos, control images, and metadata JSONL files
-- **Memory Optimization**: Supports fp8 precision, block swapping, and various attention mechanisms (SDPA, FlashAttention, SageAttention, xformers)
-- **Multi-Architecture Support**: Each architecture has its own training/inference scripts with shared utilities
-- **LoRA Networks**: Modular LoRA implementations with support for different target modules and configurations
-
-### Configuration System
-- Dataset configuration uses TOML format with support for multiple datasets, bucketing, and architecture-specific settings
-- Training configuration via command line arguments and accelerate config
-- Support for advanced features like timestep sampling, discrete flow shift, and memory-saving options
-
-### Memory Management
-- Aggressive memory optimization with options like `--blocks_to_swap`, `--fp8_base`, `--fp8_llm`
-- VAE tiling or chunking support for handling large resolutions (depending on architecture)
-- Gradient checkpointing and mixed precision training
-- Block-swap (offloading weights to CPU) for large models
+Each architecture follows the same pattern: an architecture-specific subdirectory for model code, plus top-level scripts for caching/training/inference that share the common `training/` and `dataset/` infrastructure.
 
 ## Development Notes
-- The project is under active development with experimental features
-- No formal CI/CD or automated testing
-- Uses accelerate for distributed training setup
-- Supports both interactive and batch inference modes
-- Comprehensive documentation in `docs/` directory for advanced configurations and architecture-specific guides
+
+- No formal test suite — manual testing via training and inference scripts
+- Uses `accelerate` for distributed training
+- Dataset configuration uses TOML format (see `docs/dataset_config.md` for schema)
+- User-facing documentation is in `docs/`

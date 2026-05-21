@@ -616,10 +616,10 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                         args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
                     )
 
-                    model_pred, target = self.call_dit(
+                    output = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
                     )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target, reduction="none")
+                    loss = torch.nn.functional.mse_loss(output.pred.to(dit_dtype), output.target, reduction="none")
 
                     if weighting is not None:
                         loss = loss * weighting
