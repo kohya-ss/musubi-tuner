@@ -63,6 +63,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- May 22, 2026
+    - Performed a large-scale internal refactoring to improve code quality and maintainability. See [PR #950](https://github.com/kohya-ss/musubi-tuner/pull/950)
+        - We have taken care to ensure that there are no direct impacts on users. For details and to report any issues, please refer to [this discussion](https://github.com/kohya-ss/musubi-tuner/discussions/949).
+
 - February 15, 2026
     - Added support for LoHa/LoKr training. See [PR #900](https://github.com/kohya-ss/musubi-tuner/pull/900)
         - Implemented based on the LoHa/LoKr algorithms from LyCORIS. Special thanks to KohakuBlueleaf from the LyCORIS project.
