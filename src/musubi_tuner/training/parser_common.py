@@ -26,8 +26,8 @@ def _int_or_float(value):
     try:
         float_value = float(value)
         if float_value >= 1 and float_value.is_integer():
-            return int(value)
-        return float(value)
+            return int(float_value)
+        return float_value
     except ValueError:
         raise argparse.ArgumentTypeError(f"'{value}' is not an int or float")
 

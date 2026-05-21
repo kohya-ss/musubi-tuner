@@ -1531,7 +1531,7 @@ class NetworkTrainer:
                 accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
 
                 weights_sd = load_file(weight_path)
-                weights_sd = self.convert_weight_keys(weights_sd, args.network_module)
+                weights_sd = self.convert_weight_keys(weights_sd, network_module)
                 module = network_module.create_arch_network_from_weights(
                     multiplier, weights_sd, unet=transformer, for_inference=True
                 )

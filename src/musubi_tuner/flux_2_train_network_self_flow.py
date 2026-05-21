@@ -61,6 +61,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         self._coupling_scheduler = None
         self._feature_extractor = None
         self._self_flow_logs: dict = {}
+        self._saved_student_state: Optional[dict] = None
 
     # region argument validation (existing extension point — handle_model_specific_args)
 
@@ -274,6 +275,8 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
     ) -> None:
         """Restore student weights after EMA sampling."""
+        if not args.self_flow or self.ema_lora_state is None:
+            return
         if self._saved_student_state is None:
             return
         network = accelerator.unwrap_model(network)
