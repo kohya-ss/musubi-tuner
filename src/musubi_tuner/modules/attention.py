@@ -9,11 +9,15 @@ try:
     from flash_attn.flash_attn_interface import _flash_attn_forward
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
     from flash_attn.flash_attn_interface import flash_attn_func
+    from flash_attn.flash_attn_interface import flash_attn_qkvpacked_func
+    from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 except ImportError:
     flash_attn = None
     flash_attn_varlen_func = None
     _flash_attn_forward = None
     flash_attn_func = None
+    flash_attn_qkvpacked_func = None
+    flash_attn_varlen_qkvpacked_func = None
 
 try:
     from sageattention import sageattn_varlen, sageattn
@@ -93,20 +97,33 @@ def attention(
     processing each sequence individually.
 
     Args:
-        qkv_or_q: Query tensor [B, L, H, D]. or list of such tensors.
-        k: Key tensor [B, L, H, D].
-        v: Value tensor [B, L, H, D].
-        attn_param: Attention parameters including mask and sequence lengths.
+        qkv_or_q: One of:
+            - Query tensor [B, L, H, D] (k and v must be provided separately)
+            - List [q, k, v] of tensors each [B, L, H, D]
+            - Packed QKV tensor [B, L, 3, H, D] (used directly by flash attention)
+        k: Key tensor [B, L, H, D]. Required when qkv_or_q is a plain query tensor.
+        v: Value tensor [B, L, H, D]. Required when qkv_or_q is a plain query tensor.
+        attn_params: Attention parameters including mask and sequence lengths.
         drop_rate: Attention dropout rate.
 
     Returns:
         Attention output tensor [B, L, H*D].
     """
+    # qkv_packed holds [B, L, 3, H, D] when the input was already packed.
+    # For flash attention this avoids a re-stack; other backends unpack via unbind views.
+    qkv_packed: Optional[torch.Tensor] = None
+
     if isinstance(qkv_or_q, list):
         q, k, v = qkv_or_q
         q: torch.Tensor = q
         qkv_or_q.clear()
         del qkv_or_q
+    elif isinstance(qkv_or_q, torch.Tensor) and qkv_or_q.ndim == 5:
+        # Packed QKV tensor [B, L, 3, H, D]
+        assert qkv_or_q.shape[2] == 3, f"5D input must be packed QKV [B, L, 3, H, D], got shape {tuple(qkv_or_q.shape)}"
+        qkv_packed = qkv_or_q
+        del qkv_or_q
+        q, k, v = qkv_packed.unbind(dim=2)  # views: each [B, L, H, D]
     else:
         q: torch.Tensor = qkv_or_q
         del qkv_or_q
@@ -227,32 +244,50 @@ def attention(
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
-                # HND seems to cause an error
-                x_i = flash_attn_func(q[i], k[i], v[i], drop_rate)  # B, L, H, D
-                q[i] = None
-                k[i] = None
-                v[i] = None
-                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, L, H, D
+                if qkv_packed is not None:
+                    # Packed input: slice directly, no unbind/re-stack needed
+                    qkv_i = qkv_packed[i : i + 1, : attn_params.seqlens[i]]  # [1, L_i, 3, H, D]
+                    x_i = flash_attn_qkvpacked_func(qkv_i, drop_rate)  # [1, L_i, H, D]
+                else:
+                    x_i = flash_attn_func(q[i], k[i], v[i], drop_rate)  # [1, L_i, H, D]
+                    q[i] = None
+                    k[i] = None
+                    v[i] = None
+                x.append(pad_fn(x_i, attn_params.max_seqlen))  # [1, max_seqlen, H, D]
             x = torch.cat(x, dim=0)
             q, k, v = None, None, None
+            qkv_packed = None
         elif attn_params.cu_seqlens is None:  # all tokens are valid
-            x = flash_attn_func(q, k, v, drop_rate)  # B, L, H, D
-            q, k, v = None, None, None
+            if qkv_packed is not None:
+                x = flash_attn_qkvpacked_func(qkv_packed, drop_rate)  # [B, L, H, D]
+                qkv_packed = None
+            else:
+                x = flash_attn_func(q, k, v, drop_rate)  # [B, L, H, D]
+                q, k, v = None, None, None
         else:
-            # Reshape to [(bxs), a, d]
+            # Varlen
             batch_size, seqlen = q.shape[0], q.shape[1]
-            q = q.view(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
-            k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
-            v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
+            if qkv_packed is not None:
+                # View to [B*L, 3, H, D] — zero-copy since qkv_packed is contiguous
+                qkv_flat = qkv_packed.view(batch_size * seqlen, 3, *qkv_packed.shape[3:])
+                qkv_packed = None
+                # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv
+                x = flash_attn_varlen_qkvpacked_func(
+                    qkv_flat, attn_params.cu_seqlens, attn_params.max_seqlen, drop_rate
+                )
+                qkv_flat = None
+            else:
+                q = q.view(batch_size * seqlen, *q.shape[2:])  # [B*L, H, D]
+                k = k.view(batch_size * seqlen, *k.shape[2:])
+                v = v.view(batch_size * seqlen, *v.shape[2:])
+                # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv
+                x = flash_attn_varlen_func(
+                    q, k, v, attn_params.cu_seqlens, attn_params.cu_seqlens, attn_params.max_seqlen, attn_params.max_seqlen, drop_rate
+                )
+                q, k, v = None, None, None
 
-            # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv
-            x = flash_attn_varlen_func(
-                q, k, v, attn_params.cu_seqlens, attn_params.cu_seqlens, attn_params.max_seqlen, attn_params.max_seqlen, drop_rate
-            )
-            q, k, v = None, None, None
-
-            # Reshape x with shape [(bxs), a, d] to [b, s, a, d]
-            x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
+            # Reshape [B*L, H, D] → [B, L, H, D]
+            x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])
 
     else:
         # Currently only PyTorch SDPA and xformers are implemented
