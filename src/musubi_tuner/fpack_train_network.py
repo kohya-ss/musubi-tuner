@@ -22,6 +22,7 @@ from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask
 from musubi_tuner.dataset.image_video_dataset import resize_image_to_bucket
 from musubi_tuner.hv_train_network import (
+    DiTOutput,
     NetworkTrainer,
     load_prompts,
     clean_memory_on_device,
@@ -532,7 +533,8 @@ class FramePackNetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
         model: HunyuanVideoTransformer3DModelPacked = transformer
         device = accelerator.device
         batch_size = latents.shape[0]
@@ -587,7 +589,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
         # flow matching loss
         target = noise - latents
 
-        return model_pred, target
+        return DiTOutput(pred=model_pred, target=target)
 
     # endregion model specific
 

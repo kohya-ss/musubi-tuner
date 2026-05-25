@@ -58,6 +58,10 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/05/22
+    - コードベースの大規模な内部リファクタリングを行い、コードベースの品質と保守性を向上させました。[PR #950](https://github.com/kohya-ss/musubi-tuner/pull/950)
+        - ユーザーの方には直接の影響がないよう配慮しました。詳細について、および不具合報告などは[こちらのdiscussion](https://github.com/kohya-ss/musubi-tuner/discussions/949)までお願いします。
+
 - 2026/02/15
     - LoHa/LoKrの学習に対応しました。[PR #900](https://github.com/kohya-ss/musubi-tuner/pull/900)
         - LyCORISのLoHa/LoKrアルゴリズムに基づいて実装されています。LyCORISプロジェクトのKohakuBlueleaf氏に深く感謝します。
