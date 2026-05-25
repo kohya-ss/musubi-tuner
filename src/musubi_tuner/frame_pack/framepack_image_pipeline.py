@@ -97,6 +97,7 @@ class ImageInput:
     image_size: tuple = (256, 256)
     seed: Optional[int] = None
     infer_steps: int = 25
+    strength: Optional[float] = None
     guidance_scale: float = 1.0
     embedded_cfg_scale: float = 10.0
     guidance_rescale: float = 0.0
@@ -660,6 +661,8 @@ class FramePackImagePipeline:
                 )
             if inp.infer_steps != ref.infer_steps:
                 raise ValueError(f"Batch item {i} has infer_steps={inp.infer_steps} but item 0 has {ref.infer_steps}.")
+            if inp.strength != ref.strength:
+                raise ValueError(f"Batch item {i} has strength={inp.strength} but item 0 has {ref.strength}.")
             if inp.guidance_scale != ref.guidance_scale:
                 raise ValueError(f"Batch item {i} has guidance_scale={inp.guidance_scale} but item 0 has {ref.guidance_scale}.")
             if inp.embedded_cfg_scale != ref.embedded_cfg_scale:
@@ -784,10 +787,15 @@ class FramePackImagePipeline:
             device, dtype=torch.bfloat16
         )
 
+        # --- Start latents for I2I
+        start_latents = torch.cat([imd["start_latent"] for imd in image_data], dim=0).to(device)
+
         # --- Single batched call to sample_hunyuan ---
         generated = sample_hunyuan(
             transformer=self.dit_model,
             sampler=self.sample_solver,
+            initial_latent=start_latents,
+            strength=1.0 if ref.strength is None else ref.strength,
             width=width,
             height=height,
             frames=frames,

@@ -82,6 +82,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negative_prompt", type=str, default="", help="Negative prompt")
     parser.add_argument("--image_size", type=int, nargs=2, default=[256, 256], help="Image size: height width")
     parser.add_argument("--infer_steps", type=int, default=25, help="Number of inference steps")
+    parser.add_argument(
+        "--strength",
+        type=float,
+        default=None,
+        help="Strength for image-to-image generation (0.0-1.0), uses `image_path` as an initial image",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--embedded_cfg_scale", type=float, default=10.0, help="Distilled CFG scale")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale (1.0 = no CFG)")
@@ -179,6 +185,7 @@ def parse_prompt_line(line: str, defaults: argparse.Namespace) -> ImageInput:
     height, width = defaults.image_size
     seed = defaults.seed
     infer_steps = defaults.infer_steps
+    strength = defaults.strength
     guidance_scale = defaults.guidance_scale
     embedded_cfg_scale = defaults.embedded_cfg_scale
     guidance_rescale = defaults.guidance_rescale
@@ -203,6 +210,8 @@ def parse_prompt_line(line: str, defaults: argparse.Namespace) -> ImageInput:
             height = int(val)
         elif opt == "s":
             infer_steps = int(val)
+        elif opt == "t":
+            strength = float(val)
         elif opt == "d":
             seed = int(val)
         elif opt in ("g", "l"):
@@ -233,6 +242,7 @@ def parse_prompt_line(line: str, defaults: argparse.Namespace) -> ImageInput:
         image_size=(height, width),
         seed=seed,
         infer_steps=infer_steps,
+        strength=strength,
         guidance_scale=guidance_scale,
         embedded_cfg_scale=embedded_cfg_scale,
         guidance_rescale=guidance_rescale,
