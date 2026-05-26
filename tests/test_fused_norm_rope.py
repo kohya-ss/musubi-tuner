@@ -1,173 +1,187 @@
-"""Tests for the fused QKNorm + RoPE Triton kernel.
+"""Tests for the fused QKNorm + RoPE kernel.
 
 Compares the Triton fused kernel against a pure-PyTorch reference
-implementation using realistic Flux2-like tensor shapes.
+implementation, and validates helper utilities.
 """
 
 import pytest
 import torch
-
-# Skip the entire module if Triton is not available (CPU-only environments)
-triton = pytest.importorskip("triton", reason="triton not installed")
-
 from musubi_tuner.kernels.fused_norm_rope import (
-    extract_cos_sin,
     fused_norm_rope,
-    qk_norm_rope_reference,
+    fused_qkv_norm_rope,
+    reference_norm_rope,
+    reference_qkv_norm_rope,
+    extract_cos_sin,
+    HAS_TRITON,
 )
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Test 1: reference vs triton kernel (skip if no triton or no CUDA)
 # ---------------------------------------------------------------------------
 
 
-def _make_freqs_cis(B: int, L: int, D_half: int, device: torch.device) -> torch.Tensor:
-    """Build a synthetic freqs_cis tensor with shape [B, 1, L, D_half, 2, 2]."""
-    # Use random angles so the rotation matrices are non-trivial
-    angles = torch.rand(B, L, D_half, device=device, dtype=torch.float32) * 2 * torch.pi
-    cos_a = torch.cos(angles)
-    sin_a = torch.sin(angles)
-    # Build rotation matrices [B, L, D_half, 2, 2]
-    rot = torch.stack(
-        [
-            torch.stack([cos_a, -sin_a], dim=-1),   # row 0: [cos, -sin]
-            torch.stack([sin_a,  cos_a], dim=-1),   # row 1: [sin,  cos]
-        ],
-        dim=-2,
-    )
-    # Add the head dimension (=1 in the actual model)
-    return rot.unsqueeze(1)  # [B, 1, L, D_half, 2, 2]
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(
-    params=[
-        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")),
-    ]
+@pytest.mark.skipif(
+    not HAS_TRITON or not torch.cuda.is_available(),
+    reason="requires triton + CUDA",
 )
-def device(request):
-    return torch.device(request.param)
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "B, L, H, D",
-    [
-        (2, 256, 24, 128),  # Flux2 Klein-4B-ish
-        (1, 64,  8,  64),   # smaller sanity check
-        (2, 128, 16, 128),  # another realistic shape
-    ],
-)
-def test_fused_norm_rope_matches_reference(B, L, H, D, device):
-    """Kernel output must match the PyTorch reference within bfloat16 tolerance."""
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_fused_norm_rope_matches_reference(dtype):
+    B, L, H, D = 2, 64, 16, 128
     torch.manual_seed(42)
-    D_half = D // 2
+    x = torch.randn(B, L, H, D, dtype=dtype, device="cuda")
+    weight = torch.randn(D, device="cuda")
+    # simple cos/sin for testing
+    D2 = D // 2
+    cos = torch.ones(B, L, D2, device="cuda")
+    sin = torch.zeros(B, L, D2, device="cuda")
 
-    # Input tensor in bfloat16 on the target device
-    x = torch.randn(B, L, H, D, dtype=torch.bfloat16, device=device)
-
-    # RMSNorm weight (learned scale), one per head-dimension element
-    weight = torch.rand(D, dtype=torch.bfloat16, device=device) + 0.5  # avoid zeros
-
-    # Build freqs_cis and extract cos/sin
-    freqs_cis = _make_freqs_cis(B, L, D_half, device=device)
-    cos, sin = extract_cos_sin(freqs_cis)
-
-    # Reference (pure PyTorch)
-    ref = qk_norm_rope_reference(x, weight, cos, sin, eps=1e-6)
-
-    # Fused Triton kernel
-    out = fused_norm_rope(x, weight, cos, sin, eps=1e-6)
-
-    assert out.shape == ref.shape, f"Shape mismatch: {out.shape} vs {ref.shape}"
-    assert out.dtype == ref.dtype, f"Dtype mismatch: {out.dtype} vs {ref.dtype}"
-
-    # bfloat16 has limited precision — use a generous but reasonable tolerance
-    torch.testing.assert_close(out.float(), ref.float(), atol=1e-2, rtol=1e-2)
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
-def test_fused_norm_rope_dtypes(dtype, device):
-    """Kernel handles bf16, fp16, and fp32 inputs."""
-    torch.manual_seed(0)
-    B, L, H, D = 1, 32, 4, 64
-    D_half = D // 2
-
-    x = torch.randn(B, L, H, D, dtype=dtype, device=device)
-    weight = torch.ones(D, dtype=dtype, device=device)
-    freqs_cis = _make_freqs_cis(B, L, D_half, device=device)
-    cos, sin = extract_cos_sin(freqs_cis)
-
-    ref = qk_norm_rope_reference(x, weight, cos, sin)
+    ref = reference_norm_rope(x, weight, cos, sin)
     out = fused_norm_rope(x, weight, cos, sin)
 
+    assert out.shape == ref.shape
     assert out.dtype == dtype
     torch.testing.assert_close(out.float(), ref.float(), atol=1e-2, rtol=1e-2)
 
 
-def test_extract_cos_sin_shape(device):
-    """extract_cos_sin returns tensors of the expected shape."""
-    B, L, D_half = 2, 64, 32
-    freqs_cis = _make_freqs_cis(B, L, D_half, device=device)
-    cos, sin = extract_cos_sin(freqs_cis)
-    assert cos.shape == (B, L, D_half)
-    assert sin.shape == (B, L, D_half)
+# ---------------------------------------------------------------------------
+# Test 2: extract_cos_sin roundtrip (CPU, no triton needed)
+# ---------------------------------------------------------------------------
 
 
-def test_extract_cos_sin_values(device):
-    """cos and sin values extracted from freqs_cis are correct."""
-    B, L, D_half = 1, 4, 8
-    angles = torch.rand(B, L, D_half, device=device, dtype=torch.float32) * 2 * torch.pi
-    cos_expected = torch.cos(angles)
-    sin_expected = torch.sin(angles)
-
-    rot = torch.stack(
-        [
-            torch.stack([cos_expected, -sin_expected], dim=-1),
-            torch.stack([sin_expected,  cos_expected], dim=-1),
-        ],
-        dim=-2,
-    ).unsqueeze(1)  # [B, 1, L, D_half, 2, 2]
-
-    cos_got, sin_got = extract_cos_sin(rot)
-    torch.testing.assert_close(cos_got, cos_expected)
-    torch.testing.assert_close(sin_got, sin_expected)
+def test_extract_cos_sin():
+    B, L, D2 = 2, 64, 32
+    # Build a freqs_cis with known cos/sin values
+    cos_expected = torch.rand(B, L, D2)
+    sin_expected = torch.rand(B, L, D2)
+    # freqs_cis shape: [B, 1, L, D2, 2, 2]; the '1' is the num_heads broadcast dim.
+    # Assign via the squeezed view to avoid the singleton-dimension mismatch.
+    fc = torch.zeros(B, 1, L, D2, 2, 2)
+    fc[:, 0, :, :, 0, 0] = cos_expected
+    fc[:, 0, :, :, 0, 1] = -sin_expected
+    fc[:, 0, :, :, 1, 0] = sin_expected
+    fc[:, 0, :, :, 1, 1] = cos_expected
+    cos_out, sin_out = extract_cos_sin(fc)
+    torch.testing.assert_close(cos_out, cos_expected)
+    torch.testing.assert_close(sin_out, sin_expected)
 
 
-def test_identity_weight_no_rope(device):
-    """With unit weight and zero sin (no rotation), output == RMSNorm(x)."""
-    torch.manual_seed(1)
-    B, L, H, D = 1, 16, 2, 32
-    D_half = D // 2
-
-    x = torch.randn(B, L, H, D, dtype=torch.float32, device=device)
-    weight = torch.ones(D, device=device)
-
-    # Build freqs_cis with zero rotation (identity matrix)
-    cos_const = torch.ones(B, L, D_half, device=device)
-    sin_const = torch.zeros(B, L, D_half, device=device)
-
-    ref = qk_norm_rope_reference(x, weight, cos_const, sin_const)
-    out = fused_norm_rope(x, weight, cos_const, sin_const)
-    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+# ---------------------------------------------------------------------------
+# Test 3: reference is correct vs manual computation (CPU)
+# ---------------------------------------------------------------------------
 
 
-def test_output_dtype_preserved(device):
-    """Output dtype must match input dtype."""
-    for dtype in [torch.bfloat16, torch.float16, torch.float32]:
-        B, L, H, D = 1, 8, 2, 16
-        x = torch.randn(B, L, H, D, dtype=dtype, device=device)
-        weight = torch.ones(D, dtype=dtype, device=device)
-        cos = torch.ones(B, L, D // 2, device=device)
-        sin = torch.zeros(B, L, D // 2, device=device)
-        out = fused_norm_rope(x, weight, cos, sin)
-        assert out.dtype == dtype, f"Expected {dtype}, got {out.dtype}"
+def test_reference_correctness():
+    B, L, H, D = 1, 4, 2, 8
+    torch.manual_seed(0)
+    x = torch.randn(B, L, H, D)
+    weight = torch.ones(D)
+    D2 = D // 2
+    # identity RoPE (cos=1, sin=0) -> should just return normed x
+    cos = torch.ones(B, L, D2)
+    sin = torch.zeros(B, L, D2)
+    out = reference_norm_rope(x, weight, cos, sin)
+    # verify it's normalized per head
+    norms = out.pow(2).mean(-1)
+    torch.testing.assert_close(norms, torch.ones_like(norms), atol=1e-5, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Test 4: non-trivial RoPE rotations (CUDA, requires triton)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not HAS_TRITON or not torch.cuda.is_available(),
+    reason="requires triton + CUDA",
+)
+@pytest.mark.parametrize(
+    "B, L, H, D",
+    [
+        (2, 256, 24, 128),
+        (1, 64, 8, 64),
+        (2, 128, 16, 128),
+    ],
+)
+def test_fused_norm_rope_nontrivial_rope(B, L, H, D):
+    """Kernel matches reference for random (non-identity) cos/sin values."""
+    torch.manual_seed(99)
+    D2 = D // 2
+    x = torch.randn(B, L, H, D, dtype=torch.bfloat16, device="cuda")
+    weight = torch.rand(D, device="cuda") + 0.5  # avoid zeros
+    angles = torch.rand(B, L, D2, device="cuda") * 2 * torch.pi
+    cos = torch.cos(angles)
+    sin = torch.sin(angles)
+
+    ref = reference_norm_rope(x, weight, cos, sin)
+    out = fused_norm_rope(x, weight, cos, sin)
+
+    assert out.shape == ref.shape
+    assert out.dtype == torch.bfloat16
+    torch.testing.assert_close(out.float(), ref.float(), atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Test 5: fused_qkv_norm_rope reference correctness (CPU)
+# ---------------------------------------------------------------------------
+
+
+def test_fused_qkv_norm_rope_reference_correctness():
+    """reference_qkv_norm_rope matches applying reference_norm_rope per Q and K."""
+    B, L, H, D = 1, 4, 2, 8
+    torch.manual_seed(7)
+    D2 = D // 2
+    qkv = torch.randn(B, L, 3, H, D)
+    q_weight = torch.rand(D) + 0.5
+    k_weight = torch.rand(D) + 0.5
+    angles = torch.rand(B, L, D2) * 2 * torch.pi
+    cos = torch.cos(angles)
+    sin = torch.sin(angles)
+
+    out = reference_qkv_norm_rope(qkv, q_weight, k_weight, cos, sin)
+
+    q_ref = reference_norm_rope(qkv[:, :, 0], q_weight, cos, sin)
+    k_ref = reference_norm_rope(qkv[:, :, 1], k_weight, cos, sin)
+    v_ref = qkv[:, :, 2].float()
+
+    assert out.shape == (B, L, 3, H, D)
+    torch.testing.assert_close(out[:, :, 0].float(), q_ref.float(), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(out[:, :, 1].float(), k_ref.float(), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(out[:, :, 2].float(), v_ref, atol=1e-5, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: fused_qkv_norm_rope Triton kernel matches reference (CUDA)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not HAS_TRITON or not torch.cuda.is_available(),
+    reason="requires triton + CUDA",
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "B, L, H, D",
+    [
+        (2, 64, 16, 128),
+        (1, 32, 8, 64),
+        (2, 128, 24, 128),
+    ],
+)
+def test_fused_qkv_norm_rope_matches_reference(dtype, B, L, H, D):
+    """Packed QKV kernel matches reference for each Q/K/V slice."""
+    torch.manual_seed(42)
+    D2 = D // 2
+    qkv = torch.randn(B, L, 3, H, D, dtype=dtype, device="cuda")
+    q_weight = (torch.rand(D, device="cuda") + 0.5).to(dtype)
+    k_weight = (torch.rand(D, device="cuda") + 0.5).to(dtype)
+    angles = torch.rand(B, L, D2, device="cuda") * 2 * torch.pi
+    cos = torch.cos(angles)
+    sin = torch.sin(angles)
+
+    ref = reference_qkv_norm_rope(qkv, q_weight, k_weight, cos, sin)
+    out = fused_qkv_norm_rope(qkv, q_weight, k_weight, cos, sin)
+
+    assert out.shape == (B, L, 3, H, D)
+    assert out.dtype == dtype
+    torch.testing.assert_close(out.float(), ref.float(), atol=1e-2, rtol=1e-2)

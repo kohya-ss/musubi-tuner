@@ -11,6 +11,7 @@ from torch.utils.checkpoint import checkpoint
 from musubi_tuner.modules.attention import AttentionParams
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.attention import attention as unified_attention
+from musubi_tuner.kernels.fused_norm_rope import fused_qkv_norm_rope, extract_cos_sin
 
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
@@ -752,14 +753,14 @@ class SingleStreamBlock(nn.Module):
 
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1)
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del qkv
-        q, k = self.norm(q, k, v)
+        # torch.split returns a non-contiguous view; contiguous() makes a compact copy
+        qkv = qkv.contiguous().reshape(*qkv.shape[:2], 3, self.num_heads, -1)  # [B, L, 3, H, D]
+        cos, sin = extract_cos_sin(pe)
+        del pe
+        qkv = fused_qkv_norm_rope(qkv, self.norm.query_norm.scale, self.norm.key_norm.scale, cos, sin)
 
-        qkv_list = [q, k, v]
-        del q, k, v
-        attn = attention(qkv_list, pe, attn_params)
-        del qkv_list, pe
+        attn = unified_attention(qkv, attn_params=attn_params)
+        del qkv
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
@@ -840,9 +841,10 @@ class DoubleStreamBlock(nn.Module):
 
         img_qkv = self.img_attn.qkv(img_modulated)
         del img_modulated
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del img_qkv
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+        img_qkv = img_qkv.contiguous().reshape(*img_qkv.shape[:2], 3, self.num_heads, -1)  # [B, L_img, 3, H, D]
+        img_cos, img_sin = extract_cos_sin(pe)
+        del pe
+        img_qkv = fused_qkv_norm_rope(img_qkv, self.img_attn.norm.query_norm.scale, self.img_attn.norm.key_norm.scale, img_cos, img_sin)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
@@ -850,24 +852,18 @@ class DoubleStreamBlock(nn.Module):
         del txt_mod1_scale, txt_mod1_shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         del txt_modulated
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del txt_qkv
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
-
-        txt_len = txt_q.shape[2]
-        q = torch.cat((txt_q, img_q), dim=2)
-        del txt_q, img_q
-        k = torch.cat((txt_k, img_k), dim=2)
-        del txt_k, img_k
-        v = torch.cat((txt_v, img_v), dim=2)
-        del txt_v, img_v
-
-        pe = torch.cat((pe_ctx, pe), dim=2)
+        txt_qkv = txt_qkv.contiguous().reshape(*txt_qkv.shape[:2], 3, self.num_heads, -1)  # [B, L_txt, 3, H, D]
+        txt_cos, txt_sin = extract_cos_sin(pe_ctx)
         del pe_ctx
-        qkv_list = [q, k, v]
-        del q, k, v
-        attn = attention(qkv_list, pe, attn_params)
-        del qkv_list, pe
+        txt_qkv = fused_qkv_norm_rope(txt_qkv, self.txt_attn.norm.query_norm.scale, self.txt_attn.norm.key_norm.scale, txt_cos, txt_sin)
+
+        # Concatenate packed QKV along sequence dim, then run attention once
+        txt_len = txt_qkv.shape[1]
+        qkv = torch.cat((txt_qkv, img_qkv), dim=1)  # [B, L_total, 3, H, D]
+        del txt_qkv, img_qkv
+
+        attn = unified_attention(qkv, attn_params=attn_params)
+        del qkv
         txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
         del attn
 
