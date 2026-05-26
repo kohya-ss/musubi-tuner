@@ -64,6 +64,7 @@ dev = [
   "tensorboard",
   "prompt-toolkit==3.0.51",
   "ruff>=0.12.10",
+  "pytest",
 ]
 
 [build-system]

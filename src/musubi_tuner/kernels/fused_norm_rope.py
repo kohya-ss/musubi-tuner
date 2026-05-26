@@ -24,12 +24,21 @@ def reference_norm_rope(
     sin: torch.Tensor,     # [B, L, D//2]
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Reference: RMSNorm then RoPE, pure PyTorch (no Triton)."""
+    """Reference: RMSNorm then RoPE, pure PyTorch (no Triton).
+
+    Matches the original Flux2 precision path:
+      1. RMSNorm: (x * rrms).to(x_dtype) * weight  — intermediate cast
+      2. QKNorm .to(v): cast to input dtype
+      3. RoPE in float32, output cast to input dtype
+    """
     orig_dtype = x.dtype
     x = x.float()
     # RMSNorm over last dim
     rrms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
-    x = x * rrms * weight.float()
+    # Match original RMSNorm: (x * rrms).to(x_dtype) * weight
+    x = (x * rrms).to(orig_dtype) * weight.float()
+    # Match QKNorm .to(v) cast
+    x = x.to(orig_dtype).float()
     # RoPE: reshape to expose pairs
     x = x.reshape(*x.shape[:-1], -1, 2)   # [B, L, H, D//2, 2]
     x1, x2 = x[..., 0], x[..., 1]         # each [B, L, H, D//2]
@@ -111,17 +120,27 @@ def _rmsnorm_backward(
     weight: torch.Tensor,  # [D] float32
     dnormed: torch.Tensor, # [B, L, H, D] float32 — grad w.r.t. RMSNorm output
     eps: float,
+    input_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Backward through RMSNorm: y = x * rsqrt(mean(x²) + eps) * w.
+
+    When ``input_dtype`` is provided, the dw computation uses
+    ``(x * rrms).to(input_dtype)`` to match the original RMSNorm which
+    quantizes before the scale multiply: ``(x * rrms).to(x_dtype) * w``.
 
     Returns (dx, dw).
     """
     D = x.shape[-1]
     rrms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)  # [B, L, H, 1]
-    # dw: sum over (B, L, H) of x * rrms * dnormed
-    dw = (dnormed * x * rrms).sum(dim=(0, 1, 2))  # [D]
-    # dx: standard RMSNorm gradient
+    normed = x * rrms
+    # dw: match original RMSNorm's intermediate cast for weight gradient
+    if input_dtype is not None:
+        normed_for_dw = normed.to(input_dtype).float()
+    else:
+        normed_for_dw = normed
+    dw = (dnormed * normed_for_dw).sum(dim=(0, 1, 2))  # [D]
+    # dx: standard RMSNorm gradient (STE through casts doesn't change dx)
     dot = (dnormed * weight * x).sum(-1, keepdim=True)  # [B, L, H, 1]
     dx = rrms * (dnormed * weight - (rrms**2 / D) * x * dot)
     return dx, dw
@@ -138,6 +157,7 @@ if HAS_TRITON:
         H, L, D, D2,        # D2 = D // 2
         eps,
         BLOCK_D2: tl.constexpr,   # power of 2, >= D2
+        INPUT_DTYPE: tl.constexpr,  # input dtype for intermediate casts
     ):
         pid = tl.program_id(0)
         h = pid % H
@@ -162,8 +182,12 @@ if HAS_TRITON:
         w1 = tl.load(w_ptr + cols * 2,     mask=mask, other=1.0).to(tl.float32)
         w2 = tl.load(w_ptr + cols * 2 + 1, mask=mask, other=1.0).to(tl.float32)
 
-        n1 = x1 * rrms * w1
-        n2 = x2 * rrms * w2
+        # Match original RMSNorm: (x * rrms).to(x_dtype) * weight
+        n1 = (x1 * rrms).to(INPUT_DTYPE).to(tl.float32) * w1
+        n2 = (x2 * rrms).to(INPUT_DTYPE).to(tl.float32) * w2
+        # Match QKNorm .to(v) cast
+        n1 = n1.to(INPUT_DTYPE).to(tl.float32)
+        n2 = n2.to(INPUT_DTYPE).to(tl.float32)
 
         # RoPE
         c = tl.load(cos_ptr + cos_base + cols, mask=mask, other=1.0).to(tl.float32)
@@ -184,6 +208,7 @@ if HAS_TRITON:
         H, L, D, D2,        # D2 = D // 2
         eps,
         BLOCK_D2: tl.constexpr,   # power of 2, >= D2
+        INPUT_DTYPE: tl.constexpr,  # input dtype for intermediate casts
     ):
         """One program per (b, l, h) row. Processes Q and K, copies V.
 
@@ -197,9 +222,9 @@ if HAS_TRITON:
 
         # Base offsets into [B, L, 3, H, D]
         row_base  = b * (L * 3 * H * D) + l * (3 * H * D) + h * D
-        q_base    = row_base + 0 * H * D   # K index 0
+        q_base    = row_base + 0 * H * D   # Q index 0
         k_base    = row_base + 1 * H * D   # K index 1
-        v_base    = row_base + 2 * H * D   # K index 2
+        v_base    = row_base + 2 * H * D   # V index 2
         cos_base  = b * (L * D2) + l * D2
 
         cols = tl.arange(0, BLOCK_D2)
@@ -216,8 +241,11 @@ if HAS_TRITON:
         rrms_q = tl.rsqrt(ss_q / D + eps)
         wq1 = tl.load(wq_ptr + cols * 2,     mask=mask, other=1.0).to(tl.float32)
         wq2 = tl.load(wq_ptr + cols * 2 + 1, mask=mask, other=1.0).to(tl.float32)
-        nq1 = q1 * rrms_q * wq1
-        nq2 = q2 * rrms_q * wq2
+        # Match original RMSNorm: (x * rrms).to(x_dtype) * weight, then .to(v) cast
+        nq1 = (q1 * rrms_q).to(INPUT_DTYPE).to(tl.float32) * wq1
+        nq2 = (q2 * rrms_q).to(INPUT_DTYPE).to(tl.float32) * wq2
+        nq1 = nq1.to(INPUT_DTYPE).to(tl.float32)
+        nq2 = nq2.to(INPUT_DTYPE).to(tl.float32)
         oq1 = c * nq1 - s * nq2
         oq2 = s * nq1 + c * nq2
         tl.store(out_ptr + q_base + cols * 2,     oq1, mask=mask)
@@ -230,8 +258,11 @@ if HAS_TRITON:
         rrms_k = tl.rsqrt(ss_k / D + eps)
         wk1 = tl.load(wk_ptr + cols * 2,     mask=mask, other=1.0).to(tl.float32)
         wk2 = tl.load(wk_ptr + cols * 2 + 1, mask=mask, other=1.0).to(tl.float32)
-        nk1 = k1 * rrms_k * wk1
-        nk2 = k2 * rrms_k * wk2
+        # Match original RMSNorm: (x * rrms).to(x_dtype) * weight, then .to(v) cast
+        nk1 = (k1 * rrms_k).to(INPUT_DTYPE).to(tl.float32) * wk1
+        nk2 = (k2 * rrms_k).to(INPUT_DTYPE).to(tl.float32) * wk2
+        nk1 = nk1.to(INPUT_DTYPE).to(tl.float32)
+        nk2 = nk2.to(INPUT_DTYPE).to(tl.float32)
         ok1 = c * nk1 - s * nk2
         ok2 = s * nk1 + c * nk2
         tl.store(out_ptr + k_base + cols * 2,     ok1, mask=mask)
@@ -248,7 +279,19 @@ if HAS_TRITON:
 # autograd.Function wrappers (Triton forward, PyTorch backward)
 # ---------------------------------------------------------------------------
 
+_TORCH_TO_TRITON_DTYPE = {
+    torch.float32: "fp32",
+    torch.float16: "fp16",
+    torch.bfloat16: "bf16",
+}
+
 if HAS_TRITON:
+    _TRITON_DTYPE_MAP = {
+        "fp32": tl.float32,
+        "fp16": tl.float16,
+        "bf16": tl.bfloat16,
+    }
+
     class _FusedNormRopeFunction(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x, weight, cos, sin, eps):
@@ -260,10 +303,12 @@ if HAS_TRITON:
             D2 = D // 2
             BLOCK_D2 = triton.next_power_of_2(D2)
             out_f32 = torch.empty(B, L, H, D, dtype=torch.float32, device=x.device)
+            triton_dtype = _TRITON_DTYPE_MAP[_TORCH_TO_TRITON_DTYPE[x.dtype]]
             fused_norm_rope_kernel[(B * L * H,)](
                 x, out_f32, weight.float(), cos, sin,
                 H, L, D, D2, eps,
                 BLOCK_D2=BLOCK_D2,
+                INPUT_DTYPE=triton_dtype,
             )
             return out_f32.to(x.dtype)
 
@@ -271,17 +316,19 @@ if HAS_TRITON:
         def backward(ctx, grad_output):
             x, weight, cos, sin = ctx.saved_tensors
             eps = ctx.eps
+            input_dtype = x.dtype
 
-            x_f = x.float()
             dout_f = grad_output.float()
 
             # RoPE backward (transpose rotation)
             dnormed = _rope_backward(dout_f, cos, sin)
+            # Match QKNorm .to(v) backward: gradient quantized through bf16 cast
+            dnormed = dnormed.to(input_dtype).float()
 
-            # RMSNorm backward
-            dx_f, dw_f = _rmsnorm_backward(x_f, weight.float(), dnormed, eps)
+            # RMSNorm backward (pass input_dtype for matching intermediate casts)
+            dx_f, dw_f = _rmsnorm_backward(x.float(), weight.float(), dnormed, eps, input_dtype=input_dtype)
 
-            grad_x = dx_f.to(x.dtype) if ctx.needs_input_grad[0] else None
+            grad_x = dx_f.to(input_dtype) if ctx.needs_input_grad[0] else None
             grad_w = dw_f.to(weight.dtype) if ctx.needs_input_grad[1] else None
             return grad_x, grad_w, None, None, None  # cos, sin, eps: no grad
 
@@ -296,10 +343,12 @@ if HAS_TRITON:
             D2 = D // 2
             BLOCK_D2 = triton.next_power_of_2(D2)
             out_f32 = torch.empty(B, L, 3, H, D, dtype=torch.float32, device=qkv.device)
+            triton_dtype = _TRITON_DTYPE_MAP[_TORCH_TO_TRITON_DTYPE[qkv.dtype]]
             fused_qkv_norm_rope_kernel[(B * L * H,)](
                 qkv, out_f32, q_weight.float(), k_weight.float(), cos, sin,
                 H, L, D, D2, eps,
                 BLOCK_D2=BLOCK_D2,
+                INPUT_DTYPE=triton_dtype,
             )
             return out_f32.to(qkv.dtype)
 
@@ -307,6 +356,7 @@ if HAS_TRITON:
         def backward(ctx, grad_output):
             qkv, q_weight, k_weight, cos, sin = ctx.saved_tensors
             eps = ctx.eps
+            input_dtype = qkv.dtype
 
             need_grad_qkv = ctx.needs_input_grad[0]
             need_grad_wq  = ctx.needs_input_grad[1]
@@ -323,7 +373,9 @@ if HAS_TRITON:
                 q_f    = qkv[:, :, 0].float()          # [B, L, H, D] fp32
                 dout_q = grad_output[:, :, 0].float()
                 dnormed_q = _rope_backward(dout_q, cos, sin)
-                dq_f, dw_q_f = _rmsnorm_backward(q_f, q_weight.float(), dnormed_q, eps)
+                # Match QKNorm .to(v) backward: gradient quantized through input dtype cast
+                dnormed_q = dnormed_q.to(input_dtype).float()
+                dq_f, dw_q_f = _rmsnorm_backward(q_f, q_weight.float(), dnormed_q, eps, input_dtype=input_dtype)
                 if need_grad_wq:
                     grad_wq = dw_q_f.to(q_weight.dtype)
 
@@ -331,7 +383,9 @@ if HAS_TRITON:
                 k_f    = qkv[:, :, 1].float()
                 dout_k = grad_output[:, :, 1].float()
                 dnormed_k = _rope_backward(dout_k, cos, sin)
-                dk_f, dw_k_f = _rmsnorm_backward(k_f, k_weight.float(), dnormed_k, eps)
+                # Match QKNorm .to(v) backward: gradient quantized through input dtype cast
+                dnormed_k = dnormed_k.to(input_dtype).float()
+                dk_f, dw_k_f = _rmsnorm_backward(k_f, k_weight.float(), dnormed_k, eps, input_dtype=input_dtype)
                 if need_grad_wk:
                     grad_wk = dw_k_f.to(k_weight.dtype)
 
