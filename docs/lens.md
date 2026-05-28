@@ -105,6 +105,8 @@ accelerate launch lens_train_network.py \
 
 `networks.lora_lens` only trains Lens transformer attention and MLP linear layers. It does not train the GPT-OSS text encoder.
 
+`--blocks_to_swap N` is supported for low-VRAM LoRA training and uses Musubi's existing `ModelOffloader` on Lens transformer blocks.
+
 ## Dataset Limits
 
 Lens MVP accepts image datasets only. Control images and video datasets are rejected during dataset preparation.

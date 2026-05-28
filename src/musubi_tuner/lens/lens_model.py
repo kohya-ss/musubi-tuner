@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.qwen_image.qwen_image_model import AdaLayerNormContinuous, FeedForward, RMSNorm, TimestepEmbedding, Timesteps
 
 
@@ -331,6 +332,9 @@ class LensTransformer2DModel(nn.Module):
         self.multi_layer_encoder_feature = multi_layer_encoder_feature
         self.selected_layer_index = list(selected_layer_index)
         self.gradient_checkpointing = False
+        self.blocks_to_swap = None
+        self.offloader = None
+        self.num_blocks = num_layers
 
         self.pos_embed = LensEmbedRope(theta=10000, axes_dim=list(axes_dims_rope), scale_rope=True)
         self.time_text_embed = LensTimestepProjEmbeddings(embedding_dim=self.inner_dim)
@@ -363,11 +367,63 @@ class LensTransformer2DModel(nn.Module):
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, cpu_offload: bool = False):
+        if cpu_offload:
+            raise ValueError("Lens does not support activation CPU offloading yet.")
         self.gradient_checkpointing = True
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+
+    def enable_block_swap(
+        self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False
+    ):
+        self.blocks_to_swap = blocks_to_swap
+        self.num_blocks = len(self.transformer_blocks)
+
+        assert self.blocks_to_swap <= self.num_blocks - 1, (
+            f"Cannot swap more than {self.num_blocks - 1} Lens blocks. Requested {self.blocks_to_swap} blocks."
+        )
+
+        self.offloader = ModelOffloader(
+            "lens-block",
+            self.transformer_blocks,
+            self.num_blocks,
+            self.blocks_to_swap,
+            supports_backward,
+            device,
+            use_pinned_memory,
+        )
+        print(
+            f"LensTransformer2DModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks}. Supports backward: {supports_backward}"
+        )
+
+    def switch_block_swap_for_inference(self):
+        if self.blocks_to_swap:
+            self.offloader.set_forward_only(True)
+            self.prepare_block_swap_before_forward()
+            print("LensTransformer2DModel: Block swap set to forward only.")
+
+    def switch_block_swap_for_training(self):
+        if self.blocks_to_swap:
+            self.offloader.set_forward_only(False)
+            self.prepare_block_swap_before_forward()
+            print("LensTransformer2DModel: Block swap set to forward and backward.")
+
+    def move_to_device_except_swap_blocks(self, device: torch.device):
+        if self.blocks_to_swap:
+            save_blocks = self.transformer_blocks
+            self.transformer_blocks = nn.ModuleList()
+
+        self.to(device)
+
+        if self.blocks_to_swap:
+            self.transformer_blocks = save_blocks
+
+    def prepare_block_swap_before_forward(self):
+        if self.blocks_to_swap is None or self.blocks_to_swap == 0:
+            return
+        self.offloader.prepare_block_devices_before_forward(self.transformer_blocks)
 
     def forward(
         self,
@@ -416,7 +472,11 @@ class LensTransformer2DModel(nn.Module):
         temb = self.time_text_embed(timestep, hidden_states)
         image_rotary_emb = self.pos_embed(img_shapes, [text_seq_len], device=hidden_states.device)
 
-        for block in self.transformer_blocks:
+        input_device = hidden_states.device
+        for index_block, block in enumerate(self.transformer_blocks):
+            if self.blocks_to_swap:
+                self.offloader.wait_for_block(index_block)
+
             if self.training and self.gradient_checkpointing:
                 encoder_hidden_states, hidden_states = checkpoint(
                     block,
@@ -435,6 +495,12 @@ class LensTransformer2DModel(nn.Module):
                     image_rotary_emb=image_rotary_emb,
                     attention_mask=attention_mask,
                 )
+
+            if self.blocks_to_swap:
+                self.offloader.submit_move_blocks_forward(self.transformer_blocks, index_block)
+
+        if input_device != hidden_states.device:
+            hidden_states = hidden_states.to(input_device)
 
         hidden_states = self.norm_out(hidden_states, temb)
         return self.proj_out(hidden_states)

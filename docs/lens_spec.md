@@ -14,6 +14,8 @@ The Lens support direction is accepted with two mandatory corrections:
 
 The MVP supports only `lens_bf16` text-to-image inference, latent caching, GPT-OSS text-cache generation, and LoRA training. The first patch explicitly excludes `lens_turbo_bf16`, mxfp8/fp8 training, the reasoner API, GUI integration, image edit/control workflows, video data, and full-model finetuning.
 
+Lens LoRA training supports Musubi block swap on local `LensTransformerBlock` modules through `ModelOffloader`.
+
 ### Source contract
 
 Reference implementation: <https://github.com/microsoft/Lens>.
@@ -127,6 +129,14 @@ Keys:
 - `txt_mlp.w1/w2/w3`
 
 It excludes normalization, RoPE/position embedding, timestep embedding, modulation layers, and final projection by default. GPT-OSS text encoder LoRA is out of scope.
+
+`LensTransformer2DModel` is a local `torch.nn.Module` implementation, not a runtime import from `microsoft/Lens`. It implements the Musubi block-swap lifecycle methods expected by the shared trainer:
+
+- `enable_block_swap`
+- `move_to_device_except_swap_blocks`
+- `prepare_block_swap_before_forward`
+- `switch_block_swap_for_inference`
+- `switch_block_swap_for_training`
 
 ### CLI contract
 

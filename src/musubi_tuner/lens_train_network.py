@@ -35,8 +35,6 @@ class LensNetworkTrainer(NetworkTrainer):
     def handle_model_specific_args(self, args):
         if args.fp8_base or args.fp8_scaled:
             raise ValueError("Lens MVP supports bf16/fp16 DiT training only; fp8/mxfp8 training is out of scope.")
-        if args.blocks_to_swap and args.blocks_to_swap > 0:
-            raise ValueError("Lens MVP does not support blocks_to_swap yet.")
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
@@ -199,7 +197,9 @@ class LensNetworkTrainer(NetworkTrainer):
 
     def compile_transformer(self, args, transformer):
         transformer: LensTransformer2DModel = transformer
-        return model_utils.compile_transformer(args, transformer, [transformer.transformer_blocks], disable_linear=False)
+        return model_utils.compile_transformer(
+            args, transformer, [transformer.transformer_blocks], disable_linear=self.blocks_to_swap > 0
+        )
 
     def scale_shift_latents(self, latents):
         return latents
