@@ -89,7 +89,7 @@ ARCH_QWEN_IMAGE_LAYERED = "Qwen-Image-Layered"
 ARCH_KANDINSKY5 = "Kandinsky-5"
 ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
 ARCH_Z_IMAGE = "Z-Image"
-ARCH_LENS = "Lens"
+ARCH_LENS = "lens"
 
 ADAPTER_LORA = "lora"
 

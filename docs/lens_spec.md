@@ -41,7 +41,7 @@ Lens is a separate Musubi architecture, not a FLUX.2 variant:
 
 - short cache name: `lens`
 - full metadata name: `lens`
-- SAI model-spec architecture: `Lens`
+- SAI model-spec architecture: `lens`
 - SAI implementation URL: `https://github.com/microsoft/Lens`
 - dataset resolution step: `16`
 - image datasets only
@@ -159,7 +159,7 @@ Minimum local checks:
 3. A mocked batch with two prompt lengths roundtrips through latent cache and four-layer text cache loading.
 4. Existing `flux_2_generate_image.py --help`, `qwen_image_train_network.py --help`, and `zimage_train_network.py --help` still pass in an environment with the same optional training dependencies.
 5. With real weights, one prompt generates a non-empty PNG.
-6. With real weights and a tiny dataset, one LoRA optimizer step completes without NaN and produces safetensors metadata for `Lens/LoRA`.
+6. With real weights and a tiny dataset, one LoRA optimizer step completes without NaN and produces safetensors metadata for `lens/lora`.
 
 ## 深度交互
 

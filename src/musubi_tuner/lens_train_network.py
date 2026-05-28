@@ -72,9 +72,12 @@ class LensNetworkTrainer(NetworkTrainer):
         for prompt_dict in prompt_dicts:
             if "negative_prompt" not in prompt_dict:
                 prompt_dict["negative_prompt"] = ""
-            for prompt in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]:
-                if prompt is not None:
-                    all_prompts.append(prompt)
+            prompt = prompt_dict.get("prompt", "")
+            if prompt is not None:
+                all_prompts.append(prompt)
+            negative_prompt = prompt_dict.get("negative_prompt", "")
+            if negative_prompt is not None and negative_prompt.strip():
+                all_prompts.append(negative_prompt)
 
         encoded = self._encode_prompts(args, device, all_prompts)
         sample_parameters = []
@@ -86,7 +89,11 @@ class LensNetworkTrainer(NetworkTrainer):
             prompt_dict_copy["lens_ctx_mask"] = mask
 
             negative_prompt = prompt_dict.get("negative_prompt", "")
-            negative_features, negative_mask = encoded[negative_prompt]
+            if negative_prompt.strip():
+                negative_features, negative_mask = encoded[negative_prompt]
+            else:
+                negative_features = [feat.new_zeros(feat.shape) for feat in features]
+                negative_mask = torch.zeros_like(mask, dtype=torch.bool)
             prompt_dict_copy["negative_lens_ctx"] = negative_features
             prompt_dict_copy["negative_lens_ctx_mask"] = negative_mask
             sample_parameters.append(prompt_dict_copy)

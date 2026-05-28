@@ -52,9 +52,13 @@ def _encode_prompt(text_embedder, prompt: str, negative_prompt: str, device: tor
     prompt_features = [feat.to(device=device, dtype=dtype) for feat in prompt_features]
     prompt_mask = prompt_mask.to(device=device, dtype=torch.bool)
 
-    negative_features, negative_mask = text_embedder([negative_prompt])
-    negative_features = [feat.to(device=device, dtype=dtype) for feat in negative_features]
-    negative_mask = negative_mask.to(device=device, dtype=torch.bool)
+    if negative_prompt.strip():
+        negative_features, negative_mask = text_embedder([negative_prompt])
+        negative_features = [feat.to(device=device, dtype=dtype) for feat in negative_features]
+        negative_mask = negative_mask.to(device=device, dtype=torch.bool)
+    else:
+        negative_features = [feat.new_zeros(feat.shape) for feat in prompt_features]
+        negative_mask = torch.zeros_like(prompt_mask, dtype=torch.bool)
 
     return lens_utils.align_text_feature_lists(prompt_features, prompt_mask, negative_features, negative_mask)
 
