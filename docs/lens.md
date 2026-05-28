@@ -37,7 +37,7 @@ The helper downloads weights from `Comfy-Org/Lens` and GPT-OSS metadata/tokenize
   tokenizer/tokenizer_config.json
 ```
 
-Training and inference scripts never download implicitly. Pass local paths explicitly.
+Training and inference scripts never download model weights implicitly. GPT-OSS config and tokenizer metadata are resolved automatically from sibling local files when present, otherwise from `microsoft/Lens`; the Lens loader handles the official `TokenizersBackend` tokenizer metadata without a user-provided tokenizer path.
 
 ## Cache Latents
 
@@ -56,8 +56,6 @@ Lens uses the FLUX.2 VAE loader and saves latent tensors with keys like `latents
 python lens_cache_text_encoder_outputs.py \
   --dataset_config /path/to/dataset.toml \
   --text_encoder /path/to/models/lens/text_encoders/gpt_oss_20b_nvfp4.safetensors \
-  --text_encoder_config /path/to/models/lens/text_encoder \
-  --tokenizer /path/to/models/lens/tokenizer \
   --text_encoder_dtype bfloat16
 ```
 
@@ -75,8 +73,6 @@ python lens_generate_image.py \
   --dit /path/to/models/lens/diffusion_models/lens_bf16.safetensors \
   --vae /path/to/models/lens/vae/flux2-vae.safetensors \
   --text_encoder /path/to/models/lens/text_encoders/gpt_oss_20b_nvfp4.safetensors \
-  --text_encoder_config /path/to/models/lens/text_encoder \
-  --tokenizer /path/to/models/lens/tokenizer \
   --prompt "a compact ceramic tea set on a walnut table" \
   --save_path output/lens.png \
   --infer_steps 20 \

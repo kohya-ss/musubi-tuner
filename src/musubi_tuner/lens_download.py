@@ -26,9 +26,8 @@ def main():
         print("\nReady-to-use paths:")
         print(f"  --dit {args.output_dir}/diffusion_models/lens_bf16.safetensors")
         print(f"  --text_encoder {args.output_dir}/text_encoders/gpt_oss_20b_nvfp4.safetensors")
-        print(f"  --text_encoder_config {args.output_dir}/text_encoder")
-        print(f"  --tokenizer {args.output_dir}/tokenizer")
         print(f"  --vae {args.output_dir}/vae/flux2-vae.safetensors")
+        print("  tokenizer/config are resolved automatically from local files or microsoft/Lens")
 
 
 if __name__ == "__main__":

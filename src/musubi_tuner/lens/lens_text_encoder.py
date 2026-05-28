@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
 import torch
 from accelerate import init_empty_weights
-from transformers import AutoTokenizer
+from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
@@ -120,8 +122,6 @@ def _strip_prefixes(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
 def infer_lens_text_paths(
     text_encoder: Union[str, Path],
-    text_encoder_config: Optional[Union[str, Path]] = None,
-    tokenizer: Optional[Union[str, Path]] = None,
 ) -> tuple[Path, Path, Path]:
     text_encoder = Path(text_encoder)
     if text_encoder.is_file():
@@ -135,23 +135,14 @@ def infer_lens_text_paths(
         weights_path = next((p for p in candidates if p.exists()), candidates[0])
         root = text_encoder
 
-    config_path = Path(text_encoder_config) if text_encoder_config is not None else root / "text_encoder"
-    tokenizer_path = Path(tokenizer) if tokenizer is not None else root / "tokenizer"
-    return weights_path, config_path, tokenizer_path
+    return weights_path, root / "text_encoder", root / "tokenizer"
 
 
 def _resolve_local_or_hf_source(
-    explicit_path: Optional[Union[str, Path]],
     default_local_path: Path,
     hf_subfolder: str,
     description: str,
 ) -> tuple[Union[str, Path], Optional[str]]:
-    if explicit_path is not None:
-        path = Path(explicit_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Lens {description} directory not found: {path}")
-        return path, None
-
     if default_local_path.exists():
         return default_local_path, None
 
@@ -160,6 +151,44 @@ def _resolve_local_or_hf_source(
         f"falling back to {DEFAULT_LENS_TEXT_REPO}/{hf_subfolder}"
     )
     return DEFAULT_LENS_TEXT_REPO, hf_subfolder
+
+
+def _resolve_tokenizer_file(source: Union[str, Path], subfolder: Optional[str], filename: str) -> Path:
+    if subfolder is None:
+        path = Path(source) / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Lens tokenizer file not found: {path}")
+        return path
+    return Path(hf_hub_download(str(source), filename=filename, subfolder=subfolder))
+
+
+def _load_lens_tokenizer(source: Union[str, Path], subfolder: Optional[str]):
+    tokenizer_kwargs = {"subfolder": subfolder} if subfolder is not None else {}
+    try:
+        tokenizer_obj = AutoTokenizer.from_pretrained(source, **tokenizer_kwargs)
+    except ValueError as e:
+        if "TokenizersBackend" not in str(e):
+            raise
+        logger.info("Falling back to PreTrainedTokenizerFast for Lens TokenizersBackend metadata")
+        config_path = _resolve_tokenizer_file(source, subfolder, "tokenizer_config.json")
+        tokenizer_path = _resolve_tokenizer_file(source, subfolder, "tokenizer.json")
+        chat_template_path = _resolve_tokenizer_file(source, subfolder, "chat_template.jinja")
+        with config_path.open("r", encoding="utf-8") as f:
+            tokenizer_config = json.load(f)
+        chat_template = chat_template_path.read_text(encoding="utf-8")
+        tokenizer_obj = PreTrainedTokenizerFast(
+            tokenizer_file=str(tokenizer_path),
+            bos_token=tokenizer_config.get("bos_token"),
+            eos_token=tokenizer_config.get("eos_token"),
+            pad_token=tokenizer_config.get("pad_token"),
+            model_max_length=tokenizer_config.get("model_max_length", int(1e30)),
+            clean_up_tokenization_spaces=tokenizer_config.get("clean_up_tokenization_spaces", False),
+            chat_template=chat_template,
+        )
+    if tokenizer_obj.pad_token_id is None:
+        tokenizer_obj.pad_token = tokenizer_obj.eos_token
+    tokenizer_obj.padding_side = "right"
+    return tokenizer_obj
 
 
 class LensTextEmbedder(torch.nn.Module):
@@ -227,22 +256,18 @@ def load_lens_text_embedder(
     text_encoder: Union[str, Path],
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
-    text_encoder_config: Optional[Union[str, Path]] = None,
-    tokenizer: Optional[Union[str, Path]] = None,
     disable_mmap: bool = False,
 ) -> LensTextEmbedder:
-    weights_path, config_path, tokenizer_path = infer_lens_text_paths(text_encoder, text_encoder_config, tokenizer)
+    weights_path, config_path, tokenizer_path = infer_lens_text_paths(text_encoder)
     if not weights_path.exists():
         raise FileNotFoundError(f"Lens text encoder weights not found: {weights_path}")
 
     config_source, config_subfolder = _resolve_local_or_hf_source(
-        text_encoder_config,
         config_path,
         DEFAULT_LENS_CONFIG_SUBFOLDER,
         "text encoder config",
     )
     tokenizer_source, tokenizer_subfolder = _resolve_local_or_hf_source(
-        tokenizer,
         tokenizer_path,
         DEFAULT_LENS_TOKENIZER_SUBFOLDER,
         "tokenizer",
@@ -265,9 +290,5 @@ def load_lens_text_embedder(
         model.to(dtype)
     model.eval()
 
-    tokenizer_kwargs = {"subfolder": tokenizer_subfolder} if tokenizer_subfolder is not None else {}
-    tokenizer_obj = AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
-    if tokenizer_obj.pad_token_id is None:
-        tokenizer_obj.pad_token = tokenizer_obj.eos_token
-    tokenizer_obj.padding_side = "right"
+    tokenizer_obj = _load_lens_tokenizer(tokenizer_source, tokenizer_subfolder)
     return LensTextEmbedder(model, tokenizer_obj)

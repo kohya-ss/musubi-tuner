@@ -33,7 +33,7 @@ MVP download list:
 - `microsoft/Lens/tokenizer/tokenizer.json`
 - `microsoft/Lens/tokenizer/tokenizer_config.json`
 
-Training and inference scripts must not implicitly download weights. All runtime entry points require local paths.
+Training and inference scripts must not implicitly download model weights. Lens GPT-OSS config and tokenizer metadata are resolved automatically from sibling local files when present, otherwise from `microsoft/Lens`. These metadata paths are not user-facing CLI parameters.
 
 ### Architecture contract
 
@@ -158,12 +158,13 @@ Minimum local checks:
 
 1. `lens_download.py --dry_run` prints the exact file list above.
 2. All Lens CLI `--help` commands exit successfully.
-3. A mocked batch with two prompt lengths roundtrips through latent cache and four-layer text cache loading.
-4. Existing `flux_2_generate_image.py --help`, `qwen_image_train_network.py --help`, and `zimage_train_network.py --help` still pass in an environment with the same optional training dependencies.
-5. A 1-block in-memory Lens model can be optimized with the Lens scaled-fp8 target/exclude list, strict-loaded, and run through a minimal forward without NaN.
-6. `lens_train_network.py --fp8_base` fails with the expected Lens-only scaled-fp8 error; `--fp8_base --fp8_scaled` reaches normal argument validation.
-7. With real weights, one prompt generates a non-empty PNG.
-8. With real weights and a tiny dataset, one LoRA optimizer step completes without NaN and produces safetensors metadata for `lens/lora`.
+3. `GptOssConfig.from_pretrained("microsoft/Lens", subfolder="text_encoder")` works and the Lens tokenizer loader auto-loads `microsoft/Lens/tokenizer` without user-provided paths, including the `TokenizersBackend` fallback for pinned transformers versions.
+4. A mocked batch with two prompt lengths roundtrips through latent cache and four-layer text cache loading.
+5. Existing `flux_2_generate_image.py --help`, `qwen_image_train_network.py --help`, and `zimage_train_network.py --help` still pass in an environment with the same optional training dependencies.
+6. A 1-block in-memory Lens model can be optimized with the Lens scaled-fp8 target/exclude list, strict-loaded, and run through a minimal forward without NaN.
+7. `lens_train_network.py --fp8_base` fails with the expected Lens-only scaled-fp8 error; `--fp8_base --fp8_scaled` reaches normal argument validation.
+8. With real weights, one prompt generates a non-empty PNG.
+9. With real weights and a tiny dataset, one LoRA optimizer step completes without NaN and produces safetensors metadata for `lens/lora`.
 
 ## 深度交互
 
@@ -173,7 +174,7 @@ Lens reuses a FLUX.2 VAE latent format, but the denoiser is a Lens-specific join
 
 ### Challenge 2: Comfy weights are not enough
 
-Comfy's repository is convenient for safetensors, but it does not replace the official GPT-OSS tokenizer/config contract. If text encoding is reconstructed from only safetensors, prompt embeddings are not reproducible. The implementation therefore downloads Comfy weights plus official metadata.
+Comfy's repository is convenient for safetensors, but it does not replace the official GPT-OSS tokenizer/config contract. If text encoding is reconstructed from only safetensors, prompt embeddings are not reproducible. The implementation therefore downloads Comfy weights through the model helper and resolves official metadata automatically when text encoding is needed.
 
 ### Challenge 3: narrow the first training target
 

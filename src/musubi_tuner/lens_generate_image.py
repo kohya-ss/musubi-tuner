@@ -20,8 +20,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dit", type=str, required=True, help="Lens DiT safetensors path")
     parser.add_argument("--vae", type=str, required=True, help="Lens/FLUX.2 VAE safetensors path")
     parser.add_argument("--text_encoder", type=str, required=True, help="Lens GPT-OSS text encoder safetensors path")
-    parser.add_argument("--text_encoder_config", type=str, default=None, help="directory containing GPT-OSS config.json")
-    parser.add_argument("--tokenizer", type=str, default=None, help="directory containing Lens tokenizer files")
     parser.add_argument("--prompt", type=str, required=True, help="prompt for generation")
     parser.add_argument("--negative_prompt", type=str, default="", help="negative prompt")
     parser.add_argument("--image_size", type=int, nargs=2, default=None, help="image size as height width")
@@ -81,8 +79,6 @@ def generate(args: argparse.Namespace) -> list[Image.Image]:
         args.text_encoder,
         dtype=te_dtype,
         device=device,
-        text_encoder_config=args.text_encoder_config,
-        tokenizer=args.tokenizer,
         disable_mmap=args.disable_numpy_memmap,
     )
     transformer = lens_utils.load_lens_transformer(args.dit, dtype=dit_dtype, device=device, disable_mmap=args.disable_numpy_memmap)

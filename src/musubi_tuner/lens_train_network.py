@@ -48,8 +48,6 @@ class LensNetworkTrainer(NetworkTrainer):
             args.text_encoder,
             dtype=te_dtype,
             device=device,
-            text_encoder_config=args.text_encoder_config,
-            tokenizer=args.tokenizer,
             disable_mmap=args.disable_numpy_memmap,
         )
         outputs = {}
@@ -268,8 +266,6 @@ def lens_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.set_defaults(network_module="networks.lora_lens")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for Lens DiT base")
     parser.add_argument("--text_encoder", type=str, default=None, help="Lens GPT-OSS text encoder safetensors path")
-    parser.add_argument("--text_encoder_config", type=str, default=None, help="directory containing GPT-OSS config.json")
-    parser.add_argument("--tokenizer", type=str, default=None, help="directory containing Lens tokenizer files")
     parser.add_argument("--text_encoder_dtype", type=str, default=None, help="text encoder dtype, default bfloat16")
     return parser
 
