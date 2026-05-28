@@ -23,6 +23,9 @@ CHAT_ASSISTANT_THINKING = "Need to generate one image according to the descripti
 DEFAULT_TXT_OFFSET = 97
 DEFAULT_SELECTED_LAYERS = (5, 11, 17, 23)
 DEFAULT_MAX_SEQUENCE_LENGTH = 512
+DEFAULT_LENS_TEXT_REPO = "microsoft/Lens"
+DEFAULT_LENS_CONFIG_SUBFOLDER = "text_encoder"
+DEFAULT_LENS_TOKENIZER_SUBFOLDER = "tokenizer"
 
 
 class LensGptOssEncoder(GptOssForCausalLM):
@@ -137,6 +140,28 @@ def infer_lens_text_paths(
     return weights_path, config_path, tokenizer_path
 
 
+def _resolve_local_or_hf_source(
+    explicit_path: Optional[Union[str, Path]],
+    default_local_path: Path,
+    hf_subfolder: str,
+    description: str,
+) -> tuple[Union[str, Path], Optional[str]]:
+    if explicit_path is not None:
+        path = Path(explicit_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Lens {description} directory not found: {path}")
+        return path, None
+
+    if default_local_path.exists():
+        return default_local_path, None
+
+    logger.info(
+        f"Lens {description} not found at {default_local_path}; "
+        f"falling back to {DEFAULT_LENS_TEXT_REPO}/{hf_subfolder}"
+    )
+    return DEFAULT_LENS_TEXT_REPO, hf_subfolder
+
+
 class LensTextEmbedder(torch.nn.Module):
     def __init__(
         self,
@@ -209,13 +234,23 @@ def load_lens_text_embedder(
     weights_path, config_path, tokenizer_path = infer_lens_text_paths(text_encoder, text_encoder_config, tokenizer)
     if not weights_path.exists():
         raise FileNotFoundError(f"Lens text encoder weights not found: {weights_path}")
-    if not config_path.exists():
-        raise FileNotFoundError(f"Lens text encoder config directory not found: {config_path}")
-    if not tokenizer_path.exists():
-        raise FileNotFoundError(f"Lens tokenizer directory not found: {tokenizer_path}")
 
-    logger.info(f"Loading Lens GPT-OSS config from {config_path}")
-    config = GptOssConfig.from_pretrained(config_path)
+    config_source, config_subfolder = _resolve_local_or_hf_source(
+        text_encoder_config,
+        config_path,
+        DEFAULT_LENS_CONFIG_SUBFOLDER,
+        "text encoder config",
+    )
+    tokenizer_source, tokenizer_subfolder = _resolve_local_or_hf_source(
+        tokenizer,
+        tokenizer_path,
+        DEFAULT_LENS_TOKENIZER_SUBFOLDER,
+        "tokenizer",
+    )
+
+    config_kwargs = {"subfolder": config_subfolder} if config_subfolder is not None else {}
+    logger.info(f"Loading Lens GPT-OSS config from {config_source}")
+    config = GptOssConfig.from_pretrained(config_source, **config_kwargs)
     with init_empty_weights():
         model = LensGptOssEncoder(config)
     model.set_selected_layers(DEFAULT_SELECTED_LAYERS)
@@ -230,7 +265,8 @@ def load_lens_text_embedder(
         model.to(dtype)
     model.eval()
 
-    tokenizer_obj = AutoTokenizer.from_pretrained(tokenizer_path)
+    tokenizer_kwargs = {"subfolder": tokenizer_subfolder} if tokenizer_subfolder is not None else {}
+    tokenizer_obj = AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
     if tokenizer_obj.pad_token_id is None:
         tokenizer_obj.pad_token = tokenizer_obj.eos_token
     tokenizer_obj.padding_side = "right"
