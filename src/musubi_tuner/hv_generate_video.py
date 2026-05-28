@@ -9,7 +9,6 @@ from typing import Union
 
 import numpy as np
 import torch
-import torchvision
 import accelerate
 from diffusers.utils.torch_utils import randn_tensor
 from transformers.models.llama import LlamaModel
@@ -60,6 +59,8 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
         n_rows (int, optional): Defaults to 1.
         fps (int, optional): video save fps. Defaults to 8.
     """
+    import torchvision
+
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
     for x in videos:
@@ -113,6 +114,8 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
 def save_images_grid(
     videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1, create_subdir=True
 ) -> list[str]:
+    import torchvision
+
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
     for x in videos:

@@ -61,7 +61,6 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_HUNYUAN_VIDEO,
     ARCHITECTURE_HUNYUAN_VIDEO_FULL,
 )
-from musubi_tuner.hv_generate_video import resize_image_to_bucket, encode_to_latents
 from musubi_tuner.utils import model_utils
 
 # accelerate.set_seed is re-exported because qwen_image_train.py and
@@ -274,6 +273,8 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
         latents = torch.cat(latents, dim=2)
 
         if self.i2v_training:
+            from musubi_tuner.hv_generate_video import encode_to_latents, resize_image_to_bucket
+
             # Move VAE to the appropriate device for sampling
             vae.to(device)
             vae.eval()
