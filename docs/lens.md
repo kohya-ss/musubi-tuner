@@ -7,7 +7,7 @@ Lens support currently covers the `lens_bf16` text-to-image MVP:
 - standalone image generation
 - LoRA training against the Lens DiT
 
-The first implementation does not support Lens-Turbo, mxfp8/fp8 training, reasoner API calls, GUI setup, image edit/control data, video data, or full-model finetuning.
+Lens LoRA training can optionally use `--fp8_base --fp8_scaled` for a scaled-fp8 frozen DiT base. The first implementation does not support Lens-Turbo, bare fp8 base training, mxfp8 training, scaled-mm, reasoner API calls, GUI setup, image edit/control data, video data, or full-model finetuning.
 
 ## Model Download
 
@@ -106,6 +106,8 @@ accelerate launch lens_train_network.py \
 `networks.lora_lens` only trains Lens transformer attention and MLP linear layers. It does not train the GPT-OSS text encoder.
 
 `--blocks_to_swap N` is supported for low-VRAM LoRA training and uses Musubi's existing `ModelOffloader` on Lens transformer blocks.
+
+For lower VRAM, add both `--fp8_base --fp8_scaled`. Lens does not support `--fp8_base` by itself; scaled fp8 keeps the frozen DiT base quantized and dequantizes Linear weights through Musubi's existing fp8 path while LoRA weights train normally.
 
 ## Dataset Limits
 

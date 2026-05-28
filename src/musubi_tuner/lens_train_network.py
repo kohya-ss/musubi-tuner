@@ -33,8 +33,8 @@ class LensNetworkTrainer(NetworkTrainer):
         return ARCHITECTURE_LENS_FULL
 
     def handle_model_specific_args(self, args):
-        if args.fp8_base or args.fp8_scaled:
-            raise ValueError("Lens MVP supports bf16/fp16 DiT training only; fp8/mxfp8 training is out of scope.")
+        if args.fp8_base and not args.fp8_scaled:
+            raise ValueError("Lens only supports scaled fp8 base. Use --fp8_base --fp8_scaled together.")
         self.dit_dtype = torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
@@ -196,8 +196,10 @@ class LensNetworkTrainer(NetworkTrainer):
             raise ValueError("Lens MVP supports --sdpa only.")
         model = lens_utils.load_lens_transformer(
             dit_path,
-            dtype=dit_weight_dtype,
-            device=loading_device,
+            calc_device=accelerator.device,
+            loading_device=loading_device,
+            dit_weight_dtype=dit_weight_dtype,
+            fp8_scaled=args.fp8_scaled,
             disable_mmap=args.disable_numpy_memmap,
         )
         return model
@@ -264,7 +266,7 @@ class LensNetworkTrainer(NetworkTrainer):
 
 def lens_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.set_defaults(network_module="networks.lora_lens")
-    parser.add_argument("--fp8_scaled", action="store_true", help="not supported for Lens MVP")
+    parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for Lens DiT base")
     parser.add_argument("--text_encoder", type=str, default=None, help="Lens GPT-OSS text encoder safetensors path")
     parser.add_argument("--text_encoder_config", type=str, default=None, help="directory containing GPT-OSS config.json")
     parser.add_argument("--tokenizer", type=str, default=None, help="directory containing Lens tokenizer files")

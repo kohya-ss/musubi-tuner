@@ -35,6 +35,9 @@ DEFAULT_TRANSFORMER_CONFIG = dict(
     selected_layer_index=(5, 11, 17, 23),
 )
 
+FP8_OPTIMIZATION_TARGET_KEYS = ["transformer_blocks"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "pos_embed", "time_text_embed", "img_mod", "txt_mod", "norm_out", "proj_out"]
+
 
 def apply_rotary_emb_lens(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))

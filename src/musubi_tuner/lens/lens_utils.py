@@ -86,23 +86,71 @@ def normalize_lens_state_dict(sd: dict[str, Tensor]) -> dict[str, Tensor]:
 
 def load_lens_transformer(
     dit_path: Union[str, Path],
-    dtype: Optional[torch.dtype],
-    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[str, torch.device]] = None,
     disable_mmap: bool = False,
+    *,
+    calc_device: Optional[Union[str, torch.device]] = None,
+    loading_device: Optional[Union[str, torch.device]] = None,
+    dit_weight_dtype: Optional[torch.dtype] = None,
+    fp8_scaled: bool = False,
 ):
-    from musubi_tuner.lens.lens_model import DEFAULT_TRANSFORMER_CONFIG, LensTransformer2DModel
+    from musubi_tuner.lens.lens_model import (
+        DEFAULT_TRANSFORMER_CONFIG,
+        FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        FP8_OPTIMIZATION_TARGET_KEYS,
+        LensTransformer2DModel,
+    )
+
+    if dit_weight_dtype is None and not fp8_scaled:
+        dit_weight_dtype = dtype
+    if loading_device is None:
+        loading_device = device if device is not None else "cpu"
+    if calc_device is None:
+        calc_device = loading_device
+
+    calc_device = torch.device(calc_device)
+    loading_device = torch.device(loading_device)
 
     with init_empty_weights():
         model = LensTransformer2DModel(**DEFAULT_TRANSFORMER_CONFIG)
+        if dit_weight_dtype is not None:
+            model.to(dit_weight_dtype)
 
-    logger.info(f"Loading Lens DiT weights from {dit_path}")
-    sd = load_split_weights(str(dit_path), device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+    logger.info(f"Loading Lens DiT weights from {dit_path}, device={loading_device}, fp8_scaled={fp8_scaled}")
+    if fp8_scaled:
+        from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+        from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+
+        sd = load_safetensors_with_lora_and_fp8(
+            model_files=str(dit_path),
+            lora_weights_list=None,
+            lora_multipliers=None,
+            fp8_optimization=True,
+            calc_device=calc_device,
+            move_to_device=(loading_device == calc_device),
+            dit_weight_dtype=None,
+            target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+            exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+            disable_numpy_memmap=disable_mmap,
+        )
+    else:
+        sd = load_split_weights(str(dit_path), device=loading_device, disable_mmap=disable_mmap, dtype=dit_weight_dtype)
     sd = normalize_lens_state_dict(sd)
+
+    if fp8_scaled:
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+        if loading_device.type != "cpu":
+            logger.info(f"Moving Lens fp8-scaled weights to {loading_device}")
+            for key in sd.keys():
+                sd[key] = sd[key].to(loading_device)
+
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Lens DiT: {info}")
-    model.to(device)
-    if dtype is not None and dtype.itemsize > 1:
-        model.to(dtype)
+    if not fp8_scaled:
+        model.to(loading_device)
+        if dit_weight_dtype is not None and dit_weight_dtype.itemsize > 1:
+            model.to(dit_weight_dtype)
     return model
 
 

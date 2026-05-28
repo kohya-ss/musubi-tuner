@@ -12,7 +12,7 @@ The Lens support direction is accepted with two mandatory corrections:
 - `Comfy-Org/Lens` is used only as the packaged weight source.
 - GPT-OSS `config.json`, `generation_config.json`, and `tokenizer/*` are taken from the official `microsoft/Lens` repository so the text encoder can be reconstructed reproducibly.
 
-The MVP supports only `lens_bf16` text-to-image inference, latent caching, GPT-OSS text-cache generation, and LoRA training. The first patch explicitly excludes `lens_turbo_bf16`, mxfp8/fp8 training, the reasoner API, GUI integration, image edit/control workflows, video data, and full-model finetuning.
+The MVP supports only `lens_bf16` text-to-image inference, latent caching, GPT-OSS text-cache generation, and LoRA training. LoRA training may optionally use the existing Musubi scaled-fp8 frozen DiT base path via `--fp8_base --fp8_scaled`. The first patch explicitly excludes `lens_turbo_bf16`, bare fp8 base training, mxfp8 training, scaled-mm, the reasoner API, GUI integration, image edit/control workflows, video data, and full-model finetuning.
 
 Lens LoRA training supports Musubi block swap on local `LensTransformerBlock` modules through `ModelOffloader`.
 
@@ -130,6 +130,8 @@ Keys:
 
 It excludes normalization, RoPE/position embedding, timestep embedding, modulation layers, and final projection by default. GPT-OSS text encoder LoRA is out of scope.
 
+Scaled fp8 for Lens reuses Musubi's existing fp8 optimization utilities. It quantizes only `transformer_blocks` attention and MLP Linear weights, excludes `norm`, `pos_embed`, `time_text_embed`, `img_mod`, `txt_mod`, `norm_out`, and `proj_out`, and keeps `torch._scaled_mm` disabled.
+
 `LensTransformer2DModel` is a local `torch.nn.Module` implementation, not a runtime import from `microsoft/Lens`. It implements the Musubi block-swap lifecycle methods expected by the shared trainer:
 
 - `enable_block_swap`
@@ -158,8 +160,10 @@ Minimum local checks:
 2. All Lens CLI `--help` commands exit successfully.
 3. A mocked batch with two prompt lengths roundtrips through latent cache and four-layer text cache loading.
 4. Existing `flux_2_generate_image.py --help`, `qwen_image_train_network.py --help`, and `zimage_train_network.py --help` still pass in an environment with the same optional training dependencies.
-5. With real weights, one prompt generates a non-empty PNG.
-6. With real weights and a tiny dataset, one LoRA optimizer step completes without NaN and produces safetensors metadata for `lens/lora`.
+5. A 1-block in-memory Lens model can be optimized with the Lens scaled-fp8 target/exclude list, strict-loaded, and run through a minimal forward without NaN.
+6. `lens_train_network.py --fp8_base` fails with the expected Lens-only scaled-fp8 error; `--fp8_base --fp8_scaled` reaches normal argument validation.
+7. With real weights, one prompt generates a non-empty PNG.
+8. With real weights and a tiny dataset, one LoRA optimizer step completes without NaN and produces safetensors metadata for `lens/lora`.
 
 ## 深度交互
 
@@ -173,7 +177,7 @@ Comfy's repository is convenient for safetensors, but it does not replace the of
 
 ### Challenge 3: narrow the first training target
 
-`lens_turbo` and mxfp8 are inference and memory-pressure questions, not prerequisites for proving LoRA training. Supporting them before the bf16 path is stable would multiply loader and optimizer failure modes. The MVP intentionally trains only `lens_bf16`.
+`lens_turbo`, mxfp8, bare fp8, and scaled-mm are inference and memory-pressure questions, not prerequisites for proving LoRA training. Supporting them before the bf16/scaled-fp8 path is stable would multiply loader and optimizer failure modes. The MVP intentionally trains only `lens_bf16`, with optional scaled-fp8 frozen base weights for lower-VRAM LoRA training.
 
 ### Challenge 4: keep dependency blast radius small
 
