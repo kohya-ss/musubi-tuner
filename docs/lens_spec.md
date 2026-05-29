@@ -9,8 +9,8 @@ Branch base: `upstream/main` at `78acafb`.
 
 The Lens support direction is accepted with two mandatory corrections:
 
-- `Comfy-Org/Lens` is used only as the packaged weight source.
-- GPT-OSS `config.json`, `generation_config.json`, and `tokenizer/*` are taken from the official `microsoft/Lens` repository so the text encoder can be reconstructed reproducibly.
+- `Comfy-Org/Lens` is used for the Lens DiT, VAE, and GPT-OSS text encoder packaged weights.
+- GPT-OSS `config.json`, `generation_config.json`, and `tokenizer/*` are taken from the official `microsoft/Lens` repository so the Comfy text encoder weight file can be reconstructed without user-provided metadata paths.
 
 The MVP supports only `lens_bf16` text-to-image inference, latent caching, GPT-OSS text-cache generation, and LoRA training. LoRA training may optionally use the existing Musubi scaled-fp8 frozen DiT base path via `--fp8_base --fp8_scaled`. The first patch explicitly excludes `lens_turbo_bf16`, bare fp8 base training, mxfp8 training, scaled-mm, the reasoner API, GUI integration, image edit/control workflows, video data, and full-model finetuning.
 
@@ -20,7 +20,8 @@ Lens LoRA training supports Musubi block swap on local `LensTransformerBlock` mo
 
 Reference implementation: <https://github.com/microsoft/Lens>.
 
-Weight source: <https://huggingface.co/Comfy-Org/Lens>.
+DiT/VAE/GPT-OSS text encoder weight source: <https://huggingface.co/Comfy-Org/Lens>.
+GPT-OSS config/tokenizer metadata source: <https://huggingface.co/microsoft/Lens>.
 
 MVP download list:
 
@@ -33,7 +34,7 @@ MVP download list:
 - `microsoft/Lens/tokenizer/tokenizer.json`
 - `microsoft/Lens/tokenizer/tokenizer_config.json`
 
-Training and inference scripts must not implicitly download model weights. Lens GPT-OSS config and tokenizer metadata are resolved automatically from sibling local files when present, otherwise from `microsoft/Lens`. These metadata paths are not user-facing CLI parameters.
+Training and inference scripts must not implicitly download model weights. Lens GPT-OSS config and tokenizer metadata are resolved automatically from sibling local files when present, otherwise from `microsoft/Lens`. These metadata paths are not user-facing CLI parameters. The default text encoder path is the Comfy `text_encoders/gpt_oss_20b_nvfp4.safetensors` file; the loader normalizes bare GPT-OSS keys and dequantizes Comfy NVFP4 expert tensors into the local GPT-OSS module before strict loading.
 
 ### Architecture contract
 
@@ -158,7 +159,7 @@ Minimum local checks:
 
 1. `lens_download.py --dry_run` prints the exact file list above.
 2. All Lens CLI `--help` commands exit successfully.
-3. `GptOssConfig.from_pretrained("microsoft/Lens", subfolder="text_encoder")` works and the Lens tokenizer loader auto-loads `microsoft/Lens/tokenizer` without user-provided paths, including the `TokenizersBackend` fallback for pinned transformers versions.
+3. The Comfy GPT-OSS text encoder safetensors is the default `--text_encoder` target; `GptOssConfig.from_pretrained("microsoft/Lens", subfolder="text_encoder")` works and the Lens tokenizer loader auto-loads `microsoft/Lens/tokenizer` without user-provided paths, including the `TokenizersBackend` fallback for pinned transformers versions.
 4. A mocked batch with two prompt lengths roundtrips through latent cache and four-layer text cache loading.
 5. Existing `flux_2_generate_image.py --help`, `qwen_image_train_network.py --help`, and `zimage_train_network.py --help` still pass in an environment with the same optional training dependencies.
 6. A 1-block in-memory Lens model can be optimized with the Lens scaled-fp8 target/exclude list, strict-loaded, and run through a minimal forward without NaN.
@@ -172,9 +173,9 @@ Minimum local checks:
 
 Lens reuses a FLUX.2 VAE latent format, but the denoiser is a Lens-specific joint image/text transformer. Treating it as a FLUX.2 variant would blur cache names, metadata, and target modules. A separate `lens` architecture is the lower-risk boundary.
 
-### Challenge 2: Comfy weights are not enough
+### Challenge 2: Comfy TE is not a plain checkpoint
 
-Comfy's repository is convenient for safetensors, but it does not replace the official GPT-OSS tokenizer/config contract. If text encoding is reconstructed from only safetensors, prompt embeddings are not reproducible. The implementation therefore downloads Comfy weights through the model helper and resolves official metadata automatically when text encoding is needed.
+Comfy's repository is the default weight source, including the GPT-OSS TE. Its TE file is still not a plain transformers checkpoint: keys are stored as bare GPT-OSS names and MoE expert weights are Comfy NVFP4 tensors. The loader must therefore normalize keys and dequantize the expert tensors locally; treating it as a normal safetensors state dict leaves GPT-OSS parameters on meta tensors.
 
 ### Challenge 3: narrow the first training target
 

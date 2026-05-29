@@ -265,7 +265,7 @@ class LensNetworkTrainer(NetworkTrainer):
 def lens_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.set_defaults(network_module="networks.lora_lens")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for Lens DiT base")
-    parser.add_argument("--text_encoder", type=str, default=None, help="Lens GPT-OSS text encoder safetensors path")
+    parser.add_argument("--text_encoder", type=str, default=None, help="Lens Comfy GPT-OSS text encoder safetensors path")
     parser.add_argument("--text_encoder_dtype", type=str, default=None, help="text encoder dtype, default bfloat16")
     return parser
 

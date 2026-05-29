@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Lens text-to-image inference")
     parser.add_argument("--dit", type=str, required=True, help="Lens DiT safetensors path")
     parser.add_argument("--vae", type=str, required=True, help="Lens/FLUX.2 VAE safetensors path")
-    parser.add_argument("--text_encoder", type=str, required=True, help="Lens GPT-OSS text encoder safetensors path")
+    parser.add_argument("--text_encoder", type=str, required=True, help="Lens Comfy GPT-OSS text encoder safetensors path")
     parser.add_argument("--prompt", type=str, required=True, help="prompt for generation")
     parser.add_argument("--negative_prompt", type=str, default="", help="negative prompt")
     parser.add_argument("--image_size", type=int, nargs=2, default=None, help="image size as height width")

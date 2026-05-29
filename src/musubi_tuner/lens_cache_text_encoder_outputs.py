@@ -74,7 +74,7 @@ def main():
 
 
 def lens_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--text_encoder", type=str, required=True, help="Lens GPT-OSS text encoder safetensors path")
+    parser.add_argument("--text_encoder", type=str, required=True, help="Lens Comfy GPT-OSS text encoder safetensors path")
     parser.add_argument("--text_encoder_dtype", type=str, default=None, help="text encoder dtype, default bfloat16")
     parser.add_argument("--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors")
     return parser

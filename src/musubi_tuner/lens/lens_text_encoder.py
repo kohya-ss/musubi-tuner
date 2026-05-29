@@ -15,7 +15,7 @@ from transformers.masking_utils import create_causal_mask, create_sliding_window
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
-from musubi_tuner.utils.safetensors_utils import load_split_weights
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_split_weights
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +28,9 @@ DEFAULT_MAX_SEQUENCE_LENGTH = 512
 DEFAULT_LENS_TEXT_REPO = "microsoft/Lens"
 DEFAULT_LENS_CONFIG_SUBFOLDER = "text_encoder"
 DEFAULT_LENS_TOKENIZER_SUBFOLDER = "tokenizer"
+COMFY_FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+COMFY_EXPERT_WEIGHT_SUFFIXES = (".mlp.experts.gate_up_proj.weight", ".mlp.experts.down_proj.weight")
+COMFY_EXPERT_AUX_SUFFIXES = (".comfy_quant", ".weight_scale", ".weight_scale_2")
 
 
 class LensGptOssEncoder(GptOssForCausalLM):
@@ -59,12 +62,14 @@ class LensGptOssEncoder(GptOssForCausalLM):
 
         model = self.model
         inputs_embeds = model.embed_tokens(input_ids)
-        position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device).unsqueeze(0).expand_as(input_ids)
+        cache_position = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+        position_ids = cache_position.unsqueeze(0).expand_as(input_ids)
 
         mask_kwargs = {
             "config": model.config,
-            "inputs_embeds": inputs_embeds,
+            "input_embeds": inputs_embeds,
             "attention_mask": attention_mask,
+            "cache_position": cache_position,
             "past_key_values": None,
             "position_ids": position_ids,
         }
@@ -85,6 +90,7 @@ class LensGptOssEncoder(GptOssForCausalLM):
                 attention_mask=causal_mask_mapping[model.config.layer_types[i]],
                 position_embeddings=position_embeddings,
                 position_ids=position_ids,
+                cache_position=cache_position,
                 past_key_values=None,
                 use_cache=False,
             )
@@ -108,16 +114,21 @@ def _strip_prefixes(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     prefixes = ("text_encoder.", "model.text_encoder.", "module.")
     out = {}
     for key, value in sd.items():
-        new_key = key
-        changed = True
-        while changed:
-            changed = False
-            for prefix in prefixes:
-                if new_key.startswith(prefix):
-                    new_key = new_key[len(prefix) :]
-                    changed = True
+        new_key = _strip_lens_text_prefixes(key)
         out[new_key] = value
     return out
+
+
+def _strip_lens_text_prefixes(key: str) -> str:
+    prefixes = ("text_encoder.", "model.text_encoder.", "module.")
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                key = key[len(prefix) :]
+                changed = True
+    return key
 
 
 def infer_lens_text_paths(
@@ -128,12 +139,15 @@ def infer_lens_text_paths(
         weights_path = text_encoder
         root = text_encoder.parent.parent if text_encoder.parent.name == "text_encoders" else text_encoder.parent
     else:
-        candidates = [
-            text_encoder / "gpt_oss_20b_nvfp4.safetensors",
-            text_encoder / "text_encoders" / "gpt_oss_20b_nvfp4.safetensors",
-        ]
+        if text_encoder.name == "text_encoders":
+            candidates = [text_encoder / "gpt_oss_20b_nvfp4.safetensors"]
+        else:
+            candidates = [
+                text_encoder / "text_encoders" / "gpt_oss_20b_nvfp4.safetensors",
+                text_encoder / "gpt_oss_20b_nvfp4.safetensors",
+            ]
         weights_path = next((p for p in candidates if p.exists()), candidates[0])
-        root = text_encoder
+        root = text_encoder.parent if text_encoder.name == "text_encoders" else text_encoder
 
     return weights_path, root / "text_encoder", root / "tokenizer"
 
@@ -151,6 +165,157 @@ def _resolve_local_or_hf_source(
         f"falling back to {DEFAULT_LENS_TEXT_REPO}/{hf_subfolder}"
     )
     return DEFAULT_LENS_TEXT_REPO, hf_subfolder
+
+
+def _single_file_has_comfy_quant(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    with MemoryEfficientSafeOpen(str(path), disable_numpy_memmap=True) as f:
+        metadata = f.metadata()
+        return metadata.get("lens_te_mode") == "nvfp4" or "tokenizer_json" in f.keys() or any(
+            key.endswith(COMFY_EXPERT_AUX_SUFFIXES) for key in f.keys()
+        )
+
+
+def _normalize_lens_text_key(key: str) -> Optional[str]:
+    key = _strip_lens_text_prefixes(key)
+    if key == "tokenizer_json" or key.startswith("__") or key.startswith("lm_head.") or key.endswith(COMFY_EXPERT_AUX_SUFFIXES):
+        return None
+    if key.endswith(".mlp.experts.gate_up_proj.weight"):
+        key = key[: -len(".weight")]
+    elif key.endswith(".mlp.experts.gate_up_proj.bias"):
+        key = f"{key[: -len('.bias')]}_bias"
+    elif key.endswith(".mlp.experts.down_proj.weight"):
+        key = key[: -len(".weight")]
+    elif key.endswith(".mlp.experts.down_proj.bias"):
+        key = f"{key[: -len('.bias')]}_bias"
+    if not key.startswith(("model.", "lm_head.")):
+        key = f"model.{key}"
+    return key
+
+
+def _normalize_lens_text_state_dict(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    out: dict[str, torch.Tensor] = {}
+    for key, value in sd.items():
+        new_key = _normalize_lens_text_key(key)
+        if new_key is not None:
+            out[new_key] = value
+    return out
+
+
+def _unpack_comfy_fp4_e2m1(weight: torch.Tensor) -> torch.Tensor:
+    if weight.dtype != torch.uint8:
+        raise TypeError(f"Comfy NVFP4 packed weight must be uint8, got {weight.dtype}")
+    high = weight >> 4
+    low = weight & 0x0F
+    indices = torch.stack((high, low), dim=-1).reshape(*weight.shape[:-1], weight.shape[-1] * 2).to(torch.long)
+    lut = torch.tensor(COMFY_FP4_E2M1_VALUES, dtype=torch.float32, device=indices.device)
+    return lut[indices]
+
+
+def _from_comfy_blocked_scale(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    if scale.ndim != 2:
+        raise ValueError(f"Comfy NVFP4 block scale must be 2D per expert, got shape {tuple(scale.shape)}")
+    padded_rows, padded_cols = scale.shape
+    if padded_rows % 128 != 0 or padded_cols % 4 != 0:
+        raise ValueError(f"Unexpected Comfy NVFP4 scale layout shape {tuple(scale.shape)}")
+    if rows > padded_rows or cols > padded_cols:
+        raise ValueError(f"Comfy NVFP4 scale shape {tuple(scale.shape)} is too small for unblocked shape {(rows, cols)}")
+
+    n_row_blocks = padded_rows // 128
+    n_col_blocks = padded_cols // 4
+    blocked = scale.reshape(-1, 32, 16)
+    blocked = blocked.reshape(-1, 32, 4, 4).transpose(1, 2)
+    blocked = blocked.reshape(n_row_blocks, n_col_blocks, 128, 4)
+    unblocked = blocked.permute(0, 2, 1, 3).reshape(padded_rows, padded_cols)
+    return unblocked[:rows, :cols]
+
+
+def _dequant_comfy_nvfp4_weight(
+    packed_weight: torch.Tensor,
+    block_scale: torch.Tensor,
+    tensor_scale: torch.Tensor,
+    *,
+    target_dtype: torch.dtype,
+    device: Union[str, torch.device],
+    transpose: bool,
+) -> torch.Tensor:
+    if packed_weight.ndim != 3:
+        raise ValueError(f"Comfy NVFP4 expert weight must be 3D, got shape {tuple(packed_weight.shape)}")
+    if block_scale.ndim != 3:
+        raise ValueError(f"Comfy NVFP4 expert block scale must be 3D, got shape {tuple(block_scale.shape)}")
+    if tensor_scale.ndim != 1 or tensor_scale.shape[0] != packed_weight.shape[0]:
+        raise ValueError(
+            f"Comfy NVFP4 tensor scale shape {tuple(tensor_scale.shape)} does not match expert count {packed_weight.shape[0]}"
+        )
+
+    expert_count, rows, packed_cols = packed_weight.shape
+    cols = packed_cols * 2
+    scale_cols = (cols + 15) // 16
+    out = []
+    device = torch.device(device)
+    for expert_idx in range(expert_count):
+        values = _unpack_comfy_fp4_e2m1(packed_weight[expert_idx]).to(torch.float32)
+        scale = _from_comfy_blocked_scale(block_scale[expert_idx].to(torch.float32), rows, scale_cols)
+        scale = scale.repeat_interleave(16, dim=1)[:, :cols]
+        dequant = values * scale * tensor_scale[expert_idx].to(torch.float32)
+        if transpose:
+            dequant = dequant.transpose(0, 1).contiguous()
+        out.append(dequant.to(device=device, dtype=target_dtype))
+    return torch.stack(out, dim=0)
+
+
+def _load_comfy_lens_text_state_dict(
+    weights_path: Path,
+    dtype: Optional[torch.dtype],
+    device: Union[str, torch.device],
+    disable_mmap: bool,
+) -> dict[str, torch.Tensor]:
+    target_dtype = dtype if dtype is not None and dtype.itemsize > 1 else torch.bfloat16
+    device = torch.device(device)
+    state_dict: dict[str, torch.Tensor] = {}
+
+    with MemoryEfficientSafeOpen(str(weights_path), disable_numpy_memmap=disable_mmap) as f:
+        keys = set(f.keys())
+        for key in sorted(keys):
+            if key == "tokenizer_json" or key.startswith("__") or key.endswith(COMFY_EXPERT_AUX_SUFFIXES):
+                continue
+
+            if key.endswith(COMFY_EXPERT_WEIGHT_SUFFIXES):
+                scale_key = f"{key[:-len('.weight')]}.weight_scale"
+                scale2_key = f"{key[:-len('.weight')]}.weight_scale_2"
+                if scale_key not in keys or scale2_key not in keys:
+                    raise KeyError(f"Missing Comfy NVFP4 scales for {key}")
+                packed_weight = f.get_tensor(key, device=torch.device("cpu"), dtype=None)
+                block_scale = f.get_tensor(scale_key, device=torch.device("cpu"), dtype=None)
+                tensor_scale = f.get_tensor(scale2_key, device=torch.device("cpu"), dtype=None)
+                new_key = _normalize_lens_text_key(key)
+                if new_key is None:
+                    continue
+                state_dict[new_key] = _dequant_comfy_nvfp4_weight(
+                    packed_weight,
+                    block_scale,
+                    tensor_scale,
+                    target_dtype=target_dtype,
+                    device=device,
+                    transpose=True,
+                )
+                continue
+
+            new_key = _normalize_lens_text_key(key)
+            if new_key is None:
+                continue
+            state_dict[new_key] = f.get_tensor(key, device=device, dtype=target_dtype)
+
+    return state_dict
+
+
+def _assert_no_meta_parameters(model: torch.nn.Module) -> None:
+    meta = [name for name, param in model.named_parameters() if param.is_meta]
+    if meta:
+        preview = ", ".join(meta[:8])
+        suffix = "..." if len(meta) > 8 else ""
+        raise RuntimeError(f"Lens GPT-OSS text encoder still has meta tensors after loading: {preview}{suffix}")
 
 
 def _resolve_tokenizer_file(source: Union[str, Path], subfolder: Optional[str], filename: str) -> Path:
@@ -189,6 +354,34 @@ def _load_lens_tokenizer(source: Union[str, Path], subfolder: Optional[str]):
         tokenizer_obj.pad_token = tokenizer_obj.eos_token
     tokenizer_obj.padding_side = "right"
     return tokenizer_obj
+
+
+def _load_lens_text_encoder_from_single_file(
+    weights_path: Path,
+    config: GptOssConfig,
+    dtype: Optional[torch.dtype],
+    device: Union[str, torch.device],
+    disable_mmap: bool,
+) -> LensGptOssEncoder:
+    with init_empty_weights():
+        model = LensGptOssEncoder(config)
+        model.lm_head = torch.nn.Identity()
+    model.set_selected_layers(DEFAULT_SELECTED_LAYERS)
+
+    logger.info(f"Loading Lens GPT-OSS weights from {weights_path}")
+    if _single_file_has_comfy_quant(weights_path):
+        sd = _load_comfy_lens_text_state_dict(weights_path, dtype, device, disable_mmap)
+    else:
+        sd = load_split_weights(str(weights_path), device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+        sd = _normalize_lens_text_state_dict(sd)
+    info = model.load_state_dict(sd, strict=True, assign=True)
+    logger.info(f"Loaded Lens GPT-OSS text encoder: {info}")
+    _assert_no_meta_parameters(model)
+    model.to(device)
+    if dtype is not None and dtype.itemsize > 1:
+        model.to(dtype)
+    model.eval()
+    return model
 
 
 class LensTextEmbedder(torch.nn.Module):
@@ -259,8 +452,6 @@ def load_lens_text_embedder(
     disable_mmap: bool = False,
 ) -> LensTextEmbedder:
     weights_path, config_path, tokenizer_path = infer_lens_text_paths(text_encoder)
-    if not weights_path.exists():
-        raise FileNotFoundError(f"Lens text encoder weights not found: {weights_path}")
 
     config_source, config_subfolder = _resolve_local_or_hf_source(
         config_path,
@@ -276,19 +467,11 @@ def load_lens_text_embedder(
     config_kwargs = {"subfolder": config_subfolder} if config_subfolder is not None else {}
     logger.info(f"Loading Lens GPT-OSS config from {config_source}")
     config = GptOssConfig.from_pretrained(config_source, **config_kwargs)
-    with init_empty_weights():
-        model = LensGptOssEncoder(config)
-    model.set_selected_layers(DEFAULT_SELECTED_LAYERS)
-
-    logger.info(f"Loading Lens GPT-OSS weights from {weights_path}")
-    sd = load_split_weights(str(weights_path), device=str(device), disable_mmap=disable_mmap, dtype=dtype)
-    sd = _strip_prefixes(sd)
-    info = model.load_state_dict(sd, strict=False, assign=True)
-    logger.info(f"Loaded Lens GPT-OSS text encoder: {info}")
-    model.to(device)
-    if dtype is not None and dtype.itemsize > 1:
-        model.to(dtype)
-    model.eval()
+    if not weights_path.exists():
+        raise FileNotFoundError(f"Lens text encoder weights not found: {weights_path}")
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"Lens text encoder must be a Comfy safetensors file or a directory containing it: {weights_path}")
+    model = _load_lens_text_encoder_from_single_file(weights_path, config, dtype, device, disable_mmap)
 
     tokenizer_obj = _load_lens_tokenizer(tokenizer_source, tokenizer_subfolder)
     return LensTextEmbedder(model, tokenizer_obj)

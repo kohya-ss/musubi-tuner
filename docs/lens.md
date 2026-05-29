@@ -23,7 +23,7 @@ To inspect the exact file list without downloading:
 python lens_download.py --output_dir /path/to/models/lens --dry_run
 ```
 
-The helper downloads weights from `Comfy-Org/Lens` and GPT-OSS metadata/tokenizer files from `microsoft/Lens`:
+The helper downloads Lens DiT/VAE and GPT-OSS text encoder weights from `Comfy-Org/Lens`, plus the GPT-OSS config/tokenizer metadata from `microsoft/Lens`:
 
 ```text
 /path/to/models/lens/
@@ -37,7 +37,7 @@ The helper downloads weights from `Comfy-Org/Lens` and GPT-OSS metadata/tokenize
   tokenizer/tokenizer_config.json
 ```
 
-Training and inference scripts never download model weights implicitly. GPT-OSS config and tokenizer metadata are resolved automatically from sibling local files when present, otherwise from `microsoft/Lens`; the Lens loader handles the official `TokenizersBackend` tokenizer metadata without a user-provided tokenizer path.
+Training and inference scripts never download model weights implicitly. GPT-OSS config and tokenizer metadata are resolved automatically from sibling local files when present, otherwise from `microsoft/Lens`; these are not user-facing CLI parameters. The default text encoder weight is the Comfy `text_encoders/gpt_oss_20b_nvfp4.safetensors` file, which the Lens loader converts from Comfy NVFP4 expert tensors into the local GPT-OSS module state dict before caching or inference.
 
 ## Cache Latents
 
