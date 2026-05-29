@@ -442,18 +442,26 @@ class LensTransformer2DModel(nn.Module):
             if not isinstance(encoder_hidden_states, (list, tuple)):
                 raise ValueError("multi_layer_encoder_feature=True expects a list of per-layer text tensors.")
             if len(encoder_hidden_states) != len(self.selected_layer_index):
-                raise ValueError(f"Expected {len(self.selected_layer_index)} text feature layers, got {len(encoder_hidden_states)}.")
+                raise ValueError(
+                    f"Expected {len(self.selected_layer_index)} text feature layers, got {len(encoder_hidden_states)}."
+                )
             text_seq_len = encoder_hidden_states[0].shape[1]
             for i, feat in enumerate(encoder_hidden_states):
                 if feat.shape[0] != bsz:
-                    raise ValueError(f"Text feature layer {i} batch size {feat.shape[0]} does not match hidden_states batch size {bsz}.")
+                    raise ValueError(
+                        f"Text feature layer {i} batch size {feat.shape[0]} does not match hidden_states batch size {bsz}."
+                    )
                 if feat.shape[1] != text_seq_len:
-                    raise ValueError(f"Text feature layer {i} sequence length {feat.shape[1]} does not match layer 0 length {text_seq_len}.")
+                    raise ValueError(
+                        f"Text feature layer {i} sequence length {feat.shape[1]} does not match layer 0 length {text_seq_len}."
+                    )
         else:
             if not isinstance(encoder_hidden_states, torch.Tensor):
                 raise ValueError("multi_layer_encoder_feature=False expects a single text feature tensor.")
             if encoder_hidden_states.shape[0] != bsz:
-                raise ValueError(f"Text feature batch size {encoder_hidden_states.shape[0]} does not match hidden_states batch size {bsz}.")
+                raise ValueError(
+                    f"Text feature batch size {encoder_hidden_states.shape[0]} does not match hidden_states batch size {bsz}."
+                )
             text_seq_len = encoder_hidden_states.shape[1]
         if encoder_hidden_states_mask.shape != (bsz, text_seq_len):
             raise ValueError(

@@ -99,8 +99,7 @@ def _unsqueeze_attention_weight_if_needed(key: str, value: Tensor) -> Tensor:
 def normalize_lens_vae_state_dict(sd: dict[str, Tensor], num_levels: int = 4) -> dict[str, Tensor]:
     """Convert diffusers AutoencoderKLFlux2 keys to the local FLUX.2 AutoEncoder keys."""
     has_diffusers_keys = any(
-        key.startswith(("quant_conv.", "post_quant_conv.", "encoder.down_blocks.", "decoder.up_blocks."))
-        for key in sd.keys()
+        key.startswith(("quant_conv.", "post_quant_conv.", "encoder.down_blocks.", "decoder.up_blocks.")) for key in sd.keys()
     )
     if not has_diffusers_keys:
         return sd
@@ -128,7 +127,9 @@ def normalize_lens_vae_state_dict(sd: dict[str, Tensor], num_levels: int = 4) ->
                 new_key = new_key.replace(".to_v.", ".v.")
                 new_key = new_key.replace(".to_out.0.", ".proj_out.")
                 new_key = re.sub(r"encoder\.down_blocks\.(\d+)\.resnets\.(\d+)\.", r"encoder.down.\1.block.\2.", new_key)
-                new_key = re.sub(r"encoder\.down_blocks\.(\d+)\.downsamplers\.0\.conv\.", r"encoder.down.\1.downsample.conv.", new_key)
+                new_key = re.sub(
+                    r"encoder\.down_blocks\.(\d+)\.downsamplers\.0\.conv\.", r"encoder.down.\1.downsample.conv.", new_key
+                )
             elif new_key.startswith("decoder."):
                 new_key = new_key.replace("decoder.conv_norm_out.", "decoder.norm_out.")
                 new_key = new_key.replace("decoder.mid_block.resnets.0.", "decoder.mid.block_1.")
@@ -239,7 +240,6 @@ def load_lens_vae(vae_path: Union[str, Path], dtype: torch.dtype, device: Union[
     info = ae.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Lens VAE: {info}")
     return ae
-
 
 
 def pack_latents(latents: Tensor) -> Tensor:

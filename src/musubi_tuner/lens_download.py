@@ -7,7 +7,9 @@ def main():
     parser = argparse.ArgumentParser(description="Download Lens MVP components")
     parser.add_argument("--output_dir", type=str, required=True, help="directory to download model components into")
     parser.add_argument("--repo_id", type=str, default=lens_utils.COMFY_LENS_REPO_ID, help="Comfy Lens weights repo")
-    parser.add_argument("--metadata_repo_id", type=str, default=lens_utils.OFFICIAL_LENS_REPO_ID, help="official Lens metadata repo")
+    parser.add_argument(
+        "--metadata_repo_id", type=str, default=lens_utils.OFFICIAL_LENS_REPO_ID, help="official Lens metadata repo"
+    )
     parser.add_argument("--token", type=str, default=None, help="Hugging Face token")
     parser.add_argument("--dry_run", action="store_true", help="list files without downloading")
     args = parser.parse_args()

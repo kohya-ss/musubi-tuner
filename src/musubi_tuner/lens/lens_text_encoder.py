@@ -48,7 +48,11 @@ class LensGptOssEncoder(GptOssForCausalLM):
     @torch.no_grad()
     def forward(self, input_ids: Optional[torch.LongTensor] = None, attention_mask: Optional[torch.Tensor] = None, *args, **kwargs):
         is_lens_feature_call = (
-            input_ids is not None and attention_mask is not None and hasattr(self, "_lens_selected_layers") and not args and not kwargs
+            input_ids is not None
+            and attention_mask is not None
+            and hasattr(self, "_lens_selected_layers")
+            and not args
+            and not kwargs
         )
 
         target_device = self.model.embed_tokens.weight.device
@@ -160,10 +164,7 @@ def _resolve_local_or_hf_source(
     if default_local_path.exists():
         return default_local_path, None
 
-    logger.info(
-        f"Lens {description} not found at {default_local_path}; "
-        f"falling back to {DEFAULT_LENS_TEXT_REPO}/{hf_subfolder}"
-    )
+    logger.info(f"Lens {description} not found at {default_local_path}; falling back to {DEFAULT_LENS_TEXT_REPO}/{hf_subfolder}")
     return DEFAULT_LENS_TEXT_REPO, hf_subfolder
 
 
@@ -172,8 +173,10 @@ def _single_file_has_comfy_quant(path: Path) -> bool:
         return False
     with MemoryEfficientSafeOpen(str(path), disable_numpy_memmap=True) as f:
         metadata = f.metadata()
-        return metadata.get("lens_te_mode") == "nvfp4" or "tokenizer_json" in f.keys() or any(
-            key.endswith(COMFY_EXPERT_AUX_SUFFIXES) for key in f.keys()
+        return (
+            metadata.get("lens_te_mode") == "nvfp4"
+            or "tokenizer_json" in f.keys()
+            or any(key.endswith(COMFY_EXPERT_AUX_SUFFIXES) for key in f.keys())
         )
 
 
@@ -282,8 +285,8 @@ def _load_comfy_lens_text_state_dict(
                 continue
 
             if key.endswith(COMFY_EXPERT_WEIGHT_SUFFIXES):
-                scale_key = f"{key[:-len('.weight')]}.weight_scale"
-                scale2_key = f"{key[:-len('.weight')]}.weight_scale_2"
+                scale_key = f"{key[: -len('.weight')]}.weight_scale"
+                scale2_key = f"{key[: -len('.weight')]}.weight_scale_2"
                 if scale_key not in keys or scale2_key not in keys:
                     raise KeyError(f"Missing Comfy NVFP4 scales for {key}")
                 packed_weight = f.get_tensor(key, device=torch.device("cpu"), dtype=None)
