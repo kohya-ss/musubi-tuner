@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
@@ -84,6 +85,76 @@ def normalize_lens_state_dict(sd: dict[str, Tensor]) -> dict[str, Tensor]:
     return out
 
 
+def _unsqueeze_attention_weight_if_needed(key: str, value: Tensor) -> Tensor:
+    if (
+        ".attn_1." in key
+        and key.endswith(".weight")
+        and value.ndim == 2
+        and any(f".{name}.weight" in key for name in ("q", "k", "v", "proj_out"))
+    ):
+        return value[:, :, None, None]
+    return value
+
+
+def normalize_lens_vae_state_dict(sd: dict[str, Tensor], num_levels: int = 4) -> dict[str, Tensor]:
+    """Convert diffusers AutoencoderKLFlux2 keys to the local FLUX.2 AutoEncoder keys."""
+    has_diffusers_keys = any(
+        key.startswith(("quant_conv.", "post_quant_conv.", "encoder.down_blocks.", "decoder.up_blocks."))
+        for key in sd.keys()
+    )
+    if not has_diffusers_keys:
+        return sd
+
+    out: dict[str, Tensor] = {}
+    for key, value in sd.items():
+        new_key = key
+        if new_key.startswith("__"):
+            continue
+        if new_key.startswith("quant_conv."):
+            new_key = f"encoder.{new_key}"
+        elif new_key.startswith("post_quant_conv."):
+            new_key = f"decoder.{new_key}"
+        else:
+            new_key = new_key.replace(".conv_shortcut.", ".nin_shortcut.")
+
+            if new_key.startswith("encoder."):
+                new_key = new_key.replace("encoder.conv_norm_out.", "encoder.norm_out.")
+                new_key = new_key.replace("encoder.mid_block.resnets.0.", "encoder.mid.block_1.")
+                new_key = new_key.replace("encoder.mid_block.resnets.1.", "encoder.mid.block_2.")
+                new_key = new_key.replace("encoder.mid_block.attentions.0.", "encoder.mid.attn_1.")
+                new_key = new_key.replace(".group_norm.", ".norm.")
+                new_key = new_key.replace(".to_q.", ".q.")
+                new_key = new_key.replace(".to_k.", ".k.")
+                new_key = new_key.replace(".to_v.", ".v.")
+                new_key = new_key.replace(".to_out.0.", ".proj_out.")
+                new_key = re.sub(r"encoder\.down_blocks\.(\d+)\.resnets\.(\d+)\.", r"encoder.down.\1.block.\2.", new_key)
+                new_key = re.sub(r"encoder\.down_blocks\.(\d+)\.downsamplers\.0\.conv\.", r"encoder.down.\1.downsample.conv.", new_key)
+            elif new_key.startswith("decoder."):
+                new_key = new_key.replace("decoder.conv_norm_out.", "decoder.norm_out.")
+                new_key = new_key.replace("decoder.mid_block.resnets.0.", "decoder.mid.block_1.")
+                new_key = new_key.replace("decoder.mid_block.resnets.1.", "decoder.mid.block_2.")
+                new_key = new_key.replace("decoder.mid_block.attentions.0.", "decoder.mid.attn_1.")
+                new_key = new_key.replace(".group_norm.", ".norm.")
+                new_key = new_key.replace(".to_q.", ".q.")
+                new_key = new_key.replace(".to_k.", ".k.")
+                new_key = new_key.replace(".to_v.", ".v.")
+                new_key = new_key.replace(".to_out.0.", ".proj_out.")
+
+                resnet_match = re.match(r"decoder\.up_blocks\.(\d+)\.resnets\.(\d+)\.(.*)", new_key)
+                if resnet_match is not None:
+                    local_level = num_levels - 1 - int(resnet_match.group(1))
+                    new_key = f"decoder.up.{local_level}.block.{resnet_match.group(2)}.{resnet_match.group(3)}"
+                upsample_match = re.match(r"decoder\.up_blocks\.(\d+)\.upsamplers\.0\.conv\.(.*)", new_key)
+                if upsample_match is not None:
+                    local_level = num_levels - 1 - int(upsample_match.group(1))
+                    new_key = f"decoder.up.{local_level}.upsample.conv.{upsample_match.group(2)}"
+
+        out[new_key] = _unsqueeze_attention_weight_if_needed(new_key, value)
+
+    logger.info("Converted Lens FLUX.2 VAE diffusers state dict keys to local AutoEncoder format")
+    return out
+
+
 def load_lens_transformer(
     dit_path: Union[str, Path],
     dtype: Optional[torch.dtype] = None,
@@ -155,9 +226,20 @@ def load_lens_transformer(
 
 
 def load_lens_vae(vae_path: Union[str, Path], dtype: torch.dtype, device: Union[str, torch.device]):
-    from musubi_tuner.flux_2 import flux2_utils
+    from musubi_tuner.flux_2 import flux2_models
 
-    return flux2_utils.load_ae(str(vae_path), dtype=dtype, device=device, disable_mmap=True)
+    logger.info("Building Lens FLUX.2 AutoEncoder")
+    params = flux2_models.AutoEncoderParams()
+    with init_empty_weights():
+        ae = flux2_models.AutoEncoder(params).to(dtype)
+
+    logger.info(f"Loading Lens VAE state dict from {vae_path}")
+    sd = load_split_weights(str(vae_path), device=str(device), disable_mmap=True, dtype=dtype)
+    sd = normalize_lens_vae_state_dict(sd, num_levels=len(params.ch_mult))
+    info = ae.load_state_dict(sd, strict=True, assign=True)
+    logger.info(f"Loaded Lens VAE: {info}")
+    return ae
+
 
 
 def pack_latents(latents: Tensor) -> Tensor:

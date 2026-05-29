@@ -79,7 +79,7 @@ Modified shared files:
 
 Reuse from Musubi:
 
-- `flux_2.flux2_utils.load_ae` and FLUX.2 VAE implementation for `vae/flux2-vae.safetensors`
+- FLUX.2 VAE implementation for `vae/flux2-vae.safetensors`, loaded through the Lens VAE loader so Comfy/diffusers `AutoencoderKLFlux2` keys are normalized to local `flux2_models.AutoEncoder` keys
 - `training.trainer_base.NetworkTrainer`
 - existing image dataset, bucket, and cache path behavior
 - existing LoRA core in `networks/lora.py`
