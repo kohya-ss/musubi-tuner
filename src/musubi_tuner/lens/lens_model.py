@@ -6,7 +6,6 @@ plain torch module so Musubi does not need newer diffusers runtime classes.
 
 from __future__ import annotations
 
-import math
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, Union
 

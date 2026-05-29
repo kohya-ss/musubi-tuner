@@ -54,7 +54,7 @@ def main():
         disable_mmap=args.disable_numpy_memmap,
     )
 
-    def encode_for_text_encoder(batch: list[ItemInfo]):
+    def encode_for_text_encoder(batch: list[ItemInfo], text_embedder=text_embedder):
         encode_and_save_batch(text_embedder, batch, device)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
