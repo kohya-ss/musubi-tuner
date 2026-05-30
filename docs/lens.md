@@ -6,8 +6,9 @@ Lens support currently covers the `lens_bf16` text-to-image MVP:
 - GPT-OSS selected-layer text caching
 - standalone image generation
 - LoRA training against the Lens DiT
+- full DiT finetuning against cached latents/text
 
-Lens LoRA training can optionally use `--fp8_base --fp8_scaled` for a scaled-fp8 frozen DiT base. The first implementation does not support Lens-Turbo, bare fp8 base training, mxfp8 training, scaled-mm, reasoner API calls, GUI setup, image edit/control data, video data, or full-model finetuning.
+Lens LoRA training can optionally use `--fp8_base --fp8_scaled` for a scaled-fp8 frozen DiT base. Lens full finetuning does not support fp8/scaled-fp8 yet. The first implementation does not support Lens-Turbo, bare fp8 base training, mxfp8 training, scaled-mm, reasoner API calls, GUI setup, image edit/control data, or video data.
 
 ## Model Download
 
@@ -104,6 +105,31 @@ accelerate launch lens_train_network.py \
 `--blocks_to_swap N` is supported for low-VRAM LoRA training and uses Musubi's existing `ModelOffloader` on Lens transformer blocks.
 
 For lower VRAM, add both `--fp8_base --fp8_scaled`. Lens does not support `--fp8_base` by itself; scaled fp8 keeps the frozen DiT base quantized and dequantizes Linear weights through Musubi's existing fp8 path while LoRA weights train normally.
+
+## Train Full DiT
+
+Lens full finetuning trains the DiT directly and reuses the same cached latent and text encoder outputs as LoRA training. It does not train the GPT-OSS text encoder or VAE, and it rejects LoRA/network arguments.
+
+```bash
+accelerate launch lens_train.py \
+  --dataset_config /path/to/dataset.toml \
+  --dit /path/to/models/lens/diffusion_models/lens_bf16.safetensors \
+  --sdpa \
+  --mixed_precision bf16 \
+  --full_bf16 \
+  --optimizer_type adafactor \
+  --optimizer_args "relative_step=False" "scale_parameter=False" "warmup_init=False" \
+  --fused_backward_pass \
+  --learning_rate 1e-6 \
+  --gradient_checkpointing \
+  --timestep_sampling flux2_shift \
+  --output_dir /path/to/output \
+  --output_name lens_full
+```
+
+Use `--blocks_to_swap N` for low-VRAM training. If the optimizer keeps gradients on the swapped device and errors at `optimizer.step()`, add `--block_swap_optimizer_patch_params`; it is not needed with `--fused_backward_pass`.
+
+Sampling during full finetuning uses the normal Lens sample prompt path. Add `--vae` and `--text_encoder` only when `--sample_prompts` is used.
 
 ## Dataset Limits
 
