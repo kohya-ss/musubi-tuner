@@ -51,7 +51,7 @@ def reference_norm_rope(
     return out.to(orig_dtype)
 
 
-def reference_qkv_norm_rope(
+def reference_packed_qk_norm_rope(
     qkv: torch.Tensor,      # [B, L, 3, H, D]
     q_weight: torch.Tensor, # [D]
     k_weight: torch.Tensor, # [D]
@@ -59,7 +59,7 @@ def reference_qkv_norm_rope(
     sin: torch.Tensor,      # [B, L, D//2]
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Reference: packed QKV — RMSNorm+RoPE on Q and K, V copied unchanged."""
+    """Reference: packed QKV input — RMSNorm+RoPE on Q and K, V copied unchanged."""
     q = reference_norm_rope(qkv[:, :, 0], q_weight, cos, sin, eps)
     k = reference_norm_rope(qkv[:, :, 1], k_weight, cos, sin, eps)
     v = qkv[:, :, 2].to(q.dtype)
@@ -201,7 +201,7 @@ if HAS_TRITON:
         tl.store(out_ptr + x_base + cols * 2 + 1, o2, mask=mask)
 
     @triton.jit
-    def fused_qkv_norm_rope_kernel(
+    def fused_packed_qk_norm_rope_kernel(
         qkv_ptr, out_ptr,
         wq_ptr, wk_ptr,     # [D] norm weights for Q and K respectively
         cos_ptr, sin_ptr,   # [B, L, D//2]
@@ -332,7 +332,7 @@ if HAS_TRITON:
             grad_w = dw_f.to(weight.dtype) if ctx.needs_input_grad[1] else None
             return grad_x, grad_w, None, None, None  # cos, sin, eps: no grad
 
-    class _FusedQKVNormRopeFunction(torch.autograd.Function):
+    class _FusedPackedQKNormRopeFunction(torch.autograd.Function):
         @staticmethod
         def forward(ctx, qkv, q_weight, k_weight, cos, sin, eps):
             # qkv: [B, L, 3, H, D]
@@ -344,7 +344,7 @@ if HAS_TRITON:
             BLOCK_D2 = triton.next_power_of_2(D2)
             out_f32 = torch.empty(B, L, 3, H, D, dtype=torch.float32, device=qkv.device)
             triton_dtype = _TRITON_DTYPE_MAP[_TORCH_TO_TRITON_DTYPE[qkv.dtype]]
-            fused_qkv_norm_rope_kernel[(B * L * H,)](
+            fused_packed_qk_norm_rope_kernel[(B * L * H,)](
                 qkv, out_f32, q_weight.float(), k_weight.float(), cos, sin,
                 H, L, D, D2, eps,
                 BLOCK_D2=BLOCK_D2,
@@ -433,7 +433,7 @@ def fused_norm_rope(
     torch.Tensor
         Same shape and dtype as *x*.
     """
-    if not HAS_TRITON:
+    if not HAS_TRITON or not x.is_cuda:
         return reference_norm_rope(x, weight, cos, sin, eps)
 
     assert x.is_contiguous(), "x must be contiguous"
@@ -443,7 +443,7 @@ def fused_norm_rope(
     return _FusedNormRopeFunction.apply(x, weight, cos, sin, eps)
 
 
-def fused_qkv_norm_rope(
+def fused_packed_qk_norm_rope(
     qkv: torch.Tensor,      # [B, L, 3, H, D] contiguous, any float dtype
     q_weight: torch.Tensor, # [D] RMSNorm scale for Q
     k_weight: torch.Tensor, # [D] RMSNorm scale for K
@@ -482,12 +482,12 @@ def fused_qkv_norm_rope(
         Shape ``[B, L, 3, H, D]``, same dtype as *qkv*.  Q and K are
         normalised and rotated; V is unchanged.
     """
-    if not HAS_TRITON:
-        return reference_qkv_norm_rope(qkv, q_weight, k_weight, cos, sin, eps)
+    if not HAS_TRITON or not qkv.is_cuda:
+        return reference_packed_qk_norm_rope(qkv, q_weight, k_weight, cos, sin, eps)
 
     assert qkv.is_contiguous(), "qkv must be contiguous"
     assert qkv.shape[2] == 3, f"Expected packed QKV with dim-2 == 3, got {qkv.shape}"
     B, L, _, H, D = qkv.shape
     assert D % 2 == 0, f"Head dim D={D} must be even for RoPE"
 
-    return _FusedQKVNormRopeFunction.apply(qkv, q_weight, k_weight, cos, sin, eps)
+    return _FusedPackedQKNormRopeFunction.apply(qkv, q_weight, k_weight, cos, sin, eps)

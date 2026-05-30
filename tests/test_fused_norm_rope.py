@@ -8,9 +8,9 @@ import pytest
 import torch
 from musubi_tuner.kernels.fused_norm_rope import (
     fused_norm_rope,
-    fused_qkv_norm_rope,
+    fused_packed_qk_norm_rope,
     reference_norm_rope,
-    reference_qkv_norm_rope,
+    reference_packed_qk_norm_rope,
     extract_cos_sin,
     HAS_TRITON,
 )
@@ -122,12 +122,12 @@ def test_fused_norm_rope_nontrivial_rope(B, L, H, D):
 
 
 # ---------------------------------------------------------------------------
-# Test 5: fused_qkv_norm_rope reference correctness (CPU)
+# Test 5: fused_packed_qk_norm_rope reference correctness (CPU)
 # ---------------------------------------------------------------------------
 
 
-def test_fused_qkv_norm_rope_reference_correctness():
-    """reference_qkv_norm_rope matches applying reference_norm_rope per Q and K."""
+def test_fused_packed_qk_norm_rope_reference_correctness():
+    """reference_packed_qk_norm_rope matches applying reference_norm_rope per Q and K."""
     B, L, H, D = 1, 4, 2, 8
     torch.manual_seed(7)
     D2 = D // 2
@@ -138,7 +138,7 @@ def test_fused_qkv_norm_rope_reference_correctness():
     cos = torch.cos(angles)
     sin = torch.sin(angles)
 
-    out = reference_qkv_norm_rope(qkv, q_weight, k_weight, cos, sin)
+    out = reference_packed_qk_norm_rope(qkv, q_weight, k_weight, cos, sin)
 
     q_ref = reference_norm_rope(qkv[:, :, 0], q_weight, cos, sin)
     k_ref = reference_norm_rope(qkv[:, :, 1], k_weight, cos, sin)
@@ -151,7 +151,7 @@ def test_fused_qkv_norm_rope_reference_correctness():
 
 
 # ---------------------------------------------------------------------------
-# Test 6: fused_qkv_norm_rope Triton kernel matches reference (CUDA)
+# Test 6: fused_packed_qk_norm_rope Triton kernel matches reference (CUDA)
 # ---------------------------------------------------------------------------
 
 
@@ -168,7 +168,7 @@ def test_fused_qkv_norm_rope_reference_correctness():
         (2, 128, 24, 128),
     ],
 )
-def test_fused_qkv_norm_rope_matches_reference(dtype, B, L, H, D):
+def test_fused_packed_qk_norm_rope_matches_reference(dtype, B, L, H, D):
     """Packed QKV kernel matches reference for each Q/K/V slice."""
     torch.manual_seed(42)
     D2 = D // 2
@@ -179,8 +179,8 @@ def test_fused_qkv_norm_rope_matches_reference(dtype, B, L, H, D):
     cos = torch.cos(angles)
     sin = torch.sin(angles)
 
-    ref = reference_qkv_norm_rope(qkv, q_weight, k_weight, cos, sin)
-    out = fused_qkv_norm_rope(qkv, q_weight, k_weight, cos, sin)
+    ref = reference_packed_qk_norm_rope(qkv, q_weight, k_weight, cos, sin)
+    out = fused_packed_qk_norm_rope(qkv, q_weight, k_weight, cos, sin)
 
     assert out.shape == (B, L, 3, H, D)
     assert out.dtype == dtype

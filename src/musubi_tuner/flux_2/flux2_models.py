@@ -11,7 +11,7 @@ from torch.utils.checkpoint import checkpoint
 from musubi_tuner.modules.attention import AttentionParams
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.attention import attention as unified_attention
-from musubi_tuner.kernels.fused_norm_rope import fused_qkv_norm_rope, extract_cos_sin
+from musubi_tuner.kernels.fused_norm_rope import fused_packed_qk_norm_rope, extract_cos_sin
 
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
@@ -757,7 +757,7 @@ class SingleStreamBlock(nn.Module):
         qkv = qkv.contiguous().reshape(*qkv.shape[:2], 3, self.num_heads, -1)  # [B, L, 3, H, D]
         cos, sin = extract_cos_sin(pe)
         del pe
-        qkv = fused_qkv_norm_rope(qkv, self.norm.query_norm.scale, self.norm.key_norm.scale, cos, sin)
+        qkv = fused_packed_qk_norm_rope(qkv, self.norm.query_norm.scale, self.norm.key_norm.scale, cos, sin)
 
         attn = unified_attention(qkv, attn_params=attn_params)
         del qkv
@@ -844,7 +844,7 @@ class DoubleStreamBlock(nn.Module):
         img_qkv = img_qkv.contiguous().reshape(*img_qkv.shape[:2], 3, self.num_heads, -1)  # [B, L_img, 3, H, D]
         img_cos, img_sin = extract_cos_sin(pe)
         del pe
-        img_qkv = fused_qkv_norm_rope(img_qkv, self.img_attn.norm.query_norm.scale, self.img_attn.norm.key_norm.scale, img_cos, img_sin)
+        img_qkv = fused_packed_qk_norm_rope(img_qkv, self.img_attn.norm.query_norm.scale, self.img_attn.norm.key_norm.scale, img_cos, img_sin)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
@@ -855,7 +855,7 @@ class DoubleStreamBlock(nn.Module):
         txt_qkv = txt_qkv.contiguous().reshape(*txt_qkv.shape[:2], 3, self.num_heads, -1)  # [B, L_txt, 3, H, D]
         txt_cos, txt_sin = extract_cos_sin(pe_ctx)
         del pe_ctx
-        txt_qkv = fused_qkv_norm_rope(txt_qkv, self.txt_attn.norm.query_norm.scale, self.txt_attn.norm.key_norm.scale, txt_cos, txt_sin)
+        txt_qkv = fused_packed_qk_norm_rope(txt_qkv, self.txt_attn.norm.query_norm.scale, self.txt_attn.norm.key_norm.scale, txt_cos, txt_sin)
 
         # Concatenate packed QKV along sequence dim, then run attention once
         txt_len = txt_qkv.shape[1]

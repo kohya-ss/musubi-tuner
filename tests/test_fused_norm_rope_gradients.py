@@ -1,8 +1,8 @@
 """Gradient diagnostics for fused QKNorm + RoPE kernel.
 
 Confirms that:
-  1. reference_qkv_norm_rope produces correct non-zero gradients (baseline).
-  2. fused_qkv_norm_rope (with autograd.Function) matches reference gradients.
+  1. reference_packed_qk_norm_rope produces correct non-zero gradients (baseline).
+  2. fused_packed_qk_norm_rope (with autograd.Function) matches reference gradients.
   3. Gradient flow reaches both qkv (→ linear weights) and norm scale weights.
 
 Run with:
@@ -13,8 +13,8 @@ import pytest
 import torch
 from musubi_tuner.kernels.fused_norm_rope import (
     HAS_TRITON,
-    fused_qkv_norm_rope,
-    reference_qkv_norm_rope,
+    fused_packed_qk_norm_rope,
+    reference_packed_qk_norm_rope,
 )
 
 
@@ -46,12 +46,12 @@ def _clone_with_grad(*tensors):
 
 
 def test_reference_gradients_are_nonzero():
-    """Baseline: reference_qkv_norm_rope must produce valid grads."""
+    """Baseline: reference_packed_qk_norm_rope must produce valid grads."""
     B, L, H, D = 1, 16, 8, 64
     qkv, q_w, k_w, cos, sin = _make_inputs(B, L, H, D, torch.float32, "cpu")
     qkv_r, q_w_r, k_w_r = _clone_with_grad(qkv, q_w, k_w)
 
-    out = reference_qkv_norm_rope(qkv_r, q_w_r, k_w_r, cos, sin)
+    out = reference_packed_qk_norm_rope(qkv_r, q_w_r, k_w_r, cos, sin)
     out.sum().backward()
 
     assert qkv_r.grad is not None, "qkv grad should exist"
@@ -73,12 +73,12 @@ def test_reference_gradients_are_nonzero():
     reason="requires triton + CUDA",
 )
 def test_fused_gradients_exist():
-    """fused_qkv_norm_rope must produce non-None, non-zero gradients."""
+    """fused_packed_qk_norm_rope must produce non-None, non-zero gradients."""
     B, L, H, D = 1, 16, 8, 64
     qkv, q_w, k_w, cos, sin = _make_inputs(B, L, H, D, torch.bfloat16, "cuda")
     qkv_f, q_w_f, k_w_f = _clone_with_grad(qkv.cuda(), q_w.cuda(), k_w.cuda())
 
-    out = fused_qkv_norm_rope(qkv_f, q_w_f, k_w_f, cos, sin)
+    out = fused_packed_qk_norm_rope(qkv_f, q_w_f, k_w_f, cos, sin)
     out.sum().backward()
 
     assert qkv_f.grad is not None, (
@@ -123,12 +123,12 @@ def test_fused_gradients_match_reference(dtype, B, L, H, D):
 
     # Reference
     qkv_r, q_w_r, k_w_r = _clone_with_grad(qkv, q_w, k_w)
-    out_r = reference_qkv_norm_rope(qkv_r, q_w_r, k_w_r, cos_cuda, sin_cuda)
+    out_r = reference_packed_qk_norm_rope(qkv_r, q_w_r, k_w_r, cos_cuda, sin_cuda)
     out_r.sum().backward()
 
     # Fused
     qkv_f, q_w_f, k_w_f = _clone_with_grad(qkv, q_w, k_w)
-    out_f = fused_qkv_norm_rope(qkv_f, q_w_f, k_w_f, cos_cuda, sin_cuda)
+    out_f = fused_packed_qk_norm_rope(qkv_f, q_w_f, k_w_f, cos_cuda, sin_cuda)
     out_f.sum().backward()
 
     # Compare gradients (float32 comparison, loose tolerance for bfloat16)
@@ -163,7 +163,7 @@ def test_v_gradient_passthrough():
     qkv, q_w, k_w, cos, sin = _make_inputs(B, L, H, D, torch.bfloat16, "cuda")
     qkv_f, q_w_f, k_w_f = _clone_with_grad(qkv, q_w, k_w)
 
-    out = fused_qkv_norm_rope(qkv_f, q_w_f, k_w_f, cos, sin)
+    out = fused_packed_qk_norm_rope(qkv_f, q_w_f, k_w_f, cos, sin)
 
     # Backprop a gradient that only has signal in the V slice
     grad = torch.zeros_like(out)
@@ -188,13 +188,13 @@ def test_v_gradient_passthrough():
 
 
 def test_reference_fallback_gradients_cpu():
-    """reference_qkv_norm_rope on CPU must have valid grads (fallback path)."""
+    """reference_packed_qk_norm_rope on CPU must have valid grads (fallback path)."""
     B, L, H, D = 1, 8, 4, 32
     qkv, q_w, k_w, cos, sin = _make_inputs(B, L, H, D, torch.float32, "cpu")
     qkv_r, q_w_r, k_w_r = _clone_with_grad(qkv, q_w, k_w)
 
     # This exercises the PyTorch reference path (same as fused fallback when no Triton)
-    out = reference_qkv_norm_rope(qkv_r, q_w_r, k_w_r, cos, sin)
+    out = reference_packed_qk_norm_rope(qkv_r, q_w_r, k_w_r, cos, sin)
     out.sum().backward()
 
     assert qkv_r.grad is not None and qkv_r.grad.norm() > 0
