@@ -4,6 +4,7 @@
 
 ## Table of contents / 目次
 
+- [DINOv3 auxiliary perceptual loss](#dinov3-auxiliary-perceptual-loss--dinov3補助知覚loss)
 - [Using configuration files to specify training options](#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定)
 - [How to specify `network_args`](#how-to-specify-network_args--network_argsの指定方法)
 - [LoRA+](#lora)
@@ -19,6 +20,36 @@
 - [Schedule Free Optimizer](#schedule-free-optimizer--スケジュールフリーオプティマイザ)
 
 [Post-Hoc EMA merging for LoRA](tools.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ) is described in the [Tools](tools.md) document.
+
+## DINOv3 auxiliary perceptual loss / DINOv3補助知覚Loss
+
+HiDream-O1 training can add an optional SenseCraft DINOv3 perceptual loss on top of the normal model loss. This is disabled by default. The shared base trainer only keeps an auxiliary-loss hook; the DINO implementation and CLI options are HiDream-O1-specific because they depend on converting predicted pixel patch tokens back to RGB images.
+
+Install the optional dependency before enabling it:
+
+```bash
+uv pip install ".[hidream_o1]"
+```
+
+Basic options:
+
+- `--dino_loss_weight N`: enable the loss and add `N * dino_loss` to the normal loss.
+- `--dino_loss_backend vit|convnext`: choose the SenseCraft DINOv3 backend. Default is `vit`.
+- `--dino_loss_model_type NAME`: DINO model type. Defaults to `small` for ViT and `tiny` for ConvNeXt.
+- `--dino_loss_layer N`: feature layer. Defaults to `-4` for ViT and `-1` for ConvNeXt.
+- `--dino_loss_feature_mode all|patch|cls|both`: ViT token selection. Default is `patch`, which drops CLS/register tokens and compares patch features.
+- `--dino_loss_resize N`: resize RGB tensors to `NxN` before DINO. Default is `224`; set `0` to disable resizing.
+- `--dino_loss_use_gram`: use Gram feature loss. By default direct normalized feature MSE is used.
+- `--dino_loss_no_norm`: disable L2 normalization of DINO features.
+- `--dino_loss_every_n_steps N`: compute the DINO loss every N optimizer steps.
+
+For character/style LoRA training, start conservatively:
+
+```bash
+--dino_loss_weight 0.02 --dino_loss_backend vit --dino_loss_model_type small --dino_loss_layer -4 --dino_loss_feature_mode patch --dino_loss_resize 224
+```
+
+The base loss is logged as `loss/base`, while the auxiliary values are logged as `loss/dino` and `loss/dino_weighted`.
 
 ## Using configuration files to specify training options / 設定ファイルを使用した学習オプションの指定
 
