@@ -12,6 +12,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_HUNYUAN_VIDEO_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL,
     ARCHITECTURE_KANDINSKY5_FULL,
+    ARCHITECTURE_LENS_FULL,
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_WAN_FULL,
     ARCHITECTURE_Z_IMAGE_FULL,
@@ -242,6 +243,17 @@ def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
     save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
+def save_latent_cache_lens(item_info: ItemInfo, latent: torch.Tensor):
+    """Lens architecture. No control latent is supported."""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+
+    _, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_LENS_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -368,6 +380,19 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     sd[f"varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
+
+
+def save_text_encoder_output_cache_lens(item_info: ItemInfo, embeds: list[torch.Tensor]):
+    """Lens architecture. Saves selected GPT-OSS layer features as varlen tensors."""
+    assert len(embeds) > 0, "embeds should not be empty"
+
+    sd = {}
+    for i, embed in enumerate(embeds):
+        assert embed.dim() == 2, f"embed should be 2D tensor (feature, hidden_size), got {embed.shape}"
+        dtype_str = dtype_to_str(embed.dtype)
+        sd[f"varlen_lens_ctx_{i}_{dtype_str}"] = embed.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_LENS_FULL)
 
 
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):

@@ -18,7 +18,6 @@ from safetensors import safe_open
 from PIL import Image
 import cv2
 import numpy as np
-import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
 from musubi_tuner.dataset import image_video_dataset
@@ -48,6 +47,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+class _LazyTorchvisionFunctional:
+    def __getattr__(self, name):
+        import torchvision.transforms.functional as functional
+
+        globals()["TF"] = functional
+        return getattr(functional, name)
+
+
+TF = _LazyTorchvisionFunctional()
 
 
 class GenerationSettings:

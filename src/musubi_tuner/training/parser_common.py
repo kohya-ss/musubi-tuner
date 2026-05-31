@@ -396,8 +396,8 @@ def _add_memory_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--disable_numpy_memmap",
         action="store_true",
-        help="Disable numpy memory mapping for model loading. Only for Wan, FramePack, Qwen-Image and FLUX.2. Increases RAM usage but speeds up model loading in some cases."
-        " / モデル読み込み時のnumpyメモリマッピングを無効にします。Wan、FramePack、Qwen-Image、FLUX.2で有効です。RAM使用量が増えますが、場合によってはモデルの読み込みが高速化されます。",
+        help="Disable numpy memory mapping for model loading. Only for Wan, FramePack, Qwen-Image, FLUX.2 and Lens. Increases RAM usage but speeds up model loading in some cases."
+        " / モデル読み込み時のnumpyメモリマッピングを無効にします。Wan、FramePack、Qwen-Image、FLUX.2、Lensで有効です。RAM使用量が増えますが、場合によってはモデルの読み込みが高速化されます。",
     )
 
 

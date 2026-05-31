@@ -43,7 +43,6 @@ from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid
 
 import logging
 
@@ -984,11 +983,15 @@ class NetworkTrainer:
 
         if video.shape[2] == 1:
             # In Qwen-Image-Layered, video is (N, C, 1, H, W) where N=Layers, otherwise (1, C, 1, H, W)
+            from musubi_tuner.hv_generate_video import save_images_grid
+
             image_paths = save_images_grid(video, save_dir, save_path, n_rows=video.shape[0], create_subdir=False)
             if wandb_tracker is not None and wandb is not None:
                 for image_path in image_paths:
                     wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)
         else:
+            from musubi_tuner.hv_generate_video import save_videos_grid
+
             video_path = os.path.join(save_dir, save_path) + ".mp4"
             save_videos_grid(video, video_path)
             if wandb_tracker is not None and wandb is not None:
@@ -1388,8 +1391,8 @@ class NetworkTrainer:
 
         if args.disable_numpy_memmap:
             logger.info(
-                "Disabling numpy memory mapping for model loading (for Wan, FramePack and Qwen-Image). This may lead to higher memory usage but can speed up loading in some cases."
-                " / モデル読み込み時のnumpyメモリマッピングを無効にします（Wan、FramePack、Qwen-Imageでのみ有効）。これによりメモリ使用量が増える可能性がありますが、場合によっては読み込みが高速化されることがあります"
+                "Disabling numpy memory mapping for model loading (for Wan, FramePack, Qwen-Image, FLUX.2 and Lens). This may lead to higher memory usage but can speed up loading in some cases."
+                " / モデル読み込み時のnumpyメモリマッピングを無効にします（Wan、FramePack、Qwen-Image、FLUX.2、Lensで有効）。これによりメモリ使用量が増える可能性がありますが、場合によっては読み込みが高速化されることがあります"
             )
 
         # check model specific arguments

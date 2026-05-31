@@ -21,7 +21,6 @@ lycoris_available = find_spec("lycoris") is not None
 from musubi_tuner.networks import lora_flux_2
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, setup_parser_compile, synchronize_device
-from musubi_tuner.wan_generate_video import merge_lora_weights
 
 import logging
 
@@ -330,6 +329,8 @@ def load_dit_model(
     # merge LoRA weights
     if args.lycoris:
         if args.lora_weight is not None and len(args.lora_weight) > 0:
+            from musubi_tuner.wan_generate_video import merge_lora_weights
+
             merge_lora_weights(
                 lora_flux_2,
                 model,
@@ -941,6 +942,8 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     if first_prompt_args.lora_weight is not None and len(first_prompt_args.lora_weight) > 0:
         logger.info("Merging LoRA weights into DiT model...")
+        from musubi_tuner.wan_generate_video import merge_lora_weights
+
         merge_lora_weights(
             lora_flux_2,
             dit_model,
