@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, Sequence, TYPE_CHECKING, Union
 
 import torch
 from safetensors.torch import save_file
@@ -9,6 +9,7 @@ from safetensors.torch import save_file
 from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_FRAMEPACK_FULL,
     ARCHITECTURE_FLUX_KONTEXT_FULL,
+    ARCHITECTURE_HIDREAM_O1_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL,
     ARCHITECTURE_KANDINSKY5_FULL,
@@ -242,6 +243,35 @@ def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
     save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
+def save_pixel_cache_hidream_o1(
+    item_info: ItemInfo, pixel_tokens: torch.Tensor, control_pixel_tokens: Optional[Union[list[torch.Tensor], torch.Tensor]] = None
+):
+    """HiDream-O1 architecture. Cache normalized 32x32 pixel patch tokens."""
+    assert pixel_tokens.dim() == 3, "pixel_tokens should be 3D tensor (height_patches, width_patches, patch_dim)"
+
+    height_patches, width_patches, _ = pixel_tokens.shape
+    dtype_str = dtype_to_str(pixel_tokens.dtype)
+    sd = {f"latents_1x{height_patches}x{width_patches}_{dtype_str}": pixel_tokens.detach().cpu().contiguous()}
+
+    if control_pixel_tokens is not None:
+        if torch.is_tensor(control_pixel_tokens):
+            assert control_pixel_tokens.dim() == 4, (
+                "control_pixel_tokens should be 4D tensor (num_controls, height_patches, width_patches, patch_dim)"
+            )
+            control_pixel_tokens = list(control_pixel_tokens)
+        assert all(cl.dim() == 3 for cl in control_pixel_tokens), (
+            "control_pixel_tokens should contain 3D tensors (height_patches, width_patches, patch_dim)"
+        )
+        for i, cl in enumerate(control_pixel_tokens):
+            control_height_patches, control_width_patches, _ = cl.shape
+            control_dtype_str = dtype_to_str(cl.dtype)
+            sd[f"latents_control_{i}_{control_height_patches}x{control_width_patches}_{control_dtype_str}"] = (
+                cl.detach().cpu().contiguous()
+            )
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_HIDREAM_O1_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -370,7 +400,51 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
-def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
+def save_text_encoder_output_cache_hidream_o1(
+    item_info: ItemInfo,
+    input_ids: torch.Tensor,
+    input_embeds: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.Tensor] = None,
+    token_types: Optional[torch.Tensor] = None,
+    pixel_values: Optional[torch.Tensor] = None,
+    image_grid_thw: Optional[torch.Tensor] = None,
+):
+    """HiDream-O1 architecture. Cache tokenized prompt and optional initial text token embeddings."""
+    sd = {f"varlen_input_ids_{dtype_to_str(input_ids.dtype)}": input_ids.detach().cpu()}
+    if input_embeds is not None:
+        sd[f"varlen_input_embeds_{dtype_to_str(input_embeds.dtype)}"] = input_embeds.detach().cpu()
+    if position_ids is not None:
+        sd[f"varlen_position_ids_{dtype_to_str(position_ids.dtype)}"] = position_ids.detach().cpu()
+    if token_types is not None:
+        sd[f"varlen_token_types_{dtype_to_str(token_types.dtype)}"] = token_types.detach().cpu()
+    if pixel_values is not None:
+        sd[f"varlen_pixel_values_{dtype_to_str(pixel_values.dtype)}"] = pixel_values.detach().cpu()
+    if image_grid_thw is not None:
+        sd[f"varlen_image_grid_thw_{dtype_to_str(image_grid_thw.dtype)}"] = image_grid_thw.detach().cpu()
+
+    drop_existing_key_prefixes = []
+    if input_embeds is None:
+        drop_existing_key_prefixes.append("varlen_input_embeds_")
+    if position_ids is None:
+        drop_existing_key_prefixes.append("varlen_position_ids_")
+    if token_types is None:
+        drop_existing_key_prefixes.append("varlen_token_types_")
+    if pixel_values is None:
+        drop_existing_key_prefixes.append("varlen_pixel_values_")
+    if image_grid_thw is None:
+        drop_existing_key_prefixes.append("varlen_image_grid_thw_")
+
+    save_text_encoder_output_cache_common(
+        item_info, sd, ARCHITECTURE_HIDREAM_O1_FULL, drop_existing_key_prefixes=drop_existing_key_prefixes
+    )
+
+
+def save_text_encoder_output_cache_common(
+    item_info: ItemInfo,
+    sd: dict[str, torch.Tensor],
+    arch_fullname: str,
+    drop_existing_key_prefixes: Optional[Sequence[str]] = None,
+):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
         if torch.isnan(value).any():
@@ -385,11 +459,15 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
 
     if os.path.exists(item_info.text_encoder_output_cache_path):
         # load existing cache and update metadata
+        drop_existing_key_prefixes = drop_existing_key_prefixes or []
         with safetensors_utils.MemoryEfficientSafeOpen(item_info.text_encoder_output_cache_path) as f:
             existing_metadata = f.metadata()
             for key in f.keys():
-                if key not in sd:  # avoid overwriting by existing cache, we keep the new one
-                    sd[key] = f.get_tensor(key)
+                if key in sd:
+                    continue
+                if any(key.startswith(prefix) for prefix in drop_existing_key_prefixes):
+                    continue
+                sd[key] = f.get_tensor(key)
 
         assert existing_metadata["architecture"] == metadata["architecture"], "architecture mismatch"
         if existing_metadata["caption1"] != metadata["caption1"]:
