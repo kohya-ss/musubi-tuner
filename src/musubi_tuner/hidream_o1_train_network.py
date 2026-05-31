@@ -320,7 +320,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             logger.info(f"Loaded HiDream-O1 scaled fp8 optimized weights: {info}")
 
         if not hasattr(model, "enable_gradient_checkpointing"):
-            model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable()
+            # The decoder loop passes keyword arguments to the checkpointed layer, which reentrant
+            # checkpointing rejects, so non-reentrant checkpointing must be requested explicitly.
+            model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
 
         return model
 
