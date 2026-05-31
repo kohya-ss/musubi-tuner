@@ -126,8 +126,6 @@ class NetworkTrainer:
             logs["max_norm/average_key_norm"] = mean_norm
             logs["max_norm/max_key_norm"] = maximum_norm
 
-        logs.update(getattr(self, "_latest_aux_loss_logs", {}))
-
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
             if lr_descriptions is not None:
@@ -144,13 +142,13 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("dadapt") or "prodigy" in args.optimizer_type.lower():
+            if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower().endswith("Prodigy".lower()):
                 # tracking d*lr value
                 logs[f"lr/d*lr/{lr_desc}"] = (
                     lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
                 )
 
-            if args.optimizer_type.lower().endswith("prodigyplusschedulefree") and optimizer is not None:
+            if args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower()) and optimizer is not None:
                 # tracking d*lr value of unet.
                 logs[f"lr/d*lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
                 if "effective_lr" in optimizer.param_groups[i]:
@@ -605,19 +603,19 @@ class NetworkTrainer:
                     t = torch.sigmoid(-logsnr / 2)
 
                 elif args.timestep_sampling.startswith("qinglong"):
-                    # Qinglong triple hybrid sampling.
+                    # Qinglong triple hybrid sampling: mid_shift:logsnr:logsnr2 = .80:.075:.125
                     # First decide which method to use for each sample independently
                     decision_t = torch.rand((batch_size,), device=device)
 
-                    # Flux uses 79% mid_shift, 11% logsnr, 10% logsnr2. Qwen skips the logsnr middle bucket.
-                    mid_mask = decision_t < 0.79 if args.timestep_sampling == "qinglong_flux" else decision_t < 0.95
-                    logsnr_mask = (decision_t >= 0.79) & (decision_t < 0.9)
-                    logsnr_mask2 = decision_t >= 0.9 if args.timestep_sampling == "qinglong_flux" else decision_t >= 0.95
+                    # Create masks based on decision_t: .80 for mid_shift, 0.075 for logsnr, and 0.125 for logsnr2
+                    mid_mask = decision_t < 0.80  # 80% for mid_shift
+                    logsnr_mask = (decision_t >= 0.80) & (decision_t < 0.875)  # 7.5% for logsnr
+                    logsnr_mask2 = decision_t >= 0.875  # 12.5% for logsnr with -logit_mean
 
                     # Initialize output tensor
                     t = torch.zeros((batch_size,), device=device)
 
-                    # Generate mid_shift samples for selected indices.
+                    # Generate mid_shift samples for selected indices (80%)
                     if mid_mask.any():
                         mid_count = mid_mask.sum().item()
                         h, w = latents.shape[-2:]
@@ -633,8 +631,8 @@ class NetworkTrainer:
 
                         t[mid_mask] = t_mid
 
-                    # Generate logsnr samples for selected indices.
-                    if args.timestep_sampling != "qinglong_qwen" and logsnr_mask.any():
+                    # Generate logsnr samples for selected indices (7.5%)
+                    if logsnr_mask.any():
                         logsnr_count = logsnr_mask.sum().item()
                         logsnr = rand_logsnr(
                             logsnr_count,
@@ -646,7 +644,7 @@ class NetworkTrainer:
 
                         t[logsnr_mask] = t_logsnr
 
-                    # Generate logsnr2 samples with -logit_mean for selected indices.
+                    # Generate logsnr2 samples with -logit_mean for selected indices (12.5%)
                     if logsnr_mask2.any():
                         logsnr2_count = logsnr_mask2.sum().item()
                         logsnr2 = rand_logsnr(
@@ -1107,16 +1105,6 @@ class NetworkTrainer:
     # Internal extension points — no API stability guarantees.
     # Subclasses live in this repo; if you fork, expect breakage on updates.
 
-    def prepare_network_kwargs(
-        self,
-        args: argparse.Namespace,
-        train_dataset_group: Any,
-        network_module: Any,
-        net_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Optionally adjust network factory kwargs before creating the network."""
-        return net_kwargs
-
     def process_batch(
         self,
         args: argparse.Namespace,
@@ -1150,24 +1138,8 @@ class NetworkTrainer:
         )
 
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
-        if not isinstance(output, DiTOutput):
-            model_pred, target = output
-            output = DiTOutput(pred=model_pred, target=target)
 
-        loss, loss_metrics = self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype)
-        loss = self.apply_auxiliary_losses(
-            args,
-            accelerator,
-            loss,
-            output.pred,
-            output.target,
-            batch,
-            latents,
-            timesteps,
-            network_dtype,
-            global_step,
-        )
-        return loss, loss_metrics
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype)
 
     def compute_loss(
         self,
@@ -1195,21 +1167,6 @@ class NetworkTrainer:
         if weighting is not None:
             loss = loss * weighting
         return loss.mean(), {}
-
-    def apply_auxiliary_losses(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        loss: torch.Tensor,
-        model_pred: torch.Tensor,
-        target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
-        global_step: int,
-    ) -> torch.Tensor:
-        return loss
 
     def on_transformer_loaded(
         self,
@@ -1344,7 +1301,7 @@ class NetworkTrainer:
         accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
         sample_parameters, vae = self._prepare_sampling(args, accelerator, vae_dtype)
         transformer = self._load_dit_and_swap(args, accelerator, dit_weight_dtype)
-        network = self._build_network(args, accelerator, transformer, vae, weight_dtype, train_dataset_group)
+        network = self._build_network(args, accelerator, transformer, vae, weight_dtype)
         if network is None:
             return
         (
@@ -1555,7 +1512,7 @@ class NetworkTrainer:
             transformer.move_to_device_except_swap_blocks(accelerator.device)
         return transformer
 
-    def _build_network(self, args, accelerator, transformer, vae, weight_dtype, train_dataset_group):
+    def _build_network(self, args, accelerator, transformer, vae, weight_dtype):
         # load network module for differential training
         # Allow short paths like `--network_module networks.lora` by putting the musubi_tuner
         # package dir on sys.path. __file__ is under musubi_tuner/training/, so step up one level.
@@ -1588,7 +1545,6 @@ class NetworkTrainer:
             for net_arg in args.network_args:
                 key, value = net_arg.split("=")
                 net_kwargs[key] = value
-        net_kwargs = self.prepare_network_kwargs(args, train_dataset_group, network_module, net_kwargs)
 
         if args.dim_from_weights:
             logger.info(f"Loading network from weights: {args.dim_from_weights}")
