@@ -591,17 +591,18 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
                         args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
                     )
 
-                    model_pred, target = self.call_dit(
+                    dit_output = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
                     )
+                    model_pred, target = dit_output.pred, dit_output.target
                     loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
 
                     if weighting is not None:
                         loss = loss * weighting
 
                     loss = loss.mean()
-                    loss = self.apply_auxiliary_losses(
-                        args, accelerator, loss, model_pred, target, batch, latents, timesteps, dit_dtype, global_step
+                    loss, dino_logs = self.apply_dino_loss(
+                        args, loss, model_pred, target, dit_output.extra["pixel_grid_hw"], global_step
                     )
 
                     accelerator.backward(loss)
@@ -669,6 +670,7 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, None, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
+                    logs.update(dino_logs)
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:

@@ -11,7 +11,14 @@ from musubi_tuner.hidream_o1 import hidream_o1_utils
 from musubi_tuner.hidream_o1.pipeline import TIMESTEP_TOKEN_NUM, generate_image
 from musubi_tuner.hidream_o1.utils import get_rope_index_fix_point
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from musubi_tuner.hv_train_network import NetworkTrainer, get_sigmas, load_prompts, read_config_from_file, setup_parser_common
+from musubi_tuner.hv_train_network import (
+    DiTOutput,
+    NetworkTrainer,
+    get_sigmas,
+    load_prompts,
+    read_config_from_file,
+    setup_parser_common,
+)
 from musubi_tuner.utils import model_utils
 
 logger = logging.getLogger(__name__)
@@ -51,7 +58,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.use_flash_attn = False
         self.model_type = "full"
         self.dino_loss_fn = None
-        self._latest_aux_loss_logs: dict[str, float] = {}
 
     @property
     def architecture(self) -> str:
@@ -113,7 +119,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             choices = ", ".join(name.lower() for name in enum_class.__members__.keys())
             raise ValueError(f"Invalid DINO model type '{model_type}'. Available choices: {choices}")
 
-    def _get_dino_loss_fn(self, args: argparse.Namespace, accelerator: Accelerator) -> torch.nn.Module:
+    def _get_dino_loss_fn(self, args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
         if self.dino_loss_fn is not None:
             return self.dino_loss_fn
 
@@ -151,7 +157,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 'HiDream-O1 DINO auxiliary loss requires SenseCraft with DINOv3 support. Install it with: uv pip install ".[hidream_o1]"'
             ) from e
 
-        self.dino_loss_fn.requires_grad_(False).eval().to(accelerator.device)
+        self.dino_loss_fn.requires_grad_(False).eval().to(device)
         logger.info(
             "HiDream-O1 DINO auxiliary loss enabled: "
             "backend=%s, model_type=%s, layer=%s, feature_mode=%s, weight=%s, resize=%s, use_norm=%s, use_gram=%s",
@@ -581,54 +587,77 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         model_pred = torch.cat(model_preds, dim=0)
         target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
-        return model_pred, target
+        # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
+        # DINO auxiliary loss without needing the latents tensor itself.
+        return DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        loss, metrics = super().compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        loss, dino_logs = self.apply_dino_loss(
+            args, loss, output.pred, output.target, output.extra["pixel_grid_hw"], global_step
+        )
+        if dino_logs:
+            metrics = {**metrics, **dino_logs}
+        return loss, metrics
 
     def prepare_dino_loss_images(
         self,
-        args: argparse.Namespace,
         model_pred: torch.Tensor,
         target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
+        pixel_grid_hw: tuple[int, int],
     ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-        if model_pred.ndim == 3 and target.ndim == 3 and latents.ndim == 4:
-            height = latents.shape[1] * hidream_o1_utils.PATCH_SIZE
-            width = latents.shape[2] * hidream_o1_utils.PATCH_SIZE
-            pred_images = hidream_o1_utils.unpatchify_pixels(model_pred, height, width)
-            target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
-            return pred_images, target_images
+        if model_pred.ndim != 3 or target.ndim != 3:
+            return None
+        height_patches, width_patches = pixel_grid_hw
+        height = height_patches * hidream_o1_utils.PATCH_SIZE
+        width = width_patches * hidream_o1_utils.PATCH_SIZE
+        pred_images = hidream_o1_utils.unpatchify_pixels(model_pred, height, width)
+        target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
+        return pred_images, target_images
 
-        return None
-
-    def apply_auxiliary_losses(
+    def apply_dino_loss(
         self,
         args: argparse.Namespace,
-        accelerator: Accelerator,
         loss: torch.Tensor,
         model_pred: torch.Tensor,
         target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
+        pixel_grid_hw: tuple[int, int],
         global_step: int,
-    ) -> torch.Tensor:
-        self._latest_aux_loss_logs = {}
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Add the optional SenseCraft DINOv3 perceptual loss to ``loss``.
+
+        Shared by the LoRA trainer (via ``compute_loss``) and the full-finetune
+        loop. Returns ``(possibly_augmented_loss, logs)``; ``logs`` is empty when
+        the DINO term is disabled or skipped for this step.
+
+        The DINO perceptual loss is not inherently HiDream-O1 specific and could
+        in principle be reused by other architectures; it is scoped to HiDream-O1
+        here to keep the surface area small. If a second consumer appears, this
+        helper (and ``prepare_dino_loss_images`` / RGB reconstruction) is a
+        candidate to lift into shared training infrastructure.
+        """
         if args.dino_loss_weight <= 0:
-            return loss
+            return loss, {}
         if args.dino_loss_every_n_steps < 1:
             raise ValueError("--dino_loss_every_n_steps must be >= 1")
         if args.dino_loss_every_n_steps > 1 and global_step % args.dino_loss_every_n_steps != 0:
-            return loss
+            return loss, {}
 
-        images = self.prepare_dino_loss_images(args, model_pred, target, batch, latents, timesteps, network_dtype)
+        images = self.prepare_dino_loss_images(model_pred, target, pixel_grid_hw)
         if images is None:
             raise ValueError(
                 "HiDream-O1 DINO auxiliary loss is enabled, but RGB image tensors could not be prepared. "
                 f"model_pred shape={tuple(model_pred.shape)}, target shape={tuple(target.shape)}, "
-                f"latents shape={tuple(latents.shape)}."
+                f"pixel_grid_hw={pixel_grid_hw}."
             )
 
         pred_images, target_images = images
@@ -640,7 +669,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             pred_images = torch.nn.functional.interpolate(pred_images, size=size, mode="bilinear", align_corners=False)
             target_images = torch.nn.functional.interpolate(target_images, size=size, mode="bilinear", align_corners=False)
 
-        dino_loss_fn = self._get_dino_loss_fn(args, accelerator)
+        dino_loss_fn = self._get_dino_loss_fn(args, model_pred.device)
         if args.dino_loss_backend == "vit" and args.dino_loss_feature_mode != "all":
             dino_loss = self._compute_vit_dino_feature_loss(
                 dino_loss_fn,
@@ -655,12 +684,12 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         weighted_dino_loss = dino_loss * args.dino_loss_weight
         total_loss = loss + weighted_dino_loss.to(dtype=loss.dtype)
 
-        self._latest_aux_loss_logs = {
+        logs = {
             "loss/base": float(loss.detach().item()),
             "loss/dino": float(dino_loss.detach().item()),
             "loss/dino_weighted": float(weighted_dino_loss.detach().item()),
         }
-        return total_loss
+        return total_loss, logs
 
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
