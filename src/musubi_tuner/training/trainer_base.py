@@ -142,17 +142,19 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("dadapt") or args.optimizer_type.lower().endswith("prodigy"):
-                # tracking d*lr value
-                logs[f"lr/d*lr/{lr_desc}"] = (
-                    lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-                )
-
+            # Check prodigyplusschedulefree first: it is handled via optimizer.param_groups below and does not
+            # expose `d` on lr_scheduler.optimizers, so it must not fall into the substring "prodigy" path.
             if args.optimizer_type.lower().endswith("prodigyplusschedulefree") and optimizer is not None:
                 # tracking d*lr value of unet.
                 logs[f"lr/d*lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
                 if "effective_lr" in optimizer.param_groups[i]:
                     logs[f"lr/d*eff_lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["effective_lr"]
+
+            elif args.optimizer_type.lower().startswith("dadapt") or "prodigy" in args.optimizer_type.lower():
+                # tracking d*lr value (Prodigy, Prodigy_Adv, Prodigy_Lion_Adv, etc.)
+                logs[f"lr/d*lr/{lr_desc}"] = (
+                    lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
+                )
 
         return logs
 
@@ -1152,9 +1154,7 @@ class NetworkTrainer:
             model_pred, target = output
             output = DiTOutput(pred=model_pred, target=target)
 
-        loss, loss_metrics = self.compute_loss(
-            args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step
-        )
+        loss, loss_metrics = self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
         return loss, loss_metrics
 
     def compute_loss(
