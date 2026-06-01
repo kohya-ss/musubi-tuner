@@ -85,9 +85,6 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
         if specified_lora_args:
             raise ValueError("HiDream-O1 full finetuning does not use LoRA/network arguments: " + ", ".join(specified_lora_args))
 
-    def _dataset_has_control(self, train_dataset_group) -> bool:
-        return any(getattr(dataset, "has_control", False) for dataset in train_dataset_group.datasets)
-
     def _sample_prompts_use_visual(self, sample_parameters) -> bool:
         if sample_parameters is None:
             return False
@@ -212,7 +209,9 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
             blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
         )
-        has_control = self._dataset_has_control(train_dataset_group)
+        # Driven by --task (set on self._control_training in handle_model_specific_args). Consistency with the
+        # actual dataset is enforced in call_dit, shared with the LoRA trainer.
+        has_control = self._control_training
 
         if train_dataset_group.num_train_items == 0:
             raise ValueError(

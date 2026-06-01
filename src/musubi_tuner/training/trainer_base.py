@@ -1107,16 +1107,6 @@ class NetworkTrainer:
     # Internal extension points — no API stability guarantees.
     # Subclasses live in this repo; if you fork, expect breakage on updates.
 
-    def prepare_network_kwargs(
-        self,
-        args: argparse.Namespace,
-        train_dataset_group: Any,
-        network_module: Any,
-        net_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Optionally adjust network factory kwargs before creating the network."""
-        return net_kwargs
-
     def process_batch(
         self,
         args: argparse.Namespace,
@@ -1321,7 +1311,7 @@ class NetworkTrainer:
         accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
         sample_parameters, vae = self._prepare_sampling(args, accelerator, vae_dtype)
         transformer = self._load_dit_and_swap(args, accelerator, dit_weight_dtype)
-        network = self._build_network(args, accelerator, transformer, vae, weight_dtype, train_dataset_group)
+        network = self._build_network(args, accelerator, transformer, vae, weight_dtype)
         if network is None:
             return
         (
@@ -1532,7 +1522,7 @@ class NetworkTrainer:
             transformer.move_to_device_except_swap_blocks(accelerator.device)
         return transformer
 
-    def _build_network(self, args, accelerator, transformer, vae, weight_dtype, train_dataset_group):
+    def _build_network(self, args, accelerator, transformer, vae, weight_dtype):
         # load network module for differential training
         # Allow short paths like `--network_module networks.lora` by putting the musubi_tuner
         # package dir on sys.path. __file__ is under musubi_tuner/training/, so step up one level.
@@ -1565,7 +1555,6 @@ class NetworkTrainer:
             for net_arg in args.network_args:
                 key, value = net_arg.split("=")
                 net_kwargs[key] = value
-        net_kwargs = self.prepare_network_kwargs(args, train_dataset_group, network_module, net_kwargs)
 
         if args.dim_from_weights:
             logger.info(f"Loading network from weights: {args.dim_from_weights}")

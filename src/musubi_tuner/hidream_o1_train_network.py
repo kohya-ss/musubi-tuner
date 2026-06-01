@@ -1,6 +1,6 @@
 import argparse
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -71,7 +71,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.dit_dtype = torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
-        self._control_training = False
+        self._control_training = args.task == "i2i"
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
         self.default_guidance_scale = 0.0 if self.model_type == "dev" else 5.0
@@ -91,20 +91,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
         if args.fp8_base and not getattr(args, "fp8_scaled", False):
             raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
-
-    def prepare_network_kwargs(
-        self,
-        args: argparse.Namespace,
-        train_dataset_group: Any,
-        network_module: Any,
-        net_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        has_control = any(getattr(dataset, "has_control", False) for dataset in train_dataset_group.datasets)
-        net_kwargs = dict(net_kwargs)
-        net_kwargs["hidream_has_control"] = str(has_control)
-        target = "I2I/control" if has_control else "T2I"
-        logger.info(f"HiDream-O1 LoRA target is selected from dataset: {target}")
-        return net_kwargs
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         return load_prompts(sample_prompts)
@@ -332,6 +318,9 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
 
+        # Tag the model with the training task so the LoRA factory can pick target modules from it.
+        model.hidream_o1_task = args.task
+
         return model
 
     def compile_transformer(self, args, transformer):
@@ -514,6 +503,19 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             [key for key in batch.keys() if key.startswith("latents_control")],
             key=lambda key: int(key.rsplit("_", 1)[-1]) if key.rsplit("_", 1)[-1].isdigit() else 0,
         )
+
+        # Validate the declared task against the data actually present in the batch.
+        if self._control_training and not control_keys:
+            raise ValueError(
+                "HiDream-O1 --task i2i was specified, but the dataset has no control data (latents_control_* "
+                "tensors). Add control images to the dataset, or use --task t2i."
+            )
+        if not self._control_training and control_keys:
+            raise ValueError(
+                "HiDream-O1 dataset provides control data (latents_control_* tensors), but --task is t2i. "
+                "Use --task i2i to train with control/reference images."
+            )
+
         for i, input_ids in enumerate(input_ids_list):
             control_patch_shapes = []
             control_sequences = []
@@ -602,9 +604,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         loss, metrics = super().compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
-        loss, dino_logs = self.apply_dino_loss(
-            args, loss, output.pred, output.target, output.extra["pixel_grid_hw"], global_step
-        )
+        loss, dino_logs = self.apply_dino_loss(args, loss, output.pred, output.target, output.extra["pixel_grid_hw"], global_step)
         if dino_logs:
             metrics = {**metrics, **dino_logs}
         return loss, metrics
@@ -694,6 +694,14 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--model_type", type=str, default="full", choices=["full", "dev"], help="HiDream-O1 model variant")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="t2i",
+        choices=["t2i", "i2i"],
+        help="HiDream-O1 training task: 't2i' (text-to-image) or 'i2i' (image/control-conditioned). "
+        "'i2i' makes the visual encoder trainable and adds the visual modules to the LoRA target.",
+    )
     parser.add_argument(
         "--noise_scale_start",
         type=float,

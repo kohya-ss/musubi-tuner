@@ -23,12 +23,6 @@ HIDREAM_O1_I2I_TARGET_REPLACE_MODULES = HIDREAM_O1_T2I_TARGET_REPLACE_MODULES + 
 HIDREAM_O1_TARGET_REPLACE_MODULES = HIDREAM_O1_I2I_TARGET_REPLACE_MODULES + HIDREAM_O1_TIMESTEP_TARGET_REPLACE_MODULES
 
 
-def _to_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
 def create_arch_network(
     multiplier: float,
     network_dim: Optional[int],
@@ -39,13 +33,13 @@ def create_arch_network(
     neuron_dropout: Optional[float] = None,
     **kwargs,
 ):
-    has_control = _to_bool(kwargs.pop("hidream_has_control", False))
+    # The training task is tagged onto the model in the trainer's load_transformer.
+    has_control = unet.hidream_o1_task == "i2i"
 
     target_replace_modules = HIDREAM_O1_I2I_TARGET_REPLACE_MODULES if has_control else HIDREAM_O1_T2I_TARGET_REPLACE_MODULES
 
-    if has_control and kwargs.get("conv_dim", None) is None:
-        kwargs["conv_dim"] = 4
-        kwargs.setdefault("conv_alpha", 4)
+    # conv layers (e.g. 3x3) are LoRA targets only when the user passes conv_dim, matching sd-scripts.
+    # I2I users who want the visual conv layers adapted must set --network_args conv_dim=N conv_alpha=N.
 
     exclude_patterns = kwargs.get("exclude_patterns", None) or []
     if isinstance(exclude_patterns, str):
