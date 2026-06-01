@@ -142,7 +142,7 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("dadapt") or "prodigy" in args.optimizer_type.lower():
+            if args.optimizer_type.lower().startswith("dadapt") or args.optimizer_type.lower().endswith("prodigy"):
                 # tracking d*lr value
                 logs[f"lr/d*lr/{lr_desc}"] = (
                     lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
