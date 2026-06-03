@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 try:
     import triton
     import triton.language as tl
-    HAS_TRITON = True
+    # MUSUBI_DISABLE_TRITON=1 forces the pure-PyTorch reference path for debugging
+    HAS_TRITON = os.environ.get("MUSUBI_DISABLE_TRITON", "0") != "1"
 except ImportError:
     HAS_TRITON = False
 
@@ -139,6 +142,7 @@ if HAS_TRITON:
         H, L, D, D2,        # D2 = D // 2
         eps,
         BLOCK_D2: tl.constexpr,
+        STORE_DTYPE: tl.constexpr,
     ):
         pid = tl.program_id(0)
         h = pid % H
@@ -173,9 +177,8 @@ if HAS_TRITON:
         o1 = c * n1 - s * n2
         o2 = s * n1 + c * n2
 
-        # store interleaved pairs — cast back to float32; wrapper converts to original dtype
-        tl.store(out_ptr + x_base + cols * 2,     o1, mask=mask)
-        tl.store(out_ptr + x_base + cols * 2 + 1, o2, mask=mask)
+        tl.store(out_ptr + x_base + cols * 2,     o1.to(STORE_DTYPE), mask=mask)
+        tl.store(out_ptr + x_base + cols * 2 + 1, o2.to(STORE_DTYPE), mask=mask)
 
     @triton.jit
     def fused_packed_qk_norm_rope_kernel(
@@ -185,6 +188,7 @@ if HAS_TRITON:
         H, L, D, D2,        # D2 = D // 2
         eps,
         BLOCK_D2: tl.constexpr,
+        STORE_DTYPE: tl.constexpr,
     ):
         """One program per (b, l, h) row. Processes Q and K, copies V.
 
@@ -221,8 +225,8 @@ if HAS_TRITON:
         nq2 = q2 * rrms_q * wq2
         oq1 = c * nq1 - s * nq2
         oq2 = s * nq1 + c * nq2
-        tl.store(out_ptr + q_base + cols * 2,     oq1, mask=mask)
-        tl.store(out_ptr + q_base + cols * 2 + 1, oq2, mask=mask)
+        tl.store(out_ptr + q_base + cols * 2,     oq1.to(STORE_DTYPE), mask=mask)
+        tl.store(out_ptr + q_base + cols * 2 + 1, oq2.to(STORE_DTYPE), mask=mask)
 
         # --- Process K ---
         k1 = tl.load(qkv_ptr + k_base + cols * 2,     mask=mask, other=0.0).to(tl.float32)
@@ -235,8 +239,8 @@ if HAS_TRITON:
         nk2 = k2 * rrms_k * wk2
         ok1 = c * nk1 - s * nk2
         ok2 = s * nk1 + c * nk2
-        tl.store(out_ptr + k_base + cols * 2,     ok1, mask=mask)
-        tl.store(out_ptr + k_base + cols * 2 + 1, ok2, mask=mask)
+        tl.store(out_ptr + k_base + cols * 2,     ok1.to(STORE_DTYPE), mask=mask)
+        tl.store(out_ptr + k_base + cols * 2 + 1, ok2.to(STORE_DTYPE), mask=mask)
 
         # --- Copy V unchanged ---
         v1 = tl.load(qkv_ptr + v_base + cols * 2,     mask=mask, other=0.0)
@@ -260,13 +264,14 @@ if HAS_TRITON:
             B, L, H, D = x.shape
             D2 = D // 2
             BLOCK_D2 = triton.next_power_of_2(D2)
-            out_f32 = torch.empty(B, L, H, D, dtype=torch.float32, device=x.device)
+            out = torch.empty(B, L, H, D, dtype=x.dtype, device=x.device)
             fused_norm_rope_kernel[(B * L * H,)](
-                x, out_f32, weight.float(), cos, sin,
+                x, out, weight.float(), cos, sin,
                 H, L, D, D2, eps,
                 BLOCK_D2=BLOCK_D2,
+                STORE_DTYPE=tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16 if x.dtype == torch.float16 else tl.float32,
             )
-            return out_f32.to(x.dtype)
+            return out
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -290,13 +295,14 @@ if HAS_TRITON:
             B, L, _, H, D = qkv.shape
             D2 = D // 2
             BLOCK_D2 = triton.next_power_of_2(D2)
-            out_f32 = torch.empty(B, L, 3, H, D, dtype=torch.float32, device=qkv.device)
+            out = torch.empty(B, L, 3, H, D, dtype=qkv.dtype, device=qkv.device)
             fused_packed_qk_norm_rope_kernel[(B * L * H,)](
-                qkv, out_f32, q_weight.float(), k_weight.float(), cos, sin,
+                qkv, out, q_weight.float(), k_weight.float(), cos, sin,
                 H, L, D, D2, eps,
                 BLOCK_D2=BLOCK_D2,
+                STORE_DTYPE=tl.bfloat16 if qkv.dtype == torch.bfloat16 else tl.float16 if qkv.dtype == torch.float16 else tl.float32,
             )
-            return out_f32.to(qkv.dtype)
+            return out
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -313,15 +319,32 @@ if HAS_TRITON:
             dq_f     = None
             dk_f     = None
 
+            _nan_debug = os.environ.get("MUSUBI_NAN_DEBUG", "0") == "1"
+            if _nan_debug:
+                def _has_nan(t, label):
+                    if torch.isnan(t).any():
+                        print(f"[PackedQKNorm bwd] NaN in {label}  shape={tuple(t.shape)}")
+                        return True
+                    return False
+                _has_nan(grad_output[:, :, 0], "grad_output[Q]")
+                _has_nan(grad_output[:, :, 1], "grad_output[K]")
+                _has_nan(grad_output[:, :, 2], "grad_output[V]")
+                _has_nan(qkv[:, :, 0], "saved qkv[Q]")
+                _has_nan(qkv[:, :, 1], "saved qkv[K]")
+
             if need_grad_qkv or need_grad_wq:
                 dnormed_q = _rope_backward(grad_output[:, :, 0].float(), cos, sin)
+                if _nan_debug: _has_nan(dnormed_q, "dnormed_q (after rope bwd)")
                 dq_f, dw_q_f = _rmsnorm_backward(qkv[:, :, 0].float(), q_weight.float(), dnormed_q, eps)
+                if _nan_debug: _has_nan(dq_f, "dq_f (after rmsnorm bwd)")
                 if need_grad_wq:
                     grad_wq = dw_q_f.to(q_weight.dtype)
 
             if need_grad_qkv or need_grad_wk:
                 dnormed_k = _rope_backward(grad_output[:, :, 1].float(), cos, sin)
+                if _nan_debug: _has_nan(dnormed_k, "dnormed_k (after rope bwd)")
                 dk_f, dw_k_f = _rmsnorm_backward(qkv[:, :, 1].float(), k_weight.float(), dnormed_k, eps)
+                if _nan_debug: _has_nan(dk_f, "dk_f (after rmsnorm bwd)")
                 if need_grad_wk:
                     grad_wk = dw_k_f.to(k_weight.dtype)
 
