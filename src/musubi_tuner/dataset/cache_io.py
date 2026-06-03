@@ -11,6 +11,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_FLUX_KONTEXT_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL,
+    ARCHITECTURE_IDEOGRAM4_FULL,
     ARCHITECTURE_KANDINSKY5_FULL,
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_WAN_FULL,
@@ -242,6 +243,18 @@ def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
     save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
+def save_latent_cache_ideogram4(item_info: ItemInfo, latent: torch.Tensor):
+    """Ideogram 4 architecture."""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+
+    _, H, W = latent.shape
+    F = 1
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -370,7 +383,27 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
+def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torch.Tensor, cache_dtype: str):
+    """Ideogram 4 architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(features.dtype)
+    sd[f"varlen_i4_llm_features_{dtype_str}"] = features.detach().cpu()
+
+    save_text_encoder_output_cache_common_with_extra_metadata(
+        item_info,
+        sd,
+        ARCHITECTURE_IDEOGRAM4_FULL,
+        {"text_cache_dtype": cache_dtype, "feature_width": str(features.shape[-1]), "num_text_tokens": str(features.shape[0])},
+    )
+
+
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
+    save_text_encoder_output_cache_common_with_extra_metadata(item_info, sd, arch_fullname, {})
+
+
+def save_text_encoder_output_cache_common_with_extra_metadata(
+    item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str, extra_metadata: dict[str, str]
+):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
         if torch.isnan(value).any():
@@ -382,7 +415,6 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
         "caption1": item_info.caption,
         "format_version": "1.0.1",
     }
-
     if os.path.exists(item_info.text_encoder_output_cache_path):
         # load existing cache and update metadata
         with safetensors_utils.MemoryEfficientSafeOpen(item_info.text_encoder_output_cache_path) as f:
@@ -403,4 +435,5 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
         text_encoder_output_dir = os.path.dirname(item_info.text_encoder_output_cache_path)
         os.makedirs(text_encoder_output_dir, exist_ok=True)
 
+    metadata.update(extra_metadata)
     safetensors_utils.mem_eff_save_file(sd, item_info.text_encoder_output_cache_path, metadata=metadata)
