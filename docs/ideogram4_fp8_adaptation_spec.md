@@ -125,12 +125,13 @@ Dependency stance:
 
 ## Weight Loading
 
-Support two inputs:
+Support explicit local component paths only. The implementation should not download Comfy-Org
+weights by `repo_id`, should not infer a remote repository layout at runtime, and should not expose
+a manual `--repo_id` argument. The docs should tell users to download the component files they need
+from https://huggingface.co/Comfy-Org/Ideogram-4, then pass the local paths, matching this repo's
+other single-file/local-weight model workflows.
 
-1. `--repo_id Comfy-Org/Ideogram-4`
-2. explicit local component paths for users who already downloaded the Comfy files
-
-Required Comfy/default component layout:
+Required Comfy component files:
 
 - conditional DiT: `diffusion_models/ideogram4_fp8_scaled.safetensors`
 - unconditional DiT: `diffusion_models/ideogram4_unconditional_fp8_scaled.safetensors`
@@ -142,24 +143,29 @@ Required Comfy/default component layout:
 Implementation rules:
 
 - Add constants:
-  - `IDEOGRAM4_COMFY_REPO_ID = "Comfy-Org/Ideogram-4"`
   - `IDEOGRAM4_OFFICIAL_REPO_ID = "ideogram-ai/ideogram-4-fp8"`
   - `IDEOGRAM4_TOKENIZER_SUBFOLDER = "tokenizer"`
   - `IDEOGRAM4_TEXT_ENCODER_CONFIG_SUBFOLDER = "text_encoder"`
-- CLI defaults:
-  - `--repo_id Comfy-Org/Ideogram-4` for component weight downloads.
+- CLI required/local-path arguments:
+  - `--dit path/to/ideogram4_fp8_scaled.safetensors`
+  - `--unconditional_dit path/to/ideogram4_unconditional_fp8_scaled.safetensors`
+  - `--text_encoder path/to/qwen3vl_8b_fp8_scaled.safetensors`
+  - `--vae path/to/flux2-vae.safetensors`
 - Do not add tokenizer/config CLI arguments. Tokenizer/config are internal automatic downloads,
   like other Musubi single-file/local-weight loaders.
+- Do not add `--repo_id` or any equivalent remote Comfy-Org download argument. Model component
+  weight paths are supplied by the user as local files.
 - Only tokenizer/config should come from `IDEOGRAM4_OFFICIAL_REPO_ID`. Do not load transformer,
-  text encoder, or VAE weights from the official repo; those weights come from Comfy files or
-  explicit local component paths.
+  text encoder, or VAE weights from the official repo; those weights come from explicit local
+  component paths.
 - Port the official `Fp8Linear` path instead of routing it through existing `scale_weight` FP8
   monkey patches. Official checkpoints use `weight_scale`; current Musubi optimized FP8 uses
   `scale_weight`.
 - For the text encoder, preserve the official special case where FP8 text-encoder config sets
   `ideogram_fp8_weight_only` and requires rebuilding via `AutoModel.from_config`.
-- Use `huggingface_hub.hf_hub_download` for Comfy repo mode and current `load_split_weights` /
-  `MemoryEfficientSafeOpen` style for local component paths where possible.
+- Use current `load_split_weights` / `MemoryEfficientSafeOpen` style for local component paths
+  where possible. Do not use `huggingface_hub.hf_hub_download` for Comfy component weights in the
+  runtime scripts.
 - Use `AutoTokenizer.from_pretrained(IDEOGRAM4_OFFICIAL_REPO_ID, subfolder=IDEOGRAM4_TOKENIZER_SUBFOLDER)` and
   `AutoConfig.from_pretrained(IDEOGRAM4_OFFICIAL_REPO_ID, subfolder=IDEOGRAM4_TEXT_ENCODER_CONFIG_SUBFOLDER)`
   for the text side. This mirrors current project patterns such as Qwen-Image loading tokenizer
@@ -390,8 +396,8 @@ Minimum tests:
 
 Smoke tests:
 
-- Comfy-Org component files can be resolved after accepting the original Ideogram non-commercial
-  license where required,
+- local Comfy-Org component paths exist and safetensors metadata matches the expected component
+  types,
 - generate one 512x512 image with `V4_TURBO_12`,
 - cache latents and text features for a two-image dataset,
 - run a one-step LoRA training job with `network_module networks.lora_ideogram4`,
@@ -400,7 +406,8 @@ Smoke tests:
 ## Risks
 
 - License: weights and derivatives are non-commercial. Docs must say this plainly.
-- HF access: users must accept model terms before downloads work.
+- HF access: docs must tell users to accept the relevant model terms before manually downloading
+  the component files.
 - Dependency floor: official code requests newer torch than this repo currently declares.
 - Memory: Qwen3-VL-8B plus two 9.3B DiTs is heavy even with FP8 weights. Text caching must be a
   first-class workflow, not an optional optimization.
