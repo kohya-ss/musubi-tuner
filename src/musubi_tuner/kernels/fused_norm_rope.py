@@ -10,15 +10,11 @@ logger = logging.getLogger(__name__)
 try:
     import triton
     import triton.language as tl
-    if os.environ.get("MUSUBI_DISABLE_TRITON", "0") == "1":
-        HAS_TRITON = False
-        logger.info("Triton disabled (MUSUBI_DISABLE_TRITON=1) — using PyTorch reference")
-    else:
-        HAS_TRITON = True
-        logger.info("Triton fused kernel enabled")
+    HAS_TRITON = os.environ.get("MUSUBI_DISABLE_TRITON", "0") != "1"
 except ImportError:
     HAS_TRITON = False
-    logger.info("Triton not installed — using PyTorch reference")
+
+_kernel_logged = False
 
 import torch
 
@@ -398,6 +394,17 @@ def fused_norm_rope(
     torch.Tensor
         Same shape and dtype as *x*.
     """
+    global _kernel_logged
+    if not _kernel_logged:
+        _kernel_logged = True
+        if HAS_TRITON and x.is_cuda:
+            logger.info("QKNorm+RoPE: using Triton fused kernel")
+        elif not HAS_TRITON:
+            reason = "MUSUBI_DISABLE_TRITON=1" if os.environ.get("MUSUBI_DISABLE_TRITON") == "1" else "Triton not installed"
+            logger.info("QKNorm+RoPE: using PyTorch reference (%s)", reason)
+        else:
+            logger.info("QKNorm+RoPE: using PyTorch reference (non-CUDA tensor)")
+
     if not HAS_TRITON or not x.is_cuda:
         return reference_norm_rope(x, weight, cos, sin, eps)
 
@@ -447,6 +454,17 @@ def fused_packed_qk_norm_rope(
         Shape ``[B, L, 3, H, D]``, same dtype as *qkv*.  Q and K are
         normalised and rotated; V is unchanged.
     """
+    global _kernel_logged
+    if not _kernel_logged:
+        _kernel_logged = True
+        if HAS_TRITON and qkv.is_cuda:
+            logger.info("QKNorm+RoPE: using Triton fused kernel")
+        elif not HAS_TRITON:
+            reason = "MUSUBI_DISABLE_TRITON=1" if os.environ.get("MUSUBI_DISABLE_TRITON") == "1" else "Triton not installed"
+            logger.info("QKNorm+RoPE: using PyTorch reference (%s)", reason)
+        else:
+            logger.info("QKNorm+RoPE: using PyTorch reference (non-CUDA tensor)")
+
     if not HAS_TRITON or not qkv.is_cuda:
         return reference_packed_qk_norm_rope(qkv, q_weight, k_weight, cos, sin, eps)
 
