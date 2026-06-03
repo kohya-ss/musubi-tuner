@@ -6,12 +6,13 @@ Base: `upstream/main` at `de648d36b719d21b24e424da0a2774cc9de29e84`
 
 ## Goal
 
-Add first-class Musubi Tuner support for `ideogram-ai/ideogram-4-fp8`, using the official
-`ideogram-oss/ideogram4` implementation as the behavioral reference.
+Add first-class Musubi Tuner support for the ComfyUI single-file component layout in
+`Comfy-Org/Ideogram-4`, using the official `ideogram-oss/ideogram4` implementation as the
+behavioral reference.
 
 The useful end state is not "the model imports". The useful end state is:
 
-- deterministic text-to-image inference from the gated FP8 HF weights,
+- deterministic text-to-image inference from the Comfy-Org FP8 safetensors,
 - latent and text-encoder-output pre-caching compatible with this repo's dataset pipeline,
 - LoRA training through the existing `NetworkTrainer` flow,
 - a documented CLI path that clearly states the non-commercial model-license boundary.
@@ -20,7 +21,8 @@ The useful end state is not "the model imports". The useful end state is:
 
 Official sources:
 
-- Model: https://huggingface.co/ideogram-ai/ideogram-4-fp8
+- Target weights: https://huggingface.co/Comfy-Org/Ideogram-4
+- Original weights: https://huggingface.co/ideogram-ai/ideogram-4-fp8
 - Code: https://github.com/ideogram-oss/ideogram4
 - Architecture docs: https://github.com/ideogram-oss/ideogram4/blob/main/docs/model_architecture.md
 - Pipeline docs: https://github.com/ideogram-oss/ideogram4/blob/main/docs/pipeline.md
@@ -29,9 +31,9 @@ Official sources:
 
 Facts to preserve:
 
-- The FP8 model is listed as 9.3B params, FP8 quantized, non-commercial, and without Diffusers
-  support in the official model zoo. The HF card also shows a generic Diffusers snippet, so do
-  not treat Diffusers as the authoritative path until it is locally verified.
+- The original FP8 model is listed as 9.3B params, FP8 quantized, non-commercial, and without
+  Diffusers support in the official model zoo. The target Comfy-Org repository is a repackaged
+  ComfyUI layout of the original FP8 weights, not a separate architecture.
 - The backbone is a 34-layer, fully single-stream DiT. Text tokens and image latent tokens are
   concatenated into one sequence and processed by the same transformer blocks.
 - Transformer config:
@@ -50,17 +52,27 @@ Facts to preserve:
 - The reference pipeline has two DiTs: `conditional_transformer` and `unconditional_transformer`.
   Asymmetric CFG uses the conditional text+image sequence for the positive branch and an
   image-only sequence with zero text features for the negative branch.
-- The FP8 HF checkpoint file tree confirms those are two separately published weight files:
-  - `transformer/diffusion_pytorch_model.safetensors`
-    - LFS sha256 `19e12b4d5bdfcf35e17e5f4d292f5301a69a30e02336a9f8645e4b82f8319a1b`
-    - size `9,289,792,888` bytes
-  - `unconditional_transformer/diffusion_pytorch_model.safetensors`
-    - LFS sha256 `83f7f7d1d0a409c1e9288b11c8ec44a03c95348d46851d6c184f054b6ec4626d`
-    - size `9,289,792,888` bytes
-  - The index JSON files are structurally identical because they describe the same module shape,
-    but the underlying LFS objects are different. Budget as two DiTs, not one reused DiT.
+- The Comfy-Org checkpoint file tree confirms those are two separately published DiT files:
+  - `diffusion_models/ideogram4_fp8_scaled.safetensors`
+    - LFS sha256 `49a946f1b0f8bcf5eab7d3b1ecc7b453c104e034cb1b592032745692724bd306`
+    - size `9,280,741,285` bytes
+    - safetensors metadata `model_type=ideogram4_cond`
+  - `diffusion_models/ideogram4_unconditional_fp8_scaled.safetensors`
+    - LFS sha256 `9b359007dae162cca7591d00868feea733eb7c56e56e3a214a4d5a9a2a07cd60`
+    - size `9,280,741,293` bytes
+    - safetensors metadata `model_type=ideogram4_uncond`
+  - Budget as two DiTs, not one reused DiT.
+- Additional Comfy-Org component files:
+  - `text_encoders/qwen3vl_8b_fp8_scaled.safetensors`
+    - LFS sha256 `4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd`
+    - size `10,588,637,512` bytes
+  - `vae/flux2-vae.safetensors`
+    - LFS sha256 `868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3`
+    - size `336,211,292` bytes
 - Official FP8 is weight-only E4M3 FP8 with per-row scale buffers and BF16 activations. It is not
   the same thing as this repo's `--fp8_scaled` optimization path.
+- Despite the Comfy filenames ending in `fp8_scaled`, safetensors metadata confirms the DiT and
+  text encoder use official `*.weight_scale` keys, not Musubi's `*.scale_weight` format.
 - VAE is a KL autoencoder with 32 latent channels and 8x spatial compression. The DiT consumes
   2x2 latent patches, so image token grids are `height / 16` by `width / 16`, and each token has
   `32 * 2 * 2 = 128` channels.
@@ -106,21 +118,26 @@ Dependency stance:
   Qwen3-VL and float8 buffers correctly.
 - Do not depend on Diffusers for FP8 until the official "Diffusers Support: No" contradiction is
   resolved by a local smoke test.
+- The target Comfy-Org repository does not include tokenizer/config subfolders. The implementation
+  must explicitly source the Qwen3-VL tokenizer/config from a compatible upstream such as
+  `Qwen/Qwen3-VL-8B-Instruct`, or embed the exact config locally as this repo already does for
+  Qwen/Z-Image text encoders.
 
 ## Weight Loading
 
 Support two inputs:
 
-1. `--repo_id ideogram-ai/ideogram-4-fp8`
-2. local component paths for users who already downloaded gated files
+1. `--repo_id Comfy-Org/Ideogram-4`
+2. explicit local component paths for users who already downloaded the Comfy files
 
-Required HF/default component layout:
+Required Comfy/default component layout:
 
-- conditional DiT: `transformer/diffusion_pytorch_model.safetensors[.index.json]`
-- unconditional DiT: `unconditional_transformer/diffusion_pytorch_model.safetensors[.index.json]`
-- VAE: `vae/diffusion_pytorch_model.safetensors`
-- text encoder: `text_encoder/`
-- tokenizer: `tokenizer/`
+- conditional DiT: `diffusion_models/ideogram4_fp8_scaled.safetensors`
+- unconditional DiT: `diffusion_models/ideogram4_unconditional_fp8_scaled.safetensors`
+- text encoder: `text_encoders/qwen3vl_8b_fp8_scaled.safetensors`
+- VAE: `vae/flux2-vae.safetensors`
+- tokenizer/config: not present in the Comfy repo; load from `--tokenizer_id` /
+  `--text_encoder_config_id` or local config assets.
 
 Implementation rules:
 
@@ -129,14 +146,15 @@ Implementation rules:
   `scale_weight`.
 - For the text encoder, preserve the official special case where FP8 text-encoder config sets
   `ideogram_fp8_weight_only` and requires rebuilding via `AutoModel.from_config`.
-- Use `huggingface_hub` downloads for repo mode and current `load_split_weights` /
-  `MemoryEfficientSafeOpen` style for local mode where possible.
+- Use `huggingface_hub.hf_hub_download` for Comfy repo mode and current `load_split_weights` /
+  `MemoryEfficientSafeOpen` style for local component paths where possible.
 - Keep conditional and unconditional transformers as separate modules. Training can initially
   optimize only the conditional transformer for LoRA, but sample inference must still load/use the
   unconditional transformer for CFG.
 - Do not ship an implementation that assumes the pipeline-doc pseudocode's single `dit(...)` call
-  means shared weights. The code path and HF tree both prove separate conditional/unconditional
-  weights for the FP8 release.
+  means shared weights. The official code path and Comfy-Org file tree both prove separate
+  conditional/unconditional weights for the FP8 release.
+- Do not call this an all-in-one checkpoint. It is a single-file-per-component layout.
 
 ## Latent Caching
 
@@ -356,7 +374,8 @@ Minimum tests:
 
 Smoke tests:
 
-- gated HF repo can be resolved after license acceptance and token setup,
+- Comfy-Org component files can be resolved after accepting the original Ideogram non-commercial
+  license where required,
 - generate one 512x512 image with `V4_TURBO_12`,
 - cache latents and text features for a two-image dataset,
 - run a one-step LoRA training job with `network_module networks.lora_ideogram4`,
@@ -382,8 +401,8 @@ Smoke tests:
 ## Implementation Order
 
 0. Confirm the target checkpoint tree before coding against a new Ideogram 4 release. For
-   `ideogram-ai/ideogram-4-fp8`, this has been verified: two distinct DiT LFS objects exist under
-   `transformer/` and `unconditional_transformer/`.
+   `Comfy-Org/Ideogram-4`, this has been verified: two distinct DiT LFS objects exist under
+   `diffusion_models/`, plus separate text encoder and VAE files.
 1. Port minimal official model, scheduler, autoencoder, latent norm, caption verifier, and FP8
    loader under `src/musubi_tuner/ideogram4/`.
 2. Add standalone `ideogram4_generate_image.py` and verify image generation before training code.
