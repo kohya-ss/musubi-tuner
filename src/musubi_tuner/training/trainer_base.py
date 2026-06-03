@@ -2043,7 +2043,13 @@ class NetworkTrainer:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
-                    optimizer.step()
+                    # Check if step_func exists, ScheduleFree+
+                    # We need to check the underlining optimizer from the Accelerate version
+                    if hasattr(optimizer.optimizer, "step_func"):
+                        optimizer.step_func(lambda: loss.item())
+                    else:
+                        optimizer.step()
+
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
