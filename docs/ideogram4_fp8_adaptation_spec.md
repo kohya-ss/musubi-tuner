@@ -50,6 +50,15 @@ Facts to preserve:
 - The reference pipeline has two DiTs: `conditional_transformer` and `unconditional_transformer`.
   Asymmetric CFG uses the conditional text+image sequence for the positive branch and an
   image-only sequence with zero text features for the negative branch.
+- The FP8 HF checkpoint file tree confirms those are two separately published weight files:
+  - `transformer/diffusion_pytorch_model.safetensors`
+    - LFS sha256 `19e12b4d5bdfcf35e17e5f4d292f5301a69a30e02336a9f8645e4b82f8319a1b`
+    - size `9,289,792,888` bytes
+  - `unconditional_transformer/diffusion_pytorch_model.safetensors`
+    - LFS sha256 `83f7f7d1d0a409c1e9288b11c8ec44a03c95348d46851d6c184f054b6ec4626d`
+    - size `9,289,792,888` bytes
+  - The index JSON files are structurally identical because they describe the same module shape,
+    but the underlying LFS objects are different. Budget as two DiTs, not one reused DiT.
 - Official FP8 is weight-only E4M3 FP8 with per-row scale buffers and BF16 activations. It is not
   the same thing as this repo's `--fp8_scaled` optimization path.
 - VAE is a KL autoencoder with 32 latent channels and 8x spatial compression. The DiT consumes
@@ -125,6 +134,9 @@ Implementation rules:
 - Keep conditional and unconditional transformers as separate modules. Training can initially
   optimize only the conditional transformer for LoRA, but sample inference must still load/use the
   unconditional transformer for CFG.
+- Do not ship an implementation that assumes the pipeline-doc pseudocode's single `dit(...)` call
+  means shared weights. The code path and HF tree both prove separate conditional/unconditional
+  weights for the FP8 release.
 
 ## Latent Caching
 
@@ -169,6 +181,28 @@ Processing:
 
 Do not cache only a pooled vector. The transformer consumes per-token multi-layer features.
 
+Text cache size is a first-order constraint:
+
+- Feature width is `53248`.
+- BF16 cache cost is `106,496` bytes per token, before safetensors overhead.
+- FP8 activation cache cost is `53,248` bytes per token, before overhead, but must be treated as
+  a quality/precision option rather than silently forced.
+- Approximate BF16 disk cost:
+  - 128 tokens: `13.6 MB/image`, `13.6 GB/1k images`
+  - 256 tokens: `27.3 MB/image`, `27.3 GB/1k images`
+  - 512 tokens: `54.5 MB/image`, `54.5 GB/1k images`
+  - 2048 tokens: `218.1 MB/image`, `218.1 GB/1k images`
+- Approximate FP8 disk cost is half of BF16:
+  - 256 tokens: `13.6 MB/image`, `13.6 GB/1k images`
+  - 2048 tokens: `109.1 MB/image`, `109.1 GB/1k images`
+
+Implementation requirement:
+
+- Add `--text_cache_dtype {bf16,fp8_e4m3fn,float32}` to `ideogram4_cache_text_encoder_outputs.py`.
+- Default to `bf16` for first correctness parity unless local tests show FP8 cached activations do
+  not degrade LoRA training. Document the disk cost and let users opt into FP8 cache explicitly.
+- Store the selected cache dtype in safetensors metadata, and cast to `network_dtype` in `call_dit`.
+
 Batch-time reconstruction:
 
 - Pad variable-length `i4_llm_features` to batch max text length.
@@ -187,7 +221,25 @@ Add `Ideogram4NetworkTrainer(NetworkTrainer)`.
 - `_i2v_training = False`,
 - `_control_training = False`,
 - `default_guidance_scale = 7.0` for sampling,
-- use a new sampler preset argument rather than overloading `--discrete_flow_shift`.
+- use a new sampler preset argument rather than overloading `--discrete_flow_shift`,
+- set the default training timestep sampler to Ideogram 4 logit-normal, not the repo-wide
+  `sigma` default.
+
+Training timestep sampling:
+
+- Add an Ideogram-specific sampler path matching official `LogitNormalSchedule`:
+  `t = clamp(1 - sigmoid(mu_adjusted + std * normal()), t_min, t_max)`.
+- Use the same resolution adjustment as inference:
+  `mu_adjusted = train_mu + 0.5 * log(num_pixels / (512 * 512))`.
+- Start defaults:
+  - `--ideogram4_train_mu 0.0`
+  - `--ideogram4_train_std 1.5`
+  - `--weighting_scheme none`
+- Do not approximate this with the existing `timestep_sampling=logsnr` without a test. The current
+  base implementation computes `t = sigmoid(-logsnr / 2)`, which is not exactly the official
+  schedule.
+- Add a histogram/debug test comparing sampled `t` against the official scheduler for at least
+  512x512 and 2048x2048 buckets.
 
 `scale_shift_latents`:
 
@@ -256,6 +308,23 @@ Candidate trainable linears inside target blocks:
 
 Keep text encoder frozen. Do not train VAE.
 
+FP8 base-layer integration is mandatory:
+
+- Official FP8 swaps `nn.Linear` layers into custom `Fp8Linear` modules.
+- Current `src/musubi_tuner/networks/lora.py` only discovers linears with
+  `child_module.__class__.__name__ == "Linear"`. It will not find `Fp8Linear`.
+- Extend the generic LoRA discovery API with an optional linear class-name allowlist, for example
+  `linear_module_class_names=("Linear",)`, and have `lora_ideogram4.py` pass
+  `("Linear", "Fp8Linear")`.
+- `LoRAModule` can use `Fp8Linear.in_features`, `Fp8Linear.out_features`, and wrap its forward in
+  the existing "base forward + LoRA delta" style. The base forward dequantizes to compute dtype,
+  then the LoRA delta is added in the same activation dtype.
+- Do not support "save merged model" into FP8 in v1. Merging would require dequantizing the FP8
+  base, adding the LoRA delta, and either saving BF16 or re-quantizing back to official
+  `weight_scale` format. Treat that as a separate feature.
+- A one-step LoRA smoke test must assert that at least one `Fp8Linear` target receives a LoRA
+  module and that changing the LoRA multiplier changes the transformer output.
+
 Open point: whether LoRA should be applied to `llm_cond_proj` and `input_proj`. Start without them,
 then enable only if low-rank capacity is clearly insufficient.
 
@@ -272,9 +341,18 @@ Minimum tests:
   - keys ending in `.weight_scale` swap to `Fp8Linear`,
   - output dtype follows compute dtype,
   - no trainable parameters are created for FP8 weight buffers.
+- LoRA-on-FP8 test:
+  - `lora_ideogram4.py` discovers `Fp8Linear` modules,
+  - the LoRA module wraps forward without dequantizing weights into parameters,
+  - the output changes when the LoRA multiplier changes.
+- text-cache budget test:
+  - verify saved dtype matches `--text_cache_dtype`,
+  - log estimated MB/image and GB/1k images from actual token counts.
 - patchify/unpatchify round trip for `(B, 32, H/8, W/8)` latents.
 - flow target one-step test:
   - if model predicts `noise - latents`, Euler from `x_t` moves toward noise as `t` increases and toward latents as `t` decreases.
+- timestep sampler test:
+  - sampled Ideogram 4 training timesteps match official logit-normal distribution with resolution-adjusted `mu`.
 
 Smoke tests:
 
@@ -291,21 +369,29 @@ Smoke tests:
 - Dependency floor: official code requests newer torch than this repo currently declares.
 - Memory: Qwen3-VL-8B plus two 9.3B DiTs is heavy even with FP8 weights. Text caching must be a
   first-class workflow, not an optional optimization.
-- Cache size: `53248` feature channels per token is large. Use BF16 cache by default and trim to
-  actual token length.
+- Cache size: `53248` feature channels per token dominates disk usage. The implementation must
+  display/ document concrete MB-per-image and GB-per-1k-images estimates.
 - Shape drift: official FP8 uses `weight_scale`; existing Musubi FP8 helpers use `scale_weight`.
   Mixing them silently will break loading.
+- LoRA drift: if `Fp8Linear` is not explicitly discoverable by the LoRA injector, training may run
+  with zero attached target modules.
+- Timestep drift: Ideogram 4 should not inherit the repo-wide `sigma` training default. Use a
+  schedule matching official logit-normal math unless direct experiments prove another distribution.
 - Diffusers ambiguity: HF card snippets may not match the official model-zoo support statement.
 
 ## Implementation Order
 
+0. Confirm the target checkpoint tree before coding against a new Ideogram 4 release. For
+   `ideogram-ai/ideogram-4-fp8`, this has been verified: two distinct DiT LFS objects exist under
+   `transformer/` and `unconditional_transformer/`.
 1. Port minimal official model, scheduler, autoencoder, latent norm, caption verifier, and FP8
    loader under `src/musubi_tuner/ideogram4/`.
 2. Add standalone `ideogram4_generate_image.py` and verify image generation before training code.
-3. Add architecture constants and cache save helpers.
-4. Add latent and text encoder cache scripts.
-5. Add `ideogram4_train_network.py` with conditional-transformer LoRA training only.
-6. Add `networks/lora_ideogram4.py`.
+3. Extend LoRA discovery to support `Fp8Linear`, then add `networks/lora_ideogram4.py`.
+4. Add architecture constants and cache save helpers.
+5. Add latent and text encoder cache scripts with explicit text-cache dtype and disk-budget logs.
+6. Add `ideogram4_train_network.py` with conditional-transformer LoRA training only and
+   Ideogram 4 logit-normal timestep sampling.
 7. Add `docs/ideogram4.md` with download, cache, train, inference, and license notes.
-8. Only after those pass, consider full fine-tune support or extra LoRA targets.
-
+8. Only after those pass, consider full fine-tune support, merged FP8 LoRA export, or extra LoRA
+   targets.
