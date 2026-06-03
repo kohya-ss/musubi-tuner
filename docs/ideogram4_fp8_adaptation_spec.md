@@ -118,10 +118,10 @@ Dependency stance:
   Qwen3-VL and float8 buffers correctly.
 - Do not depend on Diffusers for FP8 until the official "Diffusers Support: No" contradiction is
   resolved by a local smoke test.
-- The target Comfy-Org repository does not include tokenizer/config subfolders. The implementation
-  must explicitly source the Qwen3-VL tokenizer/config from a compatible upstream such as
-  `Qwen/Qwen3-VL-8B-Instruct`, or embed the exact config locally as this repo already does for
-  Qwen/Z-Image text encoders.
+- The target Comfy-Org repository does not include tokenizer/config subfolders. Follow this repo's
+  existing pattern for local/single-file weights: load weights from the local/Comfy file, but
+  automatically download tokenizer/config from the canonical model repo. For Ideogram 4, default
+  tokenizer/config source is `ideogram-ai/ideogram-4-fp8`.
 
 ## Weight Loading
 
@@ -136,11 +136,23 @@ Required Comfy/default component layout:
 - unconditional DiT: `diffusion_models/ideogram4_unconditional_fp8_scaled.safetensors`
 - text encoder: `text_encoders/qwen3vl_8b_fp8_scaled.safetensors`
 - VAE: `vae/flux2-vae.safetensors`
-- tokenizer/config: not present in the Comfy repo; load from `--tokenizer_id` /
-  `--text_encoder_config_id` or local config assets.
+- tokenizer/config: not present in the Comfy repo; auto-download by default from
+  `ideogram-ai/ideogram-4-fp8`.
 
 Implementation rules:
 
+- Add constants:
+  - `IDEOGRAM4_COMFY_REPO_ID = "Comfy-Org/Ideogram-4"`
+  - `IDEOGRAM4_OFFICIAL_REPO_ID = "ideogram-ai/ideogram-4-fp8"`
+- CLI defaults:
+  - `--repo_id Comfy-Org/Ideogram-4` for component weight downloads.
+  - `--tokenizer_id ideogram-ai/ideogram-4-fp8`
+  - `--tokenizer_subfolder tokenizer`
+  - `--text_encoder_config_id ideogram-ai/ideogram-4-fp8`
+  - `--text_encoder_config_subfolder text_encoder`
+- Only the tokenizer/config should come from `IDEOGRAM4_OFFICIAL_REPO_ID` by default. Do not load
+  transformer, text encoder, or VAE weights from the official repo unless the user explicitly
+  overrides the component paths.
 - Port the official `Fp8Linear` path instead of routing it through existing `scale_weight` FP8
   monkey patches. Official checkpoints use `weight_scale`; current Musubi optimized FP8 uses
   `scale_weight`.
@@ -148,6 +160,10 @@ Implementation rules:
   `ideogram_fp8_weight_only` and requires rebuilding via `AutoModel.from_config`.
 - Use `huggingface_hub.hf_hub_download` for Comfy repo mode and current `load_split_weights` /
   `MemoryEfficientSafeOpen` style for local component paths where possible.
+- Use `AutoTokenizer.from_pretrained(args.tokenizer_id, subfolder=args.tokenizer_subfolder)` and
+  `AutoConfig.from_pretrained(args.text_encoder_config_id, subfolder=args.text_encoder_config_subfolder)`
+  for the text side. This mirrors current project patterns such as Qwen-Image loading tokenizer
+  assets from `Qwen/Qwen-Image` while accepting separately supplied weights.
 - Keep conditional and unconditional transformers as separate modules. Training can initially
   optimize only the conditional transformer for LoRA, but sample inference must still load/use the
   unconditional transformer for CFG.
