@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 try:
     import triton
     import triton.language as tl
-    # MUSUBI_DISABLE_TRITON=1 forces the pure-PyTorch reference path for debugging
-    HAS_TRITON = os.environ.get("MUSUBI_DISABLE_TRITON", "0") != "1"
+    if os.environ.get("MUSUBI_DISABLE_TRITON", "0") == "1":
+        HAS_TRITON = False
+        logger.info("Triton disabled (MUSUBI_DISABLE_TRITON=1) — using PyTorch reference")
+    else:
+        HAS_TRITON = True
+        logger.info("Triton fused kernel enabled")
 except ImportError:
     HAS_TRITON = False
+    logger.info("Triton not installed — using PyTorch reference")
 
 import torch
 
