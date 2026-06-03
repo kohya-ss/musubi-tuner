@@ -144,15 +144,15 @@ Implementation rules:
 - Add constants:
   - `IDEOGRAM4_COMFY_REPO_ID = "Comfy-Org/Ideogram-4"`
   - `IDEOGRAM4_OFFICIAL_REPO_ID = "ideogram-ai/ideogram-4-fp8"`
+  - `IDEOGRAM4_TOKENIZER_SUBFOLDER = "tokenizer"`
+  - `IDEOGRAM4_TEXT_ENCODER_CONFIG_SUBFOLDER = "text_encoder"`
 - CLI defaults:
   - `--repo_id Comfy-Org/Ideogram-4` for component weight downloads.
-  - `--tokenizer_id ideogram-ai/ideogram-4-fp8`
-  - `--tokenizer_subfolder tokenizer`
-  - `--text_encoder_config_id ideogram-ai/ideogram-4-fp8`
-  - `--text_encoder_config_subfolder text_encoder`
-- Only the tokenizer/config should come from `IDEOGRAM4_OFFICIAL_REPO_ID` by default. Do not load
-  transformer, text encoder, or VAE weights from the official repo unless the user explicitly
-  overrides the component paths.
+- Do not add tokenizer/config CLI arguments. Tokenizer/config are internal automatic downloads,
+  like other Musubi single-file/local-weight loaders.
+- Only tokenizer/config should come from `IDEOGRAM4_OFFICIAL_REPO_ID`. Do not load transformer,
+  text encoder, or VAE weights from the official repo; those weights come from Comfy files or
+  explicit local component paths.
 - Port the official `Fp8Linear` path instead of routing it through existing `scale_weight` FP8
   monkey patches. Official checkpoints use `weight_scale`; current Musubi optimized FP8 uses
   `scale_weight`.
@@ -160,8 +160,8 @@ Implementation rules:
   `ideogram_fp8_weight_only` and requires rebuilding via `AutoModel.from_config`.
 - Use `huggingface_hub.hf_hub_download` for Comfy repo mode and current `load_split_weights` /
   `MemoryEfficientSafeOpen` style for local component paths where possible.
-- Use `AutoTokenizer.from_pretrained(args.tokenizer_id, subfolder=args.tokenizer_subfolder)` and
-  `AutoConfig.from_pretrained(args.text_encoder_config_id, subfolder=args.text_encoder_config_subfolder)`
+- Use `AutoTokenizer.from_pretrained(IDEOGRAM4_OFFICIAL_REPO_ID, subfolder=IDEOGRAM4_TOKENIZER_SUBFOLDER)` and
+  `AutoConfig.from_pretrained(IDEOGRAM4_OFFICIAL_REPO_ID, subfolder=IDEOGRAM4_TEXT_ENCODER_CONFIG_SUBFOLDER)`
   for the text side. This mirrors current project patterns such as Qwen-Image loading tokenizer
   assets from `Qwen/Qwen-Image` while accepting separately supplied weights.
 - Keep conditional and unconditional transformers as separate modules. Training can initially
