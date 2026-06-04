@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -144,6 +145,54 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         noisy = (1 - t) * latents + t * noise
         moved = noisy + target * (0.0 - 0.25)
         self.assertTrue(torch.allclose(moved, latents))
+
+    def test_denoising_steps_move_from_noise_to_data(self):
+        params = ideogram4_utils.PRESETS["V4_DEFAULT_20"]
+        schedule = ideogram4_utils.get_schedule_for_resolution((512, 512), known_mean=params.mu, std=params.std)
+        intervals = ideogram4_utils.make_step_intervals(params.num_steps)
+        steps = list(ideogram4_utils._iter_denoising_steps(params, schedule, intervals))
+
+        self.assertEqual(len(steps), params.num_steps)
+        self.assertGreater(steps[0][0], steps[0][1])
+        self.assertAlmostEqual(steps[0][2], 7.0)
+        self.assertGreater(steps[-1][0], steps[-1][1])
+        self.assertAlmostEqual(steps[-1][2], 3.0)
+
+
+class Ideogram4QwenMaskTests(unittest.TestCase):
+    def test_qwen_causal_mask_helper_supports_current_signature(self):
+        original = ideogram4_utils.create_causal_mask
+        calls = {}
+
+        def fake_create_causal_mask(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids=None):
+            calls["config"] = config
+            calls["input_embeds"] = input_embeds
+            calls["attention_mask"] = attention_mask
+            calls["cache_position"] = cache_position
+            calls["past_key_values"] = past_key_values
+            calls["position_ids"] = position_ids
+            return torch.ones(1, 1, 2, 2)
+
+        try:
+            ideogram4_utils.create_causal_mask = fake_create_causal_mask
+            language_model = SimpleNamespace(config=object())
+            inputs_embeds = torch.randn(1, 2, 4)
+            attention_mask = torch.ones(1, 2, dtype=torch.long)
+            position_ids = torch.arange(2).unsqueeze(0)
+            cache_position = torch.arange(2)
+            mask = ideogram4_utils._create_qwen_causal_mask(
+                language_model, inputs_embeds, attention_mask, position_ids, cache_position
+            )
+        finally:
+            ideogram4_utils.create_causal_mask = original
+
+        self.assertEqual(tuple(mask.shape), (1, 1, 2, 2))
+        self.assertIs(calls["config"], language_model.config)
+        self.assertIs(calls["input_embeds"], inputs_embeds)
+        self.assertIs(calls["attention_mask"], attention_mask)
+        self.assertIs(calls["cache_position"], cache_position)
+        self.assertIsNone(calls["past_key_values"])
+        self.assertIs(calls["position_ids"], position_ids)
 
 
 if __name__ == "__main__":

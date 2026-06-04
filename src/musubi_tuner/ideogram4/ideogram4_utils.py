@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from typing import Optional
 
 import torch
+from accelerate import init_empty_weights
 from PIL import Image
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModel, AutoTokenizer
@@ -27,6 +29,7 @@ from musubi_tuner.ideogram4.ideogram4_quantized_loading import (
     is_fp8_state_dict,
     load_bnb4bit_state_dict,
     load_fp8_state_dict,
+    require_fp8_dtype,
     swap_linears_to_bnb4bit,
     swap_linears_to_fp8,
 )
@@ -74,23 +77,27 @@ def load_ideogram4_transformer(
 ) -> Ideogram4Transformer:
     validate_local_safetensors(path, expected_model_type)
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
-    model = Ideogram4Transformer(config or Ideogram4Config())
     device = torch.device(device)
+    is_bnb4bit = is_bnb4bit_state_dict(state_dict)
+    is_fp8 = is_fp8_state_dict(state_dict)
 
-    if not hasattr(torch, "float8_e4m3fn"):
-        raise RuntimeError("Ideogram 4 FP8 weights require torch.float8_e4m3fn support")
+    if is_fp8 or not is_bnb4bit:
+        with init_empty_weights():
+            model = Ideogram4Transformer(config or Ideogram4Config())
+    else:
+        model = Ideogram4Transformer(config or Ideogram4Config())
 
-    if is_bnb4bit_state_dict(state_dict):
+    if is_bnb4bit:
         if device.type != "cuda":
             raise ValueError(f"bnb 4-bit weights require a CUDA device, got device={device}")
         swap_linears_to_bnb4bit(model, compute_dtype=dtype)
         load_bnb4bit_state_dict(model, state_dict, device=device, dtype=dtype)
-    elif is_fp8_state_dict(state_dict):
-        model.to(dtype)
+    elif is_fp8:
+        require_fp8_dtype()
         swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
-        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype)
+        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True)
     else:
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, assign=True)
         model.to(device=device, dtype=dtype)
 
     model.eval()
@@ -137,17 +144,36 @@ def load_ideogram4_text_encoder(
         subfolder=IDEOGRAM4_TEXT_ENCODER_CONFIG_SUBFOLDER,
         trust_remote_code=True,
     )
-    model = AutoModel.from_config(config, trust_remote_code=True)
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     device = torch.device(device)
+    with init_empty_weights():
+        model = AutoModel.from_config(config, trust_remote_code=True)
     if is_fp8_state_dict(state_dict):
+        require_fp8_dtype()
         swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
         load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True, strict=False)
     else:
-        model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(state_dict, strict=False, assign=True)
         model.to(device=device, dtype=dtype)
     model.eval()
     return model
+
+
+def _create_qwen_causal_mask(language_model, inputs_embeds, attention_mask, text_position_ids, cache_position):
+    signature = inspect.signature(create_causal_mask)
+    kwargs = {
+        "config": language_model.config,
+        "attention_mask": attention_mask,
+        "past_key_values": None,
+        "position_ids": text_position_ids,
+    }
+    if "input_embeds" in signature.parameters:
+        kwargs["input_embeds"] = inputs_embeds
+    else:
+        kwargs["inputs_embeds"] = inputs_embeds
+    if "cache_position" in signature.parameters:
+        kwargs["cache_position"] = cache_position
+    return create_causal_mask(**kwargs)
 
 
 def tokenize_prompt(tokenizer, prompt: str, max_text_tokens: int = IDEOGRAM4_MAX_TEXT_TOKENS) -> tuple[torch.Tensor, int]:
@@ -169,12 +195,13 @@ def _get_qwen3_vl_embeddings(text_encoder, token_ids: torch.Tensor, attention_ma
     text_position_ids = position_ids_4d[0]
     mrope_position_ids = position_ids_4d[1:]
 
-    causal_mask = create_causal_mask(
-        config=language_model.config,
-        inputs_embeds=inputs_embeds,
-        attention_mask=attention_mask,
-        past_key_values=None,
-        position_ids=text_position_ids,
+    cache_position = torch.arange(token_ids.shape[1], dtype=torch.long, device=token_ids.device)
+    causal_mask = _create_qwen_causal_mask(
+        language_model,
+        inputs_embeds,
+        attention_mask,
+        text_position_ids,
+        cache_position,
     )
     position_embeddings = language_model.rotary_emb(inputs_embeds, mrope_position_ids)
 
@@ -187,6 +214,7 @@ def _get_qwen3_vl_embeddings(text_encoder, token_ids: torch.Tensor, attention_ma
             attention_mask=causal_mask,
             position_ids=text_position_ids,
             past_key_values=None,
+            cache_position=cache_position,
             position_embeddings=position_embeddings,
         )
         if layer_idx in tap_set:
@@ -354,6 +382,14 @@ def decode_tokens_to_images(autoencoder: AutoEncoder, tokens: torch.Tensor, grid
     return [Image.fromarray(arr) for arr in decoded]
 
 
+def _iter_denoising_steps(params, schedule, step_intervals: torch.Tensor):
+    for step in range(params.num_steps):
+        t_val = float(schedule(step_intervals[step].unsqueeze(0)).item())
+        s_val = float(schedule(step_intervals[step + 1].unsqueeze(0)).item())
+        guidance = params.guidance_schedule[params.num_steps - 1 - step]
+        yield t_val, s_val, guidance
+
+
 @torch.no_grad()
 def generate_images(
     *,
@@ -396,13 +432,13 @@ def generate_images(
         device=device,
     )
 
-    iterator = range(params.num_steps - 1, -1, -1)
+    denoising_steps = list(_iter_denoising_steps(params, schedule, step_intervals))
+    iterator = range(params.num_steps)
     if show_progress:
         iterator = tqdm(iterator, total=params.num_steps, desc="Denoising steps")
 
     for i in iterator:
-        t_val = float(schedule(step_intervals[i + 1].unsqueeze(0)).item())
-        s_val = float(schedule(step_intervals[i].unsqueeze(0)).item())
+        t_val, s_val, gw_i = denoising_steps[i]
         t = torch.full((batch_size,), t_val, dtype=torch.float32, device=device)
 
         pos_z = torch.cat([text_z_padding, z], dim=1)
@@ -425,7 +461,6 @@ def generate_images(
             indicator=negative_inputs["indicator"],
         )
 
-        gw_i = params.guidance_schedule[i]
         v = gw_i * pos_v + (1.0 - gw_i) * neg_v
         z = z + v * (s_val - t_val)
 

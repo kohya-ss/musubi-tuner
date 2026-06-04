@@ -7,6 +7,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 bnb = None
+FP8_WEIGHT_DTYPE = getattr(torch, "float8_e4m3fn", None)
+
+
+def require_fp8_dtype() -> torch.dtype:
+  if FP8_WEIGHT_DTYPE is None:
+    raise RuntimeError("Ideogram 4 FP8 weights require torch.float8_e4m3fn support")
+  return FP8_WEIGHT_DTYPE
 
 
 def _require_bnb():
@@ -30,7 +37,6 @@ _BNB_SIBLING_SUFFIXES = (
 # Largest magnitude representable by the e4m3 float8 format. Per-row weight
 # scales map each row's max abs value onto this so we use the full range.
 FP8_E4M3_MAX = 448.0
-FP8_WEIGHT_DTYPE = torch.float8_e4m3fn
 FP8_SCALE_SUFFIX = ".weight_scale"
 # Marker written into the text encoder's config.json so the loader knows to take
 # the custom weight-only FP8 path instead of transformers' from_pretrained.
@@ -161,17 +167,18 @@ def quantize_weight_to_fp8(
   in ``float8_e4m3fn`` and ``scale`` has shape ``(out,)`` in float32 such that
   ``weight ≈ weight_fp8.to(dtype) * scale[:, None]``.
   """
+  fp8_dtype = require_fp8_dtype()
   w = weight.detach().to(torch.float32)
   amax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
   scale = amax / FP8_E4M3_MAX
-  q = (w / scale).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(FP8_WEIGHT_DTYPE)
+  q = (w / scale).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fp8_dtype)
   return q, scale.squeeze(1).to(torch.float32)
 
 
 def is_fp8_state_dict(state_dict: dict[str, torch.Tensor]) -> bool:
   """True if the checkpoint carries weight-only FP8 Linear weights."""
-  return any(k.endswith(FP8_SCALE_SUFFIX) for k in state_dict) or any(
-    v.dtype == FP8_WEIGHT_DTYPE for v in state_dict.values()
+  return any(k.endswith(FP8_SCALE_SUFFIX) for k in state_dict) or (
+    FP8_WEIGHT_DTYPE is not None and any(v.dtype == FP8_WEIGHT_DTYPE for v in state_dict.values())
   )
 
 
@@ -195,12 +202,13 @@ class Fp8Linear(nn.Module):
     compute_dtype: torch.dtype,
   ) -> None:
     super().__init__()
+    fp8_dtype = require_fp8_dtype()
     self.in_features = in_features
     self.out_features = out_features
     self.compute_dtype = compute_dtype
     self.register_buffer(
       "weight",
-      torch.empty(out_features, in_features, dtype=FP8_WEIGHT_DTYPE),
+      torch.empty(out_features, in_features, dtype=fp8_dtype),
     )
     self.register_buffer("weight_scale", torch.empty(out_features, dtype=torch.float32))
     if bias:
@@ -270,9 +278,10 @@ def load_fp8_state_dict(
   ``strict=False`` downgrades missing keys to a warning (e.g. tied weights that a
   ``transformers`` model resolves itself); unexpected keys always raise.
   """
+  fp8_dtype = require_fp8_dtype()
   prepared: dict[str, torch.Tensor] = {}
   for k, v in state_dict.items():
-    if v.dtype == FP8_WEIGHT_DTYPE:
+    if v.dtype == fp8_dtype:
       prepared[k] = v.to(device=device)
     elif k.endswith(FP8_SCALE_SUFFIX):
       prepared[k] = v.to(device=device, dtype=torch.float32)
