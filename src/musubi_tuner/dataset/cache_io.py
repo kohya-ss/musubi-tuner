@@ -18,7 +18,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_Z_IMAGE_FULL,
 )
 from musubi_tuner.utils import safetensors_utils
-from musubi_tuner.utils.model_utils import dtype_to_str
+from musubi_tuner.utils.model_utils import dtype_to_str, remove_dtype_suffix
 
 if TYPE_CHECKING:
     from musubi_tuner.dataset.image_video_dataset import ItemInfo
@@ -449,10 +449,14 @@ def save_text_encoder_output_cache_common(
 
     if merge_existing and os.path.exists(item_info.text_encoder_output_cache_path):
         # load existing cache and update metadata
+        new_key_bases = {remove_dtype_suffix(key) for key in sd}  # logical keys (dtype stripped) just written
         with safetensors_utils.MemoryEfficientSafeOpen(item_info.text_encoder_output_cache_path) as f:
             existing_metadata = f.metadata()
             for key in f.keys():
-                if key in sd:
+                # Skip any existing key superseded by a freshly written one. Comparing on the dtype-stripped base
+                # (not the exact key) also drops a stale copy written in another precision, e.g. re-caching after
+                # toggling fp8; otherwise both dtype variants would survive and collide under one key on load.
+                if remove_dtype_suffix(key) in new_key_bases:
                     continue
                 sd[key] = f.get_tensor(key)
 
