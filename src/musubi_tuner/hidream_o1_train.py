@@ -44,16 +44,11 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
     def __init__(self):
         super().__init__()
 
-    def handle_model_specific_args(self, args):
-        fp8_base = args.fp8_base
-        fp8_scaled = args.fp8_scaled
-        args.fp8_base = False
-        args.fp8_scaled = False
-        try:
-            super().handle_model_specific_args(args)
-        finally:
-            args.fp8_base = fp8_base
-            args.fp8_scaled = fp8_scaled
+    def _validate_fp8_args(self, args):
+        # Full finetuning supports --fp8_base on its own (initial weights are quantized, trainable tensors promoted back
+        # to bf16) and does not support --fp8_scaled. The fp8 consistency check lives in _validate_full_finetune_args,
+        # so the LoRA rule (fp8_base requires fp8_scaled) must not fire here.
+        pass
 
     def _validate_full_finetune_args(self, args: argparse.Namespace):
         if args.dataset_config is None:
