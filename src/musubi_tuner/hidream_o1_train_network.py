@@ -89,7 +89,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
-        if args.fp8_base and not getattr(args, "fp8_scaled", False):
+        if args.fp8_base and not args.fp8_scaled:
             raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
@@ -295,7 +295,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         dtype = dit_weight_dtype or torch.bfloat16
         model = hidream_o1_utils.load_model(dit_path, dtype=dtype, device=loading_device, model_type=args.model_type)
 
-        if getattr(args, "fp8_scaled", False):
+        if args.fp8_scaled:
             logger.info("Applying HiDream-O1 scaled fp8 optimization.")
             state_dict = model.state_dict()
             quant_device = accelerator.device
