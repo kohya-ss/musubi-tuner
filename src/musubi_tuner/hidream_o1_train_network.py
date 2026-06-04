@@ -1,5 +1,7 @@
 import argparse
 import logging
+import os
+import time
 from typing import Optional
 
 import numpy as np
@@ -318,6 +320,15 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
 
+        # The t2i dummy visual-encoder forward (Qwen3VLModel._forward_generation) exists only to keep FSDP
+        # grad collectives symmetric across t2i/i2i ranks. It runs every t2i step and includes .item() syncs,
+        # so it is pure overhead for single-process training. Allow skipping it (numerically a zero-add no-op).
+        if getattr(args, "skip_t2i_visual_dummy", False):
+            inner = getattr(model, "model", None)
+            if inner is not None and hasattr(inner, "skip_t2i_visual_dummy"):
+                inner.skip_t2i_visual_dummy = True
+                logger.info("HiDream-O1: skipping t2i dummy visual-encoder forward (skip_t2i_visual_dummy=True).")
+
         # Tag the model with the training task so the LoRA factory can pick target modules from it.
         model.hidream_o1_task = args.task
 
@@ -478,6 +489,29 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
     ):
+        # [DEBUG-TIMING] per-step timing/sync, gated by HIDREAM_TIMING=1 (off by default -> clean hot path, true GPU util)
+        _timing = os.environ.get("HIDREAM_TIMING") == "1"
+        if _timing:
+            self._dbg_fwd_time = 0.0
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(accelerator.device)
+            _t_call_dit = time.perf_counter()
+            _c_call_dit = time.process_time()  # process CPU time, to tell CPU-bound from GPU-wait
+
+        # [DEBUG-TIMING] optionally profile the forward on one step: HIDREAM_PROFILE=1 (HIDREAM_PROFILE_STEP=N, default 3)
+        self._dbg_step = getattr(self, "_dbg_step", 0) + 1
+        _do_profile = os.environ.get("HIDREAM_PROFILE") == "1" and self._dbg_step == int(
+            os.environ.get("HIDREAM_PROFILE_STEP", "3")
+        )
+        _prof = None
+        if _do_profile:
+            _prof = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=False,
+                with_stack=False,
+            )
+            _prof.__enter__()
+
         model_config = accelerator.unwrap_model(transformer).config
         input_ids_list = batch["input_ids"]
         if torch.is_tensor(input_ids_list):
@@ -489,7 +523,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             noisy_model_input.shape[0], height_patches * width_patches, noisy_model_input.shape[-1]
         )
 
-        model_preds = []
         input_embeds_list = batch.get("input_embeds", None)
         if torch.is_tensor(input_embeds_list):
             input_embeds_list = list(input_embeds_list)
@@ -516,6 +549,185 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 "Use --task i2i to train with control/reference images."
             )
 
+        # The per-sample loop runs an effective batch size of 1 (one transformer forward per image),
+        # which makes the Linear layers launch-bound. For t2i we instead pad the variable-length text
+        # prefix to a common length, assemble one padded batch, and call the transformer once so the
+        # Linears see [B, L, D]. The flash path still assumes a uniform per-batch layout (idx_ar from
+        # token_types[0]), so it keeps the per-sample path until the split+trim+2-pass module lands.
+        use_batched_t2i = (not control_keys) and (not self.use_flash_attn)
+        if use_batched_t2i:
+            device = accelerator.device
+            img_tokens = height_patches * width_patches
+            batch_size = len(input_ids_list)
+
+            # Cheap per-sample prep (tensor construction only, no model forward).
+            text_ids_list = []
+            text_embeds_list = []
+            pos_list = []
+            ttypes_list = []
+            vmask_list = []
+            txt_lens = []
+            for i, input_ids in enumerate(input_ids_list):
+                input_ids_b, position_ids_i, token_types_i, vinput_mask_i = self._build_layout_tensors(
+                    input_ids,
+                    height_patches,
+                    width_patches,
+                    model_config,
+                    device,
+                    control_patch_shapes=[],
+                    processor_image_grid_thw=None,
+                )
+                txt_lens.append(input_ids_b.shape[-1])
+                text_ids_list.append(input_ids_b[0])
+                pos_list.append(position_ids_i[:, 0])
+                ttypes_list.append(token_types_i[0])
+                vmask_list.append(vinput_mask_i[0])
+                if input_embeds_list is not None:
+                    text_embeds_list.append(input_embeds_list[i].to(device=device, dtype=network_dtype))
+
+            txt_max = max(txt_lens)
+            total_len = txt_max + img_tokens
+
+            # Padded-batch layout per sample: [text(0:t)] [padding(t:txt_max)] [image(txt_max:total_len)].
+            # position_ids keep each sample's original image position *values* (continuing from t), so the
+            # text<->image relative distances match the unbatched forward; padding is masked via attn_validity.
+            input_ids_pad = torch.zeros((batch_size, txt_max), dtype=torch.long, device=device)
+            position_ids = torch.ones((3, batch_size, total_len), dtype=torch.long, device=device)
+            token_types = torch.zeros((batch_size, total_len), dtype=ttypes_list[0].dtype, device=device)
+            vinput_mask = torch.zeros((batch_size, total_len), dtype=torch.bool, device=device)
+            attn_validity = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
+            input_embeds = None
+            if input_embeds_list is not None:
+                input_embeds = torch.zeros(
+                    (batch_size, txt_max, text_embeds_list[0].shape[-1]), dtype=network_dtype, device=device
+                )
+
+            for i in range(batch_size):
+                t = txt_lens[i]
+                input_ids_pad[i, :t] = text_ids_list[i]
+                position_ids[:, i, :t] = pos_list[i][:, :t]
+                position_ids[:, i, txt_max:] = pos_list[i][:, t:]
+                token_types[i, :t] = ttypes_list[i][:t]
+                token_types[i, txt_max:] = ttypes_list[i][t:]
+                vinput_mask[i, :t] = vmask_list[i][:t]
+                vinput_mask[i, txt_max:] = vmask_list[i][t:]
+                attn_validity[i, :t] = 1
+                attn_validity[i, txt_max:] = 1
+                if input_embeds is not None:
+                    input_embeds[i, :t] = text_embeds_list[i]
+
+            vinputs = noisy_model_input_seq.to(device=device, dtype=network_dtype)  # [B, img_tokens, D]
+            if args.gradient_checkpointing:
+                vinputs.requires_grad_(True)
+
+            raw_timestep = timesteps.to(device=device, dtype=network_dtype)
+            if args.timestep_sampling in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+                timestep = ((1001.0 - raw_timestep) / 1000.0).clamp(0.0, 1.0).reshape(-1)
+            else:
+                timestep = (1.0 - raw_timestep / 1000.0).clamp(0.0, 1.0).reshape(-1)
+
+            if _timing:
+                _t_fwd = time.perf_counter()
+            with accelerator.autocast():
+                outputs = transformer(
+                    input_ids=input_ids_pad,
+                    inputs_embeds=input_embeds,
+                    position_ids=position_ids,
+                    vinputs=vinputs,
+                    timestep=timestep,
+                    token_types=token_types,
+                    pixel_values=None,
+                    image_grid_thw=None,
+                    attention_mask=attn_validity,
+                    use_flash_attn=self.use_flash_attn,
+                )
+            if _timing:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize(accelerator.device)
+                self._dbg_fwd_time += time.perf_counter() - _t_fwd
+
+            # Each row has exactly img_tokens gen positions; gather them back to [B, img_tokens, out_dim].
+            model_pred = outputs.x_pred[vinput_mask].reshape(batch_size, img_tokens, -1)
+        else:
+            model_pred = self._call_dit_per_sample(
+                args,
+                accelerator,
+                transformer,
+                model_config,
+                batch,
+                latents_seq,
+                noisy_model_input_seq,
+                timesteps,
+                network_dtype,
+                input_ids_list,
+                input_embeds_list,
+                pixel_values_list,
+                image_grid_thw_list,
+                control_keys,
+                height_patches,
+                width_patches,
+            )
+        target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
+
+        # [DEBUG-TIMING] dump profiler tables for this one step (discard before commit)
+        if _prof is not None:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(accelerator.device)
+            _prof.__exit__(None, None, None)
+            ka = _prof.key_averages()
+            logger.info("[HiDream-O1 profile] top ops by self CPU time:\n%s", ka.table(sort_by="self_cpu_time_total", row_limit=25))
+            logger.info(
+                "[HiDream-O1 profile] top ops by self CUDA time:\n%s", ka.table(sort_by="self_cuda_time_total", row_limit=25)
+            )
+
+        # [DEBUG-TIMING] decompose call_dit into forward (GPU) vs CPU prep, plus CPU-vs-wall (HIDREAM_TIMING=1)
+        if _timing:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(accelerator.device)
+            _dit_ms = (time.perf_counter() - _t_call_dit) * 1000.0
+            _cpu_ms = (time.process_time() - _c_call_dit) * 1000.0
+            _fwd_ms = self._dbg_fwd_time * 1000.0
+            _prep_ms = _dit_ms - _fwd_ms  # everything that is not the transformer forward
+            logger.info(
+                "[HiDream-O1 timing] batch=%d res=%dx%d patches | call_dit=%.1fms (cpu=%.1fms) | "
+                "fwd(sync)=%.1fms (%.0f%%) | prep/other=%.1fms (%.0f%%)",
+                len(input_ids_list),
+                height_patches,
+                width_patches,
+                _dit_ms,
+                _cpu_ms,
+                _fwd_ms,
+                (_fwd_ms / _dit_ms * 100.0) if _dit_ms > 0 else 0.0,
+                _prep_ms,
+                (_prep_ms / _dit_ms * 100.0) if _dit_ms > 0 else 0.0,
+            )
+
+        # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
+        # DINO auxiliary loss without needing the latents tensor itself.
+        return DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
+
+    def _call_dit_per_sample(
+        self,
+        args,
+        accelerator,
+        transformer,
+        model_config,
+        batch,
+        latents_seq,
+        noisy_model_input_seq,
+        timesteps,
+        network_dtype,
+        input_ids_list,
+        input_embeds_list,
+        pixel_values_list,
+        image_grid_thw_list,
+        control_keys,
+        height_patches,
+        width_patches,
+    ):
+        # Effective batch size 1: one transformer forward per image. Used for i2i (control data, whose
+        # visual-encoder batching is deferred) and the flash path. Kept verbatim from the original loop.
+        model_preds = []
         for i, input_ids in enumerate(input_ids_list):
             control_patch_shapes = []
             control_sequences = []
@@ -571,6 +783,9 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             if image_grid_thw_list is not None:
                 image_grid_thw = image_grid_thw_list[i].to(device=accelerator.device, dtype=torch.int64)
 
+            _timing = os.environ.get("HIDREAM_TIMING") == "1"
+            if _timing:
+                _t_fwd = time.perf_counter()
             with accelerator.autocast():
                 outputs = transformer(
                     input_ids=input_ids,
@@ -583,15 +798,15 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                     image_grid_thw=image_grid_thw,
                     use_flash_attn=self.use_flash_attn,
                 )
+            if _timing:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize(accelerator.device)
+                self._dbg_fwd_time = getattr(self, "_dbg_fwd_time", 0.0) + (time.perf_counter() - _t_fwd)
 
             pred = outputs.x_pred[0, vinput_mask[0]][: latents_seq.shape[1]].unsqueeze(0)
             model_preds.append(pred)
 
-        model_pred = torch.cat(model_preds, dim=0)
-        target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
-        # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
-        # DINO auxiliary loss without needing the latents tensor itself.
-        return DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
+        return torch.cat(model_preds, dim=0)
 
     def compute_loss(
         self,
@@ -724,6 +939,12 @@ def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--fp8_scaled",
         action="store_true",
         help="use scaled fp8 for HiDream-O1 DiT weights / HiDream-O1 DiTにスケーリングされたfp8を使う",
+    )
+    parser.add_argument(
+        "--skip_t2i_visual_dummy",
+        action="store_true",
+        help="skip the t2i dummy visual-encoder forward (needed only for FSDP grad symmetry). "
+        "Removes per-step overhead and .item() syncs in single-process t2i training.",
     )
     parser.add_argument(
         "--dino_loss_weight",

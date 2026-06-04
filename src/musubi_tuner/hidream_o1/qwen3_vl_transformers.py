@@ -1657,6 +1657,11 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 causal = torch.triu(causal, diagonal=1)  # lower tri + diag = 0 (allowed)
                 gen_positions = token_types[b].bool()  # [total_seq_len]
                 causal[gen_positions, :] = 0  # gen tokens attend to everything
+                if attention_mask is not None:
+                    # attention_mask is a [B, total_seq_len] validity mask (1=real, 0=padding).
+                    # Mask padding *columns* so no query (including gen tokens) attends to padding.
+                    pad_cols = attention_mask[b].to(causal.device) == 0  # [total_seq_len]
+                    causal[:, pad_cols] = min_val
                 attn_masks.append(causal)
             attention_mask_4d = torch.stack(attn_masks, dim=0).unsqueeze(1)  # [batch, 1, seq, seq]
 
