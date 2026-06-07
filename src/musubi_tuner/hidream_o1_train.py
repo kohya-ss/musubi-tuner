@@ -143,9 +143,9 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
             blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
         )
-        # Driven by --task (set on self._control_training in handle_model_specific_args). Consistency with the
+        # Driven by --task (set on self._i2i_training in handle_model_specific_args). Consistency with the
         # actual dataset is enforced in call_dit, shared with the LoRA trainer.
-        has_control = self._control_training
+        has_control = self._i2i_training
 
         if train_dataset_group.num_train_items == 0:
             raise ValueError(

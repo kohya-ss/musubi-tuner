@@ -71,7 +71,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.dit_dtype = torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
-        self._control_training = args.task == "i2i"
+        # control_training in the base class means video-control training, which makes sample image
+        # generation require control_video_path. HiDream-O1 is an image model that takes control images
+        # (control_image_path), like FLUX.2/Kontext, so keep this False and track i2i separately.
+        self._control_training = False
+        self._i2i_training = args.task == "i2i"
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
         self.default_guidance_scale = 0.0 if self.model_type == "dev" else 5.0
@@ -516,12 +520,12 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         )
 
         # Validate the declared task against the data actually present in the batch.
-        if self._control_training and not control_keys:
+        if self._i2i_training and not control_keys:
             raise ValueError(
                 "HiDream-O1 --task i2i was specified, but the dataset has no control data (latents_control_* "
                 "tensors). Add control images to the dataset, or use --task t2i."
             )
-        if not self._control_training and control_keys:
+        if not self._i2i_training and control_keys:
             raise ValueError(
                 "HiDream-O1 dataset provides control data (latents_control_* tensors), but --task is t2i. "
                 "Use --task i2i to train with control/reference images."
