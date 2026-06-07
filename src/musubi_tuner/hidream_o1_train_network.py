@@ -89,11 +89,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
-        self._validate_fp8_args(args)
-
-    def _validate_fp8_args(self, args):
-        # LoRA fp8 rule: fp8_base is only supported together with fp8_scaled.
-        # Full finetuning has different fp8 constraints and overrides this; see _validate_full_finetune_args.
         if args.fp8_base and not args.fp8_scaled:
             raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
 
