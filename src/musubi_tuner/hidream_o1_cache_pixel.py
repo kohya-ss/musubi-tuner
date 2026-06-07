@@ -22,9 +22,14 @@ def encode_and_save_batch(batch: List[ItemInfo]):
         control_tokens = None
         if item.control_content is not None:
             controls = item.control_content if isinstance(item.control_content, list) else [item.control_content]
-            control_contents = torch.stack([torch.from_numpy(control) for control in controls], dim=0)
-            control_pixels = hidream_o1_utils.preprocess_image_tensor(control_contents)
-            control_tokens = hidream_o1_utils.patchify_pixels_grid(control_pixels).to(torch.bfloat16)
+            # Each control image for one sample can have a different shape (e.g. reference images of
+            # different aspect ratios). The cache format stores controls individually and the model
+            # reads them per-control with their own patch shape, so preprocess each one separately
+            # instead of stacking (torch.stack would require a uniform shape across controls).
+            control_tokens = []
+            for control in controls:
+                control_pixels = hidream_o1_utils.preprocess_image_tensor(torch.from_numpy(control).unsqueeze(0))
+                control_tokens.append(hidream_o1_utils.patchify_pixels_grid(control_pixels)[0].to(torch.bfloat16))  # H,W,D
         logger.debug(f"Saving HiDream-O1 pixel-token cache for item {item.item_key}: {tuple(tokens.shape)}")
         save_pixel_cache_hidream_o1(item, tokens.to(torch.bfloat16), control_tokens)
 

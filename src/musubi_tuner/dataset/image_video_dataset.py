@@ -16,6 +16,7 @@ import torch
 from PIL import Image
 
 from musubi_tuner.utils import safetensors_utils
+from musubi_tuner.utils.model_utils import remove_dtype_suffix
 
 import logging
 
@@ -405,12 +406,15 @@ class ImageDataset(BaseDataset):
 
                     if controls is not None:
                         item_info.control_content = controls
-                        if self.no_resize_control or self.control_resolution is not None:
-                            # Add control size to bucket_reso to make different control resolutions to different batch
-                            bucket_reso = list(bucket_reso)
-                            for control in controls:
-                                bucket_reso = bucket_reso + list(control.shape[0:2])
-                            bucket_reso = tuple(bucket_reso)
+                        # Add every control size to bucket_reso so that different control resolutions AND a
+                        # different number of control images go to different batches. Run this whenever control
+                        # data is present (not only for no_resize_control / control_resolution): otherwise items
+                        # with a different control count share a batch and the collator stacks a ragged batch.
+                        # controls is already in index order, so the appended shapes stay index-aligned.
+                        bucket_reso = list(bucket_reso)
+                        for control in controls:
+                            bucket_reso = bucket_reso + list(control.shape[0:2])
+                        bucket_reso = tuple(bucket_reso)
 
                     if bucket_reso not in batches:
                         batches[bucket_reso] = []
@@ -528,12 +532,19 @@ class ImageDataset(BaseDataset):
                     bucket_reso.append(len(self.fp_1f_clean_indices))
                     bucket_reso.append(self.fp_1f_no_post)
                 bucket_reso = tuple(bucket_reso)
-            if self.no_resize_control or self.control_resolution is not None:
-                # we also need to split the bucket with control resolutions
-                control_key = safetensors_utils.find_key(cache_file, starts_with="latents_control_")  # latents_control_FxHxW_dtype
-                if control_key is not None:
-                    control_shape = control_key.rsplit("_", 3)[-2]  # FxHxW
-                    bucket_reso = tuple(list(bucket_reso) + [control_shape])  # (int, int, str)
+            # Split the bucket by control latents so that every item in a batch has the same number of
+            # control images AND matching per-control shapes. The collator stacks latents_control_{i}
+            # across the batch (see BucketBatchManager.__getitem__), so a count or shape mismatch produces
+            # a ragged stack (crash) or silently misaligns controls between samples. This must run whenever
+            # control data is present, not only for no_resize_control / control_resolution: even controls
+            # resized to the bucket resolution share that resolution but can still differ in *count*.
+            # find_keys returns the keys sorted, so the per-control order (and the index<->shape pairing,
+            # which remove_dtype_suffix keeps in each element) is deterministic across cache files.
+            control_keys = safetensors_utils.find_keys(cache_file, starts_with="latents_control_")
+            if control_keys:
+                # key: latents_control_{i}_FxHxW_dtype -> "latents_control_{i}_FxHxW" (index + shape)
+                control_shapes = [remove_dtype_suffix(key) for key in control_keys]
+                bucket_reso = tuple(list(bucket_reso) + control_shapes)
 
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
