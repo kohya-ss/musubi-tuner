@@ -327,7 +327,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         # The t2i dummy visual-encoder forward (Qwen3VLModel._forward_generation) exists only to keep FSDP
         # grad collectives symmetric across t2i/i2i ranks. It runs every t2i step and includes .item() syncs,
         # so it is pure overhead for single-process training. Allow skipping it (numerically a zero-add no-op).
-        if getattr(args, "skip_t2i_visual_dummy", False):
+        if args.skip_t2i_visual_dummy:
             inner = getattr(model, "model", None)
             if inner is not None and hasattr(inner, "skip_t2i_visual_dummy"):
                 inner.skip_t2i_visual_dummy = True
@@ -521,17 +521,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         if torch.is_tensor(input_ids_list):
             input_ids_list = list(input_ids_list)
 
-        # Block swap is incompatible with the per-sample forward loop below: it runs one full decoder forward per
-        # sample, but the offloader expects a single forward+backward per step (the backward hooks restore the initial
-        # block placement). With more than one sample the second forward starts with the front blocks already offloaded
-        # to CPU, which crashes with a device mismatch. Until the forward is batched, require batch_size=1 with block swap.
-        if self.blocks_to_swap and len(input_ids_list) > 1:
-            raise ValueError(
-                "HiDream-O1 --blocks_to_swap currently supports a dataset batch_size of 1 only "
-                f"(got {len(input_ids_list)} samples in a batch). The per-sample forward loop is incompatible with "
-                "block swap. Set the dataset batch_size to 1, or train without --blocks_to_swap."
-            )
-
         height_patches, width_patches = latents.shape[1], latents.shape[2]
         latents_seq = latents.reshape(latents.shape[0], height_patches * width_patches, latents.shape[-1])
         noisy_model_input_seq = noisy_model_input.reshape(
@@ -570,19 +559,49 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         # Linears see [B, L, D]. The flash path still assumes a uniform per-batch layout (idx_ar from
         # token_types[0]), so it keeps the per-sample path until the split+trim+2-pass module lands.
         use_batched_t2i = (not control_keys) and (not self.use_flash_attn)
+
+        # Block swap requires a single decoder forward+backward per step: the offloader's backward hooks restore the
+        # initial block placement, so a second forward in the same step starts with the front blocks already offloaded
+        # to CPU and crashes with a device mismatch. The batched t2i path runs one forward for the whole batch, so it is
+        # compatible with any batch size. The per-sample path (i2i / flash) still runs one forward per sample, so it
+        # remains restricted to batch_size=1 under block swap.
+        if self.blocks_to_swap and len(input_ids_list) > 1 and not use_batched_t2i:
+            raise ValueError(
+                "HiDream-O1 --blocks_to_swap with a dataset batch_size > 1 "
+                f"(got {len(input_ids_list)} samples) is only supported by the batched t2i path. "
+                "The i2i / flash path runs one transformer forward per sample, which is incompatible with block swap. "
+                "Set the dataset batch_size to 1, or train without --blocks_to_swap."
+            )
+
         if use_batched_t2i:
             device = accelerator.device
             img_tokens = height_patches * width_patches
             batch_size = len(input_ids_list)
 
-            # Cheap per-sample prep (tensor construction only, no model forward).
-            text_ids_list = []
-            text_embeds_list = []
-            pos_list = []
-            ttypes_list = []
-            vmask_list = []
-            txt_lens = []
+            # The text prefix is the only variable-length part; the image block is fixed within a bucket. txt_lens
+            # come straight from the cached text token ids (_build_layout_tensors returns the text unchanged), so the
+            # padded buffers can be sized up front and filled in a single pass without intermediate per-sample lists.
+            txt_lens = [input_ids.shape[-1] for input_ids in input_ids_list]
+            txt_max = max(txt_lens)
+            total_len = txt_max + img_tokens
+
+            # Padded-batch layout per sample: [text(0:t)] [padding(t:txt_max)] [image(txt_max:total_len)].
+            # position_ids keep each sample's original image position *values* (continuing from t), so the
+            # text<->image relative distances match the unbatched forward; padding is masked via attn_validity.
+            # token_types is long to match _build_layout_tensors (it casts token_types to the input_ids dtype).
+            input_ids_pad = torch.zeros((batch_size, txt_max), dtype=torch.long, device=device)
+            position_ids = torch.ones((3, batch_size, total_len), dtype=torch.long, device=device)
+            token_types = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
+            vinput_mask = torch.zeros((batch_size, total_len), dtype=torch.bool, device=device)
+            attn_validity = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
+            input_embeds = None
+            if input_embeds_list is not None:
+                input_embeds = torch.zeros(
+                    (batch_size, txt_max, input_embeds_list[0].shape[-1]), dtype=network_dtype, device=device
+                )
+
             for i, input_ids in enumerate(input_ids_list):
+                # Per-sample layout (tensor construction only, no model forward), scattered into the padded buffers.
                 input_ids_b, position_ids_i, token_types_i, vinput_mask_i = self._build_layout_tensors(
                     input_ids,
                     height_patches,
@@ -592,42 +611,18 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                     control_patch_shapes=[],
                     processor_image_grid_thw=None,
                 )
-                txt_lens.append(input_ids_b.shape[-1])
-                text_ids_list.append(input_ids_b[0])
-                pos_list.append(position_ids_i[:, 0])
-                ttypes_list.append(token_types_i[0])
-                vmask_list.append(vinput_mask_i[0])
-                if input_embeds_list is not None:
-                    text_embeds_list.append(input_embeds_list[i].to(device=device, dtype=network_dtype))
-
-            txt_max = max(txt_lens)
-            total_len = txt_max + img_tokens
-
-            # Padded-batch layout per sample: [text(0:t)] [padding(t:txt_max)] [image(txt_max:total_len)].
-            # position_ids keep each sample's original image position *values* (continuing from t), so the
-            # text<->image relative distances match the unbatched forward; padding is masked via attn_validity.
-            input_ids_pad = torch.zeros((batch_size, txt_max), dtype=torch.long, device=device)
-            position_ids = torch.ones((3, batch_size, total_len), dtype=torch.long, device=device)
-            token_types = torch.zeros((batch_size, total_len), dtype=ttypes_list[0].dtype, device=device)
-            vinput_mask = torch.zeros((batch_size, total_len), dtype=torch.bool, device=device)
-            attn_validity = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
-            input_embeds = None
-            if input_embeds_list is not None:
-                input_embeds = torch.zeros((batch_size, txt_max, text_embeds_list[0].shape[-1]), dtype=network_dtype, device=device)
-
-            for i in range(batch_size):
                 t = txt_lens[i]
-                input_ids_pad[i, :t] = text_ids_list[i]
-                position_ids[:, i, :t] = pos_list[i][:, :t]
-                position_ids[:, i, txt_max:] = pos_list[i][:, t:]
-                token_types[i, :t] = ttypes_list[i][:t]
-                token_types[i, txt_max:] = ttypes_list[i][t:]
-                vinput_mask[i, :t] = vmask_list[i][:t]
-                vinput_mask[i, txt_max:] = vmask_list[i][t:]
+                input_ids_pad[i, :t] = input_ids_b[0]
+                position_ids[:, i, :t] = position_ids_i[:, 0, :t]
+                position_ids[:, i, txt_max:] = position_ids_i[:, 0, t:]
+                token_types[i, :t] = token_types_i[0, :t]
+                token_types[i, txt_max:] = token_types_i[0, t:]
+                vinput_mask[i, :t] = vinput_mask_i[0, :t]
+                vinput_mask[i, txt_max:] = vinput_mask_i[0, t:]
                 attn_validity[i, :t] = 1
                 attn_validity[i, txt_max:] = 1
                 if input_embeds is not None:
-                    input_embeds[i, :t] = text_embeds_list[i]
+                    input_embeds[i, :t] = input_embeds_list[i].to(device=device, dtype=network_dtype)
 
             vinputs = noisy_model_input_seq.to(device=device, dtype=network_dtype)  # [B, img_tokens, D]
             if args.gradient_checkpointing:
