@@ -27,8 +27,6 @@ The workflow has three steps:
 2. Cache prompt token IDs.
 3. Train or run inference.
 
-See `docs/hidream_o1_i2i_training_spec.md` for the control/reference training contract.
-
 ## Model
 
 Download the HiDream-O1-Image model from the official repository:
@@ -186,7 +184,6 @@ Notes:
 - `--mem_eff_save` can reduce RAM usage when saving model checkpoints.
 - `--block_swap_optimizer_patch_params` is available when using block swap without `--fused_backward_pass`.
 - Dev models should use `--model_type dev --noise_scale_start 7.5 --noise_scale_end 7.5 --noise_clip_std 2.5`.
-- The design notes are in `docs/hidream_o1_full_finetune_spec.md`.
 
 ## Inference
 
