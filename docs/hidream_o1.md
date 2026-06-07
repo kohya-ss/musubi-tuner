@@ -181,9 +181,7 @@ Notes:
 
 - `--full_bf16` is strongly recommended for memory-limited systems. Without it, model weights are trained in float32.
 - `--task t2i` freezes the Qwen3-VL visual encoder and skips its dummy zero-gradient pass; `--task i2i` keeps it trainable for control/reference data. As with LoRA, the task must match the dataset.
-- `--fp8_base` is experimental: trainable tensors are promoted back to the training dtype, so only frozen inactive modules may
-  stay FP8. This still starts trainable tensors from FP8-quantized initial values. `--fp8_scaled` is still rejected for full
-  finetuning.
+- Full finetuning does not support fp8: both `--fp8_base` and `--fp8_scaled` are rejected. The DiT stays trainable in bf16/fp32, so fp8 could only quantize frozen modules and is not worth the complexity.
 - `--fused_backward_pass` is intended for Adafactor and should be used with `--max_grad_norm 0`.
 - `--mem_eff_save` can reduce RAM usage when saving model checkpoints.
 - `--block_swap_optimizer_patch_params` is available when using block swap without `--fused_backward_pass`.
