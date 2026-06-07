@@ -483,6 +483,17 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         if torch.is_tensor(input_ids_list):
             input_ids_list = list(input_ids_list)
 
+        # Block swap is incompatible with the per-sample forward loop below: it runs one full decoder forward per
+        # sample, but the offloader expects a single forward+backward per step (the backward hooks restore the initial
+        # block placement). With more than one sample the second forward starts with the front blocks already offloaded
+        # to CPU, which crashes with a device mismatch. Until the forward is batched, require batch_size=1 with block swap.
+        if self.blocks_to_swap and len(input_ids_list) > 1:
+            raise ValueError(
+                "HiDream-O1 --blocks_to_swap currently supports a dataset batch_size of 1 only "
+                f"(got {len(input_ids_list)} samples in a batch). The per-sample forward loop is incompatible with "
+                "block swap. Set the dataset batch_size to 1, or train without --blocks_to_swap."
+            )
+
         height_patches, width_patches = latents.shape[1], latents.shape[2]
         latents_seq = latents.reshape(latents.shape[0], height_patches * width_patches, latents.shape[-1])
         noisy_model_input_seq = noisy_model_input.reshape(
