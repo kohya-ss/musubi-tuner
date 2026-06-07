@@ -613,9 +613,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             attn_validity = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
             input_embeds = None
             if input_embeds_list is not None:
-                input_embeds = torch.zeros(
-                    (batch_size, txt_max, text_embeds_list[0].shape[-1]), dtype=network_dtype, device=device
-                )
+                input_embeds = torch.zeros((batch_size, txt_max, text_embeds_list[0].shape[-1]), dtype=network_dtype, device=device)
 
             for i in range(batch_size):
                 t = txt_lens[i]
