@@ -656,8 +656,13 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
             # Each row has exactly img_tokens gen positions; gather them back to [B, img_tokens, out_dim].
             model_pred = outputs.x_pred[vinput_mask].reshape(batch_size, img_tokens, -1)
+            target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
+
+            # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
+            # DINO auxiliary loss without needing the latents tensor itself.
+            dit_output = DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
         else:
-            model_pred = self._call_dit_per_sample(
+            dit_output = self._call_dit_per_sample(
                 args,
                 accelerator,
                 transformer,
@@ -675,7 +680,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 height_patches,
                 width_patches,
             )
-        target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
 
         # [DEBUG-TIMING] dump profiler tables for this one step (HIDREAM_PROFILE=1)
         if _prof is not None:
@@ -710,9 +714,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 (_prep_ms / _dit_ms * 100.0) if _dit_ms > 0 else 0.0,
             )
 
-        # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
-        # DINO auxiliary loss without needing the latents tensor itself.
-        return DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
+        return dit_output
 
     def _call_dit_per_sample(
         self,
