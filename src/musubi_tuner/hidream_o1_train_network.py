@@ -73,7 +73,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.dit_dtype = torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
-        self._control_training = args.task == "i2i"
+        # control_training in the base class means video-control training, which makes sample image
+        # generation require control_video_path. HiDream-O1 is an image model that takes control images
+        # (control_image_path), like FLUX.2/Kontext, so keep this False and track i2i separately.
+        self._control_training = False
+        self._i2i_training = args.task == "i2i"
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
         self.default_guidance_scale = 0.0 if self.model_type == "dev" else 5.0
@@ -91,7 +95,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
-        if args.fp8_base and not getattr(args, "fp8_scaled", False):
+        if args.fp8_base and not args.fp8_scaled:
             raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
@@ -297,7 +301,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         dtype = dit_weight_dtype or torch.bfloat16
         model = hidream_o1_utils.load_model(dit_path, dtype=dtype, device=loading_device, model_type=args.model_type)
 
-        if getattr(args, "fp8_scaled", False):
+        if args.fp8_scaled:
             logger.info("Applying HiDream-O1 scaled fp8 optimization.")
             state_dict = model.state_dict()
             quant_device = accelerator.device
@@ -517,6 +521,17 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         if torch.is_tensor(input_ids_list):
             input_ids_list = list(input_ids_list)
 
+        # Block swap is incompatible with the per-sample forward loop below: it runs one full decoder forward per
+        # sample, but the offloader expects a single forward+backward per step (the backward hooks restore the initial
+        # block placement). With more than one sample the second forward starts with the front blocks already offloaded
+        # to CPU, which crashes with a device mismatch. Until the forward is batched, require batch_size=1 with block swap.
+        if self.blocks_to_swap and len(input_ids_list) > 1:
+            raise ValueError(
+                "HiDream-O1 --blocks_to_swap currently supports a dataset batch_size of 1 only "
+                f"(got {len(input_ids_list)} samples in a batch). The per-sample forward loop is incompatible with "
+                "block swap. Set the dataset batch_size to 1, or train without --blocks_to_swap."
+            )
+
         height_patches, width_patches = latents.shape[1], latents.shape[2]
         latents_seq = latents.reshape(latents.shape[0], height_patches * width_patches, latents.shape[-1])
         noisy_model_input_seq = noisy_model_input.reshape(
@@ -538,12 +553,12 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         )
 
         # Validate the declared task against the data actually present in the batch.
-        if self._control_training and not control_keys:
+        if self._i2i_training and not control_keys:
             raise ValueError(
                 "HiDream-O1 --task i2i was specified, but the dataset has no control data (latents_control_* "
                 "tensors). Add control images to the dataset, or use --task t2i."
             )
-        if not self._control_training and control_keys:
+        if not self._i2i_training and control_keys:
             raise ValueError(
                 "HiDream-O1 dataset provides control data (latents_control_* tensors), but --task is t2i. "
                 "Use --task i2i to train with control/reference images."
@@ -806,7 +821,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             pred = outputs.x_pred[0, vinput_mask[0]][: latents_seq.shape[1]].unsqueeze(0)
             model_preds.append(pred)
 
-        return torch.cat(model_preds, dim=0)
+        model_pred = torch.cat(model_preds, dim=0)
+        target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
+        # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
+        # DINO auxiliary loss without needing the latents tensor itself.
+        return DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
 
     def compute_loss(
         self,

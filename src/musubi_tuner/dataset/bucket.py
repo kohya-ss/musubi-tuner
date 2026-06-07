@@ -25,6 +25,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_Z_IMAGE,
 )
 from musubi_tuner.dataset.media_utils import divisible_by
+from musubi_tuner.utils.model_utils import remove_dtype_suffix
 
 if TYPE_CHECKING:
     from musubi_tuner.dataset.image_video_dataset import ItemInfo
@@ -253,7 +254,7 @@ class BucketBatchManager:
                 if content_key.endswith("_mask"):
                     pass
                 else:
-                    content_key = content_key.rsplit("_", 1)[0]  # remove dtype
+                    content_key = remove_dtype_suffix(content_key)  # remove dtype (handles e.g. float8_e4m3fn)
                     if content_key.startswith("latents_"):
                         content_key = content_key.rsplit("_", 1)[0]  # remove FxHxW
 

@@ -29,6 +29,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_FLUX_2_KLEIN_9B,
     ARCHITECTURE_FLUX_KONTEXT,
     ARCHITECTURE_FRAMEPACK,
+    ARCHITECTURE_HIDREAM_O1,
     ARCHITECTURE_HUNYUAN_VIDEO,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ARCHITECTURE_KANDINSKY5,
@@ -324,6 +325,8 @@ class ImageDataset(BaseDataset):
             control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
             control_count_per_image = None  # can be multiple control images
+        elif self.architecture == ARCHITECTURE_HIDREAM_O1:
+            control_count_per_image = None  # can be multiple control/reference images
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
