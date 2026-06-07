@@ -497,7 +497,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         _timing = os.environ.get("HIDREAM_TIMING") == "1"
         if _timing:
             self._dbg_fwd_time = 0.0
-            if torch.cuda.is_available():
+            if accelerator.device.type == "cuda":
                 torch.cuda.synchronize(accelerator.device)
             _t_call_dit = time.perf_counter()
             _c_call_dit = time.process_time()  # process CPU time, to tell CPU-bound from GPU-wait
@@ -655,7 +655,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                     use_flash_attn=self.use_flash_attn,
                 )
             if _timing:
-                if torch.cuda.is_available():
+                if accelerator.device.type == "cuda":
                     torch.cuda.synchronize(accelerator.device)
                 self._dbg_fwd_time += time.perf_counter() - _t_fwd
 
@@ -684,7 +684,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         # [DEBUG-TIMING] dump profiler tables for this one step (discard before commit)
         if _prof is not None:
-            if torch.cuda.is_available():
+            if accelerator.device.type == "cuda":
                 torch.cuda.synchronize(accelerator.device)
             _prof.__exit__(None, None, None)
             ka = _prof.key_averages()
@@ -695,7 +695,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         # [DEBUG-TIMING] decompose call_dit into forward (GPU) vs CPU prep, plus CPU-vs-wall (HIDREAM_TIMING=1)
         if _timing:
-            if torch.cuda.is_available():
+            if accelerator.device.type == "cuda":
                 torch.cuda.synchronize(accelerator.device)
             _dit_ms = (time.perf_counter() - _t_call_dit) * 1000.0
             _cpu_ms = (time.process_time() - _c_call_dit) * 1000.0
@@ -812,7 +812,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                     use_flash_attn=self.use_flash_attn,
                 )
             if _timing:
-                if torch.cuda.is_available():
+                if accelerator.device.type == "cuda":
                     torch.cuda.synchronize(accelerator.device)
                 self._dbg_fwd_time = getattr(self, "_dbg_fwd_time", 0.0) + (time.perf_counter() - _t_fwd)
 
