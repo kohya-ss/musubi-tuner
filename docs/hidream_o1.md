@@ -27,8 +27,6 @@ The workflow has three steps:
 2. Cache prompt token IDs.
 3. Train or run inference.
 
-See `docs/hidream_o1_i2i_training_spec.md` for the control/reference training contract.
-
 ## Model
 
 Download the HiDream-O1-Image model from the official repository:
@@ -93,7 +91,7 @@ Use `hidream_o1_train_network.py` with the HiDream-O1 single checkpoint passed a
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train_network.py \
     --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
-    --model_type full \
+    --model_type full --task t2i \
     --mixed_precision bf16 \
     --timestep_sampling uniform --weighting_scheme none \
     --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0 \
@@ -104,18 +102,36 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
     --output_dir path/to/output_dir --output_name hidream_o1_lora
 ```
 
+For control/reference (image-to-image) LoRA training, pass `--task i2i`, and add `--network_args conv_dim=4 conv_alpha=1` if you want the visual conv layers adapted:
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train_network.py \
+    --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
+    --dataset_config path/to/control_dataset.toml \
+    --model_type full --task i2i \
+    --mixed_precision bf16 \
+    --timestep_sampling uniform --weighting_scheme none \
+    --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0 \
+    --optimizer_type adamw8bit --learning_rate 4e-5 \
+    --gradient_checkpointing \
+    --network_module networks.lora_hidream_o1 --network_dim 32 \
+    --network_args conv_dim=4 conv_alpha=1 \
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
+    --output_dir path/to/output_dir --output_name hidream_o1_i2i_lora
+```
+
 Memory related options:
 
-- `--blocks_to_swap N` offloads Qwen3VL decoder blocks to CPU. This is recommended for high resolutions such as 2048x2048.
+- `--blocks_to_swap N` offloads Qwen3VL decoder blocks to CPU. This is recommended for high resolutions such as 2048x2048. **Block swap currently requires a dataset `batch_size` of 1** (for both LoRA and full finetuning): HiDream-O1 runs one decoder forward per sample, which is incompatible with the block-swap offloader, so training raises an error if a larger batch is used together with `--blocks_to_swap`.
 - `--use_pinned_memory_for_block_swap` can improve transfer speed, but may increase shared GPU memory usage on Windows.
 - `--flash_attn` enables the HiDream-O1 flash attention path. This is recommended for 2K resolution if FlashAttention is installed.
 - `--timestep_sampling uniform --weighting_scheme none` matches the uniform timestep sampling described for HiDream-O1 post-training/SFT in the paper.
 - Set `--model_type` and the matching noise parameters explicitly. Full uses `--model_type full --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0`; dev uses `--model_type dev --noise_scale_start 7.5 --noise_scale_end 7.5 --noise_clip_std 2.5`.
 - `--dino_loss_weight N` enables the optional SenseCraft DINOv3 auxiliary perceptual loss. Install the `hidream_o1` extra first. HiDream-O1 converts predicted and target pixel patch tokens back to RGB before computing this loss. See `docs/advanced_config.md`.
-- HiDream-O1 LoRA targets are selected from the dataset automatically. Datasets without `control_directory` use decoder + pixel patch input/output layers. Datasets with control/reference inputs also select Qwen3-VL visual encoder layers.
-- Control/reference datasets use `conv_dim=4 conv_alpha=4` by default for LoRA on the Conv3d visual patch embedding. Set `--network_args conv_dim=0` to skip that layer, or pass a larger value to increase its rank.
+- HiDream-O1 LoRA targets are selected by `--task`. `--task t2i` (default) trains the decoder + pixel patch input/output layers. `--task i2i` additionally trains the Qwen3-VL visual encoder layers for control/reference conditioning. The task must match the dataset: training raises an error if `--task i2i` is used without control data, or if a control dataset is used with `--task t2i`.
+- Conv layers (such as the 3x3 Conv3d visual patch embedding) are included in the LoRA **only when you pass `conv_dim`**, matching sd-scripts. For `--task i2i`, add `--network_args conv_dim=4 conv_alpha=1` (or a larger `conv_dim` to increase rank) if you want those conv layers adapted. Without `conv_dim`, only the linear and 1x1 conv layers are trained — those are always covered by `--network_dim`. This is the first architecture in Musubi Tuner to expose conv-layer LoRA, so set it deliberately.
 - The Qwen3VL decoder blocks are the shared generation backbone for text and image tokens. Token embeddings and the LM head remain excluded.
-- After changing a T2I dataset to a control/reference dataset, rebuild both pixel and text caches. Older caches do not contain the required `latents_control_*`, `pixel_values`, or `image_grid_thw` tensors.
+- After changing a T2I dataset to a control/reference dataset, switch `--task` to `i2i` and rebuild both pixel and text caches. Older caches do not contain the required `latents_control_*`, `pixel_values`, or `image_grid_thw` tensors.
 - For `--model_type dev`, training samples with exactly one `control_image_path` default to the official `flow_match` editing scheduler. Use `editing_scheduler = "flash"` in the sample prompt config to force the flash scheduler.
 - Training sample prompt configs can include `layout_bboxes` to use the official layout conditioning path during sampling.
 
@@ -145,7 +161,7 @@ Full finetuning uses `hidream_o1_train.py`. This trains the full HiDream-O1 sing
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hidream_o1_train.py \
     --dit path/to/checkpoints/hidream_o1_image_bf16.safetensors \
     --dataset_config path/to/dataset.toml \
-    --model_type full \
+    --model_type full --task t2i \
     --timestep_sampling uniform --weighting_scheme none \
     --noise_scale_start 8.0 --noise_scale_end 8.0 --noise_clip_std 0.0 \
     --full_bf16 \
@@ -162,15 +178,12 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 Notes:
 
 - `--full_bf16` is strongly recommended for memory-limited systems. Without it, model weights are trained in float32.
-- Pure T2I datasets automatically freeze the Qwen3-VL visual encoder and skip its dummy zero-gradient pass.
-- `--fp8_base` is experimental: trainable tensors are promoted back to the training dtype, so only frozen inactive modules may
-  stay FP8. This still starts trainable tensors from FP8-quantized initial values. `--fp8_scaled` is still rejected for full
-  finetuning.
+- `--task t2i` freezes the Qwen3-VL visual encoder and skips its dummy zero-gradient pass; `--task i2i` keeps it trainable for control/reference data. As with LoRA, the task must match the dataset.
+- Full finetuning does not support fp8: both `--fp8_base` and `--fp8_scaled` are rejected. The DiT stays trainable in bf16/fp32, so fp8 could only quantize frozen modules and is not worth the complexity.
 - `--fused_backward_pass` is intended for Adafactor and should be used with `--max_grad_norm 0`.
 - `--mem_eff_save` can reduce RAM usage when saving model checkpoints.
 - `--block_swap_optimizer_patch_params` is available when using block swap without `--fused_backward_pass`.
 - Dev models should use `--model_type dev --noise_scale_start 7.5 --noise_scale_end 7.5 --noise_clip_std 2.5`.
-- The design notes are in `docs/hidream_o1_full_finetune_spec.md`.
 
 ## Inference
 

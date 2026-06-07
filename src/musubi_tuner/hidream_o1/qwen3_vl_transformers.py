@@ -1885,6 +1885,10 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     accepts_loss_kwargs = False
     config: Qwen3VLConfig
 
+    # HiDream-O1 training task ("t2i" or "i2i"), set by the trainer's load_transformer.
+    # Used by networks.lora_hidream_o1 to choose LoRA target modules without a net_kwargs round-trip.
+    hidream_o1_task: Optional[str] = None
+
     def __init__(self, config):
         super().__init__(config)
         self.model = Qwen3VLModel(config)

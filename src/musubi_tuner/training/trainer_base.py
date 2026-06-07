@@ -126,8 +126,6 @@ class NetworkTrainer:
             logs["max_norm/average_key_norm"] = mean_norm
             logs["max_norm/max_key_norm"] = maximum_norm
 
-        logs.update(getattr(self, "_latest_aux_loss_logs", {}))
-
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
             if lr_descriptions is not None:
@@ -144,17 +142,19 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("dadapt") or "prodigy" in args.optimizer_type.lower():
-                # tracking d*lr value
-                logs[f"lr/d*lr/{lr_desc}"] = (
-                    lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-                )
-
+            # Check prodigyplusschedulefree first: it is handled via optimizer.param_groups below and does not
+            # expose `d` on lr_scheduler.optimizers, so it must not fall into the substring "prodigy" path.
             if args.optimizer_type.lower().endswith("prodigyplusschedulefree") and optimizer is not None:
                 # tracking d*lr value of unet.
                 logs[f"lr/d*lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
                 if "effective_lr" in optimizer.param_groups[i]:
                     logs[f"lr/d*eff_lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["effective_lr"]
+
+            elif args.optimizer_type.lower().startswith("dadapt") or "prodigy" in args.optimizer_type.lower():
+                # tracking d*lr value (Prodigy, Prodigy_Adv, Prodigy_Lion_Adv, etc.)
+                logs[f"lr/d*lr/{lr_desc}"] = (
+                    lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
+                )
 
         return logs
 
@@ -1107,16 +1107,6 @@ class NetworkTrainer:
     # Internal extension points — no API stability guarantees.
     # Subclasses live in this repo; if you fork, expect breakage on updates.
 
-    def prepare_network_kwargs(
-        self,
-        args: argparse.Namespace,
-        train_dataset_group: Any,
-        network_module: Any,
-        net_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Optionally adjust network factory kwargs before creating the network."""
-        return net_kwargs
-
     def process_batch(
         self,
         args: argparse.Namespace,
@@ -1154,19 +1144,7 @@ class NetworkTrainer:
             model_pred, target = output
             output = DiTOutput(pred=model_pred, target=target)
 
-        loss, loss_metrics = self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype)
-        loss = self.apply_auxiliary_losses(
-            args,
-            accelerator,
-            loss,
-            output.pred,
-            output.target,
-            batch,
-            latents,
-            timesteps,
-            network_dtype,
-            global_step,
-        )
+        loss, loss_metrics = self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
         return loss, loss_metrics
 
     def compute_loss(
@@ -1177,39 +1155,28 @@ class NetworkTrainer:
         noise_scheduler,
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
+        global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
         Default implementation: weighted MSE between ``output.pred`` and
         ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
         then ``.mean()``. Override to swap the loss formulation entirely
-        (e.g. Self-Flow's L_gen + gamma * L_rep). Subclasses are responsible
-        for whatever weighting/reduction they need — this hook owns the
-        full loss computation, not just the per-element MSE.
+        (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary terms
+        (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses are
+        responsible for whatever weighting/reduction they need — this hook owns
+        the full loss computation, not just the per-element MSE.
 
-        ``loss_metrics`` defaults to empty; populate with named scalars for
-        loss-decomposition logging (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
+        ``global_step`` is provided for step-gated terms (e.g. computing an
+        auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
+        populate with named scalars for loss-decomposition logging
+        (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
         weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
         loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
             loss = loss * weighting
         return loss.mean(), {}
-
-    def apply_auxiliary_losses(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        loss: torch.Tensor,
-        model_pred: torch.Tensor,
-        target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
-        global_step: int,
-    ) -> torch.Tensor:
-        return loss
 
     def on_transformer_loaded(
         self,
@@ -1344,7 +1311,7 @@ class NetworkTrainer:
         accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
         sample_parameters, vae = self._prepare_sampling(args, accelerator, vae_dtype)
         transformer = self._load_dit_and_swap(args, accelerator, dit_weight_dtype)
-        network = self._build_network(args, accelerator, transformer, vae, weight_dtype, train_dataset_group)
+        network = self._build_network(args, accelerator, transformer, vae, weight_dtype)
         if network is None:
             return
         (
@@ -1555,7 +1522,7 @@ class NetworkTrainer:
             transformer.move_to_device_except_swap_blocks(accelerator.device)
         return transformer
 
-    def _build_network(self, args, accelerator, transformer, vae, weight_dtype, train_dataset_group):
+    def _build_network(self, args, accelerator, transformer, vae, weight_dtype):
         # load network module for differential training
         # Allow short paths like `--network_module networks.lora` by putting the musubi_tuner
         # package dir on sys.path. __file__ is under musubi_tuner/training/, so step up one level.
@@ -1588,7 +1555,6 @@ class NetworkTrainer:
             for net_arg in args.network_args:
                 key, value = net_arg.split("=")
                 net_kwargs[key] = value
-        net_kwargs = self.prepare_network_kwargs(args, train_dataset_group, network_module, net_kwargs)
 
         if args.dim_from_weights:
             logger.info(f"Loading network from weights: {args.dim_from_weights}")

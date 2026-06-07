@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Sequence, TYPE_CHECKING, Union
+from typing import Optional, TYPE_CHECKING, Union
 
 import torch
 from safetensors.torch import save_file
@@ -18,7 +18,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_Z_IMAGE_FULL,
 )
 from musubi_tuner.utils import safetensors_utils
-from musubi_tuner.utils.model_utils import dtype_to_str
+from musubi_tuner.utils.model_utils import dtype_to_str, remove_dtype_suffix
 
 if TYPE_CHECKING:
     from musubi_tuner.dataset.image_video_dataset import ItemInfo
@@ -410,41 +410,31 @@ def save_text_encoder_output_cache_hidream_o1(
     image_grid_thw: Optional[torch.Tensor] = None,
 ):
     """HiDream-O1 architecture. Cache tokenized prompt and optional initial text token embeddings."""
-    sd = {f"varlen_input_ids_{dtype_to_str(input_ids.dtype)}": input_ids.detach().cpu()}
-    if input_embeds is not None:
-        sd[f"varlen_input_embeds_{dtype_to_str(input_embeds.dtype)}"] = input_embeds.detach().cpu()
-    if position_ids is not None:
-        sd[f"varlen_position_ids_{dtype_to_str(position_ids.dtype)}"] = position_ids.detach().cpu()
-    if token_types is not None:
-        sd[f"varlen_token_types_{dtype_to_str(token_types.dtype)}"] = token_types.detach().cpu()
-    if pixel_values is not None:
-        sd[f"varlen_pixel_values_{dtype_to_str(pixel_values.dtype)}"] = pixel_values.detach().cpu()
-    if image_grid_thw is not None:
-        sd[f"varlen_image_grid_thw_{dtype_to_str(image_grid_thw.dtype)}"] = image_grid_thw.detach().cpu()
+    # The dtype suffix is parsed back on load (see bucket.py), so it must be built per tensor here; absent optionals
+    # are simply skipped. HiDream-O1 writes its full key set in a single pass, so the cache is overwritten fresh
+    # (merge_existing=False) instead of merged, dropping any stale optional/dtype keys left from a previous run.
+    tensors = {
+        "varlen_input_ids": input_ids,
+        "varlen_input_embeds": input_embeds,
+        "varlen_position_ids": position_ids,
+        "varlen_token_types": token_types,
+        "varlen_pixel_values": pixel_values,
+        "varlen_image_grid_thw": image_grid_thw,
+    }
+    sd = {f"{name}_{dtype_to_str(t.dtype)}": t.detach().cpu() for name, t in tensors.items() if t is not None}
 
-    drop_existing_key_prefixes = []
-    if input_embeds is None:
-        drop_existing_key_prefixes.append("varlen_input_embeds_")
-    if position_ids is None:
-        drop_existing_key_prefixes.append("varlen_position_ids_")
-    if token_types is None:
-        drop_existing_key_prefixes.append("varlen_token_types_")
-    if pixel_values is None:
-        drop_existing_key_prefixes.append("varlen_pixel_values_")
-    if image_grid_thw is None:
-        drop_existing_key_prefixes.append("varlen_image_grid_thw_")
-
-    save_text_encoder_output_cache_common(
-        item_info, sd, ARCHITECTURE_HIDREAM_O1_FULL, drop_existing_key_prefixes=drop_existing_key_prefixes
-    )
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HIDREAM_O1_FULL, merge_existing=False)
 
 
 def save_text_encoder_output_cache_common(
     item_info: ItemInfo,
     sd: dict[str, torch.Tensor],
     arch_fullname: str,
-    drop_existing_key_prefixes: Optional[Sequence[str]] = None,
+    merge_existing: bool = True,
 ):
+    # merge_existing keeps keys written by previous passes (e.g. HunyuanVideo caches LLM and CLIP separately).
+    # Single-pass architectures that write their full key set at once should pass merge_existing=False so the
+    # cache is overwritten fresh, dropping any stale keys (e.g. optionals/dtypes) left from an earlier run.
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
         if torch.isnan(value).any():
@@ -457,15 +447,16 @@ def save_text_encoder_output_cache_common(
         "format_version": "1.0.1",
     }
 
-    if os.path.exists(item_info.text_encoder_output_cache_path):
+    if merge_existing and os.path.exists(item_info.text_encoder_output_cache_path):
         # load existing cache and update metadata
-        drop_existing_key_prefixes = drop_existing_key_prefixes or []
+        new_key_bases = {remove_dtype_suffix(key) for key in sd}  # logical keys (dtype stripped) just written
         with safetensors_utils.MemoryEfficientSafeOpen(item_info.text_encoder_output_cache_path) as f:
             existing_metadata = f.metadata()
             for key in f.keys():
-                if key in sd:
-                    continue
-                if any(key.startswith(prefix) for prefix in drop_existing_key_prefixes):
+                # Skip any existing key superseded by a freshly written one. Comparing on the dtype-stripped base
+                # (not the exact key) also drops a stale copy written in another precision, e.g. re-caching after
+                # toggling fp8; otherwise both dtype variants would survive and collide under one key on load.
+                if remove_dtype_suffix(key) in new_key_bases:
                     continue
                 sd[key] = f.get_tensor(key)
 

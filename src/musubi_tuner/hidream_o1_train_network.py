@@ -1,6 +1,6 @@
 import argparse
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -11,7 +11,14 @@ from musubi_tuner.hidream_o1 import hidream_o1_utils
 from musubi_tuner.hidream_o1.pipeline import TIMESTEP_TOKEN_NUM, generate_image
 from musubi_tuner.hidream_o1.utils import get_rope_index_fix_point
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from musubi_tuner.hv_train_network import NetworkTrainer, get_sigmas, load_prompts, read_config_from_file, setup_parser_common
+from musubi_tuner.hv_train_network import (
+    DiTOutput,
+    NetworkTrainer,
+    get_sigmas,
+    load_prompts,
+    read_config_from_file,
+    setup_parser_common,
+)
 from musubi_tuner.utils import model_utils
 
 logger = logging.getLogger(__name__)
@@ -51,7 +58,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.use_flash_attn = False
         self.model_type = "full"
         self.dino_loss_fn = None
-        self._latest_aux_loss_logs: dict[str, float] = {}
 
     @property
     def architecture(self) -> str:
@@ -65,7 +71,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.dit_dtype = torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
+        # control_training in the base class means video-control training, which makes sample image
+        # generation require control_video_path. HiDream-O1 is an image model that takes control images
+        # (control_image_path), like FLUX.2/Kontext, so keep this False and track i2i separately.
         self._control_training = False
+        self._i2i_training = args.task == "i2i"
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
         self.default_guidance_scale = 0.0 if self.model_type == "dev" else 5.0
@@ -83,22 +93,8 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
-        if args.fp8_base and not getattr(args, "fp8_scaled", False):
+        if args.fp8_base and not args.fp8_scaled:
             raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
-
-    def prepare_network_kwargs(
-        self,
-        args: argparse.Namespace,
-        train_dataset_group: Any,
-        network_module: Any,
-        net_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        has_control = any(getattr(dataset, "has_control", False) for dataset in train_dataset_group.datasets)
-        net_kwargs = dict(net_kwargs)
-        net_kwargs["hidream_has_control"] = str(has_control)
-        target = "I2I/control" if has_control else "T2I"
-        logger.info(f"HiDream-O1 LoRA target is selected from dataset: {target}")
-        return net_kwargs
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         return load_prompts(sample_prompts)
@@ -113,7 +109,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             choices = ", ".join(name.lower() for name in enum_class.__members__.keys())
             raise ValueError(f"Invalid DINO model type '{model_type}'. Available choices: {choices}")
 
-    def _get_dino_loss_fn(self, args: argparse.Namespace, accelerator: Accelerator) -> torch.nn.Module:
+    def _get_dino_loss_fn(self, args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
         if self.dino_loss_fn is not None:
             return self.dino_loss_fn
 
@@ -151,7 +147,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 'HiDream-O1 DINO auxiliary loss requires SenseCraft with DINOv3 support. Install it with: uv pip install ".[hidream_o1]"'
             ) from e
 
-        self.dino_loss_fn.requires_grad_(False).eval().to(accelerator.device)
+        self.dino_loss_fn.requires_grad_(False).eval().to(device)
         logger.info(
             "HiDream-O1 DINO auxiliary loss enabled: "
             "backend=%s, model_type=%s, layer=%s, feature_mode=%s, weight=%s, resize=%s, use_norm=%s, use_gram=%s",
@@ -303,7 +299,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         dtype = dit_weight_dtype or torch.bfloat16
         model = hidream_o1_utils.load_model(dit_path, dtype=dtype, device=loading_device, model_type=args.model_type)
 
-        if getattr(args, "fp8_scaled", False):
+        if args.fp8_scaled:
             logger.info("Applying HiDream-O1 scaled fp8 optimization.")
             state_dict = model.state_dict()
             quant_device = accelerator.device
@@ -320,7 +316,14 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             logger.info(f"Loaded HiDream-O1 scaled fp8 optimized weights: {info}")
 
         if not hasattr(model, "enable_gradient_checkpointing"):
-            model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable()
+            # The decoder loop passes keyword arguments to the checkpointed layer, which reentrant
+            # checkpointing rejects, so non-reentrant checkpointing must be requested explicitly.
+            model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+
+        # Tag the model with the training task so the LoRA factory can pick target modules from it.
+        model.hidream_o1_task = args.task
 
         return model
 
@@ -484,6 +487,17 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         if torch.is_tensor(input_ids_list):
             input_ids_list = list(input_ids_list)
 
+        # Block swap is incompatible with the per-sample forward loop below: it runs one full decoder forward per
+        # sample, but the offloader expects a single forward+backward per step (the backward hooks restore the initial
+        # block placement). With more than one sample the second forward starts with the front blocks already offloaded
+        # to CPU, which crashes with a device mismatch. Until the forward is batched, require batch_size=1 with block swap.
+        if self.blocks_to_swap and len(input_ids_list) > 1:
+            raise ValueError(
+                "HiDream-O1 --blocks_to_swap currently supports a dataset batch_size of 1 only "
+                f"(got {len(input_ids_list)} samples in a batch). The per-sample forward loop is incompatible with "
+                "block swap. Set the dataset batch_size to 1, or train without --blocks_to_swap."
+            )
+
         height_patches, width_patches = latents.shape[1], latents.shape[2]
         latents_seq = latents.reshape(latents.shape[0], height_patches * width_patches, latents.shape[-1])
         noisy_model_input_seq = noisy_model_input.reshape(
@@ -504,6 +518,19 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             [key for key in batch.keys() if key.startswith("latents_control")],
             key=lambda key: int(key.rsplit("_", 1)[-1]) if key.rsplit("_", 1)[-1].isdigit() else 0,
         )
+
+        # Validate the declared task against the data actually present in the batch.
+        if self._i2i_training and not control_keys:
+            raise ValueError(
+                "HiDream-O1 --task i2i was specified, but the dataset has no control data (latents_control_* "
+                "tensors). Add control images to the dataset, or use --task t2i."
+            )
+        if not self._i2i_training and control_keys:
+            raise ValueError(
+                "HiDream-O1 dataset provides control data (latents_control_* tensors), but --task is t2i. "
+                "Use --task i2i to train with control/reference images."
+            )
+
         for i, input_ids in enumerate(input_ids_list):
             control_patch_shapes = []
             control_sequences = []
@@ -577,54 +604,75 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         model_pred = torch.cat(model_preds, dim=0)
         target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
-        return model_pred, target
+        # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
+        # DINO auxiliary loss without needing the latents tensor itself.
+        return DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        loss, metrics = super().compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        loss, dino_logs = self.apply_dino_loss(args, loss, output.pred, output.target, output.extra["pixel_grid_hw"], global_step)
+        if dino_logs:
+            metrics = {**metrics, **dino_logs}
+        return loss, metrics
 
     def prepare_dino_loss_images(
         self,
-        args: argparse.Namespace,
         model_pred: torch.Tensor,
         target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
+        pixel_grid_hw: tuple[int, int],
     ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-        if model_pred.ndim == 3 and target.ndim == 3 and latents.ndim == 4:
-            height = latents.shape[1] * hidream_o1_utils.PATCH_SIZE
-            width = latents.shape[2] * hidream_o1_utils.PATCH_SIZE
-            pred_images = hidream_o1_utils.unpatchify_pixels(model_pred, height, width)
-            target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
-            return pred_images, target_images
+        if model_pred.ndim != 3 or target.ndim != 3:
+            return None
+        height_patches, width_patches = pixel_grid_hw
+        height = height_patches * hidream_o1_utils.PATCH_SIZE
+        width = width_patches * hidream_o1_utils.PATCH_SIZE
+        pred_images = hidream_o1_utils.unpatchify_pixels(model_pred, height, width)
+        target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
+        return pred_images, target_images
 
-        return None
-
-    def apply_auxiliary_losses(
+    def apply_dino_loss(
         self,
         args: argparse.Namespace,
-        accelerator: Accelerator,
         loss: torch.Tensor,
         model_pred: torch.Tensor,
         target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
+        pixel_grid_hw: tuple[int, int],
         global_step: int,
-    ) -> torch.Tensor:
-        self._latest_aux_loss_logs = {}
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Add the optional SenseCraft DINOv3 perceptual loss to ``loss``.
+
+        Shared by the LoRA trainer (via ``compute_loss``) and the full-finetune
+        loop. Returns ``(possibly_augmented_loss, logs)``; ``logs`` is empty when
+        the DINO term is disabled or skipped for this step.
+
+        The DINO perceptual loss is not inherently HiDream-O1 specific and could
+        in principle be reused by other architectures; it is scoped to HiDream-O1
+        here to keep the surface area small. If a second consumer appears, this
+        helper (and ``prepare_dino_loss_images`` / RGB reconstruction) is a
+        candidate to lift into shared training infrastructure.
+        """
         if args.dino_loss_weight <= 0:
-            return loss
+            return loss, {}
         if args.dino_loss_every_n_steps < 1:
             raise ValueError("--dino_loss_every_n_steps must be >= 1")
         if args.dino_loss_every_n_steps > 1 and global_step % args.dino_loss_every_n_steps != 0:
-            return loss
+            return loss, {}
 
-        images = self.prepare_dino_loss_images(args, model_pred, target, batch, latents, timesteps, network_dtype)
+        images = self.prepare_dino_loss_images(model_pred, target, pixel_grid_hw)
         if images is None:
             raise ValueError(
                 "HiDream-O1 DINO auxiliary loss is enabled, but RGB image tensors could not be prepared. "
                 f"model_pred shape={tuple(model_pred.shape)}, target shape={tuple(target.shape)}, "
-                f"latents shape={tuple(latents.shape)}."
+                f"pixel_grid_hw={pixel_grid_hw}."
             )
 
         pred_images, target_images = images
@@ -636,7 +684,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             pred_images = torch.nn.functional.interpolate(pred_images, size=size, mode="bilinear", align_corners=False)
             target_images = torch.nn.functional.interpolate(target_images, size=size, mode="bilinear", align_corners=False)
 
-        dino_loss_fn = self._get_dino_loss_fn(args, accelerator)
+        dino_loss_fn = self._get_dino_loss_fn(args, model_pred.device)
         if args.dino_loss_backend == "vit" and args.dino_loss_feature_mode != "all":
             dino_loss = self._compute_vit_dino_feature_loss(
                 dino_loss_fn,
@@ -651,16 +699,24 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         weighted_dino_loss = dino_loss * args.dino_loss_weight
         total_loss = loss + weighted_dino_loss.to(dtype=loss.dtype)
 
-        self._latest_aux_loss_logs = {
+        logs = {
             "loss/base": float(loss.detach().item()),
             "loss/dino": float(dino_loss.detach().item()),
             "loss/dino_weighted": float(weighted_dino_loss.detach().item()),
         }
-        return total_loss
+        return total_loss, logs
 
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--model_type", type=str, default="full", choices=["full", "dev"], help="HiDream-O1 model variant")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="t2i",
+        choices=["t2i", "i2i"],
+        help="HiDream-O1 training task: 't2i' (text-to-image) or 'i2i' (image/control-conditioned). "
+        "'i2i' makes the visual encoder trainable and adds the visual modules to the LoRA target.",
+    )
     parser.add_argument(
         "--noise_scale_start",
         type=float,

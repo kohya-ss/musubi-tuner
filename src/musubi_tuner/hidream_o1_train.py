@@ -37,23 +37,10 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
-
 
 class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
     def __init__(self):
         super().__init__()
-
-    def handle_model_specific_args(self, args):
-        fp8_base = args.fp8_base
-        fp8_scaled = args.fp8_scaled
-        args.fp8_base = False
-        args.fp8_scaled = False
-        try:
-            super().handle_model_specific_args(args)
-        finally:
-            args.fp8_base = fp8_base
-            args.fp8_scaled = fp8_scaled
 
     def _validate_full_finetune_args(self, args: argparse.Namespace):
         if args.dataset_config is None:
@@ -61,8 +48,8 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
         if args.dit is None:
             raise ValueError("path to DiT model is required")
 
-        if args.fp8_scaled:
-            raise ValueError("HiDream-O1 full finetuning does not support --fp8_scaled yet.")
+        if args.fp8_base or args.fp8_scaled:
+            raise ValueError("HiDream-O1 full finetuning does not support --fp8_base / --fp8_scaled.")
 
         if args.sage_attn:
             raise ValueError("SageAttention doesn't support training currently. Use the default attention path or --flash_attn.")
@@ -84,18 +71,6 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
         specified_lora_args = [name for name, value in lora_only_args.items() if value not in (None, False, [])]
         if specified_lora_args:
             raise ValueError("HiDream-O1 full finetuning does not use LoRA/network arguments: " + ", ".join(specified_lora_args))
-
-    def _dataset_has_control(self, train_dataset_group) -> bool:
-        return any(getattr(dataset, "has_control", False) for dataset in train_dataset_group.datasets)
-
-    def _sample_prompts_use_visual(self, sample_parameters) -> bool:
-        if sample_parameters is None:
-            return False
-        for sample_parameter in sample_parameters:
-            control_image_path = sample_parameter.get("control_image_path", None)
-            if control_image_path:
-                return True
-        return False
 
     def _set_t2i_visual_dummy_skip(self, transformer, enabled: bool):
         inner_model = getattr(transformer, "model", None)
@@ -127,50 +102,6 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
             f"({frozen_params} tensors, {frozen_numel} parameters) and disabled dummy visual training pass."
         )
         return frozen_params, frozen_numel
-
-    def _get_module_and_attr(self, model: torch.nn.Module, tensor_name: str) -> tuple[torch.nn.Module, str]:
-        if "." not in tensor_name:
-            return model, tensor_name
-        module_name, attr_name = tensor_name.rsplit(".", 1)
-        return model.get_submodule(module_name), attr_name
-
-    def _replace_parameter_dtype(self, module: torch.nn.Module, parameter_name: str, dtype: torch.dtype) -> bool:
-        parameter = getattr(module, parameter_name)
-        if parameter.dtype not in FP8_DTYPES:
-            return False
-        new_parameter = torch.nn.Parameter(
-            parameter.detach().to(device=parameter.device, dtype=dtype), requires_grad=parameter.requires_grad
-        )
-        module.register_parameter(parameter_name, new_parameter)
-        return True
-
-    def _promote_fp8_parameters(self, model: torch.nn.Module, dtype: torch.dtype, trainable_only: bool) -> tuple[int, int]:
-        promoted_params = 0
-        promoted_numel = 0
-        parameter_names = [name for name, parameter in model.named_parameters() if parameter.dtype in FP8_DTYPES]
-        for name in parameter_names:
-            module, parameter_name = self._get_module_and_attr(model, name)
-            parameter = getattr(module, parameter_name)
-            if trainable_only and not parameter.requires_grad:
-                continue
-            numel = parameter.numel()
-            if self._replace_parameter_dtype(module, parameter_name, dtype):
-                promoted_params += 1
-                promoted_numel += numel
-        return promoted_params, promoted_numel
-
-    def _promote_fp8_buffers(self, model: torch.nn.Module, dtype: torch.dtype) -> tuple[int, int]:
-        promoted_buffers = 0
-        promoted_numel = 0
-        buffer_names = [name for name, buffer in model.named_buffers() if buffer.dtype in FP8_DTYPES]
-        for name in buffer_names:
-            module, buffer_name = self._get_module_and_attr(model, name)
-            buffer = getattr(module, buffer_name)
-            persistent = buffer_name not in module._non_persistent_buffers_set
-            module.register_buffer(buffer_name, buffer.detach().to(device=buffer.device, dtype=dtype), persistent=persistent)
-            promoted_buffers += 1
-            promoted_numel += buffer.numel()
-        return promoted_buffers, promoted_numel
 
     def train(self, args):
         if torch.cuda.is_available():
@@ -212,7 +143,9 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
             blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
         )
-        has_control = self._dataset_has_control(train_dataset_group)
+        # Driven by --task (set on self._i2i_training in handle_model_specific_args). Consistency with the
+        # actual dataset is enforced in call_dit, shared with the LoRA trainer.
+        has_control = self._i2i_training
 
         if train_dataset_group.num_train_items == 0:
             raise ValueError(
@@ -248,44 +181,12 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
 
         logger.info(f"Loading DiT model from {args.dit}")
         attn_mode = "flash" if args.flash_attn else "torch"
-        dit_weight_dtype = torch.float8_e4m3fn if args.fp8_base else dit_dtype
-        if args.fp8_base:
-            logger.warning(
-                "HiDream-O1 --fp8_base quantizes initial weights before training. Trainable tensors are promoted back to "
-                f"{dit_dtype} before optimizer creation, but they still start from FP8-quantized values."
-            )
+        dit_weight_dtype = dit_dtype
         transformer = self.load_transformer(
             accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
         )
 
         frozen_visual_params, frozen_visual_numel = self._freeze_inactive_modules_for_dataset(transformer, has_control)
-        fp8_frozen_visual = False
-        promoted_buffer_numel = 0
-        if args.fp8_base:
-            sample_uses_visual = self._sample_prompts_use_visual(sample_parameters)
-            fp8_frozen_visual = not has_control and not sample_uses_visual
-            promoted_buffers, promoted_buffer_numel = self._promote_fp8_buffers(transformer, dit_dtype)
-            if promoted_buffers:
-                logger.info(
-                    "HiDream-O1 fp8_base full finetuning: promoted "
-                    f"{promoted_buffers} FP8 buffers ({promoted_buffer_numel} values) back to {dit_dtype}."
-                )
-            promoted_params, promoted_numel = self._promote_fp8_parameters(transformer, dit_dtype, trainable_only=fp8_frozen_visual)
-            logger.info(
-                "HiDream-O1 fp8_base full finetuning: promoted "
-                f"{promoted_params} trainable FP8 tensors ({promoted_numel} parameters) back to {dit_dtype}."
-            )
-            if fp8_frozen_visual:
-                logger.info("Frozen T2I visual encoder remains in FP8 because it is not used by training or sampling.")
-            else:
-                promoted_frozen_params, promoted_frozen_numel = self._promote_fp8_parameters(
-                    transformer, dit_dtype, trainable_only=False
-                )
-                if promoted_frozen_params:
-                    logger.info(
-                        "Promoted frozen FP8 tensors needed by control/reference sampling back to "
-                        f"{dit_dtype}: {promoted_frozen_params} tensors ({promoted_frozen_numel} parameters)."
-                    )
 
         if blocks_to_swap > 0:
             logger.info(
@@ -410,9 +311,6 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
             "ss_max_grad_norm": args.max_grad_norm,
             "ss_full_fp16": False,
             "ss_full_bf16": bool(args.full_bf16),
-            "ss_fp8_base": bool(args.fp8_base),
-            "ss_fp8_frozen_visual": bool(fp8_frozen_visual),
-            "ss_fp8_promoted_buffers": promoted_buffer_numel,
             "ss_has_control": bool(has_control),
             "ss_frozen_visual_params": frozen_visual_numel,
             "ss_weighting_scheme": args.weighting_scheme,
@@ -591,17 +489,18 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
                         args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
                     )
 
-                    model_pred, target = self.call_dit(
+                    dit_output = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
                     )
+                    model_pred, target = dit_output.pred, dit_output.target
                     loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
 
                     if weighting is not None:
                         loss = loss * weighting
 
                     loss = loss.mean()
-                    loss = self.apply_auxiliary_losses(
-                        args, accelerator, loss, model_pred, target, batch, latents, timesteps, dit_dtype, global_step
+                    loss, dino_logs = self.apply_dino_loss(
+                        args, loss, model_pred, target, dit_output.extra["pixel_grid_hw"], global_step
                     )
 
                     accelerator.backward(loss)
@@ -669,6 +568,7 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, None, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
+                    logs.update(dino_logs)
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:

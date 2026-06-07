@@ -624,9 +624,18 @@ This is a hybrid sampling method that combines three different samplers to balan
 
 In each training step, one of the following samplers is chosen for each sample in the batch based on a predefined ratio:
 
-1.  **flux_shift or qwen_shift (80%)**: The standard sampler for high-resolution models. Focuses on overall stability.
-2.  **logsnr (7.5%)**: The Style-Friendly sampler. Focuses on style learning.
-3.  **logsnr2 (12.5%)**: A sampler that focuses on low-noise regions (high log-SNR values). Aims to improve the learning of fine details.
+1.  **flux_shift or qwen_shift (mid_shift)**: The standard resolution-dependent shift sampler for high-resolution models. Focuses on overall stability.
+2.  **logsnr**: The Style-Friendly sampler. Focuses on style learning.
+3.  **logsnr2**: A sampler that focuses on low-noise regions (high log-SNR values). Aims to improve the learning of fine details.
+
+`qinglong_flux` and `qinglong_qwen` use different ratios:
+
+| Sampler | mid_shift | logsnr | logsnr2 |
+| --- | --- | --- | --- |
+| `qinglong_flux` | 79% | 11% | 10% |
+| `qinglong_qwen` | 95% | 0% | 5% |
+
+`qinglong_qwen` skips the middle `logsnr` bucket entirely and uses a `qwen_shift` tuned for Qwen-Image resolutions. Note that these ratios changed with the HiDream-O1 update; earlier versions used 80% / 7.5% / 12.5% for both samplers.
 
 To use this, specify `qinglong_flux` or `qinglong_qwen` for `--timestep_sampling`.
 
@@ -648,9 +657,18 @@ Following is the distribution of the qinglong flux sampler:
 
 各学習ステップにおいて、バッチ内の各サンプルに対して、あらかじめ定義された比率に基づき以下のいずれかのサンプラーが選択されます。
 
-1.  **flux_shift または qwen_shift (80%)**: 高解像度モデル向けの標準的なサンプラー。全体的な安定性を重視します。
-2.  **logsnr (7.5%)**: Style-Friendlyサンプラー。スタイルの学習を重視します。
-3.  **logsnr2 (12.5%)**: 低ノイズ領域（高いlog-SNR値）に焦点を当てたサンプラー。細部のディテール学習を向上させることを目的とします。
+1.  **flux_shift または qwen_shift (mid_shift)**: 高解像度モデル向けの、解像度に応じた標準的な shift サンプラー。全体的な安定性を重視します。
+2.  **logsnr**: Style-Friendlyサンプラー。スタイルの学習を重視します。
+3.  **logsnr2**: 低ノイズ領域（高いlog-SNR値）に焦点を当てたサンプラー。細部のディテール学習を向上させることを目的とします。
+
+`qinglong_flux` と `qinglong_qwen` では比率が異なります。
+
+| サンプラー | mid_shift | logsnr | logsnr2 |
+| --- | --- | --- | --- |
+| `qinglong_flux` | 79% | 11% | 10% |
+| `qinglong_qwen` | 95% | 0% | 5% |
+
+`qinglong_qwen` は中間の `logsnr` バケットを完全にスキップし、Qwen-Image の解像度に合わせた `qwen_shift` を使用します。これらの比率は HiDream-O1 のアップデートで変更されました。以前のバージョンでは両サンプラーとも 80% / 7.5% / 12.5% でした。
 
 使用するには、`--timestep_sampling` に `qinglong_flux` または `qinglong_qwen` を指定します。
 
