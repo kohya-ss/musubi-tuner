@@ -553,6 +553,21 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 "Use --task i2i to train with control/reference images."
             )
 
+        # Validate cache consistency once for every forward path (batched t2i, per-sample i2i, per-sample flash t2i):
+        # the control latents (pixel cache) and the VLM conditioning inputs (pixel_values/image_grid_thw in the text
+        # cache) must be present together or absent together. The batched path otherwise silently ignores stale
+        # pixel_values/image_grid_thw from an old i2i text cache and trains on placeholder tokens with no features.
+        if control_keys and (pixel_values_list is None or image_grid_thw_list is None):
+            raise ValueError(
+                "HiDream-O1 control pixel cache was found (latents_control_*), but the text cache has no "
+                "pixel_values/image_grid_thw. Rebuild the text encoder cache."
+            )
+        if not control_keys and (pixel_values_list is not None or image_grid_thw_list is not None):
+            raise ValueError(
+                "HiDream-O1 control text cache was found (pixel_values/image_grid_thw), but the pixel cache has no "
+                "latents_control_* tensors. Rebuild the pixel cache."
+            )
+
         # The per-sample loop runs an effective batch size of 1 (one transformer forward per image),
         # which makes the Linear layers launch-bound. For t2i we instead pad the variable-length text
         # prefix to a common length, assemble one padded batch, and call the transformer once so the
@@ -746,17 +761,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 control_patch_shapes.append((control.shape[0], control.shape[1]))
                 control_sequences.append(control.reshape(1, control.shape[0] * control.shape[1], control.shape[-1]))
 
-            if control_sequences and (pixel_values_list is None or image_grid_thw_list is None):
-                raise ValueError(
-                    "HiDream-O1 control pixel cache was found, but text cache has no pixel_values/image_grid_thw. "
-                    "Rebuild the text encoder cache."
-                )
-            if not control_sequences and (pixel_values_list is not None or image_grid_thw_list is not None):
-                raise ValueError(
-                    "HiDream-O1 control text cache was found, but pixel cache has no latents_control_* tensors. "
-                    "Rebuild the pixel cache."
-                )
-
+            # Cache consistency (control latents <-> pixel_values/image_grid_thw) is validated once in call_dit.
             processor_image_grid_thw = None
             if image_grid_thw_list is not None:
                 processor_image_grid_thw = image_grid_thw_list[i]
