@@ -677,7 +677,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             )
         target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
 
-        # [DEBUG-TIMING] dump profiler tables for this one step (discard before commit)
+        # [DEBUG-TIMING] dump profiler tables for this one step (HIDREAM_PROFILE=1)
         if _prof is not None:
             if accelerator.device.type == "cuda":
                 torch.cuda.synchronize(accelerator.device)
