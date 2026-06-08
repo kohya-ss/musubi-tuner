@@ -14,7 +14,6 @@ dependencies = [
     "opencv-python==4.10.0.84",
     "pillow>=11.3.0",
     "safetensors==0.4.5",
-    "scipy>=1.11.0",
     # "sageattention>=1.0.6",
     "toml==0.10.2",
     "tqdm==4.67.1",
