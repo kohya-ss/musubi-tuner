@@ -1140,12 +1140,7 @@ class NetworkTrainer:
         )
 
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
-        if not isinstance(output, DiTOutput):
-            model_pred, target = output
-            output = DiTOutput(pred=model_pred, target=target)
-
-        loss, loss_metrics = self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
-        return loss, loss_metrics
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def compute_loss(
         self,
