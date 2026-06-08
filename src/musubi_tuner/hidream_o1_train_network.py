@@ -348,17 +348,15 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         # The decoder sequence length changes from step to step (variable-length text prefix + image-size
         # buckets), so static compilation recompiles on nearly every step and is typically a net slowdown.
-        # dynamic=True is effectively required for usable performance here.
-        if (getattr(args, "compile_dynamic", None) or "").lower() != "true":
+        # dynamic=true is effectively required for usable performance here.
+        if args.compile_dynamic is None or args.compile_dynamic.lower() != "true":
             logger.warning(
                 "HiDream-O1: --compile is enabled but --compile_dynamic is not 'true'. The decoder sequence length "
                 "varies per step (variable text length + image-size buckets), so static compilation will recompile "
                 "frequently and is likely to run slower than no compile. Pass --compile_dynamic true."
             )
 
-        return model_utils.compile_transformer(
-            args, transformer, target_blocks, disable_linear=self.blocks_to_swap > 0
-        )
+        return model_utils.compile_transformer(args, transformer, target_blocks, disable_linear=self.blocks_to_swap > 0)
 
     def scale_shift_latents(self, latents):
         return latents
