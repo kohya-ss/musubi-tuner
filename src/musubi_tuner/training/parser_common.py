@@ -373,6 +373,10 @@ def _add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_memory_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fp8_base", action="store_true", help="use fp8 for base model / base modelにfp8を使う")
+    # The base NetworkTrainer reads args.fp8_scaled unguarded (trainer_base.py). Most trainers add --fp8_scaled in
+    # their own parser, but HunyuanVideo does not support it, so guarantee the attribute exists here as a safety net.
+    # Trainers that add --fp8_scaled override this default; do not remove it (it is not redundant).
+    parser.set_defaults(fp8_scaled=False)
     # parser.add_argument("--full_fp16", action="store_true", help="fp16 training including gradients / 勾配も含めてfp16で学習する")
     # parser.add_argument("--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する")
 
