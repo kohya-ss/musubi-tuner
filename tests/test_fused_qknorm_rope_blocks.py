@@ -26,9 +26,9 @@ def make_pe(B, L, D, device, theta=2000, offset: int = 0):
     return rope(pos, D, theta).unsqueeze(1)
 
 
-def make_mod(B, hidden, device, seed):
+def make_mod(B, hidden, device, seed, dtype=torch.float32):
     gen = torch.Generator(device=device).manual_seed(seed)
-    return tuple(torch.randn(B, 1, hidden, device=device, generator=gen) * 0.1 for _ in range(3))
+    return tuple(torch.randn(B, 1, hidden, device=device, dtype=dtype, generator=gen) * 0.1 for _ in range(3))
 
 
 def run_single(block, x, pe, mod, attn_params):
@@ -193,6 +193,65 @@ def test_double_stream_block_fused_with_checkpointing():
             torch.testing.assert_close(res_b[4][name], res_a[4][name], **scale_tol, msg=f"grad mismatch: {name}")
         else:
             torch.testing.assert_close(res_b[4][name], res_a[4][name], **tol, msg=f"grad mismatch: {name}")
+
+
+def _flash_available():
+    from musubi_tuner.modules.attention import flash_attn_qkvpacked_func
+
+    return flash_attn_qkvpacked_func is not None
+
+
+@pytest.mark.skipif(not _flash_available(), reason="flash_attn not available")
+def test_single_stream_block_fused_flash_matches_eager_bf16():
+    """Production path: bf16 fused block with attn_mode=flash (packed handoff to
+    flash_attn_qkvpacked_func) vs the eager block on the torch backend."""
+    torch.manual_seed(0)
+    B, L = 2, 33
+    head_dim = HIDDEN // HEADS
+    block = SingleStreamBlock(HIDDEN, HEADS).to(DEVICE).to(torch.bfloat16)
+    block_fused = copy.deepcopy(block)
+    block_fused.fused_qknorm_rope = True
+
+    x = torch.randn(B, L, HIDDEN, device=DEVICE, dtype=torch.bfloat16)
+    pe = make_pe(B, L, head_dim, DEVICE)
+    mod = make_mod(B, HIDDEN, DEVICE, seed=1, dtype=torch.bfloat16)
+
+    out_e, gx_e, _ = run_single(block, x, pe, mod, AttentionParams.create_attention_params("torch", False))
+    out_f, gx_f, _ = run_single(block_fused, x, pe, mod, AttentionParams.create_attention_params("flash", False))
+
+    # bf16 + different attention backends: param grads are checked by the fp32
+    # torch-backend tests; here outputs and input grads pin the flash packed path.
+    tol = dict(rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(out_f.float(), out_e.float(), **tol)
+    torch.testing.assert_close(gx_f.float(), gx_e.float(), **tol)
+
+
+@pytest.mark.skipif(not _flash_available(), reason="flash_attn not available")
+def test_double_stream_block_fused_flash_matches_eager_bf16():
+    """Production path: bf16 fused DoubleStreamBlock with attn_mode=flash vs eager/torch."""
+    torch.manual_seed(0)
+    B, L_img, L_txt = 2, 33, 11
+    head_dim = HIDDEN // HEADS
+    block = DoubleStreamBlock(HIDDEN, HEADS, mlp_ratio=4.0).to(DEVICE).to(torch.bfloat16)
+    block_fused = copy.deepcopy(block)
+    block_fused.fused_qknorm_rope = True
+
+    img = torch.randn(B, L_img, HIDDEN, device=DEVICE, dtype=torch.bfloat16)
+    txt = torch.randn(B, L_txt, HIDDEN, device=DEVICE, dtype=torch.bfloat16)
+    pe = make_pe(B, L_img, head_dim, DEVICE, offset=100)
+    pe_ctx = make_pe(B, L_txt, head_dim, DEVICE)
+    mod_img = (make_mod(B, HIDDEN, DEVICE, seed=2, dtype=torch.bfloat16), make_mod(B, HIDDEN, DEVICE, seed=3, dtype=torch.bfloat16))
+    mod_txt = (make_mod(B, HIDDEN, DEVICE, seed=4, dtype=torch.bfloat16), make_mod(B, HIDDEN, DEVICE, seed=5, dtype=torch.bfloat16))
+
+    res_e = run_double(block, img, txt, pe, pe_ctx, mod_img, mod_txt, AttentionParams.create_attention_params("torch", False))
+    res_f = run_double(
+        block_fused, img, txt, pe, pe_ctx, mod_img, mod_txt, AttentionParams.create_attention_params("flash", False)
+    )
+
+    tol = dict(rtol=2e-2, atol=2e-2)
+    for a, b, what in [(res_f[0], res_e[0], "img out"), (res_f[1], res_e[1], "txt out"),
+                       (res_f[2], res_e[2], "img grad"), (res_f[3], res_e[3], "txt grad")]:
+        torch.testing.assert_close(a.float(), b.float(), **tol, msg=f"mismatch: {what}")
 
 
 def test_flux2_model_threads_fused_flag():
