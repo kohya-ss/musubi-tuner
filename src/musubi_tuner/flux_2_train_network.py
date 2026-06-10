@@ -234,6 +234,12 @@ class Flux2NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
+        fused_qknorm_rope = getattr(args, "fused_qknorm_rope", False)
+        if fused_qknorm_rope:
+            logger.info(
+                "Using fused QKNorm+RoPE (Triton, packed QKV) for FLUX.2 blocks"
+                + (" with flash_attn_qkvpacked_func" if attn_mode == "flash" else "")
+            )
         model = flux2_utils.load_flow_model(
             accelerator.device,
             model_version_info=self.model_version_info,
@@ -244,7 +250,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
             disable_numpy_memmap=args.disable_numpy_memmap,
-            fused_qknorm_rope=getattr(args, "fused_qknorm_rope", False),
+            fused_qknorm_rope=fused_qknorm_rope,
         )
         return model
 
