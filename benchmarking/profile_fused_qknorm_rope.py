@@ -105,6 +105,11 @@ def main():
     parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
     parser.add_argument("--warmup", type=int, default=WARMUP_ITERS, help="Pre-profiler warmup iterations")
     parser.add_argument("--out", default="traces/profile_fused_qknorm_rope", help="Output directory for traces")
+    parser.add_argument(
+        "--frozen-scales",
+        action="store_true",
+        help="freeze the RMSNorm scales (the LoRA training case; skips dscale atomics via NEEDS_DSCALE)",
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available() and HAS_TRITON, "CUDA + Triton required"
@@ -113,20 +118,22 @@ def main():
     B, L, H, D = args.shape
     device = "cuda"
 
-    tag = f"B{B}_L{L}_H{H}_D{D}_{args.dtype}"
+    tag = f"B{B}_L{L}_H{H}_D{D}_{args.dtype}" + ("_frozen" if args.frozen_scales else "")
     trace_dir = Path(args.out) / tag
     trace_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"dtype  : {dtype}")
     print(f"Shape  : B={B} L={L} H={H} D={D}")
+    print(f"Scales : {'frozen (LoRA case)' if args.frozen_scales else 'trainable'}")
     print(f"Traces : {trace_dir.resolve()}")
 
     torch.manual_seed(42)
     pos = torch.arange(L, device=device).unsqueeze(0).float()
     pe = rope(pos, D, 2000).unsqueeze(1)
     qkv = torch.randn(B, L, 3, H, D, device=device, dtype=dtype, requires_grad=True)
-    q_scale = torch.ones(D, device=device, dtype=dtype, requires_grad=True)
-    k_scale = torch.ones(D, device=device, dtype=dtype, requires_grad=True)
+    train_scales = not args.frozen_scales
+    q_scale = torch.ones(D, device=device, dtype=dtype, requires_grad=train_scales)
+    k_scale = torch.ones(D, device=device, dtype=dtype, requires_grad=train_scales)
     go = torch.randn(B, L, 3, H, D, device=device, dtype=dtype)
 
     def clear_grads():
