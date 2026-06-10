@@ -77,13 +77,23 @@ def test_forward_parity(dtype, shape):
 
 
 def test_forward_strided_input_view():
-    """Input as a non-contiguous view of (B, L, 3*H*D), like the linear output."""
+    """Input as a non-contiguous view of (B, L, 3*H*D), like the linear output.
+
+    Exercises the NEEDS_DSCALE=False kernel variant (scales non-requiring-grad).
+    The flat buffer is the grad leaf so the fused op actually receives a strided view.
+    """
     from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
 
     B, L, H, D = 2, 33, 4, 128
     flat = torch.randn(B, L, 3 * H * D + 16, dtype=torch.float32, device="cuda")
-    qkv_f = flat[..., : 3 * H * D].reshape(B, L, 3, H, D).clone().requires_grad_(True)
+    # base_f is the grad leaf; qkv_f is a non-contiguous view into it
+    base_f = flat.clone().requires_grad_(True)
+    qkv_f = base_f[..., : 3 * H * D].reshape(B, L, 3, H, D)
+    assert not qkv_f.is_contiguous(), "guard: qkv_f must be strided to exercise this path"
+    # eager reference uses contiguous clone of same values
     qkv_e = qkv_f.detach().clone().requires_grad_(True)
+    assert qkv_e.is_contiguous()
+
     q_scale = torch.ones(D, device="cuda")
     k_scale = torch.ones(D, device="cuda")
     pe = make_pe(B, L, D, "cuda")
@@ -95,7 +105,9 @@ def test_forward_strided_input_view():
 
     out_f.backward(grad_out)
     ref.backward(grad_out)
-    torch.testing.assert_close(qkv_f.grad, qkv_e.grad, **TOLS[torch.float32])
+    # grad flows back through the view to base_f; compare the qkv slice
+    grad_view = base_f.grad[..., : 3 * H * D].reshape(B, L, 3, H, D)
+    torch.testing.assert_close(grad_view, qkv_e.grad, **TOLS[torch.float32])
 
 
 def test_forward_pe_broadcast_batch1():

@@ -1006,7 +1006,13 @@ def packed_attention(qkv: Tensor, attn_params: AttentionParams) -> Tensor:
     otherwise unbinds to views and reuses the unified attention dispatch.
     Returns (B, L, H*D) like attention().
     """
-    if attn_params.attn_mode == "flash" and not attn_params.split_attn and flash_attn_qkvpacked_func is not None:
+    if (
+        attn_params.attn_mode == "flash"
+        and not attn_params.split_attn
+        and flash_attn_qkvpacked_func is not None
+        and attn_params.cu_seqlens is None
+        and attn_params.attention_mask is None
+    ):
         x = flash_attn_qkvpacked_func(qkv, 0.0)  # B, L, H, D
         return x.reshape(x.shape[0], x.shape[1], -1)
     q, k, v = qkv.unbind(dim=2)  # views: B, L, H, D
