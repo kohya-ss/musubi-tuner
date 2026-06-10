@@ -11,6 +11,7 @@ from torch.utils.checkpoint import checkpoint
 from musubi_tuner.modules.attention import AttentionParams, flash_attn_qkvpacked_func
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.attention import attention as unified_attention
+from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
 
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
@@ -715,7 +716,7 @@ class LastLayer(nn.Module):
 
 
 class SingleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, fused_qknorm_rope: bool = False):
         super().__init__()
 
         self.hidden_dim = hidden_size
@@ -735,6 +736,7 @@ class SingleStreamBlock(nn.Module):
 
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
+        self.fused_qknorm_rope = fused_qknorm_rope
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
@@ -752,14 +754,21 @@ class SingleStreamBlock(nn.Module):
 
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1)
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del qkv
-        q, k = self.norm(q, k, v)
+        if self.fused_qknorm_rope:
+            head_dim = self.hidden_size // self.num_heads
+            qkv = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, head_dim)
+            qkv = fused_qknorm_rope(qkv, self.norm.query_norm.scale, self.norm.key_norm.scale, pe)
+            attn = packed_attention(qkv, attn_params)
+            del qkv, pe
+        else:
+            q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            del qkv
+            q, k = self.norm(q, k, v)
 
-        qkv_list = [q, k, v]
-        del q, k, v
-        attn = attention(qkv_list, pe, attn_params)
-        del qkv_list, pe
+            qkv_list = [q, k, v]
+            del q, k, v
+            attn = attention(qkv_list, pe, attn_params)
+            del qkv_list, pe
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
