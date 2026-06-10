@@ -450,6 +450,7 @@ def load_flow_model(
     lora_weights_list: Optional[dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[list[float]] = None,
     disable_numpy_memmap: bool = False,
+    fused_qknorm_rope: bool = False,
 ) -> flux2_models.Flux2:
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -460,7 +461,7 @@ def load_flow_model(
     # build model
     with init_empty_weights():
         params = model_version_info.params
-        model = flux2_models.Flux2(params, attn_mode, split_attn)
+        model = flux2_models.Flux2(params, attn_mode, split_attn, fused_qknorm_rope=fused_qknorm_rope)
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
 

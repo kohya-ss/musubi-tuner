@@ -244,6 +244,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
             disable_numpy_memmap=args.disable_numpy_memmap,
+            fused_qknorm_rope=getattr(args, "fused_qknorm_rope", False),
         )
         return model
 
@@ -342,6 +343,12 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
     parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument(
+        "--fused_qknorm_rope",
+        action="store_true",
+        help="use fused Triton QKNorm+RoPE with packed QKV (requires triton; uses flash_attn_qkvpacked_func when --attn_mode flash)"
+        " / Triton融合QKNorm+RoPE(packed QKV)を使う",
+    )
     flux2_utils.add_model_version_args(parser)
     return parser
 

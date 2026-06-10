@@ -129,6 +129,12 @@ def parse_args() -> argparse.Namespace:
         choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  #  "flash2", "flash3",
         help="attention mode",
     )
+    parser.add_argument(
+        "--fused_qknorm_rope",
+        action="store_true",
+        help="use fused Triton QKNorm+RoPE with packed QKV (requires triton; uses flash_attn_qkvpacked_func when --attn_mode flash)"
+        " / Triton融合QKNorm+RoPE(packed QKV)を使う",
+    )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
     parser.add_argument(
         "--use_pinned_memory_for_block_swap",
@@ -325,6 +331,7 @@ def load_dit_model(
         lora_weights_list,
         args.lora_multiplier,
         args.disable_numpy_memmap,
+        fused_qknorm_rope=args.fused_qknorm_rope,
     )
 
     # merge LoRA weights

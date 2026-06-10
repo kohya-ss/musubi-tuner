@@ -141,9 +141,10 @@ def test_single_stream_block_fused_with_checkpointing():
     tol = dict(rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(out_b, out_a, **tol)
     torch.testing.assert_close(gx_b, gx_a, **tol)
+    assert grads_a.keys() == grads_b.keys()
     for name in grads_a:
-        # dscale atomics are non-deterministic in the Triton kernel; if only the norm
-        # scale grads differ slightly between the two runs, loosen tolerance for those.
+        # norm scale grads use a looser tolerance because dscale accumulates via atomic adds
+        # (non-deterministic ordering)
         if "norm" in name and "scale" in name:
             scale_tol = dict(rtol=1e-4, atol=1e-4)
             torch.testing.assert_close(grads_b[name], grads_a[name], **scale_tol, msg=f"grad mismatch: {name}")
@@ -183,11 +184,29 @@ def test_double_stream_block_fused_with_checkpointing():
     for a, b, what in [(res_b[0], res_a[0], "img out"), (res_b[1], res_a[1], "txt out"),
                        (res_b[2], res_a[2], "img grad"), (res_b[3], res_a[3], "txt grad")]:
         torch.testing.assert_close(a, b, **tol, msg=f"mismatch: {what}")
+    assert res_a[4].keys() == res_b[4].keys()
     for name in res_a[4]:
-        # dscale atomics are non-deterministic in the Triton kernel; if only the norm
-        # scale grads differ slightly between the two runs, loosen tolerance for those.
+        # norm scale grads use a looser tolerance because dscale accumulates via atomic adds
+        # (non-deterministic ordering)
         if "norm" in name and "scale" in name:
             scale_tol = dict(rtol=1e-4, atol=1e-4)
             torch.testing.assert_close(res_b[4][name], res_a[4][name], **scale_tol, msg=f"grad mismatch: {name}")
         else:
             torch.testing.assert_close(res_b[4][name], res_a[4][name], **tol, msg=f"grad mismatch: {name}")
+
+
+def test_flux2_model_threads_fused_flag():
+    # construction-only; no CUDA needed
+    from musubi_tuner.flux_2.flux2_models import Flux2, Flux2Params
+
+    params = Flux2Params(
+        in_channels=64, context_in_dim=512, hidden_size=256, mlp_ratio=4.0,
+        num_heads=2, depth=1, depth_single_blocks=1, axes_dim=[32, 32, 32, 32],
+        theta=2000, use_guidance_embed=False,
+    )
+    model = Flux2(params, attn_mode="torch", split_attn=False, fused_qknorm_rope=True)
+    assert all(b.fused_qknorm_rope for b in model.double_blocks)
+    assert all(b.fused_qknorm_rope for b in model.single_blocks)
+
+    model_off = Flux2(params, attn_mode="torch", split_attn=False)
+    assert not any(b.fused_qknorm_rope for b in model_off.single_blocks)

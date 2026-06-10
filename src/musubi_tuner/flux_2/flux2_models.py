@@ -412,7 +412,7 @@ class AutoEncoder(nn.Module):
 
 
 class Flux2(nn.Module):
-    def __init__(self, params: Flux2Params, attn_mode: str = "flash", split_attn: bool = False) -> None:
+    def __init__(self, params: Flux2Params, attn_mode: str = "flash", split_attn: bool = False, fused_qknorm_rope: bool = False) -> None:
         super().__init__()
 
         self.in_channels = params.in_channels
@@ -436,13 +436,17 @@ class Flux2(nn.Module):
 
         self.attn_mode = attn_mode
         self.split_attn = split_attn
+        self.fused_qknorm_rope = fused_qknorm_rope
 
         self.double_blocks = nn.ModuleList(
-            [DoubleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio) for _ in range(params.depth)]
+            [
+                DoubleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, fused_qknorm_rope=fused_qknorm_rope)
+                for _ in range(params.depth)
+            ]
         )
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, fused_qknorm_rope=fused_qknorm_rope)
                 for _ in range(params.depth_single_blocks)
             ]
         )
