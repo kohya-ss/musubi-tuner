@@ -82,13 +82,20 @@ def test_forward_strided_input_view():
 
     B, L, H, D = 2, 33, 4, 128
     flat = torch.randn(B, L, 3 * H * D + 16, dtype=torch.float32, device="cuda")
-    qkv = flat[..., : 3 * H * D].reshape(B, L, 3, H, D)  # non-contiguous parent slice
+    qkv_f = flat[..., : 3 * H * D].reshape(B, L, 3, H, D).clone().requires_grad_(True)
+    qkv_e = qkv_f.detach().clone().requires_grad_(True)
     q_scale = torch.ones(D, device="cuda")
     k_scale = torch.ones(D, device="cuda")
     pe = make_pe(B, L, D, "cuda")
-    out = fused_qknorm_rope(qkv, q_scale, k_scale, pe)
-    ref = eager_reference(qkv, q_scale, k_scale, pe)
-    torch.testing.assert_close(out, ref, **TOLS[torch.float32])
+    grad_out = torch.randn(B, L, 3, H, D, device="cuda")
+
+    out_f = fused_qknorm_rope(qkv_f, q_scale, k_scale, pe)
+    ref = eager_reference(qkv_e, q_scale, k_scale, pe)
+    torch.testing.assert_close(out_f, ref, **TOLS[torch.float32])
+
+    out_f.backward(grad_out)
+    ref.backward(grad_out)
+    torch.testing.assert_close(qkv_f.grad, qkv_e.grad, **TOLS[torch.float32])
 
 
 def test_forward_pe_broadcast_batch1():
@@ -96,14 +103,21 @@ def test_forward_pe_broadcast_batch1():
     from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
 
     B, L, H, D = 2, 16, 2, 64
-    qkv, q_scale, k_scale, _ = make_inputs(B, L, H, D, torch.float32)
+    qkv_f, q_scale, k_scale, _ = make_inputs(B, L, H, D, torch.float32, requires_grad=True)
+    qkv_e = qkv_f.detach().clone().requires_grad_(True)
     # build a batch-1 pe and broadcast manually for the reference
     pe1 = make_pe(1, L, D, "cuda")  # shape (1, 1, L, D//2, 2, 2)
     # reference: expand pe1 to B so eager uses the same values for all batches
     pe_expanded = pe1.expand(B, -1, -1, -1, -1, -1)
-    out = fused_qknorm_rope(qkv, q_scale, k_scale, pe1)
-    ref = eager_reference(qkv, q_scale, k_scale, pe_expanded)
-    torch.testing.assert_close(out.float(), ref.float(), **TOLS[torch.float32])
+    grad_out = torch.randn(B, L, 3, H, D, device="cuda")
+
+    out_f = fused_qknorm_rope(qkv_f, q_scale, k_scale, pe1)
+    ref = eager_reference(qkv_e, q_scale, k_scale, pe_expanded)
+    torch.testing.assert_close(out_f.float(), ref.float(), **TOLS[torch.float32])
+
+    out_f.backward(grad_out)
+    ref.backward(grad_out)
+    torch.testing.assert_close(qkv_f.grad, qkv_e.grad, **TOLS[torch.float32])
 
 
 @pytest.mark.parametrize("dtype,tol,scale_tol", [
@@ -114,7 +128,7 @@ def test_forward_pe_broadcast_batch1():
     # per plan: bf16 dscale is the noisiest comparison, loosen beyond rtol=5e-2.
     (torch.bfloat16, dict(rtol=3e-2, atol=3e-2), dict(rtol=0.0, atol=0.5)),
 ])
-@pytest.mark.parametrize("shape", [(2, 33, 4, 128), (2, 17, 3, 64)])
+@pytest.mark.parametrize("shape", [(2, 33, 4, 128), (2, 17, 3, 64), (2, 17, 3, 96)])
 def test_backward_parity(dtype, tol, scale_tol, shape):
     from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
 

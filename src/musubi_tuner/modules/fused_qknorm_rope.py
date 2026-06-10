@@ -96,6 +96,7 @@ if HAS_TRITON:
         go_base, x_base, gx_base, scale_ptr, dscale_ptr, cos, sin, offs, mask,
         stride_go_d, stride_x_d, stride_gx_d, eps,
         D: tl.constexpr,
+        NEEDS_DSCALE: tl.constexpr,
     ):
         """Backward for one q or k row: un-rotate, RMSNorm backward, dscale atomics."""
         go_even = tl.load(go_base + (2 * offs) * stride_go_d, mask=mask, other=0.0).to(tl.float32)
@@ -110,8 +111,9 @@ if HAS_TRITON:
         rrms = 1.0 / tl.sqrt(meansq + eps)
 
         # dscale += g * x_hat (fp32 atomics; non-deterministic ordering)
-        tl.atomic_add(dscale_ptr + 2 * offs, g_even * (x_even * rrms), mask=mask)
-        tl.atomic_add(dscale_ptr + 2 * offs + 1, g_odd * (x_odd * rrms), mask=mask)
+        if NEEDS_DSCALE:
+            tl.atomic_add(dscale_ptr + 2 * offs, g_even * (x_even * rrms), mask=mask)
+            tl.atomic_add(dscale_ptr + 2 * offs + 1, g_odd * (x_odd * rrms), mask=mask)
 
         s_even = tl.load(scale_ptr + 2 * offs, mask=mask, other=0.0).to(tl.float32)
         s_odd = tl.load(scale_ptr + 2 * offs + 1, mask=mask, other=0.0).to(tl.float32)
@@ -136,6 +138,7 @@ if HAS_TRITON:
         eps,
         D: tl.constexpr,
         BLOCK_DHALF: tl.constexpr,
+        NEEDS_DSCALE: tl.constexpr,
     ):
         pid = tl.program_id(0)
         h = pid % H
@@ -154,10 +157,10 @@ if HAS_TRITON:
         gx_base = gx_ptr + b * stride_gxb + l * stride_gxl + h * stride_gxh
 
         _bwd_row(go_base, x_base, gx_base, q_scale_ptr, dq_scale_ptr, cos, sin, offs, mask,
-                 stride_god, stride_xd, stride_gxd, eps, D)
+                 stride_god, stride_xd, stride_gxd, eps, D, NEEDS_DSCALE)
         _bwd_row(go_base + stride_gok, x_base + stride_xk, gx_base + stride_gxk,
                  k_scale_ptr, dk_scale_ptr, cos, sin, offs, mask,
-                 stride_god, stride_xd, stride_gxd, eps, D)
+                 stride_god, stride_xd, stride_gxd, eps, D, NEEDS_DSCALE)
 
         # grad_v passthrough
         offs_d = tl.arange(0, 2 * BLOCK_DHALF)
@@ -194,8 +197,14 @@ class _FusedQKNormRoPE(torch.autograd.Function):
         B, L, K, H, D = qkv.shape
         grad_out = grad_out.contiguous()
         grad_qkv = torch.empty((B, L, 3, H, D), dtype=qkv.dtype, device=qkv.device)
-        dq_scale = torch.zeros(D, dtype=torch.float32, device=qkv.device)
-        dk_scale = torch.zeros(D, dtype=torch.float32, device=qkv.device)
+        needs_dscale = ctx.needs_input_grad[1] or ctx.needs_input_grad[2]
+        if needs_dscale:
+            dq_scale = torch.zeros(D, dtype=torch.float32, device=qkv.device)
+            dk_scale = torch.zeros(D, dtype=torch.float32, device=qkv.device)
+        else:
+            # Pass valid pointers the kernel won't touch when NEEDS_DSCALE=False
+            dq_scale = grad_qkv
+            dk_scale = grad_qkv
         stride_pb = pe.stride(0) if pe.shape[0] != 1 else 0
         grid = (B * L * H,)
         _fused_qknorm_rope_bwd_kernel[grid](
@@ -209,6 +218,7 @@ class _FusedQKNormRoPE(torch.autograd.Function):
             D=D,
             BLOCK_DHALF=triton.next_power_of_2(D // 2),
             num_warps=2,
+            NEEDS_DSCALE=needs_dscale,
         )
         grad_q_scale = dq_scale.to(q_scale.dtype) if ctx.needs_input_grad[1] else None
         grad_k_scale = dk_scale.to(k_scale.dtype) if ctx.needs_input_grad[2] else None
