@@ -26,7 +26,7 @@ from torch import nn
 from torch.nn import functional as F
 from accelerate import init_empty_weights
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import LoRAStreamOffloader, ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.qwen_image.qwen_image_modules import get_activation
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
@@ -1176,7 +1176,13 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         print("QwenModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(
-        self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False
+        self,
+        blocks_to_swap: int,
+        device: torch.device,
+        supports_backward: bool,
+        use_pinned_memory: bool = False,
+        h2d_only: bool = False,
+        ring_size: int = 2,
     ):
         self.blocks_to_swap = blocks_to_swap
         self.num_blocks = len(self.transformer_blocks)
@@ -1185,18 +1191,32 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
             f"Cannot swap more than {self.num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
         )
 
-        self.offloader = ModelOffloader(
-            "qwen-image-block",
-            self.transformer_blocks,
-            self.num_blocks,
-            self.blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
-        )
+        if h2d_only:
+            # H2D-only offload for frozen-base (LoRA) training: no device->host transfer
+            self.offloader = LoRAStreamOffloader(
+                "qwen-image-block",
+                self.transformer_blocks,
+                self.num_blocks,
+                self.blocks_to_swap,
+                supports_backward,
+                device,
+                ring_size=ring_size,
+                use_pinned_memory=use_pinned_memory,
+            )
+        else:
+            self.offloader = ModelOffloader(
+                "qwen-image-block",
+                self.transformer_blocks,
+                self.num_blocks,
+                self.blocks_to_swap,
+                supports_backward,
+                device,
+                use_pinned_memory,
+            )
         # , debug=True
         print(
-            f"QwenModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. Supports backward: {supports_backward}"
+            f"QwenModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. "
+            f"Supports backward: {supports_backward}. H2D-only: {h2d_only}"
         )
 
     def switch_block_swap_for_inference(self):

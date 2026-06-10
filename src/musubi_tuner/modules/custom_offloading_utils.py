@@ -477,3 +477,330 @@ class ModelOffloader(Offloader):
             block_idx_to_cuda = block_idx_to_cuda % self.num_blocks  # this works for forward-only offloading
 
         self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
+
+
+class LoRAStreamOffloader:
+    """
+    H2D-only offloader for training where the base weights are frozen (e.g. LoRA / LoHa / LoKr).
+
+    The classic block swap (``ModelOffloader``) *exchanges* a block: it copies one block back to the
+    CPU (Device->Host) while copying the next one in (Host->Device). When the base weights never change,
+    the CPU already holds an identical copy, so the D2H half is pure overhead. This offloader keeps a
+    permanent (pinned) master copy of every streamed weight on the CPU and only ever copies Host->Device,
+    removing the D2H transfer and the CPU-side staging memcpy entirely.
+
+    Layout (N = num_blocks, S = blocks_to_swap, B = ring_size):
+      - ``N - S`` blocks stay resident on the GPU permanently.
+      - ``S`` "streaming" blocks are placed at even intervals; their ``Linear`` weights live on the CPU
+        (pinned) as masters and are streamed into a small ring of ``B`` GPU buffers (default 2: one being
+        computed on, one being prefetched). Non-Linear params / buffers of streaming blocks stay resident.
+
+    Mechanics:
+      - Because the streamed weights are frozen (no ``.grad`` to preserve), we swap the whole ``module.weight``
+        *reference* between its CPU master Parameter and a preallocated GPU ring Parameter, instead of the
+        ``.data`` storage trick used by ``ModelOffloader``. No per-step ``cudaMalloc``.
+      - Eviction is free: repoint ``module.weight`` back to the CPU master (no transfer). A ring slot is
+        overwritten only when its block is consumed, so the last ``B`` streamed blocks of a pass stay
+        resident. On the reverse pass they are exactly the first blocks needed, so the forward<->backward
+        turn-around needs no reload.
+      - Direction is implicit in the callback: ``submit_move_blocks_forward`` prefetches the block ``B``
+        streaming-slots *ahead* (larger index); the backward hook prefetches ``B`` slots *behind* (smaller
+        index). No explicit scheduler / no ``prepare_*_before_backward``.
+      - ``wait_for_block`` self-heals: if a needed streaming block is not resident in its slot (cold start,
+        or an inference pass boundary), it is loaded on demand.
+    """
+
+    def __init__(
+        self,
+        block_type: str,
+        blocks: list[nn.Module],
+        num_blocks: int,
+        blocks_to_swap: int,
+        supports_backward: bool,
+        device: torch.device,
+        ring_size: int = 2,
+        use_pinned_memory: bool = True,
+        debug: bool = False,
+    ):
+        self.block_type = block_type
+        self._blocks = blocks
+        self.num_blocks = num_blocks  # N
+        self.blocks_to_swap = blocks_to_swap  # requested S
+        self.device = device
+        self.use_pinned_memory = use_pinned_memory
+        self.supports_backward = supports_backward
+        self.forward_only = not supports_backward
+
+        import os
+
+        if not debug:
+            debug = os.getenv("MUSUBI_TUNER_OFFLOADER_DEBUG", "0") == "1"
+        self.debug = debug
+        self.debug_interval = int(os.getenv("MUSUBI_TUNER_OFFLOADER_DEBUG_INTERVAL", "10"))  # steps between prints
+
+        assert device.type == "cuda", "LoRAStreamOffloader currently supports CUDA only"
+
+        # ---- streaming placement: S evenly spaced block indices (midpoint formula -> distinct for S <= N) ----
+        stream_idx = sorted({((2 * i + 1) * num_blocks) // (2 * blocks_to_swap) for i in range(blocks_to_swap)})
+        self.stream_idx = stream_idx
+        self.S = len(stream_idx)  # actual streaming count (>=1; dedup is a no-op unless S is close to N)
+        self.rank = {b: k for k, b in enumerate(stream_idx)}  # block_idx -> position in stream_idx
+        self.is_stream = [b in self.rank for b in range(num_blocks)]
+        self.B = min(ring_size, self.S)  # clamp ring to number of streaming blocks
+
+        # ---- finetuning guard: H2D-only must never lose weight updates ----
+        for b in stream_idx:
+            for m in self._swap_modules(blocks[b]):
+                assert not m.weight.requires_grad, (
+                    "LoRAStreamOffloader requires frozen base weights (LoRA / no full fine-tune). "
+                    f"Found a trainable Linear weight in block {b}."
+                )
+
+        # ---- runtime state (GPU buffers allocated lazily in prepare_block_devices_before_forward) ----
+        self.copy_stream = torch.cuda.Stream(device=device)
+        self.cpu_master = {}  # block_idx -> [CPU (pinned) Parameter per swap weight] (master copies)
+        self.ring_param = None  # [slot] -> [GPU nn.Parameter per swap weight] (preallocated, reused)
+        self.in_slot = [None] * self.B  # slot -> block_idx currently bound to this slot (or None)
+        self.load_event = {}  # block_idx -> cuda.Event recording H2D completion
+        self.free_event = [None] * self.B  # slot -> cuda.Event recording when compute finished using the slot
+        self._module_cache = {}  # block_idx -> [modules with swap weights]
+
+        self._wait_ctx = "fwd"  # context tag for wait/load timing ("fwd" while in the forward loop, "bwd" in hooks)
+        if self.debug:
+            self._dbg_reset()
+
+        # ---- backward hooks: only where there is work (prefetch this block, or wait the previous one) ----
+        if supports_backward:
+            self.remove_handles = []
+            for i, block in enumerate(blocks):
+                hook = self._create_backward_hook(i)
+                if hook is not None:
+                    self.remove_handles.append(block.register_full_backward_hook(hook))
+
+        print(
+            f"LoRAStreamOffloader[{block_type}]: H2D-only block swap. "
+            f"{self.S} streaming / {num_blocks} blocks, ring={self.B}, pinned={use_pinned_memory}. "
+            f"streaming indices: {stream_idx}"
+        )
+
+    # ------------------------------------------------------------------ helpers
+
+    def _swap_modules(self, block: nn.Module) -> list[nn.Module]:
+        # same selection rule as ModelOffloader.swap_weight_devices_cuda: Linear layers with a weight
+        mods = []
+        for _, m in block.named_modules():
+            if hasattr(m, "weight") and m.weight is not None and m.__class__.__name__.endswith("Linear"):
+                mods.append(m)
+        return mods
+
+    def _modules(self, block_idx: int) -> list[nn.Module]:
+        cached = self._module_cache.get(block_idx)
+        if cached is None:
+            cached = self._swap_modules(self._blocks[block_idx])
+            self._module_cache[block_idx] = cached
+        return cached
+
+    def _bind(self, block_idx: int, params: list[nn.Parameter]):
+        for m, p in zip(self._modules(block_idx), params):
+            m.weight = p
+
+    def _load(self, rank: int, slot: int, ctx: str = "fwd"):
+        """Stream the streaming block at ``rank`` into ring ``slot`` (H2D only), repointing weights."""
+        # evict the slot's current owner: repoint its weights back to the CPU master (no transfer)
+        prev = self.in_slot[slot]
+        if prev is not None and prev != self.stream_idx[rank]:
+            self._bind(prev, self.cpu_master[prev])
+
+        blk = self.stream_idx[rank]
+        ev_a = ev_b = None
+        with torch.cuda.stream(self.copy_stream):
+            free_ev = self.free_event[slot]
+            if free_ev is not None:
+                self.copy_stream.wait_event(free_ev)  # do not overwrite weights still used by compute
+            if self.debug:
+                ev_a = torch.cuda.Event(enable_timing=True)
+                ev_b = torch.cuda.Event(enable_timing=True)
+                ev_a.record(self.copy_stream)
+            for dst, src in zip(self.ring_param[slot], self.cpu_master[blk]):
+                dst.data.copy_(src.data, non_blocking=self.use_pinned_memory)  # pure H2D
+            if self.debug:
+                ev_b.record(self.copy_stream)
+        self.load_event[blk] = self.copy_stream.record_event()
+
+        self._bind(blk, self.ring_param[slot])  # reference swap (no .data trick, no cudaMalloc)
+        self.in_slot[slot] = blk
+
+        if self.debug:
+            c = self._cur[ctx]
+            c["loads"] += 1
+            c["xfer_ev"].append((ev_a, ev_b))
+
+    # ------------------------------------------------------------------ public interface (mirrors ModelOffloader)
+
+    def set_forward_only(self, forward_only: bool):
+        self.copy_stream.synchronize()
+        self.forward_only = forward_only
+
+    def __del__(self):
+        if getattr(self, "supports_backward", False):
+            for handle in getattr(self, "remove_handles", []):
+                handle.remove()
+
+    def prepare_block_devices_before_forward(self, blocks: list[nn.Module]):
+        if self.S == 0:
+            return
+
+        if self.debug:
+            print(f"[{self.block_type}] Prepare block devices before forward (H2D-only)")
+
+        first_time = not self.cpu_master  # device placement is only needed on the very first call
+        cpu_device = torch.device("cpu")
+        for i, b in enumerate(blocks):
+            if not self.is_stream[i]:
+                if first_time:
+                    b.to(self.device)  # resident block: buffers + Linear weights on GPU permanently
+                    weighs_to_device(b, self.device)
+                continue
+
+            if first_time:
+                # move the whole block to device (buffers, norms, bias), then pull the swap weights back to
+                # the CPU as the persistent (pinned) masters
+                b.to(self.device)
+                master = []
+                for m in self._modules(i):
+                    w = m.weight.data.to(cpu_device)
+                    if self.use_pinned_memory:
+                        w = w.pin_memory(device=self.device)
+                    m.weight.data = w
+                    master.append(m.weight)  # keep the original Parameter object as the persistent master
+                self.cpu_master[i] = master
+            else:
+                # re-prepare (e.g. around in-training sampling): the non-swap parts are already on the device
+                # and the CPU masters have stayed on the CPU throughout, so just repoint weights to the masters.
+                # IMPORTANT: do NOT call b.to(device) here -- it would drag the CPU masters onto the GPU and
+                # they would never be released (every swap block would end up resident).
+                self._bind(i, self.cpu_master[i])
+
+        # validate homogeneous streaming blocks (shared ring template)
+        template = self.cpu_master[self.stream_idx[0]]
+        for b in self.stream_idx[1:]:
+            assert len(self.cpu_master[b]) == len(template), f"block {b} has a different number of swap weights"
+            for p, t in zip(self.cpu_master[b], template):
+                assert p.data.shape == t.data.shape and p.data.dtype == t.data.dtype, (
+                    f"block {b} swap-weight shape/dtype differs from the streaming template"
+                )
+
+        # preallocate the GPU ring (once); copies happen into these buffers, never reallocated
+        if self.ring_param is None:
+            self.ring_param = [
+                [nn.Parameter(torch.empty_like(p.data, device=self.device), requires_grad=False) for p in template]
+                for _ in range(self.B)
+            ]
+
+        # reset ring state and cold-start preload the first B streaming blocks
+        self.in_slot = [None] * self.B
+        self.free_event = [None] * self.B
+        self.load_event = {}
+        for k in range(self.B):
+            self._load(k, k)
+
+        _synchronize_device(self.device)
+        _clean_memory_on_device(self.device)
+
+    def wait_for_block(self, block_idx: int):
+        if self.S == 0 or not self.is_stream[block_idx]:
+            return
+        ctx = self._wait_ctx
+        if self.debug and ctx == "fwd" and block_idx == self.stream_idx[0]:
+            self._dbg_boundary()  # a forward pass is starting -> finalize the previous step's stats
+        j = self.rank[block_idx]
+        slot = j % self.B
+        if self.in_slot[slot] != block_idx:
+            # self-healing: not resident (cold start / inference pass boundary / same-direction restart)
+            if self.debug:
+                self._cur[ctx]["self_heal"] += 1
+            self._load(j, slot, ctx)
+        ev = self.load_event.get(block_idx)
+        if ev is None:
+            return
+        if not self.debug:
+            torch.cuda.current_stream().wait_event(ev)  # compute waits for H2D (GPU-side, does not block CPU)
+            return
+        # debug: measure the actual GPU stall (idle time the compute stream spends on wait_event)
+        s = torch.cuda.current_stream()
+        c = self._cur[ctx]
+        c["waits"] += 1
+        if not ev.query():
+            c["not_ready"] += 1  # H2D not finished when compute reached it -> a real stall (cheap, no sync)
+        ev_a = torch.cuda.Event(enable_timing=True)
+        ev_b = torch.cuda.Event(enable_timing=True)
+        ev_a.record(s)
+        s.wait_event(ev)
+        ev_b.record(s)
+        c["stall_ev"].append((ev_a, ev_b))
+
+    def submit_move_blocks_forward(self, blocks: list[nn.Module], block_idx: int):
+        # consumed block_idx in the forward pass: free its slot and prefetch the block B streaming-slots ahead
+        if self.S == 0 or not self.is_stream[block_idx]:
+            return
+        j = self.rank[block_idx]
+        self.free_event[j % self.B] = torch.cuda.current_stream().record_event()
+        if j + self.B < self.S:
+            self._load(j + self.B, (j + self.B) % self.B, "fwd")  # same slot as rank j; evicts rank j
+
+    def _create_backward_hook(self, block_index: int):
+        prefetch = self.is_stream[block_index]
+        wait_prev = block_index - 1 >= 0 and self.is_stream[block_index - 1]
+        if not prefetch and not wait_prev:
+            return None
+
+        def backward_hook(module, grad_input, grad_output):
+            if prefetch:
+                # consumed block_index in backward: free its slot and prefetch B streaming-slots behind
+                j = self.rank[block_index]
+                self.free_event[j % self.B] = torch.cuda.current_stream().record_event()
+                if j - self.B >= 0:
+                    self._load(j - self.B, (j - self.B) % self.B, "bwd")  # same slot as rank j; evicts rank j
+            if wait_prev:
+                self._wait_ctx = "bwd"
+                self.wait_for_block(block_index - 1)  # ensure the next block to run is ready
+                self._wait_ctx = "fwd"
+            return None
+
+        return backward_hook
+
+    # ------------------------------------------------------------------ debug timing
+
+    def _dbg_reset(self):
+        self._dbg_empty = lambda: {"stall_ev": [], "xfer_ev": [], "waits": 0, "not_ready": 0, "self_heal": 0, "loads": 0}
+        self._cur = {"fwd": self._dbg_empty(), "bwd": self._dbg_empty()}
+        self._roll = {"fwd": defaultdict(float), "bwd": defaultdict(float)}
+        self._step = 0
+
+    def _dbg_boundary(self):
+        # finalize the events accumulated for the step that just ended, then print every debug_interval steps
+        if not any(self._cur[c]["waits"] or self._cur[c]["loads"] for c in ("fwd", "bwd")):
+            return  # very first forward: nothing finished yet
+        torch.cuda.synchronize()  # ensure timing events are complete (debug only)
+        for ctx in ("fwd", "bwd"):
+            c, r = self._cur[ctx], self._roll[ctx]
+            r["stall_ms"] += sum(a.elapsed_time(b) for a, b in c["stall_ev"])
+            r["xfer_ms"] += sum(a.elapsed_time(b) for a, b in c["xfer_ev"])
+            for k in ("waits", "not_ready", "self_heal", "loads"):
+                r[k] += c[k]
+            self._cur[ctx] = self._dbg_empty()
+        self._step += 1
+        if self._step % self.debug_interval == 0:
+            self._dbg_print()
+
+    def _dbg_print(self):
+        n = self.debug_interval
+        print(f"[{self.block_type}] H2D-only timing (avg over {n} steps):")
+        for ctx in ("fwd", "bwd"):
+            r = self._roll[ctx]
+            print(
+                f"  {ctx}: stall {r['stall_ms'] / n:6.2f} ms/step, H2D {r['xfer_ms'] / n:6.2f} ms/step"
+                f" | waits {r['waits'] / n:.1f}, not-ready {r['not_ready'] / n:.1f},"
+                f" self-heal {r['self_heal'] / n:.1f}, loads {r['loads'] / n:.1f}"
+            )
+            self._roll[ctx] = defaultdict(float)
