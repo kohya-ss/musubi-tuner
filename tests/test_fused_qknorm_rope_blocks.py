@@ -67,3 +67,45 @@ def test_single_stream_block_fused_constructor_flag():
     block = SingleStreamBlock(HIDDEN, HEADS, fused_qknorm_rope=True)
     assert block.fused_qknorm_rope is True
     assert SingleStreamBlock(HIDDEN, HEADS).fused_qknorm_rope is False
+
+
+def run_double(block, img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params):
+    img = img.detach().clone().requires_grad_(True)
+    txt = txt.detach().clone().requires_grad_(True)
+    out_img, out_txt = block(img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params)
+    (out_img.sum() + out_txt.sum()).backward()
+    grads = {n: p.grad.detach().clone() for n, p in block.named_parameters() if p.grad is not None}
+    return out_img.detach(), out_txt.detach(), img.grad.detach().clone(), txt.grad.detach().clone(), grads
+
+
+def test_double_stream_block_fused_matches_eager():
+    torch.manual_seed(0)
+    B, L_img, L_txt = 2, 33, 11
+    head_dim = HIDDEN // HEADS
+    block = DoubleStreamBlock(HIDDEN, HEADS, mlp_ratio=4.0).to(DEVICE).float()
+    block_fused = copy.deepcopy(block)
+    block_fused.fused_qknorm_rope = True
+
+    img = torch.randn(B, L_img, HIDDEN, device=DEVICE)
+    txt = torch.randn(B, L_txt, HIDDEN, device=DEVICE)
+    pe = make_pe(B, L_img, head_dim, DEVICE)
+    pe_ctx = make_pe(B, L_txt, head_dim, DEVICE)
+    mod_img = (make_mod(B, HIDDEN, DEVICE, seed=2), make_mod(B, HIDDEN, DEVICE, seed=3))
+    mod_txt = (make_mod(B, HIDDEN, DEVICE, seed=4), make_mod(B, HIDDEN, DEVICE, seed=5))
+    attn_params = AttentionParams.create_attention_params("torch", False)
+
+    res_e = run_double(block, img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params)
+    res_f = run_double(block_fused, img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params)
+
+    tol = dict(rtol=1e-4, atol=1e-4)
+    for a, b, what in [(res_f[0], res_e[0], "img out"), (res_f[1], res_e[1], "txt out"),
+                       (res_f[2], res_e[2], "img grad"), (res_f[3], res_e[3], "txt grad")]:
+        torch.testing.assert_close(a, b, **tol, msg=f"mismatch: {what}")
+    assert res_e[4].keys() == res_f[4].keys()
+    for name in res_e[4]:
+        torch.testing.assert_close(res_f[4][name], res_e[4][name], **tol, msg=f"grad mismatch: {name}")
+
+
+def test_double_stream_block_fused_constructor_flag():
+    block = DoubleStreamBlock(HIDDEN, HEADS, mlp_ratio=4.0, fused_qknorm_rope=True)
+    assert block.fused_qknorm_rope is True

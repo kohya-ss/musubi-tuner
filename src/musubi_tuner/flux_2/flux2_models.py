@@ -785,7 +785,7 @@ class SingleStreamBlock(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, fused_qknorm_rope: bool = False):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
@@ -813,6 +813,7 @@ class DoubleStreamBlock(nn.Module):
         )
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
+        self.fused_qknorm_rope = fused_qknorm_rope
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
@@ -849,9 +850,6 @@ class DoubleStreamBlock(nn.Module):
 
         img_qkv = self.img_attn.qkv(img_modulated)
         del img_modulated
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del img_qkv
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
@@ -859,24 +857,46 @@ class DoubleStreamBlock(nn.Module):
         del txt_mod1_scale, txt_mod1_shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         del txt_modulated
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del txt_qkv
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        txt_len = txt_q.shape[2]
-        q = torch.cat((txt_q, img_q), dim=2)
-        del txt_q, img_q
-        k = torch.cat((txt_k, img_k), dim=2)
-        del txt_k, img_k
-        v = torch.cat((txt_v, img_v), dim=2)
-        del txt_v, img_v
+        txt_len = txt_qkv.shape[1]
 
-        pe = torch.cat((pe_ctx, pe), dim=2)
-        del pe_ctx
-        qkv_list = [q, k, v]
-        del q, k, v
-        attn = attention(qkv_list, pe, attn_params)
-        del qkv_list, pe
+        if self.fused_qknorm_rope:
+            head_dim = self.hidden_size // self.num_heads
+            img_qkv = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, head_dim)
+            img_qkv = fused_qknorm_rope(
+                img_qkv, self.img_attn.norm.query_norm.scale, self.img_attn.norm.key_norm.scale, pe
+            )
+            txt_qkv = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, head_dim)
+            txt_qkv = fused_qknorm_rope(
+                txt_qkv, self.txt_attn.norm.query_norm.scale, self.txt_attn.norm.key_norm.scale, pe_ctx
+            )
+            qkv = torch.cat((txt_qkv, img_qkv), dim=1)
+            del txt_qkv, img_qkv, pe, pe_ctx
+            attn = packed_attention(qkv, attn_params)
+            del qkv
+        else:
+            img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            del img_qkv
+            img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+
+            txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            del txt_qkv
+            txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+
+            q = torch.cat((txt_q, img_q), dim=2)
+            del txt_q, img_q
+            k = torch.cat((txt_k, img_k), dim=2)
+            del txt_k, img_k
+            v = torch.cat((txt_v, img_v), dim=2)
+            del txt_v, img_v
+
+            pe = torch.cat((pe_ctx, pe), dim=2)
+            del pe_ctx
+            qkv_list = [q, k, v]
+            del q, k, v
+            attn = attention(qkv_list, pe, attn_params)
+            del qkv_list, pe
+
         txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
         del attn
 
