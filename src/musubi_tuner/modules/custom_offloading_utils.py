@@ -747,6 +747,13 @@ class LoRAStreamOffloader:
         self.free_event[j % self.B] = torch.cuda.current_stream().record_event()
         if j + self.B < self.S:
             self._load(j + self.B, (j + self.B) % self.B, "fwd")  # same slot as rank j; evicts rank j
+        elif self.forward_only and j == self.S - 1 and self.S > self.B:
+            # inference: no backward pass will consume the retained tail, and the next forward pass starts
+            # from rank 0 again. Wrap around: all tail slots are free once the last streaming block is
+            # consumed, so preload the first B ranks now. The H2D overlaps with the remaining (resident)
+            # blocks and the output layers, instead of stalling at the start of the next pass (self-heal).
+            for k in range(self.B):
+                self._load(k, k, "fwd")
 
     def _create_backward_hook(self, block_index: int):
         prefetch = self.is_stream[block_index]
