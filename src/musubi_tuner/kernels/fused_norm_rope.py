@@ -31,21 +31,33 @@ def reference_norm_rope(
     sin: torch.Tensor,     # [B, L, D//2]
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Reference: RMSNorm then RoPE, pure PyTorch (no Triton).
+    """Reference RMSNorm + RoPE — byte-for-byte match of the original Flux2 path.
 
-    Matches the original Flux2 precision path:
-      1. RMSNorm: (x * rrms).to(x_dtype) * weight  — intermediate cast
-      2. QKNorm .to(v): cast to input dtype
-      3. RoPE in float32, output cast to input dtype
+    This is the production fallback used whenever the Triton kernel is
+    unavailable (Triton not installed, ``MUSUBI_DISABLE_TRITON=1``, or a
+    non-CUDA tensor), so it reproduces the *exact* numerics of the pre-fusion
+    code in ``flux2_models.py``:
+
+      1. ``RMSNorm.forward``: ``(x.float() * rrms).to(x_dtype) * scale`` — the
+         normalized value is rounded back to the input dtype **before** the
+         scale multiply.
+      2. ``QKNorm.forward``: ``.to(v)`` — cast to v's (the qkv) dtype.
+      3. ``apply_rope``: computed in float32, result ``type_as`` the input.
+
+    For the float32-throughout variant that matches the fused Triton kernel,
+    use :func:`reference_norm_rope_fp32`.
     """
     orig_dtype = x.dtype
-    x = x.float()
+    xf = x.float()
     # RMSNorm over last dim
-    rrms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
-    x = x * rrms * weight.float()
-    # RoPE: reshape to expose pairs
-    x = x.reshape(*x.shape[:-1], -1, 2)   # [B, L, H, D//2, 2]
-    x1, x2 = x[..., 0], x[..., 1]         # each [B, L, H, D//2]
+    rrms = torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
+    # Original RMSNorm: round to input dtype, then multiply by scale.
+    normed = (xf * rrms).to(orig_dtype) * weight
+    # Original QKNorm .to(v): cast to the qkv dtype.
+    normed = normed.to(orig_dtype)
+    # Original apply_rope: float32 compute, then cast back to input dtype.
+    nf = normed.float().reshape(*normed.shape[:-1], -1, 2)  # [B, L, H, D//2, 2]
+    x1, x2 = nf[..., 0], nf[..., 1]       # each [B, L, H, D//2]
     # broadcast cos/sin over H dim: [B, L, 1, D//2]
     c = cos.unsqueeze(2).float()
     s = sin.unsqueeze(2).float()
@@ -63,9 +75,65 @@ def reference_packed_qk_norm_rope(
     sin: torch.Tensor,      # [B, L, D//2]
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Reference: packed QKV input — RMSNorm+RoPE on Q and K, V copied unchanged."""
+    """Packed QKV reference (production fallback) — matches the original Flux2
+    path exactly: RMSNorm+RoPE on Q and K, V copied unchanged.
+
+    See :func:`reference_norm_rope` for the precise precision path.  The fused
+    Triton kernel is verified against :func:`reference_packed_qk_norm_rope_fp32`
+    instead, since the kernel stays in float32 throughout.
+    """
     q = reference_norm_rope(qkv[:, :, 0], q_weight, cos, sin, eps)
     k = reference_norm_rope(qkv[:, :, 1], k_weight, cos, sin, eps)
+    v = qkv[:, :, 2].to(q.dtype)
+    return torch.stack([q, k, v], dim=2)
+
+
+# ---------------------------------------------------------------------------
+# Float32 oracle (matches the fused Triton kernel, NOT the original Flux2 path)
+# ---------------------------------------------------------------------------
+
+
+def reference_norm_rope_fp32(
+    x: torch.Tensor,       # [B, L, H, D]
+    weight: torch.Tensor,  # [D]
+    cos: torch.Tensor,     # [B, L, D//2]
+    sin: torch.Tensor,     # [B, L, D//2]
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Float32-throughout RMSNorm + RoPE — oracle for the fused Triton kernel.
+
+    Unlike :func:`reference_norm_rope` (which reproduces the original Flux2
+    intermediate dtype casts), this keeps RMSNorm and the scale multiply
+    entirely in float32 with no intermediate rounding, casting to the input
+    dtype only on the final output — exactly what the Triton kernel does.
+    Use this to verify the kernel; use :func:`reference_norm_rope` as the
+    production fallback.
+    """
+    orig_dtype = x.dtype
+    x = x.float()
+    rrms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
+    x = x * rrms * weight.float()
+    x = x.reshape(*x.shape[:-1], -1, 2)   # [B, L, H, D//2, 2]
+    x1, x2 = x[..., 0], x[..., 1]         # each [B, L, H, D//2]
+    c = cos.unsqueeze(2).float()
+    s = sin.unsqueeze(2).float()
+    o1 = c * x1 - s * x2
+    o2 = s * x1 + c * x2
+    out = torch.stack([o1, o2], dim=-1).reshape(*o1.shape[:-1], -1)  # [B,L,H,D]
+    return out.to(orig_dtype)
+
+
+def reference_packed_qk_norm_rope_fp32(
+    qkv: torch.Tensor,      # [B, L, 3, H, D]
+    q_weight: torch.Tensor, # [D]
+    k_weight: torch.Tensor, # [D]
+    cos: torch.Tensor,      # [B, L, D//2]
+    sin: torch.Tensor,      # [B, L, D//2]
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Float32 packed oracle for the fused kernel (see :func:`reference_norm_rope_fp32`)."""
+    q = reference_norm_rope_fp32(qkv[:, :, 0], q_weight, cos, sin, eps)
+    k = reference_norm_rope_fp32(qkv[:, :, 1], k_weight, cos, sin, eps)
     v = qkv[:, :, 2].to(q.dtype)
     return torch.stack([q, k, v], dim=2)
 

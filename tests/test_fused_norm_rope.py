@@ -11,6 +11,8 @@ from musubi_tuner.kernels.fused_norm_rope import (
     fused_packed_qk_norm_rope,
     reference_norm_rope,
     reference_packed_qk_norm_rope,
+    reference_norm_rope_fp32,
+    reference_packed_qk_norm_rope_fp32,
     extract_cos_sin,
     HAS_TRITON,
 )
@@ -36,7 +38,8 @@ def test_fused_norm_rope_matches_reference(dtype):
     cos = torch.ones(B, L, D2, device="cuda")
     sin = torch.zeros(B, L, D2, device="cuda")
 
-    ref = reference_norm_rope(x, weight, cos, sin)
+    # The kernel stays in float32, so compare against the float32 oracle.
+    ref = reference_norm_rope_fp32(x, weight, cos, sin)
     out = fused_norm_rope(x, weight, cos, sin)
 
     assert out.shape == ref.shape
@@ -113,7 +116,8 @@ def test_fused_norm_rope_nontrivial_rope(B, L, H, D):
     cos = torch.cos(angles)
     sin = torch.sin(angles)
 
-    ref = reference_norm_rope(x, weight, cos, sin)
+    # The kernel stays in float32, so compare against the float32 oracle.
+    ref = reference_norm_rope_fp32(x, weight, cos, sin)
     out = fused_norm_rope(x, weight, cos, sin)
 
     assert out.shape == ref.shape
@@ -179,7 +183,8 @@ def test_fused_packed_qk_norm_rope_matches_reference(dtype, B, L, H, D):
     cos = torch.cos(angles)
     sin = torch.sin(angles)
 
-    ref = reference_packed_qk_norm_rope(qkv, q_weight, k_weight, cos, sin)
+    # The kernel stays in float32, so compare against the float32 oracle.
+    ref = reference_packed_qk_norm_rope_fp32(qkv, q_weight, k_weight, cos, sin)
     out = fused_packed_qk_norm_rope(qkv, q_weight, k_weight, cos, sin)
 
     assert out.shape == (B, L, 3, H, D)

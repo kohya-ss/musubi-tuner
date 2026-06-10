@@ -15,6 +15,7 @@ from musubi_tuner.kernels.fused_norm_rope import (
     HAS_TRITON,
     fused_packed_qk_norm_rope,
     reference_packed_qk_norm_rope,
+    reference_packed_qk_norm_rope_fp32,
 )
 
 
@@ -121,9 +122,9 @@ def test_fused_gradients_match_reference(dtype, B, L, H, D):
     cos_cuda = cos.cuda()
     sin_cuda = sin.cuda()
 
-    # Reference
+    # Float32 reference (the kernel's oracle — kernel stays in float32)
     qkv_r, q_w_r, k_w_r = _clone_with_grad(qkv, q_w, k_w)
-    out_r = reference_packed_qk_norm_rope(qkv_r, q_w_r, k_w_r, cos_cuda, sin_cuda)
+    out_r = reference_packed_qk_norm_rope_fp32(qkv_r, q_w_r, k_w_r, cos_cuda, sin_cuda)
     out_r.sum().backward()
 
     # Fused
