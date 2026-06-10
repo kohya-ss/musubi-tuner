@@ -162,3 +162,47 @@ def test_backward_frozen_scales():
     out.sum().backward()
     assert qkv.grad is not None
     assert qs.grad is None and ks.grad is None
+
+
+def _has_flash_attn():
+    try:
+        from flash_attn import flash_attn_qkvpacked_func  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def test_packed_attention_torch_backend_matches_eager():
+    from musubi_tuner.flux_2.flux2_models import attention as flux_attention, packed_attention
+    from musubi_tuner.modules.attention import AttentionParams
+    from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
+
+    B, L, H, D = 2, 33, 4, 128
+    qkv, qs, ks, pe = make_inputs(B, L, H, D, torch.float32, seed=3)
+    attn_params = AttentionParams.create_attention_params("torch", False)
+
+    packed = fused_qknorm_rope(qkv, qs, ks, pe)
+    out_packed = packed_attention(packed, attn_params)
+
+    q, k, v = rearrange(qkv, "B L K H D -> K B H L D")
+    q = eager_rms(q, qs).to(v.dtype)
+    k = eager_rms(k, ks).to(v.dtype)
+    out_eager = flux_attention([q, k, v], pe, attn_params)
+
+    assert out_packed.shape == (B, L, H * D)
+    torch.testing.assert_close(out_packed, out_eager, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.skipif(not _has_flash_attn(), reason="flash_attn not installed")
+def test_packed_attention_flash_matches_torch_backend():
+    from musubi_tuner.flux_2.flux2_models import packed_attention
+    from musubi_tuner.modules.attention import AttentionParams
+    from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
+
+    B, L, H, D = 2, 33, 4, 128
+    qkv, qs, ks, pe = make_inputs(B, L, H, D, torch.bfloat16, seed=4)
+    packed = fused_qknorm_rope(qkv, qs, ks, pe)
+
+    out_flash = packed_attention(packed, AttentionParams.create_attention_params("flash", False))
+    out_torch = packed_attention(packed, AttentionParams.create_attention_params("torch", False))
+    torch.testing.assert_close(out_flash.float(), out_torch.float(), rtol=2e-2, atol=2e-2)

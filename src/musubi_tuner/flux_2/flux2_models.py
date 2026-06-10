@@ -8,7 +8,7 @@ from einops import rearrange
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from musubi_tuner.modules.attention import AttentionParams
+from musubi_tuner.modules.attention import AttentionParams, flash_attn_qkvpacked_func
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.attention import attention as unified_attention
 
@@ -997,6 +997,20 @@ def attention(qkv_list: list[Tensor], pe: Tensor, attn_params: AttentionParams) 
     del q, k, v
     x = unified_attention(qkv_list, attn_params=attn_params)
     return x
+
+
+def packed_attention(qkv: Tensor, attn_params: AttentionParams) -> Tensor:
+    """Attention on packed qkv (B, L, 3, H, D) with QKNorm and RoPE already applied.
+
+    Uses flash_attn_qkvpacked_func when possible (no unbind, no copies);
+    otherwise unbinds to views and reuses the unified attention dispatch.
+    Returns (B, L, H*D) like attention().
+    """
+    if attn_params.attn_mode == "flash" and not attn_params.split_attn and flash_attn_qkvpacked_func is not None:
+        x = flash_attn_qkvpacked_func(qkv, 0.0)  # B, L, H, D
+        return x.reshape(x.shape[0], x.shape[1], -1)
+    q, k, v = qkv.unbind(dim=2)  # views: B, L, H, D
+    return unified_attention([q, k, v], attn_params=attn_params)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
