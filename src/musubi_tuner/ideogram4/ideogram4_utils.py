@@ -39,9 +39,7 @@ from musubi_tuner.utils import safetensors_utils
 
 logger = logging.getLogger(__name__)
 
-IDEOGRAM4_OFFICIAL_REPO_ID = "ideogram-ai/ideogram-4-fp8"
-IDEOGRAM4_TOKENIZER_SUBFOLDER = "tokenizer"
-IDEOGRAM4_TEXT_ENCODER_CONFIG_SUBFOLDER = "text_encoder"
+QWEN3_VL_8B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-8B-Instruct"
 IDEOGRAM4_MAX_TEXT_TOKENS = 2048
 IDEOGRAM4_PATCH_SIZE = 2
 IDEOGRAM4_AE_SCALE_FACTOR = 8
@@ -125,8 +123,7 @@ def load_ideogram4_autoencoder(
 
 def load_ideogram4_tokenizer():
     return AutoTokenizer.from_pretrained(
-        IDEOGRAM4_OFFICIAL_REPO_ID,
-        subfolder=IDEOGRAM4_TOKENIZER_SUBFOLDER,
+        QWEN3_VL_8B_INSTRUCT_REPO_ID,
         trust_remote_code=True,
     )
 
@@ -140,8 +137,7 @@ def load_ideogram4_text_encoder(
 ):
     validate_local_safetensors(path)
     config = AutoConfig.from_pretrained(
-        IDEOGRAM4_OFFICIAL_REPO_ID,
-        subfolder=IDEOGRAM4_TEXT_ENCODER_CONFIG_SUBFOLDER,
+        QWEN3_VL_8B_INSTRUCT_REPO_ID,
         trust_remote_code=True,
     )
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
