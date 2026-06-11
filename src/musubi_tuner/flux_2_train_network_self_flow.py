@@ -85,6 +85,33 @@ def apply_per_token_mask(
     return masked_input, mask_flat
 
 
+def build_per_token_timestep_map(
+    timesteps_teacher: torch.Tensor,
+    timesteps_student: torch.Tensor,
+    mask_flat: torch.Tensor,
+    mismatch_prob: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token timestep map for dual-timestep conditioning (paper §3.3).
+
+    Unmasked tokens get the student timestep. Masked tokens get the teacher
+    timestep, except with probability ``mismatch_prob`` they get the student
+    timestep (deliberate mismatch — experimental, 0.0 = paper behaviour).
+    Returns (per_token_timesteps (B, N), mismatch_mask (B, N) bool).
+    """
+    B, N = mask_flat.shape
+    t_student = timesteps_student.unsqueeze(1).expand(B, N)
+    t_teacher = timesteps_teacher.unsqueeze(1).expand(B, N)
+
+    if mismatch_prob <= 0.0:
+        per_token_t = torch.where(mask_flat, t_teacher, t_student)
+        return per_token_t, torch.zeros_like(mask_flat)
+
+    coin = torch.rand(B, N, device=mask_flat.device)
+    mismatch_mask = mask_flat & (coin < mismatch_prob)
+    per_token_t = torch.where(mask_flat & ~mismatch_mask, t_teacher, t_student)
+    return per_token_t, mismatch_mask
+
+
 # endregion self-flow math helpers
 
 
