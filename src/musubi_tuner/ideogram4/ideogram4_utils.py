@@ -341,6 +341,19 @@ def build_negative_image_inputs(
     }
 
 
+def build_unconditional_sequence_inputs(
+    text_features: list[torch.Tensor],
+    height: int,
+    width: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, torch.Tensor | int]:
+    inputs = build_sequence_inputs_from_features(text_features, height, width, device=device)
+    inputs["llm_features"] = inputs["llm_features"].to(device=device, dtype=dtype)
+    return inputs
+
+
 def patchify_vae_latents(latents: torch.Tensor) -> torch.Tensor:
     if latents.ndim != 4:
         raise ValueError(f"expected VAE latents as B,C,H,W, got {tuple(latents.shape)}")
@@ -426,13 +439,14 @@ def _iter_denoising_steps(params, schedule, step_intervals: torch.Tensor):
 def generate_images(
     *,
     conditional_transformer: Ideogram4Transformer,
-    unconditional_transformer: Ideogram4Transformer,
     autoencoder: AutoEncoder,
     text_features: list[torch.Tensor],
     height: int,
     width: int,
     sampler_preset: str,
     device: torch.device,
+    unconditional_transformer: Optional[Ideogram4Transformer] = None,
+    unconditional_text_features: Optional[list[torch.Tensor]] = None,
     seed: Optional[int] = None,
     show_progress: bool = True,
     initial_sigma: Optional[float] = None,
@@ -458,12 +472,29 @@ def generate_images(
     text_z_padding = torch.zeros(batch_size, max_text_tokens, latent_dim, dtype=torch.float32, device=device)
 
     cond_features = inputs["llm_features"].to(device=device, dtype=torch.float32)
-    negative_inputs = build_negative_image_inputs(
-        inputs,
-        feature_dim=cond_features.shape[-1],
-        dtype=cond_features.dtype,
-        device=device,
-    )
+    if unconditional_transformer is None:
+        if unconditional_text_features is None:
+            unconditional_text_features = [torch.zeros_like(features) for features in text_features]
+        if len(unconditional_text_features) != len(text_features):
+            raise ValueError("unconditional_text_features must have the same batch size as text_features")
+        negative_inputs = build_unconditional_sequence_inputs(
+            unconditional_text_features,
+            height,
+            width,
+            device=device,
+            dtype=cond_features.dtype,
+        )
+        neg_max_text_tokens = int(negative_inputs["max_text_tokens"])
+        neg_text_z_padding = torch.zeros(batch_size, neg_max_text_tokens, latent_dim, dtype=torch.float32, device=device)
+    else:
+        negative_inputs = build_negative_image_inputs(
+            inputs,
+            feature_dim=cond_features.shape[-1],
+            dtype=cond_features.dtype,
+            device=device,
+        )
+        neg_max_text_tokens = 0
+        neg_text_z_padding = None
 
     denoising_steps = list(_iter_denoising_steps(params, schedule, step_intervals))
     iterator = range(params.num_steps)
@@ -487,14 +518,26 @@ def generate_images(
         )
         pos_v = pos_out[:, max_text_tokens:]
 
-        neg_v = unconditional_transformer(
-            llm_features=negative_inputs["llm_features"],
-            x=z,
-            t=t,
-            position_ids=negative_inputs["position_ids"],
-            segment_ids=negative_inputs["segment_ids"],
-            indicator=negative_inputs["indicator"],
-        )
+        if unconditional_transformer is None:
+            neg_z = torch.cat([neg_text_z_padding, z], dim=1)
+            neg_out = conditional_transformer(
+                llm_features=negative_inputs["llm_features"],
+                x=neg_z,
+                t=t,
+                position_ids=negative_inputs["position_ids"],
+                segment_ids=negative_inputs["segment_ids"],
+                indicator=negative_inputs["indicator"],
+            )
+            neg_v = neg_out[:, neg_max_text_tokens:]
+        else:
+            neg_v = unconditional_transformer(
+                llm_features=negative_inputs["llm_features"],
+                x=z,
+                t=t,
+                position_ids=negative_inputs["position_ids"],
+                segment_ids=negative_inputs["segment_ids"],
+                indicator=negative_inputs["indicator"],
+            )
 
         v = gw_i * pos_v + (1.0 - gw_i) * neg_v
         z = z + v * (s_val - t_val)

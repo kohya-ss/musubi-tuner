@@ -44,8 +44,8 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         self.args_ideogram4_timestep_std = args.ideogram4_timestep_std
         if args.blocks_to_swap is not None and args.blocks_to_swap > 33:
             raise ValueError("--blocks_to_swap for Ideogram 4 must be <= 33")
-        if args.sample_prompts and (args.unconditional_dit is None or args.text_encoder is None or args.vae is None):
-            raise ValueError("--sample_prompts for Ideogram 4 requires --unconditional_dit, --text_encoder, and --vae")
+        if args.sample_prompts and (args.text_encoder is None or args.vae is None):
+            raise ValueError("--sample_prompts for Ideogram 4 requires --text_encoder and --vae")
 
     def process_sample_prompts(
         self,
@@ -67,9 +67,11 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 
         sample_parameters = []
         with torch.no_grad():
+            has_unconditional_dit = bool(args.unconditional_dit)
             for prompt_dict in prompts:
                 prompt = prompt_dict.get("prompt", "")
-                if prompt_dict.get("negative_prompt") is not None:
+                negative_prompt = prompt_dict.get("negative_prompt")
+                if has_unconditional_dit and negative_prompt is not None:
                     logger.warning("Ideogram 4 v1 ignores negative_prompt in sample prompts.")
                 if args.validate_caption_structure:
                     ideogram4_utils.validate_prompt(prompt, warn_only=args.warn_on_caption_issues)
@@ -77,6 +79,10 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 prompt_dict["i4_llm_features"] = ideogram4_utils.encode_prompt_to_features(
                     tokenizer, text_encoder, prompt, device
                 ).cpu()
+                if not has_unconditional_dit:
+                    prompt_dict["i4_unconditional_llm_features"] = ideogram4_utils.encode_prompt_to_features(
+                        tokenizer, text_encoder, negative_prompt or "", device
+                    ).cpu()
                 sample_parameters.append(prompt_dict)
 
         del tokenizer, text_encoder
@@ -96,7 +102,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         sample_parameters,
         dit_dtype,
     ) -> None:
-        if self.unconditional_transformer is None:
+        if args.unconditional_dit and self.unconditional_transformer is None:
             logger.info(f"Loading Ideogram 4 unconditional DiT from {args.unconditional_dit}")
             self.unconditional_transformer = ideogram4_utils.load_ideogram4_transformer(
                 args.unconditional_dit,
@@ -147,10 +153,11 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         del discrete_flow_shift, sample_steps, frame_count, generator, do_classifier_free_guidance, guidance_scale, cfg_scale
         height = (height // ideogram4_utils.IDEOGRAM4_IMAGE_PATCH) * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
         width = (width // ideogram4_utils.IDEOGRAM4_IMAGE_PATCH) * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
-        if self.unconditional_transformer is None:
-            raise RuntimeError("unconditional transformer is not loaded for Ideogram 4 sampling")
         sampler_preset = sample_parameter.get("sampler_preset", args.sampler_preset)
         features = sample_parameter["i4_llm_features"].to(torch.float32)
+        unconditional_features = sample_parameter.get("i4_unconditional_llm_features")
+        if unconditional_features is not None:
+            unconditional_features = unconditional_features.to(torch.float32)
         vae.to(accelerator.device)
         vae.eval()
         conditional_transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
@@ -170,6 +177,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 unconditional_transformer=self.unconditional_transformer,
                 autoencoder=vae,
                 text_features=[features],
+                unconditional_text_features=[unconditional_features] if unconditional_features is not None else None,
                 height=height,
                 width=width,
                 sampler_preset=sampler_preset,
@@ -303,17 +311,20 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
             x.requires_grad_(True)
             llm_features.requires_grad_(True)
 
+        # Training samples use t=0 as clean and t=1 as noise. The Ideogram 4
+        # transformer uses the inverse convention: t=0 is noise and t=1 is clean.
+        model_t = 1.0 - timesteps.to(accelerator.device, dtype=torch.float32) / 1000.0
         model_pred = model(
             llm_features=llm_features,
             x=x,
-            t=timesteps.to(accelerator.device, dtype=torch.float32) / 1000.0,
+            t=model_t,
             position_ids=inputs["position_ids"],
             segment_ids=inputs["segment_ids"],
             indicator=inputs["indicator"],
         )
         model_pred = model_pred[:, int(inputs["max_text_tokens"]) :]
         model_pred = ideogram4_utils.unflatten_token_grid(model_pred, grid_h, grid_w)
-        target = noise - latents
+        target = latents - noise
         return DiTOutput(pred=model_pred, target=target)
 
 

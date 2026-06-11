@@ -16,11 +16,21 @@ logging.basicConfig(level=logging.INFO)
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dit", type=str, required=True, help="conditional Ideogram 4 DiT safetensors path")
-    parser.add_argument("--unconditional_dit", type=str, required=True, help="unconditional Ideogram 4 DiT safetensors path")
+    parser.add_argument(
+        "--unconditional_dit",
+        type=str,
+        default=None,
+        help="optional unconditional Ideogram 4 DiT safetensors path; omitted uses single-DiT unconditional embeds CFG",
+    )
     parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3-VL BF16 text encoder safetensors path")
     parser.add_argument("--vae", type=str, required=True, help="Flux2 VAE safetensors path")
     parser.add_argument("--prompt", type=str, required=True, help="prompt")
-    parser.add_argument("--negative_prompt", type=str, default=None, help="ignored for Ideogram 4 asymmetric CFG v1")
+    parser.add_argument(
+        "--negative_prompt",
+        type=str,
+        default=None,
+        help="negative/unconditional prompt used only when --unconditional_dit is omitted",
+    )
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size as height width")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
     parser.add_argument("--initial_sigma", type=float, default=1.004, help="override the first denoising sigma")
@@ -52,7 +62,7 @@ def main():
     parser = setup_parser()
     args = parser.parse_args()
 
-    if args.negative_prompt is not None:
+    if args.unconditional_dit and args.negative_prompt is not None:
         logger.warning("Ideogram 4 v1 uses official asymmetric CFG; --negative_prompt is ignored.")
 
     height, width = args.image_size
@@ -70,6 +80,11 @@ def main():
         disable_mmap=args.disable_numpy_memmap,
     )
     text_features = [ideogram4_utils.encode_prompt_to_features(tokenizer, text_encoder, args.prompt, device)]
+    unconditional_text_features = None
+    if not args.unconditional_dit:
+        unconditional_text_features = [
+            ideogram4_utils.encode_prompt_to_features(tokenizer, text_encoder, args.negative_prompt or "", device)
+        ]
     del tokenizer, text_encoder
     clean_memory_on_device(device)
 
@@ -81,14 +96,18 @@ def main():
         expected_model_type=ideogram4_utils.IDEOGRAM4_COND_MODEL_TYPE,
         disable_mmap=args.disable_numpy_memmap,
     )
-    logger.info("Loading unconditional DiT")
-    unconditional_transformer = ideogram4_utils.load_ideogram4_transformer(
-        args.unconditional_dit,
-        device=device,
-        dtype=dtype,
-        expected_model_type=ideogram4_utils.IDEOGRAM4_UNCOND_MODEL_TYPE,
-        disable_mmap=args.disable_numpy_memmap,
-    )
+    unconditional_transformer = None
+    if args.unconditional_dit:
+        logger.info("Loading unconditional DiT")
+        unconditional_transformer = ideogram4_utils.load_ideogram4_transformer(
+            args.unconditional_dit,
+            device=device,
+            dtype=dtype,
+            expected_model_type=ideogram4_utils.IDEOGRAM4_UNCOND_MODEL_TYPE,
+            disable_mmap=args.disable_numpy_memmap,
+        )
+    else:
+        logger.info("Using conditional DiT for unconditional embeds CFG")
     logger.info("Loading VAE")
     autoencoder = ideogram4_utils.load_ideogram4_autoencoder(
         args.vae,
@@ -102,6 +121,7 @@ def main():
         unconditional_transformer=unconditional_transformer,
         autoencoder=autoencoder,
         text_features=text_features,
+        unconditional_text_features=unconditional_text_features,
         height=height,
         width=width,
         sampler_preset=args.sampler_preset,

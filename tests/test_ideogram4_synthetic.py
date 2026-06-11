@@ -406,6 +406,63 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertAlmostEqual(conditional.seen_t[0], -0.004, places=6)
         self.assertAlmostEqual(unconditional.seen_t[0], -0.004, places=6)
 
+    def test_generate_images_reuses_conditional_transformer_for_unconditional_embeds_cfg(self):
+        class FakeTransformer:
+            def __init__(self):
+                self.config = SimpleNamespace(in_channels=2)
+                self.calls = []
+
+            def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
+                self.calls.append(
+                    {
+                        "llm_shape": tuple(llm_features.shape),
+                        "x_shape": tuple(x.shape),
+                        "t": float(t[0].item()),
+                        "position_shape": tuple(position_ids.shape),
+                        "segment_shape": tuple(segment_ids.shape),
+                        "indicator_shape": tuple(indicator.shape),
+                    }
+                )
+                return torch.full_like(x, float(len(self.calls)))
+
+        original_decode = ideogram4_utils.decode_tokens_to_images
+        original_preset = ideogram4_utils.PRESETS.get("TEST_SINGLE_DIT_CFG")
+        ideogram4_utils.PRESETS["TEST_SINGLE_DIT_CFG"] = SamplerParameters(
+            num_steps=1,
+            guidance_schedule=(2.0,),
+            mu=0.0,
+            std=1.0,
+        )
+        ideogram4_utils.decode_tokens_to_images = lambda *args, **kwargs: ["image"]
+
+        try:
+            transformer = FakeTransformer()
+            images = ideogram4_utils.generate_images(
+                conditional_transformer=transformer,
+                autoencoder=object(),
+                text_features=[torch.ones(2, 4)],
+                unconditional_text_features=[torch.zeros(1, 4)],
+                height=16,
+                width=16,
+                sampler_preset="TEST_SINGLE_DIT_CFG",
+                device=torch.device("cpu"),
+                seed=1,
+                show_progress=False,
+            )
+        finally:
+            ideogram4_utils.decode_tokens_to_images = original_decode
+            if original_preset is None:
+                ideogram4_utils.PRESETS.pop("TEST_SINGLE_DIT_CFG", None)
+            else:
+                ideogram4_utils.PRESETS["TEST_SINGLE_DIT_CFG"] = original_preset
+
+        self.assertEqual(images, ["image"])
+        self.assertEqual(len(transformer.calls), 2)
+        self.assertEqual(transformer.calls[0]["x_shape"], (1, 3, 2))
+        self.assertEqual(transformer.calls[0]["llm_shape"], (1, 3, 4))
+        self.assertEqual(transformer.calls[1]["x_shape"], (1, 2, 2))
+        self.assertEqual(transformer.calls[1]["llm_shape"], (1, 2, 4))
+
     def test_text_cache_metadata_and_flow_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             class DummyItem:
@@ -435,10 +492,11 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         latents = torch.zeros(1, 2, 2, 2)
         noise = torch.ones_like(latents)
-        target = noise - latents
+        target = latents - noise
         t = torch.full((1, 1, 1, 1), 0.25)
         noisy = (1 - t) * latents + t * noise
-        moved = noisy + target * (0.0 - 0.25)
+        model_t = 1.0 - t
+        moved = noisy + target * (1.0 - model_t)
         self.assertTrue(torch.allclose(moved, latents))
 
     def test_text_cache_accepts_plain_caption_by_default(self):
@@ -549,6 +607,27 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertAlmostEqual(args.initial_sigma, 1.004)
         self.assertFalse(args.validate_caption_structure)
 
+    def test_generate_parser_allows_missing_unconditional_dit(self):
+        from musubi_tuner import ideogram4_generate_image
+
+        parser = ideogram4_generate_image.setup_parser()
+        args = parser.parse_args(
+            [
+                "--dit",
+                "conditional.safetensors",
+                "--text_encoder",
+                "qwen3vl.safetensors",
+                "--vae",
+                "vae.safetensors",
+                "--prompt",
+                "caption",
+                "--save_path",
+                "out.png",
+            ]
+        )
+
+        self.assertIsNone(args.unconditional_dit)
+
     def test_process_batch_uses_cached_model_latents_without_renormalizing(self):
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
         original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
@@ -597,7 +676,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 captured["noise"] = noise.detach().clone()
                 captured["noisy_model_input"] = noisy_model_input.detach().clone()
                 captured["timesteps"] = timesteps.detach().clone()
-                target = noise - latents
+                target = latents - noise
                 return DiTOutput(pred=target, target=target)
 
             trainer._sample_ideogram_timesteps = fake_sample
@@ -642,6 +721,112 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertTrue(torch.allclose(captured["noisy_model_input"], expected_noisy))
         self.assertTrue(torch.equal(captured["timesteps"], torch.full((1,), 250.0)))
         self.assertEqual(float(loss.item()), 0.0)
+
+    def test_call_dit_uses_model_time_and_clean_minus_noise_target(self):
+        original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
+        original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
+        original_trainer = sys.modules.get("musubi_tuner.training.trainer_base")
+        original_module = sys.modules.pop("musubi_tuner.ideogram4_train_network", None)
+        imported_module = None
+        original_build_inputs = None
+
+        fake_image_video = types.ModuleType("musubi_tuner.dataset.image_video_dataset")
+        fake_image_video.ARCHITECTURE_IDEOGRAM4 = "i4"
+        fake_image_video.ARCHITECTURE_IDEOGRAM4_FULL = "ideogram4"
+
+        fake_sampling = types.ModuleType("musubi_tuner.training.sampling_prompts")
+        fake_sampling.load_prompts = lambda path: []
+
+        fake_trainer = types.ModuleType("musubi_tuner.training.trainer_base")
+
+        class DiTOutput:
+            def __init__(self, pred=None, target=None):
+                self.pred = pred
+                self.target = target
+
+        class NetworkTrainer:
+            def __init__(self):
+                self.blocks_to_swap = 0
+
+            def train(self, args):
+                pass
+
+        fake_trainer.DiTOutput = DiTOutput
+        fake_trainer.NetworkTrainer = NetworkTrainer
+
+        try:
+            sys.modules["musubi_tuner.dataset.image_video_dataset"] = fake_image_video
+            sys.modules["musubi_tuner.training.sampling_prompts"] = fake_sampling
+            sys.modules["musubi_tuner.training.trainer_base"] = fake_trainer
+            imported_module = importlib.import_module("musubi_tuner.ideogram4_train_network")
+            original_build_inputs = imported_module.ideogram4_utils.build_sequence_inputs_from_features
+
+            def fake_build_inputs(text_features, image_height, image_width, device):
+                self.assertEqual(len(text_features), 1)
+                self.assertEqual((image_height, image_width), (32, 32))
+                return {
+                    "max_text_tokens": 1,
+                    "llm_features": torch.zeros(1, 5, 8, device=device),
+                    "position_ids": torch.zeros(1, 5, 3, dtype=torch.long, device=device),
+                    "segment_ids": torch.zeros(1, 5, dtype=torch.long, device=device),
+                    "indicator": torch.zeros(1, 5, dtype=torch.long, device=device),
+                }
+
+            imported_module.ideogram4_utils.build_sequence_inputs_from_features = fake_build_inputs
+
+            class FakeModel:
+                def __init__(self):
+                    self.config = SimpleNamespace(in_channels=4)
+                    self.seen_t = None
+                    self.seen_x_shape = None
+
+                def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
+                    del llm_features, position_ids, segment_ids, indicator
+                    self.seen_t = t.detach().clone()
+                    self.seen_x_shape = tuple(x.shape)
+                    return torch.zeros_like(x)
+
+            trainer = imported_module.Ideogram4NetworkTrainer()
+            transformer = FakeModel()
+            latents = torch.arange(16, dtype=torch.float32).reshape(1, 4, 2, 2)
+            noise = torch.full_like(latents, 3.0)
+            noisy_model_input = 0.75 * latents + 0.25 * noise
+
+            output = trainer.call_dit(
+                SimpleNamespace(gradient_checkpointing=False),
+                SimpleNamespace(device=torch.device("cpu")),
+                transformer,
+                latents,
+                {"i4_llm_features": [torch.zeros(1, 8)]},
+                noise,
+                noisy_model_input,
+                torch.tensor([250.0]),
+                torch.float32,
+            )
+        finally:
+            if imported_module is not None and original_build_inputs is not None:
+                imported_module.ideogram4_utils.build_sequence_inputs_from_features = original_build_inputs
+            if original_module is not None:
+                sys.modules["musubi_tuner.ideogram4_train_network"] = original_module
+            else:
+                sys.modules.pop("musubi_tuner.ideogram4_train_network", None)
+            if original_image_video is not None:
+                sys.modules["musubi_tuner.dataset.image_video_dataset"] = original_image_video
+            else:
+                sys.modules.pop("musubi_tuner.dataset.image_video_dataset", None)
+            if original_sampling is not None:
+                sys.modules["musubi_tuner.training.sampling_prompts"] = original_sampling
+            else:
+                sys.modules.pop("musubi_tuner.training.sampling_prompts", None)
+            if original_trainer is not None:
+                sys.modules["musubi_tuner.training.trainer_base"] = original_trainer
+            else:
+                sys.modules.pop("musubi_tuner.training.trainer_base", None)
+
+        self.assertTrue(torch.allclose(transformer.seen_t, torch.tensor([0.75])))
+        self.assertEqual(transformer.seen_x_shape, (1, 5, 4))
+        self.assertTrue(torch.equal(output.target, latents - noise))
+        self.assertEqual(tuple(output.pred.shape), (1, 4, 2, 2))
 
     def test_denoising_steps_move_from_noise_to_data(self):
         params = ideogram4_utils.PRESETS["V4_DEFAULT_20"]
