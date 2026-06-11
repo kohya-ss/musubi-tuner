@@ -37,9 +37,7 @@ logging.basicConfig(level=logging.INFO)
 # region self-flow math helpers
 
 
-def assign_teacher_student_timesteps(
-    timesteps_a: torch.Tensor, timesteps_b: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def assign_teacher_student_timesteps(timesteps_a: torch.Tensor, timesteps_b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-sample teacher/student split (paper §3.3): teacher = min (cleaner), student = max."""
     t_a = timesteps_a.float()
     t_b = timesteps_b.float()
@@ -48,9 +46,7 @@ def assign_teacher_student_timesteps(
     return timesteps_teacher, timesteps_student
 
 
-def reconstruct_noisy_input(
-    latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor
-) -> torch.Tensor:
+def reconstruct_noisy_input(latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
     """Flow-matching interpolation (1-t)*latents + t*noise; timesteps in [1, 1001]."""
     t = (timesteps.float() - 1.0) / 1000.0
     if latents.ndim == 5:
@@ -133,9 +129,7 @@ def compute_ema_weight_drift(
     """Mean L2 distance between EMA and current weights (floating-point only)."""
     with torch.no_grad():
         dists = [
-            torch.linalg.vector_norm(current_state[k].float() - v.float())
-            for k, v in ema_state.items()
-            if v.is_floating_point()
+            torch.linalg.vector_norm(current_state[k].float() - v.float()) for k, v in ema_state.items() if v.is_floating_point()
         ]
         if not dists:
             return torch.tensor(0.0)
