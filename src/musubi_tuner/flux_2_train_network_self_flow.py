@@ -60,6 +60,31 @@ def reconstruct_noisy_input(
     return (1 - t_exp) * latents + t_exp * noise
 
 
+def apply_per_token_mask(
+    noisy_input_student: torch.Tensor,
+    noisy_input_teacher: torch.Tensor,
+    mask_ratio: float,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token masking (paper Eq. 4-5): masked tokens take the teacher (cleaner) values.
+
+    Returns (masked_input, mask_flat) with mask_flat (B, N) bool, True = masked.
+    N indexes latent pixels, which map 1:1 to packed FLUX.2 image tokens (prc_img
+    does no patchify). Independent per-token draw; locality modes are a follow-up.
+    """
+    B = noisy_input_student.shape[0]
+    if noisy_input_student.ndim == 5:
+        _, _, T, H, W = noisy_input_student.shape
+        mask_flat = torch.rand(B, T * H * W, device=device) < mask_ratio
+        mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
+    else:
+        _, _, H, W = noisy_input_student.shape
+        mask_flat = torch.rand(B, H * W, device=device) < mask_ratio
+        mask_spatial = mask_flat.view(B, 1, H, W).expand_as(noisy_input_student)
+    masked_input = torch.where(mask_spatial, noisy_input_teacher, noisy_input_student)
+    return masked_input, mask_flat
+
+
 # endregion self-flow math helpers
 
 
