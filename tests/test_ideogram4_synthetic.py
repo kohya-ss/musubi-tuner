@@ -286,21 +286,28 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertTrue(torch.equal(latents, restored))
 
     def test_decode_tokens_keeps_patched_vae_channels(self):
+        class FakeDecoder:
+            def __init__(self):
+                self.seen_shape = None
+
+            def __call__(self, z):
+                self.seen_shape = tuple(z.shape)
+                return torch.zeros(z.shape[0], 3, z.shape[2] * 8, z.shape[3] * 8)
+
         class FakeAutoEncoder:
             dtype = torch.float32
 
             def __init__(self):
-                self.seen_shape = None
+                self.decoder = FakeDecoder()
 
             def decode(self, z):
-                self.seen_shape = tuple(z.shape)
-                return torch.zeros(z.shape[0], 3, z.shape[2] * 16, z.shape[3] * 16)
+                raise AssertionError("official pipeline calls autoencoder.decoder directly")
 
         autoencoder = FakeAutoEncoder()
         tokens = torch.zeros(1, 4, 128)
         images = ideogram4_utils.decode_tokens_to_images(autoencoder, tokens, grid_h=2, grid_w=2)
 
-        self.assertEqual(autoencoder.seen_shape, (1, 128, 2, 2))
+        self.assertEqual(autoencoder.decoder.seen_shape, (1, 32, 4, 4))
         self.assertEqual(len(images), 1)
 
     def test_text_cache_metadata_and_flow_target(self):
@@ -452,9 +459,18 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         steps = list(ideogram4_utils._iter_denoising_steps(params, schedule, intervals))
 
         self.assertEqual(len(steps), params.num_steps)
-        self.assertGreater(steps[0][0], steps[0][1])
+        official_first_index = params.num_steps - 1
+        expected_t0 = float(schedule(intervals[official_first_index + 1].unsqueeze(0)).item())
+        expected_s0 = float(schedule(intervals[official_first_index].unsqueeze(0)).item())
+        expected_t_last = float(schedule(intervals[1].unsqueeze(0)).item())
+        expected_s_last = float(schedule(intervals[0].unsqueeze(0)).item())
+        self.assertAlmostEqual(steps[0][0], expected_t0)
+        self.assertAlmostEqual(steps[0][1], expected_s0)
+        self.assertLess(steps[0][0], steps[0][1])
         self.assertAlmostEqual(steps[0][2], 7.0)
-        self.assertGreater(steps[-1][0], steps[-1][1])
+        self.assertAlmostEqual(steps[-1][0], expected_t_last)
+        self.assertAlmostEqual(steps[-1][1], expected_s_last)
+        self.assertLess(steps[-1][0], steps[-1][1])
         self.assertAlmostEqual(steps[-1][2], 3.0)
 
 
