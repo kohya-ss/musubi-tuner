@@ -675,11 +675,10 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
             "self_flow/actual_mask_ratio": mask_flat.float().mean().item(),
             "self_flow/ema_weight_drift": ema_drift.item(),
         }
-        if mismatch_mask.any():
-            masked_count = mask_flat.sum().item()
-            self._self_flow_logs["self_flow/mismatch_patch_frac"] = (
-                mismatch_mask.sum().item() / masked_count if masked_count > 0 else 0.0
-            )
+        masked_count = mask_flat.sum().item()
+        mismatch_count = mismatch_mask.sum().item()
+        self._self_flow_logs["self_flow/mismatch_patch_count"] = mismatch_count
+        self._self_flow_logs["self_flow/mismatch_patch_frac"] = mismatch_count / masked_count if masked_count > 0 else 0.0
 
         return loss, loss_metrics
 

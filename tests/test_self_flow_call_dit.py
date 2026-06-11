@@ -106,6 +106,40 @@ def test_call_dit_per_token_map_staged_and_cleared(trainer_with_model):
     assert trainer._modulation_controller._tau is None  # cleared after forward
 
 
+def test_call_dit_hidden_features_requires_grad_in_train_mode(trainer_with_model):
+    """Student features must stay in the autograd graph (requires_grad=True) when the model
+    is in train mode and torch.no_grad is NOT active.  A future refactor that accidentally
+    detaches hidden_features would silently stop L_rep from training the transformer."""
+    trainer, args, model = trainer_with_model
+    model.train()
+    batch, latents, noise = make_batch()
+    timesteps = torch.tensor([500.0, 800.0])
+    noisy = latents
+
+    # Ensure we are NOT inside no_grad
+    with torch.enable_grad():
+        output = trainer.call_dit(
+            args,
+            FakeAccelerator(),
+            model,
+            latents,
+            batch,
+            noise,
+            noisy,
+            timesteps,
+            torch.float32,
+            hidden_features=True,
+            feature_layer=0,
+        )
+
+    features = output.extra["features"]
+    assert features is not None, "features must not be None in train mode"
+    assert features.requires_grad is True, (
+        "features.requires_grad must be True in grad-enabled train mode; "
+        "detaching here would silently break L_rep backprop through the transformer"
+    )
+
+
 def test_call_dit_control_images_unsupported(trainer_with_model):
     trainer, args, model = trainer_with_model
     batch, latents, noise = make_batch()
