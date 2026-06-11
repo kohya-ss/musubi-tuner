@@ -37,6 +37,9 @@ python src/musubi_tuner/ideogram4_cache_text_encoder_outputs.py `
   --text_cache_dtype bf16
 ```
 
+Plain text captions are accepted by default. Add `--validate_caption_structure` to check official structured JSON
+captions before caching; combine it with `--warn_on_caption_issues` to warn instead of failing.
+
 Text cache size is large because each token stores 53,248 channels. Approximate BF16 cost:
 
 - 128 tokens: 13.6 MB/image, 13.6 GB/1k images

@@ -24,10 +24,19 @@ def _resolve_cache_dtype(name: str) -> torch.dtype:
     raise ValueError(f"Unsupported text cache dtype: {name}")
 
 
-def encode_and_save_batch(tokenizer, text_encoder, batch: List[ItemInfo], device: torch.device, cache_dtype_name: str, warn_only: bool):
+def encode_and_save_batch(
+    tokenizer,
+    text_encoder,
+    batch: List[ItemInfo],
+    device: torch.device,
+    cache_dtype_name: str,
+    validate_caption_structure: bool,
+    warn_only: bool,
+):
     cache_dtype = _resolve_cache_dtype(cache_dtype_name)
     for item in batch:
-        ideogram4_utils.validate_prompt(item.caption, warn_only=warn_only)
+        if validate_caption_structure:
+            ideogram4_utils.validate_prompt(item.caption, warn_only=warn_only)
         with torch.no_grad():
             features = ideogram4_utils.encode_prompt_to_features(tokenizer, text_encoder, item.caption, device)
         mb_per_image, gb_per_1k = ideogram4_utils.dtype_cache_cost(features.shape[0], cache_dtype)
@@ -47,7 +56,16 @@ def setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         choices=["bf16", "fp8_e4m3fn", "float32"],
         help="dtype for cached Ideogram 4 text features",
     )
-    parser.add_argument("--warn_on_caption_issues", action="store_true", help="warn instead of failing on structured-caption issues")
+    parser.add_argument(
+        "--validate_caption_structure",
+        action="store_true",
+        help="validate official structured JSON captions before caching; ordinary prompt captions are accepted by default",
+    )
+    parser.add_argument(
+        "--warn_on_caption_issues",
+        action="store_true",
+        help="warn instead of failing on structured-caption issues when --validate_caption_structure is enabled",
+    )
     return parser
 
 
@@ -78,7 +96,15 @@ def main():
     )
 
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(tokenizer, text_encoder_model, batch, device, args.text_cache_dtype, args.warn_on_caption_issues)
+        encode_and_save_batch(
+            tokenizer,
+            text_encoder_model,
+            batch,
+            device,
+            args.text_cache_dtype,
+            args.validate_caption_structure,
+            args.warn_on_caption_issues,
+        )
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,

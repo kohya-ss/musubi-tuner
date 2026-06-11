@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from musubi_tuner.dataset.architectures import ARCHITECTURE_IDEOGRAM4
 from musubi_tuner.dataset.bucket import BucketSelector
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_ideogram4
+from musubi_tuner import ideogram4_cache_text_encoder_outputs
 from musubi_tuner.ideogram4 import ideogram4_utils
 from musubi_tuner.ideogram4.ideogram4_quantized_loading import Fp8Linear, load_fp8_state_dict, swap_linears_to_fp8
 from musubi_tuner.networks import lora_ideogram4
@@ -296,6 +297,54 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         noisy = (1 - t) * latents + t * noise
         moved = noisy + target * (0.0 - 0.25)
         self.assertTrue(torch.allclose(moved, latents))
+
+    def test_text_cache_accepts_plain_caption_by_default(self):
+        calls = {"validate": 0, "save": 0}
+        original_validate = ideogram4_cache_text_encoder_outputs.ideogram4_utils.validate_prompt
+        original_encode = ideogram4_cache_text_encoder_outputs.ideogram4_utils.encode_prompt_to_features
+        original_save = ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4
+
+        def fake_validate(prompt, *, warn_only):
+            calls["validate"] += 1
+            raise ValueError("plain captions are not structured JSON")
+
+        try:
+            ideogram4_cache_text_encoder_outputs.ideogram4_utils.validate_prompt = fake_validate
+            ideogram4_cache_text_encoder_outputs.ideogram4_utils.encode_prompt_to_features = (
+                lambda tokenizer, text_encoder, prompt, device: torch.ones(1, 4)
+            )
+            ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = (
+                lambda item, features, cache_dtype_name: calls.__setitem__("save", calls["save"] + 1)
+            )
+
+            item = SimpleNamespace(item_key="sample", caption="ordinary plain prompt")
+            ideogram4_cache_text_encoder_outputs.encode_and_save_batch(
+                object(),
+                object(),
+                [item],
+                torch.device("cpu"),
+                "float32",
+                validate_caption_structure=False,
+                warn_only=False,
+            )
+            self.assertEqual(calls["validate"], 0)
+            self.assertEqual(calls["save"], 1)
+
+            with self.assertRaisesRegex(ValueError, "plain captions"):
+                ideogram4_cache_text_encoder_outputs.encode_and_save_batch(
+                    object(),
+                    object(),
+                    [item],
+                    torch.device("cpu"),
+                    "float32",
+                    validate_caption_structure=True,
+                    warn_only=False,
+                )
+            self.assertEqual(calls["validate"], 1)
+        finally:
+            ideogram4_cache_text_encoder_outputs.ideogram4_utils.validate_prompt = original_validate
+            ideogram4_cache_text_encoder_outputs.ideogram4_utils.encode_prompt_to_features = original_encode
+            ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = original_save
 
     def test_denoising_steps_move_from_noise_to_data(self):
         params = ideogram4_utils.PRESETS["V4_DEFAULT_20"]
