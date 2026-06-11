@@ -431,7 +431,7 @@ def generate_images(
     z = torch.randn(batch_size, num_image_tokens, latent_dim, dtype=torch.float32, device=device, generator=generator)
     text_z_padding = torch.zeros(batch_size, max_text_tokens, latent_dim, dtype=torch.float32, device=device)
 
-    cond_features = inputs["llm_features"].to(device=device, dtype=conditional_transformer.dtype)
+    cond_features = inputs["llm_features"].to(device=device, dtype=torch.float32)
     negative_inputs = build_negative_image_inputs(
         inputs,
         feature_dim=cond_features.shape[-1],
