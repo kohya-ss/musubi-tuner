@@ -187,6 +187,66 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertNotIn("subfolder", calls["config"][1])
         self.assertTrue(calls["config"][1]["trust_remote_code"])
 
+    def test_text_encoder_loader_materializes_missing_meta_tensors(self):
+        original_config = ideogram4_utils.AutoConfig
+        original_model = ideogram4_utils.AutoModel
+        original_validate = ideogram4_utils.validate_local_safetensors
+        original_load_state_dict = ideogram4_utils._load_state_dict
+        original_init_empty_weights = ideogram4_utils.init_empty_weights
+
+        class FakeConfig:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return object()
+
+        class FakeModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.loaded = nn.Linear(2, 2, device="meta")
+                self.missing = nn.Linear(2, 2, device="meta")
+
+            def eval(self):
+                self.eval_called = True
+                return super().eval()
+
+        class FakeAutoModel:
+            @staticmethod
+            def from_config(config, trust_remote_code=True):
+                return FakeModel()
+
+        class NoOpContext:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        try:
+            ideogram4_utils.AutoConfig = FakeConfig
+            ideogram4_utils.AutoModel = FakeAutoModel
+            ideogram4_utils.validate_local_safetensors = lambda path: {}
+            ideogram4_utils._load_state_dict = lambda path, device="cpu", disable_mmap=False: {
+                "loaded.weight": torch.ones(2, 2),
+                "loaded.bias": torch.ones(2),
+            }
+            ideogram4_utils.init_empty_weights = lambda: NoOpContext()
+
+            model = ideogram4_utils.load_ideogram4_text_encoder(
+                "qwen3vl_8b_partial.safetensors",
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+        finally:
+            ideogram4_utils.AutoConfig = original_config
+            ideogram4_utils.AutoModel = original_model
+            ideogram4_utils.validate_local_safetensors = original_validate
+            ideogram4_utils._load_state_dict = original_load_state_dict
+            ideogram4_utils.init_empty_weights = original_init_empty_weights
+
+        self.assertFalse(any(param.is_meta for param in model.parameters()))
+        self.assertTrue(model.eval_called)
+        self.assertTrue(torch.equal(model.loaded.weight, torch.ones(2, 2)))
+
     def test_build_inputs_and_patchify_roundtrip(self):
         features = [torch.ones(3, 8), torch.ones(5, 8)]
         inputs = ideogram4_utils.build_sequence_inputs_from_features(features, 512, 512, device=torch.device("cpu"))

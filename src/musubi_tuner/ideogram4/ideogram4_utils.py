@@ -128,6 +128,15 @@ def load_ideogram4_tokenizer():
     )
 
 
+def _has_meta_tensors(model: torch.nn.Module) -> bool:
+    return any(param.is_meta for param in model.parameters()) or any(buffer.is_meta for buffer in model.buffers())
+
+
+def _materialize_meta_tensors(model: torch.nn.Module) -> None:
+    if _has_meta_tensors(model):
+        model.to_empty(device=torch.device("cpu"))
+
+
 def load_ideogram4_text_encoder(
     path: str,
     *,
@@ -144,6 +153,7 @@ def load_ideogram4_text_encoder(
     device = torch.device(device)
     with init_empty_weights():
         model = AutoModel.from_config(config, trust_remote_code=True)
+    _materialize_meta_tensors(model)
     if is_fp8_state_dict(state_dict):
         require_fp8_dtype()
         swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
