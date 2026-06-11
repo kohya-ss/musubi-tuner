@@ -230,6 +230,67 @@ class PerTokenModulationController:
         return (torch.cat([vec_txt, vec], dim=1),)
 
 
+class BlockFeatureExtractor:
+    """Captures hidden states from Flux2 blocks via forward hooks.
+
+    Layer indices are global, matching the old branch and the CLI help:
+    0..len(double_blocks)-1 address double blocks (img stream is captured),
+    len(double_blocks).. address single blocks (text tokens are sliced off).
+    Blocks self-checkpoint internally, so hook outputs are differentiable
+    even with gradient checkpointing enabled.
+    """
+
+    def __init__(self) -> None:
+        self._handles: list = []
+        self._armed_layer: Optional[int] = None
+        self._num_txt_tokens: Optional[int] = None
+        self._features: Optional[torch.Tensor] = None
+
+    def install(self, model, layer_indices: list[int]) -> None:
+        num_double = len(model.double_blocks)
+        num_total = num_double + len(model.single_blocks)
+        for layer in sorted(set(layer_indices)):
+            if not 0 <= layer < num_total:
+                raise ValueError(f"feature layer {layer} out of range (model has {num_total} blocks)")
+            if layer < num_double:
+                handle = model.double_blocks[layer].register_forward_hook(self._make_double_hook(layer))
+            else:
+                handle = model.single_blocks[layer - num_double].register_forward_hook(self._make_single_hook(layer))
+            self._handles.append(handle)
+
+    def remove(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles.clear()
+
+    def arm(self, layer: int, num_txt_tokens: int) -> None:
+        self._armed_layer = layer
+        self._num_txt_tokens = num_txt_tokens
+        self._features = None
+
+    def drain(self) -> Optional[torch.Tensor]:
+        features = self._features
+        self._features = None
+        self._armed_layer = None
+        self._num_txt_tokens = None
+        return features
+
+    def _make_double_hook(self, layer: int):
+        def hook(module, inputs, output):
+            if self._armed_layer == layer:
+                img, _txt = output
+                self._features = img
+
+        return hook
+
+    def _make_single_hook(self, layer: int):
+        def hook(module, inputs, output):
+            if self._armed_layer == layer:
+                self._features = output[:, self._num_txt_tokens :, ...]
+
+        return hook
+
+
 class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
     """FLUX.2 + Self-Flow.
 
