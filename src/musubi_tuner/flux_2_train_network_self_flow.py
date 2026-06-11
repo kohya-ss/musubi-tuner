@@ -618,23 +618,25 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         unwrapped_nw = accelerator.unwrap_model(network)
         student_lora_state = {k: v.clone() for k, v in unwrapped_nw.state_dict().items()}
         unwrapped_nw.load_state_dict(self.ema_lora_state)
-        with torch.no_grad():
-            output = self.call_dit(
-                args,
-                accelerator,
-                transformer,
-                latents,
-                batch,
-                noise,
-                noisy_input_teacher,
-                timesteps_teacher,
-                network_dtype,
-                hidden_features=True,
-                feature_layer=args.teacher_feature_layer,
-            )
-            feat_teacher = output.extra.get("features")
-            feat_teacher = feat_teacher.detach() if feat_teacher is not None else None
-        unwrapped_nw.load_state_dict(student_lora_state)
+        try:
+            with torch.no_grad():
+                output = self.call_dit(
+                    args,
+                    accelerator,
+                    transformer,
+                    latents,
+                    batch,
+                    noise,
+                    noisy_input_teacher,
+                    timesteps_teacher,
+                    network_dtype,
+                    hidden_features=True,
+                    feature_layer=args.teacher_feature_layer,
+                )
+                feat_teacher = output.extra.get("features")
+                feat_teacher = feat_teacher.detach() if feat_teacher is not None else None
+        finally:
+            unwrapped_nw.load_state_dict(student_lora_state)
         # block swap ran forward-only for the teacher; re-prepare device placement
         accelerator.unwrap_model(transformer).prepare_block_swap_before_forward()
 
