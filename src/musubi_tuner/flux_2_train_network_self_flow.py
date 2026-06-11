@@ -22,6 +22,7 @@ from typing import Optional
 import torch
 from accelerate import Accelerator
 
+from musubi_tuner.flux_2.flux2_models import timestep_embedding
 from musubi_tuner.flux_2_train_network import Flux2NetworkTrainer, flux2_setup_parser
 from musubi_tuner.hv_train_network import (
     DiTOutput,
@@ -155,6 +156,78 @@ def effective_gamma(gamma: float, global_step: int, warmup_steps: int) -> float:
 
 
 # endregion self-flow math helpers
+
+
+class PerTokenModulationController:
+    """Reroutes Flux2's modulation path to per-token timesteps via forward hooks.
+
+    When staged with a per-token map tau (B, N_img) in model scale [0, 1], the
+    hooks turn the modulation vec from (B, D) into (B, N_img, D); Modulation and
+    LastLayer broadcast 3D vecs natively, so no model code changes. When not
+    staged, every hook is a pass-through and the model is bit-identical to
+    vanilla. Install on the raw (unwrapped) model before accelerator.prepare.
+    """
+
+    REQUIRED_MODULES = ("time_in", "double_stream_modulation_txt", "single_stream_modulation")
+
+    def __init__(self) -> None:
+        self._handles: list = []
+        self._tau: Optional[torch.Tensor] = None
+        self._num_txt_tokens: Optional[int] = None
+
+    def install(self, model) -> None:
+        for name in self.REQUIRED_MODULES:
+            if not hasattr(model, name):
+                raise AttributeError(
+                    f"Flux2 model has no module '{name}' — upstream may have renamed it; "
+                    "the Self-Flow per-token hooks need updating."
+                )
+        self._handles.append(model.time_in.register_forward_hook(self._time_in_hook))
+        if model.use_guidance_embed:
+            self._handles.append(model.guidance_in.register_forward_hook(self._guidance_in_hook))
+        self._handles.append(model.double_stream_modulation_txt.register_forward_pre_hook(self._txt_modulation_pre_hook))
+        self._handles.append(model.single_stream_modulation.register_forward_pre_hook(self._single_modulation_pre_hook))
+
+    def remove(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles.clear()
+
+    def stage(self, per_token_timesteps: torch.Tensor, num_txt_tokens: int) -> None:
+        """Arm the hooks for the next forward. tau in model scale [0, 1], shape (B, N_img)."""
+        self._tau = per_token_timesteps
+        self._num_txt_tokens = num_txt_tokens
+
+    def clear(self) -> None:
+        self._tau = None
+        self._num_txt_tokens = None
+
+    def _time_in_hook(self, module, inputs, output):
+        if self._tau is None:
+            return None
+        B, N = self._tau.shape
+        emb = timestep_embedding(self._tau.reshape(-1), 256)
+        # module.forward (not module.__call__): bypasses hooks, so no recursion
+        return module.forward(emb).reshape(B, N, -1)
+
+    def _guidance_in_hook(self, module, inputs, output):
+        if self._tau is None:
+            return None
+        return output.unsqueeze(1)  # (B, D) -> (B, 1, D): broadcasts in `vec + guidance`
+
+    def _txt_modulation_pre_hook(self, module, args):
+        if self._tau is None:
+            return None
+        (vec,) = args  # (B, N_img, D) after the time_in hook (+ guidance)
+        return (vec.mean(dim=1),)  # text tokens get the global (mean) vec
+
+    def _single_modulation_pre_hook(self, module, args):
+        if self._tau is None:
+            return None
+        (vec,) = args  # (B, N_img, D)
+        vec_global = vec.mean(dim=1)
+        vec_txt = vec_global.unsqueeze(1).expand(-1, self._num_txt_tokens, -1)
+        return (torch.cat([vec_txt, vec], dim=1),)
 
 
 class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
