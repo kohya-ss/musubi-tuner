@@ -242,6 +242,7 @@ class BlockFeatureExtractor:
 
     def __init__(self) -> None:
         self._handles: list = []
+        self._installed_layers: set[int] = set()
         self._armed_layer: Optional[int] = None
         self._num_txt_tokens: Optional[int] = None
         self._features: Optional[torch.Tensor] = None
@@ -257,6 +258,7 @@ class BlockFeatureExtractor:
             else:
                 handle = model.single_blocks[layer - num_double].register_forward_hook(self._make_single_hook(layer))
             self._handles.append(handle)
+            self._installed_layers.add(layer)
 
     def remove(self) -> None:
         for handle in self._handles:
@@ -264,6 +266,8 @@ class BlockFeatureExtractor:
         self._handles.clear()
 
     def arm(self, layer: int, num_txt_tokens: int) -> None:
+        if layer not in self._installed_layers:
+            raise ValueError(f"feature layer {layer} was not installed (installed: {sorted(self._installed_layers)})")
         self._armed_layer = layer
         self._num_txt_tokens = num_txt_tokens
         self._features = None
@@ -470,14 +474,17 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
             self._modulation_controller.stage(tau, num_txt_tokens)
         if hidden_features:
             self._feature_extractor.arm(feature_layer, num_txt_tokens)
+        features = None
         try:
             output = super().call_dit(
                 args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs
             )
         finally:
             self._modulation_controller.clear()
+            if hidden_features:
+                features = self._feature_extractor.drain()
         if hidden_features:
-            output.extra["features"] = self._feature_extractor.drain()
+            output.extra["features"] = features
         return output
 
     def process_batch(
