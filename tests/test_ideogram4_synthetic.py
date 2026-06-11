@@ -12,6 +12,8 @@ from safetensors.torch import safe_open
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from musubi_tuner.dataset.architectures import ARCHITECTURE_IDEOGRAM4
+from musubi_tuner.dataset.bucket import BucketSelector
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_ideogram4
 from musubi_tuner.ideogram4 import ideogram4_utils
 from musubi_tuner.ideogram4.ideogram4_quantized_loading import Fp8Linear, load_fp8_state_dict, swap_linears_to_fp8
@@ -106,6 +108,12 @@ class Ideogram4Fp8Tests(unittest.TestCase):
 
 
 class Ideogram4InputAndCacheTests(unittest.TestCase):
+    def test_bucket_selector_accepts_ideogram4_architecture(self):
+        selector = BucketSelector((1024, 1024), enable_bucket=True, architecture=ARCHITECTURE_IDEOGRAM4)
+
+        self.assertEqual(selector.reso_steps, 16)
+        self.assertEqual(selector.get_bucket_resolution((1024, 1024)), (1024, 1024))
+
     def test_build_inputs_and_patchify_roundtrip(self):
         features = [torch.ones(3, 8), torch.ones(5, 8)]
         inputs = ideogram4_utils.build_sequence_inputs_from_features(features, 512, 512, device=torch.device("cpu"))
