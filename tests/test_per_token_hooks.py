@@ -127,3 +127,41 @@ def test_install_raises_on_missing_module(tiny_model):
     controller = PerTokenModulationController()
     with pytest.raises(AttributeError, match="time_in"):
         controller.install(tiny_model)
+
+
+def test_unstaged_hooks_are_bitwise_noop_with_guidance(tiny_model_guidance):
+    """Install hooks (including guidance_in hook) but don't stage — must be bitwise noop."""
+    B = 2
+    x, x_ids, ctx, ctx_ids, _ = make_inputs(B=B)
+    timesteps = torch.tensor([0.3, 0.7])
+    guidance = torch.full((B,), 1.0)
+
+    baseline = tiny_model_guidance(x=x, x_ids=x_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
+
+    controller = PerTokenModulationController()
+    controller.install(tiny_model_guidance)
+    hooked = tiny_model_guidance(x=x, x_ids=x_ids, timesteps=timesteps, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
+
+    assert torch.equal(baseline, hooked)  # bitwise — unstaged guidance path untouched
+
+
+def test_heterogeneous_map_matches_reference_with_guidance(tiny_model_guidance):
+    """Heterogeneous tau with guidance embed must match reference_per_token_forward."""
+    B, N_img = 2, 4
+    x, x_ids, ctx, ctx_ids, _ = make_inputs(B=B, N_img=N_img)
+    guidance = torch.full((B,), 1.0)
+    torch.manual_seed(7)
+    tau = torch.rand(B, N_img)  # genuinely heterogeneous
+    decoy = tau.max(dim=1).values  # what the trainer passes as 1D timesteps
+
+    expected = reference_per_token_forward(tiny_model_guidance, x, x_ids, tau, ctx, ctx_ids, guidance)
+
+    controller = PerTokenModulationController()
+    controller.install(tiny_model_guidance)
+    controller.stage(tau, num_txt_tokens=ctx.shape[1])
+    try:
+        actual = tiny_model_guidance(x=x, x_ids=x_ids, timesteps=decoy, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance)
+    finally:
+        controller.clear()
+
+    assert torch.allclose(expected, actual, atol=1e-5)

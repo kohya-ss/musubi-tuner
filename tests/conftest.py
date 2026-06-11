@@ -34,6 +34,31 @@ def tiny_model(tiny_params):
     return model
 
 
+@pytest.fixture
+def tiny_params_guidance():
+    """Same as tiny_params but with use_guidance_embed=True (production FLUX.2 dev path)."""
+    return Flux2Params(
+        in_channels=4,
+        context_in_dim=8,
+        hidden_size=16,
+        num_heads=2,
+        depth=2,
+        depth_single_blocks=2,
+        axes_dim=[2, 2, 2, 2],
+        theta=2000,
+        mlp_ratio=2.0,
+        use_guidance_embed=True,
+    )
+
+
+@pytest.fixture
+def tiny_model_guidance(tiny_params_guidance):
+    torch.manual_seed(0)
+    model = Flux2(tiny_params_guidance, attn_mode="torch")
+    model.eval()
+    return model
+
+
 def make_inputs(B=2, N_img=4, N_txt=3, in_channels=4, hidden_ctx=8, seed=0):
     """Build minimal packed inputs for Flux2.forward."""
     torch.manual_seed(seed)
