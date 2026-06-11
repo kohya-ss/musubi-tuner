@@ -34,6 +34,35 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+# region self-flow math helpers
+
+
+def assign_teacher_student_timesteps(
+    timesteps_a: torch.Tensor, timesteps_b: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-sample teacher/student split (paper §3.3): teacher = min (cleaner), student = max."""
+    t_a = timesteps_a.float()
+    t_b = timesteps_b.float()
+    timesteps_teacher = torch.min(t_a, t_b).to(timesteps_a.dtype)
+    timesteps_student = torch.max(t_a, t_b).to(timesteps_a.dtype)
+    return timesteps_teacher, timesteps_student
+
+
+def reconstruct_noisy_input(
+    latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor
+) -> torch.Tensor:
+    """Flow-matching interpolation (1-t)*latents + t*noise; timesteps in [1, 1001]."""
+    t = (timesteps.float() - 1.0) / 1000.0
+    if latents.ndim == 5:
+        t_exp = t.view(-1, 1, 1, 1, 1)
+    else:
+        t_exp = t.view(-1, 1, 1, 1)
+    return (1 - t_exp) * latents + t_exp * noise
+
+
+# endregion self-flow math helpers
+
+
 class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
     """FLUX.2 + Self-Flow.
 
