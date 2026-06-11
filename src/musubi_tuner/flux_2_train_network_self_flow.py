@@ -15,6 +15,10 @@ Per-token conditioning is achieved by hooking ``time_in`` /
 unmodified Flux2 model — its Modulation and LastLayer already broadcast 3D
 vectors natively.
 
+Limitations (first pass): coupling-prob decay schedules are constant-only,
+patch-locality mask modes are not ported, and control images
+(``latents_control_*``) raise ``NotImplementedError`` with ``--self_flow``.
+
 Internal extension point — no API stability guarantees. Subclasses live in
 this repo; if you fork, expect breakage on updates.
 """
@@ -768,8 +772,10 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
             accelerator.print(f"saving EMA checkpoint: {ema_ckpt_file}")
             student_state = {k: v.clone() for k, v in unwrapped_nw.state_dict().items()}
             unwrapped_nw.load_state_dict(self.ema_lora_state)
-            unwrapped_nw.save_weights(ema_ckpt_file, save_dtype, metadata)
-            unwrapped_nw.load_state_dict(student_state)
+            try:
+                unwrapped_nw.save_weights(ema_ckpt_file, save_dtype, metadata)
+            finally:
+                unwrapped_nw.load_state_dict(student_state)
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ema_ckpt_file, "/" + ema_ckpt_name, force_sync_upload=force_sync_upload)
 
