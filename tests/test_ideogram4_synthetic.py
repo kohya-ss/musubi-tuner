@@ -285,6 +285,24 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         restored = ideogram4_utils.unpatchify_vae_latents(token_grid, 2, 3)
         self.assertTrue(torch.equal(latents, restored))
 
+    def test_decode_tokens_keeps_patched_vae_channels(self):
+        class FakeAutoEncoder:
+            dtype = torch.float32
+
+            def __init__(self):
+                self.seen_shape = None
+
+            def decode(self, z):
+                self.seen_shape = tuple(z.shape)
+                return torch.zeros(z.shape[0], 3, z.shape[2] * 16, z.shape[3] * 16)
+
+        autoencoder = FakeAutoEncoder()
+        tokens = torch.zeros(1, 4, 128)
+        images = ideogram4_utils.decode_tokens_to_images(autoencoder, tokens, grid_h=2, grid_w=2)
+
+        self.assertEqual(autoencoder.seen_shape, (1, 128, 2, 2))
+        self.assertEqual(len(images), 1)
+
     def test_text_cache_metadata_and_flow_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             class DummyItem:

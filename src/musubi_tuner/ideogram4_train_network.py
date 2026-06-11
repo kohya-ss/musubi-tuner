@@ -232,7 +232,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del network, noise, noise_scheduler, vae, global_step
         latents = latents.to(device=accelerator.device, dtype=dit_dtype)
-        token_grid = ideogram4_utils.normalize_token_grid(ideogram4_utils.patchify_vae_latents(latents))
+        token_grid = ideogram4_utils.normalize_token_grid(latents)
         noise = torch.randn_like(token_grid)
         image_height = latents.shape[-2] * ideogram4_utils.IDEOGRAM4_AE_SCALE_FACTOR
         image_width = latents.shape[-1] * ideogram4_utils.IDEOGRAM4_AE_SCALE_FACTOR
