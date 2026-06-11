@@ -316,7 +316,8 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         self.rep_proj: Optional[torch.nn.Module] = None
         self.ema_lora_state: Optional[dict] = None
         self._coupling_scheduler = None
-        self._feature_extractor = None
+        self._feature_extractor: Optional[BlockFeatureExtractor] = None
+        self._modulation_controller: Optional[PerTokenModulationController] = None
         self._self_flow_logs: dict = {}
         self._saved_student_state: Optional[dict] = None
 
@@ -377,12 +378,29 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         captured tensors aligned with the unwrapped block indices the user
         supplied via ``--student_feature_layer`` / ``--teacher_feature_layer``.
         """
+        super().on_transformer_loaded(args, accelerator, transformer)
         if not args.self_flow:
             return
-        # TODO: register forward_hook on transformer.double_blocks[student_layer]
-        #       and transformer.double_blocks[teacher_layer], stashing outputs
-        #       into self._feature_extractor for call_dit to drain.
-        raise NotImplementedError("Self-Flow forward-hook registration — see PR #913")
+
+        num_blocks = len(transformer.double_blocks) + len(transformer.single_blocks)
+        if args.student_feature_layer is None:
+            args.student_feature_layer = max(0, int(num_blocks * 0.3))
+        if args.teacher_feature_layer is None:
+            args.teacher_feature_layer = min(num_blocks - 1, int(num_blocks * 0.7))
+        if args.student_feature_layer >= args.teacher_feature_layer:
+            raise ValueError(
+                f"--student_feature_layer ({args.student_feature_layer}) must be less than "
+                f"--teacher_feature_layer ({args.teacher_feature_layer})."
+            )
+
+        self._modulation_controller = PerTokenModulationController()
+        self._modulation_controller.install(transformer)
+        self._feature_extractor = BlockFeatureExtractor()
+        self._feature_extractor.install(transformer, [args.student_feature_layer, args.teacher_feature_layer])
+        logger.info(
+            f"Self-Flow hooks installed: student_layer={args.student_feature_layer}, "
+            f"teacher_layer={args.teacher_feature_layer} (of {num_blocks} blocks)"
+        )
 
     def on_train_start(
         self,
@@ -430,17 +448,37 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
           ``DiTOutput.extra["features"]`` (drained from ``self._feature_extractor``).
         - ``feature_layer`` (int): which registered layer's output to return.
         - ``per_token_timesteps`` (Tensor): per-token timestep map for
-          dual-timestep conditioning (paper §A.3). Requires per-token
-          timestep support inside the FLUX.2 transformer — out of scope of
-          this skeleton, see open question (3) below.
-
-        For the skeleton we delegate to the parent and ignore kwargs; once
-        the FLUX.2 model side is wired up, this override forwards
-        per_token_timesteps and surfaces captured features.
+          dual-timestep conditioning (paper §A.3). Staged into
+          ``self._modulation_controller`` before the forward and cleared after.
         """
-        return super().call_dit(
-            args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs
-        )
+        hidden_features = kwargs.pop("hidden_features", False)
+        feature_layer = kwargs.pop("feature_layer", None)
+        per_token_timesteps = kwargs.pop("per_token_timesteps", None)
+
+        if not hidden_features and per_token_timesteps is None:
+            return super().call_dit(
+                args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs
+            )
+
+        if any(k.startswith("latents_control_") for k in batch):
+            raise NotImplementedError("Self-Flow does not support control images yet")
+
+        num_txt_tokens = batch["ctx_vec"].shape[1]
+        if per_token_timesteps is not None:
+            # model scale: base call_dit divides 1D timesteps by 1000; mirror that here
+            tau = per_token_timesteps.to(device=accelerator.device) / 1000.0
+            self._modulation_controller.stage(tau, num_txt_tokens)
+        if hidden_features:
+            self._feature_extractor.arm(feature_layer, num_txt_tokens)
+        try:
+            output = super().call_dit(
+                args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs
+            )
+        finally:
+            self._modulation_controller.clear()
+        if hidden_features:
+            output.extra["features"] = self._feature_extractor.drain()
+        return output
 
     def process_batch(
         self,
