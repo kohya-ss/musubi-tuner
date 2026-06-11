@@ -304,7 +304,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 
 def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--unconditional_dit", type=str, default=None, help="unconditional Ideogram 4 DiT safetensors path")
-    parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL FP8 text encoder safetensors path; only needed for sampling")
+    parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
     parser.add_argument("--ideogram4_timestep_mu", type=float, default=0.0, help="known mean for Ideogram 4 logit-normal training timesteps")
     parser.add_argument("--ideogram4_timestep_std", type=float, default=1.0, help="std for Ideogram 4 logit-normal training timesteps")

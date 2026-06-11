@@ -17,7 +17,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dit", type=str, required=True, help="conditional Ideogram 4 DiT safetensors path")
     parser.add_argument("--unconditional_dit", type=str, required=True, help="unconditional Ideogram 4 DiT safetensors path")
-    parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3-VL FP8 text encoder safetensors path")
+    parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3-VL BF16 text encoder safetensors path")
     parser.add_argument("--vae", type=str, required=True, help="Flux2 VAE safetensors path")
     parser.add_argument("--prompt", type=str, required=True, help="prompt")
     parser.add_argument("--negative_prompt", type=str, default=None, help="ignored for Ideogram 4 asymmetric CFG v1")

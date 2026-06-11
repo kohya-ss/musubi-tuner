@@ -39,7 +39,7 @@ def encode_and_save_batch(tokenizer, text_encoder, batch: List[ItemInfo], device
 
 
 def setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3-VL FP8 text encoder safetensors path")
+    parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3-VL BF16 text encoder safetensors path")
     parser.add_argument(
         "--text_cache_dtype",
         type=str,
