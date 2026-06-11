@@ -38,6 +38,7 @@ _BNB_SIBLING_SUFFIXES = (
 # scales map each row's max abs value onto this so we use the full range.
 FP8_E4M3_MAX = 448.0
 FP8_SCALE_SUFFIX = ".weight_scale"
+COMFY_FP8_MARKER_SUFFIX = ".comfy_quant"
 # Marker written into the text encoder's config.json so the loader knows to take
 # the custom weight-only FP8 path instead of transformers' from_pretrained.
 FP8_TEXT_ENCODER_CONFIG_FLAG = "ideogram_fp8_weight_only"
@@ -287,6 +288,8 @@ def load_fp8_state_dict(
   fp8_dtype = require_fp8_dtype()
   prepared: dict[str, torch.Tensor] = {}
   for k, v in state_dict.items():
+    if k.endswith(COMFY_FP8_MARKER_SUFFIX):
+      continue
     if v.dtype == fp8_dtype:
       prepared[k] = v.to(device=device)
     elif k.endswith(FP8_SCALE_SUFFIX):

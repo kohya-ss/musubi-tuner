@@ -72,6 +72,7 @@ class Ideogram4Fp8Tests(unittest.TestCase):
         state = {
             "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
             "linear.weight_scale": torch.tensor(0.5, dtype=torch.float32),
+            "linear.comfy_quant": torch.tensor(1, dtype=torch.int8),
         }
         swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
         self.assertIsInstance(model.linear, Fp8Linear)
