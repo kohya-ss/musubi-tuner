@@ -433,21 +433,42 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
     ) -> None:
         """Finish Self-Flow setup once everything is on-device.
 
-        Steps to perform here:
+        Steps performed:
         1. Snapshot ``network.state_dict()`` into ``self.ema_lora_state``.
         2. If ``--network_weights_ema`` is given, load it into the network,
            re-snapshot, then restore student weights from ``--network_weights``.
         3. ``self.rep_proj = accelerator.prepare(self.rep_proj)``.
-        4. Optionally load ``--network_weights_proj`` into ``self.rep_proj``.
-        5. Build ``self._coupling_scheduler`` (constant / cosine / linear / rex).
 
         Forward-hook registration for feature extraction lives in
         ``on_transformer_loaded`` (runs earlier, before accelerator.prepare).
         """
+        super().on_train_start(args, accelerator, network, transformer, optimizer)
         if not args.self_flow:
             return
-        # TODO: see PR #913 hv_train_network.py around lines 2490-2522.
-        raise NotImplementedError("Self-Flow on_train_start — see PR #913")
+
+        # EMA snapshot after accelerator.prepare so tensors are on-device
+        self.ema_lora_state = {k: v.detach().clone() for k, v in network.state_dict().items()}
+        if args.network_weights_ema is not None:
+            if args.network_weights is None:
+                raise ValueError("--network_weights_ema requires --network_weights to be set")
+            unwrapped_nw = accelerator.unwrap_model(network)
+            info = unwrapped_nw.load_weights(args.network_weights_ema)
+            accelerator.print(f"load EMA network weights from {args.network_weights_ema}: {info}")
+            self.ema_lora_state = {k: v.detach().clone() for k, v in unwrapped_nw.state_dict().items()}
+            unwrapped_nw.load_weights(args.network_weights)  # restore student weights
+
+        self.rep_proj = accelerator.prepare(self.rep_proj)
+
+        if args.self_flow_teacher_coupling_decay != "constant":
+            logger.warning(
+                "self_flow_teacher_coupling_decay schedules are not implemented in this extension yet; "
+                "using constant coupling probability."
+            )
+        logger.info(
+            f"Self-Flow enabled: gamma={args.self_flow_gamma}, mask_ratio={args.mask_ratio}, "
+            f"ema_decay={args.ema_decay}, student_layer={args.student_feature_layer}, "
+            f"teacher_layer={args.teacher_feature_layer}"
+        )
 
     def call_dit(
         self,
@@ -569,16 +590,11 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         sync_gradients: bool,
         global_step: int,
     ) -> None:
-        """EMA update of LoRA weights only on real optimizer steps.
-
-        ema_lora_state[k].lerp_(network.state_dict()[k], 1 - args.ema_decay)
-        """
-        if not args.self_flow or not sync_gradients:
+        """EMA update of LoRA weights only on real optimizer steps."""
+        super().on_post_optimizer_step(args, accelerator, network, transformer, sync_gradients, global_step)
+        if not args.self_flow or not sync_gradients or self.ema_lora_state is None:
             return
-        if self.ema_lora_state is None:
-            return
-        # TODO: in-place lerp_ across floating-point params; copy_ otherwise.
-        raise NotImplementedError("Self-Flow EMA update — see PR #913 _update_ema_weights")
+        update_ema_weights(self.ema_lora_state, network.state_dict(), args.ema_decay)
 
     def on_before_sample_images(
         self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
