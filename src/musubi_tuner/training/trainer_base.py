@@ -142,17 +142,19 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower().endswith("Prodigy".lower()):
-                # tracking d*lr value
-                logs[f"lr/d*lr/{lr_desc}"] = (
-                    lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-                )
-
-            if args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower()) and optimizer is not None:
+            # Check prodigyplusschedulefree first: it is handled via optimizer.param_groups below and does not
+            # expose `d` on lr_scheduler.optimizers, so it must not fall into the substring "prodigy" path.
+            if args.optimizer_type.lower().endswith("prodigyplusschedulefree") and optimizer is not None:
                 # tracking d*lr value of unet.
                 logs[f"lr/d*lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
                 if "effective_lr" in optimizer.param_groups[i]:
                     logs[f"lr/d*eff_lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["effective_lr"]
+
+            elif args.optimizer_type.lower().startswith("dadapt") or "prodigy" in args.optimizer_type.lower():
+                # tracking d*lr value (Prodigy, Prodigy_Adv, Prodigy_Lion_Adv, etc.)
+                logs[f"lr/d*lr/{lr_desc}"] = (
+                    lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
+                )
 
         return logs
 
@@ -603,19 +605,19 @@ class NetworkTrainer:
                     t = torch.sigmoid(-logsnr / 2)
 
                 elif args.timestep_sampling.startswith("qinglong"):
-                    # Qinglong triple hybrid sampling: mid_shift:logsnr:logsnr2 = .80:.075:.125
+                    # Qinglong triple hybrid sampling.
                     # First decide which method to use for each sample independently
                     decision_t = torch.rand((batch_size,), device=device)
 
-                    # Create masks based on decision_t: .80 for mid_shift, 0.075 for logsnr, and 0.125 for logsnr2
-                    mid_mask = decision_t < 0.80  # 80% for mid_shift
-                    logsnr_mask = (decision_t >= 0.80) & (decision_t < 0.875)  # 7.5% for logsnr
-                    logsnr_mask2 = decision_t >= 0.875  # 12.5% for logsnr with -logit_mean
+                    # Flux uses 79% mid_shift, 11% logsnr, 10% logsnr2. Qwen skips the logsnr middle bucket.
+                    mid_mask = decision_t < 0.79 if args.timestep_sampling == "qinglong_flux" else decision_t < 0.95
+                    logsnr_mask = (decision_t >= 0.79) & (decision_t < 0.9)
+                    logsnr_mask2 = decision_t >= 0.9 if args.timestep_sampling == "qinglong_flux" else decision_t >= 0.95
 
                     # Initialize output tensor
                     t = torch.zeros((batch_size,), device=device)
 
-                    # Generate mid_shift samples for selected indices (80%)
+                    # Generate mid_shift samples for selected indices.
                     if mid_mask.any():
                         mid_count = mid_mask.sum().item()
                         h, w = latents.shape[-2:]
@@ -631,8 +633,8 @@ class NetworkTrainer:
 
                         t[mid_mask] = t_mid
 
-                    # Generate logsnr samples for selected indices (7.5%)
-                    if logsnr_mask.any():
+                    # Generate logsnr samples for selected indices.
+                    if args.timestep_sampling != "qinglong_qwen" and logsnr_mask.any():
                         logsnr_count = logsnr_mask.sum().item()
                         logsnr = rand_logsnr(
                             logsnr_count,
@@ -644,7 +646,7 @@ class NetworkTrainer:
 
                         t[logsnr_mask] = t_logsnr
 
-                    # Generate logsnr2 samples with -logit_mean for selected indices (12.5%)
+                    # Generate logsnr2 samples with -logit_mean for selected indices.
                     if logsnr_mask2.any():
                         logsnr2_count = logsnr_mask2.sum().item()
                         logsnr2 = rand_logsnr(
@@ -1138,8 +1140,7 @@ class NetworkTrainer:
         )
 
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
-
-        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype)
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def compute_loss(
         self,
@@ -1149,18 +1150,22 @@ class NetworkTrainer:
         noise_scheduler,
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
+        global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
         Default implementation: weighted MSE between ``output.pred`` and
         ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
         then ``.mean()``. Override to swap the loss formulation entirely
-        (e.g. Self-Flow's L_gen + gamma * L_rep). Subclasses are responsible
-        for whatever weighting/reduction they need — this hook owns the
-        full loss computation, not just the per-element MSE.
+        (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary terms
+        (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses are
+        responsible for whatever weighting/reduction they need — this hook owns
+        the full loss computation, not just the per-element MSE.
 
-        ``loss_metrics`` defaults to empty; populate with named scalars for
-        loss-decomposition logging (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
+        ``global_step`` is provided for step-gated terms (e.g. computing an
+        auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
+        populate with named scalars for loss-decomposition logging
+        (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
         weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
         loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")

@@ -138,6 +138,16 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 self.assertEqual(metadata["num_text_tokens"], "4")
                 self.assertIn("varlen_i4_llm_features_bfloat16", f.keys())
 
+            features_fp32 = torch.ones(2, 53248, dtype=torch.float32)
+            save_text_encoder_output_cache_ideogram4(item, features_fp32, "float32")
+            with safe_open(item.text_encoder_output_cache_path, framework="pt") as f:
+                metadata = f.metadata()
+                keys = set(f.keys())
+                self.assertEqual(metadata["text_cache_dtype"], "float32")
+                self.assertEqual(metadata["num_text_tokens"], "2")
+                self.assertIn("varlen_i4_llm_features_float32", keys)
+                self.assertNotIn("varlen_i4_llm_features_bfloat16", keys)
+
         latents = torch.zeros(1, 2, 2, 2)
         noise = torch.ones_like(latents)
         target = noise - latents

@@ -375,6 +375,26 @@ def find_key(safetensors_file: str, starts_with: Optional[str] = None, ends_with
     return None
 
 
+def find_keys(safetensors_file: str, starts_with: Optional[str] = None, ends_with: Optional[str] = None) -> list[str]:
+    """
+    Find all keys in a safetensors file that start with `starts_with` and end with `ends_with`.
+    If `starts_with` is None, it will match any key. If `ends_with` is None, it will match any key.
+
+    The matching keys are returned sorted, so callers get a deterministic order regardless of the
+    order the keys happen to be stored in the file header. This matters when the keys are folded into
+    a bucket key (e.g. ``latents_control_{i}``): otherwise two files holding the same tensors in a
+    different header order, or with the index<->shape association swapped, could end up in different
+    buckets or be wrongly batched together.
+    """
+    with MemoryEfficientSafeOpen(safetensors_file) as f:
+        keys = [
+            key
+            for key in f.keys()
+            if (starts_with is None or key.startswith(starts_with)) and (ends_with is None or key.endswith(ends_with))
+        ]
+    return sorted(keys)
+
+
 @dataclass
 class WeightTransformHooks:
     split_hook: Optional[callable] = None
