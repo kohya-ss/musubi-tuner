@@ -15,7 +15,7 @@ Required files:
 - `text_encoders/qwen3vl_8b_fp8_scaled.safetensors`
 - `vae/flux2-vae.safetensors`
 
-Tokenizer and text-encoder config are downloaded automatically from `ideogram-ai/ideogram-4-fp8`; there are no tokenizer/config CLI arguments.
+Tokenizer and text-encoder config are downloaded automatically from `Qwen/Qwen3-VL-8B-Instruct`; there are no tokenizer/config CLI arguments.
 
 ## Cache
 
@@ -60,6 +60,7 @@ python src/musubi_tuner/ideogram4_generate_image.py `
   --prompt "A structured JSON or plain text prompt" `
   --image_size 1024 1024 `
   --sampler_preset V4_DEFAULT_20 `
+  --initial_sigma 1.004 `
   --save_path outputs\ideogram4.png
 ```
 
@@ -70,6 +71,7 @@ Sampler presets:
 - `V4_TURBO_12`: 11 main steps at guidance 7, then 1 polish step at guidance 3
 
 Ideogram 4 v1 uses the official asymmetric CFG path. `negative_prompt` is ignored.
+`--initial_sigma` overrides the first denoising sigma and defaults to `1.004`.
 
 ## Train LoRA
 
@@ -97,6 +99,7 @@ python src/musubi_tuner/ideogram4_train_network.py `
   --sample_prompts path\to\prompts.txt `
   --sample_every_n_steps 500 `
   --sampler_preset V4_DEFAULT_20 `
+  --initial_sigma 1.004 `
   --mixed_precision bf16 `
   --sdpa
 ```

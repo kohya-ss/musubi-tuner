@@ -101,6 +101,28 @@ class LoRAModule(torch.nn.Module):
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
 
+    def _autocast_enabled_for(self, x):
+        if not x.is_floating_point():
+            return False
+        try:
+            return torch.is_autocast_enabled(x.device.type)
+        except TypeError:
+            return torch.is_autocast_enabled()
+
+    def _lora_input(self, x):
+        if self.split_dims is None:
+            target_dtype = self.lora_down.weight.dtype
+        else:
+            target_dtype = self.lora_down[0].weight.dtype
+        if x.is_floating_point() and x.dtype != target_dtype and not self._autocast_enabled_for(x):
+            return x.to(target_dtype)
+        return x
+
+    def _match_org_dtype(self, delta, org_forwarded):
+        if delta.is_floating_point() and org_forwarded.is_floating_point() and delta.dtype != org_forwarded.dtype:
+            return delta.to(org_forwarded.dtype)
+        return delta
+
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
@@ -114,8 +136,9 @@ class LoRAModule(torch.nn.Module):
             if torch.rand(1) < self.module_dropout:
                 return org_forwarded
 
+        lora_input = self._lora_input(x)
         if self.split_dims is None:
-            lx = self.lora_down(x)
+            lx = self.lora_down(lora_input)
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -139,9 +162,10 @@ class LoRAModule(torch.nn.Module):
 
             lx = self.lora_up(lx)
 
-            return org_forwarded + lx * self.multiplier * scale
+            delta = self._match_org_dtype(lx * self.multiplier * scale, org_forwarded)
+            return org_forwarded + delta
         else:
-            lxs = [lora_down(x) for lora_down in self.lora_down]
+            lxs = [lora_down(lora_input) for lora_down in self.lora_down]
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -164,7 +188,8 @@ class LoRAModule(torch.nn.Module):
 
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
 
-            return org_forwarded + torch.cat(lxs, dim=-1) * self.multiplier * scale
+            delta = self._match_org_dtype(torch.cat(lxs, dim=-1) * self.multiplier * scale, org_forwarded)
+            return org_forwarded + delta
 
 
 class LoRAInfModule(LoRAModule):
@@ -309,14 +334,19 @@ class LoRAInfModule(LoRAModule):
 
     def default_forward(self, x):
         # logger.info(f"default_forward {self.lora_name} {x.size()}")
+        lora_input = self._lora_input(x)
         if self.split_dims is None:
-            lx = self.lora_down(x)
+            lx = self.lora_down(lora_input)
             lx = self.lora_up(lx)
-            return self.org_forward(x) + lx * self.multiplier * self.scale
+            org_forwarded = self.org_forward(x)
+            delta = self._match_org_dtype(lx * self.multiplier * self.scale, org_forwarded)
+            return org_forwarded + delta
         else:
-            lxs = [lora_down(x) for lora_down in self.lora_down]
+            lxs = [lora_down(lora_input) for lora_down in self.lora_down]
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
-            return self.org_forward(x) + torch.cat(lxs, dim=-1) * self.multiplier * self.scale
+            org_forwarded = self.org_forward(x)
+            delta = self._match_org_dtype(torch.cat(lxs, dim=-1) * self.multiplier * self.scale, org_forwarded)
+            return org_forwarded + delta
 
     def forward(self, x):
         if not self.enabled:

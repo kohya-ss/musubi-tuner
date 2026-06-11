@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext
 import gc
 import logging
 from typing import Optional
@@ -152,18 +153,31 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         features = sample_parameter["i4_llm_features"].to(torch.float32)
         vae.to(accelerator.device)
         vae.eval()
-        images = ideogram4_utils.generate_images(
-            conditional_transformer=transformer,
-            unconditional_transformer=self.unconditional_transformer,
-            autoencoder=vae,
-            text_features=[features],
-            height=height,
-            width=width,
-            sampler_preset=sampler_preset,
-            device=accelerator.device,
-            seed=sample_parameter.get("seed", None),
-            show_progress=True,
+        conditional_transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
+        # The shared trainer wraps sampling in accelerator.autocast(), but
+        # the prepared transformer also carries Accelerate's mixed-precision
+        # forward wrapper. Ideogram 4 FP8 modules already manage their compute
+        # dtype internally, so sampling must use the unwrapped model and disable
+        # autocast; otherwise samples collapse into a flat checkerboard.
+        autocast_context = (
+            torch.autocast(device_type=accelerator.device.type, enabled=False)
+            if accelerator.device.type in ("cuda", "cpu", "xpu", "hpu")
+            else nullcontext()
         )
+        with autocast_context:
+            images = ideogram4_utils.generate_images(
+                conditional_transformer=conditional_transformer,
+                unconditional_transformer=self.unconditional_transformer,
+                autoencoder=vae,
+                text_features=[features],
+                height=height,
+                width=width,
+                sampler_preset=sampler_preset,
+                device=accelerator.device,
+                seed=sample_parameter.get("seed", None),
+                show_progress=True,
+                initial_sigma=args.initial_sigma,
+            )
         arr = np.asarray(images[0]).astype(np.float32) / 255.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
         return tensor
@@ -232,10 +246,10 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del network, noise, noise_scheduler, vae, global_step
         latents = latents.to(device=accelerator.device, dtype=dit_dtype)
-        token_grid = ideogram4_utils.normalize_token_grid(latents)
+        token_grid = latents
         noise = torch.randn_like(token_grid)
-        image_height = latents.shape[-2] * ideogram4_utils.IDEOGRAM4_AE_SCALE_FACTOR
-        image_width = latents.shape[-1] * ideogram4_utils.IDEOGRAM4_AE_SCALE_FACTOR
+        image_height = token_grid.shape[-2] * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
+        image_width = token_grid.shape[-1] * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
         t = self._sample_ideogram_timesteps(token_grid.shape[0], image_height, image_width, accelerator.device, dit_dtype)
         noisy_model_input = (1.0 - t.view(-1, 1, 1, 1)) * token_grid + t.view(-1, 1, 1, 1) * noise
         timesteps = t * 1000.0
@@ -308,6 +322,7 @@ def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling")
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for Ideogram 4 DiT, default is bfloat16")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
+    parser.add_argument("--initial_sigma", type=float, default=1.004, help="override the first denoising sigma for sampling")
     parser.add_argument("--ideogram4_timestep_mu", type=float, default=0.0, help="known mean for Ideogram 4 logit-normal training timesteps")
     parser.add_argument("--ideogram4_timestep_std", type=float, default=1.0, help="std for Ideogram 4 logit-normal training timesteps")
     parser.add_argument(

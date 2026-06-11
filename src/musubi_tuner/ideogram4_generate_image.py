@@ -23,6 +23,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--negative_prompt", type=str, default=None, help="ignored for Ideogram 4 asymmetric CFG v1")
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="image size as height width")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
+    parser.add_argument("--initial_sigma", type=float, default=1.004, help="override the first denoising sigma")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--save_path", type=str, required=True, help="output image path or directory")
     parser.add_argument("--device", type=str, default=None, help="device, default cuda if available")
@@ -106,6 +107,7 @@ def main():
         sampler_preset=args.sampler_preset,
         device=device,
         seed=args.seed,
+        initial_sigma=args.initial_sigma,
     )
     _save_images(images, args.save_path)
 

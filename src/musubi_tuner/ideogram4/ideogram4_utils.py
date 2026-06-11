@@ -137,6 +137,29 @@ def _materialize_meta_tensors(model: torch.nn.Module) -> None:
         model.to_empty(device=torch.device("cpu"))
 
 
+def _normalize_qwen3_vl_state_dict_for_automodel(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    normalized: dict[str, torch.Tensor] = {}
+    for key, tensor in state_dict.items():
+        if key in ("lm_head.weight", "model.lm_head.weight", "language_model.lm_head.weight"):
+            continue
+        if key.startswith("model.visual."):
+            key = "visual." + key[len("model.visual.") :]
+        elif key.startswith("model.language_model."):
+            key = key[len("model.") :]
+        elif key.startswith("model."):
+            key = "language_model." + key[len("model.") :]
+        normalized[key] = tensor
+    return normalized
+
+
+def _raise_on_text_encoder_load_mismatch(missing: list[str], unexpected: list[str]) -> None:
+    if missing or unexpected:
+        raise RuntimeError(
+            "Qwen3-VL text encoder checkpoint did not match AutoModel after key normalization: "
+            f"missing={missing[:10]}, unexpected={unexpected[:10]}"
+        )
+
+
 def load_ideogram4_text_encoder(
     path: str,
     *,
@@ -150,6 +173,7 @@ def load_ideogram4_text_encoder(
         trust_remote_code=True,
     )
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
+    state_dict = _normalize_qwen3_vl_state_dict_for_automodel(state_dict)
     device = torch.device(device)
     with init_empty_weights():
         model = AutoModel.from_config(config, trust_remote_code=True)
@@ -157,9 +181,10 @@ def load_ideogram4_text_encoder(
     if is_fp8_state_dict(state_dict):
         require_fp8_dtype()
         swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
-        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True, strict=False)
+        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True)
     else:
-        model.load_state_dict(state_dict, strict=False, assign=True)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
+        _raise_on_text_encoder_load_mismatch(missing, unexpected)
         model.to(device=device, dtype=dtype)
     model.eval()
     return model
@@ -410,6 +435,7 @@ def generate_images(
     device: torch.device,
     seed: Optional[int] = None,
     show_progress: bool = True,
+    initial_sigma: Optional[float] = None,
 ) -> list[Image.Image]:
     if sampler_preset not in PRESETS:
         raise ValueError(f"unknown Ideogram 4 sampler preset {sampler_preset!r}; choices: {sorted(PRESETS)}")
@@ -446,6 +472,8 @@ def generate_images(
 
     for i in iterator:
         t_val, s_val, gw_i = denoising_steps[i]
+        if i == 0 and initial_sigma is not None:
+            t_val = 1.0 - float(initial_sigma)
         t = torch.full((batch_size,), t_val, dtype=torch.float32, device=device)
 
         pos_z = torch.cat([text_z_padding, z], dim=1)

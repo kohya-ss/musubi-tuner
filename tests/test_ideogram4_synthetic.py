@@ -20,8 +20,10 @@ from musubi_tuner.dataset.bucket import BucketSelector
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_ideogram4
 from musubi_tuner import ideogram4_cache_text_encoder_outputs
 from musubi_tuner.ideogram4 import ideogram4_utils
+from musubi_tuner.ideogram4.ideogram4_scheduler import SamplerParameters
 from musubi_tuner.ideogram4.ideogram4_quantized_loading import Fp8Linear, load_fp8_state_dict, swap_linears_to_fp8
 from musubi_tuner.networks import lora_ideogram4
+from musubi_tuner.networks.lora import LoRAModule
 
 
 def _has_fp8():
@@ -129,6 +131,20 @@ class Ideogram4Fp8Tests(unittest.TestCase):
         y1 = root.layers[0].attention.qkv(x)
         self.assertFalse(torch.allclose(y0, y1))
 
+    def test_zero_lora_on_fp8_linear_is_dtype_transparent_without_autocast(self):
+        linear = Fp8Linear(4, 4, bias=False, compute_dtype=torch.bfloat16)
+        linear.weight.fill_(1.0)
+        linear.weight_scale.fill_(0.01)
+        x = torch.ones(1, 4, dtype=torch.bfloat16)
+
+        expected = linear(x)
+        lora = LoRAModule("lora_fp8", linear, multiplier=1.0, lora_dim=2, alpha=2)
+        lora.apply_to()
+        actual = linear(x)
+
+        self.assertEqual(actual.dtype, expected.dtype)
+        self.assertTrue(torch.equal(actual, expected))
+
 
 class Ideogram4InputAndCacheTests(unittest.TestCase):
     def test_bucket_selector_accepts_ideogram4_architecture(self):
@@ -158,9 +174,13 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 calls["config"] = (args, kwargs)
                 return object()
 
-        class FakeModel:
+        class FakeModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+
             def load_state_dict(self, state_dict, strict=False, assign=True):
                 calls["load_state_dict"] = (state_dict, strict, assign)
+                return [], []
 
             def to(self, *, device, dtype):
                 calls["to"] = (device, dtype)
@@ -210,6 +230,34 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertNotIn("subfolder", calls["config"][1])
         self.assertTrue(calls["config"][1]["trust_remote_code"])
 
+    def test_text_encoder_state_dict_remaps_qwen3_vl_model_prefixes(self):
+        state = {
+            "lm_head.weight": torch.full((1,), -1.0),
+            "model.lm_head.weight": torch.full((1,), -1.0),
+            "model.embed_tokens.weight": torch.ones(2, 2),
+            "model.layers.0.self_attn.q_proj.weight": torch.full((2, 2), 2.0),
+            "model.language_model.norm.bias": torch.full((2,), 5.0),
+            "model.visual.patch_embed.proj.weight": torch.full((2, 2), 3.0),
+            "language_model.norm.weight": torch.full((2,), 4.0),
+        }
+
+        normalized = ideogram4_utils._normalize_qwen3_vl_state_dict_for_automodel(state)
+
+        self.assertNotIn("lm_head.weight", normalized)
+        self.assertNotIn("model.lm_head.weight", normalized)
+        self.assertTrue(torch.equal(normalized["language_model.embed_tokens.weight"], state["model.embed_tokens.weight"]))
+        self.assertTrue(
+            torch.equal(
+                normalized["language_model.layers.0.self_attn.q_proj.weight"],
+                state["model.layers.0.self_attn.q_proj.weight"],
+            )
+        )
+        self.assertTrue(torch.equal(normalized["language_model.norm.bias"], state["model.language_model.norm.bias"]))
+        self.assertTrue(
+            torch.equal(normalized["visual.patch_embed.proj.weight"], state["model.visual.patch_embed.proj.weight"])
+        )
+        self.assertTrue(torch.equal(normalized["language_model.norm.weight"], state["language_model.norm.weight"]))
+
     def test_text_encoder_loader_materializes_missing_meta_tensors(self):
         original_config = ideogram4_utils.AutoConfig
         original_model = ideogram4_utils.AutoModel
@@ -225,8 +273,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         class FakeModel(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.loaded = nn.Linear(2, 2, device="meta")
-                self.missing = nn.Linear(2, 2, device="meta")
+                self.language_model = nn.Module()
+                self.language_model.loaded = nn.Linear(2, 2, device="meta")
 
             def eval(self):
                 self.eval_called = True
@@ -249,8 +297,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             ideogram4_utils.AutoModel = FakeAutoModel
             ideogram4_utils.validate_local_safetensors = lambda path: {}
             ideogram4_utils._load_state_dict = lambda path, device="cpu", disable_mmap=False: {
-                "loaded.weight": torch.ones(2, 2),
-                "loaded.bias": torch.ones(2),
+                "model.loaded.weight": torch.ones(2, 2),
+                "model.loaded.bias": torch.ones(2),
             }
             ideogram4_utils.init_empty_weights = lambda: NoOpContext()
 
@@ -268,7 +316,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         self.assertFalse(any(param.is_meta for param in model.parameters()))
         self.assertTrue(model.eval_called)
-        self.assertTrue(torch.equal(model.loaded.weight, torch.ones(2, 2)))
+        self.assertTrue(torch.equal(model.language_model.loaded.weight, torch.ones(2, 2)))
 
     def test_build_inputs_and_patchify_roundtrip(self):
         features = [torch.ones(3, 8), torch.ones(5, 8)]
@@ -309,6 +357,54 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         self.assertEqual(autoencoder.decoder.seen_shape, (1, 32, 4, 4))
         self.assertEqual(len(images), 1)
+
+    def test_generate_images_initial_sigma_overrides_first_timestep(self):
+        class FakeTransformer:
+            def __init__(self):
+                self.config = SimpleNamespace(in_channels=2)
+                self.seen_t = []
+
+            def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
+                del llm_features, position_ids, segment_ids, indicator
+                self.seen_t.append(float(t[0].item()))
+                return torch.zeros_like(x)
+
+        original_decode = ideogram4_utils.decode_tokens_to_images
+        original_preset = ideogram4_utils.PRESETS.get("TEST_INITIAL_SIGMA")
+        ideogram4_utils.PRESETS["TEST_INITIAL_SIGMA"] = SamplerParameters(
+            num_steps=1,
+            guidance_schedule=(1.0,),
+            mu=0.0,
+            std=1.0,
+        )
+        ideogram4_utils.decode_tokens_to_images = lambda *args, **kwargs: ["image"]
+
+        try:
+            conditional = FakeTransformer()
+            unconditional = FakeTransformer()
+            images = ideogram4_utils.generate_images(
+                conditional_transformer=conditional,
+                unconditional_transformer=unconditional,
+                autoencoder=object(),
+                text_features=[torch.ones(1, 4)],
+                height=16,
+                width=16,
+                sampler_preset="TEST_INITIAL_SIGMA",
+                device=torch.device("cpu"),
+                seed=1,
+                show_progress=False,
+                initial_sigma=1.004,
+            )
+        finally:
+            ideogram4_utils.decode_tokens_to_images = original_decode
+            if original_preset is None:
+                ideogram4_utils.PRESETS.pop("TEST_INITIAL_SIGMA", None)
+            else:
+                ideogram4_utils.PRESETS["TEST_INITIAL_SIGMA"] = original_preset
+
+        self.assertEqual(images, ["image"])
+        self.assertAlmostEqual(conditional.seen_t[0], -0.004, places=6)
+        self.assertAlmostEqual(unconditional.seen_t[0], -0.004, places=6)
 
     def test_text_cache_metadata_and_flow_target(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -450,7 +546,102 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         self.assertTrue(hasattr(args, "dit_dtype"))
         self.assertIsNone(args.dit_dtype)
+        self.assertAlmostEqual(args.initial_sigma, 1.004)
         self.assertFalse(args.validate_caption_structure)
+
+    def test_process_batch_uses_cached_model_latents_without_renormalizing(self):
+        original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
+        original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
+        original_trainer = sys.modules.get("musubi_tuner.training.trainer_base")
+        original_module = sys.modules.pop("musubi_tuner.ideogram4_train_network", None)
+
+        fake_image_video = types.ModuleType("musubi_tuner.dataset.image_video_dataset")
+        fake_image_video.ARCHITECTURE_IDEOGRAM4 = "i4"
+        fake_image_video.ARCHITECTURE_IDEOGRAM4_FULL = "ideogram4"
+
+        fake_sampling = types.ModuleType("musubi_tuner.training.sampling_prompts")
+        fake_sampling.load_prompts = lambda path: []
+
+        fake_trainer = types.ModuleType("musubi_tuner.training.trainer_base")
+
+        class DiTOutput:
+            def __init__(self, pred=None, target=None):
+                self.pred = pred
+                self.target = target
+
+        class NetworkTrainer:
+            def __init__(self):
+                self.blocks_to_swap = 0
+
+            def train(self, args):
+                pass
+
+        fake_trainer.DiTOutput = DiTOutput
+        fake_trainer.NetworkTrainer = NetworkTrainer
+
+        try:
+            sys.modules["musubi_tuner.dataset.image_video_dataset"] = fake_image_video
+            sys.modules["musubi_tuner.training.sampling_prompts"] = fake_sampling
+            sys.modules["musubi_tuner.training.trainer_base"] = fake_trainer
+            ideogram4_train_network = importlib.import_module("musubi_tuner.ideogram4_train_network")
+
+            trainer = ideogram4_train_network.Ideogram4NetworkTrainer()
+            captured = {}
+
+            def fake_sample(batch_size, image_height, image_width, device, dtype):
+                captured["sample_args"] = (batch_size, image_height, image_width, device, dtype)
+                return torch.full((batch_size,), 0.25, device=device, dtype=dtype)
+
+            def fake_call(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype):
+                captured["latents"] = latents.detach().clone()
+                captured["noise"] = noise.detach().clone()
+                captured["noisy_model_input"] = noisy_model_input.detach().clone()
+                captured["timesteps"] = timesteps.detach().clone()
+                target = noise - latents
+                return DiTOutput(pred=target, target=target)
+
+            trainer._sample_ideogram_timesteps = fake_sample
+            trainer.call_dit = fake_call
+
+            latents = torch.linspace(-1.0, 1.0, 128 * 32 * 40, dtype=torch.float32).reshape(1, 128, 32, 40)
+            loss, _ = trainer.process_batch(
+                SimpleNamespace(),
+                SimpleNamespace(device=torch.device("cpu")),
+                transformer=None,
+                network=None,
+                batch={"i4_llm_features": [torch.zeros(1, 8)]},
+                latents=latents,
+                noise=torch.empty_like(latents),
+                noise_scheduler=None,
+                dit_dtype=torch.float32,
+                network_dtype=torch.float32,
+                vae=None,
+                global_step=0,
+            )
+        finally:
+            if original_module is not None:
+                sys.modules["musubi_tuner.ideogram4_train_network"] = original_module
+            else:
+                sys.modules.pop("musubi_tuner.ideogram4_train_network", None)
+            if original_image_video is not None:
+                sys.modules["musubi_tuner.dataset.image_video_dataset"] = original_image_video
+            else:
+                sys.modules.pop("musubi_tuner.dataset.image_video_dataset", None)
+            if original_sampling is not None:
+                sys.modules["musubi_tuner.training.sampling_prompts"] = original_sampling
+            else:
+                sys.modules.pop("musubi_tuner.training.sampling_prompts", None)
+            if original_trainer is not None:
+                sys.modules["musubi_tuner.training.trainer_base"] = original_trainer
+            else:
+                sys.modules.pop("musubi_tuner.training.trainer_base", None)
+
+        self.assertEqual(captured["sample_args"][:3], (1, 512, 640))
+        self.assertTrue(torch.equal(captured["latents"], latents))
+        expected_noisy = 0.75 * latents + 0.25 * captured["noise"]
+        self.assertTrue(torch.allclose(captured["noisy_model_input"], expected_noisy))
+        self.assertTrue(torch.equal(captured["timesteps"], torch.full((1,), 250.0)))
+        self.assertEqual(float(loss.item()), 0.0)
 
     def test_denoising_steps_move_from_noise_to_data(self):
         params = ideogram4_utils.PRESETS["V4_DEFAULT_20"]
