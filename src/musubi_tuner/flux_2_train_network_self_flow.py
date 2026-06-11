@@ -21,6 +21,7 @@ from typing import Optional
 
 import torch
 from accelerate import Accelerator
+from safetensors.torch import load_file
 
 from musubi_tuner.flux_2.flux2_models import timestep_embedding
 from musubi_tuner.flux_2_train_network import Flux2NetworkTrainer, flux2_setup_parser
@@ -362,12 +363,28 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         the projection head's parameters share the network LR schedule because
         Prodigy and friends don't support per-group LRs.
         """
+        trainable_params = super().extra_trainable_params(args, accelerator, network, transformer, trainable_params)
         if not args.self_flow:
             return trainable_params
 
-        # TODO: build Sequential(Linear, GELU, Linear) sized from transformer.hidden_size.
-        #       See PR #913 hv_train_network.py around line 2395.
-        raise NotImplementedError("Self-Flow rep_proj construction — see PR #913")
+        hidden_size = accelerator.unwrap_model(transformer).hidden_size
+        self.rep_proj = torch.nn.Sequential(
+            torch.nn.Linear(hidden_size, hidden_size),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden_size, hidden_size),
+        )
+        if args.network_weights_proj is not None:
+            proj_state = load_file(args.network_weights_proj)
+            self.rep_proj.load_state_dict(proj_state)
+            accelerator.print(f"loaded projection head weights from {args.network_weights_proj}")
+
+        # Merge into the first param group: shares the network LR schedule because
+        # Prodigy and friends don't support per-group LRs.
+        if trainable_params:
+            trainable_params[0]["params"] = list(trainable_params[0]["params"]) + list(self.rep_proj.parameters())
+        else:
+            trainable_params = [{"params": list(self.rep_proj.parameters())}]
+        return trainable_params
 
     def on_transformer_loaded(
         self,
