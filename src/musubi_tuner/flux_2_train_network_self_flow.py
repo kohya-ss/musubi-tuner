@@ -112,6 +112,36 @@ def build_per_token_timestep_map(
     return per_token_t, mismatch_mask
 
 
+def update_ema_weights(
+    ema_state: dict[str, torch.Tensor],
+    current_state: dict[str, torch.Tensor],
+    decay: float,
+) -> None:
+    """In-place EMA update: ema = decay * ema + (1 - decay) * current."""
+    with torch.no_grad():
+        for k, v in current_state.items():
+            if v.is_floating_point():
+                ema_state[k].lerp_(v, 1 - decay)
+            else:
+                ema_state[k].copy_(v)
+
+
+def compute_ema_weight_drift(
+    ema_state: dict[str, torch.Tensor],
+    current_state: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Mean L2 distance between EMA and current weights (floating-point only)."""
+    with torch.no_grad():
+        dists = [
+            torch.linalg.vector_norm(current_state[k].float() - v.float())
+            for k, v in ema_state.items()
+            if v.is_floating_point()
+        ]
+        if not dists:
+            return torch.tensor(0.0)
+        return torch.stack(dists).mean()
+
+
 # endregion self-flow math helpers
 
 
