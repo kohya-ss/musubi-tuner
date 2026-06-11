@@ -200,24 +200,30 @@ class Fp8Linear(nn.Module):
     out_features: int,
     bias: bool,
     compute_dtype: torch.dtype,
+    scale_shape: torch.Size | tuple[int, ...] | None = None,
   ) -> None:
     super().__init__()
     fp8_dtype = require_fp8_dtype()
     self.in_features = in_features
     self.out_features = out_features
     self.compute_dtype = compute_dtype
+    if scale_shape is None:
+      scale_shape = (out_features,)
     self.register_buffer(
       "weight",
       torch.empty(out_features, in_features, dtype=fp8_dtype),
     )
-    self.register_buffer("weight_scale", torch.empty(out_features, dtype=torch.float32))
+    self.register_buffer("weight_scale", torch.empty(scale_shape, dtype=torch.float32))
     if bias:
       self.register_buffer("bias", torch.empty(out_features, dtype=compute_dtype))
     else:
       self.bias = None
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
-    w = self.weight.to(x.dtype) * self.weight_scale.to(x.dtype).unsqueeze(1)
+    scale = self.weight_scale.to(x.dtype)
+    if scale.ndim == 1:
+      scale = scale.unsqueeze(1)
+    w = self.weight.to(x.dtype) * scale
     bias = self.bias.to(x.dtype) if self.bias is not None else None
     return F.linear(x, w, bias)
 
@@ -237,9 +243,8 @@ def swap_linears_to_fp8(
   """
   for name, child in list(module.named_children()):
     child_prefix = f"{prefix}{name}"
-    if (
-      isinstance(child, nn.Linear) and f"{child_prefix}{FP8_SCALE_SUFFIX}" in state_dict
-    ):
+    scale_key = f"{child_prefix}{FP8_SCALE_SUFFIX}"
+    if isinstance(child, nn.Linear) and scale_key in state_dict:
       setattr(
         module,
         name,
@@ -248,6 +253,7 @@ def swap_linears_to_fp8(
           child.out_features,
           bias=child.bias is not None,
           compute_dtype=compute_dtype,
+          scale_shape=state_dict[scale_key].shape,
         ),
       )
     else:

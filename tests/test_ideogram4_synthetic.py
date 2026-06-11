@@ -62,6 +62,24 @@ class Ideogram4Fp8Tests(unittest.TestCase):
         swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
         self.assertIsInstance(model.linear, nn.Linear)
 
+    def test_scalar_weight_scale_loads_fp8_linear(self):
+        class Tiny(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(3, 2, bias=False)
+
+        model = Tiny()
+        state = {
+            "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
+            "linear.weight_scale": torch.tensor(0.5, dtype=torch.float32),
+        }
+        swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
+        self.assertIsInstance(model.linear, Fp8Linear)
+        self.assertEqual(tuple(model.linear.weight_scale.shape), ())
+        load_fp8_state_dict(model, state, device=torch.device("cpu"), dtype=torch.float32)
+        out = model.linear(torch.ones(1, 3))
+        self.assertEqual(tuple(out.shape), (1, 2))
+
     def test_lora_discovers_fp8_linear_and_changes_output(self):
         class Attention(nn.Module):
             def __init__(self):
