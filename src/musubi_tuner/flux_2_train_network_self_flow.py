@@ -1,15 +1,19 @@
 """Self-Flow training entry point for FLUX.2.
 
-Skeleton for Self-Supervised Flow Matching (Self-Flow) on the FLUX.2 backbone.
-Each base-class extension seam is overridden here as a stub showing how the
-algorithm hooks in. Actual algorithmic logic is intentionally left as
-``NotImplementedError`` / ``# TODO`` markers — to be filled in by porting
-rockerBOO's PR #913 implementation onto these seams.
+Implements Self-Supervised Flow Matching (Self-Flow, arXiv:2603.06507) on the
+FLUX.2 backbone via extension seams and runtime forward hooks — zero
+modifications to ``flux2_models.py`` or any base trainer are required.
 
-Reference: https://github.com/kohya-ss/musubi-tuner/pull/913
+Algorithm: dual-timestep scheduling assigns a cleaner (teacher) and a noisier
+(student) timestep per sample each step; per-token masking injects teacher
+values into a fraction of student tokens; a representation alignment loss
+(L_rep) distils knowledge from a deeper EMA teacher block into the shallower
+student block via a learnable projection head.
 
-This file is the proposed extension surface, not a runnable trainer. Do not
-use it to start a training run yet.
+Per-token conditioning is achieved by hooking ``time_in`` /
+``double_stream_modulation_txt`` / ``single_stream_modulation`` on the
+unmodified Flux2 model — its Modulation and LastLayer already broadcast 3D
+vectors natively.
 
 Internal extension point — no API stability guarantees. Subclasses live in
 this repo; if you fork, expect breakage on updates.
@@ -299,7 +303,7 @@ class BlockFeatureExtractor:
 
 
 class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
-    """FLUX.2 + Self-Flow.
+    """FLUX.2 + Self-Flow trainer.
 
     Owned state (set during the relevant lifecycle seams, used across steps):
     - ``self.rep_proj``: representation projection head (paper §3.3, Eq. 6).
@@ -307,22 +311,22 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
     - ``self.ema_lora_state``: EMA snapshot of LoRA weights (the "teacher").
       Initialised in ``on_train_start`` after ``accelerator.prepare`` so it
       sits on-device. Updated by ``on_post_optimizer_step``.
-    - ``self._coupling_scheduler``: dummy LR scheduler whose "lr" is the
-      teacher coupling probability (decays over training).
     - ``self._feature_extractor``: holds DiT layer outputs captured via
       ``register_forward_hook`` (no DiT model edit required). Hooks are
       registered in ``on_transformer_loaded``.
+    - ``self._modulation_controller``: reroutes Flux2's modulation path to
+      per-token timesteps via forward hooks (no model code changes).
     - ``self._self_flow_logs``: per-step state metrics dict drained by
-      ``extra_step_logs`` (e.g. coupling-scheduler value). Loss decomposition
-      itself (``loss/gen``, ``loss/rep``) flows through ``process_batch``'s
-      ``loss_metrics`` return, not through here.
+      ``extra_step_logs``. Loss decomposition (``loss/gen``, ``loss/rep``)
+      flows through ``process_batch``'s ``loss_metrics`` return, not through here.
+    - ``self._saved_student_state``: snapshot of student LoRA weights while
+      EMA weights are swapped in for sampling; restored in ``on_after_sample_images``.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.rep_proj: Optional[torch.nn.Module] = None
         self.ema_lora_state: Optional[dict] = None
-        self._coupling_scheduler = None
         self._feature_extractor: Optional[BlockFeatureExtractor] = None
         self._modulation_controller: Optional[PerTokenModulationController] = None
         self._self_flow_logs: dict = {}
@@ -346,6 +350,8 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
                 )
             if args.mask_ratio > 0.5:
                 raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)")
+            if getattr(args, "compile", False):
+                logger.warning("--compile with --self_flow: forward hooks cause graph breaks; expect reduced compile benefit.")
 
     # endregion
 
