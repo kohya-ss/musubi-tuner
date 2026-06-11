@@ -142,6 +142,24 @@ def compute_ema_weight_drift(
         return torch.stack(dists).mean()
 
 
+def compute_representation_loss(
+    student_features: torch.Tensor,
+    teacher_features: torch.Tensor,
+    rep_proj: torch.nn.Module,
+) -> torch.Tensor:
+    """L_rep (paper Eq. 6): negative mean cosine similarity of projected student vs teacher."""
+    student_proj = rep_proj(student_features)
+    cos_sim = torch.nn.functional.cosine_similarity(student_proj, teacher_features, dim=-1)
+    return -cos_sim.mean()
+
+
+def effective_gamma(gamma: float, global_step: int, warmup_steps: int) -> float:
+    """Linear warmup of the L_rep weight: 0 -> gamma over warmup_steps, then constant."""
+    if warmup_steps <= 0:
+        return gamma
+    return gamma * min(1.0, global_step / warmup_steps)
+
+
 # endregion self-flow math helpers
 
 
