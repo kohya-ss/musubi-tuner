@@ -218,3 +218,59 @@ def test_packed_attention_flash_matches_torch_backend():
     out_flash = packed_attention(packed, AttentionParams.create_attention_params("flash", False))
     out_torch = packed_attention(packed, AttentionParams.create_attention_params("torch", False))
     torch.testing.assert_close(out_flash.float(), out_torch.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_parity_production_shape_real_rope():
+    """Klein 4B production shape with real EmbedND rope (audit follow-up).
+
+    Covers what the synthetic shapes above don't: L=4608 (512 txt + 64x64 img
+    tokens for a 1024px image), H=24, real 4-axis frequencies with image
+    positions to 63x63, and the real Klein 4B qk-norm scale range [0.32, 2.86]
+    — the actual input regime of FLUX.2 LoRA training (frozen scales, bf16).
+
+    At scales up to ~2.8 the eager path's extra intermediate roundings exceed
+    a fixed eager-as-oracle tolerance, so this compares both paths against an
+    fp64 ground truth instead and asserts fused is at least as accurate.
+    """
+    from musubi_tuner.flux_2.flux2_models import EmbedND
+    from musubi_tuner.flux_2.flux2_utils import prc_img, prc_txt
+    from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
+
+    B, H, D = 1, 24, 128
+    _, txt_ids = prc_txt(torch.zeros(B, 512, 8))
+    _, img_ids = prc_img(torch.zeros(B, 16, 64, 64))
+    ids = torch.cat([txt_ids, img_ids], dim=1).to("cuda")  # (B, 4608, 4)
+    pe = EmbedND(dim=D, theta=2000, axes_dim=[32, 32, 32, 32])(ids)
+    L = ids.shape[1]
+
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    qkv_f = torch.randn(B, L, 3, H, D, dtype=torch.bfloat16, device="cuda", generator=gen).requires_grad_(True)
+    qkv_e = qkv_f.detach().clone().requires_grad_(True)
+    # span the real Klein 4B qk-norm scale range [0.32, 2.86] (frozen base weights)
+    q_scale = torch.rand(D, dtype=torch.bfloat16, device="cuda", generator=gen) * 2.5 + 0.3
+    k_scale = torch.rand(D, dtype=torch.bfloat16, device="cuda", generator=gen) * 2.5 + 0.3
+    grad_out = torch.randn(B, L, 3, H, D, dtype=torch.bfloat16, device="cuda", generator=gen)
+
+    out_f = fused_qknorm_rope(qkv_f, q_scale, k_scale, pe)
+    ref = eager_reference(qkv_e, q_scale, k_scale, pe)
+
+    # fp64 ground truth through the same eager math, including backward
+    qkv_64 = qkv_f.detach().double().requires_grad_(True)
+    ref64 = eager_reference(qkv_64, q_scale.double(), k_scale.double(), pe.double())
+
+    err_fused = (out_f.double() - ref64).abs()
+    err_eager = (ref.double() - ref64).abs()
+    assert err_fused.max() <= err_eager.max() * 1.1, (err_fused.max(), err_eager.max())
+    assert err_fused.mean() <= err_eager.mean() * 1.1, (err_fused.mean(), err_eager.mean())
+    # both stay within ordinary bf16 rounding of the truth
+    torch.testing.assert_close(out_f.double(), ref64, rtol=3e-2, atol=4e-2)
+
+    out_f.backward(grad_out)
+    ref.backward(grad_out)
+    ref64.backward(grad_out.double())
+
+    gerr_fused = (qkv_f.grad.double() - qkv_64.grad).abs()
+    gerr_eager = (qkv_e.grad.double() - qkv_64.grad).abs()
+    assert gerr_fused.max() <= gerr_eager.max() * 1.1, (gerr_fused.max(), gerr_eager.max())
+    assert gerr_fused.mean() <= gerr_eager.mean() * 1.1, (gerr_fused.mean(), gerr_eager.mean())
+    torch.testing.assert_close(qkv_f.grad.double(), qkv_64.grad, rtol=3e-2, atol=4e-2)
