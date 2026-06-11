@@ -70,7 +70,8 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 prompt = prompt_dict.get("prompt", "")
                 if prompt_dict.get("negative_prompt") is not None:
                     logger.warning("Ideogram 4 v1 ignores negative_prompt in sample prompts.")
-                ideogram4_utils.validate_prompt(prompt, warn_only=args.warn_on_caption_issues)
+                if args.validate_caption_structure:
+                    ideogram4_utils.validate_prompt(prompt, warn_only=args.warn_on_caption_issues)
                 prompt_dict = prompt_dict.copy()
                 prompt_dict["i4_llm_features"] = ideogram4_utils.encode_prompt_to_features(
                     tokenizer, text_encoder, prompt, device
@@ -305,10 +306,20 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--unconditional_dit", type=str, default=None, help="unconditional Ideogram 4 DiT safetensors path")
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling")
+    parser.add_argument("--dit_dtype", type=str, default=None, help="data type for Ideogram 4 DiT, default is bfloat16")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
     parser.add_argument("--ideogram4_timestep_mu", type=float, default=0.0, help="known mean for Ideogram 4 logit-normal training timesteps")
     parser.add_argument("--ideogram4_timestep_std", type=float, default=1.0, help="std for Ideogram 4 logit-normal training timesteps")
-    parser.add_argument("--warn_on_caption_issues", action="store_true", help="warn instead of failing on sample caption verifier issues")
+    parser.add_argument(
+        "--validate_caption_structure",
+        action="store_true",
+        help="validate official structured JSON sample prompts; ordinary prompts are accepted by default",
+    )
+    parser.add_argument(
+        "--warn_on_caption_issues",
+        action="store_true",
+        help="warn instead of failing on sample caption verifier issues when --validate_caption_structure is enabled",
+    )
     return parser
 
 

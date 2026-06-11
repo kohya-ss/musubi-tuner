@@ -1,6 +1,9 @@
+import argparse
+import importlib
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -345,6 +348,65 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             ideogram4_cache_text_encoder_outputs.ideogram4_utils.validate_prompt = original_validate
             ideogram4_cache_text_encoder_outputs.ideogram4_utils.encode_prompt_to_features = original_encode
             ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = original_save
+
+    def test_train_parser_registers_dit_dtype(self):
+        original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
+        original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
+        original_trainer = sys.modules.get("musubi_tuner.training.trainer_base")
+        original_module = sys.modules.pop("musubi_tuner.ideogram4_train_network", None)
+
+        fake_image_video = types.ModuleType("musubi_tuner.dataset.image_video_dataset")
+        fake_image_video.ARCHITECTURE_IDEOGRAM4 = "i4"
+        fake_image_video.ARCHITECTURE_IDEOGRAM4_FULL = "ideogram4"
+
+        fake_sampling = types.ModuleType("musubi_tuner.training.sampling_prompts")
+        fake_sampling.load_prompts = lambda path: []
+
+        fake_trainer = types.ModuleType("musubi_tuner.training.trainer_base")
+
+        class DiTOutput:
+            def __init__(self, pred=None, target=None):
+                self.pred = pred
+                self.target = target
+
+        class NetworkTrainer:
+            def __init__(self):
+                self.blocks_to_swap = 0
+
+            def train(self, args):
+                pass
+
+        fake_trainer.DiTOutput = DiTOutput
+        fake_trainer.NetworkTrainer = NetworkTrainer
+
+        try:
+            sys.modules["musubi_tuner.dataset.image_video_dataset"] = fake_image_video
+            sys.modules["musubi_tuner.training.sampling_prompts"] = fake_sampling
+            sys.modules["musubi_tuner.training.trainer_base"] = fake_trainer
+            ideogram4_train_network = importlib.import_module("musubi_tuner.ideogram4_train_network")
+            parser = ideogram4_train_network.ideogram4_setup_parser(argparse.ArgumentParser())
+            args = parser.parse_args([])
+        finally:
+            if original_module is not None:
+                sys.modules["musubi_tuner.ideogram4_train_network"] = original_module
+            else:
+                sys.modules.pop("musubi_tuner.ideogram4_train_network", None)
+            if original_image_video is not None:
+                sys.modules["musubi_tuner.dataset.image_video_dataset"] = original_image_video
+            else:
+                sys.modules.pop("musubi_tuner.dataset.image_video_dataset", None)
+            if original_sampling is not None:
+                sys.modules["musubi_tuner.training.sampling_prompts"] = original_sampling
+            else:
+                sys.modules.pop("musubi_tuner.training.sampling_prompts", None)
+            if original_trainer is not None:
+                sys.modules["musubi_tuner.training.trainer_base"] = original_trainer
+            else:
+                sys.modules.pop("musubi_tuner.training.trainer_base", None)
+
+        self.assertTrue(hasattr(args, "dit_dtype"))
+        self.assertIsNone(args.dit_dtype)
+        self.assertFalse(args.validate_caption_structure)
 
     def test_denoising_steps_move_from_noise_to_data(self):
         params = ideogram4_utils.PRESETS["V4_DEFAULT_20"]
