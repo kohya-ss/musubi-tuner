@@ -101,8 +101,12 @@ def test_double_stream_block_fused_matches_eager():
     res_f = run_double(block_fused, img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params)
 
     tol = dict(rtol=1e-4, atol=1e-4)
-    for a, b, what in [(res_f[0], res_e[0], "img out"), (res_f[1], res_e[1], "txt out"),
-                       (res_f[2], res_e[2], "img grad"), (res_f[3], res_e[3], "txt grad")]:
+    for a, b, what in [
+        (res_f[0], res_e[0], "img out"),
+        (res_f[1], res_e[1], "txt out"),
+        (res_f[2], res_e[2], "img grad"),
+        (res_f[3], res_e[3], "txt grad"),
+    ]:
         torch.testing.assert_close(a, b, **tol, msg=f"mismatch: {what}")
     assert res_e[4].keys() == res_f[4].keys()
     for name in res_e[4]:
@@ -181,8 +185,12 @@ def test_double_stream_block_fused_with_checkpointing():
     res_b = run_double(block_ckpt, img, txt, pe, pe_ctx, mod_img, mod_txt, attn_params)
 
     tol = dict(rtol=1e-5, atol=1e-5)
-    for a, b, what in [(res_b[0], res_a[0], "img out"), (res_b[1], res_a[1], "txt out"),
-                       (res_b[2], res_a[2], "img grad"), (res_b[3], res_a[3], "txt grad")]:
+    for a, b, what in [
+        (res_b[0], res_a[0], "img out"),
+        (res_b[1], res_a[1], "txt out"),
+        (res_b[2], res_a[2], "img grad"),
+        (res_b[3], res_a[3], "txt grad"),
+    ]:
         torch.testing.assert_close(a, b, **tol, msg=f"mismatch: {what}")
     assert res_a[4].keys() == res_b[4].keys()
     for name in res_a[4]:
@@ -244,13 +252,15 @@ def test_double_stream_block_fused_flash_matches_eager_bf16():
     mod_txt = (make_mod(B, HIDDEN, DEVICE, seed=4, dtype=torch.bfloat16), make_mod(B, HIDDEN, DEVICE, seed=5, dtype=torch.bfloat16))
 
     res_e = run_double(block, img, txt, pe, pe_ctx, mod_img, mod_txt, AttentionParams.create_attention_params("torch", False))
-    res_f = run_double(
-        block_fused, img, txt, pe, pe_ctx, mod_img, mod_txt, AttentionParams.create_attention_params("flash", False)
-    )
+    res_f = run_double(block_fused, img, txt, pe, pe_ctx, mod_img, mod_txt, AttentionParams.create_attention_params("flash", False))
 
     tol = dict(rtol=2e-2, atol=2e-2)
-    for a, b, what in [(res_f[0], res_e[0], "img out"), (res_f[1], res_e[1], "txt out"),
-                       (res_f[2], res_e[2], "img grad"), (res_f[3], res_e[3], "txt grad")]:
+    for a, b, what in [
+        (res_f[0], res_e[0], "img out"),
+        (res_f[1], res_e[1], "txt out"),
+        (res_f[2], res_e[2], "img grad"),
+        (res_f[3], res_e[3], "txt grad"),
+    ]:
         torch.testing.assert_close(a.float(), b.float(), **tol, msg=f"mismatch: {what}")
 
 
@@ -259,9 +269,16 @@ def test_flux2_model_threads_fused_flag():
     from musubi_tuner.flux_2.flux2_models import Flux2, Flux2Params
 
     params = Flux2Params(
-        in_channels=64, context_in_dim=512, hidden_size=256, mlp_ratio=4.0,
-        num_heads=2, depth=1, depth_single_blocks=1, axes_dim=[32, 32, 32, 32],
-        theta=2000, use_guidance_embed=False,
+        in_channels=64,
+        context_in_dim=512,
+        hidden_size=256,
+        mlp_ratio=4.0,
+        num_heads=2,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[32, 32, 32, 32],
+        theta=2000,
+        use_guidance_embed=False,
     )
     model = Flux2(params, attn_mode="torch", split_attn=False, fused_qknorm_rope=True)
     assert all(b.fused_qknorm_rope for b in model.double_blocks)

@@ -132,14 +132,17 @@ def test_forward_pe_broadcast_batch1():
     torch.testing.assert_close(qkv_f.grad, qkv_e.grad, **TOLS[torch.float32])
 
 
-@pytest.mark.parametrize("dtype,tol,scale_tol", [
-    (torch.float32, dict(rtol=1e-4, atol=1e-4), dict(rtol=1e-4, atol=1e-4)),
-    # dscale sums B*H*L bf16 values via fp32 atomics; when scale grads are near
-    # zero the relative error is meaningless — use absolute tolerance only.
-    # Max abs diff is ~0.25 (1 bf16 ULP at value ~16). atol=0.5 catches real bugs.
-    # per plan: bf16 dscale is the noisiest comparison, loosen beyond rtol=5e-2.
-    (torch.bfloat16, dict(rtol=3e-2, atol=3e-2), dict(rtol=0.0, atol=0.5)),
-])
+@pytest.mark.parametrize(
+    "dtype,tol,scale_tol",
+    [
+        (torch.float32, dict(rtol=1e-4, atol=1e-4), dict(rtol=1e-4, atol=1e-4)),
+        # dscale sums B*H*L bf16 values via fp32 atomics; when scale grads are near
+        # zero the relative error is meaningless — use absolute tolerance only.
+        # Max abs diff is ~0.25 (1 bf16 ULP at value ~16). atol=0.5 catches real bugs.
+        # per plan: bf16 dscale is the noisiest comparison, loosen beyond rtol=5e-2.
+        (torch.bfloat16, dict(rtol=3e-2, atol=3e-2), dict(rtol=0.0, atol=0.5)),
+    ],
+)
 @pytest.mark.parametrize("shape", [(2, 33, 4, 128), (2, 17, 3, 64), (2, 17, 3, 96)])
 def test_backward_parity(dtype, tol, scale_tol, shape):
     from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
@@ -179,6 +182,7 @@ def test_backward_frozen_scales():
 def _has_flash_attn():
     try:
         from flash_attn import flash_attn_qkvpacked_func  # noqa: F401
+
         return True
     except ImportError:
         return False

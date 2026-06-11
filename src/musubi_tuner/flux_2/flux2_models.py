@@ -412,7 +412,9 @@ class AutoEncoder(nn.Module):
 
 
 class Flux2(nn.Module):
-    def __init__(self, params: Flux2Params, attn_mode: str = "flash", split_attn: bool = False, fused_qknorm_rope: bool = False) -> None:
+    def __init__(
+        self, params: Flux2Params, attn_mode: str = "flash", split_attn: bool = False, fused_qknorm_rope: bool = False
+    ) -> None:
         super().__init__()
 
         self.in_channels = params.in_channels
@@ -867,13 +869,9 @@ class DoubleStreamBlock(nn.Module):
         if self.fused_qknorm_rope:
             head_dim = self.hidden_size // self.num_heads
             img_qkv = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, head_dim)
-            img_qkv = fused_qknorm_rope(
-                img_qkv, self.img_attn.norm.query_norm.scale, self.img_attn.norm.key_norm.scale, pe
-            )
+            img_qkv = fused_qknorm_rope(img_qkv, self.img_attn.norm.query_norm.scale, self.img_attn.norm.key_norm.scale, pe)
             txt_qkv = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, head_dim)
-            txt_qkv = fused_qknorm_rope(
-                txt_qkv, self.txt_attn.norm.query_norm.scale, self.txt_attn.norm.key_norm.scale, pe_ctx
-            )
+            txt_qkv = fused_qknorm_rope(txt_qkv, self.txt_attn.norm.query_norm.scale, self.txt_attn.norm.key_norm.scale, pe_ctx)
             qkv = torch.cat((txt_qkv, img_qkv), dim=1)
             del txt_qkv, img_qkv, pe, pe_ctx
             attn = packed_attention(qkv, attn_params)

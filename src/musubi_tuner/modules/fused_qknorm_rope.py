@@ -33,8 +33,16 @@ if HAS_TRITON:
 
     @triton.jit
     def _norm_rope_row(
-        in_base, out_base, scale_ptr, cos, sin, offs, mask,
-        stride_in_d, stride_out_d, eps,
+        in_base,
+        out_base,
+        scale_ptr,
+        cos,
+        sin,
+        offs,
+        mask,
+        stride_in_d,
+        stride_out_d,
+        eps,
         D: tl.constexpr,
     ):
         """RMSNorm + rotate one (b, l, h) row of q or k. Pairs are (x[2i], x[2i+1])."""
@@ -54,11 +62,27 @@ if HAS_TRITON:
 
     @triton.jit
     def _fused_qknorm_rope_fwd_kernel(
-        x_ptr, out_ptr, q_scale_ptr, k_scale_ptr, pe_ptr,
-        L, H,
-        stride_xb, stride_xl, stride_xk, stride_xh, stride_xd,
-        stride_ob, stride_ol, stride_ok, stride_oh, stride_od,
-        stride_pb, stride_pl, stride_pd, stride_pi,
+        x_ptr,
+        out_ptr,
+        q_scale_ptr,
+        k_scale_ptr,
+        pe_ptr,
+        L,
+        H,
+        stride_xb,
+        stride_xl,
+        stride_xk,
+        stride_xh,
+        stride_xd,
+        stride_ob,
+        stride_ol,
+        stride_ok,
+        stride_oh,
+        stride_od,
+        stride_pb,
+        stride_pl,
+        stride_pd,
+        stride_pi,
         eps,
         D: tl.constexpr,
         BLOCK_DHALF: tl.constexpr,
@@ -81,9 +105,7 @@ if HAS_TRITON:
 
         # q (index 0 along K) and k (index 1)
         _norm_rope_row(x_base, out_base, q_scale_ptr, cos, sin, offs, mask, stride_xd, stride_od, eps, D)
-        _norm_rope_row(
-            x_base + stride_xk, out_base + stride_ok, k_scale_ptr, cos, sin, offs, mask, stride_xd, stride_od, eps, D
-        )
+        _norm_rope_row(x_base + stride_xk, out_base + stride_ok, k_scale_ptr, cos, sin, offs, mask, stride_xd, stride_od, eps, D)
 
         # v passthrough (index 2 along K)
         offs_d = tl.arange(0, 2 * BLOCK_DHALF)
@@ -93,8 +115,19 @@ if HAS_TRITON:
 
     @triton.jit
     def _bwd_row(
-        go_base, x_base, gx_base, scale_ptr, dscale_ptr, cos, sin, offs, mask,
-        stride_go_d, stride_x_d, stride_gx_d, eps,
+        go_base,
+        x_base,
+        gx_base,
+        scale_ptr,
+        dscale_ptr,
+        cos,
+        sin,
+        offs,
+        mask,
+        stride_go_d,
+        stride_x_d,
+        stride_gx_d,
+        eps,
         D: tl.constexpr,
         NEEDS_DSCALE: tl.constexpr,
     ):
@@ -129,12 +162,35 @@ if HAS_TRITON:
 
     @triton.jit
     def _fused_qknorm_rope_bwd_kernel(
-        go_ptr, x_ptr, gx_ptr, q_scale_ptr, k_scale_ptr, dq_scale_ptr, dk_scale_ptr, pe_ptr,
-        L, H,
-        stride_gob, stride_gol, stride_gok, stride_goh, stride_god,
-        stride_xb, stride_xl, stride_xk, stride_xh, stride_xd,
-        stride_gxb, stride_gxl, stride_gxk, stride_gxh, stride_gxd,
-        stride_pb, stride_pl, stride_pd, stride_pi,
+        go_ptr,
+        x_ptr,
+        gx_ptr,
+        q_scale_ptr,
+        k_scale_ptr,
+        dq_scale_ptr,
+        dk_scale_ptr,
+        pe_ptr,
+        L,
+        H,
+        stride_gob,
+        stride_gol,
+        stride_gok,
+        stride_goh,
+        stride_god,
+        stride_xb,
+        stride_xl,
+        stride_xk,
+        stride_xh,
+        stride_xd,
+        stride_gxb,
+        stride_gxl,
+        stride_gxk,
+        stride_gxh,
+        stride_gxd,
+        stride_pb,
+        stride_pl,
+        stride_pd,
+        stride_pi,
         eps,
         D: tl.constexpr,
         BLOCK_DHALF: tl.constexpr,
@@ -156,11 +212,40 @@ if HAS_TRITON:
         x_base = x_ptr + b * stride_xb + l * stride_xl + h * stride_xh
         gx_base = gx_ptr + b * stride_gxb + l * stride_gxl + h * stride_gxh
 
-        _bwd_row(go_base, x_base, gx_base, q_scale_ptr, dq_scale_ptr, cos, sin, offs, mask,
-                 stride_god, stride_xd, stride_gxd, eps, D, NEEDS_DSCALE)
-        _bwd_row(go_base + stride_gok, x_base + stride_xk, gx_base + stride_gxk,
-                 k_scale_ptr, dk_scale_ptr, cos, sin, offs, mask,
-                 stride_god, stride_xd, stride_gxd, eps, D, NEEDS_DSCALE)
+        _bwd_row(
+            go_base,
+            x_base,
+            gx_base,
+            q_scale_ptr,
+            dq_scale_ptr,
+            cos,
+            sin,
+            offs,
+            mask,
+            stride_god,
+            stride_xd,
+            stride_gxd,
+            eps,
+            D,
+            NEEDS_DSCALE,
+        )
+        _bwd_row(
+            go_base + stride_gok,
+            x_base + stride_xk,
+            gx_base + stride_gxk,
+            k_scale_ptr,
+            dk_scale_ptr,
+            cos,
+            sin,
+            offs,
+            mask,
+            stride_god,
+            stride_xd,
+            stride_gxd,
+            eps,
+            D,
+            NEEDS_DSCALE,
+        )
 
         # grad_v passthrough
         offs_d = tl.arange(0, 2 * BLOCK_DHALF)
@@ -177,11 +262,27 @@ class _FusedQKNormRoPE(torch.autograd.Function):
         stride_pb = pe.stride(0) if pe.shape[0] != 1 else 0
         grid = (B * L * H,)
         _fused_qknorm_rope_fwd_kernel[grid](
-            qkv, out, q_scale, k_scale, pe,
-            L, H,
-            qkv.stride(0), qkv.stride(1), qkv.stride(2), qkv.stride(3), qkv.stride(4),
-            out.stride(0), out.stride(1), out.stride(2), out.stride(3), out.stride(4),
-            stride_pb, pe.stride(1), pe.stride(2), pe.stride(3),
+            qkv,
+            out,
+            q_scale,
+            k_scale,
+            pe,
+            L,
+            H,
+            qkv.stride(0),
+            qkv.stride(1),
+            qkv.stride(2),
+            qkv.stride(3),
+            qkv.stride(4),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            out.stride(3),
+            out.stride(4),
+            stride_pb,
+            pe.stride(1),
+            pe.stride(2),
+            pe.stride(3),
             eps,
             D=D,
             BLOCK_DHALF=triton.next_power_of_2(D // 2),
@@ -208,12 +309,35 @@ class _FusedQKNormRoPE(torch.autograd.Function):
         stride_pb = pe.stride(0) if pe.shape[0] != 1 else 0
         grid = (B * L * H,)
         _fused_qknorm_rope_bwd_kernel[grid](
-            grad_out, qkv, grad_qkv, q_scale, k_scale, dq_scale, dk_scale, pe,
-            L, H,
-            grad_out.stride(0), grad_out.stride(1), grad_out.stride(2), grad_out.stride(3), grad_out.stride(4),
-            qkv.stride(0), qkv.stride(1), qkv.stride(2), qkv.stride(3), qkv.stride(4),
-            grad_qkv.stride(0), grad_qkv.stride(1), grad_qkv.stride(2), grad_qkv.stride(3), grad_qkv.stride(4),
-            stride_pb, pe.stride(1), pe.stride(2), pe.stride(3),
+            grad_out,
+            qkv,
+            grad_qkv,
+            q_scale,
+            k_scale,
+            dq_scale,
+            dk_scale,
+            pe,
+            L,
+            H,
+            grad_out.stride(0),
+            grad_out.stride(1),
+            grad_out.stride(2),
+            grad_out.stride(3),
+            grad_out.stride(4),
+            qkv.stride(0),
+            qkv.stride(1),
+            qkv.stride(2),
+            qkv.stride(3),
+            qkv.stride(4),
+            grad_qkv.stride(0),
+            grad_qkv.stride(1),
+            grad_qkv.stride(2),
+            grad_qkv.stride(3),
+            grad_qkv.stride(4),
+            stride_pb,
+            pe.stride(1),
+            pe.stride(2),
+            pe.stride(3),
             ctx.eps,
             D=D,
             BLOCK_DHALF=triton.next_power_of_2(D // 2),

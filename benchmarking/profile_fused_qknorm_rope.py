@@ -98,7 +98,10 @@ def profile_variant(label: str, fn, trace_dir: Path, *, warmup: int = WARMUP_ITE
 def main():
     parser = argparse.ArgumentParser(description="Profile fused QKNorm+RoPE with torch.profiler")
     parser.add_argument(
-        "--shape", nargs=4, type=int, metavar=("B", "L", "H", "D"),
+        "--shape",
+        nargs=4,
+        type=int,
+        metavar=("B", "L", "H", "D"),
         default=[1, 4096, 48, 128],
         help="Input shape B L H D (default: 1 4096 48 128)",
     )
