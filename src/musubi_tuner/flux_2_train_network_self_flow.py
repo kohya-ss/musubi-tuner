@@ -17,11 +17,12 @@ this repo; if you fork, expect breakage on updates.
 
 import argparse
 import logging
+import os
 from typing import Optional
 
 import torch
 from accelerate import Accelerator
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 from musubi_tuner.flux_2.flux2_models import timestep_embedding
 from musubi_tuner.flux_2_train_network import Flux2NetworkTrainer, flux2_setup_parser
@@ -30,6 +31,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.utils import huggingface_utils
 
 
 logger = logging.getLogger(__name__)
@@ -736,10 +738,34 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         - ``<ckpt_name stem>-proj.safetensors`` (raw rep_proj state_dict)
         Each follows the main checkpoint's HuggingFace upload toggle.
         """
+        super().on_post_save(args, accelerator, network, transformer, ckpt_name, save_dtype, metadata, force_sync_upload)
         if not args.self_flow:
             return
-        # TODO: see PR #913 hv_train_network.py around lines 2750-2774.
-        raise NotImplementedError("Self-Flow companion file saving — see PR #913")
+
+        unwrapped_nw = accelerator.unwrap_model(network)
+
+        if self.rep_proj is not None:
+            proj_ckpt_name = ckpt_name.replace(".safetensors", "-proj.safetensors")
+            proj_ckpt_file = os.path.join(args.output_dir, proj_ckpt_name)
+            accelerator.print(f"saving projection head: {proj_ckpt_file}")
+            proj_state = {
+                k: v.to(save_dtype) if save_dtype is not None else v
+                for k, v in accelerator.unwrap_model(self.rep_proj).state_dict().items()
+            }
+            save_file(proj_state, proj_ckpt_file)
+            if args.huggingface_repo_id is not None:
+                huggingface_utils.upload(args, proj_ckpt_file, "/" + proj_ckpt_name, force_sync_upload=force_sync_upload)
+
+        if self.ema_lora_state is not None:
+            ema_ckpt_name = ckpt_name.replace(".safetensors", "-ema.safetensors")
+            ema_ckpt_file = os.path.join(args.output_dir, ema_ckpt_name)
+            accelerator.print(f"saving EMA checkpoint: {ema_ckpt_file}")
+            student_state = {k: v.clone() for k, v in unwrapped_nw.state_dict().items()}
+            unwrapped_nw.load_state_dict(self.ema_lora_state)
+            unwrapped_nw.save_weights(ema_ckpt_file, save_dtype, metadata)
+            unwrapped_nw.load_state_dict(student_state)
+            if args.huggingface_repo_id is not None:
+                huggingface_utils.upload(args, ema_ckpt_file, "/" + ema_ckpt_name, force_sync_upload=force_sync_upload)
 
     def extra_metadata(self, args: argparse.Namespace) -> dict:
         """Return ``ss_self_flow_*`` keys for embedding into safetensors metadata."""
