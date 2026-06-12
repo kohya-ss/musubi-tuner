@@ -899,6 +899,10 @@ def main():
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
+    args.dit_dtype = None  # set from mixed_precision
+    if args.vae_dtype is None:
+        args.vae_dtype = "float32"  # make float32 as default for VAE
+
     trainer = Flux2SelfFlowNetworkTrainer()
     trainer.train(args)
 
