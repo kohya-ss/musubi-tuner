@@ -337,16 +337,14 @@ class AutoEncoder(nn.Module):
   def encode(self, x: Tensor) -> Tensor:
     moments = self.encoder(x)
     mean = torch.chunk(moments, 2, dim=1)[0]
-    z = rearrange(
+    return rearrange(
       mean,
       "... c (i pi) (j pj) -> ... (c pi pj) i j",
       pi=self.ps[0],
       pj=self.ps[1],
     )
-    return self.normalize(z)
 
   def decode(self, z: Tensor) -> Tensor:
-    z = self.inv_normalize(z)
     z = rearrange(
       z,
       "... (c pi pj) i j -> ... c (i pi) (j pj)",
