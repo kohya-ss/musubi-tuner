@@ -628,7 +628,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         self.assertIsNone(args.unconditional_dit)
 
-    def test_process_batch_uses_common_timestep_sampler_without_renormalizing_cached_model_latents(self):
+    def test_process_batch_uses_common_timestep_sampler_with_normalized_model_latents(self):
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
         original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
         original_trainer = sys.modules.get("musubi_tuner.training.trainer_base")
@@ -729,8 +729,9 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertIs(captured["sampler_noise_scheduler"], noise_scheduler)
         self.assertEqual(captured["sampler_device"], torch.device("cpu"))
         self.assertEqual(captured["sampler_dtype"], torch.float32)
-        self.assertTrue(torch.equal(captured["latents"], latents))
-        expected_noisy = 0.75 * latents + 0.25 * captured["noise"]
+        expected_latents = ideogram4_utils.normalize_token_grid(latents)
+        self.assertTrue(torch.allclose(captured["latents"], expected_latents))
+        expected_noisy = 0.75 * expected_latents + 0.25 * captured["noise"]
         self.assertTrue(torch.allclose(captured["noisy_model_input"], expected_noisy))
         self.assertTrue(torch.equal(captured["timesteps"], torch.full((1,), 251.0)))
         self.assertEqual(float(loss.item()), 0.0)

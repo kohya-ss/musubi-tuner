@@ -253,7 +253,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del network, noise, vae, global_step
         latents = latents.to(device=accelerator.device, dtype=dit_dtype)
-        token_grid = latents
+        token_grid = ideogram4_utils.normalize_token_grid(latents)
         noise = torch.randn_like(token_grid)
         noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
             args,
