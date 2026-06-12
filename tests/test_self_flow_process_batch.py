@@ -64,6 +64,13 @@ def test_process_batch_self_flow_smoke(tiny_model):
     assert "self_flow/mismatch_patch_count" in trainer._self_flow_logs, (
         "self_flow/mismatch_patch_count must be logged unconditionally (0 when no mismatch)"
     )
+    # Fix 1: cleaner_fraction_mean must be present (shows per-step coin outcome)
+    assert "self_flow/cleaner_fraction_mean" in trainer._self_flow_logs, (
+        "self_flow/cleaner_fraction_mean must be logged after Fix 1 (per-sample coin-flip)"
+    )
+    # actual_mask_ratio is now the mean of the per-sample effective ratio (near R_M or 1-R_M bimodal)
+    # — it hovers around 0.5 on average; no longer expected to be near args.mask_ratio exactly.
+    assert "self_flow/actual_mask_ratio" in trainer._self_flow_logs
 
     loss.backward()
     grads = [p.grad for p in trainer.rep_proj.parameters()]

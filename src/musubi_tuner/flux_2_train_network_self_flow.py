@@ -50,7 +50,18 @@ logging.basicConfig(level=logging.INFO)
 
 
 def assign_teacher_student_timesteps(timesteps_a: torch.Tensor, timesteps_b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-sample teacher/student split (paper §3.3): teacher = min (cleaner), student = max."""
+    """Per-sample teacher/student split: teacher = min (cleaner), student = max.
+
+    Note: the paper does NOT say "student = max" is always the conditioning timestep.
+    Paper Eq. 4 gives each masked token timestep s as drawn (cleaner only half the
+    time). The distribution-equivalent implementation used here is: per-sample fair
+    coin selects effective fraction R_M (heads) or 1−R_M (tails), so masked tokens
+    always take the teacher (cleaner) values but the fraction flips — restoring the
+    per-token marginal timestep distribution p(t) for any R_M.
+    ``timesteps_student`` (max) is kept as the 1-D scalar passed to call_dit and
+    for optional SD3-style weighting; the per-token map overrides conditioning
+    in the model via PerTokenModulationController.
+    """
     t_a = timesteps_a.float()
     t_b = timesteps_b.float()
     timesteps_teacher = torch.min(t_a, t_b).to(timesteps_a.dtype)
@@ -71,23 +82,34 @@ def reconstruct_noisy_input(latents: torch.Tensor, noise: torch.Tensor, timestep
 def apply_per_token_mask(
     noisy_input_student: torch.Tensor,
     noisy_input_teacher: torch.Tensor,
-    mask_ratio: float,
+    mask_ratio: "float | torch.Tensor",
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-token masking (paper Eq. 4-5): masked tokens take the teacher (cleaner) values.
+
+    ``mask_ratio`` may be a float (uniform across the batch) or a 1-D per-sample
+    tensor of shape (B,), enabling the paper-faithful coin-flip scheduling where
+    each sample independently uses R_M or 1−R_M as its effective fraction.
 
     Returns (masked_input, mask_flat) with mask_flat (B, N) bool, True = masked.
     N indexes latent pixels, which map 1:1 to packed FLUX.2 image tokens (prc_img
     does no patchify). Independent per-token draw; locality modes are a follow-up.
     """
     B = noisy_input_student.shape[0]
+    # Normalise ratio: accept float, 0-dim tensor, or (B,) tensor.
+    ratio = torch.as_tensor(mask_ratio, dtype=torch.float32, device=device)
+    if ratio.ndim == 0:
+        ratio = ratio.expand(B)  # broadcast scalar to (B,)
+    # ratio is now (B,); broadcast to (B, N) for per-token comparison.
     if noisy_input_student.ndim == 5:
         _, _, T, H, W = noisy_input_student.shape
-        mask_flat = torch.rand(B, T * H * W, device=device) < mask_ratio
+        N = T * H * W
+        mask_flat = torch.rand(B, N, device=device) < ratio.unsqueeze(1)  # (B, N)
         mask_spatial = mask_flat.view(B, 1, T, H, W).expand_as(noisy_input_student)
     else:
         _, _, H, W = noisy_input_student.shape
-        mask_flat = torch.rand(B, H * W, device=device) < mask_ratio
+        N = H * W
+        mask_flat = torch.rand(B, N, device=device) < ratio.unsqueeze(1)  # (B, N)
         mask_spatial = mask_flat.view(B, 1, H, W).expand_as(noisy_input_student)
     masked_input = torch.where(mask_spatial, noisy_input_teacher, noisy_input_student)
     return masked_input, mask_flat
@@ -600,10 +622,20 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
         timesteps_teacher, timesteps_student = assign_teacher_student_timesteps(timesteps_a, timesteps_b)
 
         # 2. noisy inputs + per-token mask (masked tokens take the cleaner teacher noise)
+        # Paper-faithful Eq. 4 coin-flip: per-sample fair coin selects effective fraction
+        # R_M (heads) or 1−R_M (tails). This preserves the per-token marginal p(t) for
+        # any R_M, which is the key invariant of paper Eq. 4.
         noisy_input_teacher = reconstruct_noisy_input(latents, noise, timesteps_teacher)
         noisy_input_student = reconstruct_noisy_input(latents, noise, timesteps_student)
+        B = latents.shape[0]
+        coin = torch.rand(B, device=accelerator.device) < 0.5
+        effective_ratio = torch.where(
+            coin,
+            torch.full((B,), args.mask_ratio, device=accelerator.device),
+            torch.full((B,), 1.0 - args.mask_ratio, device=accelerator.device),
+        )
         noisy_input_student, mask_flat = apply_per_token_mask(
-            noisy_input_student, noisy_input_teacher, args.mask_ratio, accelerator.device
+            noisy_input_student, noisy_input_teacher, effective_ratio, accelerator.device
         )
 
         coupling_prob = args.self_flow_teacher_coupling_prob  # constant; decay schedules are a follow-up
@@ -686,7 +718,10 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
             "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
             "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
             "self_flow/teacher_coupling_prob": coupling_prob,
+            # actual_mask_ratio: mean of per-sample effective ratios (bimodal around R_M and 1-R_M, average ~0.5)
             "self_flow/actual_mask_ratio": mask_flat.float().mean().item(),
+            # cleaner_fraction_mean: mean effective ratio this step (shows per-step coin outcomes, hovers ~0.5)
+            "self_flow/cleaner_fraction_mean": effective_ratio.mean().item(),
             "self_flow/ema_weight_drift": ema_drift.item(),
         }
         masked_count = mask_flat.sum().item()
