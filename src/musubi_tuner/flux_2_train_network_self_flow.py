@@ -376,6 +376,14 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
                 )
             if args.mask_ratio > 0.5:
                 raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)")
+            num_buckets = getattr(args, "num_timestep_buckets", None)
+            if num_buckets is not None and num_buckets >= 2:
+                raise ValueError(
+                    f"--num_timestep_buckets ({num_buckets}) is incompatible with --self_flow: "
+                    "bucketed timestep sampling forces both self-flow draws to the same bucket "
+                    "value (t == s), collapsing the dual-timestep schedule to a no-op. "
+                    "Unset --num_timestep_buckets when using --self_flow."
+                )
             if getattr(args, "compile", False):
                 logger.warning("--compile with --self_flow: forward hooks cause graph breaks; expect reduced compile benefit.")
 
@@ -872,7 +880,12 @@ def self_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
         "--ema_decay",
         type=float,
         default=0.999,
-        help="EMA decay for the Self-Flow teacher LoRA weights.",
+        help=(
+            "EMA decay for the Self-Flow teacher LoRA weights. "
+            "The paper used 0.9999 at pretraining scale; 0.999 is the default here as a "
+            "conservative choice for short LoRA fine-tuning runs where faster EMA tracking "
+            "is preferable."
+        ),
     )
     parser.add_argument(
         "--student_feature_layer",
@@ -921,7 +934,12 @@ def self_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
         "--network_weights_proj",
         type=str,
         default=None,
-        help="Pretrained projection head weights for resumption.",
+        help=(
+            "Pretrained projection head weights for resumption. "
+            "Note: the projection head here is a 2-layer Linear-GELU-Linear MLP; "
+            "the paper (Self-Flow/REPA) used a 3-layer MLP at ~10M params — "
+            "this smaller head is adequate for LoRA-scale runs."
+        ),
     )
     return parser
 
