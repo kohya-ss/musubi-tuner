@@ -10,7 +10,6 @@ from accelerate import Accelerator
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_IDEOGRAM4, ARCHITECTURE_IDEOGRAM4_FULL
 from musubi_tuner.ideogram4 import ideogram4_utils
-from musubi_tuner.ideogram4.ideogram4_scheduler import get_schedule_for_resolution
 from musubi_tuner.ideogram4.sampler_configs import PRESETS
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
@@ -20,6 +19,18 @@ from musubi_tuner.utils.device_utils import clean_memory_on_device
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS = {
+    "uniform",
+    "sigmoid",
+    "shift",
+    "flux_shift",
+    "qwen_shift",
+    "logsnr",
+    "qinglong_flux",
+    "qinglong_qwen",
+    "flux2_shift",
+}
 
 
 class Ideogram4NetworkTrainer(NetworkTrainer):
@@ -40,8 +51,6 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         self._control_training = False
         self.default_guidance_scale = 7.0
         self.default_discrete_flow_shift = 1.0
-        self.args_ideogram4_timestep_mu = args.ideogram4_timestep_mu
-        self.args_ideogram4_timestep_std = args.ideogram4_timestep_std
         if args.blocks_to_swap is not None and args.blocks_to_swap > 33:
             raise ValueError("--blocks_to_swap for Ideogram 4 must be <= 33")
         if args.sample_prompts and (args.text_encoder is None or args.vae is None):
@@ -227,16 +236,6 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
     def scale_shift_latents(self, latents):
         return latents
 
-    def _sample_ideogram_timesteps(self, batch_size: int, image_height: int, image_width: int, device: torch.device, dtype: torch.dtype):
-        schedule = get_schedule_for_resolution(
-            (image_height, image_width),
-            known_mean=self.args_ideogram4_timestep_mu,
-            std=self.args_ideogram4_timestep_std,
-        )
-        u = torch.rand(batch_size, device=device, dtype=torch.float32)
-        t = schedule(u).to(device=device, dtype=dtype)
-        return t
-
     def process_batch(
         self,
         args: argparse.Namespace,
@@ -252,15 +251,19 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         vae,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del network, noise, noise_scheduler, vae, global_step
+        del network, noise, vae, global_step
         latents = latents.to(device=accelerator.device, dtype=dit_dtype)
         token_grid = latents
         noise = torch.randn_like(token_grid)
-        image_height = token_grid.shape[-2] * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
-        image_width = token_grid.shape[-1] * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
-        t = self._sample_ideogram_timesteps(token_grid.shape[0], image_height, image_width, accelerator.device, dit_dtype)
-        noisy_model_input = (1.0 - t.view(-1, 1, 1, 1)) * token_grid + t.view(-1, 1, 1, 1) * noise
-        timesteps = t * 1000.0
+        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
+            args,
+            noise,
+            token_grid,
+            batch.get("timesteps"),
+            noise_scheduler,
+            accelerator.device,
+            dit_dtype,
+        )
 
         output = self.call_dit(
             args,
@@ -273,8 +276,29 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
             timesteps,
             network_dtype,
         )
-        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target.to(network_dtype), reduction="mean")
-        return loss, {}
+        pred = output.pred.to(network_dtype)
+        target = output.target.to(network_dtype)
+        loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
+
+        loss_metrics = {}
+        if getattr(args, "log_loss_stats", False):
+            with torch.no_grad():
+                pred_f = pred.detach().float()
+                target_f = target.detach().float()
+                pred_rms = pred_f.square().mean().sqrt()
+                target_rms = target_f.square().mean().sqrt()
+                denom = (pred_rms * target_rms).clamp_min(1e-8)
+                loss_metrics = {
+                    "loss/zero_pred": target_f.square().mean().item(),
+                    "loss/flipped_pred": torch.nn.functional.mse_loss(-pred_f, target_f, reduction="mean").item(),
+                    "loss/pred_rms": pred_rms.item(),
+                    "loss/target_rms": target_rms.item(),
+                    "loss/pred_target_cosine": ((pred_f * target_f).mean() / denom).item(),
+                    "timestep/mean": timesteps.detach().float().mean().item(),
+                    "timestep/min": timesteps.detach().float().min().item(),
+                    "timestep/max": timesteps.detach().float().max().item(),
+                }
+        return loss, loss_metrics
 
     def call_dit(
         self,
@@ -313,7 +337,11 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 
         # Training samples use t=0 as clean and t=1 as noise. The Ideogram 4
         # transformer uses the inverse convention: t=0 is noise and t=1 is clean.
-        model_t = 1.0 - timesteps.to(accelerator.device, dtype=torch.float32) / 1000.0
+        raw_timestep = timesteps.to(accelerator.device, dtype=torch.float32)
+        if getattr(args, "timestep_sampling", "sigma") in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+            model_t = ((1001.0 - raw_timestep) / 1000.0).clamp(0.0, 1.0)
+        else:
+            model_t = (1.0 - raw_timestep / 1000.0).clamp(0.0, 1.0)
         model_pred = model(
             llm_features=llm_features,
             x=x,
@@ -334,8 +362,11 @@ def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for Ideogram 4 DiT, default is bfloat16")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
     parser.add_argument("--initial_sigma", type=float, default=1.004, help="override the first denoising sigma for sampling")
-    parser.add_argument("--ideogram4_timestep_mu", type=float, default=0.0, help="known mean for Ideogram 4 logit-normal training timesteps")
-    parser.add_argument("--ideogram4_timestep_std", type=float, default=1.0, help="std for Ideogram 4 logit-normal training timesteps")
+    parser.add_argument("--log_loss_stats", action="store_true", help="log Ideogram 4 prediction/target diagnostics during training")
+    # Deprecated compatibility knobs. Ideogram 4 now uses the shared
+    # --timestep_sampling path, so these legacy values are intentionally ignored.
+    parser.add_argument("--ideogram4_timestep_mu", type=float, default=0.0, help=argparse.SUPPRESS)
+    parser.add_argument("--ideogram4_timestep_std", type=float, default=1.0, help=argparse.SUPPRESS)
     parser.add_argument(
         "--validate_caption_structure",
         action="store_true",

@@ -628,7 +628,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         self.assertIsNone(args.unconditional_dit)
 
-    def test_process_batch_uses_cached_model_latents_without_renormalizing(self):
+    def test_process_batch_uses_common_timestep_sampler_without_renormalizing_cached_model_latents(self):
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
         original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
         original_trainer = sys.modules.get("musubi_tuner.training.trainer_base")
@@ -667,9 +667,15 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             trainer = ideogram4_train_network.Ideogram4NetworkTrainer()
             captured = {}
 
-            def fake_sample(batch_size, image_height, image_width, device, dtype):
-                captured["sample_args"] = (batch_size, image_height, image_width, device, dtype)
-                return torch.full((batch_size,), 0.25, device=device, dtype=dtype)
+            def fake_get_timesteps(args, noise, latents, timesteps, noise_scheduler, device, dtype):
+                captured["sampler_args"] = args
+                captured["sampler_timesteps"] = timesteps
+                captured["sampler_noise_scheduler"] = noise_scheduler
+                captured["sampler_device"] = device
+                captured["sampler_dtype"] = dtype
+                t = torch.full((latents.shape[0],), 0.25, device=device, dtype=dtype)
+                noisy_model_input = (1.0 - t.view(-1, 1, 1, 1)) * latents + t.view(-1, 1, 1, 1) * noise
+                return noisy_model_input, t * 1000.0 + 1.0
 
             def fake_call(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype):
                 captured["latents"] = latents.detach().clone()
@@ -679,19 +685,22 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 target = latents - noise
                 return DiTOutput(pred=target, target=target)
 
-            trainer._sample_ideogram_timesteps = fake_sample
+            trainer.get_noisy_model_input_and_timesteps = fake_get_timesteps
             trainer.call_dit = fake_call
 
             latents = torch.linspace(-1.0, 1.0, 128 * 32 * 40, dtype=torch.float32).reshape(1, 128, 32, 40)
-            loss, _ = trainer.process_batch(
-                SimpleNamespace(),
+            args = SimpleNamespace(timestep_sampling="uniform", log_loss_stats=True)
+            noise_scheduler = object()
+            batch_timesteps = [0.25]
+            loss, metrics = trainer.process_batch(
+                args,
                 SimpleNamespace(device=torch.device("cpu")),
                 transformer=None,
                 network=None,
-                batch={"i4_llm_features": [torch.zeros(1, 8)]},
+                batch={"i4_llm_features": [torch.zeros(1, 8)], "timesteps": batch_timesteps},
                 latents=latents,
                 noise=torch.empty_like(latents),
-                noise_scheduler=None,
+                noise_scheduler=noise_scheduler,
                 dit_dtype=torch.float32,
                 network_dtype=torch.float32,
                 vae=None,
@@ -715,12 +724,20 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             else:
                 sys.modules.pop("musubi_tuner.training.trainer_base", None)
 
-        self.assertEqual(captured["sample_args"][:3], (1, 512, 640))
+        self.assertIs(captured["sampler_args"], args)
+        self.assertIs(captured["sampler_timesteps"], batch_timesteps)
+        self.assertIs(captured["sampler_noise_scheduler"], noise_scheduler)
+        self.assertEqual(captured["sampler_device"], torch.device("cpu"))
+        self.assertEqual(captured["sampler_dtype"], torch.float32)
         self.assertTrue(torch.equal(captured["latents"], latents))
         expected_noisy = 0.75 * latents + 0.25 * captured["noise"]
         self.assertTrue(torch.allclose(captured["noisy_model_input"], expected_noisy))
-        self.assertTrue(torch.equal(captured["timesteps"], torch.full((1,), 250.0)))
+        self.assertTrue(torch.equal(captured["timesteps"], torch.full((1,), 251.0)))
         self.assertEqual(float(loss.item()), 0.0)
+        self.assertGreater(metrics["loss/zero_pred"], 0.0)
+        self.assertGreater(metrics["loss/flipped_pred"], 0.0)
+        self.assertAlmostEqual(metrics["loss/pred_target_cosine"], 1.0, places=6)
+        self.assertAlmostEqual(metrics["timestep/mean"], 251.0, places=6)
 
     def test_call_dit_uses_model_time_and_clean_minus_noise_target(self):
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
@@ -793,14 +810,14 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             noisy_model_input = 0.75 * latents + 0.25 * noise
 
             output = trainer.call_dit(
-                SimpleNamespace(gradient_checkpointing=False),
+                SimpleNamespace(gradient_checkpointing=False, timestep_sampling="uniform"),
                 SimpleNamespace(device=torch.device("cpu")),
                 transformer,
                 latents,
                 {"i4_llm_features": [torch.zeros(1, 8)]},
                 noise,
                 noisy_model_input,
-                torch.tensor([250.0]),
+                torch.tensor([251.0]),
                 torch.float32,
             )
         finally:
