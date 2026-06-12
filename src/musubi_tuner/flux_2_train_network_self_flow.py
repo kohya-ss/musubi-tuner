@@ -374,8 +374,8 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
                     f"--student_feature_layer ({args.student_feature_layer}) must be less than "
                     f"--teacher_feature_layer ({args.teacher_feature_layer})."
                 )
-            if args.mask_ratio > 0.5:
-                raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)")
+            if not 0.0 <= args.mask_ratio <= 0.5:
+                raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be in [0, 0.5] (paper constraint R_M <= 0.5)")
             num_buckets = getattr(args, "num_timestep_buckets", None)
             if num_buckets is not None and num_buckets >= 2:
                 raise ValueError(
@@ -726,7 +726,7 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
             "self_flow/timestep_teacher_mean": timesteps_teacher.float().mean().item(),
             "self_flow/timestep_diff": (timesteps_student.float().mean() - timesteps_teacher.float().mean()).item(),
             "self_flow/teacher_coupling_prob": coupling_prob,
-            # actual_mask_ratio: mean of per-sample effective ratios (bimodal around R_M and 1-R_M, average ~0.5)
+            # actual_mask_ratio: empirical masked-token fraction (per-sample bimodal around R_M / 1-R_M, average ~0.5)
             "self_flow/actual_mask_ratio": mask_flat.float().mean().item(),
             # cleaner_fraction_mean: mean effective ratio this step (shows per-step coin outcomes, hovers ~0.5)
             "self_flow/cleaner_fraction_mean": effective_ratio.mean().item(),
@@ -922,7 +922,8 @@ def self_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
         "--self_flow_teacher_mismatch_ratio",
         type=float,
         default=1.0,
-        help="When the coupling gate fires, fraction of masked patches receiving the timestep mismatch.",
+        help="When the coupling gate fires, fraction of masked patches receiving the timestep mismatch. "
+        "Note: the masked population is per-sample bimodal (R_M or 1-R_M of tokens) under paper-faithful scheduling.",
     )
     parser.add_argument(
         "--network_weights_ema",

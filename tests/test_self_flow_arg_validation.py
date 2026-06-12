@@ -57,3 +57,11 @@ def test_mask_ratio_gt_half_raises():
     args = make_args(mask_ratio=0.6)
     with pytest.raises(ValueError, match="mask_ratio"):
         trainer.handle_model_specific_args(args)
+
+
+def test_negative_mask_ratio_raises():
+    """Guard: mask_ratio < 0 must raise (would yield 1 - R_M > 1 on coin tails)."""
+    trainer = Flux2SelfFlowNetworkTrainer()
+    args = make_args(mask_ratio=-0.1)
+    with pytest.raises(ValueError, match="mask_ratio"):
+        trainer.handle_model_specific_args(args)
