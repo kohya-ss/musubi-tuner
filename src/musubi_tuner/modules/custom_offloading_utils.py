@@ -632,12 +632,18 @@ class LoRAStreamOffloader:
 
     def _load(self, rank: int, slot: int, ctx: str = "fwd"):
         """Stream the streaming block at ``rank`` into ring ``slot`` (H2D only), repointing weights."""
+        blk = self.stream_idx[rank]
+
+        # already resident (e.g. ring survived a re-prepare): the slot content is still identical to the
+        # immutable CPU master, so just rebind the weights to the ring -- no transfer needed
+        if self.in_slot[slot] == blk:
+            self._bind(blk, self.ring_param[slot])
+            return
+
         # evict the slot's current owner: repoint its weights back to the CPU master (no transfer)
         prev = self.in_slot[slot]
-        if prev is not None and prev != self.stream_idx[rank]:
+        if prev is not None:
             self._bind(prev, self.cpu_master[prev])
-
-        blk = self.stream_idx[rank]
         ev_a = ev_b = None
         with torch.cuda.stream(self.copy_stream):
             free_ev = self.free_event[slot]
@@ -737,8 +743,9 @@ class LoRAStreamOffloader:
                 for flat in self.ring_flat
             ]
 
-        # reset ring state and cold-start preload the first B streaming blocks
-        self.in_slot = [None] * self.B
+        # reset transfer state and preload the first B streaming blocks. in_slot deliberately survives:
+        # after a completed backward pass the ring already holds ranks 0..B-1, so these loads become
+        # no-op rebinds (see _load) instead of redundant cold-start transfers.
         self.free_event = [None] * self.B
         self.load_event = {}
         for k in range(self.B):
