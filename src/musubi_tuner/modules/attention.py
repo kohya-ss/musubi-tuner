@@ -9,11 +9,13 @@ try:
     from flash_attn.flash_attn_interface import _flash_attn_forward
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
     from flash_attn.flash_attn_interface import flash_attn_func
+    from flash_attn.flash_attn_interface import flash_attn_qkvpacked_func
 except ImportError:
     flash_attn = None
     flash_attn_varlen_func = None
     _flash_attn_forward = None
     flash_attn_func = None
+    flash_attn_qkvpacked_func = None
 
 try:
     from sageattention import sageattn_varlen, sageattn

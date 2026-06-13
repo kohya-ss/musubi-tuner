@@ -1836,6 +1836,7 @@ class NetworkTrainer:
             "ss_max_grad_norm": args.max_grad_norm,
             "ss_fp8_base": bool(args.fp8_base),
             # "ss_fp8_llm": bool(args.fp8_llm), # remove this because this is only for HuanyuanVideo TODO set architecure dependent metadata
+            "ss_fused_qknorm_rope": bool(getattr(args, "fused_qknorm_rope", False)),  # FLUX.2 only
             "ss_full_fp16": bool(args.full_fp16),
             "ss_full_bf16": bool(args.full_bf16),
             "ss_weighting_scheme": args.weighting_scheme,

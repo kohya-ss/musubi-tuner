@@ -8,9 +8,10 @@ from einops import rearrange
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from musubi_tuner.modules.attention import AttentionParams
+from musubi_tuner.modules.attention import AttentionParams, flash_attn_qkvpacked_func
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.attention import attention as unified_attention
+from musubi_tuner.modules.fused_qknorm_rope import fused_qknorm_rope
 
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
@@ -411,7 +412,9 @@ class AutoEncoder(nn.Module):
 
 
 class Flux2(nn.Module):
-    def __init__(self, params: Flux2Params, attn_mode: str = "flash", split_attn: bool = False) -> None:
+    def __init__(
+        self, params: Flux2Params, attn_mode: str = "flash", split_attn: bool = False, fused_qknorm_rope: bool = False
+    ) -> None:
         super().__init__()
 
         self.in_channels = params.in_channels
@@ -435,13 +438,17 @@ class Flux2(nn.Module):
 
         self.attn_mode = attn_mode
         self.split_attn = split_attn
+        self.fused_qknorm_rope = fused_qknorm_rope
 
         self.double_blocks = nn.ModuleList(
-            [DoubleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio) for _ in range(params.depth)]
+            [
+                DoubleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, fused_qknorm_rope=fused_qknorm_rope)
+                for _ in range(params.depth)
+            ]
         )
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, fused_qknorm_rope=fused_qknorm_rope)
                 for _ in range(params.depth_single_blocks)
             ]
         )
@@ -715,7 +722,7 @@ class LastLayer(nn.Module):
 
 
 class SingleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, fused_qknorm_rope: bool = False):
         super().__init__()
 
         self.hidden_dim = hidden_size
@@ -735,6 +742,7 @@ class SingleStreamBlock(nn.Module):
 
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
+        self.fused_qknorm_rope = fused_qknorm_rope
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
@@ -752,14 +760,21 @@ class SingleStreamBlock(nn.Module):
 
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1)
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del qkv
-        q, k = self.norm(q, k, v)
+        if self.fused_qknorm_rope:
+            head_dim = self.hidden_size // self.num_heads
+            qkv = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, head_dim)
+            qkv = fused_qknorm_rope(qkv, self.norm.query_norm.scale, self.norm.key_norm.scale, pe)
+            attn = packed_attention(qkv, attn_params)
+            del qkv, pe
+        else:
+            q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            del qkv
+            q, k = self.norm(q, k, v)
 
-        qkv_list = [q, k, v]
-        del q, k, v
-        attn = attention(qkv_list, pe, attn_params)
-        del qkv_list, pe
+            qkv_list = [q, k, v]
+            del q, k, v
+            attn = attention(qkv_list, pe, attn_params)
+            del qkv_list, pe
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
@@ -776,7 +791,7 @@ class SingleStreamBlock(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, fused_qknorm_rope: bool = False):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
@@ -804,6 +819,7 @@ class DoubleStreamBlock(nn.Module):
         )
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
+        self.fused_qknorm_rope = fused_qknorm_rope
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
@@ -840,9 +856,6 @@ class DoubleStreamBlock(nn.Module):
 
         img_qkv = self.img_attn.qkv(img_modulated)
         del img_modulated
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del img_qkv
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
@@ -850,24 +863,42 @@ class DoubleStreamBlock(nn.Module):
         del txt_mod1_scale, txt_mod1_shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         del txt_modulated
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        del txt_qkv
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        txt_len = txt_q.shape[2]
-        q = torch.cat((txt_q, img_q), dim=2)
-        del txt_q, img_q
-        k = torch.cat((txt_k, img_k), dim=2)
-        del txt_k, img_k
-        v = torch.cat((txt_v, img_v), dim=2)
-        del txt_v, img_v
+        txt_len = txt_qkv.shape[1]
 
-        pe = torch.cat((pe_ctx, pe), dim=2)
-        del pe_ctx
-        qkv_list = [q, k, v]
-        del q, k, v
-        attn = attention(qkv_list, pe, attn_params)
-        del qkv_list, pe
+        if self.fused_qknorm_rope:
+            head_dim = self.hidden_size // self.num_heads
+            img_qkv = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, head_dim)
+            img_qkv = fused_qknorm_rope(img_qkv, self.img_attn.norm.query_norm.scale, self.img_attn.norm.key_norm.scale, pe)
+            txt_qkv = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, head_dim)
+            txt_qkv = fused_qknorm_rope(txt_qkv, self.txt_attn.norm.query_norm.scale, self.txt_attn.norm.key_norm.scale, pe_ctx)
+            qkv = torch.cat((txt_qkv, img_qkv), dim=1)
+            del txt_qkv, img_qkv, pe, pe_ctx
+            attn = packed_attention(qkv, attn_params)
+            del qkv
+        else:
+            img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            del img_qkv
+            img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+
+            txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            del txt_qkv
+            txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+
+            q = torch.cat((txt_q, img_q), dim=2)
+            del txt_q, img_q
+            k = torch.cat((txt_k, img_k), dim=2)
+            del txt_k, img_k
+            v = torch.cat((txt_v, img_v), dim=2)
+            del txt_v, img_v
+
+            pe = torch.cat((pe_ctx, pe), dim=2)
+            del pe_ctx
+            qkv_list = [q, k, v]
+            del q, k, v
+            attn = attention(qkv_list, pe, attn_params)
+            del qkv_list, pe
+
         txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
         del attn
 
@@ -997,6 +1028,26 @@ def attention(qkv_list: list[Tensor], pe: Tensor, attn_params: AttentionParams) 
     del q, k, v
     x = unified_attention(qkv_list, attn_params=attn_params)
     return x
+
+
+def packed_attention(qkv: Tensor, attn_params: AttentionParams) -> Tensor:
+    """Attention on packed qkv (B, L, 3, H, D) with QKNorm and RoPE already applied.
+
+    Uses flash_attn_qkvpacked_func when possible (no unbind, no copies);
+    otherwise unbinds to views and reuses the unified attention dispatch.
+    Returns (B, L, H*D) like attention().
+    """
+    if (
+        attn_params.attn_mode == "flash"
+        and not attn_params.split_attn
+        and flash_attn_qkvpacked_func is not None
+        and attn_params.cu_seqlens is None
+        and attn_params.attention_mask is None
+    ):
+        x = flash_attn_qkvpacked_func(qkv, 0.0)  # B, L, H, D
+        return x.reshape(x.shape[0], x.shape[1], -1)
+    q, k, v = qkv.unbind(dim=2)  # views: B, L, H, D
+    return unified_attention([q, k, v], attn_params=attn_params)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
