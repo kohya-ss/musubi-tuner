@@ -479,6 +479,60 @@ class ModelOffloader(Offloader):
         self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
 
 
+class _DirectCopier:
+    """
+    Transfer engine for ``LoRAStreamOffloader``: copies a flat host buffer straight into a flat device
+    buffer on a private copy stream (Host->Device only).
+
+    This is the seam that isolates all CUDA stream/event primitives from the residency logic. The residency
+    side only ever calls ``submit`` / ``wait``; a future ``StagedCopier`` (pageable master + a small pinned
+    staging pool + worker thread) and a non-CUDA device shim plug in behind the same interface without the
+    residency code changing. Keep every ``torch.cuda.*`` transfer primitive inside copiers like this one.
+
+    ``non_blocking`` mirrors ``use_pinned_memory``: True when the source is pinned (async H2D), False for the
+    pageable fallback (a synchronous copy that blocks the calling thread -- the path ``StagedCopier`` replaces).
+    """
+
+    def __init__(self, device: torch.device, non_blocking: bool, debug: bool = False):
+        self.device = device
+        self.non_blocking = non_blocking
+        self.debug = debug
+        self.copy_stream = torch.cuda.Stream(device=device)
+        self._events = {}  # key -> cuda.Event recording H2D completion
+        self._xfer = {}  # key -> (ev_a, ev_b) transfer-timing events (debug only)
+
+    def submit(self, key, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event=None):
+        """Begin the H2D copy of ``src_flat`` into ``dst_flat``, gated behind ``gate_event`` (compute done with dst)."""
+        ev_a = ev_b = None
+        with torch.cuda.stream(self.copy_stream):
+            if gate_event is not None:
+                self.copy_stream.wait_event(gate_event)  # do not overwrite a buffer still used by compute
+            if self.debug:
+                ev_a = torch.cuda.Event(enable_timing=True)
+                ev_b = torch.cuda.Event(enable_timing=True)
+                ev_a.record(self.copy_stream)
+            dst_flat.copy_(src_flat, non_blocking=self.non_blocking)
+            if self.debug:
+                ev_b.record(self.copy_stream)
+                self._xfer[key] = (ev_a, ev_b)
+        self._events[key] = self.copy_stream.record_event()
+
+    def wait(self, key):
+        """Return the H2D-completion event for ``key`` (None if nothing is in flight for it)."""
+        return self._events.get(key)
+
+    def pop_xfer_timing(self, key):
+        """Pop the (start, end) transfer-timing events recorded for ``key`` (debug only)."""
+        return self._xfer.pop(key, None)
+
+    def sync(self):
+        self.copy_stream.synchronize()
+
+    def reset(self):
+        self._events.clear()
+        self._xfer.clear()
+
+
 class LoRAStreamOffloader:
     """
     H2D-only offloader for training where the base weights are frozen (e.g. LoRA / LoHa / LoKr).
@@ -560,15 +614,16 @@ class LoRAStreamOffloader:
                     f"Found a trainable Linear weight in block {b}."
                 )
 
+        # ---- transfer engine: owns the copy stream and all H2D primitives (see _DirectCopier) ----
+        self.copier = _DirectCopier(device, non_blocking=use_pinned_memory, debug=self.debug)
+
         # ---- runtime state (GPU buffers allocated lazily in prepare_block_devices_before_forward) ----
-        self.copy_stream = torch.cuda.Stream(device=device)
         self.cpu_master = {}  # block_idx -> [CPU (pinned) Parameter per swap weight] (views into cpu_flat)
         self.cpu_flat = {}  # block_idx -> flat (pinned) uint8 CPU tensor backing the masters
         self.ring_param = None  # [slot] -> [GPU nn.Parameter per swap weight] (views into ring_flat)
         self.ring_flat = None  # [slot] -> flat uint8 GPU tensor backing the ring params
         self._layout = None  # ([byte offset per swap weight], total bytes) shared by all streaming blocks
         self.in_slot = [None] * self.B  # slot -> block_idx currently bound to this slot (or None)
-        self.load_event = {}  # block_idx -> cuda.Event recording H2D completion
         self.free_event = [None] * self.B  # slot -> cuda.Event recording when compute finished using the slot
         self._module_cache = {}  # block_idx -> [modules with swap weights]
 
@@ -644,24 +699,13 @@ class LoRAStreamOffloader:
         prev = self.in_slot[slot]
         if prev is not None:
             self._bind(prev, self.cpu_master[prev])
-        ev_a = ev_b = None
-        with torch.cuda.stream(self.copy_stream):
-            free_ev = self.free_event[slot]
-            if free_ev is not None:
-                self.copy_stream.wait_event(free_ev)  # do not overwrite weights still used by compute
-            if self.debug:
-                ev_a = torch.cuda.Event(enable_timing=True)
-                ev_b = torch.cuda.Event(enable_timing=True)
-                ev_a.record(self.copy_stream)
-            # single coalesced H2D copy of the whole block (the ring params are views into ring_flat).
-            # NOTE: this bumps the autograd version counter of all views in the slot. Safe under gradient
-            # checkpointing (weights are re-read at recompute time, and a slot is only overwritten after its
-            # free_event); without checkpointing autograd raises a version error instead of silently using
-            # stale-saved weights -- which the old per-tensor `.data.copy_` would have hidden.
-            self.ring_flat[slot].copy_(self.cpu_flat[blk], non_blocking=self.use_pinned_memory)
-            if self.debug:
-                ev_b.record(self.copy_stream)
-        self.load_event[blk] = self.copy_stream.record_event()
+
+        # single coalesced H2D copy of the whole block, gated behind the slot's free_event (compute done
+        # with it). The ring params are views into ring_flat, so the copy bumps their autograd version
+        # counter: safe under gradient checkpointing (weights are re-read at recompute time, and a slot is
+        # only overwritten after its free_event); without checkpointing autograd raises a version error
+        # instead of silently using stale-saved weights -- which the old per-tensor `.data.copy_` hid.
+        self.copier.submit(blk, self.ring_flat[slot], self.cpu_flat[blk], self.free_event[slot])
 
         self._bind(blk, self.ring_param[slot])  # reference swap (no .data trick, no cudaMalloc)
         self.in_slot[slot] = blk
@@ -669,12 +713,14 @@ class LoRAStreamOffloader:
         if self.debug:
             c = self._cur[ctx]
             c["loads"] += 1
-            c["xfer_ev"].append((ev_a, ev_b))
+            xfer = self.copier.pop_xfer_timing(blk)
+            if xfer is not None:
+                c["xfer_ev"].append(xfer)
 
     # ------------------------------------------------------------------ public interface (mirrors ModelOffloader)
 
     def set_forward_only(self, forward_only: bool):
-        self.copy_stream.synchronize()
+        self.copier.sync()
         self.forward_only = forward_only
 
     def __del__(self):
@@ -747,7 +793,7 @@ class LoRAStreamOffloader:
         # after a completed backward pass the ring already holds ranks 0..B-1, so these loads become
         # no-op rebinds (see _load) instead of redundant cold-start transfers.
         self.free_event = [None] * self.B
-        self.load_event = {}
+        self.copier.reset()
         for k in range(self.B):
             self._load(k, k)
 
@@ -767,7 +813,7 @@ class LoRAStreamOffloader:
             if self.debug:
                 self._cur[ctx]["self_heal"] += 1
             self._load(j, slot, ctx)
-        ev = self.load_event.get(block_idx)
+        ev = self.copier.wait(block_idx)
         if ev is None:
             return
         if not self.debug:
