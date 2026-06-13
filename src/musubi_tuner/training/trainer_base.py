@@ -1915,7 +1915,13 @@ class NetworkTrainer:
         del train_dataset_group
 
         # function for saving/removing
-        save_dtype = dit_dtype
+        save_dtype = train_utils.resolve_save_dtype(
+            args.save_precision, getattr(args, "full_fp16", False), getattr(args, "full_bf16", False)
+        )
+        logger.info(
+            f"network weights will be saved as {save_dtype}"
+            + (f" (--save_precision {args.save_precision})" if args.save_precision is not None else " (default)")
+        )
 
         def save_model(ckpt_name: str, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
             os.makedirs(args.output_dir, exist_ok=True)

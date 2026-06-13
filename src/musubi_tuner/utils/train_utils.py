@@ -5,8 +5,10 @@ import shutil
 from typing import Callable
 
 import accelerate
+import torch
 
 from musubi_tuner.utils import huggingface_utils
+from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -181,3 +183,19 @@ def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: flo
     m = (y2 - y1) / (x2 - x1)
     b = y1 - m * x1
     return lambda x: m * x + b
+
+
+def resolve_save_dtype(save_precision: str | None, full_fp16: bool = False, full_bf16: bool = False) -> torch.dtype:
+    """Resolve the dtype for saving network weights.
+
+    Explicit --save_precision wins; otherwise follow full_fp16/full_bf16 so the
+    saved weights match the training precision; otherwise fp32, the precision
+    the network weights are actually trained in.
+    """
+    if save_precision is not None:
+        return str_to_dtype(save_precision)
+    if full_fp16:
+        return torch.float16
+    if full_bf16:
+        return torch.bfloat16
+    return torch.float32

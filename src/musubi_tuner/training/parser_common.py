@@ -201,6 +201,14 @@ def _add_training_args(parser: argparse.ArgumentParser) -> None:
         choices=["no", "fp16", "bf16"],
         help="use mixed precision / 混合精度を使う場合、その精度",
     )
+    parser.add_argument(
+        "--save_precision",
+        type=str,
+        default=None,
+        choices=["float", "fp32", "fp16", "bf16"],
+        help="precision for saving network weights, default: fp32 (the precision network weights are trained in)"
+        " / ネットワークの重みを保存する際の精度、省略時はfp32（ネットワークの重みはfp32で学習されるため）",
+    )
 
 
 def _add_logging_args(parser: argparse.ArgumentParser) -> None:
