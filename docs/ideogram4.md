@@ -96,7 +96,6 @@ Sampling during training requires the remaining local components:
 python src/musubi_tuner/ideogram4_train_network.py `
   --dataset_config path\to\dataset.toml `
   --dit path\to\ideogram4_fp8_scaled.safetensors `
-  --unconditional_dit path\to\ideogram4_unconditional_fp8_scaled.safetensors `
   --text_encoder path\to\qwen3vl_8b_fp8_scaled.safetensors `
   --vae path\to\flux2-vae.safetensors `
   --network_module networks.lora_ideogram4 `
@@ -109,6 +108,9 @@ python src/musubi_tuner/ideogram4_train_network.py `
 ```
 
 LoRA v1 trains only the conditional transformer. It targets `attention.qkv`, `attention.o`, and `feed_forward.w1/w2/w3` inside `Ideogram4TransformerBlock`, including official `Fp8Linear` layers. Merging LoRA back into FP8 base weights is not supported.
+Sampling during LoRA training defaults to single-DiT CFG for the same reason: the LoRA adapter is attached only to the
+conditional DiT. If you pass `--unconditional_dit`, it is ignored for training samples unless you also pass
+`--use_unconditional_dit_for_lora_sampling` to opt into the official asymmetric CFG path.
 
 Ideogram 4 training defaults to `--timestep_sampling ideogram4_shift`, a resolution-aware logit-normal timestep
 sampler aligned with the official pipeline.

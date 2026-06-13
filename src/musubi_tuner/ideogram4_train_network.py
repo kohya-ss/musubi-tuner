@@ -10,6 +10,7 @@ from accelerate import Accelerator
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_IDEOGRAM4, ARCHITECTURE_IDEOGRAM4_FULL
 from musubi_tuner.ideogram4 import ideogram4_utils
+from musubi_tuner.ideogram4.sampling_policy import should_use_unconditional_dit_for_lora_sampling
 from musubi_tuner.ideogram4.sampler_configs import PRESETS
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
@@ -77,11 +78,17 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 
         sample_parameters = []
         with torch.no_grad():
-            has_unconditional_dit = bool(args.unconditional_dit)
+            use_unconditional_dit = should_use_unconditional_dit_for_lora_sampling(args)
+            if args.unconditional_dit and not use_unconditional_dit:
+                logger.warning(
+                    "Ignoring --unconditional_dit for Ideogram 4 LoRA sampling. "
+                    "LoRA training only adapts the conditional DiT, so sampling defaults to single-DiT CFG. "
+                    "Pass --use_unconditional_dit_for_lora_sampling to opt into the old asymmetric CFG path."
+                )
             for prompt_dict in prompts:
                 prompt = prompt_dict.get("prompt", "")
                 negative_prompt = prompt_dict.get("negative_prompt")
-                if has_unconditional_dit and negative_prompt is not None:
+                if use_unconditional_dit and negative_prompt is not None:
                     logger.warning("Ideogram 4 v1 ignores negative_prompt in sample prompts.")
                 if args.validate_caption_structure:
                     ideogram4_utils.validate_prompt(prompt, warn_only=args.warn_on_caption_issues)
@@ -89,7 +96,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 prompt_dict["i4_llm_features"] = ideogram4_utils.encode_prompt_to_features(
                     tokenizer, text_encoder, prompt, device
                 ).cpu()
-                if not has_unconditional_dit:
+                if not use_unconditional_dit:
                     prompt_dict["i4_unconditional_llm_features"] = ideogram4_utils.encode_prompt_to_features(
                         tokenizer, text_encoder, negative_prompt or "", device
                     ).cpu()
@@ -112,7 +119,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         sample_parameters,
         dit_dtype,
     ) -> None:
-        if args.unconditional_dit and self.unconditional_transformer is None:
+        if should_use_unconditional_dit_for_lora_sampling(args) and self.unconditional_transformer is None:
             logger.info(f"Loading Ideogram 4 unconditional DiT from {args.unconditional_dit}")
             self.unconditional_transformer = ideogram4_utils.load_ideogram4_transformer(
                 args.unconditional_dit,
@@ -360,6 +367,14 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.set_defaults(timestep_sampling="ideogram4_shift")
     parser.add_argument("--unconditional_dit", type=str, default=None, help="unconditional Ideogram 4 DiT safetensors path")
+    parser.add_argument(
+        "--use_unconditional_dit_for_lora_sampling",
+        action="store_true",
+        help=(
+            "opt into official asymmetric CFG during LoRA training samples; by default LoRA sampling uses single-DiT CFG "
+            "because only the conditional DiT is trained"
+        ),
+    )
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling")
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for Ideogram 4 DiT, default is bfloat16")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
