@@ -481,21 +481,17 @@ class ModelOffloader(Offloader):
 
 class _DirectCopier:
     """
-    Transfer engine for ``LoRAStreamOffloader``: copies a flat host buffer straight into a flat device
-    buffer on a private copy stream (Host->Device only).
+    Transfer engine for ``LoRAStreamOffloader`` when the masters are *pinned*: copies a flat pinned host
+    buffer straight into a flat device buffer on a private copy stream (async Host->Device only).
 
     This is the seam that isolates all CUDA stream/event primitives from the residency logic. The residency
-    side only ever calls ``submit`` / ``wait``; a future ``StagedCopier`` (pageable master + a small pinned
-    staging pool + worker thread) and a non-CUDA device shim plug in behind the same interface without the
-    residency code changing. Keep every ``torch.cuda.*`` transfer primitive inside copiers like this one.
-
-    ``non_blocking`` mirrors ``use_pinned_memory``: True when the source is pinned (async H2D), False for the
-    pageable fallback (a synchronous copy that blocks the calling thread -- the path ``StagedCopier`` replaces).
+    side only ever calls ``submit`` / ``wait``; ``_StagedCopier`` (pageable master + worker thread) and a
+    future non-CUDA device shim plug in behind the same interface without the residency code changing. Keep
+    every ``torch.cuda.*`` transfer primitive inside copiers like this one.
     """
 
-    def __init__(self, device: torch.device, non_blocking: bool, debug: bool = False):
+    def __init__(self, device: torch.device, debug: bool = False):
         self.device = device
-        self.non_blocking = non_blocking
         self.debug = debug
         self.copy_stream = torch.cuda.Stream(device=device)
         self._events = {}  # key -> cuda.Event recording H2D completion
@@ -511,7 +507,7 @@ class _DirectCopier:
                 ev_a = torch.cuda.Event(enable_timing=True)
                 ev_b = torch.cuda.Event(enable_timing=True)
                 ev_a.record(self.copy_stream)
-            dst_flat.copy_(src_flat, non_blocking=self.non_blocking)
+            dst_flat.copy_(src_flat, non_blocking=True)  # src is pinned -> async H2D
             if self.debug:
                 ev_b.record(self.copy_stream)
                 self._xfer[key] = (ev_a, ev_b)
@@ -531,6 +527,111 @@ class _DirectCopier:
     def reset(self):
         self._events.clear()
         self._xfer.clear()
+
+
+class _StagedCopier:
+    """
+    Transfer engine for ``LoRAStreamOffloader`` when the masters are kept in *pageable* host memory: each
+    H2D is staged through a small pool of pinned buffers filled by a background worker thread. Same
+    ``submit`` / ``wait`` interface as ``_DirectCopier``, so the residency code is identical.
+
+    Why: pinning every streaming master (what ``_DirectCopier`` needs) can cost tens of GB of non-pageable
+    "shared GPU memory" (notably on Windows). Here the masters stay pageable and only ``num_staging`` pinned
+    buffers exist. A pageable->device copy is, inside the CUDA driver, already a synchronous serial
+    pageable->pinned->device transfer; doing it ourselves on a worker thread lets the pageable->pinned
+    memcpy overlap the previous block's pinned->device DMA and -- crucially -- keeps it off the main thread
+    so compute kernel launches are never blocked. That is the whole speed difference versus the old
+    synchronous pageable path this replaces.
+
+    Hazards handled:
+      - a staging buffer is reused only after the H2D that consumed it has completed (one consume-event per
+        buffer; the worker waits on it before overwriting);
+      - ``wait`` blocks the caller until the worker has actually enqueued the H2D and recorded its
+        completion event, so the residency layer can ``current_stream().wait_event`` it as usual.
+    """
+
+    def __init__(self, device: torch.device, num_staging: int = 2, debug: bool = False):
+        self.device = device
+        self.num_staging = max(1, num_staging)
+        self.debug = debug
+        self.copy_stream = torch.cuda.Stream(device=device)
+        self._pool = ThreadPoolExecutor(max_workers=1)
+        self._futures = {}  # key -> Future -> (load_event, (ev_a, ev_b))
+        self._xfer = {}  # key -> (ev_a, ev_b) transfer-timing events (debug only)
+        self._staging = None  # list[pinned uint8 tensor] (lazily sized to the flat block)
+        self._staging_free = None  # list[cuda.Event | None]: the H2D that last consumed each buffer
+        self._rr = 0  # round-robin staging index (touched only on the worker thread)
+
+    def _ensure_staging(self, nbytes: int):
+        if self._staging is None:
+            self._staging = [
+                torch.empty(nbytes, dtype=torch.uint8).pin_memory(device=self.device) for _ in range(self.num_staging)
+            ]
+            self._staging_free = [None] * self.num_staging
+
+    def _run(self, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event):
+        # runs on the worker thread: pageable->pinned memcpy, then enqueue the async pinned->device H2D
+        idx = self._rr
+        self._rr = (idx + 1) % self.num_staging
+        staging = self._staging[idx]
+
+        free_ev = self._staging_free[idx]
+        if free_ev is not None:
+            free_ev.synchronize()  # CPU(worker) waits until the prior H2D released this buffer -- off main thread
+
+        staging.copy_(src_flat)  # pageable -> pinned, plain CPU memcpy
+
+        ev_a = ev_b = None
+        with torch.cuda.stream(self.copy_stream):
+            if gate_event is not None:
+                self.copy_stream.wait_event(gate_event)  # do not overwrite a dst still used by compute
+            if self.debug:
+                ev_a = torch.cuda.Event(enable_timing=True)
+                ev_b = torch.cuda.Event(enable_timing=True)
+                ev_a.record(self.copy_stream)
+            dst_flat.copy_(staging, non_blocking=True)  # pinned -> device, async
+            if self.debug:
+                ev_b.record(self.copy_stream)
+            done = self.copy_stream.record_event()  # H2D complete == this staging buffer is free again
+        self._staging_free[idx] = done
+        return done, (ev_a, ev_b)
+
+    def submit(self, key, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event=None):
+        self._ensure_staging(src_flat.numel())  # flat uint8 -> numel == byte size
+        self._futures[key] = self._pool.submit(self._run, dst_flat, src_flat, gate_event)
+
+    def wait(self, key):
+        fut = self._futures.get(key)
+        if fut is None:
+            return None
+        load_event, xfer = fut.result()  # block until the worker enqueued the H2D (tiny if it ran ahead)
+        if self.debug and xfer[0] is not None:
+            self._xfer[key] = xfer
+        return load_event
+
+    def pop_xfer_timing(self, key):
+        return self._xfer.pop(key, None)
+
+    def _flush(self):
+        for fut in list(self._futures.values()):
+            fut.result()
+
+    def sync(self):
+        self._flush()
+        self.copy_stream.synchronize()
+
+    def reset(self):
+        self._flush()
+        self.copy_stream.synchronize()  # ensure all in-flight H2D are done before clearing staging state
+        self._futures.clear()
+        self._xfer.clear()
+        if self._staging is not None:
+            self._staging_free = [None] * self.num_staging
+
+    def __del__(self):
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=False)
 
 
 class LoRAStreamOffloader:
@@ -614,8 +715,13 @@ class LoRAStreamOffloader:
                     f"Found a trainable Linear weight in block {b}."
                 )
 
-        # ---- transfer engine: owns the copy stream and all H2D primitives (see _DirectCopier) ----
-        self.copier = _DirectCopier(device, non_blocking=use_pinned_memory, debug=self.debug)
+        # ---- transfer engine: owns the copy stream and all H2D primitives ----
+        # pinned masters -> direct async H2D; pageable masters -> stage through a worker thread + pinned pool
+        # (low "shared GPU memory" footprint, e.g. on Windows). Both expose the same submit/wait interface.
+        if use_pinned_memory:
+            self.copier = _DirectCopier(device, debug=self.debug)
+        else:
+            self.copier = _StagedCopier(device, num_staging=self.B, debug=self.debug)
 
         # ---- runtime state (GPU buffers allocated lazily in prepare_block_devices_before_forward) ----
         self.cpu_master = {}  # block_idx -> [CPU (pinned) Parameter per swap weight] (views into cpu_flat)
@@ -831,6 +937,11 @@ class LoRAStreamOffloader:
         s.wait_event(ev)
         ev_b.record(s)
         c["stall_ev"].append((ev_a, ev_b))
+        # staged copier records its transfer-timing events on the worker thread, so they only become
+        # available once wait() has joined it; the direct copier already popped them in _load (returns None)
+        xfer = self.copier.pop_xfer_timing(block_idx)
+        if xfer is not None:
+            c["xfer_ev"].append(xfer)
 
     def submit_move_blocks_forward(self, blocks: list[nn.Module], block_idx: int):
         # consumed block_idx in the forward pass: free its slot and prefetch the block B streaming-slots ahead
