@@ -499,6 +499,10 @@ class LoRAStreamOffloader:
       - Because the streamed weights are frozen (no ``.grad`` to preserve), we swap the whole ``module.weight``
         *reference* between its CPU master Parameter and a preallocated GPU ring Parameter, instead of the
         ``.data`` storage trick used by ``ModelOffloader``. No per-step ``cudaMalloc``.
+      - All swap weights of a block are packed into a single contiguous (byte) buffer -- one pinned CPU
+        buffer per streaming block and one GPU buffer per ring slot -- and the individual weights are
+        dtype/shape views into it. Loading a block is therefore a single H2D ``copy_`` instead of one
+        per Linear, which removes the per-tensor launch/driver overhead on PCIe/CPU-bound systems.
       - Eviction is free: repoint ``module.weight`` back to the CPU master (no transfer). A ring slot is
         overwritten only when its block is consumed, so the last ``B`` streamed blocks of a pass stay
         resident. On the reverse pass they are exactly the first blocks needed, so the forward<->backward
@@ -558,8 +562,11 @@ class LoRAStreamOffloader:
 
         # ---- runtime state (GPU buffers allocated lazily in prepare_block_devices_before_forward) ----
         self.copy_stream = torch.cuda.Stream(device=device)
-        self.cpu_master = {}  # block_idx -> [CPU (pinned) Parameter per swap weight] (master copies)
-        self.ring_param = None  # [slot] -> [GPU nn.Parameter per swap weight] (preallocated, reused)
+        self.cpu_master = {}  # block_idx -> [CPU (pinned) Parameter per swap weight] (views into cpu_flat)
+        self.cpu_flat = {}  # block_idx -> flat (pinned) uint8 CPU tensor backing the masters
+        self.ring_param = None  # [slot] -> [GPU nn.Parameter per swap weight] (views into ring_flat)
+        self.ring_flat = None  # [slot] -> flat uint8 GPU tensor backing the ring params
+        self._layout = None  # ([byte offset per swap weight], total bytes) shared by all streaming blocks
         self.in_slot = [None] * self.B  # slot -> block_idx currently bound to this slot (or None)
         self.load_event = {}  # block_idx -> cuda.Event recording H2D completion
         self.free_event = [None] * self.B  # slot -> cuda.Event recording when compute finished using the slot
@@ -604,6 +611,25 @@ class LoRAStreamOffloader:
         for m, p in zip(self._modules(block_idx), params):
             m.weight = p
 
+    @staticmethod
+    def _compute_layout(weights: list[torch.Tensor]) -> tuple[list[int], int]:
+        """Byte offsets (aligned so ``view(dtype)`` is valid for any element size) and total size of the flat buffer."""
+        align = 256
+        offsets = []
+        total = 0
+        for w in weights:
+            total = (total + align - 1) // align * align
+            offsets.append(total)
+            total += w.numel() * w.element_size()
+        return offsets, total
+
+    def _flat_views(self, flat: torch.Tensor, weights: list[torch.Tensor]) -> list[torch.Tensor]:
+        """dtype/shape views into a flat uint8 buffer, one per swap weight, following ``self._layout``."""
+        offsets, _ = self._layout
+        return [
+            flat[off : off + w.numel() * w.element_size()].view(w.dtype).view(w.shape) for off, w in zip(offsets, weights)
+        ]
+
     def _load(self, rank: int, slot: int, ctx: str = "fwd"):
         """Stream the streaming block at ``rank`` into ring ``slot`` (H2D only), repointing weights."""
         # evict the slot's current owner: repoint its weights back to the CPU master (no transfer)
@@ -621,8 +647,12 @@ class LoRAStreamOffloader:
                 ev_a = torch.cuda.Event(enable_timing=True)
                 ev_b = torch.cuda.Event(enable_timing=True)
                 ev_a.record(self.copy_stream)
-            for dst, src in zip(self.ring_param[slot], self.cpu_master[blk]):
-                dst.data.copy_(src.data, non_blocking=self.use_pinned_memory)  # pure H2D
+            # single coalesced H2D copy of the whole block (the ring params are views into ring_flat).
+            # NOTE: this bumps the autograd version counter of all views in the slot. Safe under gradient
+            # checkpointing (weights are re-read at recompute time, and a slot is only overwritten after its
+            # free_event); without checkpointing autograd raises a version error instead of silently using
+            # stale-saved weights -- which the old per-tensor `.data.copy_` would have hidden.
+            self.ring_flat[slot].copy_(self.cpu_flat[blk], non_blocking=self.use_pinned_memory)
             if self.debug:
                 ev_b.record(self.copy_stream)
         self.load_event[blk] = self.copy_stream.record_event()
@@ -664,15 +694,21 @@ class LoRAStreamOffloader:
 
             if first_time:
                 # move the whole block to device (buffers, norms, bias), then pull the swap weights back to
-                # the CPU as the persistent (pinned) masters
+                # the CPU into one flat (pinned) buffer per block as the persistent masters
                 b.to(self.device)
+                mods = self._modules(i)
+                weights = [m.weight.data for m in mods]
+                if self._layout is None:
+                    self._layout = self._compute_layout(weights)  # first streaming block defines the shared layout
+                flat = torch.empty(self._layout[1], dtype=torch.uint8, device=cpu_device)
+                if self.use_pinned_memory:
+                    flat = flat.pin_memory(device=self.device)
                 master = []
-                for m in self._modules(i):
-                    w = m.weight.data.to(cpu_device)
-                    if self.use_pinned_memory:
-                        w = w.pin_memory(device=self.device)
-                    m.weight.data = w
+                for m, view in zip(mods, self._flat_views(flat, weights)):
+                    view.copy_(m.weight.data)  # one-time D2H into the flat master
+                    m.weight.data = view
                     master.append(m.weight)  # keep the original Parameter object as the persistent master
+                self.cpu_flat[i] = flat
                 self.cpu_master[i] = master
             else:
                 # re-prepare (e.g. around in-training sampling): the non-swap parts are already on the device
@@ -690,11 +726,15 @@ class LoRAStreamOffloader:
                     f"block {b} swap-weight shape/dtype differs from the streaming template"
                 )
 
-        # preallocate the GPU ring (once); copies happen into these buffers, never reallocated
+        # preallocate the GPU ring (once); copies happen into these flat buffers, never reallocated
         if self.ring_param is None:
+            template_weights = [p.data for p in template]
+            self.ring_flat = [
+                torch.empty(self._layout[1], dtype=torch.uint8, device=self.device) for _ in range(self.B)
+            ]
             self.ring_param = [
-                [nn.Parameter(torch.empty_like(p.data, device=self.device), requires_grad=False) for p in template]
-                for _ in range(self.B)
+                [nn.Parameter(view, requires_grad=False) for view in self._flat_views(flat, template_weights)]
+                for flat in self.ring_flat
             ]
 
         # reset ring state and cold-start preload the first B streaming blocks
