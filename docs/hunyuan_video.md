@@ -223,6 +223,12 @@ The training settings are still experimental. Appropriate learning rates, traini
 
 For additional options, use `python src/musubi_tuner/hv_train_network.py --help` (note that many options are unverified).
 
+### Save Precision
+
+`--save_precision` specifies the precision used when saving network weights. The available values are `float`/`fp32`, `fp16`, and `bf16`. If omitted, network weights are saved in fp32, matching the precision used to train the LoRA weights.
+
+Saving in fp32 preserves more information for post-processing such as post-hoc EMA, merging, extraction, and weight analysis. When training with `--mixed_precision bf16`(`fp16`), the saved LoRA file may be about twice as large as before. To keep the previous behavior, specify `--save_precision bf16`(`fp16`).
+
 ### Memory Optimization
 
 `--gradient_checkpointing` enables gradient checkpointing to reduce VRAM usage. Gradient checkpointing is a memory-saving technique that trades off computation time for memory usage by recomputing certain intermediate results during the backward pass instead of storing them all in memory. This is particularly useful for training large models such as HunyuanVideo, where VRAM can be a limiting factor. However, it may slow down training. If you have sufficient VRAM, you can disable it.
@@ -281,6 +287,12 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 ただ、適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、以前として不明な点が数多くあります。情報提供をお待ちしています。
 
 その他のオプションは`python src/musubi_tuner/hv_train_network.py --help`で確認できます（ただし多くのオプションは動作未確認です）。
+
+**保存精度**
+
+`--save_precision`でネットワーク重みを保存する際の精度を指定できます。指定可能な値は`float`/`fp32`、`fp16`、`bf16`です。省略時は、LoRA重みの学習精度に合わせてfp32で保存されます。
+
+fp32で保存すると、post-hoc EMA、マージ、抽出、重み解析などの後処理でより多くの情報を保持できます。`--mixed_precision bf16`(`fp16`)で学習している場合、保存されるLoRAファイルのサイズが従来のおよそ2倍になることがあります。従来と同じ挙動にしたい場合は`--save_precision bf16`(`fp16`)を指定してください。
 
 **メモリ最適化**
 
