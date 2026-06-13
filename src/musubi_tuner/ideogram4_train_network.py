@@ -26,6 +26,7 @@ NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS = {
     "shift",
     "flux_shift",
     "qwen_shift",
+    "ideogram4_shift",
     "logsnr",
     "qinglong_flux",
     "qinglong_qwen",
@@ -357,6 +358,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 
 
 def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.set_defaults(timestep_sampling="ideogram4_shift")
     parser.add_argument("--unconditional_dit", type=str, default=None, help="unconditional Ideogram 4 DiT safetensors path")
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling")
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for Ideogram 4 DiT, default is bfloat16")

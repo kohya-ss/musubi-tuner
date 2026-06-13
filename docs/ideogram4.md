@@ -109,3 +109,6 @@ python src/musubi_tuner/ideogram4_train_network.py `
 ```
 
 LoRA v1 trains only the conditional transformer. It targets `attention.qkv`, `attention.o`, and `feed_forward.w1/w2/w3` inside `Ideogram4TransformerBlock`, including official `Fp8Linear` layers. Merging LoRA back into FP8 base weights is not supported.
+
+Ideogram 4 training defaults to `--timestep_sampling ideogram4_shift`, a resolution-aware logit-normal timestep
+sampler aligned with the official pipeline.

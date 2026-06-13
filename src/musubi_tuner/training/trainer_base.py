@@ -59,6 +59,7 @@ from musubi_tuner.training.accelerator_setup import (
 from musubi_tuner.training.sampling_prompts import should_sample_images
 from musubi_tuner.training.timesteps import (
     compute_density_for_timestep_sampling,
+    compute_ideogram4_shift_timestep,
     compute_loss_weighting_for_sd3,
     get_sigmas,
 )
@@ -547,6 +548,7 @@ class NetworkTrainer:
             or args.timestep_sampling == "shift"
             or args.timestep_sampling == "flux_shift"
             or args.timestep_sampling == "qwen_shift"
+            or args.timestep_sampling == "ideogram4_shift"
             or args.timestep_sampling == "logsnr"
             or args.timestep_sampling == "qinglong_flux"
             or args.timestep_sampling == "qinglong_qwen"
@@ -577,6 +579,10 @@ class NetworkTrainer:
                         t = torch.sigmoid(args.sigmoid_scale * randn(batch_size, org_timesteps))
                     else:
                         t = rand(batch_size, org_timesteps)
+
+                elif args.timestep_sampling == "ideogram4_shift":
+                    h, w = latents.shape[-2:]
+                    t = compute_ideogram4_shift_timestep(rand(batch_size, org_timesteps), h, w)
 
                 elif args.timestep_sampling.endswith("shift"):
                     if args.timestep_sampling == "shift":

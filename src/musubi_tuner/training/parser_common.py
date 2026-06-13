@@ -419,6 +419,7 @@ def _add_timestep_args(parser: argparse.ArgumentParser) -> None:
             "shift",
             "flux_shift",
             "flux2_shift",
+            "ideogram4_shift",
             "qwen_shift",
             "logsnr",
             "qinglong_flux",
