@@ -564,9 +564,7 @@ class _StagedCopier:
 
     def _ensure_staging(self, nbytes: int):
         if self._staging is None:
-            self._staging = [
-                torch.empty(nbytes, dtype=torch.uint8).pin_memory(device=self.device) for _ in range(self.num_staging)
-            ]
+            self._staging = [torch.empty(nbytes, dtype=torch.uint8).pin_memory(device=self.device) for _ in range(self.num_staging)]
             self._staging_free = [None] * self.num_staging
 
     def _run(self, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event):
@@ -787,9 +785,7 @@ class LoRAStreamOffloader:
     def _flat_views(self, flat: torch.Tensor, weights: list[torch.Tensor]) -> list[torch.Tensor]:
         """dtype/shape views into a flat uint8 buffer, one per swap weight, following ``self._layout``."""
         offsets, _ = self._layout
-        return [
-            flat[off : off + w.numel() * w.element_size()].view(w.dtype).view(w.shape) for off, w in zip(offsets, weights)
-        ]
+        return [flat[off : off + w.numel() * w.element_size()].view(w.dtype).view(w.shape) for off, w in zip(offsets, weights)]
 
     def _load(self, rank: int, slot: int, ctx: str = "fwd"):
         """Stream the streaming block at ``rank`` into ring ``slot`` (H2D only), repointing weights."""
@@ -887,9 +883,7 @@ class LoRAStreamOffloader:
         # preallocate the GPU ring (once); copies happen into these flat buffers, never reallocated
         if self.ring_param is None:
             template_weights = [p.data for p in template]
-            self.ring_flat = [
-                torch.empty(self._layout[1], dtype=torch.uint8, device=self.device) for _ in range(self.B)
-            ]
+            self.ring_flat = [torch.empty(self._layout[1], dtype=torch.uint8, device=self.device) for _ in range(self.B)]
             self.ring_param = [
                 [nn.Parameter(view, requires_grad=False) for view in self._flat_views(flat, template_weights)]
                 for flat in self.ring_flat
