@@ -23,12 +23,7 @@ def test_lora_sampling_ignores_unconditional_dit_by_default():
 
 
 def test_lora_sampling_can_opt_into_unconditional_dit():
-    assert (
-        should_use_unconditional_dit_for_lora_sampling(
-            _args(use_unconditional_dit_for_lora_sampling=True)
-        )
-        is True
-    )
+    assert should_use_unconditional_dit_for_lora_sampling(_args(use_unconditional_dit_for_lora_sampling=True)) is True
 
 
 def test_lora_sampling_does_not_use_missing_unconditional_dit():

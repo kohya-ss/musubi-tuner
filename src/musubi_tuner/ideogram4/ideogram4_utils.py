@@ -54,9 +54,7 @@ def validate_local_safetensors(path: str, expected_model_type: Optional[str] = N
     with safetensors_utils.MemoryEfficientSafeOpen(path) as f:
         metadata = f.metadata()
     if expected_model_type is not None and metadata.get("model_type") != expected_model_type:
-        raise ValueError(
-            f"{path} has safetensors model_type={metadata.get('model_type')!r}, expected {expected_model_type!r}"
-        )
+        raise ValueError(f"{path} has safetensors model_type={metadata.get('model_type')!r}, expected {expected_model_type!r}")
     return metadata
 
 

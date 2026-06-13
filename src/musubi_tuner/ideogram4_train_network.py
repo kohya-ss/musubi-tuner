@@ -327,7 +327,9 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         text_features = [x.to(dtype=network_dtype) for x in batch["i4_llm_features"]]
         image_height = grid_h * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
         image_width = grid_w * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
-        inputs = ideogram4_utils.build_sequence_inputs_from_features(text_features, image_height, image_width, device=accelerator.device)
+        inputs = ideogram4_utils.build_sequence_inputs_from_features(
+            text_features, image_height, image_width, device=accelerator.device
+        )
 
         image_tokens = ideogram4_utils.flatten_token_grid(noisy_model_input).to(device=accelerator.device, dtype=network_dtype)
         text_padding = torch.zeros(
@@ -375,11 +377,15 @@ def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
             "because only the conditional DiT is trained"
         ),
     )
-    parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling")
+    parser.add_argument(
+        "--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling"
+    )
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for Ideogram 4 DiT, default is bfloat16")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
     parser.add_argument("--initial_sigma", type=float, default=1.004, help="override the first denoising sigma for sampling")
-    parser.add_argument("--log_loss_stats", action="store_true", help="log Ideogram 4 prediction/target diagnostics during training")
+    parser.add_argument(
+        "--log_loss_stats", action="store_true", help="log Ideogram 4 prediction/target diagnostics during training"
+    )
     # Deprecated compatibility knobs. Ideogram 4 now uses the shared
     # --timestep_sampling path, so these legacy values are intentionally ignored.
     parser.add_argument("--ideogram4_timestep_mu", type=float, default=0.0, help=argparse.SUPPRESS)

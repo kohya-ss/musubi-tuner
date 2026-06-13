@@ -15,9 +15,4 @@ def test_ideogram4_top_level_entrypoints_exist():
     for script_name, module_name in expected.items():
         script = ROOT / script_name
         assert script.exists(), f"missing top-level entrypoint: {script_name}"
-        assert script.read_text(encoding="utf-8") == (
-            f"from {module_name} import main\n"
-            "\n"
-            'if __name__ == "__main__":\n'
-            "    main()\n"
-        )
+        assert script.read_text(encoding="utf-8") == (f'from {module_name} import main\n\nif __name__ == "__main__":\n    main()\n')

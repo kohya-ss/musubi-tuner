@@ -253,9 +253,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             )
         )
         self.assertTrue(torch.equal(normalized["language_model.norm.bias"], state["model.language_model.norm.bias"]))
-        self.assertTrue(
-            torch.equal(normalized["visual.patch_embed.proj.weight"], state["model.visual.patch_embed.proj.weight"])
-        )
+        self.assertTrue(torch.equal(normalized["visual.patch_embed.proj.weight"], state["model.visual.patch_embed.proj.weight"]))
         self.assertTrue(torch.equal(normalized["language_model.norm.weight"], state["language_model.norm.weight"]))
 
     def test_text_encoder_loader_materializes_missing_meta_tensors(self):
@@ -465,6 +463,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
     def test_text_cache_metadata_and_flow_target(self):
         with tempfile.TemporaryDirectory() as tmp:
+
             class DummyItem:
                 item_key = "sample"
                 caption = "caption"
