@@ -105,12 +105,16 @@ class BlockSwapConfig:
                 "backward 用に保存された重みの version が進むため。gradient checkpointing は再計算時に読み直すので回避できます）。"
             )
 
+        ring_size = getattr(args, "block_swap_ring_size", 2)
+        if ring_size < 1:
+            raise ValueError("--block_swap_ring_size must be >= 1")
+
         return cls(
             device=device,
             supports_backward=supports_backward,
             use_pinned_memory=getattr(args, "use_pinned_memory_for_block_swap", False),
             h2d_only=h2d_only,
-            ring_size=getattr(args, "block_swap_ring_size", 2),
+            ring_size=ring_size,
         )
 
 
