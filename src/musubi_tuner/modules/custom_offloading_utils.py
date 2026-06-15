@@ -1,6 +1,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 import gc
 import time
 from typing import Optional
@@ -62,6 +63,86 @@ def weighs_to_device(layer: nn.Module, device: torch.device):
     for module in layer.modules():
         if hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear"):
             module.weight.data = module.weight.data.to(device, non_blocking=device.type != "cpu")
+
+
+@dataclass
+class BlockSwapConfig:
+    """
+    Construction policy for a block-swap offloader, assembled once by the training/inference script and
+    passed through each architecture's ``enable_block_swap`` to ``create_offloader``.
+
+    It holds everything the offloader constructor needs that is *not* architecture-specific. The
+    architecture-specific arguments (the block-type label, the block list, and its counts) are supplied by
+    ``enable_block_swap`` per block list. Adding a new offloader knob (or a whole new offloader type) means
+    adding a field here and a branch in ``create_offloader`` -- the per-architecture ``enable_block_swap``
+    signatures stay ``(blocks_to_swap, config)`` and never change.
+    """
+
+    device: torch.device
+    supports_backward: bool
+    use_pinned_memory: bool = False
+    h2d_only: bool = False  # frozen-base (LoRA / LoHa / LoKr) only: H2D-only streaming, no device->host copy
+    ring_size: int = 2  # (h2d_only) number of GPU ring buffers for streamed blocks; 2 = double buffering
+    debug: bool = False
+
+    @classmethod
+    def from_args(cls, args, device: torch.device, supports_backward: bool) -> "BlockSwapConfig":
+        """Build from a parsed-args namespace, tolerating scripts whose parser lacks the optional knobs."""
+        h2d_only = getattr(args, "block_swap_h2d_only", False)
+
+        # H2D-only streams frozen weights into a reused GPU ring buffer and loads them with an in-place copy_,
+        # which bumps the autograd version of the saved weight view. Gradient checkpointing re-reads the weight
+        # at recompute time (a short, safe window), so the version stays consistent; without it the backward
+        # pass fails with an opaque "modified by an inplace operation ... version N expected M" error that does
+        # not point at the offloader. Fail early with an actionable message instead. (Inference / forward-only
+        # has no backward, so it is unaffected.)
+        if h2d_only and supports_backward and not getattr(args, "gradient_checkpointing", False):
+            raise ValueError(
+                "--block_swap_h2d_only requires --gradient_checkpointing for training. H2D-only block swap streams"
+                " frozen weights through a reused GPU ring buffer, which advances the autograd version of weights"
+                " saved for backward; gradient checkpointing re-reads them at recompute time and avoids this."
+                " / --block_swap_h2d_only は学習時に --gradient_checkpointing が必須です（リングバッファの上書きで"
+                "backward 用に保存された重みの version が進むため。gradient checkpointing は再計算時に読み直すので回避できます）。"
+            )
+
+        return cls(
+            device=device,
+            supports_backward=supports_backward,
+            use_pinned_memory=getattr(args, "use_pinned_memory_for_block_swap", False),
+            h2d_only=h2d_only,
+            ring_size=getattr(args, "block_swap_ring_size", 2),
+        )
+
+
+def create_offloader(block_type: str, blocks: list[nn.Module], num_blocks: int, blocks_to_swap: int, config: BlockSwapConfig):
+    """
+    Create the block-swap offloader for one block list. This is the single place that selects the offloader
+    implementation from ``config``; ``enable_block_swap`` only supplies the per-block-list arguments, so a new
+    offloader type plugs in here without touching any architecture.
+    """
+    if config.h2d_only:
+        # H2D-only streaming for frozen-base (LoRA) training: keep a CPU master, copy Host->Device only.
+        return LoRAStreamOffloader(
+            block_type,
+            blocks,
+            num_blocks,
+            blocks_to_swap,
+            config.supports_backward,
+            config.device,
+            ring_size=config.ring_size,
+            use_pinned_memory=config.use_pinned_memory,
+            debug=config.debug,
+        )
+    return ModelOffloader(
+        block_type,
+        blocks,
+        num_blocks,
+        blocks_to_swap,
+        config.supports_backward,
+        config.device,
+        config.use_pinned_memory,
+        debug=config.debug,
+    )
 
 
 class Offloader:

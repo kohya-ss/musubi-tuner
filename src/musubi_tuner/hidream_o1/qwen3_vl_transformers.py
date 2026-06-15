@@ -58,7 +58,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
 from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 
 
 def auto_docstring(*args, **kwargs):
@@ -824,7 +824,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(self, blocks_to_swap: int, config: BlockSwapConfig):
         self.blocks_to_swap = blocks_to_swap
         num_blocks = len(self.layers)
 
@@ -832,18 +832,12 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             f"Cannot swap more than {num_blocks - 1} Qwen3VL decoder blocks. Requested {self.blocks_to_swap} blocks."
         )
 
-        self.offloader = ModelOffloader(
-            "hidream-o1-qwen3vl-block",
-            self.layers,
-            num_blocks,
-            self.blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
+        self.offloader = create_offloader(
+            "hidream-o1-qwen3vl-block", self.layers, num_blocks, self.blocks_to_swap, config
         )
         print(
             f"HiDream-O1: Block swap enabled. Swapping {self.blocks_to_swap} of {num_blocks} Qwen3VL decoder blocks. "
-            f"Supports backward: {supports_backward}"
+            f"Supports backward: {config.supports_backward}"
         )
 
     def switch_block_swap_for_inference(self):
@@ -1934,8 +1928,8 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     def blocks_to_swap(self):
         return self.language_model.blocks_to_swap
 
-    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
-        self.language_model.enable_block_swap(blocks_to_swap, device, supports_backward, use_pinned_memory)
+    def enable_block_swap(self, blocks_to_swap: int, config: BlockSwapConfig):
+        self.language_model.enable_block_swap(blocks_to_swap, config)
 
     def switch_block_swap_for_inference(self):
         self.language_model.switch_block_swap_for_inference()

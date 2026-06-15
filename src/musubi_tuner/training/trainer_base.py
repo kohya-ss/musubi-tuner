@@ -39,6 +39,7 @@ from diffusers.optimization import (
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import musubi_tuner.networks.lora as lora_module
@@ -1508,19 +1509,12 @@ class NetworkTrainer:
         transformer.requires_grad_(False)
 
         if blocks_to_swap > 0:
-            h2d_only = getattr(args, "block_swap_h2d_only", False)
+            swap_config = BlockSwapConfig.from_args(args, accelerator.device, supports_backward=True)
             logger.info(
                 f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}, "
-                f"use pinned memory: {args.use_pinned_memory_for_block_swap}, H2D-only: {h2d_only}"
+                f"use pinned memory: {swap_config.use_pinned_memory}, H2D-only: {swap_config.h2d_only}"
             )
-            swap_kwargs = {"h2d_only": True, "ring_size": getattr(args, "block_swap_ring_size", 2)} if h2d_only else {}
-            transformer.enable_block_swap(
-                blocks_to_swap,
-                accelerator.device,
-                supports_backward=True,
-                use_pinned_memory=args.use_pinned_memory_for_block_swap,
-                **swap_kwargs,
-            )
+            transformer.enable_block_swap(blocks_to_swap, swap_config)
             transformer.move_to_device_except_swap_blocks(accelerator.device)
         return transformer
 

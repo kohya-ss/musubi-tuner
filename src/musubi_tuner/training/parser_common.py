@@ -395,9 +395,9 @@ def _add_memory_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--block_swap_h2d_only",
         action="store_true",
-        help="(experimental, frozen-base / LoRA training only; currently Qwen-Image only) use H2D-only block swap:"
+        help="(experimental, frozen-base / LoRA training only) use H2D-only block swap:"
         " keep a CPU master copy of streamed weights and only copy Host->Device, never back. Removes the D2H transfer."
-        " / (実験的、ベース凍結＝LoRA学習専用、現状Qwen-Imageのみ) H2DのみのブロックスワップでD2H転送を行わない。",
+        " / (実験的、ベース凍結＝LoRA学習専用) H2DのみのブロックスワップでD2H転送を行わない。",
     )
     parser.add_argument(
         "--block_swap_ring_size",
