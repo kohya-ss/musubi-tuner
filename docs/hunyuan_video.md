@@ -231,9 +231,7 @@ Specifying `--fp8_base` runs DiT in fp8 mode. Without this flag, mixed precision
 
 If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 36.
 
-(The idea of block swap is based on the implementation by 2kpr. Thanks again to 2kpr.)
-
-`--use_pinned_memory_for_block_swap` can be used to enable pinned memory for block swapping. This may improve performance when swapping blocks between CPU and GPU. However, it may increase shared VRAM usage on Windows systems. Use this option based on your system configuration (e.g., available system RAM and VRAM). In some environments, not specifying this option may result in faster performance.
+For block swap options (`--use_pinned_memory_for_block_swap`, and `--block_swap_h2d_only` for LoRA training) and details, see the [Block Swap documentation](./block_swap.md).
 
 `--gradient_checkpointing_cpu_offload` can be used to offload activations to CPU when using gradient checkpointing. This can further reduce VRAM usage, but may slow down training. This option is especially useful when the latent resolution (or video length) is high and VRAM is limited. This option must be used together with `--gradient_checkpointing`. See [PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537) for more details.
 
@@ -290,9 +288,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 
 VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大36が指定できます。
 
-（block swapのアイデアは2kpr氏の実装に基づくものです。2kpr氏にあらためて感謝します。）
-
-`--use_pinned_memory_for_block_swap`を指定すると、block swapにピン留めメモリを使用します。CPUとGPU間でブロックをスワップする際のパフォーマンスが向上する可能性があります。ただし、Windows環境では共有VRAM使用量が増加する可能性があります。システム構成（利用可能なシステムRAMやVRAMなど）に応じて、このオプションを使用してください。環境によっては指定しないほうが高速になる場合もあります。
+block swapのオプション（`--use_pinned_memory_for_block_swap`、およびLoRA学習向けの`--block_swap_h2d_only`）と詳細は、[ブロックスワップのドキュメント](./block_swap.md)を参照してください。
 
 `--gradient_checkpointing_cpu_offload`を指定すると、gradient checkpointing使用時にアクティベーションをCPUにオフロードします。これによりVRAM使用量をさらに削減できますが、学習が遅くなる可能性があります。latent解像度（または動画長）が高く、VRAMが限られている場合に特に有用です。このオプションは`--gradient_checkpointing`と併用する必要があります。詳細は[PR #537](https://github.com/Dao-AILab/flash-attention/pull/537)を参照してください。
 
@@ -398,7 +394,7 @@ Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory con
 
 `--fp8_fast` option is also available for faster inference on RTX 40x0 GPUs. This option requires `--fp8` option. 
 
-If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 38.
+If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 38. See the [Block Swap documentation](./block_swap.md) for details.
 
 For `--attn_mode`, specify either `flash`, `torch`, `sageattn`, `xformers`, or `sdpa` (same as `torch`). These correspond to FlashAttention, scaled dot product attention, SageAttention, and xformers, respectively. Default is `torch`. SageAttention is effective for VRAM reduction.
 
@@ -444,7 +440,7 @@ python src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_
 
 RTX 40x0シリーズのGPUを使用している場合は、`--fp8_fast`オプションを指定することで、高速推論が可能です。このオプションを指定する場合は、`--fp8`も指定してください。
 
-VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大38が指定できます。
+VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大38が指定できます。詳細は[ブロックスワップのドキュメント](./block_swap.md)を参照してください。
 
 `--attn_mode`には`flash`、`torch`、`sageattn`、`xformers`または`sdpa`（`torch`指定時と同じ）のいずれかを指定してください。それぞれFlashAttention、scaled dot product attention、SageAttention、xformersに対応します。デフォルトは`torch`です。SageAttentionはVRAMの削減に有効です。
 

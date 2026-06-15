@@ -177,6 +177,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [Dataset Configuration](./docs/dataset_config.md)
 - [Advanced Configuration](./docs/advanced_config.md)
 - [Sampling during Training](./docs/sampling_during_training.md)
+- [Block Swap (CPU Offloading for Memory Saving)](./docs/block_swap.md)
 - [Tools and Utilities](./docs/tools.md)
 - [Using torch.compile](./docs/torch_compile.md)
 
