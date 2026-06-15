@@ -21,6 +21,7 @@ from safetensors import safe_open
 from PIL import Image
 
 from musubi_tuner.hunyuan_model import vae
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.hunyuan_model.text_encoder import TextEncoder
 from musubi_tuner.hunyuan_model.text_encoder import PROMPT_TEMPLATE
 from musubi_tuner.hunyuan_model.vae import load_vae
@@ -730,9 +731,8 @@ def main():
 
         if blocks_to_swap > 0:
             logger.info(f"Enable swap {blocks_to_swap} blocks to CPU from device: {device}")
-            transformer.enable_block_swap(
-                blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
-            )
+            swap_config = BlockSwapConfig(device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap)
+            transformer.enable_block_swap(blocks_to_swap, swap_config)
             transformer.move_to_device_except_swap_blocks(device)
             transformer.prepare_block_swap_before_forward()
         else:

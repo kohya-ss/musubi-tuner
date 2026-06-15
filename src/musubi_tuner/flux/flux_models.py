@@ -14,7 +14,7 @@ from einops import rearrange
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 
 
@@ -953,7 +953,7 @@ class Flux(nn.Module):
 
         print("FLUX: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(self, num_blocks: int, config: BlockSwapConfig):
         self.blocks_to_swap = num_blocks
         double_blocks_to_swap = num_blocks // 2
         single_blocks_to_swap = (num_blocks - double_blocks_to_swap) * 2 + 1
@@ -963,11 +963,11 @@ class Flux(nn.Module):
             f"Requested {double_blocks_to_swap} double blocks and {single_blocks_to_swap} single blocks."
         )
 
-        self.offloader_double = ModelOffloader(
-            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
+        self.offloader_double = create_offloader(
+            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, config
         )
-        self.offloader_single = ModelOffloader(
-            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
+        self.offloader_single = create_offloader(
+            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, config
         )
         print(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."

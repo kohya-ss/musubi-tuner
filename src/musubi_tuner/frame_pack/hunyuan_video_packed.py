@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import load_split_weights
@@ -1662,7 +1662,7 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             result = block(*args)
         return result
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(self, num_blocks: int, config: BlockSwapConfig):
         self.blocks_to_swap = num_blocks
         self.num_double_blocks = len(self.transformer_blocks)
         self.num_single_blocks = len(self.single_transformer_blocks)
@@ -1674,28 +1674,16 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             f"Requested {double_blocks_to_swap} double blocks and {single_blocks_to_swap} single blocks."
         )
 
-        self.offloader_double = ModelOffloader(
-            "double",
-            self.transformer_blocks,
-            self.num_double_blocks,
-            double_blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
-            # debug=True # Optional debugging
+        self.offloader_double = create_offloader(
+            "double", self.transformer_blocks, self.num_double_blocks, double_blocks_to_swap, config
         )
-        self.offloader_single = ModelOffloader(
-            "single",
-            self.single_transformer_blocks,
-            self.num_single_blocks,
-            single_blocks_to_swap,
-            supports_backward,
-            device,  # , debug=True
-            use_pinned_memory,
+        self.offloader_single = create_offloader(
+            "single", self.single_transformer_blocks, self.num_single_blocks, single_blocks_to_swap, config
         )
         print(
             f"HunyuanVideoTransformer3DModelPacked: Block swap enabled. Swapping {num_blocks} blocks, "
-            + f"double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}, supports_backward: {supports_backward}."
+            + f"double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}, "
+            + f"supports_backward: {config.supports_backward}."
         )
 
     def switch_block_swap_for_inference(self):

@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from musubi_tuner import hidream_o1_train_network
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.hidream_o1_train_network import HiDreamO1NetworkTrainer
 from musubi_tuner.hv_train_network import (
@@ -193,9 +194,10 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
                 f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}, "
                 f"use pinned memory: {args.use_pinned_memory_for_block_swap}"
             )
-            transformer.enable_block_swap(
-                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            swap_config = BlockSwapConfig(
+                accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
             )
+            transformer.enable_block_swap(blocks_to_swap, swap_config)
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         if args.gradient_checkpointing:

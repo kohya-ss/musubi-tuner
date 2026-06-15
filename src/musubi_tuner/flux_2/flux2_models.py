@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from musubi_tuner.modules.attention import AttentionParams
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.modules.attention import attention as unified_attention
 
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
@@ -497,7 +497,7 @@ class Flux2(nn.Module):
 
         print("FLUX2: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(self, num_blocks: int, config: BlockSwapConfig):
         self.blocks_to_swap = num_blocks
         if num_blocks <= 0:
             double_blocks_to_swap = 0
@@ -534,25 +534,11 @@ class Flux2(nn.Module):
             f"Requested {double_blocks_to_swap} double blocks and {single_blocks_to_swap} single blocks."
         )
 
-        self.offloader_double = ModelOffloader(
-            "double",
-            self.double_blocks,
-            self.num_double_blocks,
-            double_blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
-            # , debug=True
+        self.offloader_double = create_offloader(
+            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, config
         )
-        self.offloader_single = ModelOffloader(
-            "single",
-            self.single_blocks,
-            self.num_single_blocks,
-            single_blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
-            # , debug=True
+        self.offloader_single = create_offloader(
+            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, config
         )
         print(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."

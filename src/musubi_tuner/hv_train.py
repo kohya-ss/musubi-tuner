@@ -32,6 +32,7 @@ from diffusers.optimization import (
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape
 import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
 from musubi_tuner.hunyuan_model.vae import load_vae
@@ -805,7 +806,7 @@ class FineTuningTrainer:
 
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
-            transformer.enable_block_swap(blocks_to_swap, accelerator.device, supports_backward=True)
+            transformer.enable_block_swap(blocks_to_swap, BlockSwapConfig(accelerator.device, supports_backward=True))
             transformer.move_to_device_except_swap_blocks(accelerator.device)
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")

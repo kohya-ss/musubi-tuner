@@ -7,6 +7,7 @@ import torch
 from safetensors.torch import load_file
 
 from musubi_tuner.hidream_o1 import hidream_o1_utils
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.hidream_o1.pipeline import generate_image
 from musubi_tuner.networks import lora_hidream_o1
 
@@ -99,12 +100,8 @@ def main():
     logger.info(f"Loading HiDream-O1 model from {args.dit}")
     model = hidream_o1_utils.load_model(args.dit, dtype=dtype, device=loading_device, model_type=args.model_type)
     if args.blocks_to_swap:
-        model.enable_block_swap(
-            args.blocks_to_swap,
-            device,
-            supports_backward=False,
-            use_pinned_memory=args.use_pinned_memory_for_block_swap,
-        )
+        swap_config = BlockSwapConfig(device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap)
+        model.enable_block_swap(args.blocks_to_swap, swap_config)
         model.move_to_device_except_swap_blocks(device)
         model.prepare_block_swap_before_forward()
 
