@@ -63,6 +63,12 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 16, 2026
+    - Added H2D-only block swap, an optimized block swap mode for LoRA (LoHa/LoKr) training, available for all architectures. Enable it with `--block_swap_h2d_only`. See [PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972).
+        - For frozen-base training, the base weights on the CPU and GPU are identical, so the classic block swap's device-to-host (D2H) copy is pure overhead. H2D-only keeps a permanent master copy on the CPU and only ever transfers host-to-device, removing the D2H transfer entirely. This can improve training throughput, with the largest benefit when using `--fp8_base` / `--fp8_scaled`.
+        - Requires `--gradient_checkpointing`. The number of GPU ring buffers used for streaming can be tuned with `--block_swap_ring_size` (default `2`; `1` minimizes VRAM).
+        - There is also a new standalone [Block Swap documentation](./docs/block_swap.md) covering all block swap options.
+
 - June 13, 2026
     - Added the `--save_precision` option for network weights and changed the default save precision to fp32. Thank you rockerBOO [PR #967](https://github.com/kohya-ss/musubi-tuner/pull/967).
         - **Breaking Change**: The default save precision for LoRA files has been changed to fp32.

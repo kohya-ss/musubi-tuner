@@ -40,7 +40,13 @@ Enable it with `--blocks_to_swap N`, which offloads `N` blocks to CPU. A larger 
 
 H2D-only block swap (`--block_swap_h2d_only`) is an optimized mode for **frozen-base training** (LoRA / LoHa / LoKr, where the base model weights are not updated).
 
+**※Currently this implementation is only available for CUDA-based architectures.**
+
 The classic block swap *exchanges* a block: as a block is consumed it is copied back to the CPU (Device→Host, "D2H") while the next one is copied in (Host→Device, "H2D"). When the base weights are frozen, the CPU already holds an identical copy, so the D2H half is pure overhead. H2D-only keeps a permanent master copy of every streamed weight on the CPU and only ever copies Host→Device, removing the D2H transfer entirely. This can noticeably improve training throughput, and the benefit is largest with `--fp8_base` / `--fp8_scaled` (smaller weights mean less data to transfer).
+
+With less transfer time, many models can achieve complete overlap of compute and transfer, and H2D-only can provide a significant speed boost. For example, in LoRA training of Qwen-Image on an RTX 3090 with a configuration that swaps 40 blocks, classic block swap runs at about 14 seconds/sample while H2D-only runs at about 11 seconds/sample, a roughly 25% speedup.
+
+Note that on Max-Q devices and similar, power limits may cause H2D-only to run slower than no block swap at all, even with compute-transfer overlap.
 
 **Requirements:**
 
@@ -56,7 +62,13 @@ H2D-only is available for all architectures (training). Inference is not affecte
 
 H2Dのみのブロックスワップ（`--block_swap_h2d_only`）は、**ベース凍結の学習**（LoRA / LoHa / LoKr。ベースモデルの重みを更新しない学習）向けに最適化したモードです。
 
+**※現在の実装はCUDAベースのアーキテクチャでのみ利用可能です。**
+
 従来のブロックスワップはブロックを*入れ替え*ます。あるブロックを使い終わるとCPUへ書き戻し（Device→Host、「D2H」）、同時に次のブロックを転送（Host→Device、「H2D」）します。ベースの重みが凍結されている場合、CPU側には既に同一のコピーがあるため、D2Hは完全に無駄です。H2D-onlyは、ストリーミングする全重みの恒久的なマスターコピーをCPUに保持し、常にHost→Deviceのみコピーすることで、D2H転送を完全に排除します。これにより学習スループットが向上することがあり、その効果は`--fp8_base` / `--fp8_scaled`使用時に最も大きくなります（重みが小さくなり転送データ量が減るため）。
+
+転送時間が減るため多くのモデルで計算と転送は完全にオーバーラップ可能となり、H2D-onlyは大幅なスループット向上をもたらすことがあります。たとえばRTX 3090におけるQwen-ImageのLoRA学習では、40ブロックをスワップする構成で、通常のブロックスワップは約14秒／サンプルですが、H2D-onlyは約11秒／サンプルと約25%の速度向上が見られます。
+
+なお、計算と転送が完全にオーバーラップする場合でも、Max-Qデバイスなどでは電力制限により、ブロックスワップ未使用時よりも速度が低下することがあります。
 
 **要件:**
 

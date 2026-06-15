@@ -58,6 +58,12 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/06/16
+    - LoRA（LoHa/LoKr）学習向けに最適化したブロックスワップモード「H2D-only block swap」を追加しました。全アーキテクチャで利用できます。`--block_swap_h2d_only` で有効化します。[PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972)
+        - ベース凍結の学習ではCPUとGPU上のベース重みが同一のため、従来のブロックスワップにおけるdevice→host（D2H）コピーは完全に無駄になります。H2DのみのモードはCPUに恒久的なマスターコピーを保持し、常にhost→deviceのみを転送することで、D2H転送を完全に排除します。これにより学習スループットが向上することがあり、`--fp8_base` / `--fp8_scaled` 使用時に効果が最も大きくなります。
+        - `--gradient_checkpointing` が必須です。ストリーミングに使うGPUリングバッファの数は `--block_swap_ring_size` で調整できます（デフォルト `2`、`1` でVRAM最小）。
+        - ブロックスワップの全オプションをまとめた[ブロックスワップのドキュメント](./docs/block_swap.md)も新設しました。
+
 - 2026/06/13
     - ネットワーク重みの保存精度を指定する `--save_precision` オプションを追加し、デフォルトの保存精度をfp32に変更しました。[PR #967](https://github.com/kohya-ss/musubi-tuner/pull/967) rockerBOO氏に感謝します。
         - **破壊的変更**：LoRAファイルの保存精度のデフォルトがfp32に変更されました。
