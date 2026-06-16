@@ -14,7 +14,7 @@ def test_ideogram4_shift_matches_resolution_aware_logit_normal():
     t_1024 = timesteps.compute_ideogram4_shift_timestep(u, token_grid_height=64, token_grid_width=64)
 
     assert torch.allclose(t_512, torch.full_like(t_512, 0.5))
-    assert torch.allclose(t_1024, torch.full_like(t_1024, 1.0 / 3.0))
+    assert torch.allclose(t_1024, torch.full_like(t_1024, 2.0 / 3.0))
 
 
 def test_ideogram4_shift_uses_official_std_in_logit_space():
@@ -22,7 +22,7 @@ def test_ideogram4_shift_uses_official_std_in_logit_space():
 
     actual = timesteps.compute_ideogram4_shift_timestep(u, token_grid_height=32, token_grid_width=32)
 
-    assert torch.allclose(actual, torch.tensor([1.0 - torch.sigmoid(torch.tensor(1.5)).item()]))
+    assert torch.allclose(actual, torch.tensor([torch.sigmoid(torch.tensor(1.5)).item()]))
 
 
 def test_parser_accepts_ideogram4_shift_timestep_sampling():
@@ -55,5 +55,5 @@ def test_trainer_ideogram4_shift_samples_from_token_grid_resolution():
         torch.float32,
     )
 
-    assert torch.allclose(noisy_model_input, torch.full_like(noisy_model_input, 1.0 / 3.0))
-    assert torch.allclose(sampled_timesteps, torch.full_like(sampled_timesteps, 1000.0 / 3.0 + 1.0))
+    assert torch.allclose(noisy_model_input, torch.full_like(noisy_model_input, 2.0 / 3.0))
+    assert torch.allclose(sampled_timesteps, torch.full_like(sampled_timesteps, 2000.0 / 3.0 + 1.0))

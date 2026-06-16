@@ -267,8 +267,14 @@ Add `Ideogram4NetworkTrainer(NetworkTrainer)`.
 
 Training timestep sampling:
 
-- Add an Ideogram-specific sampler path matching official `LogitNormalSchedule`:
-  `t = clamp(1 - sigmoid(mu_adjusted + std * normal()), t_min, t_max)`.
+- Add an Ideogram-specific sampler path whose model-facing timestep matches official
+  `LogitNormalSchedule`. `NetworkTrainer` treats `t` as the noise coefficient
+  (`t=0` clean, `t=1` noise), while Ideogram 4's DiT receives the inverse convention
+  (`model_t=0` noise, `model_t=1` clean). Therefore sample the training noise
+  coefficient as:
+  `t_noise = clamp(sigmoid(mu_adjusted + std * normal()), 1 - t_max, 1 - t_min)`.
+  `call_dit` then passes `model_t = 1 - t_noise`, matching the official inference
+  schedule's `1 - sigmoid(mu_adjusted + std * normal())`.
 - Use the same resolution adjustment as inference:
   `mu_adjusted = train_mu + 0.5 * log(num_pixels / (512 * 512))`.
 - Start defaults:
@@ -278,8 +284,8 @@ Training timestep sampling:
 - Do not approximate this with the existing `timestep_sampling=logsnr` without a test. The current
   base implementation computes `t = sigmoid(-logsnr / 2)`, which is not exactly the official
   schedule.
-- Add a histogram/debug test comparing sampled `t` against the official scheduler for at least
-  512x512 and 2048x2048 buckets.
+- Add a histogram/debug test comparing sampled model-facing `model_t` against the official
+  scheduler for at least 512x512 and 2048x2048 buckets.
 
 `scale_shift_latents`:
 
@@ -295,11 +301,11 @@ Training timestep sampling:
 5. Concatenate zero latent padding for text slots with image latent tokens.
 6. Call the conditional transformer only.
 7. Slice image-token output and unpatchify to latent shape.
-8. Use target `noise - latents`.
+8. Use target `latents - noise`.
 
-The `noise - latents` target follows the invariant for
-`x_t = (1 - t) * x_0 + t * eps`: `dx_t/dt = eps - x_0`. Add a one-step unit test
-before trusting training loss.
+The `latents - noise` target follows the inference update direction because sampling integrates
+from high noise toward clean latents with `z = z + v * (s - t)`, where `s - t` is positive along
+the Ideogram 4 model-time path. Add a one-step unit test before trusting training loss.
 
 ## Sampling
 
