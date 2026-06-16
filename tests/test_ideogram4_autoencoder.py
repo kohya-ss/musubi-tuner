@@ -24,7 +24,7 @@ class FakeDecoder(nn.Module):
         return torch.zeros(z.shape[0], 3, z.shape[2] * 8, z.shape[3] * 8, device=z.device, dtype=z.dtype)
 
 
-def make_autoencoder(z_channels: int = 1) -> AutoEncoder:
+def make_autoencoder(z_channels: int = 32) -> AutoEncoder:
     params = AutoEncoderParams(resolution=16, ch=32, ch_mult=[1], num_res_blocks=0, z_channels=z_channels)
     return AutoEncoder(params)
 
@@ -36,24 +36,26 @@ def poison_batch_norm(autoencoder: AutoEncoder) -> None:
 
 
 def test_encode_returns_patchified_raw_encoder_mean_without_batch_norm():
-    autoencoder = make_autoencoder(z_channels=1)
+    autoencoder = make_autoencoder()
     poison_batch_norm(autoencoder)
-    mean = torch.arange(1 * 1 * 4 * 6, dtype=torch.float32).reshape(1, 1, 4, 6)
+    mean = torch.arange(1 * 32 * 4 * 6, dtype=torch.float32).reshape(1, 32, 4, 6)
     moments = torch.cat([mean, torch.zeros_like(mean)], dim=1)
     autoencoder.encoder = FakeEncoder(moments)
 
     actual = autoencoder.encode(torch.zeros(1, 3, 16, 16))
 
     assert torch.equal(actual, ideogram4_utils.patchify_vae_latents(mean))
+    assert torch.equal(ideogram4_utils.unpatchify_vae_latents(actual, 2, 3), mean)
 
 
 def test_decode_unpatchifies_tokens_without_batch_norm_inverse():
-    autoencoder = make_autoencoder(z_channels=1)
+    autoencoder = make_autoencoder()
     poison_batch_norm(autoencoder)
     decoder = FakeDecoder()
     autoencoder.decoder = decoder
-    tokens = torch.arange(1 * 4 * 2 * 3, dtype=torch.float32).reshape(1, 4, 2, 3)
+    latents = torch.arange(1 * 32 * 4 * 6, dtype=torch.float32).reshape(1, 32, 4, 6)
+    tokens = ideogram4_utils.patchify_vae_latents(latents)
 
     autoencoder.decode(tokens)
 
-    assert torch.equal(decoder.seen, ideogram4_utils.unpatchify_vae_latents(tokens, 2, 3))
+    assert torch.equal(decoder.seen, latents)

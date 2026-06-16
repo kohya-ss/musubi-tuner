@@ -191,14 +191,16 @@ Input:
 Processing:
 
 1. Normalize image pixels to the VAE input convention used by the official autoencoder.
-2. Encode with the VAE encoder and use deterministic mode/mean latents.
-3. Apply Ideogram latent normalization for training:
-   - official decode does `vae_latent = model_latent * latent_scale + latent_shift`;
-   - therefore cached model latents should be `(vae_latent - latent_shift) / latent_scale`.
-4. Save as `latents_1xHxW_<dtype>` under `ARCHITECTURE_IDEOGRAM4_FULL`.
+2. Encode with the VAE encoder and use deterministic mode/mean latents shaped `(B, 32, H/8, W/8)`.
+3. Patchify the VAE mean into token-grid shape `(B, 128, H/16, W/16)` with the single official
+   channel order `(patch_i, patch_j, latent_channel)`.
+4. Save the raw patchified VAE mean as `latents_1xHxW_<dtype>` under `ARCHITECTURE_IDEOGRAM4_FULL`.
 
-The cache stores unpatchified latents shaped like other image architectures. `call_dit` will patch
-to token shape `(B, grid_h * grid_w, 128)`.
+The cache stores raw patchified latents, not normalized model latents. Training applies
+`(token_grid - latent_shift) / latent_scale` once before adding noise. Sampling applies
+`token_grid * latent_scale + latent_shift` before unpatchifying. The 128-dimension latent
+normalization constants are ordered for `(patch_i, patch_j, latent_channel)`, so caches created with
+the older `(latent_channel, patch_i, patch_j)` order must be rebuilt.
 
 ## Text Encoder Caching
 
@@ -395,8 +397,11 @@ Minimum tests:
   - verify saved dtype matches `--text_cache_dtype`,
   - log estimated MB/image and GB/1k images from actual token counts.
 - patchify/unpatchify round trip for `(B, 32, H/8, W/8)` latents.
+- autoencoder encode/decode round trip with all 32 VAE channels, proving cached latents use the
+  same `(patch_i, patch_j, latent_channel)` order as sampling decode.
 - flow target one-step test:
-  - if model predicts `noise - latents`, Euler from `x_t` moves toward noise as `t` increases and toward latents as `t` decreases.
+  - if model predicts `latents - noise`, Euler from `x_t` moves toward latents along the
+    Ideogram 4 model-time path.
 - timestep sampler test:
   - sampled Ideogram 4 training timesteps match official logit-normal distribution with resolution-adjusted `mu`.
 

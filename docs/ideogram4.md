@@ -28,9 +28,10 @@ python src/musubi_tuner/ideogram4_cache_latents.py `
   --vae_dtype bfloat16
 ```
 
-The latent cache stores the raw patchified VAE encoder mean. Training applies the Ideogram 4
-latent shift/scale once, matching the official pipeline. Rebuild older Ideogram 4 latent caches
-created by builds that applied the VAE BatchNorm inside `AutoEncoder.encode()`.
+The latent cache stores the raw patchified VAE encoder mean in `(patch_i, patch_j, latent_channel)`
+order. Training applies the Ideogram 4 latent shift/scale once, matching the official pipeline.
+Rebuild older Ideogram 4 latent caches created by builds that applied the VAE BatchNorm inside
+`AutoEncoder.encode()` or used the older `(latent_channel, patch_i, patch_j)` patch order.
 
 Text cache:
 
