@@ -72,3 +72,63 @@ def _parse_band_weights(weights_str: Optional[str]) -> Optional[dict[str, float]
             k, v = pair.split("=", 1)
             result[k.strip()] = float(v.strip())
     return result
+
+
+def wavelet_loss_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Wavelet-loss-specific CLI arguments."""
+    parser.add_argument("--wavelet_loss", action="store_true", help="Enable wavelet auxiliary loss. Default: False")
+    parser.add_argument("--wavelet_loss_alpha", type=float, default=0.1, help="Wavelet loss weight. Default: 0.1")
+    parser.add_argument(
+        "--wavelet_loss_type",
+        default=None,
+        help="Loss function for wavelet bands: l1, l2, huber, smooth_l1. Defaults to --loss_type.",
+    )
+    parser.add_argument(
+        "--wavelet_loss_transform",
+        default="swt",
+        choices=["dwt", "swt", "qwt"],
+        help="Wavelet transform: dwt (discrete), swt (stationary), qwt (quaternion). Default: swt",
+    )
+    parser.add_argument("--wavelet_loss_wavelet", default="sym7", help="Wavelet family (e.g. sym7, db4). Default: sym7")
+    parser.add_argument(
+        "--wavelet_loss_level",
+        type=int,
+        default=1,
+        help="Decomposition levels. Level 1 captures coarse structure; higher levels add detail. Default: 1",
+    )
+    parser.add_argument(
+        "--wavelet_loss_band_weights",
+        type=_parse_band_weights,
+        default=None,
+        help="Per-band weights as ll=0.1,lh=0.01,hl=0.01,hh=0.05 or JSON dict. Default: library defaults.",
+    )
+    parser.add_argument(
+        "--wavelet_loss_band_level_weights",
+        type=_parse_band_weights,
+        default=None,
+        help="Per-band-per-level weights as ll1=0.1,lh1=0.01,hh2=0.05 etc. Overrides --wavelet_loss_band_weights.",
+    )
+    parser.add_argument(
+        "--wavelet_loss_quaternion_component_weights",
+        type=_parse_band_weights,
+        default=None,
+        help="QWT component weights as r=1.0,i=0.7,j=0.7,k=0.5. Only used with --wavelet_loss_transform qwt.",
+    )
+    parser.add_argument(
+        "--wavelet_loss_ll_level_threshold",
+        type=int,
+        default=None,
+        help="Level at which to include LL (low-frequency) band. -1 = last level only. Default: None (use all).",
+    )
+    parser.add_argument(
+        "--wavelet_loss_normalize_bands",
+        action="store_true",
+        default=None,
+        help="Normalise each wavelet band before computing the loss.",
+    )
+    parser.add_argument(
+        "--wavelet_loss_metrics",
+        action="store_true",
+        help="Log detailed per-band wavelet metrics each step (adds overhead). Default: False",
+    )
+    return parser
