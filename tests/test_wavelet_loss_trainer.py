@@ -176,3 +176,23 @@ def test_compute_loss_disabled_equals_weighted_mse():
     expected = F.mse_loss(pred, target).detach()
     assert metrics == {}
     assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_extra_metadata_enabled():
+    trainer = Flux2WaveletLossNetworkTrainer()
+    args = _make_args(wavelet_loss_band_weights={"ll": 0.1, "hh": 0.05})
+    meta = trainer.extra_metadata(args)
+    assert meta["ss_wavelet_loss"] is True
+    assert meta["ss_wavelet_loss_alpha"] == 0.1
+    assert meta["ss_wavelet_loss_transform"] == "swt"
+    assert meta["ss_wavelet_loss_wavelet"] == "sym7"
+    assert meta["ss_wavelet_loss_level"] == 1
+    # dict-valued args are JSON-encoded strings
+    import json
+    assert json.loads(meta["ss_wavelet_loss_band_weights"]) == {"ll": 0.1, "hh": 0.05}
+
+
+def test_extra_metadata_disabled():
+    trainer = Flux2WaveletLossNetworkTrainer()
+    args = _make_args(wavelet_loss=False)
+    assert trainer.extra_metadata(args) == {}

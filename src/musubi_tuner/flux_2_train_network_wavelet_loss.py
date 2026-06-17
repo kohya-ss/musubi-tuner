@@ -192,6 +192,31 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
 
         return mse_loss.mean() + args.wavelet_loss_alpha * wav_loss, loss_metrics
 
+    def extra_metadata(self, args: argparse.Namespace) -> dict:
+        """Embed wavelet-loss configuration into the saved safetensors metadata."""
+        if not args.wavelet_loss:
+            return {}
+        import json
+
+        return {
+            "ss_wavelet_loss": True,
+            "ss_wavelet_loss_alpha": args.wavelet_loss_alpha,
+            "ss_wavelet_loss_type": args.wavelet_loss_type,
+            "ss_wavelet_loss_transform": args.wavelet_loss_transform,
+            "ss_wavelet_loss_wavelet": args.wavelet_loss_wavelet,
+            "ss_wavelet_loss_level": args.wavelet_loss_level,
+            "ss_wavelet_loss_band_weights": json.dumps(args.wavelet_loss_band_weights)
+            if args.wavelet_loss_band_weights
+            else None,
+            "ss_wavelet_loss_band_level_weights": json.dumps(args.wavelet_loss_band_level_weights)
+            if args.wavelet_loss_band_level_weights
+            else None,
+            "ss_wavelet_loss_quaternion_component_weights": json.dumps(args.wavelet_loss_quaternion_component_weights)
+            if args.wavelet_loss_quaternion_component_weights
+            else None,
+            "ss_wavelet_loss_ll_level_threshold": args.wavelet_loss_ll_level_threshold,
+        }
+
 
 def _parse_band_weights(weights_str: Optional[str]) -> Optional[dict[str, float]]:
     """Parse ``ll=0.1,lh=0.01,hl=0.01,hh=0.05`` or a JSON/literal dict string."""
