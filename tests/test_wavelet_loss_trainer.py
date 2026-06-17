@@ -6,7 +6,13 @@ combination, metadata), not the wavelet_loss package internals.
 
 import argparse
 
-from musubi_tuner.flux_2_train_network_wavelet_loss import _parse_band_weights, wavelet_loss_setup_parser
+import pytest
+
+from musubi_tuner.flux_2_train_network_wavelet_loss import (
+    _parse_band_weights,
+    wavelet_loss_setup_parser,
+    Flux2WaveletLossNetworkTrainer,
+)
 
 
 def test_parse_band_weights_key_value():
@@ -57,3 +63,17 @@ def test_parser_does_not_define_dropped_args():
         "wavelet_loss_min_snr_beta",
     ):
         assert not hasattr(args, dropped), f"dropped arg leaked: {dropped}"
+
+
+def test_handle_model_specific_args_requires_package(monkeypatch):
+    import musubi_tuner.flux_2_train_network_wavelet_loss as mod
+
+    monkeypatch.setattr(mod, "WaveletLoss", None)
+    trainer = Flux2WaveletLossNetworkTrainer()
+    args = argparse.Namespace(
+        wavelet_loss=True,
+        model_version="flux2-dev",  # any valid key; only reached if import guard passes
+    )
+    # The guard must fire before any model-version logic.
+    with pytest.raises(ImportError):
+        trainer.handle_model_specific_args(args)
