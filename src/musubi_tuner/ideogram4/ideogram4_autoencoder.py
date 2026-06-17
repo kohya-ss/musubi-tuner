@@ -295,9 +295,14 @@ class AutoEncoder(nn.Module):
             z_channels=params.z_channels,
         )
 
+        self.ps = [2, 2]
+        # NOTE: `bn` holds BatchNorm statistics shipped in the checkpoint, but it is NOT used by the
+        # caching/training/inference pipeline. Latent (de)normalization is done with the standalone
+        # LATENT_SHIFT/LATENT_SCALE constants in latent_norm.py, which are the authoritative values
+        # (verified by correct generation) and do NOT match bn's running stats. `bn` is retained only
+        # so the checkpoint's bn.* keys load via the default strict state_dict load.
         self.bn_eps = 1e-4
         self.bn_momentum = 0.1
-        self.ps = [2, 2]
         self.bn = torch.nn.BatchNorm2d(
             math.prod(self.ps) * params.z_channels,
             eps=self.bn_eps,
@@ -305,16 +310,6 @@ class AutoEncoder(nn.Module):
             affine=False,
             track_running_stats=True,
         )
-
-    def normalize(self, z: Tensor) -> Tensor:
-        self.bn.eval()
-        return self.bn(z)
-
-    def inv_normalize(self, z: Tensor) -> Tensor:
-        self.bn.eval()
-        s = torch.sqrt(self.bn.running_var.view(1, -1, 1, 1) + self.bn_eps)
-        m = self.bn.running_mean.view(1, -1, 1, 1)
-        return z * s + m
 
     def encode(self, x: Tensor) -> Tensor:
         moments = self.encoder(x)

@@ -172,9 +172,14 @@ def load_ideogram4_text_encoder(
     )
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     state_dict = _normalize_qwen3_vl_state_dict_for_automodel(state_dict)
+    # Ideogram 4 conditioning only consumes the language model (see _get_qwen3_vl_embeddings), so
+    # drop the Qwen3-VL vision tower weights and remove the submodule to avoid materializing it.
+    state_dict = {k: v for k, v in state_dict.items() if not k.startswith("visual.")}
     device = torch.device(device)
     with init_empty_weights():
         model = AutoModel.from_config(config, trust_remote_code=True)
+    if hasattr(model, "visual"):
+        del model.visual
     _materialize_meta_tensors(model)
     if is_fp8_state_dict(state_dict):
         require_fp8_dtype()
@@ -217,6 +222,11 @@ def tokenize_prompt(tokenizer, prompt: str, max_text_tokens: int = IDEOGRAM4_MAX
 
 
 def _get_qwen3_vl_embeddings(text_encoder, token_ids: torch.Tensor, attention_mask: torch.Tensor, pos_2d: torch.Tensor):
+    # NOTE: This manually drives Qwen3-VL's text decoder stack (embed_tokens -> rotary_emb -> layers)
+    # instead of calling text_encoder.forward(), so it depends on transformers internals: the submodule
+    # layout (language_model.embed_tokens / .rotary_emb / .layers), the Qwen3VLDecoderLayer call
+    # signature, and transformers.masking_utils.create_causal_mask. This is validated against the pinned
+    # transformers==4.57.6 (see pyproject.toml); a transformers upgrade may require updating this path.
     language_model = text_encoder.language_model
     inputs_embeds = language_model.embed_tokens(token_ids)
 
@@ -556,8 +566,10 @@ def validate_prompt(prompt: str, *, warn_only: bool) -> None:
 
 def dtype_cache_cost(num_tokens: int, dtype: torch.dtype) -> tuple[float, float]:
     element_size = torch.empty((), dtype=dtype).element_size()
-    mb_per_image = num_tokens * 53248 * element_size / 1_000_000
-    return mb_per_image, mb_per_image * 1000 / 1000
+    bytes_per_image = num_tokens * 53248 * element_size
+    mb_per_image = bytes_per_image / 1_000_000
+    gb_per_1k_images = bytes_per_image * 1_000 / 1_000_000_000
+    return mb_per_image, gb_per_1k_images
 
 
 def fp8_cache_dtype() -> torch.dtype:
