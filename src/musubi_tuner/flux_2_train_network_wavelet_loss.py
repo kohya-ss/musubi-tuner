@@ -187,7 +187,7 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
         self.wavelet_loss.set_loss_fn(_loss_fn)
 
         wav_loss, wav_metrics = self.wavelet_loss(x0_pred.float(), x0_target.float(), timesteps)
-        loss_metrics = {f"wavelet_loss/{k}": v for k, v in wav_metrics.items()}
+        loss_metrics = dict(wav_metrics)
 
         return mse_loss.mean() + args.wavelet_loss_alpha * wav_loss, loss_metrics
 
