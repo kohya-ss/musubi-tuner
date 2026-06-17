@@ -43,9 +43,10 @@ through the existing extension seams:
 - **`handle_model_specific_args(args)`** — calls super, then raises a clear
   `ImportError` if `args.wavelet_loss` is set but the `wavelet_loss` package is
   not installed.
-- **`call_dit(...)`** — delegates to parent, then stashes `noise` and
-  `noisy_model_input` into `DiTOutput.extra` so `compute_loss` can recover x0
-  without changing the shared `compute_loss` signature.
+- **`call_dit(...)`** — delegates to parent, then stashes `noisy_model_input`
+  into `DiTOutput.extra` so `compute_loss` can recover x0 without changing the
+  shared `compute_loss` signature. (`output.pred` and `output.target` are
+  already on the `DiTOutput`; `noise` is not needed for the corrected target.)
 - **`on_train_start(...)`** — when `--wavelet_loss` is set, constructs
   `WaveletLoss(...)` on `accelerator.device` (filters live as registered
   buffers), moves it to device, and logs the active configuration.
@@ -54,10 +55,20 @@ through the existing extension seams:
   - Base term: `F.mse_loss(pred, target, reduction="none")` optionally scaled by
     `compute_loss_weighting_for_sd3(...)`.
   - Wavelet term operates on **estimated clean latents (x0)** derived from the
-    velocity prediction:
-    - `sigmas = get_sigmas(noise_scheduler, timesteps, ...)`
-    - `x0_pred   = noisy_model_input - sigmas * pred`
-    - `x0_target = noisy_model_input - sigmas * noise`  (equals `latents`)
+    velocity prediction and the velocity target. In FLUX.2,
+    `output.target = noise - latents` (velocity) and
+    `noisy = (1-sigma)*latents + sigma*noise`, so subtracting `sigma * velocity`
+    from the noisy input recovers the clean latents:
+    - `sigmas = get_sigmas(noise_scheduler, timesteps, n_dim=output.pred.ndim, ...)`
+    - `x0_pred   = noisy_model_input - sigmas * output.pred`   (≈ `latents`)
+    - `x0_target = noisy_model_input - sigmas * output.target` (= `latents` exactly)
+    - **Note:** this corrects a bug in the `example-wavelet-loss` prototype,
+      which used `x0_target = noisy - sigma*noise = (1-sigma)*latents`. That
+      biased target left a residual of `sigma*latents` even at a perfect
+      prediction; the corrected target makes the wavelet loss reach zero at the
+      optimum. `output.target` is already stashed in `DiTOutput`, so no extra
+      tensor needs to be carried through `extra` — only `noisy_model_input` is
+      stashed (and `noise` is no longer needed for the loss).
   - Per-step `set_loss_fn(...)` selects l1 / huber(smooth_l1) / mse from
     `--wavelet_loss_type`, falling back to `--loss_type`.
   - `WaveletLoss.forward(x0_pred.float(), x0_target.float(), timesteps)` returns
@@ -119,8 +130,10 @@ not the package internals:
 
 - **`_parse_band_weights`**: `key=value` form → dict of floats; JSON-dict form;
   `None` passthrough.
-- **x0-recovery identity**: with `pred == noise`, `x0_pred == x0_target ==
-  latents` (within tolerance), confirming the flow-matching recovery math.
+- **x0-recovery identity**: given `noisy = (1-sigma)*latents + sigma*noise` and
+  `target = noise - latents`, assert `x0_target = noisy - sigma*target ==
+  latents` within tolerance; and with a perfect `pred == target`,
+  `x0_pred == latents`. This locks in the corrected (unbiased) recovery math.
 - **`compute_loss`**: with a small fabricated `DiTOutput` and a real
   `WaveletLoss`, returns a finite scalar loss and a non-empty `wavelet_loss/*`
   metrics dict; with `--wavelet_loss` off, returns empty metrics and a value
