@@ -137,6 +137,61 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
         if args.wavelet_loss_band_weights:
             logger.info(f"\tBand weights: {args.wavelet_loss_band_weights}")
 
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Weighted flow-matching MSE + optional wavelet auxiliary loss.
+
+        The wavelet term runs on estimated clean latents (x0) recovered from the
+        velocity prediction and the velocity target:
+
+            x0_pred   = noisy_model_input - sigma * output.pred
+            x0_target = noisy_model_input - sigma * output.target  (= latents)
+
+        Combination is additive: ``mse.mean() + alpha * wavelet_loss``.
+        """
+        weighting = compute_loss_weighting_for_sd3(
+            args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype
+        )
+        mse_loss = F.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
+        if weighting is not None:
+            mse_loss = mse_loss * weighting
+
+        if not args.wavelet_loss or self.wavelet_loss is None:
+            return mse_loss.mean(), {}
+
+        # --- wavelet path ---
+        noisy_model_input = output.extra["noisy_model_input"]
+
+        sigmas = get_sigmas(
+            noise_scheduler, timesteps, noisy_model_input.device, n_dim=output.pred.ndim, dtype=output.pred.dtype
+        )
+        x0_pred = noisy_model_input - sigmas * output.pred.to(noisy_model_input.dtype)
+        x0_target = noisy_model_input - sigmas * output.target.to(noisy_model_input.dtype)
+
+        loss_type = args.wavelet_loss_type if args.wavelet_loss_type is not None else args.loss_type
+
+        def _loss_fn(input: torch.Tensor, target: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
+            if loss_type in ("l1", "mae"):
+                return F.l1_loss(input, target, reduction=reduction)
+            if loss_type in ("huber", "smooth_l1"):
+                return F.smooth_l1_loss(input, target, reduction=reduction)
+            return F.mse_loss(input, target, reduction=reduction)
+
+        self.wavelet_loss.set_loss_fn(_loss_fn)
+
+        wav_loss, wav_metrics = self.wavelet_loss(x0_pred.float(), x0_target.float(), timesteps)
+        loss_metrics = {f"wavelet_loss/{k}": v for k, v in wav_metrics.items()}
+
+        return mse_loss.mean() + args.wavelet_loss_alpha * wav_loss, loss_metrics
+
 
 def _parse_band_weights(weights_str: Optional[str]) -> Optional[dict[str, float]]:
     """Parse ``ll=0.1,lh=0.01,hl=0.01,hh=0.05`` or a JSON/literal dict string."""
