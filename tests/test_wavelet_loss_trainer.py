@@ -162,6 +162,11 @@ def test_compute_loss_with_wavelet_returns_metrics():
     assert len(metrics) > 0
     assert all(k.startswith("wavelet_loss/") for k in metrics)
 
+    # Verify the wavelet term actually changes the loss versus plain weighted MSE
+    base_mse = F.mse_loss(output.pred, output.target)
+    assert not torch.allclose(loss, base_mse), "wavelet term did not change the loss"
+    assert loss.item() > base_mse.item(), "enabled loss should exceed base MSE (alpha>0, wav_loss>0)"
+
 
 def test_compute_loss_disabled_equals_weighted_mse():
     trainer, args, latents, noise, noisy, target, timesteps, scheduler, _ = _setup_trainer_and_batch()
