@@ -196,3 +196,21 @@ def test_extra_metadata_disabled():
     trainer = Flux2WaveletLossNetworkTrainer()
     args = _make_args(wavelet_loss=False)
     assert trainer.extra_metadata(args) == {}
+
+
+def test_combined_parser_has_common_and_wavelet_args():
+    from musubi_tuner.hv_train_network import setup_parser_common
+    from musubi_tuner.flux_2_train_network import flux2_setup_parser
+    from musubi_tuner.flux_2_train_network_wavelet_loss import wavelet_loss_setup_parser
+
+    parser = wavelet_loss_setup_parser(flux2_setup_parser(setup_parser_common()))
+    # wavelet args coexist with the common/flux2 args without conflict
+    dests = {a.dest for a in parser._actions}
+    assert "wavelet_loss" in dests
+    assert "wavelet_loss_alpha" in dests
+
+
+def test_main_is_callable():
+    from musubi_tuner.flux_2_train_network_wavelet_loss import main
+
+    assert callable(main)

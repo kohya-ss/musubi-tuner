@@ -297,3 +297,23 @@ def wavelet_loss_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argum
         help="Log detailed per-band wavelet metrics each step (adds overhead). Default: False",
     )
     return parser
+
+
+def main():
+    parser = setup_parser_common()
+    parser = flux2_setup_parser(parser)
+    parser = wavelet_loss_setup_parser(parser)
+
+    args = parser.parse_args()
+    args = read_config_from_file(args, parser)
+
+    args.dit_dtype = None  # set from mixed_precision
+    if args.vae_dtype is None:
+        args.vae_dtype = "float32"  # make float32 the default for VAE
+
+    trainer = Flux2WaveletLossNetworkTrainer()
+    trainer.train(args)
+
+
+if __name__ == "__main__":
+    main()
