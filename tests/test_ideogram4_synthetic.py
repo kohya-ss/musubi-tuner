@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -811,7 +812,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
             output = trainer.call_dit(
                 SimpleNamespace(gradient_checkpointing=False, timestep_sampling="uniform"),
-                SimpleNamespace(device=torch.device("cpu")),
+                SimpleNamespace(device=torch.device("cpu"), autocast=lambda *a, **k: nullcontext()),
                 transformer,
                 latents,
                 {"i4_llm_features": [torch.zeros(1, 8)]},

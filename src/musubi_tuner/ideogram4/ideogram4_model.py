@@ -7,6 +7,7 @@ produce velocity predictions on image latents.
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -85,21 +86,36 @@ class Ideogram4MRoPE(nn.Module):
         assert position_ids.ndim == 3 and position_ids.shape[-1] == 3
         batch_size, seq_len, _ = position_ids.shape
 
-        # (3, B, inv_freq_size, L)
-        pos = position_ids.permute(2, 0, 1).to(dtype=torch.float32)  # type: ignore[arg-type]
-        inv_freq = self.inv_freq.to(dtype=torch.float32)[None, None, :, None].expand(3, batch_size, -1, 1)  # type: ignore[index]
-        freqs = inv_freq @ pos.unsqueeze(2)
-        freqs = freqs.transpose(2, 3)  # (3, B, L, inv_freq_size)
+        # The MRoPE frequencies must be computed in real fp32. Image position ids start at
+        # IMAGE_POSITION_OFFSET (2**16), where bf16 has a spacing of 512, so under an active
+        # autocast context the `inv_freq @ pos` matmul would be downcast to bf16 and every image
+        # position would collapse to the same value -- wiping out the spatial RoPE phase and
+        # producing a flat checkerboard. The explicit `.to(torch.float32)` below does NOT protect
+        # against this because autocast overrides matmul's compute dtype regardless of input dtype,
+        # so we force autocast off for the whole computation. This is a no-op when no outer autocast
+        # is active (the current training/inference default), so it never changes existing results.
+        device_type = position_ids.device.type
+        autocast_disabled = (
+            torch.autocast(device_type=device_type, enabled=False)
+            if device_type in ("cuda", "cpu", "xpu", "hpu")
+            else nullcontext()
+        )
+        with autocast_disabled:
+            # (3, B, inv_freq_size, L)
+            pos = position_ids.permute(2, 0, 1).to(dtype=torch.float32)  # type: ignore[arg-type]
+            inv_freq = self.inv_freq.to(dtype=torch.float32)[None, None, :, None].expand(3, batch_size, -1, 1)  # type: ignore[index]
+            freqs = inv_freq @ pos.unsqueeze(2)
+            freqs = freqs.transpose(2, 3)  # (3, B, L, inv_freq_size)
 
-        # interleaved mrope: pull H freqs into idx 1 mod 3, W freqs into idx 2 mod 3.
-        freqs_t = freqs[0].clone()
-        for axis, offset in ((1, 1), (2, 2)):
-            length = self.mrope_section[axis] * 3
-            idx = torch.arange(offset, length, 3, device=freqs_t.device)
-            freqs_t[..., idx] = freqs[axis][..., idx]
+            # interleaved mrope: pull H freqs into idx 1 mod 3, W freqs into idx 2 mod 3.
+            freqs_t = freqs[0].clone()
+            for axis, offset in ((1, 1), (2, 2)):
+                length = self.mrope_section[axis] * 3
+                idx = torch.arange(offset, length, 3, device=freqs_t.device)
+                freqs_t[..., idx] = freqs[axis][..., idx]
 
-        emb = torch.cat((freqs_t, freqs_t), dim=-1)
-        return emb.cos(), emb.sin()
+            emb = torch.cat((freqs_t, freqs_t), dim=-1)
+            return emb.cos(), emb.sin()
 
 
 class Ideogram4RMSNorm(nn.Module):

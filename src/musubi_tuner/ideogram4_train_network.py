@@ -1,5 +1,4 @@
 import argparse
-from contextlib import nullcontext
 import gc
 import logging
 from typing import Optional
@@ -178,31 +177,25 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         vae.to(accelerator.device)
         vae.eval()
         conditional_transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
-        # The shared trainer wraps sampling in accelerator.autocast(), but
-        # the prepared transformer also carries Accelerate's mixed-precision
-        # forward wrapper. Ideogram 4 FP8 modules already manage their compute
-        # dtype internally, so sampling must use the unwrapped model and disable
-        # autocast; otherwise samples collapse into a flat checkerboard.
-        autocast_context = (
-            torch.autocast(device_type=accelerator.device.type, enabled=False)
-            if accelerator.device.type in ("cuda", "cpu", "xpu", "hpu")
-            else nullcontext()
+        # Sampling runs under the caller's accelerator.autocast() (see NetworkTrainer.sample_images), so
+        # it follows --mixed_precision exactly like training's call_dit(). This used to force autocast off
+        # to dodge a checkerboard, but the real cause was Ideogram4MRoPE losing precision under autocast;
+        # now that MRoPE pins its frequency matmul to fp32, autocast sampling is safe and we let the
+        # mixed-precision regime match between training and sampling.
+        images = ideogram4_utils.generate_images(
+            conditional_transformer=conditional_transformer,
+            unconditional_transformer=self.unconditional_transformer,
+            autoencoder=vae,
+            text_features=[features],
+            unconditional_text_features=[unconditional_features] if unconditional_features is not None else None,
+            height=height,
+            width=width,
+            sampler_preset=sampler_preset,
+            device=accelerator.device,
+            seed=sample_parameter.get("seed", None),
+            show_progress=True,
+            initial_sigma=args.initial_sigma,
         )
-        with autocast_context:
-            images = ideogram4_utils.generate_images(
-                conditional_transformer=conditional_transformer,
-                unconditional_transformer=self.unconditional_transformer,
-                autoencoder=vae,
-                text_features=[features],
-                unconditional_text_features=[unconditional_features] if unconditional_features is not None else None,
-                height=height,
-                width=width,
-                sampler_preset=sampler_preset,
-                device=accelerator.device,
-                seed=sample_parameter.get("seed", None),
-                show_progress=True,
-                initial_sigma=args.initial_sigma,
-            )
         arr = np.asarray(images[0]).astype(np.float32) / 255.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
         return tensor
@@ -352,14 +345,21 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
             model_t = ((1001.0 - raw_timestep) / 1000.0).clamp(0.0, 1.0)
         else:
             model_t = (1.0 - raw_timestep / 1000.0).clamp(0.0, 1.0)
-        model_pred = model(
-            llm_features=llm_features,
-            x=x,
-            t=model_t,
-            position_ids=inputs["position_ids"],
-            segment_ids=inputs["segment_ids"],
-            indicator=inputs["indicator"],
-        )
+        # Run the DiT under accelerator.autocast() like every other architecture, so --mixed_precision
+        # selects the compute regime: bf16 -> autocast mixed precision (LoRA computed in bf16), and the
+        # default 'no' -> a true no-op, i.e. fp32 LoRA over the bf16 base (the previous Ideogram 4
+        # behaviour, unchanged). This is only safe because Ideogram4MRoPE forces its frequency matmul to
+        # fp32 internally; without that guard autocast would collapse the image RoPE positions to a single
+        # value (offset 2**16, below bf16 resolution) and produce a flat checkerboard.
+        with accelerator.autocast():
+            model_pred = model(
+                llm_features=llm_features,
+                x=x,
+                t=model_t,
+                position_ids=inputs["position_ids"],
+                segment_ids=inputs["segment_ids"],
+                indicator=inputs["indicator"],
+            )
         model_pred = model_pred[:, int(inputs["max_text_tokens"]) :]
         model_pred = ideogram4_utils.unflatten_token_grid(model_pred, grid_h, grid_w)
         target = latents - noise
