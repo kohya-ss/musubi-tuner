@@ -60,6 +60,10 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
             raise ValueError("--blocks_to_swap for Ideogram 4 must be <= 33")
         if args.sample_prompts and (args.text_encoder is None or args.vae is None):
             raise ValueError("--sample_prompts for Ideogram 4 requires --text_encoder and --vae")
+        # compute_loss() uses a plain mean MSE and intentionally ignores the SD3 timestep
+        # weighting, so reject a non-default --weighting_scheme rather than silently dropping it.
+        if args.weighting_scheme != "none":
+            raise ValueError("Ideogram 4 currently supports --weighting_scheme none only.")
 
     def process_sample_prompts(
         self,
@@ -245,71 +249,13 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         return model_utils.compile_transformer(args, transformer, [transformer.layers], disable_linear=self.blocks_to_swap > 0)
 
     def scale_shift_latents(self, latents):
-        return latents
-
-    def process_batch(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        transformer,
-        network,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        noise: torch.Tensor,
-        noise_scheduler,
-        dit_dtype: torch.dtype,
-        network_dtype: torch.dtype,
-        vae,
-        global_step: int,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        del network, noise, vae, global_step
-        latents = latents.to(device=accelerator.device, dtype=dit_dtype)
-        token_grid = ideogram4_utils.normalize_token_grid(latents)
-        noise = torch.randn_like(token_grid)
-        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-            args,
-            noise,
-            token_grid,
-            batch.get("timesteps"),
-            noise_scheduler,
-            accelerator.device,
-            dit_dtype,
-        )
-
-        output = self.call_dit(
-            args,
-            accelerator,
-            transformer,
-            token_grid,
-            batch,
-            noise,
-            noisy_model_input,
-            timesteps,
-            network_dtype,
-        )
-        pred = output.pred.to(network_dtype)
-        target = output.target.to(network_dtype)
-        loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
-
-        loss_metrics = {}
-        if getattr(args, "log_loss_stats", False):
-            with torch.no_grad():
-                pred_f = pred.detach().float()
-                target_f = target.detach().float()
-                pred_rms = pred_f.square().mean().sqrt()
-                target_rms = target_f.square().mean().sqrt()
-                denom = (pred_rms * target_rms).clamp_min(1e-8)
-                loss_metrics = {
-                    "loss/zero_pred": target_f.square().mean().item(),
-                    "loss/flipped_pred": torch.nn.functional.mse_loss(-pred_f, target_f, reduction="mean").item(),
-                    "loss/pred_rms": pred_rms.item(),
-                    "loss/target_rms": target_rms.item(),
-                    "loss/pred_target_cosine": ((pred_f * target_f).mean() / denom).item(),
-                    "timestep/mean": timesteps.detach().float().mean().item(),
-                    "timestep/min": timesteps.detach().float().min().item(),
-                    "timestep/max": timesteps.detach().float().max().item(),
-                }
-        return loss, loss_metrics
+        # Transform raw VAE latents into the model's normalized token-grid space
+        # (per-channel (latents - shift) / scale). This is the designated latents-transform
+        # hook (cf. Z-Image), called by the base training loop before noise sampling, so the
+        # base process_batch can build the noisy input directly in model space. Keeping the
+        # transform here lets this trainer override only call_dit and compute_loss instead of
+        # reimplementing the whole batch flow.
+        return ideogram4_utils.normalize_token_grid(latents)
 
     def call_dit(
         self,
@@ -374,6 +320,44 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         model_pred = ideogram4_utils.unflatten_token_grid(model_pred, grid_h, grid_w)
         target = latents - noise
         return DiTOutput(pred=model_pred, target=target)
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        # Plain mean MSE in flow-matching velocity space. Ideogram 4 does not use the
+        # SD3 weighting_scheme, so this owns the full loss formulation rather than
+        # augmenting super().compute_loss (which would apply that weighting).
+        del noise_scheduler, dit_dtype, global_step
+        pred = output.pred.to(network_dtype)
+        target = output.target.to(network_dtype)
+        loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
+
+        loss_metrics = {}
+        if getattr(args, "log_loss_stats", False):
+            with torch.no_grad():
+                pred_f = pred.detach().float()
+                target_f = target.detach().float()
+                pred_rms = pred_f.square().mean().sqrt()
+                target_rms = target_f.square().mean().sqrt()
+                denom = (pred_rms * target_rms).clamp_min(1e-8)
+                loss_metrics = {
+                    "loss/zero_pred": target_f.square().mean().item(),
+                    "loss/flipped_pred": torch.nn.functional.mse_loss(-pred_f, target_f, reduction="mean").item(),
+                    "loss/pred_rms": pred_rms.item(),
+                    "loss/target_rms": target_rms.item(),
+                    "loss/pred_target_cosine": ((pred_f * target_f).mean() / denom).item(),
+                    "timestep/mean": timesteps.detach().float().mean().item(),
+                    "timestep/min": timesteps.detach().float().min().item(),
+                    "timestep/max": timesteps.detach().float().max().item(),
+                }
+        return loss, loss_metrics
 
 
 def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
