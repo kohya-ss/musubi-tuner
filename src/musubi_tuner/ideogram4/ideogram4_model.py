@@ -475,9 +475,6 @@ class Ideogram4Transformer(nn.Module):
         cos = cos.to(h.dtype)
         sin = sin.to(h.dtype)
 
-        if self.blocks_to_swap:
-            self.prepare_block_swap_before_forward()
-
         for index, layer in enumerate(self.layers):
             if self.blocks_to_swap:
                 assert self.offloader is not None
