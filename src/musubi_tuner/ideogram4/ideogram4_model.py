@@ -440,7 +440,10 @@ class Ideogram4Transformer(nn.Module):
 
         param_dtype = _linear_compute_dtype(self.input_proj)
         x = x.to(param_dtype)
-        t = t.to(param_dtype)
+        # NOTE: t is intentionally NOT cast here. It is consumed only by self.t_embedding
+        # (Ideogram4EmbedScalar), which re-casts to float32 internally. Casting t to the bf16
+        # param dtype first would quantize the timestep to bf16 resolution for no benefit, losing
+        # precision in the --mixed_precision=no path where t arrives as clean float32.
         llm_features = llm_features.to(param_dtype)
 
         indicator = indicator.to(torch.long)
