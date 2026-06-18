@@ -18,7 +18,6 @@ from musubi_tuner.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
     QWEN3_VL_ACTIVATION_LAYERS,
-    SEQUENCE_PADDING_INDICATOR,
 )
 from musubi_tuner.ideogram4.ideogram4_autoencoder import AutoEncoder, AutoEncoderParams, convert_diffusers_state_dict
 from musubi_tuner.ideogram4.ideogram4_model import Ideogram4Config, Ideogram4Transformer
@@ -146,6 +145,8 @@ def load_ideogram4_transformer(
     expected_model_type: Optional[str],
     disable_mmap: bool = False,
     config: Optional[Ideogram4Config] = None,
+    attn_mode: str = "torch",
+    split_attn: bool = False,
 ) -> Ideogram4Transformer:
     validate_local_safetensors(path, expected_model_type)
     device = torch.device(device)
@@ -161,7 +162,7 @@ def load_ideogram4_transformer(
         if device.type != "cuda":
             raise ValueError(f"bnb 4-bit weights require a CUDA device, got device={device}")
         state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
-        model = Ideogram4Transformer(config or Ideogram4Config())
+        model = Ideogram4Transformer(config or Ideogram4Config(), attn_mode=attn_mode, split_attn=split_attn)
         swap_linears_to_bnb4bit(model, compute_dtype=dtype)
         load_bnb4bit_state_dict(model, state_dict, device=device, dtype=dtype)
         model.eval()
@@ -173,7 +174,7 @@ def load_ideogram4_transformer(
         # layout, and apply_fp8_monkey_patch installs the dequantizing forward on each Linear.
         require_fp8_dtype()
         with init_empty_weights():
-            model = Ideogram4Transformer(config or Ideogram4Config())
+            model = Ideogram4Transformer(config or Ideogram4Config(), attn_mode=attn_mode, split_attn=split_attn)
         hooks = safetensors_utils.WeightTransformHooks(split_hook=_make_ideogram4_comfy_fp8_split_hook(dtype))
         sd = load_safetensors_with_lora_and_fp8(
             model_files=path,
@@ -198,7 +199,7 @@ def load_ideogram4_transformer(
     # plain (bf16/fp16/fp32) weights
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     with init_empty_weights():
-        model = Ideogram4Transformer(config or Ideogram4Config())
+        model = Ideogram4Transformer(config or Ideogram4Config(), attn_mode=attn_mode, split_attn=split_attn)
     model.load_state_dict(state_dict, assign=True)
     model.to(device=device, dtype=dtype)
     model.eval()
@@ -405,29 +406,30 @@ def build_sequence_inputs_from_features(
     t_idx = torch.zeros_like(h_idx)
     image_pos = torch.stack([t_idx, h_idx, w_idx], dim=1) + IMAGE_POSITION_OFFSET
 
+    # Sequence layout is [image][text][right-padding]: image tokens lead (Qwen-Image / Z-Image
+    # convention) so the shared attention() can build its mask from the text-only attention_mask.
     llm_features = torch.zeros(batch_size, total_seq_len, feature_dim, dtype=text_features[0].dtype)
     position_ids = torch.zeros(batch_size, total_seq_len, 3, dtype=torch.long)
-    segment_ids = torch.full((batch_size, total_seq_len), SEQUENCE_PADDING_INDICATOR, dtype=torch.long)
+    attention_mask = torch.zeros(batch_size, max_text_tokens, dtype=torch.long)
     indicator = torch.zeros(batch_size, total_seq_len, dtype=torch.long)
+
+    position_ids[:, :num_image_tokens] = image_pos
+    indicator[:, :num_image_tokens] = OUTPUT_IMAGE_INDICATOR
 
     for b, features in enumerate(text_features):
         num_text = int(features.shape[0])
-        pad_len = max_text_tokens - num_text
-        total_unpadded = num_text + num_image_tokens
-        offset = pad_len
+        text_start = num_image_tokens
         text_pos = torch.arange(num_text)
         text_pos_3d = torch.stack([text_pos, text_pos, text_pos], dim=1)
-        llm_features[b, offset : offset + num_text] = features.cpu()
-        position_ids[b, offset : offset + num_text] = text_pos_3d
-        position_ids[b, offset + num_text :] = image_pos
-        indicator[b, offset : offset + num_text] = LLM_TOKEN_INDICATOR
-        indicator[b, offset + num_text :] = OUTPUT_IMAGE_INDICATOR
-        segment_ids[b, offset : offset + total_unpadded] = 1
+        llm_features[b, text_start : text_start + num_text] = features.cpu()
+        position_ids[b, text_start : text_start + num_text] = text_pos_3d
+        indicator[b, text_start : text_start + num_text] = LLM_TOKEN_INDICATOR
+        attention_mask[b, :num_text] = 1
 
     return {
         "llm_features": llm_features.to(device),
         "position_ids": position_ids.to(device),
-        "segment_ids": segment_ids.to(device),
+        "attention_mask": attention_mask.to(device),
         "indicator": indicator.to(device),
         "num_image_tokens": num_image_tokens,
         "grid_h": grid_h,
@@ -443,17 +445,18 @@ def build_negative_image_inputs(
     dtype: torch.dtype,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
-    max_text_tokens = int(sequence_inputs["max_text_tokens"])
     num_image_tokens = int(sequence_inputs["num_image_tokens"])
-    position_ids = sequence_inputs["position_ids"][:, max_text_tokens:]
-    segment_ids = sequence_inputs["segment_ids"][:, max_text_tokens:]
-    indicator = sequence_inputs["indicator"][:, max_text_tokens:]
+    # Image tokens lead the sequence, so the image-only negative is just the leading slice.
+    position_ids = sequence_inputs["position_ids"][:, :num_image_tokens]
+    indicator = sequence_inputs["indicator"][:, :num_image_tokens]
     batch_size = int(position_ids.shape[0])
+    # No text tokens: an empty text mask makes every (image) token valid.
+    attention_mask = torch.zeros(batch_size, 0, dtype=torch.long, device=device)
     llm_features = torch.zeros(batch_size, num_image_tokens, feature_dim, dtype=dtype, device=device)
     return {
         "llm_features": llm_features,
         "position_ids": position_ids,
-        "segment_ids": segment_ids,
+        "attention_mask": attention_mask,
         "indicator": indicator,
     }
 
@@ -624,35 +627,35 @@ def generate_images(
             t_val = 1.0 - float(initial_sigma)
         t = torch.full((batch_size,), t_val, dtype=torch.float32, device=device)
 
-        pos_z = torch.cat([text_z_padding, z], dim=1)
+        pos_z = torch.cat([z, text_z_padding], dim=1)
         pos_out = conditional_transformer(
             llm_features=cond_features,
             x=pos_z,
             t=t,
             position_ids=inputs["position_ids"],
-            segment_ids=inputs["segment_ids"],
+            attention_mask=inputs["attention_mask"],
             indicator=inputs["indicator"],
         )
-        pos_v = pos_out[:, max_text_tokens:]
+        pos_v = pos_out[:, :num_image_tokens]
 
         if unconditional_transformer is None:
-            neg_z = torch.cat([neg_text_z_padding, z], dim=1)
+            neg_z = torch.cat([z, neg_text_z_padding], dim=1)
             neg_out = conditional_transformer(
                 llm_features=negative_inputs["llm_features"],
                 x=neg_z,
                 t=t,
                 position_ids=negative_inputs["position_ids"],
-                segment_ids=negative_inputs["segment_ids"],
+                attention_mask=negative_inputs["attention_mask"],
                 indicator=negative_inputs["indicator"],
             )
-            neg_v = neg_out[:, neg_max_text_tokens:]
+            neg_v = neg_out[:, :num_image_tokens]
         else:
             neg_v = unconditional_transformer(
                 llm_features=negative_inputs["llm_features"],
                 x=z,
                 t=t,
                 position_ids=negative_inputs["position_ids"],
-                segment_ids=negative_inputs["segment_ids"],
+                attention_mask=negative_inputs["attention_mask"],
                 indicator=negative_inputs["indicator"],
             )
 

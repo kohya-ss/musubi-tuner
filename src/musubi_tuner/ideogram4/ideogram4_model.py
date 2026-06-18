@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from musubi_tuner.modules.attention import AttentionParams, attention
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.ideogram4.constants import (
@@ -74,9 +75,9 @@ def _apply_rotary_pos_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # q, k: (B, num_heads, L, head_dim); cos/sin: (B, L, head_dim).
-    cos = cos.unsqueeze(1)
-    sin = sin.unsqueeze(1)
+    # q, k: (B, L, num_heads, head_dim); cos/sin: (B, L, head_dim).
+    cos = cos.unsqueeze(2)
+    sin = sin.unsqueeze(2)
     q_embed = (q * cos) + (_rotate_half(q) * sin)
     k_embed = (k * cos) + (_rotate_half(k) * sin)
     return q_embed, k_embed
@@ -161,7 +162,7 @@ class Ideogram4Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        segment_ids: torch.Tensor,
+        attn_params: AttentionParams,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
@@ -169,23 +170,18 @@ class Ideogram4Attention(nn.Module):
 
         qkv = self.qkv(x)
         qkv = qkv.view(batch_size, seq_len, 3, self.num_heads, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)
+        q, k, v = qkv.unbind(dim=2)  # each (B, L, num_heads, head_dim)
 
         q = self.norm_q(q)
         k = self.norm_k(k)
 
-        # SDPA expects (B, num_heads, L, head_dim).
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
         q, k = _apply_rotary_pos_emb(q, k, cos, sin)
 
-        # Block-diagonal mask from segment ids: (B, 1, L, L), True = attend.
-        attn_mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
-
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        out = out.transpose(1, 2).reshape(batch_size, seq_len, self.hidden_size)
+        # The shared attention() consumes (B, L, num_heads, head_dim) and returns (B, L, hidden_size).
+        # attn_params carries the text padding mask (image tokens are always valid and come first), so
+        # this is mathematically equivalent to the previous block-diagonal SDPA mask whose only role was
+        # excluding the leading padding -- but it also unlocks the flash/sage/xformers + split_attn paths.
+        out = attention(q, k, v, attn_params)
         return self.o(out)
 
 
@@ -223,7 +219,7 @@ class Ideogram4TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        segment_ids: torch.Tensor,
+        attn_params: AttentionParams,
         cos: torch.Tensor,
         sin: torch.Tensor,
         adaln_input: torch.Tensor,
@@ -237,7 +233,7 @@ class Ideogram4TransformerBlock(nn.Module):
 
         attn_out = self.attention(
             self.attention_norm1(x) * scale_msa,
-            segment_ids=segment_ids,
+            attn_params=attn_params,
             cos=cos,
             sin=sin,
         )
@@ -292,9 +288,11 @@ class Ideogram4FinalLayer(nn.Module):
 class Ideogram4Transformer(nn.Module):
     """Ideogram 4 flow-matching transformer."""
 
-    def __init__(self, config: Ideogram4Config) -> None:
+    def __init__(self, config: Ideogram4Config, attn_mode: str = "torch", split_attn: bool = False) -> None:
         super().__init__()
         self.config = config
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
         self.blocks_to_swap = None
@@ -414,17 +412,21 @@ class Ideogram4Transformer(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         position_ids: torch.Tensor,
-        segment_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
         indicator: torch.Tensor,
     ) -> torch.Tensor:
         """Velocity prediction.
+
+        The sequence layout is ``[image][text][right-padding]`` (image tokens first, valid text next,
+        padding last), matching the Qwen-Image / Z-Image convention so the shared attention() can be used.
 
         Args:
           llm_features: (B, L, llm_features_dim) Qwen3-VL conditioning features.
           x: (B, L, in_channels) noise tokens.
           t: (B,) or (B, L) flow-matching time in [0, 1].
           position_ids: (B, L, 3) (t, h, w) positions for MRoPE.
-          segment_ids: (B, L) sample id within a packed batch.
+          attention_mask: (B, max_text_tokens) text-token validity mask (1 = valid, 0 = padding).
+            Image tokens are always valid and occupy the first ``L - max_text_tokens`` positions.
           indicator: (B, L) per-token role: LLM_TOKEN_INDICATOR or OUTPUT_IMAGE_INDICATOR.
 
         Returns:
@@ -433,6 +435,12 @@ class Ideogram4Transformer(nn.Module):
         """
         batch_size, seq_len, in_channels = x.shape
         assert in_channels == self.config.in_channels
+
+        # Image tokens lead the sequence; the remaining positions are the (right-padded) text tokens.
+        img_len = seq_len - attention_mask.shape[1] if attention_mask is not None else seq_len
+        attn_params = AttentionParams.create_attention_params_from_mask(
+            self.attn_mode, self.split_attn, img_len, attention_mask
+        )
 
         param_dtype = _linear_compute_dtype(self.input_proj)
         x = x.to(param_dtype)
@@ -475,9 +483,9 @@ class Ideogram4Transformer(nn.Module):
                 assert self.offloader is not None
                 self.offloader.wait_for_block(index)
             if self.gradient_checkpointing and self.training:
-                h = self._gradient_checkpointing_func(layer, h, segment_ids, cos, sin, adaln_input)
+                h = self._gradient_checkpointing_func(layer, h, attn_params, cos, sin, adaln_input)
             else:
-                h = layer(h, segment_ids=segment_ids, cos=cos, sin=sin, adaln_input=adaln_input)
+                h = layer(h, attn_params=attn_params, cos=cos, sin=sin, adaln_input=adaln_input)
             if self.blocks_to_swap:
                 assert self.offloader is not None
                 self.offloader.submit_move_blocks_forward(self.layers, index)

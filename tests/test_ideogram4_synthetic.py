@@ -300,11 +300,19 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
     def test_build_inputs_and_patchify_roundtrip(self):
         features = [torch.ones(3, 8), torch.ones(5, 8)]
         inputs = ideogram4_utils.build_sequence_inputs_from_features(features, 512, 512, device=torch.device("cpu"))
-        self.assertEqual(inputs["num_image_tokens"], 32 * 32)
+        num_image = 32 * 32
+        self.assertEqual(inputs["num_image_tokens"], num_image)
         self.assertEqual(inputs["max_text_tokens"], 5)
-        self.assertEqual(tuple(inputs["position_ids"].shape), (2, 5 + 32 * 32, 3))
+        self.assertEqual(tuple(inputs["position_ids"].shape), (2, 5 + num_image, 3))
         self.assertEqual(int((inputs["indicator"] == 3).sum().item()), 8)
-        self.assertEqual(int((inputs["indicator"] == 2).sum().item()), 2 * 32 * 32)
+        self.assertEqual(int((inputs["indicator"] == 2).sum().item()), 2 * num_image)
+
+        # Layout is [image][text][right-padding]: image tokens lead, the text mask covers only the text region.
+        self.assertEqual(tuple(inputs["attention_mask"].shape), (2, 5))
+        self.assertTrue(torch.all(inputs["indicator"][:, :num_image] == 2))
+        self.assertTrue(torch.equal(inputs["attention_mask"].sum(dim=1), torch.tensor([3, 5])))
+        # The first valid text token sits right after the image block (no left padding).
+        self.assertEqual(int(inputs["indicator"][0, num_image].item()), 3)
 
         latents = torch.arange(2 * 32 * 4 * 6, dtype=torch.float32).reshape(2, 32, 4, 6)
         token_grid = ideogram4_utils.patchify_vae_latents(latents)
@@ -343,8 +351,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 self.config = SimpleNamespace(in_channels=2)
                 self.seen_t = []
 
-            def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
-                del llm_features, position_ids, segment_ids, indicator
+            def __call__(self, *, llm_features, x, t, position_ids, attention_mask, indicator):
+                del llm_features, position_ids, attention_mask, indicator
                 self.seen_t.append(float(t[0].item()))
                 return torch.zeros_like(x)
 
@@ -391,14 +399,14 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 self.config = SimpleNamespace(in_channels=2)
                 self.calls = []
 
-            def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
+            def __call__(self, *, llm_features, x, t, position_ids, attention_mask, indicator):
                 self.calls.append(
                     {
                         "llm_shape": tuple(llm_features.shape),
                         "x_shape": tuple(x.shape),
                         "t": float(t[0].item()),
                         "position_shape": tuple(position_ids.shape),
-                        "segment_shape": tuple(segment_ids.shape),
+                        "attention_shape": tuple(attention_mask.shape),
                         "indicator_shape": tuple(indicator.shape),
                     }
                 )
@@ -793,9 +801,10 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 self.assertEqual((image_height, image_width), (32, 32))
                 return {
                     "max_text_tokens": 1,
+                    "num_image_tokens": 4,
                     "llm_features": torch.zeros(1, 5, 8, device=device),
                     "position_ids": torch.zeros(1, 5, 3, dtype=torch.long, device=device),
-                    "segment_ids": torch.zeros(1, 5, dtype=torch.long, device=device),
+                    "attention_mask": torch.zeros(1, 1, dtype=torch.long, device=device),
                     "indicator": torch.zeros(1, 5, dtype=torch.long, device=device),
                 }
 
@@ -807,8 +816,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                     self.seen_t = None
                     self.seen_x_shape = None
 
-                def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
-                    del llm_features, position_ids, segment_ids, indicator
+                def __call__(self, *, llm_features, x, t, position_ids, attention_mask, indicator):
+                    del llm_features, position_ids, attention_mask, indicator
                     self.seen_t = t.detach().clone()
                     self.seen_x_shape = tuple(x.shape)
                     return torch.zeros_like(x)

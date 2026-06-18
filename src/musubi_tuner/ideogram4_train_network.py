@@ -38,6 +38,10 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
         self.unconditional_transformer = None
+        # Attention backend selected for the conditional DiT, reused for the unconditional DiT so both
+        # share the same attention path during asymmetric-CFG LoRA sampling.
+        self._attn_mode = "torch"
+        self._split_attn = False
 
     @property
     def architecture(self) -> str:
@@ -126,6 +130,8 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 dtype=dit_dtype,
                 expected_model_type=ideogram4_utils.IDEOGRAM4_UNCOND_MODEL_TYPE,
                 disable_mmap=args.disable_numpy_memmap,
+                attn_mode=self._attn_mode,
+                split_attn=self._split_attn,
             )
 
     def on_after_sample_images(
@@ -222,13 +228,17 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        del accelerator, attn_mode, split_attn, dit_weight_dtype
+        del accelerator, dit_weight_dtype
+        self._attn_mode = attn_mode
+        self._split_attn = split_attn
         return ideogram4_utils.load_ideogram4_transformer(
             dit_path,
             device=loading_device,
             dtype=model_utils.str_to_dtype(args.dit_dtype),
             expected_model_type=ideogram4_utils.IDEOGRAM4_COND_MODEL_TYPE,
             disable_mmap=args.disable_numpy_memmap,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
 
     def compile_transformer(self, args, transformer):
@@ -332,7 +342,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
             dtype=network_dtype,
             device=accelerator.device,
         )
-        x = torch.cat([text_padding, image_tokens], dim=1)
+        x = torch.cat([image_tokens, text_padding], dim=1)
         llm_features = inputs["llm_features"].to(dtype=network_dtype)
         if args.gradient_checkpointing:
             x.requires_grad_(True)
@@ -357,10 +367,10 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 x=x,
                 t=model_t,
                 position_ids=inputs["position_ids"],
-                segment_ids=inputs["segment_ids"],
+                attention_mask=inputs["attention_mask"],
                 indicator=inputs["indicator"],
             )
-        model_pred = model_pred[:, int(inputs["max_text_tokens"]) :]
+        model_pred = model_pred[:, : int(inputs["num_image_tokens"])]
         model_pred = ideogram4_utils.unflatten_token_grid(model_pred, grid_h, grid_w)
         target = latents - noise
         return DiTOutput(pred=model_pred, target=target)
