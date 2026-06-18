@@ -59,3 +59,17 @@ def test_decode_unpatchifies_tokens_without_batch_norm_inverse():
     autoencoder.decode(tokens)
 
     assert torch.equal(decoder.seen, latents)
+
+
+def test_is_diffusers_vae_state_dict_distinguishes_layouts():
+    native = {
+        "encoder.down.0.block.0.norm1.weight": torch.zeros(1),
+        "encoder.norm_out.weight": torch.zeros(1),
+        "bn.running_mean": torch.zeros(1),
+    }
+    diffusers = {
+        "encoder.down_blocks.0.resnets.0.norm1.weight": torch.zeros(1),
+        "encoder.conv_norm_out.weight": torch.zeros(1),
+    }
+    assert not ideogram4_utils._is_diffusers_vae_state_dict(native)
+    assert ideogram4_utils._is_diffusers_vae_state_dict(diffusers)

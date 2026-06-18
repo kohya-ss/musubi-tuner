@@ -200,7 +200,7 @@ def load_ideogram4_transformer(
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     with init_empty_weights():
         model = Ideogram4Transformer(config or Ideogram4Config(), attn_mode=attn_mode, split_attn=split_attn)
-    model.load_state_dict(state_dict, assign=True)
+    model.load_state_dict(state_dict, strict=True, assign=True)
     model.to(device=device, dtype=dtype)
     model.eval()
     return model
@@ -215,14 +215,22 @@ def load_ideogram4_autoencoder(
 ) -> AutoEncoder:
     validate_local_safetensors(path)
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
+    # The VAE ships in two key layouts: this repo's native layout and the diffusers layout
+    # (down_blocks/up_blocks/conv_norm_out). Detect the format up front so a wrong checkpoint
+    # fails the strict load below with a clear missing/unexpected-keys error, instead of being
+    # masked by a native-then-diffusers try/except fallback.
+    if _is_diffusers_vae_state_dict(state_dict):
+        state_dict = convert_diffusers_state_dict(state_dict)
     ae = AutoEncoder(AutoEncoderParams())
-    try:
-        ae.load_state_dict(state_dict)
-    except RuntimeError:
-        ae.load_state_dict(convert_diffusers_state_dict(state_dict))
+    ae.load_state_dict(state_dict, strict=True)
     ae.to(device=torch.device(device), dtype=dtype)
     ae.eval()
     return ae
+
+
+def _is_diffusers_vae_state_dict(state_dict: dict[str, torch.Tensor]) -> bool:
+    """True if the VAE checkpoint uses the diffusers key layout (vs this repo's native layout)."""
+    return any(".down_blocks." in k or ".up_blocks." in k or k.endswith("conv_norm_out.weight") for k in state_dict)
 
 
 def load_ideogram4_tokenizer():
