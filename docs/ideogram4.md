@@ -88,6 +88,10 @@ To apply trained LoRA weights, add `--lora_weight path\to\lora.safetensors` (rep
 forward hook rather than merged into the weights, because the FP8 base cannot have LoRA merged back into it.
 This means generation results may differ from tools that merge LoRA into the weights (e.g. ComfyUI).
 
+`--attn_mode` selects the attention backend (`torch`/`sdpa` (default), `flash`, `sageattn`, `xformers`); add
+`--split_attn` to process each sample's attention separately. `flash`/`sageattn`/`xformers` require the
+respective package to be installed and can be faster, but the numerics differ slightly from `torch`.
+
 ## Train LoRA
 
 ```powershell

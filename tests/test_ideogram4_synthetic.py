@@ -616,6 +616,31 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         self.assertIsNone(args.unconditional_dit)
         self.assertIsNone(args.lora_weight)
+        self.assertEqual(args.attn_mode, "torch")
+        self.assertFalse(args.split_attn)
+
+    def test_generate_parser_accepts_attn_mode_and_split_attn(self):
+        from musubi_tuner import ideogram4_generate_image
+
+        parser = ideogram4_generate_image.setup_parser()
+        base = [
+            "--dit",
+            "conditional.safetensors",
+            "--text_encoder",
+            "qwen3vl.safetensors",
+            "--vae",
+            "vae.safetensors",
+            "--prompt",
+            "caption",
+            "--save_path",
+            "out.png",
+        ]
+        args = parser.parse_args(base + ["--attn_mode", "flash", "--split_attn"])
+        self.assertEqual(args.attn_mode, "flash")
+        self.assertTrue(args.split_attn)
+        # "sdpa" is accepted as a choice (normalized to "torch" inside main()).
+        args_sdpa = parser.parse_args(base + ["--attn_mode", "sdpa"])
+        self.assertEqual(args_sdpa.attn_mode, "sdpa")
 
     def test_generate_parser_accepts_lora_args(self):
         from musubi_tuner import ideogram4_generate_image

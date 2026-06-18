@@ -53,6 +53,14 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save_path", type=str, required=True, help="output image path or directory")
     parser.add_argument("--device", type=str, default=None, help="device, default cuda if available")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="compute dtype for models")
+    parser.add_argument(
+        "--attn_mode",
+        type=str,
+        default="torch",
+        choices=["torch", "sdpa", "flash", "sageattn", "xformers"],
+        help="attention mode for the DiT ('sdpa' is an alias for 'torch')",
+    )
+    parser.add_argument("--split_attn", action="store_true", help="process each sample's attention separately")
     parser.add_argument("--disable_numpy_memmap", action="store_true", help="disable numpy memmap while loading safetensors")
     parser.add_argument("--warn_on_caption_issues", action="store_true", help="warn instead of failing on caption verifier issues")
     return parser
@@ -110,6 +118,8 @@ def main():
     height, width = args.image_size
     device = torch.device(args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu")
     dtype = str_to_dtype(args.dtype)
+    # "sdpa" is a user-facing alias for the shared attention()'s "torch" mode.
+    attn_mode = "torch" if args.attn_mode == "sdpa" else args.attn_mode
 
     ideogram4_utils.validate_prompt(args.prompt, warn_only=args.warn_on_caption_issues)
 
@@ -137,6 +147,8 @@ def main():
         dtype=dtype,
         expected_model_type=ideogram4_utils.IDEOGRAM4_COND_MODEL_TYPE,
         disable_mmap=args.disable_numpy_memmap,
+        attn_mode=attn_mode,
+        split_attn=args.split_attn,
     )
     if args.lora_weight:
         _apply_lora_weights(conditional_transformer, args, device)
@@ -149,6 +161,8 @@ def main():
             dtype=dtype,
             expected_model_type=ideogram4_utils.IDEOGRAM4_UNCOND_MODEL_TYPE,
             disable_mmap=args.disable_numpy_memmap,
+            attn_mode=attn_mode,
+            split_attn=args.split_attn,
         )
     else:
         logger.info("Using conditional DiT for unconditional embeds CFG")
