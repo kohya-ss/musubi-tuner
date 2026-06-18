@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,88 +22,23 @@ from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_ideogra
 from musubi_tuner import ideogram4_cache_text_encoder_outputs
 from musubi_tuner.ideogram4 import ideogram4_utils
 from musubi_tuner.ideogram4.ideogram4_scheduler import SamplerParameters
-from musubi_tuner.ideogram4.ideogram4_quantized_loading import Fp8Linear, load_fp8_state_dict, swap_linears_to_fp8
 from musubi_tuner.networks import lora_ideogram4
-from musubi_tuner.networks.lora import LoRAModule
 
 
-def _has_fp8():
-    return hasattr(torch, "float8_e4m3fn")
-
-
-@unittest.skipUnless(_has_fp8(), "torch.float8_e4m3fn is not available")
-class Ideogram4Fp8Tests(unittest.TestCase):
-    def test_weight_scale_swaps_and_loads_fp8_linear(self):
-        class Tiny(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(3, 2, bias=False)
-
-        model = Tiny()
-        state = {
-            "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
-            "linear.weight_scale": torch.full((2,), 0.5, dtype=torch.float32),
-        }
-        swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
-        self.assertIsInstance(model.linear, Fp8Linear)
-        load_fp8_state_dict(model, state, device=torch.device("cpu"), dtype=torch.float32)
-        self.assertEqual(len(list(model.linear.parameters())), 0)
-        out = model.linear(torch.ones(1, 3))
-        self.assertEqual(tuple(out.shape), (1, 2))
-
-    def test_scale_weight_does_not_trigger_official_fp8_swap(self):
-        class Tiny(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(3, 2, bias=False)
-
-        model = Tiny()
-        state = {
-            "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
-            "linear.scale_weight": torch.full((2,), 0.5, dtype=torch.float32),
-        }
-        swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
-        self.assertIsInstance(model.linear, nn.Linear)
-
-    def test_scalar_weight_scale_loads_fp8_linear(self):
-        class Tiny(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(3, 2, bias=False)
-
-        model = Tiny()
-        state = {
-            "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
-            "linear.weight_scale": torch.tensor(0.5, dtype=torch.float32),
-            "linear.comfy_quant": torch.tensor(1, dtype=torch.int8),
-        }
-        swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
-        self.assertIsInstance(model.linear, Fp8Linear)
-        self.assertEqual(tuple(model.linear.weight_scale.shape), ())
-        load_fp8_state_dict(model, state, device=torch.device("cpu"), dtype=torch.float32)
-        out = model.linear(torch.ones(1, 3))
-        self.assertEqual(tuple(out.shape), (1, 2))
-
-    def test_lora_discovers_fp8_linear_and_changes_output(self):
+class Ideogram4LoraDiscoveryTests(unittest.TestCase):
+    def test_lora_discovers_block_linears_and_changes_output(self):
         class Attention(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.qkv = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.o = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.qkv.weight.fill_(1.0)
-                self.o.weight.fill_(1.0)
-                self.qkv.weight_scale.fill_(0.01)
-                self.o.weight_scale.fill_(0.01)
+                self.qkv = nn.Linear(4, 4, bias=False)
+                self.o = nn.Linear(4, 4, bias=False)
 
         class FeedForward(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.w1 = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.w2 = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.w3 = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                for module in (self.w1, self.w2, self.w3):
-                    module.weight.fill_(1.0)
-                    module.weight_scale.fill_(0.01)
+                self.w1 = nn.Linear(4, 4, bias=False)
+                self.w2 = nn.Linear(4, 4, bias=False)
+                self.w3 = nn.Linear(4, 4, bias=False)
 
         class Ideogram4TransformerBlock(nn.Module):
             def __init__(self):
@@ -131,19 +67,64 @@ class Ideogram4Fp8Tests(unittest.TestCase):
         y1 = root.layers[0].attention.qkv(x)
         self.assertFalse(torch.allclose(y0, y1))
 
-    def test_zero_lora_on_fp8_linear_is_dtype_transparent_without_autocast(self):
-        linear = Fp8Linear(4, 4, bias=False, compute_dtype=torch.bfloat16)
-        linear.weight.fill_(1.0)
-        linear.weight_scale.fill_(0.01)
-        x = torch.ones(1, 4, dtype=torch.bfloat16)
+    def test_apply_lora_weights_changes_conditional_output(self):
+        import copy
 
-        expected = linear(x)
-        lora = LoRAModule("lora_fp8", linear, multiplier=1.0, lora_dim=2, alpha=2)
-        lora.apply_to()
-        actual = linear(x)
+        from safetensors.torch import save_file
 
-        self.assertEqual(actual.dtype, expected.dtype)
-        self.assertTrue(torch.equal(actual, expected))
+        from musubi_tuner import ideogram4_generate_image
+
+        class Attention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.qkv = nn.Linear(4, 4, bias=False)
+                self.o = nn.Linear(4, 4, bias=False)
+
+        class FeedForward(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w1 = nn.Linear(4, 4, bias=False)
+                self.w2 = nn.Linear(4, 4, bias=False)
+                self.w3 = nn.Linear(4, 4, bias=False)
+
+        class Ideogram4TransformerBlock(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attention = Attention()
+                self.feed_forward = FeedForward()
+
+        class TinyRoot(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([Ideogram4TransformerBlock()])
+
+        torch.manual_seed(0)
+        root_ref = TinyRoot()
+        root_test = copy.deepcopy(root_ref)  # identical frozen base, no hooks
+
+        # Build a "trained" LoRA on the reference root and give it a nonzero effect.
+        network = lora_ideogram4.create_arch_network(1.0, 2, 1.0, None, [], root_ref)
+        network.apply_to(None, root_ref, apply_text_encoder=False, apply_unet=True)
+        for lora in network.unet_loras:
+            nn.init.normal_(lora.lora_up.weight, std=0.5)
+        weights_sd = {k: v.contiguous() for k, v in network.state_dict().items()}
+
+        x = torch.ones(1, 4)
+        y_base = root_test.layers[0].attention.qkv(x).clone()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lora_path = os.path.join(tmp, "lora.safetensors")
+            save_file(weights_sd, lora_path)
+            args = SimpleNamespace(
+                lora_weight=[lora_path],
+                lora_multiplier=[1.0],
+                include_patterns=None,
+                exclude_patterns=None,
+            )
+            ideogram4_generate_image._apply_lora_weights(root_test, args, torch.device("cpu"))
+
+        y_lora = root_test.layers[0].attention.qkv(x)
+        self.assertFalse(torch.allclose(y_base, y_lora))
 
 
 class Ideogram4InputAndCacheTests(unittest.TestCase):
@@ -319,11 +300,19 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
     def test_build_inputs_and_patchify_roundtrip(self):
         features = [torch.ones(3, 8), torch.ones(5, 8)]
         inputs = ideogram4_utils.build_sequence_inputs_from_features(features, 512, 512, device=torch.device("cpu"))
-        self.assertEqual(inputs["num_image_tokens"], 32 * 32)
+        num_image = 32 * 32
+        self.assertEqual(inputs["num_image_tokens"], num_image)
         self.assertEqual(inputs["max_text_tokens"], 5)
-        self.assertEqual(tuple(inputs["position_ids"].shape), (2, 5 + 32 * 32, 3))
+        self.assertEqual(tuple(inputs["position_ids"].shape), (2, 5 + num_image, 3))
         self.assertEqual(int((inputs["indicator"] == 3).sum().item()), 8)
-        self.assertEqual(int((inputs["indicator"] == 2).sum().item()), 2 * 32 * 32)
+        self.assertEqual(int((inputs["indicator"] == 2).sum().item()), 2 * num_image)
+
+        # Layout is [image][text][right-padding]: image tokens lead, the text mask covers only the text region.
+        self.assertEqual(tuple(inputs["attention_mask"].shape), (2, 5))
+        self.assertTrue(torch.all(inputs["indicator"][:, :num_image] == 2))
+        self.assertTrue(torch.equal(inputs["attention_mask"].sum(dim=1), torch.tensor([3, 5])))
+        # The first valid text token sits right after the image block (no left padding).
+        self.assertEqual(int(inputs["indicator"][0, num_image].item()), 3)
 
         latents = torch.arange(2 * 32 * 4 * 6, dtype=torch.float32).reshape(2, 32, 4, 6)
         token_grid = ideogram4_utils.patchify_vae_latents(latents)
@@ -362,8 +351,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 self.config = SimpleNamespace(in_channels=2)
                 self.seen_t = []
 
-            def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
-                del llm_features, position_ids, segment_ids, indicator
+            def __call__(self, *, llm_features, x, t, position_ids, attention_mask, indicator):
+                del llm_features, position_ids, attention_mask, indicator
                 self.seen_t.append(float(t[0].item()))
                 return torch.zeros_like(x)
 
@@ -410,14 +399,14 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 self.config = SimpleNamespace(in_channels=2)
                 self.calls = []
 
-            def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
+            def __call__(self, *, llm_features, x, t, position_ids, attention_mask, indicator):
                 self.calls.append(
                     {
                         "llm_shape": tuple(llm_features.shape),
                         "x_shape": tuple(x.shape),
                         "t": float(t[0].item()),
                         "position_shape": tuple(position_ids.shape),
-                        "segment_shape": tuple(segment_ids.shape),
+                        "attention_shape": tuple(attention_mask.shape),
                         "indicator_shape": tuple(indicator.shape),
                     }
                 )
@@ -471,21 +460,16 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             item = DummyItem()
             item.text_encoder_output_cache_path = os.path.join(tmp, "sample_i4_te.safetensors")
             features = torch.ones(4, 53248, dtype=torch.bfloat16)
-            save_text_encoder_output_cache_ideogram4(item, features, "bf16")
+            save_text_encoder_output_cache_ideogram4(item, features)
             with safe_open(item.text_encoder_output_cache_path, framework="pt") as f:
                 metadata = f.metadata()
                 self.assertEqual(metadata["architecture"], "ideogram4")
-                self.assertEqual(metadata["text_cache_dtype"], "bf16")
-                self.assertEqual(metadata["num_text_tokens"], "4")
                 self.assertIn("varlen_i4_llm_features_bfloat16", f.keys())
 
             features_fp32 = torch.ones(2, 53248, dtype=torch.float32)
-            save_text_encoder_output_cache_ideogram4(item, features_fp32, "float32")
+            save_text_encoder_output_cache_ideogram4(item, features_fp32)
             with safe_open(item.text_encoder_output_cache_path, framework="pt") as f:
-                metadata = f.metadata()
                 keys = set(f.keys())
-                self.assertEqual(metadata["text_cache_dtype"], "float32")
-                self.assertEqual(metadata["num_text_tokens"], "2")
                 self.assertIn("varlen_i4_llm_features_float32", keys)
                 self.assertNotIn("varlen_i4_llm_features_bfloat16", keys)
 
@@ -513,8 +497,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             ideogram4_cache_text_encoder_outputs.ideogram4_utils.encode_prompt_to_features = (
                 lambda tokenizer, text_encoder, prompt, device: torch.ones(1, 4)
             )
-            ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = (
-                lambda item, features, cache_dtype_name: calls.__setitem__("save", calls["save"] + 1)
+            ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = lambda item, features: (
+                calls.__setitem__("save", calls["save"] + 1)
             )
 
             item = SimpleNamespace(item_key="sample", caption="ordinary plain prompt")
@@ -626,6 +610,60 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         )
 
         self.assertIsNone(args.unconditional_dit)
+        self.assertIsNone(args.lora_weight)
+        self.assertEqual(args.attn_mode, "torch")
+        self.assertFalse(args.split_attn)
+
+    def test_generate_parser_accepts_attn_mode_and_split_attn(self):
+        from musubi_tuner import ideogram4_generate_image
+
+        parser = ideogram4_generate_image.setup_parser()
+        base = [
+            "--dit",
+            "conditional.safetensors",
+            "--text_encoder",
+            "qwen3vl.safetensors",
+            "--vae",
+            "vae.safetensors",
+            "--prompt",
+            "caption",
+            "--save_path",
+            "out.png",
+        ]
+        args = parser.parse_args(base + ["--attn_mode", "flash", "--split_attn"])
+        self.assertEqual(args.attn_mode, "flash")
+        self.assertTrue(args.split_attn)
+        # "sdpa" is accepted as a choice (normalized to "torch" inside main()).
+        args_sdpa = parser.parse_args(base + ["--attn_mode", "sdpa"])
+        self.assertEqual(args_sdpa.attn_mode, "sdpa")
+
+    def test_generate_parser_accepts_lora_args(self):
+        from musubi_tuner import ideogram4_generate_image
+
+        parser = ideogram4_generate_image.setup_parser()
+        args = parser.parse_args(
+            [
+                "--dit",
+                "conditional.safetensors",
+                "--text_encoder",
+                "qwen3vl.safetensors",
+                "--vae",
+                "vae.safetensors",
+                "--prompt",
+                "caption",
+                "--save_path",
+                "out.png",
+                "--lora_weight",
+                "a.safetensors",
+                "b.safetensors",
+                "--lora_multiplier",
+                "0.8",
+                "1.0",
+            ]
+        )
+
+        self.assertEqual(args.lora_weight, ["a.safetensors", "b.safetensors"])
+        self.assertEqual(args.lora_multiplier, [0.8, 1.0])
 
     def test_process_batch_uses_common_timestep_sampler_with_normalized_model_latents(self):
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
@@ -783,9 +821,10 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 self.assertEqual((image_height, image_width), (32, 32))
                 return {
                     "max_text_tokens": 1,
+                    "num_image_tokens": 4,
                     "llm_features": torch.zeros(1, 5, 8, device=device),
                     "position_ids": torch.zeros(1, 5, 3, dtype=torch.long, device=device),
-                    "segment_ids": torch.zeros(1, 5, dtype=torch.long, device=device),
+                    "attention_mask": torch.zeros(1, 1, dtype=torch.long, device=device),
                     "indicator": torch.zeros(1, 5, dtype=torch.long, device=device),
                 }
 
@@ -797,8 +836,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                     self.seen_t = None
                     self.seen_x_shape = None
 
-                def __call__(self, *, llm_features, x, t, position_ids, segment_ids, indicator):
-                    del llm_features, position_ids, segment_ids, indicator
+                def __call__(self, *, llm_features, x, t, position_ids, attention_mask, indicator):
+                    del llm_features, position_ids, attention_mask, indicator
                     self.seen_t = t.detach().clone()
                     self.seen_x_shape = tuple(x.shape)
                     return torch.zeros_like(x)
@@ -811,7 +850,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
             output = trainer.call_dit(
                 SimpleNamespace(gradient_checkpointing=False, timestep_sampling="uniform"),
-                SimpleNamespace(device=torch.device("cpu")),
+                SimpleNamespace(device=torch.device("cpu"), autocast=lambda *a, **k: nullcontext()),
                 transformer,
                 latents,
                 {"i4_llm_features": [torch.zeros(1, 8)]},

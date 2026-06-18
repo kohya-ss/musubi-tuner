@@ -7,19 +7,38 @@ produce velocity predictions on image latents.
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.attention import AttentionParams, attention
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, LoRAStreamOffloader, ModelOffloader, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
     QWEN3_VL_ACTIVATION_LAYERS,
 )
+
+
+def _linear_compute_dtype(linear: nn.Module) -> torch.dtype:
+    """Return the compute dtype of a (possibly FP8) Linear used as a dtype reference.
+
+    A plain ``nn.Linear`` exposes it as ``weight.dtype``. But when the weight is FP8 — either the
+    legacy ``Fp8Linear`` (which carries a ``compute_dtype`` attribute) or a monkey-patched FP8
+    ``nn.Linear`` (whose ``scale_weight`` buffer holds the compute dtype) — ``weight.dtype`` would be
+    float8, so we must read the compute dtype from those instead.
+    """
+    compute_dtype = getattr(linear, "compute_dtype", None)
+    if compute_dtype is not None:
+        return compute_dtype
+    scale_weight = getattr(linear, "scale_weight", None)
+    if scale_weight is not None:
+        return scale_weight.dtype
+    return linear.weight.dtype
 
 
 @dataclass
@@ -56,9 +75,9 @@ def _apply_rotary_pos_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # q, k: (B, num_heads, L, head_dim); cos/sin: (B, L, head_dim).
-    cos = cos.unsqueeze(1)
-    sin = sin.unsqueeze(1)
+    # q, k: (B, L, num_heads, head_dim); cos/sin: (B, L, head_dim).
+    cos = cos.unsqueeze(2)
+    sin = sin.unsqueeze(2)
     q_embed = (q * cos) + (_rotate_half(q) * sin)
     k_embed = (k * cos) + (_rotate_half(k) * sin)
     return q_embed, k_embed
@@ -85,21 +104,36 @@ class Ideogram4MRoPE(nn.Module):
         assert position_ids.ndim == 3 and position_ids.shape[-1] == 3
         batch_size, seq_len, _ = position_ids.shape
 
-        # (3, B, inv_freq_size, L)
-        pos = position_ids.permute(2, 0, 1).to(dtype=torch.float32)  # type: ignore[arg-type]
-        inv_freq = self.inv_freq.to(dtype=torch.float32)[None, None, :, None].expand(3, batch_size, -1, 1)  # type: ignore[index]
-        freqs = inv_freq @ pos.unsqueeze(2)
-        freqs = freqs.transpose(2, 3)  # (3, B, L, inv_freq_size)
+        # The MRoPE frequencies must be computed in real fp32. Image position ids start at
+        # IMAGE_POSITION_OFFSET (2**16), where bf16 has a spacing of 512, so under an active
+        # autocast context the `inv_freq @ pos` matmul would be downcast to bf16 and every image
+        # position would collapse to the same value -- wiping out the spatial RoPE phase and
+        # producing a flat checkerboard. The explicit `.to(torch.float32)` below does NOT protect
+        # against this because autocast overrides matmul's compute dtype regardless of input dtype,
+        # so we force autocast off for the whole computation. This is a no-op when no outer autocast
+        # is active (the current training/inference default), so it never changes existing results.
+        device_type = position_ids.device.type
+        autocast_disabled = (
+            torch.autocast(device_type=device_type, enabled=False)
+            if device_type in ("cuda", "cpu", "xpu", "hpu")
+            else nullcontext()
+        )
+        with autocast_disabled:
+            # (3, B, inv_freq_size, L)
+            pos = position_ids.permute(2, 0, 1).to(dtype=torch.float32)  # type: ignore[arg-type]
+            inv_freq = self.inv_freq.to(dtype=torch.float32)[None, None, :, None].expand(3, batch_size, -1, 1)  # type: ignore[index]
+            freqs = inv_freq @ pos.unsqueeze(2)
+            freqs = freqs.transpose(2, 3)  # (3, B, L, inv_freq_size)
 
-        # interleaved mrope: pull H freqs into idx 1 mod 3, W freqs into idx 2 mod 3.
-        freqs_t = freqs[0].clone()
-        for axis, offset in ((1, 1), (2, 2)):
-            length = self.mrope_section[axis] * 3
-            idx = torch.arange(offset, length, 3, device=freqs_t.device)
-            freqs_t[..., idx] = freqs[axis][..., idx]
+            # interleaved mrope: pull H freqs into idx 1 mod 3, W freqs into idx 2 mod 3.
+            freqs_t = freqs[0].clone()
+            for axis, offset in ((1, 1), (2, 2)):
+                length = self.mrope_section[axis] * 3
+                idx = torch.arange(offset, length, 3, device=freqs_t.device)
+                freqs_t[..., idx] = freqs[axis][..., idx]
 
-        emb = torch.cat((freqs_t, freqs_t), dim=-1)
-        return emb.cos(), emb.sin()
+            emb = torch.cat((freqs_t, freqs_t), dim=-1)
+            return emb.cos(), emb.sin()
 
 
 class Ideogram4RMSNorm(nn.Module):
@@ -128,7 +162,7 @@ class Ideogram4Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        segment_ids: torch.Tensor,
+        attn_params: AttentionParams,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
@@ -136,23 +170,18 @@ class Ideogram4Attention(nn.Module):
 
         qkv = self.qkv(x)
         qkv = qkv.view(batch_size, seq_len, 3, self.num_heads, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)
+        q, k, v = qkv.unbind(dim=2)  # each (B, L, num_heads, head_dim)
 
         q = self.norm_q(q)
         k = self.norm_k(k)
 
-        # SDPA expects (B, num_heads, L, head_dim).
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
         q, k = _apply_rotary_pos_emb(q, k, cos, sin)
 
-        # Block-diagonal mask from segment ids: (B, 1, L, L), True = attend.
-        attn_mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
-
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        out = out.transpose(1, 2).reshape(batch_size, seq_len, self.hidden_size)
+        # The shared attention() consumes (B, L, num_heads, head_dim) and returns (B, L, hidden_size).
+        # attn_params carries the text padding mask (image tokens are always valid and come first), so
+        # this is mathematically equivalent to the previous block-diagonal SDPA mask whose only role was
+        # excluding the leading padding -- but it also unlocks the flash/sage/xformers + split_attn paths.
+        out = attention(q, k, v, attn_params)
         return self.o(out)
 
 
@@ -190,7 +219,7 @@ class Ideogram4TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        segment_ids: torch.Tensor,
+        attn_params: AttentionParams,
         cos: torch.Tensor,
         sin: torch.Tensor,
         adaln_input: torch.Tensor,
@@ -204,7 +233,7 @@ class Ideogram4TransformerBlock(nn.Module):
 
         attn_out = self.attention(
             self.attention_norm1(x) * scale_msa,
-            segment_ids=segment_ids,
+            attn_params=attn_params,
             cos=cos,
             sin=sin,
         )
@@ -239,7 +268,7 @@ class Ideogram4EmbedScalar(nn.Module):
         x = x.to(torch.float32)
         scaled = 1e4 * (x - self.range_min) / (self.range_max - self.range_min)
         emb = _sinusoidal_embedding(scaled, self.dim)
-        emb = emb.to(getattr(self.mlp_in, "compute_dtype", None) or self.mlp_in.weight.dtype)
+        emb = emb.to(_linear_compute_dtype(self.mlp_in))
         emb = F.silu(self.mlp_in(emb))
         return self.mlp_out(emb)
 
@@ -259,13 +288,17 @@ class Ideogram4FinalLayer(nn.Module):
 class Ideogram4Transformer(nn.Module):
     """Ideogram 4 flow-matching transformer."""
 
-    def __init__(self, config: Ideogram4Config) -> None:
+    def __init__(self, config: Ideogram4Config, attn_mode: str = "torch", split_attn: bool = False) -> None:
         super().__init__()
         self.config = config
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
         self.blocks_to_swap = None
-        self.offloader: ModelOffloader | None = None
+        # create_offloader returns a LoRAStreamOffloader (not a ModelOffloader subclass) when the
+        # BlockSwapConfig requests h2d_only streaming, so the annotation covers both implementations.
+        self.offloader: ModelOffloader | LoRAStreamOffloader | None = None
 
         head_dim = config.emb_dim // config.num_heads
 
@@ -320,25 +353,21 @@ class Ideogram4Transformer(nn.Module):
         self.activation_cpu_offloading = False
         print("Ideogram4Transformer: Gradient checkpointing disabled.")
 
-    def enable_block_swap(
-        self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False
-    ):
+    def enable_block_swap(self, blocks_to_swap: int, config: BlockSwapConfig):
         self.blocks_to_swap = blocks_to_swap
         num_blocks = len(self.layers)
         assert self.blocks_to_swap <= num_blocks - 1, (
             f"Cannot swap more than {num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
         )
-        self.offloader = ModelOffloader(
+        self.offloader = create_offloader(
             "ideogram4-block",
             self.layers,
             num_blocks,
             self.blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
+            config,
         )
         print(
-            f"Ideogram4Transformer: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {num_blocks} blocks. Supports backward: {supports_backward}"
+            f"Ideogram4Transformer: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {num_blocks} blocks. Supports backward: {config.supports_backward}"
         )
 
     def switch_block_swap_for_inference(self):
@@ -381,17 +410,21 @@ class Ideogram4Transformer(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         position_ids: torch.Tensor,
-        segment_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
         indicator: torch.Tensor,
     ) -> torch.Tensor:
         """Velocity prediction.
+
+        The sequence layout is ``[image][text][right-padding]`` (image tokens first, valid text next,
+        padding last), matching the Qwen-Image / Z-Image convention so the shared attention() can be used.
 
         Args:
           llm_features: (B, L, llm_features_dim) Qwen3-VL conditioning features.
           x: (B, L, in_channels) noise tokens.
           t: (B,) or (B, L) flow-matching time in [0, 1].
           position_ids: (B, L, 3) (t, h, w) positions for MRoPE.
-          segment_ids: (B, L) sample id within a packed batch.
+          attention_mask: (B, max_text_tokens) text-token validity mask (1 = valid, 0 = padding).
+            Image tokens are always valid and occupy the first ``L - max_text_tokens`` positions.
           indicator: (B, L) per-token role: LLM_TOKEN_INDICATOR or OUTPUT_IMAGE_INDICATOR.
 
         Returns:
@@ -401,9 +434,16 @@ class Ideogram4Transformer(nn.Module):
         batch_size, seq_len, in_channels = x.shape
         assert in_channels == self.config.in_channels
 
-        param_dtype = getattr(self.input_proj, "compute_dtype", None) or self.input_proj.weight.dtype
+        # Image tokens lead the sequence; the remaining positions are the (right-padded) text tokens.
+        img_len = seq_len - attention_mask.shape[1] if attention_mask is not None else seq_len
+        attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, img_len, attention_mask)
+
+        param_dtype = _linear_compute_dtype(self.input_proj)
         x = x.to(param_dtype)
-        t = t.to(param_dtype)
+        # NOTE: t is intentionally NOT cast here. It is consumed only by self.t_embedding
+        # (Ideogram4EmbedScalar), which re-casts to float32 internally. Casting t to the bf16
+        # param dtype first would quantize the timestep to bf16 resolution for no benefit, losing
+        # precision in the --mixed_precision=no path where t arrives as clean float32.
         llm_features = llm_features.to(param_dtype)
 
         indicator = indicator.to(torch.long)
@@ -434,17 +474,14 @@ class Ideogram4Transformer(nn.Module):
         cos = cos.to(h.dtype)
         sin = sin.to(h.dtype)
 
-        if self.blocks_to_swap:
-            self.prepare_block_swap_before_forward()
-
         for index, layer in enumerate(self.layers):
             if self.blocks_to_swap:
                 assert self.offloader is not None
                 self.offloader.wait_for_block(index)
             if self.gradient_checkpointing and self.training:
-                h = self._gradient_checkpointing_func(layer, h, segment_ids, cos, sin, adaln_input)
+                h = self._gradient_checkpointing_func(layer, h, attn_params, cos, sin, adaln_input)
             else:
-                h = layer(h, segment_ids=segment_ids, cos=cos, sin=sin, adaln_input=adaln_input)
+                h = layer(h, attn_params=attn_params, cos=cos, sin=sin, adaln_input=adaln_input)
             if self.blocks_to_swap:
                 assert self.offloader is not None
                 self.offloader.submit_move_blocks_forward(self.layers, index)

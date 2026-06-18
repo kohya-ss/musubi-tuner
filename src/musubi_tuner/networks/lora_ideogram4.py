@@ -14,7 +14,7 @@ IDEOGRAM4_TARGET_INCLUDE_PATTERNS = [
     r".*attention\.(qkv|o)",
     r".*feed_forward\.w[123]",
 ]
-IDEOGRAM4_LINEAR_CLASS_NAMES = ("Linear", "Fp8Linear")
+IDEOGRAM4_LINEAR_CLASS_NAMES = ("Linear",)
 
 
 def _parse_patterns(value):
@@ -58,7 +58,7 @@ def create_arch_network(
         **kwargs,
     )
     if len(network.unet_loras) == 0:
-        raise RuntimeError("Ideogram 4 LoRA found zero target modules. Check Fp8Linear discovery and include patterns.")
+        raise RuntimeError("Ideogram 4 LoRA found zero target modules. Check the include/exclude patterns and target modules.")
     return network
 
 

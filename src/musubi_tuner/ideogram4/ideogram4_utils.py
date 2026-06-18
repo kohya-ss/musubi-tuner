@@ -9,7 +9,7 @@ import torch
 from accelerate import init_empty_weights
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, Qwen3VLConfig
 from transformers.masking_utils import create_causal_mask
 
 from musubi_tuner.ideogram4.caption_verifier import CaptionVerifier
@@ -18,34 +18,98 @@ from musubi_tuner.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
     OUTPUT_IMAGE_INDICATOR,
     QWEN3_VL_ACTIVATION_LAYERS,
-    SEQUENCE_PADDING_INDICATOR,
 )
 from musubi_tuner.ideogram4.ideogram4_autoencoder import AutoEncoder, AutoEncoderParams, convert_diffusers_state_dict
 from musubi_tuner.ideogram4.ideogram4_model import Ideogram4Config, Ideogram4Transformer
 from musubi_tuner.ideogram4.ideogram4_scheduler import get_schedule_for_resolution, make_step_intervals
 from musubi_tuner.ideogram4.ideogram4_quantized_loading import (
+    COMFY_FP8_MARKER_SUFFIX,
+    FP8_SCALE_SUFFIX,
     FP8_WEIGHT_DTYPE,
     is_bnb4bit_state_dict,
     is_fp8_state_dict,
     load_bnb4bit_state_dict,
-    load_fp8_state_dict,
     require_fp8_dtype,
     swap_linears_to_bnb4bit,
-    swap_linears_to_fp8,
 )
 from musubi_tuner.ideogram4.latent_norm import get_latent_norm
 from musubi_tuner.ideogram4.sampler_configs import PRESETS
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils import safetensors_utils
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 
 logger = logging.getLogger(__name__)
 
 QWEN3_VL_8B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-8B-Instruct"
+
+# Vendored copy of the Qwen3-VL-8B-Instruct config.json so the text encoder is built without
+# fetching the config from the Hugging Face Hub. Only the tokenizer is still pulled by repo id
+# (it is small and HF-cached after first use); the config and model architecture are now fully
+# self-owned. Qwen3-VL is natively supported by transformers (no auto_map / remote code), so
+# Qwen3VLConfig.from_dict reproduces AutoConfig.from_pretrained exactly (only the cosmetic
+# _name_or_path differs). Mirror upstream config.json if Qwen ever revises it.
+QWEN3_VL_8B_INSTRUCT_CONFIG = {
+    "architectures": ["Qwen3VLForConditionalGeneration"],
+    "image_token_id": 151655,
+    "model_type": "qwen3_vl",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "dtype": "bfloat16",
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "initializer_range": 0.02,
+        "intermediate_size": 12288,
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_vl_text",
+        "num_attention_heads": 32,
+        "num_hidden_layers": 36,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": {
+            "mrope_interleaved": True,
+            "mrope_section": [24, 20, 20],
+            "rope_type": "default",
+        },
+        "rope_theta": 5000000,
+        "use_cache": True,
+        "vocab_size": 151936,
+    },
+    "tie_word_embeddings": False,
+    "video_token_id": 151656,
+    "vision_config": {
+        "deepstack_visual_indexes": [8, 16, 24],
+        "depth": 27,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_vl",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 4096,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    },
+    "vision_end_token_id": 151653,
+    "vision_start_token_id": 151652,
+}
 IDEOGRAM4_MAX_TEXT_TOKENS = 2048
 IDEOGRAM4_PATCH_SIZE = 2
 IDEOGRAM4_AE_SCALE_FACTOR = 8
 IDEOGRAM4_IMAGE_PATCH = IDEOGRAM4_PATCH_SIZE * IDEOGRAM4_AE_SCALE_FACTOR
 IDEOGRAM4_COND_MODEL_TYPE = "ideogram4_cond"
 IDEOGRAM4_UNCOND_MODEL_TYPE = "ideogram4_uncond"
+
+# FP8 optimization scope for the DiT: the per-block attention and feed-forward Linear weights
+# (qkv / o / w1 / w2 / w3). Norm and adaLN modulation weights stay in the compute dtype.
+IDEOGRAM4_FP8_OPTIMIZATION_TARGET_KEYS = ["layers."]
+IDEOGRAM4_FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "adaln"]
 
 
 def validate_local_safetensors(path: str, expected_model_type: Optional[str] = None) -> dict[str, str]:
@@ -62,6 +126,75 @@ def _load_state_dict(path: str, device: str | torch.device = "cpu", disable_mmap
     return safetensors_utils.load_safetensors(path, device=device, disable_mmap=disable_mmap, dtype=None)
 
 
+def _reshape_prequant_fp8_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Reshape a pre-quantized FP8 weight scale to a layout that broadcasts against ``[out, in]``.
+
+    Handles both layouts seen in the wild: per-channel ``[out]`` (official) -> ``[out, 1]`` and
+    per-tensor scalar ``[]`` (ComfyUI) -> ``[1]``. Any other shape is left as-is.
+    """
+    if scale.ndim == 1:
+        return scale.unsqueeze(1)  # per-channel [out] -> [out, 1]
+    if scale.ndim == 0:
+        return scale.reshape(1)  # per-tensor [] -> [1]
+    return scale
+
+
+def _make_ideogram4_comfy_fp8_split_hook(compute_dtype: torch.dtype):
+    """Build a split hook that normalizes pre-quantized FP8 keys to Musubi's monkey-patch layout.
+
+    - ``<name>.weight_scale`` -> ``<name>.scale_weight``, reshaped to broadcast against ``[out, in]``
+      and cast to ``compute_dtype`` (dequantization is done in the compute dtype to match the
+      official pipeline and the bf16 activations feeding each Linear).
+    - ``<name>.comfy_quant`` marker keys are dropped.
+    - every other key passes through unchanged.
+    """
+
+    def split_hook(key: str, value: Optional[torch.Tensor]):
+        if key.endswith(COMFY_FP8_MARKER_SUFFIX):
+            return [], None  # drop the Comfy marker key
+        if key.endswith(FP8_SCALE_SUFFIX):
+            new_key = key[: -len(FP8_SCALE_SUFFIX)] + ".scale_weight"
+            if value is None:
+                return [new_key], None
+            return [new_key], [_reshape_prequant_fp8_scale(value).to(compute_dtype)]
+        return None, None  # direct mapping
+
+    return split_hook
+
+
+def _prepare_qwen3_vl_fp8_state_dict(
+    state_dict: dict[str, torch.Tensor], *, device: torch.device, dtype: torch.dtype
+) -> dict[str, torch.Tensor]:
+    """Normalize a pre-quantized FP8 Qwen3-VL state dict to Musubi's monkey-patch layout.
+
+    Mirrors the FP8 split hook used for the DiT, but operates on an already-loaded (and
+    key-normalized / vision-tower-stripped) state dict instead of a file:
+
+    - FP8 weights stay FP8 (moved to ``device``);
+    - ``<name>.weight_scale`` -> ``<name>.scale_weight``, reshaped to broadcast and cast to
+      ``dtype`` so :func:`fp8_linear_forward_patch` dequantizes in the same compute dtype as the
+      bf16 activations (it does not cast its input);
+    - ``<name>.comfy_quant`` markers are dropped;
+    - every other floating tensor is cast to ``dtype`` (matching the non-FP8 params/activations);
+    - non-floating tensors keep their dtype.
+    """
+    fp8_dtype = require_fp8_dtype()
+    prepared: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if key.endswith(COMFY_FP8_MARKER_SUFFIX):
+            continue
+        if key.endswith(FP8_SCALE_SUFFIX):
+            new_key = key[: -len(FP8_SCALE_SUFFIX)] + ".scale_weight"
+            prepared[new_key] = _reshape_prequant_fp8_scale(value).to(device=device, dtype=dtype)
+        elif value.dtype == fp8_dtype:
+            prepared[key] = value.to(device=device)
+        elif value.is_floating_point():
+            prepared[key] = value.to(device=device, dtype=dtype)
+        else:
+            prepared[key] = value.to(device=device)
+    return prepared
+
+
 def load_ideogram4_transformer(
     path: str,
     *,
@@ -70,32 +203,63 @@ def load_ideogram4_transformer(
     expected_model_type: Optional[str],
     disable_mmap: bool = False,
     config: Optional[Ideogram4Config] = None,
+    attn_mode: str = "torch",
+    split_attn: bool = False,
 ) -> Ideogram4Transformer:
     validate_local_safetensors(path, expected_model_type)
-    state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     device = torch.device(device)
-    is_bnb4bit = is_bnb4bit_state_dict(state_dict)
-    is_fp8 = is_fp8_state_dict(state_dict)
 
-    if is_fp8 or not is_bnb4bit:
-        with init_empty_weights():
-            model = Ideogram4Transformer(config or Ideogram4Config())
-    else:
-        model = Ideogram4Transformer(config or Ideogram4Config())
+    # Cheap header peek (no tensor data loaded) to detect the checkpoint format.
+    with safetensors_utils.MemoryEfficientSafeOpen(path) as f:
+        keys = f.keys()
+    is_bnb4bit = is_bnb4bit_state_dict(keys)
+    is_prequant_fp8 = any(k.endswith(FP8_SCALE_SUFFIX) for k in keys)
 
     if is_bnb4bit:
+        # bnb 4-bit checkpoints stay on the dedicated quantized loader for now.
         if device.type != "cuda":
             raise ValueError(f"bnb 4-bit weights require a CUDA device, got device={device}")
+        state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
+        model = Ideogram4Transformer(config or Ideogram4Config(), attn_mode=attn_mode, split_attn=split_attn)
         swap_linears_to_bnb4bit(model, compute_dtype=dtype)
         load_bnb4bit_state_dict(model, state_dict, device=device, dtype=dtype)
-    elif is_fp8:
-        require_fp8_dtype()
-        swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
-        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True)
-    else:
-        model.load_state_dict(state_dict, assign=True)
-        model.to(device=device, dtype=dtype)
+        model.eval()
+        return model
 
+    if is_prequant_fp8:
+        # Pre-quantized (ComfyUI) FP8 weights -> Musubi's shared monkey-patch FP8 path (as used by
+        # Z-Image etc.). The weights are kept as FP8; a local split hook normalizes the Comfy scale
+        # layout, and apply_fp8_monkey_patch installs the dequantizing forward on each Linear.
+        require_fp8_dtype()
+        with init_empty_weights():
+            model = Ideogram4Transformer(config or Ideogram4Config(), attn_mode=attn_mode, split_attn=split_attn)
+        hooks = safetensors_utils.WeightTransformHooks(split_hook=_make_ideogram4_comfy_fp8_split_hook(dtype))
+        sd = load_safetensors_with_lora_and_fp8(
+            model_files=path,
+            lora_weights_list=None,
+            lora_multipliers=None,
+            fp8_optimization=True,
+            calc_device=device,
+            move_to_device=True,
+            dit_weight_dtype=None,
+            target_keys=IDEOGRAM4_FP8_OPTIMIZATION_TARGET_KEYS,
+            exclude_keys=IDEOGRAM4_FP8_OPTIMIZATION_EXCLUDE_KEYS,
+            disable_numpy_memmap=disable_mmap,
+            weight_transform_hooks=hooks,
+            allow_prequantized_fp8=True,
+        )
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+        model.load_state_dict(sd, strict=True, assign=True)
+        model.to(device)
+        model.eval()
+        return model
+
+    # plain (bf16/fp16/fp32) weights
+    state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
+    with init_empty_weights():
+        model = Ideogram4Transformer(config or Ideogram4Config(), attn_mode=attn_mode, split_attn=split_attn)
+    model.load_state_dict(state_dict, strict=True, assign=True)
+    model.to(device=device, dtype=dtype)
     model.eval()
     return model
 
@@ -109,21 +273,29 @@ def load_ideogram4_autoencoder(
 ) -> AutoEncoder:
     validate_local_safetensors(path)
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
+    # The VAE ships in two key layouts: this repo's native layout and the diffusers layout
+    # (down_blocks/up_blocks/conv_norm_out). Detect the format up front so a wrong checkpoint
+    # fails the strict load below with a clear missing/unexpected-keys error, instead of being
+    # masked by a native-then-diffusers try/except fallback.
+    if _is_diffusers_vae_state_dict(state_dict):
+        state_dict = convert_diffusers_state_dict(state_dict)
     ae = AutoEncoder(AutoEncoderParams())
-    try:
-        ae.load_state_dict(state_dict)
-    except RuntimeError:
-        ae.load_state_dict(convert_diffusers_state_dict(state_dict))
+    ae.load_state_dict(state_dict, strict=True)
     ae.to(device=torch.device(device), dtype=dtype)
     ae.eval()
     return ae
 
 
+def _is_diffusers_vae_state_dict(state_dict: dict[str, torch.Tensor]) -> bool:
+    """True if the VAE checkpoint uses the diffusers key layout (vs this repo's native layout)."""
+    return any(".down_blocks." in k or ".up_blocks." in k or k.endswith("conv_norm_out.weight") for k in state_dict)
+
+
 def load_ideogram4_tokenizer():
-    return AutoTokenizer.from_pretrained(
-        QWEN3_VL_8B_INSTRUCT_REPO_ID,
-        trust_remote_code=True,
-    )
+    # Qwen3-VL ships a native (Qwen2TokenizerFast) tokenizer with no remote code, so
+    # trust_remote_code is unnecessary. The tokenizer is the only artifact still fetched by
+    # repo id; it is small and retained in the Hugging Face local cache after first use.
+    return AutoTokenizer.from_pretrained(QWEN3_VL_8B_INSTRUCT_REPO_ID)
 
 
 def _has_meta_tensors(model: torch.nn.Module) -> bool:
@@ -166,20 +338,29 @@ def load_ideogram4_text_encoder(
     disable_mmap: bool = False,
 ):
     validate_local_safetensors(path)
-    config = AutoConfig.from_pretrained(
-        QWEN3_VL_8B_INSTRUCT_REPO_ID,
-        trust_remote_code=True,
-    )
+    # Build the config from the vendored dict instead of AutoConfig.from_pretrained, so no config
+    # is fetched from the Hub. Qwen3-VL is natively supported (no auto_map / remote code), hence
+    # no trust_remote_code here or on AutoModel.from_config below.
+    config = Qwen3VLConfig.from_dict(QWEN3_VL_8B_INSTRUCT_CONFIG)
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     state_dict = _normalize_qwen3_vl_state_dict_for_automodel(state_dict)
+    # Ideogram 4 conditioning only consumes the language model (see _get_qwen3_vl_embeddings), so
+    # drop the Qwen3-VL vision tower weights and remove the submodule to avoid materializing it.
+    state_dict = {k: v for k, v in state_dict.items() if not k.startswith("visual.")}
     device = torch.device(device)
     with init_empty_weights():
-        model = AutoModel.from_config(config, trust_remote_code=True)
+        model = AutoModel.from_config(config)
+    if hasattr(model, "visual"):
+        del model.visual
     _materialize_meta_tensors(model)
     if is_fp8_state_dict(state_dict):
-        require_fp8_dtype()
-        swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
-        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True)
+        # Pre-quantized FP8 Qwen3-VL (official or ComfyUI) -> Musubi's shared monkey-patch FP8 path,
+        # the same mechanism the DiT uses. The dedicated Fp8Linear class is no longer needed here.
+        state_dict = _prepare_qwen3_vl_fp8_state_dict(state_dict, device=device, dtype=dtype)
+        apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
+        _raise_on_text_encoder_load_mismatch(missing, unexpected)
+        model.to(device)
     else:
         missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
         _raise_on_text_encoder_load_mismatch(missing, unexpected)
@@ -217,6 +398,11 @@ def tokenize_prompt(tokenizer, prompt: str, max_text_tokens: int = IDEOGRAM4_MAX
 
 
 def _get_qwen3_vl_embeddings(text_encoder, token_ids: torch.Tensor, attention_mask: torch.Tensor, pos_2d: torch.Tensor):
+    # NOTE: This manually drives Qwen3-VL's text decoder stack (embed_tokens -> rotary_emb -> layers)
+    # instead of calling text_encoder.forward(), so it depends on transformers internals: the submodule
+    # layout (language_model.embed_tokens / .rotary_emb / .layers), the Qwen3VLDecoderLayer call
+    # signature, and transformers.masking_utils.create_causal_mask. This is validated against the pinned
+    # transformers==4.57.6 (see pyproject.toml); a transformers upgrade may require updating this path.
     language_model = text_encoder.language_model
     inputs_embeds = language_model.embed_tokens(token_ids)
 
@@ -286,29 +472,30 @@ def build_sequence_inputs_from_features(
     t_idx = torch.zeros_like(h_idx)
     image_pos = torch.stack([t_idx, h_idx, w_idx], dim=1) + IMAGE_POSITION_OFFSET
 
+    # Sequence layout is [image][text][right-padding]: image tokens lead (Qwen-Image / Z-Image
+    # convention) so the shared attention() can build its mask from the text-only attention_mask.
     llm_features = torch.zeros(batch_size, total_seq_len, feature_dim, dtype=text_features[0].dtype)
     position_ids = torch.zeros(batch_size, total_seq_len, 3, dtype=torch.long)
-    segment_ids = torch.full((batch_size, total_seq_len), SEQUENCE_PADDING_INDICATOR, dtype=torch.long)
+    attention_mask = torch.zeros(batch_size, max_text_tokens, dtype=torch.long)
     indicator = torch.zeros(batch_size, total_seq_len, dtype=torch.long)
+
+    position_ids[:, :num_image_tokens] = image_pos
+    indicator[:, :num_image_tokens] = OUTPUT_IMAGE_INDICATOR
 
     for b, features in enumerate(text_features):
         num_text = int(features.shape[0])
-        pad_len = max_text_tokens - num_text
-        total_unpadded = num_text + num_image_tokens
-        offset = pad_len
+        text_start = num_image_tokens
         text_pos = torch.arange(num_text)
         text_pos_3d = torch.stack([text_pos, text_pos, text_pos], dim=1)
-        llm_features[b, offset : offset + num_text] = features.cpu()
-        position_ids[b, offset : offset + num_text] = text_pos_3d
-        position_ids[b, offset + num_text :] = image_pos
-        indicator[b, offset : offset + num_text] = LLM_TOKEN_INDICATOR
-        indicator[b, offset + num_text :] = OUTPUT_IMAGE_INDICATOR
-        segment_ids[b, offset : offset + total_unpadded] = 1
+        llm_features[b, text_start : text_start + num_text] = features.cpu()
+        position_ids[b, text_start : text_start + num_text] = text_pos_3d
+        indicator[b, text_start : text_start + num_text] = LLM_TOKEN_INDICATOR
+        attention_mask[b, :num_text] = 1
 
     return {
         "llm_features": llm_features.to(device),
         "position_ids": position_ids.to(device),
-        "segment_ids": segment_ids.to(device),
+        "attention_mask": attention_mask.to(device),
         "indicator": indicator.to(device),
         "num_image_tokens": num_image_tokens,
         "grid_h": grid_h,
@@ -324,17 +511,18 @@ def build_negative_image_inputs(
     dtype: torch.dtype,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
-    max_text_tokens = int(sequence_inputs["max_text_tokens"])
     num_image_tokens = int(sequence_inputs["num_image_tokens"])
-    position_ids = sequence_inputs["position_ids"][:, max_text_tokens:]
-    segment_ids = sequence_inputs["segment_ids"][:, max_text_tokens:]
-    indicator = sequence_inputs["indicator"][:, max_text_tokens:]
+    # Image tokens lead the sequence, so the image-only negative is just the leading slice.
+    position_ids = sequence_inputs["position_ids"][:, :num_image_tokens]
+    indicator = sequence_inputs["indicator"][:, :num_image_tokens]
     batch_size = int(position_ids.shape[0])
+    # No text tokens: an empty text mask makes every (image) token valid.
+    attention_mask = torch.zeros(batch_size, 0, dtype=torch.long, device=device)
     llm_features = torch.zeros(batch_size, num_image_tokens, feature_dim, dtype=dtype, device=device)
     return {
         "llm_features": llm_features,
         "position_ids": position_ids,
-        "segment_ids": segment_ids,
+        "attention_mask": attention_mask,
         "indicator": indicator,
     }
 
@@ -505,35 +693,35 @@ def generate_images(
             t_val = 1.0 - float(initial_sigma)
         t = torch.full((batch_size,), t_val, dtype=torch.float32, device=device)
 
-        pos_z = torch.cat([text_z_padding, z], dim=1)
+        pos_z = torch.cat([z, text_z_padding], dim=1)
         pos_out = conditional_transformer(
             llm_features=cond_features,
             x=pos_z,
             t=t,
             position_ids=inputs["position_ids"],
-            segment_ids=inputs["segment_ids"],
+            attention_mask=inputs["attention_mask"],
             indicator=inputs["indicator"],
         )
-        pos_v = pos_out[:, max_text_tokens:]
+        pos_v = pos_out[:, :num_image_tokens]
 
         if unconditional_transformer is None:
-            neg_z = torch.cat([neg_text_z_padding, z], dim=1)
+            neg_z = torch.cat([z, neg_text_z_padding], dim=1)
             neg_out = conditional_transformer(
                 llm_features=negative_inputs["llm_features"],
                 x=neg_z,
                 t=t,
                 position_ids=negative_inputs["position_ids"],
-                segment_ids=negative_inputs["segment_ids"],
+                attention_mask=negative_inputs["attention_mask"],
                 indicator=negative_inputs["indicator"],
             )
-            neg_v = neg_out[:, neg_max_text_tokens:]
+            neg_v = neg_out[:, :num_image_tokens]
         else:
             neg_v = unconditional_transformer(
                 llm_features=negative_inputs["llm_features"],
                 x=z,
                 t=t,
                 position_ids=negative_inputs["position_ids"],
-                segment_ids=negative_inputs["segment_ids"],
+                attention_mask=negative_inputs["attention_mask"],
                 indicator=negative_inputs["indicator"],
             )
 
@@ -556,8 +744,10 @@ def validate_prompt(prompt: str, *, warn_only: bool) -> None:
 
 def dtype_cache_cost(num_tokens: int, dtype: torch.dtype) -> tuple[float, float]:
     element_size = torch.empty((), dtype=dtype).element_size()
-    mb_per_image = num_tokens * 53248 * element_size / 1_000_000
-    return mb_per_image, mb_per_image * 1000 / 1000
+    bytes_per_image = num_tokens * 53248 * element_size
+    mb_per_image = bytes_per_image / 1_000_000
+    gb_per_1k_images = bytes_per_image * 1_000 / 1_000_000_000
+    return mb_per_image, gb_per_1k_images
 
 
 def fp8_cache_dtype() -> torch.dtype:

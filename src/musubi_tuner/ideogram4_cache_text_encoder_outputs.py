@@ -44,7 +44,7 @@ def encode_and_save_batch(
             f"Saving Ideogram 4 text cache for {item.item_key}: tokens={features.shape[0]}, dtype={cache_dtype_name}, "
             f"approx {mb_per_image:.1f} MB/image, {gb_per_1k:.1f} GB/1k images"
         )
-        save_text_encoder_output_cache_ideogram4(item, features.to(cache_dtype), cache_dtype_name)
+        save_text_encoder_output_cache_ideogram4(item, features.to(cache_dtype))
 
 
 def setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

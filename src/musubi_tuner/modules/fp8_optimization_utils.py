@@ -247,6 +247,7 @@ def load_safetensors_with_fp8_optimization(
     block_size: Optional[int] = 64,
     disable_numpy_memmap: bool = False,
     weight_transform_hooks: Optional[WeightTransformHooks] = None,
+    allow_prequantized_fp8: bool = False,
 ) -> dict:
     """
     Load weight tensors from safetensors files and merge LoRA weights into the state dict with explicit FP8 optimization.
@@ -264,6 +265,8 @@ def load_safetensors_with_fp8_optimization(
         block_size (int, optional): Block size for block-wise quantization (used if quantization_mode is "block")
         disable_numpy_memmap (bool): Disable numpy memmap when loading safetensors
         weight_transform_hooks (WeightTransformHooks, optional): Hooks for weight transformation during loading
+        allow_prequantized_fp8 (bool): If True, target weights that are already FP8 are kept as-is instead of
+            raising; their scale is expected to be supplied separately (e.g. via weight_transform_hooks).
 
     Returns:
         dict: FP8 optimized state dict
@@ -318,6 +321,15 @@ def load_safetensors_with_fp8_optimization(
 
                 original_dtype = value.dtype
                 if original_dtype.itemsize == 1:
+                    if allow_prequantized_fp8 and original_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                        # Weight is already FP8-quantized (e.g. a pre-quantized ComfyUI checkpoint).
+                        # Keep it as-is without re-quantizing; the matching scale is supplied separately
+                        # (e.g. renamed to `.scale_weight` via weight_transform_hooks).
+                        if not move_to_device:
+                            value = value.to(original_device)
+                        state_dict[key] = value
+                        optimized_count += 1
+                        continue
                     raise ValueError(
                         f"Layer {key} is already in {original_dtype} format. `--fp8_scaled` optimization should not be applied. Please use fp16/bf16/float32 model weights."
                         + f" / レイヤー {key} は既に{original_dtype}形式です。`--fp8_scaled` 最適化は適用できません。FP16/BF16/Float32のモデル重みを使用してください。"
