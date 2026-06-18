@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+from functools import lru_cache
 from io import BytesIO
 from typing import Any, Callable, Optional
 import logging
@@ -152,6 +153,29 @@ def str_to_dtype(s: Optional[str], default_dtype: Optional[torch.dtype] = None) 
         return torch.float8_e4m3fn  # default fp8
     else:
         raise ValueError(f"Unsupported dtype: {s}")
+
+
+@lru_cache(maxsize=1)
+def _known_dtype_strs() -> tuple[str, ...]:
+    """All dtype strings dtype_to_str() can emit, longest first."""
+    names = set()
+    for attr in dir(torch):
+        try:
+            obj = getattr(torch, attr)
+        except Exception:
+            continue
+        if isinstance(obj, torch.dtype):
+            names.add(dtype_to_str(obj))
+    return tuple(sorted(names, key=len, reverse=True))
+
+
+def remove_dtype_suffix(name: str) -> str:
+    """Remove a trailing ``_<dtype>`` suffix from a cache key."""
+    for dtype_str in _known_dtype_strs():
+        suffix = "_" + dtype_str
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def to_device(x: Any, device: torch.device) -> Any:

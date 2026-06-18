@@ -25,6 +25,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_Z_IMAGE,
 )
 from musubi_tuner.dataset.media_utils import divisible_by
+from musubi_tuner.utils.model_utils import remove_dtype_suffix
 
 if TYPE_CHECKING:
     from musubi_tuner.dataset.image_video_dataset import ItemInfo
@@ -160,7 +161,11 @@ class BucketSelector:
 
 class BucketBatchManager:
     def __init__(
-        self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
+        self,
+        bucketed_item_info: dict[tuple[Any], list[ItemInfo]],
+        batch_size: int,
+        num_timestep_buckets: Optional[int] = None,
+        architecture: Optional[str] = None,
     ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
@@ -168,6 +173,7 @@ class BucketBatchManager:
         self.bucket_resos.sort()
         self.num_timestep_buckets = num_timestep_buckets
         self.timestep_pool = None
+        self.architecture = architecture
 
         # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
         self.bucket_batch_indices: list[tuple[tuple[Any], int]] = []
@@ -239,7 +245,12 @@ class BucketBatchManager:
         varlen_keys = set()
         for item_info in bucket[start:end]:
             sd_latent = load_file(item_info.latent_cache_path)
-            sd_te = load_file(item_info.text_encoder_output_cache_path)
+            if self.architecture == ARCHITECTURE_LENS:
+                from musubi_tuner.lens.lens_text_cache import load_lens_text_cache
+
+                sd_te = load_lens_text_cache(item_info.text_encoder_output_cache_path)
+            else:
+                sd_te = load_file(item_info.text_encoder_output_cache_path)
             sd = {**sd_latent, **sd_te}
 
             # TODO refactor this
@@ -253,7 +264,7 @@ class BucketBatchManager:
                 if content_key.endswith("_mask"):
                     pass
                 else:
-                    content_key = content_key.rsplit("_", 1)[0]  # remove dtype
+                    content_key = remove_dtype_suffix(content_key)  # remove dtype (handles e.g. float8_e4m3fn)
                     if content_key.startswith("latents_"):
                         content_key = content_key.rsplit("_", 1)[0]  # remove FxHxW
 

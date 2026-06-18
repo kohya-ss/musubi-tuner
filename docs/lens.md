@@ -67,6 +67,29 @@ The cache stores four variable-length GPT-OSS feature tensors:
 - `varlen_lens_ctx_2_{dtype}`
 - `varlen_lens_ctx_3_{dtype}`
 
+Use `--text_encoder_dtype fp8` to keep large GPT-OSS text encoder weights in fp8 storage during caching for lower VRAM usage. Activations and unsupported small weights still compute in `bfloat16`:
+
+```bash
+python lens_cache_text_encoder_outputs.py \
+  --dataset_config /path/to/dataset.toml \
+  --text_encoder /path/to/models/lens/text_encoders/gpt_oss_20b_nvfp4.safetensors \
+  --text_encoder_dtype fp8
+```
+
+By default the cache is saved in the text encoder output dtype (`bfloat16` unless `--text_encoder_dtype` is set). To reduce text cache disk and CPU-memory footprint, use:
+
+```bash
+python lens_cache_text_encoder_outputs.py \
+  --dataset_config /path/to/dataset.toml \
+  --text_encoder /path/to/models/lens/text_encoders/gpt_oss_20b_nvfp4.safetensors \
+  --text_encoder_dtype bfloat16 \
+  --text_encoder_cache_precision fp8
+```
+
+Supported values are `auto`, `bf16`, `fp16`, `fp32`, `fp8`, and `nvfp4`. `fp8` stores the feature tensors as native `torch.float8_e4m3fn` and is the lower-risk compressed format, roughly halving bf16 text cache size. `nvfp4` is experimental: it stores packed E2M1 values plus FP8 block scales and FP32 global scales, usually reducing bf16 text cache size to about 28-30%, but with higher quantization error risk. Both formats are decoded or cast back through the existing training path and only affect saved text encoder output caches; use `--text_encoder_dtype fp8` separately when the goal is reducing GPT-OSS VRAM usage during caching.
+
+Older Musubi versions cannot read `nvfp4` Lens text caches. Regenerate text caches with `auto`, `bf16`, or `fp8` when rolling back.
+
 ## Generate
 
 ```bash

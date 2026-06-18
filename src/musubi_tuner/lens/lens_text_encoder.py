@@ -15,6 +15,7 @@ from transformers.masking_utils import create_causal_mask, create_sliding_window
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
+from musubi_tuner.lens.lens_fp8 import apply_lens_fp8_storage
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_split_weights
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,12 @@ DEFAULT_LENS_TOKENIZER_SUBFOLDER = "tokenizer"
 COMFY_FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 COMFY_EXPERT_WEIGHT_SUFFIXES = (".mlp.experts.gate_up_proj.weight", ".mlp.experts.down_proj.weight")
 COMFY_EXPERT_AUX_SUFFIXES = (".comfy_quant", ".weight_scale", ".weight_scale_2")
+GPT_OSS_FP8_LINEAR_WEIGHT_SUFFIXES = (
+    ".self_attn.q_proj.weight",
+    ".self_attn.k_proj.weight",
+    ".self_attn.v_proj.weight",
+    ".self_attn.o_proj.weight",
+)
 
 
 class LensGptOssEncoder(GptOssForCausalLM):
@@ -275,6 +282,7 @@ def _load_comfy_lens_text_state_dict(
     disable_mmap: bool,
 ) -> dict[str, torch.Tensor]:
     target_dtype = dtype if dtype is not None and dtype.itemsize > 1 else torch.bfloat16
+    fp8_storage_dtype = dtype if dtype is not None and dtype.itemsize == 1 else None
     device = torch.device(device)
     state_dict: dict[str, torch.Tensor] = {}
 
@@ -299,7 +307,7 @@ def _load_comfy_lens_text_state_dict(
                     packed_weight,
                     block_scale,
                     tensor_scale,
-                    target_dtype=target_dtype,
+                    target_dtype=fp8_storage_dtype or target_dtype,
                     device=device,
                     transpose=True,
                 )
@@ -308,7 +316,8 @@ def _load_comfy_lens_text_state_dict(
             new_key = _normalize_lens_text_key(key)
             if new_key is None:
                 continue
-            state_dict[new_key] = f.get_tensor(key, device=device, dtype=target_dtype)
+            tensor_dtype = fp8_storage_dtype if new_key.endswith(GPT_OSS_FP8_LINEAR_WEIGHT_SUFFIXES) else target_dtype
+            state_dict[new_key] = f.get_tensor(key, device=device, dtype=tensor_dtype)
 
     return state_dict
 
@@ -372,10 +381,11 @@ def _load_lens_text_encoder_from_single_file(
     model.set_selected_layers(DEFAULT_SELECTED_LAYERS)
 
     logger.info(f"Loading Lens GPT-OSS weights from {weights_path}")
+    load_dtype = dtype if dtype is None or dtype.itemsize > 1 else torch.bfloat16
     if _single_file_has_comfy_quant(weights_path):
         sd = _load_comfy_lens_text_state_dict(weights_path, dtype, device, disable_mmap)
     else:
-        sd = load_split_weights(str(weights_path), device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+        sd = load_split_weights(str(weights_path), device=str(device), disable_mmap=disable_mmap, dtype=load_dtype)
         sd = _normalize_lens_text_state_dict(sd)
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Lens GPT-OSS text encoder: {info}")
@@ -383,6 +393,12 @@ def _load_lens_text_encoder_from_single_file(
     model.to(device)
     if dtype is not None and dtype.itemsize > 1:
         model.to(dtype)
+    elif dtype is not None and dtype.itemsize == 1:
+        converted = apply_lens_fp8_storage(model, dtype)
+        logger.info(
+            "Prepared Lens GPT-OSS fp8 text encoder storage: "
+            f"{converted['linear']} Linear layers, {converted['experts']} expert modules"
+        )
     model.eval()
     return model
 
