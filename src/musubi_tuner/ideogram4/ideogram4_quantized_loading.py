@@ -31,9 +31,6 @@ _BNB_SIBLING_SUFFIXES = (
     ".nested_quant_map",
 )
 
-# Largest magnitude representable by the e4m3 float8 format. Per-row weight
-# scales map each row's max abs value onto this so we use the full range.
-FP8_E4M3_MAX = 448.0
 FP8_SCALE_SUFFIX = ".weight_scale"
 COMFY_FP8_MARKER_SUFFIX = ".comfy_quant"
 # Marker written into the text encoder's config.json so the loader knows to take
@@ -154,23 +151,6 @@ def load_bnb4bit_state_dict(
 # matmul runs, so this needs no FP8 tensor-core hardware and works on any device
 # that can store float8 (CPU included). The win is ~2x smaller Linear weights.
 # ---------------------------------------------------------------------------
-
-
-def quantize_weight_to_fp8(
-    weight: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a 2-D Linear weight to e4m3 float8 with per-row scales.
-
-    Returns ``(weight_fp8, scale)`` where ``weight_fp8`` has shape ``(out, in)``
-    in ``float8_e4m3fn`` and ``scale`` has shape ``(out,)`` in float32 such that
-    ``weight ≈ weight_fp8.to(dtype) * scale[:, None]``.
-    """
-    fp8_dtype = require_fp8_dtype()
-    w = weight.detach().to(torch.float32)
-    amax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
-    scale = amax / FP8_E4M3_MAX
-    q = (w / scale).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(fp8_dtype)
-    return q, scale.squeeze(1).to(torch.float32)
 
 
 def is_fp8_state_dict(state_dict: dict[str, torch.Tensor]) -> bool:

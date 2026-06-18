@@ -17,11 +17,22 @@ from musubi_tuner.ideogram4 import ideogram4_utils
 from musubi_tuner.ideogram4.ideogram4_quantized_loading import (
     COMFY_FP8_MARKER_SUFFIX,
     FP8_SCALE_SUFFIX,
-    quantize_weight_to_fp8,
 )
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils import safetensors_utils
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+
+# e4m3 max; quantize a 2-D Linear weight to float8 with per-row scales, mirroring the
+# layout a ComfyUI FP8 exporter produces (weight_fp8.to(dtype) * scale[:, None] ≈ weight).
+_FP8_E4M3_MAX = 448.0
+
+
+def _quantize_weight_to_fp8(weight):
+    w = weight.detach().to(torch.float32)
+    amax = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+    scale = amax / _FP8_E4M3_MAX
+    q = (w / scale).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+    return q, scale.squeeze(1).to(torch.float32)
 
 
 def _write_comfy_fp8_checkpoint(path, *, out_features=8, in_features=16):
@@ -32,7 +43,7 @@ def _write_comfy_fp8_checkpoint(path, *, out_features=8, in_features=16):
     """
     torch.manual_seed(0)
     ref_weight = torch.randn(out_features, in_features, dtype=torch.float32)
-    weight_fp8, scale = quantize_weight_to_fp8(ref_weight)  # scale: [out]
+    weight_fp8, scale = _quantize_weight_to_fp8(ref_weight)  # scale: [out]
 
     other_weight = torch.randn(out_features, in_features, dtype=torch.bfloat16)
 
