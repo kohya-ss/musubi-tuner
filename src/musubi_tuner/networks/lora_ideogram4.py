@@ -14,7 +14,6 @@ IDEOGRAM4_TARGET_INCLUDE_PATTERNS = [
     r".*attention\.(qkv|o)",
     r".*feed_forward\.w[123]",
 ]
-IDEOGRAM4_LINEAR_CLASS_NAMES = ("Linear",)
 
 
 def _parse_patterns(value):
@@ -54,7 +53,6 @@ def create_arch_network(
         text_encoders,
         unet,
         neuron_dropout=neuron_dropout,
-        linear_module_class_names=IDEOGRAM4_LINEAR_CLASS_NAMES,
         **kwargs,
     )
     if len(network.unet_loras) == 0:
@@ -77,6 +75,5 @@ def create_arch_network_from_weights(
         text_encoders,
         unet,
         for_inference,
-        linear_module_class_names=IDEOGRAM4_LINEAR_CLASS_NAMES,
         **kwargs,
     )
