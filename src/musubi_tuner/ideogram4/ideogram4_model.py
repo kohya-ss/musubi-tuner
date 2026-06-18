@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from musubi_tuner.modules.attention import AttentionParams, attention
-from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, ModelOffloader, create_offloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, LoRAStreamOffloader, ModelOffloader, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
@@ -296,7 +296,9 @@ class Ideogram4Transformer(nn.Module):
         self.gradient_checkpointing = False
         self.activation_cpu_offloading = False
         self.blocks_to_swap = None
-        self.offloader: ModelOffloader | None = None
+        # create_offloader returns a LoRAStreamOffloader (not a ModelOffloader subclass) when the
+        # BlockSwapConfig requests h2d_only streaming, so the annotation covers both implementations.
+        self.offloader: ModelOffloader | LoRAStreamOffloader | None = None
 
         head_dim = config.emb_dim // config.num_heads
 
