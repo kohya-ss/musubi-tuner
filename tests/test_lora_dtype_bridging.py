@@ -143,9 +143,7 @@ def test_ideogram4_no_regime_helpers_are_load_bearing():
 def test_ideogram4_no_regime_breaks_without_match_org_dtype():
     """Removing _match_org_dtype leaks fp32 into the downstream bf16 Linear -> RuntimeError."""
     in_dim = out_dim = 8
-    base, _ = _make_wrapped_lora(
-        in_dim, out_dim, base_dtype=torch.bfloat16, lora_dtype=torch.float32, strip_match=True
-    )
+    base, _ = _make_wrapped_lora(in_dim, out_dim, base_dtype=torch.bfloat16, lora_dtype=torch.float32, strip_match=True)
     downstream = nn.Linear(out_dim, out_dim, bias=True).to(torch.bfloat16)
     x = torch.randn(2, in_dim, dtype=torch.bfloat16)
 
@@ -159,9 +157,7 @@ def test_ideogram4_no_regime_breaks_without_match_org_dtype():
 def test_ideogram4_no_regime_breaks_without_lora_input():
     """Removing _lora_input feeds bf16 x into the fp32 lora_down matmul -> RuntimeError."""
     in_dim = out_dim = 8
-    base, _ = _make_wrapped_lora(
-        in_dim, out_dim, base_dtype=torch.bfloat16, lora_dtype=torch.float32, strip_lora_input=True
-    )
+    base, _ = _make_wrapped_lora(in_dim, out_dim, base_dtype=torch.bfloat16, lora_dtype=torch.float32, strip_lora_input=True)
     x = torch.randn(2, in_dim, dtype=torch.bfloat16)
     with _autocast_ctx(False):
         with pytest.raises(RuntimeError):

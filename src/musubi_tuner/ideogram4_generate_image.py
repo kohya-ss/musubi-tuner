@@ -83,9 +83,7 @@ def _apply_lora_weights(transformer, args, device):
         logger.info(f"Loading LoRA from {lora_weight} (multiplier={multiplier})")
         weights_sd = load_file(lora_weight)
         weights_sd = filter_lora_state_dict(weights_sd, include, exclude)
-        network = lora_ideogram4.create_arch_network_from_weights(
-            multiplier, weights_sd, unet=transformer, for_inference=True
-        )
+        network = lora_ideogram4.create_arch_network_from_weights(multiplier, weights_sd, unet=transformer, for_inference=True)
         network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
         info = network.load_state_dict(weights_sd, strict=True)
         logger.info(f"Applied LoRA: {info}")

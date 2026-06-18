@@ -497,8 +497,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             ideogram4_cache_text_encoder_outputs.ideogram4_utils.encode_prompt_to_features = (
                 lambda tokenizer, text_encoder, prompt, device: torch.ones(1, 4)
             )
-            ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = (
-                lambda item, features: calls.__setitem__("save", calls["save"] + 1)
+            ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = lambda item, features: (
+                calls.__setitem__("save", calls["save"] + 1)
             )
 
             item = SimpleNamespace(item_key="sample", caption="ordinary plain prompt")

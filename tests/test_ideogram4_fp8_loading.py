@@ -9,9 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-pytestmark = pytest.mark.skipif(
-    not hasattr(torch, "float8_e4m3fn"), reason="float8_e4m3fn not available in this torch build"
-)
+pytestmark = pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8_e4m3fn not available in this torch build")
 
 from safetensors.torch import save_file
 
@@ -51,9 +49,7 @@ def _write_comfy_fp8_checkpoint(path, *, out_features=8, in_features=16):
 
 
 def _load_prequant_fp8(path, compute_dtype=torch.bfloat16):
-    hooks = safetensors_utils.WeightTransformHooks(
-        split_hook=ideogram4_utils._make_ideogram4_comfy_fp8_split_hook(compute_dtype)
-    )
+    hooks = safetensors_utils.WeightTransformHooks(split_hook=ideogram4_utils._make_ideogram4_comfy_fp8_split_hook(compute_dtype))
     return load_safetensors_with_lora_and_fp8(
         model_files=str(path),
         lora_weights_list=None,
@@ -128,9 +124,7 @@ def test_prequantized_fp8_rejected_without_optin(tmp_path):
 
     path = tmp_path / "dit.safetensors"
     _write_comfy_fp8_checkpoint(path)
-    hooks = safetensors_utils.WeightTransformHooks(
-        split_hook=ideogram4_utils._make_ideogram4_comfy_fp8_split_hook(torch.bfloat16)
-    )
+    hooks = safetensors_utils.WeightTransformHooks(split_hook=ideogram4_utils._make_ideogram4_comfy_fp8_split_hook(torch.bfloat16))
     with pytest.raises(ValueError, match="already in"):
         load_safetensors_with_fp8_optimization(
             [str(path)],

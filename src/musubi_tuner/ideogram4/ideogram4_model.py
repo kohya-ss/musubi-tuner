@@ -436,9 +436,7 @@ class Ideogram4Transformer(nn.Module):
 
         # Image tokens lead the sequence; the remaining positions are the (right-padded) text tokens.
         img_len = seq_len - attention_mask.shape[1] if attention_mask is not None else seq_len
-        attn_params = AttentionParams.create_attention_params_from_mask(
-            self.attn_mode, self.split_attn, img_len, attention_mask
-        )
+        attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, img_len, attention_mask)
 
         param_dtype = _linear_compute_dtype(self.input_proj)
         x = x.to(param_dtype)
