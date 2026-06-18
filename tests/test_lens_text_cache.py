@@ -163,6 +163,23 @@ def test_fp8_cache_uses_native_float8_and_remains_collatable(tmp_path):
     assert tensor.to(torch.bfloat16).dtype == torch.bfloat16
 
 
+def test_fp8_cache_replaces_nan_without_float8_masked_assignment(tmp_path):
+    from musubi_tuner.lens.lens_text_cache import save_lens_text_cache
+
+    item = _item(tmp_path)
+    features = _features(torch.bfloat16)
+    features[0][0, 0] = float("nan")
+
+    save_lens_text_cache(item, features, "fp8")
+
+    sd = load_file(item.text_encoder_output_cache_path)
+    cached = sd["varlen_lens_ctx_0_float8_e4m3fn"]
+
+    assert cached.dtype == torch.float8_e4m3fn
+    assert cached.float()[0, 0].item() == 0
+    assert not torch.isnan(cached.float()).any()
+
+
 def test_nvfp4_cache_round_trips_shape_and_finite_bf16(tmp_path):
     from musubi_tuner.lens.lens_text_cache import load_lens_text_cache, save_lens_text_cache
 

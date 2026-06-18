@@ -105,10 +105,18 @@ def _convert_cache_tensor(embed: torch.Tensor, precision: str) -> torch.Tensor:
 
 def _replace_nan_with_zero(sd: dict[str, torch.Tensor], path: str) -> None:
     for key, value in sd.items():
-        if value.is_floating_point() and torch.isnan(value.float()).any():
-            value = value.clone()
-            value[torch.isnan(value.float())] = 0
-            sd[key] = value
+        if not value.is_floating_point():
+            continue
+        nan_mask = torch.isnan(value.float())
+        if nan_mask.any():
+            if value.dtype.itemsize == 1:
+                value_f32 = value.float()
+                value_f32[nan_mask] = 0
+                sd[key] = value_f32.to(value.dtype)
+            else:
+                value = value.clone()
+                value[nan_mask] = 0
+                sd[key] = value
 
 
 def _quantize_nvfp4(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, ...]]:
