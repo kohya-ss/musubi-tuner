@@ -41,7 +41,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-from musubi_tuner.training.timesteps import compute_loss_weighting_for_sd3, get_sigmas
+from musubi_tuner.training.timesteps import compute_loss_weighting_for_sd3
 
 try:
     from wavelet_loss import WaveletLoss
@@ -169,8 +169,17 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
         # --- wavelet path ---
         noisy_model_input = output.extra["noisy_model_input"]
 
-        sigmas = get_sigmas(
-            noise_scheduler, timesteps, noisy_model_input.device, n_dim=output.pred.ndim, dtype=output.pred.dtype
+        # sigma for x0 recovery == timesteps/1000, the same value the DiT is
+        # conditioned on (see call_dit). Continuous samplers (incl. flux2_shift)
+        # draw an independent t per step, build noisy = (1-t)*latents + t*noise,
+        # and return timesteps on the scheduler's 1..1000 footing -- so any
+        # sampling-time shift is already baked into t/timesteps. A get_sigmas
+        # lookup would instead snap these off-schedule timesteps to the nearest
+        # discrete entry (logging "not in the schedule" every step) and discard
+        # the shift. The same sigma scales both x0_pred and x0_target, so it only
+        # weights the residual; compute it directly.
+        sigmas = (timesteps.to(noisy_model_input.device, dtype=output.pred.dtype) / 1000.0).view(
+            -1, *([1] * (output.pred.ndim - 1))
         )
         x0_pred = noisy_model_input - sigmas * output.pred.to(noisy_model_input.dtype)
         x0_target = noisy_model_input - sigmas * output.target.to(noisy_model_input.dtype)

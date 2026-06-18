@@ -122,12 +122,11 @@ def _setup_trainer_and_batch():
     latents = torch.randn(b, c, h, w)
     noise = torch.randn(b, c, h, w)
 
-    # schedule with a single timestep present so get_sigmas resolves cleanly
-    timesteps = torch.tensor([2])
-    schedule_ts = torch.tensor([0, 1, 2, 3])
-    schedule_sigmas = torch.tensor([0.0, 0.25, 0.5, 0.75])
-    scheduler = _FakeScheduler(schedule_ts, schedule_sigmas)
-    sigma = 0.5  # sigmas[index of timestep 2]
+    # sigma is recovered directly as timestep/1000 (the training scheduler is
+    # never set_timesteps'd), so timesteps must match the sigma that built noisy.
+    sigma = 0.5
+    timesteps = torch.tensor([sigma * 1000.0])  # 500 -> sigma 0.5
+    scheduler = _FakeScheduler(torch.tensor([0, 1, 2, 3]), torch.tensor([0.0, 0.25, 0.5, 0.75]))
 
     noisy = (1.0 - sigma) * latents + sigma * noise
     target = noise - latents  # velocity target (matches Flux2 call_dit)
@@ -181,6 +180,36 @@ def test_compute_loss_disabled_equals_weighted_mse():
     expected = F.mse_loss(pred, target).detach()
     assert metrics == {}
     assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_compute_loss_continuous_timesteps_no_schedule_warning(caplog):
+    """flux2_shift produces continuous timesteps that are not members of the
+    discrete training schedule. compute_loss must recover x0 without snapping
+    them to the schedule (which logs 'not in the schedule' every step)."""
+    from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+
+    trainer, args, latents, noise, _, _, _, _, _ = _setup_trainer_and_batch()
+
+    # Real training scheduler (never set_timesteps'd → sigma = timestep/1000).
+    scheduler = FlowMatchDiscreteScheduler(shift=3.0, reverse=True, solver="euler")
+    args = _make_args()
+
+    # Continuous off-schedule timestep, exactly as get_noisy_model_input builds it.
+    t = torch.tensor([0.7432])
+    timesteps = t * 1000.0 + 1.0  # ~743.2, not in [1000..1]
+    sigma = (t).view(-1, 1, 1, 1)
+    noisy = (1.0 - sigma) * latents + sigma * noise
+    target = noise - latents
+    pred = target + 0.1 * torch.randn_like(target)
+    output = DiTOutput(pred=pred, target=target, extra={"noisy_model_input": noisy})
+
+    with caplog.at_level("WARNING", logger="musubi_tuner.training.timesteps"):
+        loss, metrics = trainer.compute_loss(
+            args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0
+        )
+
+    assert torch.isfinite(loss)
+    assert "not in the schedule" not in caplog.text
 
 
 def test_extra_metadata_enabled():
