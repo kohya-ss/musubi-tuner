@@ -23,6 +23,23 @@ from musubi_tuner.ideogram4.constants import (
 )
 
 
+def _linear_compute_dtype(linear: nn.Module) -> torch.dtype:
+    """Return the compute dtype of a (possibly FP8) Linear used as a dtype reference.
+
+    A plain ``nn.Linear`` exposes it as ``weight.dtype``. But when the weight is FP8 — either the
+    legacy ``Fp8Linear`` (which carries a ``compute_dtype`` attribute) or a monkey-patched FP8
+    ``nn.Linear`` (whose ``scale_weight`` buffer holds the compute dtype) — ``weight.dtype`` would be
+    float8, so we must read the compute dtype from those instead.
+    """
+    compute_dtype = getattr(linear, "compute_dtype", None)
+    if compute_dtype is not None:
+        return compute_dtype
+    scale_weight = getattr(linear, "scale_weight", None)
+    if scale_weight is not None:
+        return scale_weight.dtype
+    return linear.weight.dtype
+
+
 @dataclass
 class Ideogram4Config:
     emb_dim: int = 4608
@@ -255,7 +272,7 @@ class Ideogram4EmbedScalar(nn.Module):
         x = x.to(torch.float32)
         scaled = 1e4 * (x - self.range_min) / (self.range_max - self.range_min)
         emb = _sinusoidal_embedding(scaled, self.dim)
-        emb = emb.to(getattr(self.mlp_in, "compute_dtype", None) or self.mlp_in.weight.dtype)
+        emb = emb.to(_linear_compute_dtype(self.mlp_in))
         emb = F.silu(self.mlp_in(emb))
         return self.mlp_out(emb)
 
@@ -417,7 +434,7 @@ class Ideogram4Transformer(nn.Module):
         batch_size, seq_len, in_channels = x.shape
         assert in_channels == self.config.in_channels
 
-        param_dtype = getattr(self.input_proj, "compute_dtype", None) or self.input_proj.weight.dtype
+        param_dtype = _linear_compute_dtype(self.input_proj)
         x = x.to(param_dtype)
         t = t.to(param_dtype)
         llm_features = llm_features.to(param_dtype)

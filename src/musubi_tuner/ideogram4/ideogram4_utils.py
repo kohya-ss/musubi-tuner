@@ -24,6 +24,8 @@ from musubi_tuner.ideogram4.ideogram4_autoencoder import AutoEncoder, AutoEncode
 from musubi_tuner.ideogram4.ideogram4_model import Ideogram4Config, Ideogram4Transformer
 from musubi_tuner.ideogram4.ideogram4_scheduler import get_schedule_for_resolution, make_step_intervals
 from musubi_tuner.ideogram4.ideogram4_quantized_loading import (
+    COMFY_FP8_MARKER_SUFFIX,
+    FP8_SCALE_SUFFIX,
     FP8_WEIGHT_DTYPE,
     is_bnb4bit_state_dict,
     is_fp8_state_dict,
@@ -35,7 +37,9 @@ from musubi_tuner.ideogram4.ideogram4_quantized_loading import (
 )
 from musubi_tuner.ideogram4.latent_norm import get_latent_norm
 from musubi_tuner.ideogram4.sampler_configs import PRESETS
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils import safetensors_utils
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,11 @@ IDEOGRAM4_AE_SCALE_FACTOR = 8
 IDEOGRAM4_IMAGE_PATCH = IDEOGRAM4_PATCH_SIZE * IDEOGRAM4_AE_SCALE_FACTOR
 IDEOGRAM4_COND_MODEL_TYPE = "ideogram4_cond"
 IDEOGRAM4_UNCOND_MODEL_TYPE = "ideogram4_uncond"
+
+# FP8 optimization scope for the DiT: the per-block attention and feed-forward Linear weights
+# (qkv / o / w1 / w2 / w3). Norm and adaLN modulation weights stay in the compute dtype.
+IDEOGRAM4_FP8_OPTIMIZATION_TARGET_KEYS = ["layers."]
+IDEOGRAM4_FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "adaln"]
 
 
 def validate_local_safetensors(path: str, expected_model_type: Optional[str] = None) -> dict[str, str]:
@@ -62,6 +71,31 @@ def _load_state_dict(path: str, device: str | torch.device = "cpu", disable_mmap
     return safetensors_utils.load_safetensors(path, device=device, disable_mmap=disable_mmap, dtype=None)
 
 
+def _make_ideogram4_comfy_fp8_split_hook(compute_dtype: torch.dtype):
+    """Build a split hook that normalizes ComfyUI pre-quantized FP8 keys to Musubi's monkey-patch layout.
+
+    - ``<name>.weight_scale`` (per-row, shape ``[out]``) -> ``<name>.scale_weight`` (shape ``[out, 1]``) in
+      ``compute_dtype`` (dequantization is done in the compute dtype to match the official pipeline).
+    - ``<name>.comfy_quant`` marker keys are dropped.
+    - every other key passes through unchanged.
+    """
+
+    def split_hook(key: str, value: Optional[torch.Tensor]):
+        if key.endswith(COMFY_FP8_MARKER_SUFFIX):
+            return [], None  # drop the Comfy marker key
+        if key.endswith(FP8_SCALE_SUFFIX):
+            new_key = key[: -len(FP8_SCALE_SUFFIX)] + ".scale_weight"
+            if value is None:
+                return [new_key], None
+            scale = value
+            if scale.ndim == 1:
+                scale = scale.unsqueeze(1)  # [out] -> [out, 1] (per-channel)
+            return [new_key], [scale.to(compute_dtype)]
+        return None, None  # direct mapping
+
+    return split_hook
+
+
 def load_ideogram4_transformer(
     path: str,
     *,
@@ -72,30 +106,59 @@ def load_ideogram4_transformer(
     config: Optional[Ideogram4Config] = None,
 ) -> Ideogram4Transformer:
     validate_local_safetensors(path, expected_model_type)
-    state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     device = torch.device(device)
-    is_bnb4bit = is_bnb4bit_state_dict(state_dict)
-    is_fp8 = is_fp8_state_dict(state_dict)
 
-    if is_fp8 or not is_bnb4bit:
-        with init_empty_weights():
-            model = Ideogram4Transformer(config or Ideogram4Config())
-    else:
-        model = Ideogram4Transformer(config or Ideogram4Config())
+    # Cheap header peek (no tensor data loaded) to detect the checkpoint format.
+    with safetensors_utils.MemoryEfficientSafeOpen(path) as f:
+        keys = f.keys()
+    is_bnb4bit = is_bnb4bit_state_dict(keys)
+    is_prequant_fp8 = any(k.endswith(FP8_SCALE_SUFFIX) for k in keys)
 
     if is_bnb4bit:
+        # bnb 4-bit checkpoints stay on the dedicated quantized loader for now.
         if device.type != "cuda":
             raise ValueError(f"bnb 4-bit weights require a CUDA device, got device={device}")
+        state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
+        model = Ideogram4Transformer(config or Ideogram4Config())
         swap_linears_to_bnb4bit(model, compute_dtype=dtype)
         load_bnb4bit_state_dict(model, state_dict, device=device, dtype=dtype)
-    elif is_fp8:
-        require_fp8_dtype()
-        swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
-        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True)
-    else:
-        model.load_state_dict(state_dict, assign=True)
-        model.to(device=device, dtype=dtype)
+        model.eval()
+        return model
 
+    if is_prequant_fp8:
+        # Pre-quantized (ComfyUI) FP8 weights -> Musubi's shared monkey-patch FP8 path (as used by
+        # Z-Image etc.). The weights are kept as FP8; a local split hook normalizes the Comfy scale
+        # layout, and apply_fp8_monkey_patch installs the dequantizing forward on each Linear.
+        require_fp8_dtype()
+        with init_empty_weights():
+            model = Ideogram4Transformer(config or Ideogram4Config())
+        hooks = safetensors_utils.WeightTransformHooks(split_hook=_make_ideogram4_comfy_fp8_split_hook(dtype))
+        sd = load_safetensors_with_lora_and_fp8(
+            model_files=path,
+            lora_weights_list=None,
+            lora_multipliers=None,
+            fp8_optimization=True,
+            calc_device=device,
+            move_to_device=True,
+            dit_weight_dtype=None,
+            target_keys=IDEOGRAM4_FP8_OPTIMIZATION_TARGET_KEYS,
+            exclude_keys=IDEOGRAM4_FP8_OPTIMIZATION_EXCLUDE_KEYS,
+            disable_numpy_memmap=disable_mmap,
+            weight_transform_hooks=hooks,
+            allow_prequantized_fp8=True,
+        )
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+        model.load_state_dict(sd, strict=True, assign=True)
+        model.to(device)
+        model.eval()
+        return model
+
+    # plain (bf16/fp16/fp32) weights
+    state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
+    with init_empty_weights():
+        model = Ideogram4Transformer(config or Ideogram4Config())
+    model.load_state_dict(state_dict, assign=True)
+    model.to(device=device, dtype=dtype)
     model.eval()
     return model
 
