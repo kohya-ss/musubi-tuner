@@ -460,21 +460,16 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             item = DummyItem()
             item.text_encoder_output_cache_path = os.path.join(tmp, "sample_i4_te.safetensors")
             features = torch.ones(4, 53248, dtype=torch.bfloat16)
-            save_text_encoder_output_cache_ideogram4(item, features, "bf16")
+            save_text_encoder_output_cache_ideogram4(item, features)
             with safe_open(item.text_encoder_output_cache_path, framework="pt") as f:
                 metadata = f.metadata()
                 self.assertEqual(metadata["architecture"], "ideogram4")
-                self.assertEqual(metadata["text_cache_dtype"], "bf16")
-                self.assertEqual(metadata["num_text_tokens"], "4")
                 self.assertIn("varlen_i4_llm_features_bfloat16", f.keys())
 
             features_fp32 = torch.ones(2, 53248, dtype=torch.float32)
-            save_text_encoder_output_cache_ideogram4(item, features_fp32, "float32")
+            save_text_encoder_output_cache_ideogram4(item, features_fp32)
             with safe_open(item.text_encoder_output_cache_path, framework="pt") as f:
-                metadata = f.metadata()
                 keys = set(f.keys())
-                self.assertEqual(metadata["text_cache_dtype"], "float32")
-                self.assertEqual(metadata["num_text_tokens"], "2")
                 self.assertIn("varlen_i4_llm_features_float32", keys)
                 self.assertNotIn("varlen_i4_llm_features_bfloat16", keys)
 
@@ -503,7 +498,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 lambda tokenizer, text_encoder, prompt, device: torch.ones(1, 4)
             )
             ideogram4_cache_text_encoder_outputs.save_text_encoder_output_cache_ideogram4 = (
-                lambda item, features, cache_dtype_name: calls.__setitem__("save", calls["save"] + 1)
+                lambda item, features: calls.__setitem__("save", calls["save"] + 1)
             )
 
             item = SimpleNamespace(item_key="sample", caption="ordinary plain prompt")

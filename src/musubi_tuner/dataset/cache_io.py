@@ -413,22 +413,13 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
-def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torch.Tensor, cache_dtype: str):
+def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torch.Tensor):
     """Ideogram 4 architecture."""
     sd = {}
     dtype_str = dtype_to_str(features.dtype)
     sd[f"varlen_i4_llm_features_{dtype_str}"] = features.detach().cpu()
 
-    save_text_encoder_output_cache_common(
-        item_info,
-        sd,
-        ARCHITECTURE_IDEOGRAM4_FULL,
-        extra_metadata={
-            "text_cache_dtype": cache_dtype,
-            "feature_width": str(features.shape[-1]),
-            "num_text_tokens": str(features.shape[0]),
-        },
-    )
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL)
 
 
 def save_text_encoder_output_cache_hidream_o1(
@@ -462,7 +453,6 @@ def save_text_encoder_output_cache_common(
     sd: dict[str, torch.Tensor],
     arch_fullname: str,
     merge_existing: bool = True,
-    extra_metadata: Optional[dict[str, str]] = None,
 ):
     # merge_existing keeps keys written by previous passes (e.g. HunyuanVideo caches LLM and CLIP separately).
     # Single-pass architectures that write their full key set at once should pass merge_existing=False so the
@@ -503,6 +493,4 @@ def save_text_encoder_output_cache_common(
         text_encoder_output_dir = os.path.dirname(item_info.text_encoder_output_cache_path)
         os.makedirs(text_encoder_output_dir, exist_ok=True)
 
-    if extra_metadata is not None:
-        metadata.update(extra_metadata)
     safetensors_utils.mem_eff_save_file(sd, item_info.text_encoder_output_cache_path, metadata=metadata)
