@@ -568,16 +568,14 @@ def unflatten_token_grid(tokens: torch.Tensor, grid_h: int, grid_w: int) -> torc
 
 
 def normalize_token_grid(token_grid: torch.Tensor) -> torch.Tensor:
-    shift, scale = get_latent_norm()
-    shift = shift.to(device=token_grid.device, dtype=token_grid.dtype).view(1, -1, 1, 1)
-    scale = scale.to(device=token_grid.device, dtype=token_grid.dtype).view(1, -1, 1, 1)
+    shift, scale = get_latent_norm(device=token_grid.device, dtype=token_grid.dtype)
+    shift = shift.view(1, -1, 1, 1)
+    scale = scale.view(1, -1, 1, 1)
     return (token_grid - shift) / scale
 
 
 def denormalize_tokens(tokens: torch.Tensor) -> torch.Tensor:
-    shift, scale = get_latent_norm()
-    shift = shift.to(device=tokens.device, dtype=tokens.dtype)
-    scale = scale.to(device=tokens.device, dtype=tokens.dtype)
+    shift, scale = get_latent_norm(device=tokens.device, dtype=tokens.dtype)
     if tokens.ndim == 4:
         shift = shift.view(1, -1, 1, 1)
         scale = scale.view(1, -1, 1, 1)
