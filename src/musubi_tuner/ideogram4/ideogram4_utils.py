@@ -30,10 +30,8 @@ from musubi_tuner.ideogram4.ideogram4_quantized_loading import (
     is_bnb4bit_state_dict,
     is_fp8_state_dict,
     load_bnb4bit_state_dict,
-    load_fp8_state_dict,
     require_fp8_dtype,
     swap_linears_to_bnb4bit,
-    swap_linears_to_fp8,
 )
 from musubi_tuner.ideogram4.latent_norm import get_latent_norm
 from musubi_tuner.ideogram4.sampler_configs import PRESETS
@@ -71,11 +69,25 @@ def _load_state_dict(path: str, device: str | torch.device = "cpu", disable_mmap
     return safetensors_utils.load_safetensors(path, device=device, disable_mmap=disable_mmap, dtype=None)
 
 
-def _make_ideogram4_comfy_fp8_split_hook(compute_dtype: torch.dtype):
-    """Build a split hook that normalizes ComfyUI pre-quantized FP8 keys to Musubi's monkey-patch layout.
+def _reshape_prequant_fp8_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Reshape a pre-quantized FP8 weight scale to a layout that broadcasts against ``[out, in]``.
 
-    - ``<name>.weight_scale`` (per-row, shape ``[out]``) -> ``<name>.scale_weight`` (shape ``[out, 1]``) in
-      ``compute_dtype`` (dequantization is done in the compute dtype to match the official pipeline).
+    Handles both layouts seen in the wild: per-channel ``[out]`` (official) -> ``[out, 1]`` and
+    per-tensor scalar ``[]`` (ComfyUI) -> ``[1]``. Any other shape is left as-is.
+    """
+    if scale.ndim == 1:
+        return scale.unsqueeze(1)  # per-channel [out] -> [out, 1]
+    if scale.ndim == 0:
+        return scale.reshape(1)  # per-tensor [] -> [1]
+    return scale
+
+
+def _make_ideogram4_comfy_fp8_split_hook(compute_dtype: torch.dtype):
+    """Build a split hook that normalizes pre-quantized FP8 keys to Musubi's monkey-patch layout.
+
+    - ``<name>.weight_scale`` -> ``<name>.scale_weight``, reshaped to broadcast against ``[out, in]``
+      and cast to ``compute_dtype`` (dequantization is done in the compute dtype to match the
+      official pipeline and the bf16 activations feeding each Linear).
     - ``<name>.comfy_quant`` marker keys are dropped.
     - every other key passes through unchanged.
     """
@@ -87,13 +99,43 @@ def _make_ideogram4_comfy_fp8_split_hook(compute_dtype: torch.dtype):
             new_key = key[: -len(FP8_SCALE_SUFFIX)] + ".scale_weight"
             if value is None:
                 return [new_key], None
-            scale = value
-            if scale.ndim == 1:
-                scale = scale.unsqueeze(1)  # [out] -> [out, 1] (per-channel)
-            return [new_key], [scale.to(compute_dtype)]
+            return [new_key], [_reshape_prequant_fp8_scale(value).to(compute_dtype)]
         return None, None  # direct mapping
 
     return split_hook
+
+
+def _prepare_qwen3_vl_fp8_state_dict(
+    state_dict: dict[str, torch.Tensor], *, device: torch.device, dtype: torch.dtype
+) -> dict[str, torch.Tensor]:
+    """Normalize a pre-quantized FP8 Qwen3-VL state dict to Musubi's monkey-patch layout.
+
+    Mirrors the FP8 split hook used for the DiT, but operates on an already-loaded (and
+    key-normalized / vision-tower-stripped) state dict instead of a file:
+
+    - FP8 weights stay FP8 (moved to ``device``);
+    - ``<name>.weight_scale`` -> ``<name>.scale_weight``, reshaped to broadcast and cast to
+      ``dtype`` so :func:`fp8_linear_forward_patch` dequantizes in the same compute dtype as the
+      bf16 activations (it does not cast its input);
+    - ``<name>.comfy_quant`` markers are dropped;
+    - every other floating tensor is cast to ``dtype`` (matching the non-FP8 params/activations);
+    - non-floating tensors keep their dtype.
+    """
+    fp8_dtype = require_fp8_dtype()
+    prepared: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if key.endswith(COMFY_FP8_MARKER_SUFFIX):
+            continue
+        if key.endswith(FP8_SCALE_SUFFIX):
+            new_key = key[: -len(FP8_SCALE_SUFFIX)] + ".scale_weight"
+            prepared[new_key] = _reshape_prequant_fp8_scale(value).to(device=device, dtype=dtype)
+        elif value.dtype == fp8_dtype:
+            prepared[key] = value.to(device=device)
+        elif value.is_floating_point():
+            prepared[key] = value.to(device=device, dtype=dtype)
+        else:
+            prepared[key] = value.to(device=device)
+    return prepared
 
 
 def load_ideogram4_transformer(
@@ -245,9 +287,13 @@ def load_ideogram4_text_encoder(
         del model.visual
     _materialize_meta_tensors(model)
     if is_fp8_state_dict(state_dict):
-        require_fp8_dtype()
-        swap_linears_to_fp8(model, state_dict, compute_dtype=dtype)
-        load_fp8_state_dict(model, state_dict, device=device, dtype=dtype, assign=True)
+        # Pre-quantized FP8 Qwen3-VL (official or ComfyUI) -> Musubi's shared monkey-patch FP8 path,
+        # the same mechanism the DiT uses. The dedicated Fp8Linear class is no longer needed here.
+        state_dict = _prepare_qwen3_vl_fp8_state_dict(state_dict, device=device, dtype=dtype)
+        apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
+        _raise_on_text_encoder_load_mismatch(missing, unexpected)
+        model.to(device)
     else:
         missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
         _raise_on_text_encoder_load_mismatch(missing, unexpected)
