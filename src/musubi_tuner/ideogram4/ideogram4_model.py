@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from musubi_tuner.modules.attention import AttentionParams, attention
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, ModelOffloader, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.ideogram4.constants import (
     LLM_TOKEN_INDICATOR,
@@ -351,25 +351,21 @@ class Ideogram4Transformer(nn.Module):
         self.activation_cpu_offloading = False
         print("Ideogram4Transformer: Gradient checkpointing disabled.")
 
-    def enable_block_swap(
-        self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False
-    ):
+    def enable_block_swap(self, blocks_to_swap: int, config: BlockSwapConfig):
         self.blocks_to_swap = blocks_to_swap
         num_blocks = len(self.layers)
         assert self.blocks_to_swap <= num_blocks - 1, (
             f"Cannot swap more than {num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
         )
-        self.offloader = ModelOffloader(
+        self.offloader = create_offloader(
             "ideogram4-block",
             self.layers,
             num_blocks,
             self.blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
+            config,
         )
         print(
-            f"Ideogram4Transformer: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {num_blocks} blocks. Supports backward: {supports_backward}"
+            f"Ideogram4Transformer: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {num_blocks} blocks. Supports backward: {config.supports_backward}"
         )
 
     def switch_block_swap_for_inference(self):
