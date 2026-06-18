@@ -9,7 +9,7 @@ import torch
 from accelerate import init_empty_weights
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, Qwen3VLConfig
 from transformers.masking_utils import create_causal_mask
 
 from musubi_tuner.ideogram4.caption_verifier import CaptionVerifier
@@ -41,6 +41,64 @@ from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 logger = logging.getLogger(__name__)
 
 QWEN3_VL_8B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-8B-Instruct"
+
+# Vendored copy of the Qwen3-VL-8B-Instruct config.json so the text encoder is built without
+# fetching the config from the Hugging Face Hub. Only the tokenizer is still pulled by repo id
+# (it is small and HF-cached after first use); the config and model architecture are now fully
+# self-owned. Qwen3-VL is natively supported by transformers (no auto_map / remote code), so
+# Qwen3VLConfig.from_dict reproduces AutoConfig.from_pretrained exactly (only the cosmetic
+# _name_or_path differs). Mirror upstream config.json if Qwen ever revises it.
+QWEN3_VL_8B_INSTRUCT_CONFIG = {
+    "architectures": ["Qwen3VLForConditionalGeneration"],
+    "image_token_id": 151655,
+    "model_type": "qwen3_vl",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "dtype": "bfloat16",
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "initializer_range": 0.02,
+        "intermediate_size": 12288,
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_vl_text",
+        "num_attention_heads": 32,
+        "num_hidden_layers": 36,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": {
+            "mrope_interleaved": True,
+            "mrope_section": [24, 20, 20],
+            "rope_type": "default",
+        },
+        "rope_theta": 5000000,
+        "use_cache": True,
+        "vocab_size": 151936,
+    },
+    "tie_word_embeddings": False,
+    "video_token_id": 151656,
+    "vision_config": {
+        "deepstack_visual_indexes": [8, 16, 24],
+        "depth": 27,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_vl",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 4096,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    },
+    "vision_end_token_id": 151653,
+    "vision_start_token_id": 151652,
+}
 IDEOGRAM4_MAX_TEXT_TOKENS = 2048
 IDEOGRAM4_PATCH_SIZE = 2
 IDEOGRAM4_AE_SCALE_FACTOR = 8
@@ -234,10 +292,10 @@ def _is_diffusers_vae_state_dict(state_dict: dict[str, torch.Tensor]) -> bool:
 
 
 def load_ideogram4_tokenizer():
-    return AutoTokenizer.from_pretrained(
-        QWEN3_VL_8B_INSTRUCT_REPO_ID,
-        trust_remote_code=True,
-    )
+    # Qwen3-VL ships a native (Qwen2TokenizerFast) tokenizer with no remote code, so
+    # trust_remote_code is unnecessary. The tokenizer is the only artifact still fetched by
+    # repo id; it is small and retained in the Hugging Face local cache after first use.
+    return AutoTokenizer.from_pretrained(QWEN3_VL_8B_INSTRUCT_REPO_ID)
 
 
 def _has_meta_tensors(model: torch.nn.Module) -> bool:
@@ -280,10 +338,10 @@ def load_ideogram4_text_encoder(
     disable_mmap: bool = False,
 ):
     validate_local_safetensors(path)
-    config = AutoConfig.from_pretrained(
-        QWEN3_VL_8B_INSTRUCT_REPO_ID,
-        trust_remote_code=True,
-    )
+    # Build the config from the vendored dict instead of AutoConfig.from_pretrained, so no config
+    # is fetched from the Hub. Qwen3-VL is natively supported (no auto_map / remote code), hence
+    # no trust_remote_code here or on AutoModel.from_config below.
+    config = Qwen3VLConfig.from_dict(QWEN3_VL_8B_INSTRUCT_CONFIG)
     state_dict = _load_state_dict(path, device="cpu", disable_mmap=disable_mmap)
     state_dict = _normalize_qwen3_vl_state_dict_for_automodel(state_dict)
     # Ideogram 4 conditioning only consumes the language model (see _get_qwen3_vl_embeddings), so
@@ -291,7 +349,7 @@ def load_ideogram4_text_encoder(
     state_dict = {k: v for k, v in state_dict.items() if not k.startswith("visual.")}
     device = torch.device(device)
     with init_empty_weights():
-        model = AutoModel.from_config(config, trust_remote_code=True)
+        model = AutoModel.from_config(config)
     if hasattr(model, "visual"):
         del model.visual
     _materialize_meta_tensors(model)
