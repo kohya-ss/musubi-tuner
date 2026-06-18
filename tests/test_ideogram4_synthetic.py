@@ -22,88 +22,23 @@ from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_ideogra
 from musubi_tuner import ideogram4_cache_text_encoder_outputs
 from musubi_tuner.ideogram4 import ideogram4_utils
 from musubi_tuner.ideogram4.ideogram4_scheduler import SamplerParameters
-from musubi_tuner.ideogram4.ideogram4_quantized_loading import Fp8Linear, load_fp8_state_dict, swap_linears_to_fp8
 from musubi_tuner.networks import lora_ideogram4
-from musubi_tuner.networks.lora import LoRAModule
 
 
-def _has_fp8():
-    return hasattr(torch, "float8_e4m3fn")
-
-
-@unittest.skipUnless(_has_fp8(), "torch.float8_e4m3fn is not available")
-class Ideogram4Fp8Tests(unittest.TestCase):
-    def test_weight_scale_swaps_and_loads_fp8_linear(self):
-        class Tiny(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(3, 2, bias=False)
-
-        model = Tiny()
-        state = {
-            "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
-            "linear.weight_scale": torch.full((2,), 0.5, dtype=torch.float32),
-        }
-        swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
-        self.assertIsInstance(model.linear, Fp8Linear)
-        load_fp8_state_dict(model, state, device=torch.device("cpu"), dtype=torch.float32)
-        self.assertEqual(len(list(model.linear.parameters())), 0)
-        out = model.linear(torch.ones(1, 3))
-        self.assertEqual(tuple(out.shape), (1, 2))
-
-    def test_scale_weight_does_not_trigger_official_fp8_swap(self):
-        class Tiny(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(3, 2, bias=False)
-
-        model = Tiny()
-        state = {
-            "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
-            "linear.scale_weight": torch.full((2,), 0.5, dtype=torch.float32),
-        }
-        swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
-        self.assertIsInstance(model.linear, nn.Linear)
-
-    def test_scalar_weight_scale_loads_fp8_linear(self):
-        class Tiny(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(3, 2, bias=False)
-
-        model = Tiny()
-        state = {
-            "linear.weight": torch.ones(2, 3, dtype=torch.float8_e4m3fn),
-            "linear.weight_scale": torch.tensor(0.5, dtype=torch.float32),
-            "linear.comfy_quant": torch.tensor(1, dtype=torch.int8),
-        }
-        swap_linears_to_fp8(model, state, compute_dtype=torch.float32)
-        self.assertIsInstance(model.linear, Fp8Linear)
-        self.assertEqual(tuple(model.linear.weight_scale.shape), ())
-        load_fp8_state_dict(model, state, device=torch.device("cpu"), dtype=torch.float32)
-        out = model.linear(torch.ones(1, 3))
-        self.assertEqual(tuple(out.shape), (1, 2))
-
-    def test_lora_discovers_fp8_linear_and_changes_output(self):
+class Ideogram4LoraDiscoveryTests(unittest.TestCase):
+    def test_lora_discovers_block_linears_and_changes_output(self):
         class Attention(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.qkv = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.o = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.qkv.weight.fill_(1.0)
-                self.o.weight.fill_(1.0)
-                self.qkv.weight_scale.fill_(0.01)
-                self.o.weight_scale.fill_(0.01)
+                self.qkv = nn.Linear(4, 4, bias=False)
+                self.o = nn.Linear(4, 4, bias=False)
 
         class FeedForward(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.w1 = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.w2 = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                self.w3 = Fp8Linear(4, 4, bias=False, compute_dtype=torch.float32)
-                for module in (self.w1, self.w2, self.w3):
-                    module.weight.fill_(1.0)
-                    module.weight_scale.fill_(0.01)
+                self.w1 = nn.Linear(4, 4, bias=False)
+                self.w2 = nn.Linear(4, 4, bias=False)
+                self.w3 = nn.Linear(4, 4, bias=False)
 
         class Ideogram4TransformerBlock(nn.Module):
             def __init__(self):
@@ -131,20 +66,6 @@ class Ideogram4Fp8Tests(unittest.TestCase):
         network.set_multiplier(1.0)
         y1 = root.layers[0].attention.qkv(x)
         self.assertFalse(torch.allclose(y0, y1))
-
-    def test_zero_lora_on_fp8_linear_is_dtype_transparent_without_autocast(self):
-        linear = Fp8Linear(4, 4, bias=False, compute_dtype=torch.bfloat16)
-        linear.weight.fill_(1.0)
-        linear.weight_scale.fill_(0.01)
-        x = torch.ones(1, 4, dtype=torch.bfloat16)
-
-        expected = linear(x)
-        lora = LoRAModule("lora_fp8", linear, multiplier=1.0, lora_dim=2, alpha=2)
-        lora.apply_to()
-        actual = linear(x)
-
-        self.assertEqual(actual.dtype, expected.dtype)
-        self.assertTrue(torch.equal(actual, expected))
 
 
 class Ideogram4InputAndCacheTests(unittest.TestCase):

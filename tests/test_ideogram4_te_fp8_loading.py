@@ -1,17 +1,17 @@
-"""Behavior-preservation probe for migrating the Ideogram 4 text encoder FP8 path.
+"""Probe for the Ideogram 4 text encoder pre-quantized FP8 loading path.
 
-The Qwen3-VL text encoder used to load pre-quantized FP8 weights through the dedicated
-``Fp8Linear`` class (``swap_linears_to_fp8`` + ``load_fp8_state_dict``). It now goes through
-Musubi's shared monkey-patch FP8 path (``_prepare_qwen3_vl_fp8_state_dict`` +
-``apply_fp8_monkey_patch``), the same mechanism the DiT uses.
+The Qwen3-VL text encoder loads pre-quantized FP8 weights through Musubi's shared
+monkey-patch FP8 path (``_prepare_qwen3_vl_fp8_state_dict`` + ``apply_fp8_monkey_patch``),
+the same mechanism the DiT uses.
 
-This test loads the *same* synthetic FP8 checkpoint through both paths and asserts the
-forward outputs are identical, for both scale layouts seen in the wild:
+This test loads a synthetic FP8 checkpoint through that path and asserts the forward output
+matches a manual dequantization reference, for both scale layouts seen in the wild:
 
 - per-channel ``weight_scale`` shape ``[out]``  (the official weights)
 - per-tensor  ``weight_scale`` shape ``[]``     (the ComfyUI weights)
 
-It also checks a ``.comfy_quant`` marker key is dropped. CPU only, no real model.
+It also checks the ``.comfy_quant`` marker key is dropped and the scales are renamed and
+reshaped. CPU only, no real model.
 """
 
 import pytest
@@ -21,9 +21,7 @@ import torch.nn.functional as F
 
 from musubi_tuner.ideogram4.ideogram4_quantized_loading import (
     COMFY_FP8_MARKER_SUFFIX,
-    load_fp8_state_dict,
     require_fp8_dtype,
-    swap_linears_to_fp8,
 )
 from musubi_tuner.ideogram4.ideogram4_utils import _prepare_qwen3_vl_fp8_state_dict
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
@@ -93,29 +91,6 @@ def _load_via_monkey_patch(state_dict):
     assert not missing, missing
     model.eval()
     return model, prepared
-
-
-def _load_via_fp8linear(state_dict):
-    model = _TinyQwenLike()
-    swap_linears_to_fp8(model, state_dict, compute_dtype=COMPUTE_DTYPE)
-    load_fp8_state_dict(model, state_dict, device=torch.device("cpu"), dtype=COMPUTE_DTYPE, assign=True)
-    model.eval()
-    return model
-
-
-def test_monkey_patch_matches_fp8linear_for_both_scale_layouts():
-    state_dict = _build_fp8_checkpoint()
-    new_model, _ = _load_via_monkey_patch(state_dict)
-    old_model = _load_via_fp8linear(state_dict)
-
-    x = torch.randn(3, 8, dtype=COMPUTE_DTYPE)
-    with torch.no_grad():
-        y_new = new_model(x)
-        y_old = old_model(x)
-
-    assert y_new.dtype == COMPUTE_DTYPE
-    # Both dequantize in the compute dtype with identical weights/scales -> bitwise identical.
-    assert torch.equal(y_new, y_old)
 
 
 def test_prepare_drops_comfy_marker_and_renames_scales():
