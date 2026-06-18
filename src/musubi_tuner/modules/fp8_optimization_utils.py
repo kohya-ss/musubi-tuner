@@ -321,7 +321,7 @@ def load_safetensors_with_fp8_optimization(
 
                 original_dtype = value.dtype
                 if original_dtype.itemsize == 1:
-                    if allow_prequantized_fp8:
+                    if allow_prequantized_fp8 and original_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
                         # Weight is already FP8-quantized (e.g. a pre-quantized ComfyUI checkpoint).
                         # Keep it as-is without re-quantizing; the matching scale is supplied separately
                         # (e.g. renamed to `.scale_weight` via weight_transform_hooks).
