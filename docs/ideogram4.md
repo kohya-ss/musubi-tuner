@@ -83,6 +83,11 @@ Sampler presets:
 Ideogram 4 v1 uses the official asymmetric CFG path. `negative_prompt` is ignored.
 `--initial_sigma` overrides the first denoising sigma and defaults to `1.004`.
 
+To apply trained LoRA weights, add `--lora_weight path\to\lora.safetensors` (repeatable) with optional
+`--lora_multiplier` (one value per weight, default `1.0`). The LoRA is attached to the conditional DiT as a
+forward hook rather than merged into the weights, because the FP8 base cannot have LoRA merged back into it.
+This means generation results may differ from tools that merge LoRA into the weights (e.g. ComfyUI).
+
 ## Train LoRA
 
 ```powershell

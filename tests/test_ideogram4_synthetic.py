@@ -67,6 +67,65 @@ class Ideogram4LoraDiscoveryTests(unittest.TestCase):
         y1 = root.layers[0].attention.qkv(x)
         self.assertFalse(torch.allclose(y0, y1))
 
+    def test_apply_lora_weights_changes_conditional_output(self):
+        import copy
+
+        from safetensors.torch import save_file
+
+        from musubi_tuner import ideogram4_generate_image
+
+        class Attention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.qkv = nn.Linear(4, 4, bias=False)
+                self.o = nn.Linear(4, 4, bias=False)
+
+        class FeedForward(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w1 = nn.Linear(4, 4, bias=False)
+                self.w2 = nn.Linear(4, 4, bias=False)
+                self.w3 = nn.Linear(4, 4, bias=False)
+
+        class Ideogram4TransformerBlock(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attention = Attention()
+                self.feed_forward = FeedForward()
+
+        class TinyRoot(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([Ideogram4TransformerBlock()])
+
+        torch.manual_seed(0)
+        root_ref = TinyRoot()
+        root_test = copy.deepcopy(root_ref)  # identical frozen base, no hooks
+
+        # Build a "trained" LoRA on the reference root and give it a nonzero effect.
+        network = lora_ideogram4.create_arch_network(1.0, 2, 1.0, None, [], root_ref)
+        network.apply_to(None, root_ref, apply_text_encoder=False, apply_unet=True)
+        for lora in network.unet_loras:
+            nn.init.normal_(lora.lora_up.weight, std=0.5)
+        weights_sd = {k: v.contiguous() for k, v in network.state_dict().items()}
+
+        x = torch.ones(1, 4)
+        y_base = root_test.layers[0].attention.qkv(x).clone()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lora_path = os.path.join(tmp, "lora.safetensors")
+            save_file(weights_sd, lora_path)
+            args = SimpleNamespace(
+                lora_weight=[lora_path],
+                lora_multiplier=[1.0],
+                include_patterns=None,
+                exclude_patterns=None,
+            )
+            ideogram4_generate_image._apply_lora_weights(root_test, args, torch.device("cpu"))
+
+        y_lora = root_test.layers[0].attention.qkv(x)
+        self.assertFalse(torch.allclose(y_base, y_lora))
+
 
 class Ideogram4InputAndCacheTests(unittest.TestCase):
     def test_bucket_selector_accepts_ideogram4_architecture(self):
@@ -548,6 +607,35 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         )
 
         self.assertIsNone(args.unconditional_dit)
+        self.assertIsNone(args.lora_weight)
+
+    def test_generate_parser_accepts_lora_args(self):
+        from musubi_tuner import ideogram4_generate_image
+
+        parser = ideogram4_generate_image.setup_parser()
+        args = parser.parse_args(
+            [
+                "--dit",
+                "conditional.safetensors",
+                "--text_encoder",
+                "qwen3vl.safetensors",
+                "--vae",
+                "vae.safetensors",
+                "--prompt",
+                "caption",
+                "--save_path",
+                "out.png",
+                "--lora_weight",
+                "a.safetensors",
+                "b.safetensors",
+                "--lora_multiplier",
+                "0.8",
+                "1.0",
+            ]
+        )
+
+        self.assertEqual(args.lora_weight, ["a.safetensors", "b.safetensors"])
+        self.assertEqual(args.lora_multiplier, [0.8, 1.0])
 
     def test_process_batch_uses_common_timestep_sampler_with_normalized_model_latents(self):
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
