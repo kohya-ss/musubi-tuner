@@ -3,6 +3,11 @@
 This adapter supports the Comfy-Org single-file component layout for Ideogram 4 FP8.
 The model license is non-commercial; read and accept the relevant terms before downloading or using the weights.
 
+Ideogram 4 is distributed only in quantized form (FP8 and NVFP4); there are no official BF16/FP16 DiT weights.
+The DiT is therefore always loaded from a pre-quantized FP8 checkpoint — for both inference and LoRA training — and
+kept in FP8 as the frozen base. The FP8 weights are dequantized on the fly to the compute dtype, and any LoRA modules
+run in the compute dtype, so this is the normal (and only) operating mode rather than an optional memory optimization.
+
 ## Download
 
 Download the component files yourself from https://huggingface.co/Comfy-Org/Ideogram-4 and pass local paths to the scripts.
