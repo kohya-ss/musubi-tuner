@@ -527,19 +527,6 @@ def build_negative_image_inputs(
     }
 
 
-def build_unconditional_sequence_inputs(
-    text_features: list[torch.Tensor],
-    height: int,
-    width: int,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> dict[str, torch.Tensor | int]:
-    inputs = build_sequence_inputs_from_features(text_features, height, width, device=device)
-    inputs["llm_features"] = inputs["llm_features"].to(device=device, dtype=dtype)
-    return inputs
-
-
 def patchify_vae_latents(latents: torch.Tensor) -> torch.Tensor:
     if latents.ndim != 4:
         raise ValueError(f"expected VAE latents as B,C,H,W, got {tuple(latents.shape)}")
@@ -581,16 +568,14 @@ def unflatten_token_grid(tokens: torch.Tensor, grid_h: int, grid_w: int) -> torc
 
 
 def normalize_token_grid(token_grid: torch.Tensor) -> torch.Tensor:
-    shift, scale = get_latent_norm()
-    shift = shift.to(device=token_grid.device, dtype=token_grid.dtype).view(1, -1, 1, 1)
-    scale = scale.to(device=token_grid.device, dtype=token_grid.dtype).view(1, -1, 1, 1)
+    shift, scale = get_latent_norm(device=token_grid.device, dtype=token_grid.dtype)
+    shift = shift.view(1, -1, 1, 1)
+    scale = scale.view(1, -1, 1, 1)
     return (token_grid - shift) / scale
 
 
 def denormalize_tokens(tokens: torch.Tensor) -> torch.Tensor:
-    shift, scale = get_latent_norm()
-    shift = shift.to(device=tokens.device, dtype=tokens.dtype)
-    scale = scale.to(device=tokens.device, dtype=tokens.dtype)
+    shift, scale = get_latent_norm(device=tokens.device, dtype=tokens.dtype)
     if tokens.ndim == 4:
         shift = shift.view(1, -1, 1, 1)
         scale = scale.view(1, -1, 1, 1)
@@ -663,13 +648,10 @@ def generate_images(
             unconditional_text_features = [torch.zeros_like(features) for features in text_features]
         if len(unconditional_text_features) != len(text_features):
             raise ValueError("unconditional_text_features must have the same batch size as text_features")
-        negative_inputs = build_unconditional_sequence_inputs(
-            unconditional_text_features,
-            height,
-            width,
-            device=device,
-            dtype=cond_features.dtype,
-        )
+        negative_inputs = build_sequence_inputs_from_features(unconditional_text_features, height, width, device=device)
+        # Match the negative llm_features dtype to cond_features (float32), mirroring the
+        # build_negative_image_inputs branch so both CFG paths feed the DiT the same dtype.
+        negative_inputs["llm_features"] = negative_inputs["llm_features"].to(device=device, dtype=cond_features.dtype)
         neg_max_text_tokens = int(negative_inputs["max_text_tokens"])
         neg_text_z_padding = torch.zeros(batch_size, neg_max_text_tokens, latent_dim, dtype=torch.float32, device=device)
     else:

@@ -134,10 +134,10 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertEqual(selector.reso_steps, 16)
         self.assertEqual(selector.get_bucket_resolution((1024, 1024)), (1024, 1024))
 
-    def test_qwen3_vl_metadata_loads_from_public_qwen_repo(self):
+    def test_text_encoder_uses_vendored_config_without_trust_remote_code(self):
         calls = {}
         original_tokenizer = ideogram4_utils.AutoTokenizer
-        original_config = ideogram4_utils.AutoConfig
+        original_config = ideogram4_utils.Qwen3VLConfig
         original_model = ideogram4_utils.AutoModel
         original_validate = ideogram4_utils.validate_local_safetensors
         original_load_state_dict = ideogram4_utils._load_state_dict
@@ -151,7 +151,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         class FakeConfig:
             @staticmethod
-            def from_pretrained(*args, **kwargs):
+            def from_dict(*args, **kwargs):
                 calls["config"] = (args, kwargs)
                 return object()
 
@@ -171,8 +171,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         class FakeAutoModel:
             @staticmethod
-            def from_config(config, trust_remote_code=True):
-                calls["model"] = (config, trust_remote_code)
+            def from_config(*args, **kwargs):
+                calls["model"] = (args, kwargs)
                 return FakeModel()
 
         class NoOpContext:
@@ -184,7 +184,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         try:
             ideogram4_utils.AutoTokenizer = FakeTokenizer
-            ideogram4_utils.AutoConfig = FakeConfig
+            ideogram4_utils.Qwen3VLConfig = FakeConfig
             ideogram4_utils.AutoModel = FakeAutoModel
             ideogram4_utils.validate_local_safetensors = lambda path: {}
             ideogram4_utils._load_state_dict = lambda path, device="cpu", disable_mmap=False: {}
@@ -198,18 +198,21 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             )
         finally:
             ideogram4_utils.AutoTokenizer = original_tokenizer
-            ideogram4_utils.AutoConfig = original_config
+            ideogram4_utils.Qwen3VLConfig = original_config
             ideogram4_utils.AutoModel = original_model
             ideogram4_utils.validate_local_safetensors = original_validate
             ideogram4_utils._load_state_dict = original_load_state_dict
             ideogram4_utils.init_empty_weights = original_init_empty_weights
 
-        self.assertEqual(calls["tokenizer"][0], ("Qwen/Qwen3-VL-8B-Instruct",))
+        # Tokenizer is the only artifact fetched by repo id; Qwen3-VL is natively supported so no
+        # trust_remote_code (and no subfolder).
+        self.assertEqual(calls["tokenizer"][0], (ideogram4_utils.QWEN3_VL_8B_INSTRUCT_REPO_ID,))
         self.assertNotIn("subfolder", calls["tokenizer"][1])
-        self.assertTrue(calls["tokenizer"][1]["trust_remote_code"])
-        self.assertEqual(calls["config"][0], ("Qwen/Qwen3-VL-8B-Instruct",))
-        self.assertNotIn("subfolder", calls["config"][1])
-        self.assertTrue(calls["config"][1]["trust_remote_code"])
+        self.assertNotIn("trust_remote_code", calls["tokenizer"][1])
+        # The text-encoder config is built from the vendored dict, never fetched from the Hub.
+        self.assertEqual(calls["config"][0], (ideogram4_utils.QWEN3_VL_8B_INSTRUCT_CONFIG,))
+        # AutoModel is instantiated from that config without trust_remote_code.
+        self.assertNotIn("trust_remote_code", calls["model"][1])
 
     def test_text_encoder_state_dict_remaps_qwen3_vl_model_prefixes(self):
         state = {
@@ -238,7 +241,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertTrue(torch.equal(normalized["language_model.norm.weight"], state["language_model.norm.weight"]))
 
     def test_text_encoder_loader_materializes_missing_meta_tensors(self):
-        original_config = ideogram4_utils.AutoConfig
+        original_config = ideogram4_utils.Qwen3VLConfig
         original_model = ideogram4_utils.AutoModel
         original_validate = ideogram4_utils.validate_local_safetensors
         original_load_state_dict = ideogram4_utils._load_state_dict
@@ -246,7 +249,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         class FakeConfig:
             @staticmethod
-            def from_pretrained(*args, **kwargs):
+            def from_dict(*args, **kwargs):
                 return object()
 
         class FakeModel(nn.Module):
@@ -261,7 +264,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         class FakeAutoModel:
             @staticmethod
-            def from_config(config, trust_remote_code=True):
+            def from_config(config):
                 return FakeModel()
 
         class NoOpContext:
@@ -272,7 +275,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 return False
 
         try:
-            ideogram4_utils.AutoConfig = FakeConfig
+            ideogram4_utils.Qwen3VLConfig = FakeConfig
             ideogram4_utils.AutoModel = FakeAutoModel
             ideogram4_utils.validate_local_safetensors = lambda path: {}
             ideogram4_utils._load_state_dict = lambda path, device="cpu", disable_mmap=False: {
@@ -287,7 +290,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 dtype=torch.float32,
             )
         finally:
-            ideogram4_utils.AutoConfig = original_config
+            ideogram4_utils.Qwen3VLConfig = original_config
             ideogram4_utils.AutoModel = original_model
             ideogram4_utils.validate_local_safetensors = original_validate
             ideogram4_utils._load_state_dict = original_load_state_dict
@@ -665,7 +668,10 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertEqual(args.lora_weight, ["a.safetensors", "b.safetensors"])
         self.assertEqual(args.lora_multiplier, [0.8, 1.0])
 
-    def test_process_batch_uses_common_timestep_sampler_with_normalized_model_latents(self):
+    def test_scale_shift_latents_normalizes_and_compute_loss_reports_metrics(self):
+        # process_batch is now the shared base trainer's; Ideogram 4 only overrides the
+        # scale_shift_latents (latent normalization) and compute_loss (mean MSE + diagnostics)
+        # hooks, so verify those directly instead of the old monolithic process_batch.
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
         original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
         original_trainer = sys.modules.get("musubi_tuner.training.trainer_base")
@@ -702,46 +708,25 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             ideogram4_train_network = importlib.import_module("musubi_tuner.ideogram4_train_network")
 
             trainer = ideogram4_train_network.Ideogram4NetworkTrainer()
-            captured = {}
 
-            def fake_get_timesteps(args, noise, latents, timesteps, noise_scheduler, device, dtype):
-                captured["sampler_args"] = args
-                captured["sampler_timesteps"] = timesteps
-                captured["sampler_noise_scheduler"] = noise_scheduler
-                captured["sampler_device"] = device
-                captured["sampler_dtype"] = dtype
-                t = torch.full((latents.shape[0],), 0.25, device=device, dtype=dtype)
-                noisy_model_input = (1.0 - t.view(-1, 1, 1, 1)) * latents + t.view(-1, 1, 1, 1) * noise
-                return noisy_model_input, t * 1000.0 + 1.0
+            # scale_shift_latents transforms raw VAE latents into the model's normalized token-grid space.
+            latents = torch.linspace(-1.0, 1.0, 128 * 2 * 3, dtype=torch.float32).reshape(1, 128, 2, 3)
+            normalized = trainer.scale_shift_latents(latents)
+            self.assertTrue(torch.allclose(normalized, ideogram4_utils.normalize_token_grid(latents)))
 
-            def fake_call(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype):
-                captured["latents"] = latents.detach().clone()
-                captured["noise"] = noise.detach().clone()
-                captured["noisy_model_input"] = noisy_model_input.detach().clone()
-                captured["timesteps"] = timesteps.detach().clone()
-                target = latents - noise
-                return DiTOutput(pred=target, target=target)
-
-            trainer.get_noisy_model_input_and_timesteps = fake_get_timesteps
-            trainer.call_dit = fake_call
-
-            latents = torch.linspace(-1.0, 1.0, 128 * 32 * 40, dtype=torch.float32).reshape(1, 128, 32, 40)
-            args = SimpleNamespace(timestep_sampling="uniform", log_loss_stats=True)
-            noise_scheduler = object()
-            batch_timesteps = [0.25]
-            loss, metrics = trainer.process_batch(
+            # compute_loss: plain mean MSE in velocity space; with pred == target loss is zero and the
+            # log_loss_stats diagnostics fall out (cosine == 1, timestep mean preserved).
+            target = torch.linspace(-1.0, 1.0, 4 * 2 * 2, dtype=torch.float32).reshape(1, 4, 2, 2)
+            output = DiTOutput(pred=target.clone(), target=target.clone())
+            args = SimpleNamespace(log_loss_stats=True)
+            loss, metrics = trainer.compute_loss(
                 args,
-                SimpleNamespace(device=torch.device("cpu")),
-                transformer=None,
-                network=None,
-                batch={"i4_llm_features": [torch.zeros(1, 8)], "timesteps": batch_timesteps},
-                latents=latents,
-                noise=torch.empty_like(latents),
-                noise_scheduler=noise_scheduler,
-                dit_dtype=torch.float32,
-                network_dtype=torch.float32,
-                vae=None,
-                global_step=0,
+                output,
+                torch.full((1,), 251.0),
+                object(),  # noise_scheduler (unused)
+                torch.float32,
+                torch.float32,
+                0,
             )
         finally:
             if original_module is not None:
@@ -761,16 +746,6 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             else:
                 sys.modules.pop("musubi_tuner.training.trainer_base", None)
 
-        self.assertIs(captured["sampler_args"], args)
-        self.assertIs(captured["sampler_timesteps"], batch_timesteps)
-        self.assertIs(captured["sampler_noise_scheduler"], noise_scheduler)
-        self.assertEqual(captured["sampler_device"], torch.device("cpu"))
-        self.assertEqual(captured["sampler_dtype"], torch.float32)
-        expected_latents = ideogram4_utils.normalize_token_grid(latents)
-        self.assertTrue(torch.allclose(captured["latents"], expected_latents))
-        expected_noisy = 0.75 * expected_latents + 0.25 * captured["noise"]
-        self.assertTrue(torch.allclose(captured["noisy_model_input"], expected_noisy))
-        self.assertTrue(torch.equal(captured["timesteps"], torch.full((1,), 251.0)))
         self.assertEqual(float(loss.item()), 0.0)
         self.assertGreater(metrics["loss/zero_pred"], 0.0)
         self.assertGreater(metrics["loss/flipped_pred"], 0.0)

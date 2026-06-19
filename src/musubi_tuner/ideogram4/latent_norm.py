@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 LATENT_SHIFT: tuple[float, ...] = (
@@ -265,8 +267,11 @@ LATENT_SCALE: tuple[float, ...] = (
 )
 
 
-def get_latent_norm() -> tuple[torch.Tensor, torch.Tensor]:
-    shift = torch.tensor(LATENT_SHIFT, dtype=torch.float32)
-    scale = torch.tensor(LATENT_SCALE, dtype=torch.float32)
+def get_latent_norm(
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    shift = torch.tensor(LATENT_SHIFT, dtype=dtype, device=device)
+    scale = torch.tensor(LATENT_SCALE, dtype=dtype, device=device)
     assert shift.shape == (128,) and scale.shape == (128,)
     return shift, scale
