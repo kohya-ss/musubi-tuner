@@ -1,22 +1,18 @@
 import argparse
+import logging
 
 import torch
-from transformers import CLIPTextModel, T5EncoderModel, CLIPTokenizer, T5Tokenizer
+from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokenizer
 
+import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-
 from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_FLUX_KONTEXT,
     ItemInfo,
     save_text_encoder_output_cache_flux_kontext,
 )
-
-from musubi_tuner.flux import flux_models
-from musubi_tuner.flux import flux_utils
-import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
-import logging
-
+from musubi_tuner.flux import flux_models, flux_utils
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +25,7 @@ def encode_and_save_batch(
     text_encoder2: CLIPTextModel,
     batch: list[ItemInfo],
     device: torch.device,
+    t5_max_length: int,
 ):
     prompts = [item.caption for item in batch]
     # print(prompts)
@@ -36,7 +33,7 @@ def encode_and_save_batch(
     # encode prompt
     t5_tokens = tokenizer1(
         prompts,
-        max_length=flux_models.T5XXL_MAX_LENGTH,
+        max_length=t5_max_length,
         padding="max_length",
         return_length=False,
         return_overflowing_tokens=False,
@@ -70,6 +67,8 @@ def main():
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
+    t5_max_len = args.t5_tokenizer_max_length or flux_models.T5XXL_MAX_LENGTH
+
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
@@ -92,7 +91,7 @@ def main():
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
         nonlocal tokenizer1, text_encoder1, tokenizer2, text_encoder2
-        encode_and_save_batch(tokenizer1, text_encoder1, tokenizer2, text_encoder2, batch, device)
+        encode_and_save_batch(tokenizer1, text_encoder1, tokenizer2, text_encoder2, batch, device, t5_max_len)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -116,6 +115,7 @@ def flux_kontext_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argum
     parser.add_argument("--text_encoder1", type=str, default=None, required=True, help="text encoder (T5XXL) checkpoint path")
     parser.add_argument("--text_encoder2", type=str, default=None, required=True, help="text encoder 2 (CLIP-L) checkpoint path")
     parser.add_argument("--fp8_t5", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--t5_tokenizer_max_length", type=int, default=None, help="maximum length for T5XXL text embeddings")
     return parser
 
 
