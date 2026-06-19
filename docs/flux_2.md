@@ -142,6 +142,7 @@ python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
 - Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
 - Use `--fp8_text_encoder` option to run the Text Encoder in fp8 mode for VRAM savings.
 - The larger the batch size, the more VRAM is required. Adjust `--batch_size` according to your VRAM capacity.
+- Use `--tokenizer_max_length` to change the default text embedding length. Shorter embeddings may improve training speed, but ensure your captions fit the new length or they will be silently truncated.
 
 <details>
 <summary>日本語</summary>
@@ -151,6 +152,7 @@ python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
 - `flux_2_cache_text_encoder_outputs.py`を使用します。
 - テキストエンコーダーをfp8モードで実行するための`--fp8_text_encoder`オプションを使用します。
 - バッチサイズが大きいほど、より多くのVRAMが必要です。VRAM容量に応じて`--batch_size`を調整してください。
+- デフォルトのテキスト埋め込み長を変更するには、`--tokenizer_max_length` を使用してください。埋め込み長を短くすると学習速度が向上する可能性がありますが、キャプションが新しい長さに収まるようにしてください。そうでない場合、キャプションは通知なく切り詰められます。
 
 </details>
 
