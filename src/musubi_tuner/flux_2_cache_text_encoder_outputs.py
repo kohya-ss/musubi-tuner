@@ -58,7 +58,7 @@ def main():
         dtype=m3_dtype,
         device=device,
         disable_mmap=True,
-        tokenizer_max_length=args.tokenizer_max_length
+        tokenizer_max_length=args.tokenizer_max_length,
     )
 
     # Encode with Mistral 3 or Qwen-3 text encoder

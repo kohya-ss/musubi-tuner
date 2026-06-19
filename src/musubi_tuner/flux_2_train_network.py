@@ -61,7 +61,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             dtype=te_dtype,
             device=device,
             disable_mmap=True,
-            tokenizer_max_length=args.tokenizer_max_length
+            tokenizer_max_length=args.tokenizer_max_length,
         )
 
         # Encode with Text Encoder (Mistral 3 or Qwen-3)

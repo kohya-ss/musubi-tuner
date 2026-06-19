@@ -739,12 +739,7 @@ class Mistral3Embedder(nn.Module):
 
 
 class Qwen3Embedder(nn.Module):
-    def __init__(
-        self,
-        tokenizer: Qwen2Tokenizer,
-        model: Qwen3ForCausalLM,
-        max_token_length: int
-    ):
+    def __init__(self, tokenizer: Qwen2Tokenizer, model: Qwen3ForCausalLM, max_token_length: int):
         super().__init__()
 
         self.model = model
@@ -808,7 +803,7 @@ def load_text_embedder(
     device: Union[str, torch.device],
     disable_mmap: bool = False,
     state_dict: Optional[dict] = None,
-    tokenizer_max_length: Optional[int] = None
+    tokenizer_max_length: Optional[int] = None,
 ) -> Union[Mistral3Embedder, Qwen3Embedder]:
 
     max_len = tokenizer_max_length or DEFAULT_MAX_LENGTH
