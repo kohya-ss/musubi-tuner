@@ -12,6 +12,7 @@ from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_KANDINSKY5, ARCHITECTURE_KANDINSKY5_FULL
 from musubi_tuner.hv_train_network import (
+    DiTOutput,
     NetworkTrainer,
     clean_memory_on_device,
     setup_parser_common,
@@ -745,7 +746,8 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
         bsz = latents.shape[0]
         preds = []
         targets = []
@@ -900,7 +902,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
 
         model_pred = torch.stack(preds, dim=0)  # B, F, C, H, W
         target = torch.stack(targets, dim=0)  # B, F, C, H, W
-        return model_pred, target
+        return DiTOutput(pred=model_pred, target=target)
 
     # endregion model specific
 

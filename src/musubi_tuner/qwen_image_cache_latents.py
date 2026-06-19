@@ -100,7 +100,7 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
         def decode(lat):
             with torch.no_grad():
                 pixels = vae.decode_to_pixels(lat)
-            print(pixels.min(), pixels.max(), pixels.shape)
+            logger.debug(f"pixels min/max/shape: {pixels.min()}, {pixels.max()}, {pixels.shape}")
             pixels = pixels.to(torch.float32).cpu()
             pixels = (pixels * 255).clamp(0, 255).to(torch.uint8)  # convert to uint8
             pixels = pixels[0].permute(1, 2, 0)  # C, H, W -> H, W, C

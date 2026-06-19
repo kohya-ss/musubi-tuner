@@ -15,7 +15,7 @@ from musubi_tuner.hunyuan_model.posemb_layers import apply_rotary_emb
 from musubi_tuner.hunyuan_model.mlp_layers import MLP, MLPEmbedder, FinalLayer
 from musubi_tuner.hunyuan_model.modulate_layers import ModulateDiT, modulate
 from musubi_tuner.hunyuan_model.token_refiner import SingleTokenRefiner
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.utils.device_utils import synchronize_device, clean_memory_on_device
 from musubi_tuner.hunyuan_model.posemb_layers import get_nd_rotary_pos_embed
 
@@ -673,7 +673,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
     def enable_img_in_txt_in_offloading(self):
         self._enable_img_in_txt_in_offloading = True
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(self, num_blocks: int, config: BlockSwapConfig):
         self.blocks_to_swap = num_blocks
         self.num_double_blocks = len(self.double_blocks)
         self.num_single_blocks = len(self.single_blocks)
@@ -685,25 +685,11 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             f"Requested {double_blocks_to_swap} double blocks and {single_blocks_to_swap} single blocks."
         )
 
-        self.offloader_double = ModelOffloader(
-            "double",
-            self.double_blocks,
-            self.num_double_blocks,
-            double_blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
-            # , debug=True
+        self.offloader_double = create_offloader(
+            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, config
         )
-        self.offloader_single = ModelOffloader(
-            "single",
-            self.single_blocks,
-            self.num_single_blocks,
-            single_blocks_to_swap,
-            supports_backward,
-            device,
-            use_pinned_memory,
-            # , debug=True
+        self.offloader_single = create_offloader(
+            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, config
         )
         print(
             f"HYVideoDiffusionTransformer: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."

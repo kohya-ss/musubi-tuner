@@ -55,10 +55,10 @@ def main(args):
             count += 1
             # print(f"Renamed {k} to {new_k}")
 
-    # concat or split LoRA for QKV layers
+    # concat or split LoRA/LoHa/LoKr for QKV layers
     qkv_count = 0
     if args.reverse:
-        # ComfyUI to sd-scripts: split QKV
+        # ComfyUI to sd-scripts: split QKV (LoRA only)
         keys = list(state_dict.keys())
         for key in keys:
             if "attention_qkv" in key and "lora_down" in key:
@@ -93,8 +93,12 @@ def main(args):
                 qkv_count += 1
     else:
         # sd-scripts to ComfyUI: concat QKV
+
+        # LoRA QKV merge
         keys = list(state_dict.keys())
         for key in keys:
+            if key not in state_dict:
+                continue
             if "attention" in key and ("to_q" in key or "to_k" in key or "to_v" in key):
                 if "to_q" not in key or "lora_up" not in key:  # ensure we process only once per QKV set
                     continue
@@ -139,8 +143,141 @@ def main(args):
 
                 qkv_count += 1
 
+        # LoHa QKV merge (block-diagonal, lossless)
+        # ΔW = (w1a @ w1b) ⊙ (w2a @ w2b) * scale
+        # Using block_diag for w1a/w2a and cat for w1b/w2b preserves the exact result:
+        #   block_diag(w1a_q, w1a_k, w1a_v) @ cat(w1b_q, w1b_k, w1b_v)
+        #   = [w1a_q@w1b_q; w1a_k@w1b_k; w1a_v@w1b_v]
+        # Rank becomes 3x, alpha is adjusted accordingly.
+        keys = list(state_dict.keys())
+        for key in keys:
+            if key not in state_dict:
+                continue
+            if "attention" in key and ("to_q" in key or "to_k" in key or "to_v" in key):
+                if "to_q" not in key or "hada_w1_a" not in key:
+                    continue
+
+                lora_name = key.split(".", 1)[0]
+                lora_name_prefix = lora_name.replace("to_q", "")
+
+                w1a_list, w1b_list, w2a_list, w2b_list = [], [], [], []
+                for suffix in ["to_q", "to_k", "to_v"]:
+                    name = f"{lora_name_prefix}{suffix}"
+                    w1a_list.append(state_dict.pop(f"{name}.hada_w1_a"))
+                    w1b_list.append(state_dict.pop(f"{name}.hada_w1_b"))
+                    w2a_list.append(state_dict.pop(f"{name}.hada_w2_a"))
+                    w2b_list.append(state_dict.pop(f"{name}.hada_w2_b"))
+
+                alpha = state_dict.pop(f"{lora_name}.alpha")
+                state_dict.pop(f"{lora_name_prefix}to_k.alpha", None)
+                state_dict.pop(f"{lora_name_prefix}to_v.alpha", None)
+
+                w1a_qkv = torch.block_diag(*w1a_list)  # (3*out, 3r)
+                w1b_qkv = torch.cat(w1b_list, dim=0)  # (3r, in)
+                w2a_qkv = torch.block_diag(*w2a_list)  # (3*out, 3r)
+                w2b_qkv = torch.cat(w2b_list, dim=0)  # (3r, in)
+
+                new_lora_name = lora_name_prefix + "qkv"
+                state_dict[f"{new_lora_name}.hada_w1_a"] = w1a_qkv
+                state_dict[f"{new_lora_name}.hada_w1_b"] = w1b_qkv
+                state_dict[f"{new_lora_name}.hada_w2_a"] = w2a_qkv
+                state_dict[f"{new_lora_name}.hada_w2_b"] = w2b_qkv
+                state_dict[f"{new_lora_name}.alpha"] = alpha * 3  # rank is 3x, so alpha * 3 keeps scale unchanged
+
+                qkv_count += 1
+
+        # LoKr QKV merge: materialize weight deltas via Kronecker product, concatenate, convert to LoRA via SVD
+        # Kronecker product structure cannot be preserved across QKV concatenation,
+        # so we convert QKV layers to LoRA format. Non-QKV layers remain as LoKr.
+        keys = list(state_dict.keys())
+        for key in keys:
+            if key not in state_dict:
+                continue
+            if "attention" in key and ("to_q" in key or "to_k" in key or "to_v" in key):
+                if "to_q" not in key or "lokr_w1" not in key:
+                    continue
+
+                lora_name = key.split(".", 1)[0]
+                lora_name_prefix = lora_name.replace("to_q", "")
+
+                delta_weights = []
+                original_dtype = None
+                for suffix in ["to_q", "to_k", "to_v"]:
+                    name = f"{lora_name_prefix}{suffix}"
+                    w1 = state_dict.pop(f"{name}.lokr_w1")
+                    if original_dtype is None:
+                        original_dtype = w1.dtype
+
+                    w2a_key = f"{name}.lokr_w2_a"
+                    w2b_key = f"{name}.lokr_w2_b"
+                    w2_key = f"{name}.lokr_w2"
+
+                    if w2a_key in state_dict:
+                        # low-rank mode: w2 = w2_a @ w2_b
+                        w2a = state_dict.pop(w2a_key)
+                        w2b = state_dict.pop(w2b_key)
+                        dim = w2a.shape[1]
+                        w2 = w2a.float() @ w2b.float()
+                    elif w2_key in state_dict:
+                        # full matrix mode
+                        w2 = state_dict.pop(w2_key).float()
+                        dim = None
+                    else:
+                        raise ValueError(f"Missing lokr_w2 weights for {name}")
+
+                    alpha_i = state_dict.pop(f"{name}.alpha", None)
+
+                    # Compute scale: low-rank uses alpha/dim, full matrix uses 1.0
+                    if dim is not None:
+                        if alpha_i is not None:
+                            alpha_val = alpha_i.item() if isinstance(alpha_i, torch.Tensor) else alpha_i
+                        else:
+                            alpha_val = dim
+                        scale = alpha_val / dim
+                    else:
+                        scale = 1.0
+
+                    delta_w = torch.kron(w1.float(), w2) * scale
+                    delta_weights.append(delta_w)
+
+                # Concatenate QKV deltas
+                delta_qkv = torch.cat(delta_weights, dim=0)  # (3*out, in)
+
+                # SVD decomposition
+                U, S, Vt = torch.linalg.svd(delta_qkv, full_matrices=False)
+
+                # Determine rank
+                if args.lokr_rank is not None:
+                    svd_rank = min(args.lokr_rank, S.shape[0])
+                else:
+                    # Auto: keep singular values contributing to 99.99% of total energy (Frobenius norm squared)
+                    total_energy = (S**2).sum()
+                    cumulative_energy = (S**2).cumsum(dim=0)
+                    threshold_idx = (cumulative_energy >= total_energy * 0.9999).nonzero(as_tuple=True)[0]
+                    if len(threshold_idx) > 0:
+                        svd_rank = threshold_idx[0].item() + 1
+                    else:
+                        svd_rank = S.shape[0]
+
+                # Log reconstruction quality
+                reconstructed = (U[:, :svd_rank] * S[:svd_rank].unsqueeze(0)) @ Vt[:svd_rank, :]
+                rel_error = (delta_qkv - reconstructed).norm() / delta_qkv.norm()
+                logger.info(f"  LoKr->LoRA QKV {lora_name_prefix}qkv: rank={svd_rank}/{S.shape[0]}, relative error={rel_error:.6f}")
+
+                # Construct LoRA weights: ΔW ≈ lora_up @ lora_down, with alpha = rank (scale = 1)
+                sqrt_S = torch.sqrt(S[:svd_rank])
+                lora_up = (U[:, :svd_rank] * sqrt_S.unsqueeze(0)).to(original_dtype)  # (3*out, rank)
+                lora_down = (sqrt_S.unsqueeze(1) * Vt[:svd_rank, :]).to(original_dtype)  # (rank, in)
+
+                new_lora_name = lora_name_prefix + "qkv"
+                state_dict[f"{new_lora_name}.lora_up.weight"] = lora_up
+                state_dict[f"{new_lora_name}.lora_down.weight"] = lora_down
+                state_dict[f"{new_lora_name}.alpha"] = torch.tensor(float(svd_rank))
+
+                qkv_count += 1
+
     logger.info(f"Direct key renames applied: {count}")
-    logger.info(f"QKV LoRA layers processed: {qkv_count}")
+    logger.info(f"QKV layers processed: {qkv_count}")
 
     # Calculate hash
     if metadata is not None:
@@ -155,9 +292,12 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert LoRA format")
+    parser = argparse.ArgumentParser(description="Convert LoRA/LoHa/LoKr format for Z-Image ComfyUI")
     parser.add_argument("src_path", type=str, default=None, help="source path, sd-scripts format")
     parser.add_argument("dst_path", type=str, default=None, help="destination path, ComfyUI format")
-    parser.add_argument("--reverse", action="store_true", help="reverse conversion direction")
+    parser.add_argument("--reverse", action="store_true", help="reverse conversion direction (LoRA only)")
+    parser.add_argument(
+        "--lokr_rank", type=int, default=None, help="max rank for LoKr to LoRA QKV conversion (auto if not specified)"
+    )
     args = parser.parse_args()
     main(args)

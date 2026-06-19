@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 
 from musubi_tuner import qwen_image_train_network
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
@@ -254,9 +255,10 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
-            transformer.enable_block_swap(
-                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            swap_config = BlockSwapConfig(
+                accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
             )
+            transformer.enable_block_swap(blocks_to_swap, swap_config)
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         if args.gradient_checkpointing:
@@ -616,10 +618,10 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                         args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
                     )
 
-                    model_pred, target = self.call_dit(
+                    output = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
                     )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target, reduction="none")
+                    loss = torch.nn.functional.mse_loss(output.pred.to(dit_dtype), output.target, reduction="none")
 
                     if weighting is not None:
                         loss = loss * weighting

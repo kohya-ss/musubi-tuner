@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 
 from musubi_tuner import zimage_train_network
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.zimage import zimage_model
@@ -189,9 +190,10 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
-            transformer.enable_block_swap(
-                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
+            swap_config = BlockSwapConfig(
+                accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
             )
+            transformer.enable_block_swap(blocks_to_swap, swap_config)
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
         if args.gradient_checkpointing:
@@ -527,10 +529,10 @@ class ZImageTrainer(ZImageNetworkTrainer):
                         args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
                     )
 
-                    model_pred, target = self.call_dit(
+                    output = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
                     )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
+                    loss = torch.nn.functional.mse_loss(output.pred.to(dit_dtype), output.target.to(dit_dtype), reduction="none")
 
                     if weighting is not None:
                         loss = loss * weighting
@@ -543,6 +545,15 @@ class ZImageTrainer(ZImageNetworkTrainer):
                         if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                             params_to_clip = transformer.parameters()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                        if blocks_to_swap > 0 and args.block_swap_optimizer_patch_params:
+                            # Move grad to same device of parameter: workaround for optimizer step, working with AdamW and Adafactor for now.
+                            # AdamW8bit and other optimizers does not work with this patch because of their specific implementation.
+                            unwrapped_optimizer = accelerator.unwrap_model(optimizer)
+                            for group in unwrapped_optimizer.param_groups:
+                                for param in group["params"]:
+                                    if param.grad is not None and param.device != param.grad.device:
+                                        param.grad = param.grad.to(param.device, non_blocking=True)
 
                         optimizer.step()
                         lr_scheduler.step()
@@ -671,6 +682,12 @@ def zimage_finetune_setup_parser(parser: argparse.ArgumentParser) -> argparse.Ar
         "--mem_eff_save",
         action="store_true",
         help="Enable memory efficient saving (saving states requires use normal saving, so it takes same amount of memory even with this option enabled)",
+    )
+    parser.add_argument(
+        "--block_swap_optimizer_patch_params",
+        action="store_true",
+        help="Patch optimizer parameters for block swap when blocks_to_swap > 0. Only works for some optimizers. Not needed when using --fused_backward_pass."
+        + " / ブロックスワップを使用しているときに、optimizer.stepがエラーになるのを回避するためパッチ。一部のoptimizerでのみ動作します。--fused_backward_passを使用しているときは指定不要です。",
     )
     return parser
 

@@ -16,6 +16,7 @@ import numpy as np
 from tqdm import tqdm
 
 from musubi_tuner.networks import lora_framepack
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 from musubi_tuner.frame_pack import hunyuan
 from musubi_tuner.frame_pack.hunyuan_video_packed import load_packed_model
@@ -540,9 +541,8 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
 
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
-        model.enable_block_swap(
-            args.blocks_to_swap, device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap
-        )
+        swap_config = BlockSwapConfig(device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap)
+        model.enable_block_swap(args.blocks_to_swap, swap_config)
         model.move_to_device_except_swap_blocks(device)
         model.prepare_block_swap_before_forward()
     else:

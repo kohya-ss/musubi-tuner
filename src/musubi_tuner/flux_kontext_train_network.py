@@ -10,6 +10,7 @@ from accelerate import Accelerator
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_KONTEXT, ARCHITECTURE_FLUX_KONTEXT_FULL
 from musubi_tuner.flux import flux_models, flux_utils
 from musubi_tuner.hv_train_network import (
+    DiTOutput,
     NetworkTrainer,
     load_prompts,
     clean_memory_on_device,
@@ -298,7 +299,8 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
         model: flux_models.Flux = transformer
 
         bsize = latents.shape[0]
@@ -367,7 +369,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         # flow matching loss
         target = noise - latents
 
-        return model_pred, target
+        return DiTOutput(pred=model_pred, target=target)
 
     # endregion model specific
 
