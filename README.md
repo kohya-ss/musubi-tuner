@@ -63,6 +63,12 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 19, 2026
+    - Added experimental support for Ideogram4 (LoRA training and inference). Many thanks to sdbds for [PR #966](https://github.com/kohya-ss/musubi-tuner/pull/966). Follow-ups were made in [PR #975](https://github.com/kohya-ss/musubi-tuner/pull/975) and [PR #977](https://github.com/kohya-ss/musubi-tuner/pull/977). Please refer to the PRs for detailed changes.
+        - For details, please refer to the [documentation](./docs/ideogram4.md).
+        - JSON format prompts are recommended, but natural language training is also possible.
+        - Training settings details are unknown, so community information sharing is welcome.
+
 - June 16, 2026
     - Added H2D-only block swap, an optimized block swap mode for LoRA (LoHa/LoKr) training, available for all architectures. Enable it with `--block_swap_h2d_only`. See [PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972).
         - For frozen-base training, the base weights on the CPU and GPU are identical, so the classic block swap's device-to-host (D2H) copy is pure overhead. H2D-only keeps a permanent master copy on the CPU and only ever transfers host-to-device, removing the D2H transfer entirely. This can improve training throughput, with the largest benefit when using `--fp8_base` / `--fp8_scaled`.
