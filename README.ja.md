@@ -58,6 +58,12 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/06/19
+    - Ideogram4に実験的に対応しました（LoRA学習、推論）。[PR #966](https://github.com/kohya-ss/musubi-tuner/pull/966) について、sdbds氏に深く感謝します。フォローアップは [PR #975](https://github.com/kohya-ss/musubi-tuner/pull/975) および [PR #977](https://github.com/kohya-ss/musubi-tuner/pull/977) で行われました。変更内容の詳細を確認されたい場合はPRをご覧ください。
+        - 詳細は[ドキュメント](./docs/ideogram4.md)を参照してください。
+        - JSON形式のプロンプトが推奨されますが、自然言語での学習も可能なようです。
+        - 学習設定の詳細は不明なためコミュニティからの情報共有を歓迎します。
+
 - 2026/06/16
     - LoRA（LoHa/LoKr）学習向けに最適化したブロックスワップモード「H2D-only block swap」を追加しました。全アーキテクチャで利用できます。`--block_swap_h2d_only` で有効化します。[PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972)
         - ベース凍結の学習ではCPUとGPU上のベース重みが同一のため、従来のブロックスワップにおけるdevice→host（D2H）コピーは完全に無駄になります。H2DのみのモードはCPUに恒久的なマスターコピーを保持し、常にhost→deviceのみを転送することで、D2H転送を完全に排除します。これにより学習スループットが向上することがあり、`--fp8_base` / `--fp8_scaled` 使用時に効果が最も大きくなります。
