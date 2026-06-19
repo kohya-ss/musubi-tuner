@@ -177,7 +177,7 @@ Z-Imageの学習は専用のスクリプト`zimage_train_network.py`を使用し
 
 ### Converting LoRA weights to Diffusers format for ComfyUI / LoRA重みをComfyUIで使用可能なDiffusers形式に変換する
 
-A script is provided to convert Z-Image LoRA weights to Diffusers format for ComfyUI.
+A script is provided to convert Z-Image LoRA weights to Diffusers format for ComfyUI. LoHa and LoKr formats are supported.
 
 ```bash
 python src/musubi_tuner/networks/convert_lora.py \

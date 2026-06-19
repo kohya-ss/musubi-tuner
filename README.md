@@ -63,37 +63,28 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- February 15, 2026
-    - Added `--block_swap_optimizer_patch_params` option to enable the use of some optimizers when using `blocks_to_swap` in Z-Image fine-tuning. See [PR #899](https://github.com/kohya-ss/musubi-tuner/pull/899)
-        - Please refer to the [documentation](./docs/zimage.md#finetuning) for details.
-        
-- January 29, 2026
-    - With the release of Z-Image-Base, we have verified that both LoRA and finetuning work correctly.
-    - Updated the [related documentation](./docs/zimage.md) for Z-Image.
-    - Fixed an issue where sample image generation did not work correctly in LoRA training and finetuning of Z-Image. See [PR #861](https://github.com/kohya-ss/musubi-tuner/pull/861).
+- June 16, 2026
+    - Added H2D-only block swap, an optimized block swap mode for LoRA (LoHa/LoKr) training, available for all architectures. Enable it with `--block_swap_h2d_only`. See [PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972).
+        - For frozen-base training, the base weights on the CPU and GPU are identical, so the classic block swap's device-to-host (D2H) copy is pure overhead. H2D-only keeps a permanent master copy on the CPU and only ever transfers host-to-device, removing the D2H transfer entirely. This can improve training throughput, with the largest benefit when using `--fp8_base` / `--fp8_scaled`.
+        - Requires `--gradient_checkpointing`. The number of GPU ring buffers used for streaming can be tuned with `--block_swap_ring_size` (default `2`; `1` minimizes VRAM).
+        - There is also a new standalone [Block Swap documentation](./docs/block_swap.md) covering all block swap options.
 
-- January 24, 2026
-    - Fixed an issue where LoRA training for FLUX.2 [klein] did not work. Also made various bug fixes and feature additions related to FLUX.2. See [PR #858](https://github.com/kohya-ss/musubi-tuner/pull/858).
-        - The `--model_version` specification has changed from `flux.2-dev` or `flux.2-klein-4b` to `dev` or `klein-4b`, etc.
-        - fp8 optimization and other features also work. Please refer to the [documentation](./docs/flux_2.md) for details.
-        - Since klein 9B, dev models, and training with multiple control images have not been sufficiently tested, please report any issues via Issue.
+- June 13, 2026
+    - Added the `--save_precision` option for network weights and changed the default save precision to fp32. Thank you rockerBOO [PR #967](https://github.com/kohya-ss/musubi-tuner/pull/967).
+        - **Breaking Change**: The default save precision for LoRA files has been changed to fp32.
+        - This preserves the precision of LoRA weights during training and is useful for post-processing such as post-hoc EMA, merging, extraction, and weight analysis.
+        - LoRA files may be about twice as large as before when training with `--mixed_precision bf16`(`fp16`). To keep the previous behavior, specify `--save_precision bf16` (`fp16`).
+        - Please refer to the [HunyuanVideo documentation](./docs/hunyuan_video.md#training--学習) for details.
 
-- January 21, 2026
-    - Added support for LoRA training of FLUX.2 [dev]/[klein]. See [PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841). Many thanks to christopher5106 from https://www.scenario.com for this contribution.
-        - Please refer to the [documentation](./docs/flux_2.md) for details.
+- June 8, 2026
+    - Added experimental support for HiDream-O1-Image (LoRA training, full finetuning, and inference). See [PR #964](https://github.com/kohya-ss/musubi-tuner/pull/964).
+        - Please refer to the [documentation](./docs/hidream_o1.md) for details.
+        - An optional DINOv3 auxiliary perceptual loss is also available. See the [advanced configuration documentation](./docs/advanced_config.md).
+        - Many thanks to sdbds for [PR #947](https://github.com/kohya-ss/musubi-tuner/pull/947) (followed by [PR #955](https://github.com/kohya-ss/musubi-tuner/pull/955)), which this support is based on. Please open the PRs if you would like to review the changes in detail.
 
-- January 17, 2026
-    - Changed to use `convert_lora.py` for converting Z-Image LoRA for ComfyUI to improve compatibility. See [PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851).
-        - The previous `convert_z_image_lora_to_comfy.py` can still be used, but the converted weights may not work correctly with nunchaku.
-        - Please refer to the [documentation](./docs/zimage.md#converting-lora-weights-to-diffusers-format-for-comfyui--lora重みをcomfyuiで使用可能なdiffusers形式に変換する) for details.
-        - Many thanks to fai-9 for providing the solution in [Issue #847](https://github.com/kohya-ss/musubi-tuner/issues/847).
-    - Added `--remove_first_image_from_target` option for LoRA training of Qwen-Image-Layered. See [PR #852](https://github.com/kohya-ss/musubi-tuner/pull/852).
-        - Please refer to the [documentation](./docs/qwen_image.md#lora-training--lora学習) for details.
-
-- January 11, 2026
-    - Added support for LoRA training of Qwen-Image-Layered. See [PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816).
-        - Please refer to the [documentation](./docs/qwen_image.md) for details.
-        - In the caching, training, and inference scripts, specify `--model_version` option as `layered`.
+- May 22, 2026
+    - Performed a large-scale internal refactoring to improve code quality and maintainability. See [PR #950](https://github.com/kohya-ss/musubi-tuner/pull/950)
+        - We have taken care to ensure that there are no direct impacts on users. For details and to report any issues, please refer to [this discussion](https://github.com/kohya-ss/musubi-tuner/discussions/949).
 
 ### Releases
 
@@ -155,6 +146,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [FLUX.1 Kontext](./docs/flux_kontext.md)
 - [Qwen-Image](./docs/qwen_image.md)
 - [Z-Image](./docs/zimage.md)
+- [HiDream-O1-Image](./docs/hidream_o1.md)
 - [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
 - [Kandinsky 5](./docs/kandinsky5.md)
 - [FLUX.2](./docs/flux_2.md)
@@ -163,6 +155,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [Dataset Configuration](./docs/dataset_config.md)
 - [Advanced Configuration](./docs/advanced_config.md)
 - [Sampling during Training](./docs/sampling_during_training.md)
+- [Block Swap (CPU Offloading for Memory Saving)](./docs/block_swap.md)
 - [Tools and Utilities](./docs/tools.md)
 - [Using torch.compile](./docs/torch_compile.md)
 

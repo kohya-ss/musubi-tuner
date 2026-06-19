@@ -20,7 +20,7 @@ from musubi_tuner.utils.device_utils import clean_memory_on_device
 
 from musubi_tuner.wan.modules.attention import flash_attention
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
 __all__ = ["WanModel"]
@@ -745,7 +745,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         print(f"WanModel: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(self, blocks_to_swap: int, config: BlockSwapConfig):
         self.blocks_to_swap = blocks_to_swap
         self.num_blocks = len(self.blocks)
 
@@ -753,11 +753,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             self.blocks_to_swap <= self.num_blocks - 1
         ), f"Cannot swap more than {self.num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
 
-        self.offloader = ModelOffloader(
-            "wan_attn_block", self.blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
-        )
+        self.offloader = create_offloader("wan_attn_block", self.blocks, self.num_blocks, self.blocks_to_swap, config)
         print(
-            f"WanModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. Supports backward: {supports_backward}"
+            f"WanModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. "
+            f"Supports backward: {config.supports_backward}"
         )
 
     def switch_block_swap_for_inference(self):

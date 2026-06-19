@@ -1,6 +1,6 @@
 [project]
 name = "musubi-tuner"
-version = "0.2.15"
+version = "0.3.2"
 description = "Musubi Tuner by kohya_ss"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
@@ -17,7 +17,7 @@ dependencies = [
     # "sageattention>=1.0.6",
     "toml==0.10.2",
     "tqdm==4.67.1",
-    "transformers==4.56.1",
+    "transformers==4.57.6",
     "voluptuous==0.15.2",
     # Wan2.1
     "ftfy==6.3.1",
@@ -41,6 +41,9 @@ cu130 = [
 ]
 gui = [
     "gradio>=4.0.0, <6.0.0",
+]
+hidream_o1 = [
+    "sensecraft[dinov3]>=0.3.11",
 ]
 
 [tool.uv]
@@ -121,6 +124,8 @@ extend-exclude = [
   "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py",
   "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py",
   "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py",
+  "src/musubi_tuner/hidream_o1/qwen3_vl_transformers.py",
+  "src/musubi_tuner/hidream_o1/flash_scheduler.py",
   "src/musubi_tuner/modules/scheduling_flow_match_discrete.py",
   "src/musubi_tuner/modules/unet_causal_3d_blocks.py",
   "src/musubi_tuner/wan/configs/__init__.py",
@@ -164,6 +169,8 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/frame_pack/k_diffusion_hunyuan.py" = ["ALL"]
 "src/musubi_tuner/hunyuan_model/autoencoder_kl_causal_3d.py" = ["ALL"]
 "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py" = ["ALL"]
+"src/musubi_tuner/hidream_o1/qwen3_vl_transformers.py" = ["ALL"]
+"src/musubi_tuner/hidream_o1/flash_scheduler.py" = ["ALL"]
 "src/musubi_tuner/modules/scheduling_flow_match_discrete.py" = ["ALL"]
 "src/musubi_tuner/modules/unet_causal_3d_blocks.py" = ["ALL"]
 "src/musubi_tuner/wan/configs/__init__.py" = ["ALL"]

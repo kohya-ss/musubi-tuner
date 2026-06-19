@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+from functools import lru_cache
 from io import BytesIO
 from typing import Any, Callable, Optional
 import logging
@@ -152,6 +153,38 @@ def str_to_dtype(s: Optional[str], default_dtype: Optional[torch.dtype] = None) 
         return torch.float8_e4m3fn  # default fp8
     else:
         raise ValueError(f"Unsupported dtype: {s}")
+
+
+@lru_cache(maxsize=1)
+def _known_dtype_strs() -> tuple[str, ...]:
+    """All dtype strings dtype_to_str() can emit, longest first.
+
+    Sorting by length keeps multi-underscore names (e.g. "float8_e4m3fn") ahead of their
+    prefixes ("float8...") so the longest matching suffix wins.
+    """
+    names = set()
+    for attr in dir(torch):
+        try:
+            obj = getattr(torch, attr)
+        except Exception:
+            continue
+        if isinstance(obj, torch.dtype):
+            names.add(dtype_to_str(obj))
+    return tuple(sorted(names, key=len, reverse=True))
+
+
+def remove_dtype_suffix(name: str) -> str:
+    """Remove a trailing ``_<dtype>`` suffix (as written by dtype_to_str) from a cache key.
+
+    Robust to dtype names that contain underscores such as ``float8_e4m3fn``; a plain
+    ``rsplit("_", 1)`` would only drop the final ``fn`` segment. Returns ``name`` unchanged
+    if it does not end with a known dtype suffix.
+    """
+    for dtype_str in _known_dtype_strs():
+        suffix = "_" + dtype_str
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def to_device(x: Any, device: torch.device) -> Any:

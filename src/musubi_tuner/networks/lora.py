@@ -7,7 +7,7 @@ import ast
 import math
 import os
 import re
-from typing import Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union
 from transformers import CLIPTextModel
 import torch
 import torch.nn as nn
@@ -45,7 +45,7 @@ class LoRAModule(torch.nn.Module):
         super().__init__()
         self.lora_name = lora_name
 
-        if org_module.__class__.__name__ == "Conv2d":
+        if org_module.__class__.__name__ in ("Conv2d", "Conv3d"):
             in_dim = org_module.in_channels
             out_dim = org_module.out_channels
         else:
@@ -62,6 +62,12 @@ class LoRAModule(torch.nn.Module):
                 padding = org_module.padding
                 self.lora_down = torch.nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
                 self.lora_up = torch.nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False)
+            elif org_module.__class__.__name__ == "Conv3d":
+                kernel_size = org_module.kernel_size
+                stride = org_module.stride
+                padding = org_module.padding
+                self.lora_down = torch.nn.Conv3d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
+                self.lora_up = torch.nn.Conv3d(self.lora_dim, out_dim, (1, 1, 1), (1, 1, 1), bias=False)
             else:
                 self.lora_down = torch.nn.Linear(in_dim, self.lora_dim, bias=False)
                 self.lora_up = torch.nn.Linear(self.lora_dim, out_dim, bias=False)
@@ -122,6 +128,8 @@ class LoRAModule(torch.nn.Module):
                     mask = mask.unsqueeze(1)  # for Text Encoder
                 elif len(lx.size()) == 4:
                     mask = mask.unsqueeze(-1).unsqueeze(-1)  # for Conv2d
+                elif len(lx.size()) == 5:
+                    mask = mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # for Conv3d
                 lx = lx * mask
 
                 # scaling for rank dropout: treat as if the rank is changed
@@ -179,19 +187,6 @@ class LoRAInfModule(LoRAModule):
     def set_network(self, network):
         self.network = network
 
-    # merge weight to org_module
-    # def merge_to(self, sd, dtype, device, non_blocking=False):
-    #     if torch.cuda.is_available():
-    #         stream = torch.cuda.Stream(device=device)
-    #         with torch.cuda.stream(stream):
-    #             print(f"merge_to {self.lora_name}")
-    #             self._merge_to(sd, dtype, device, non_blocking)
-    #             torch.cuda.synchronize(device=device)
-    #             print(f"merge_to {self.lora_name} done")
-    #         torch.cuda.empty_cache()
-    #     else:
-    #         self._merge_to(sd, dtype, device, non_blocking)
-
     def merge_to(self, sd, dtype, device, non_blocking=False):
         # extract weight from org_module
         org_sd = self.org_module.state_dict()
@@ -214,19 +209,37 @@ class LoRAInfModule(LoRAModule):
             if len(weight.size()) == 2:
                 # linear
                 weight = weight + self.multiplier * (up_weight @ down_weight) * self.scale
-            elif down_weight.size()[2:4] == (1, 1):
-                # conv2d 1x1
-                weight = (
-                    weight
-                    + self.multiplier
-                    * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
-                    * self.scale
-                )
+            elif len(weight.size()) == 4:
+                if down_weight.size()[2:4] == (1, 1):
+                    # conv2d 1x1
+                    weight = (
+                        weight
+                        + self.multiplier
+                        * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
+                        * self.scale
+                    )
+                else:
+                    # conv2d 3x3
+                    conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
+                    # logger.info(conved.size(), weight.size(), module.stride, module.padding)
+                    weight = weight + self.multiplier * conved * self.scale
+            elif len(weight.size()) == 5:
+                if down_weight.size()[2:5] == (1, 1, 1):
+                    # conv3d 1x1x1
+                    weight = (
+                        weight
+                        + self.multiplier
+                        * (up_weight.squeeze(4).squeeze(3).squeeze(2) @ down_weight.squeeze(4).squeeze(3).squeeze(2))
+                        .unsqueeze(2)
+                        .unsqueeze(3)
+                        .unsqueeze(4)
+                        * self.scale
+                    )
+                else:
+                    conved = torch.nn.functional.conv3d(down_weight.permute(1, 0, 2, 3, 4), up_weight).permute(1, 0, 2, 3, 4)
+                    weight = weight + self.multiplier * conved * self.scale
             else:
-                # conv2d 3x3
-                conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
-                # logger.info(conved.size(), weight.size(), module.stride, module.padding)
-                weight = weight + self.multiplier * conved * self.scale
+                raise ValueError(f"Unsupported LoRA target weight shape: {weight.size()}")
 
             # set weight to org_module
             org_sd["weight"] = weight.to(org_device, dtype=dtype)  # back to CPU without non_blocking
@@ -263,17 +276,34 @@ class LoRAInfModule(LoRAModule):
         if len(down_weight.size()) == 2:
             # linear
             weight = self.multiplier * (up_weight @ down_weight) * self.scale
-        elif down_weight.size()[2:4] == (1, 1):
-            # conv2d 1x1
-            weight = (
-                self.multiplier
-                * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
-                * self.scale
-            )
+        elif len(down_weight.size()) == 4:
+            if down_weight.size()[2:4] == (1, 1):
+                # conv2d 1x1
+                weight = (
+                    self.multiplier
+                    * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
+                    * self.scale
+                )
+            else:
+                # conv2d 3x3
+                conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
+                weight = self.multiplier * conved * self.scale
+        elif len(down_weight.size()) == 5:
+            if down_weight.size()[2:5] == (1, 1, 1):
+                # conv3d 1x1x1
+                weight = (
+                    self.multiplier
+                    * (up_weight.squeeze(4).squeeze(3).squeeze(2) @ down_weight.squeeze(4).squeeze(3).squeeze(2))
+                    .unsqueeze(2)
+                    .unsqueeze(3)
+                    .unsqueeze(4)
+                    * self.scale
+                )
+            else:
+                conved = torch.nn.functional.conv3d(down_weight.permute(1, 0, 2, 3, 4), up_weight).permute(1, 0, 2, 3, 4)
+                weight = self.multiplier * conved * self.scale
         else:
-            # conv2d 3x3
-            conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
-            weight = self.multiplier * conved * self.scale
+            raise ValueError(f"Unsupported LoRA weight shape: {down_weight.size()}")
 
         return weight
 
@@ -340,6 +370,8 @@ def create_network(
     text_encoders: List[nn.Module],
     unet: nn.Module,
     neuron_dropout: Optional[float] = None,
+    module_class: Type[object] = None,
+    module_kwargs: Optional[Dict[str, Any]] = None,
     **kwargs,
 ):
     """architecture independent network creation"""
@@ -381,6 +413,9 @@ def create_network(
     if include_patterns is not None and isinstance(include_patterns, str):
         include_patterns = ast.literal_eval(include_patterns)
 
+    if module_class is None:
+        module_class = LoRAModule
+
     # too many arguments ( ^ω^)･･･
     network = LoRANetwork(
         target_replace_modules,
@@ -395,6 +430,8 @@ def create_network(
         module_dropout=module_dropout,
         conv_lora_dim=conv_dim,
         conv_alpha=conv_alpha,
+        module_class=module_class,
+        module_kwargs=module_kwargs,
         exclude_patterns=exclude_patterns,
         include_patterns=include_patterns,
         verbose=verbose,
@@ -430,6 +467,7 @@ class LoRANetwork(torch.nn.Module):
         conv_lora_dim: Optional[int] = None,
         conv_alpha: Optional[float] = None,
         module_class: Type[object] = LoRAModule,
+        module_kwargs: Optional[Dict[str, Any]] = None,
         modules_dim: Optional[Dict[str, int]] = None,
         modules_alpha: Optional[Dict[str, int]] = None,
         exclude_patterns: Optional[List[str]] = None,
@@ -448,6 +486,7 @@ class LoRANetwork(torch.nn.Module):
         self.module_dropout = module_dropout
         self.target_replace_modules = target_replace_modules
         self.prefix = prefix
+        self.module_kwargs = module_kwargs or {}
 
         self.loraplus_lr_ratio = None
         # self.loraplus_unet_lr_ratio = None
@@ -507,21 +546,23 @@ class LoRANetwork(torch.nn.Module):
                     for child_name, child_module in module.named_modules():
                         is_linear = child_module.__class__.__name__ == "Linear"
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
+                        is_conv3d = child_module.__class__.__name__ == "Conv3d"
                         is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
+                        is_conv3d_1x1 = is_conv3d and child_module.kernel_size == (1, 1, 1)
 
-                        if is_linear or is_conv2d:
+                        if is_linear or is_conv2d or is_conv3d:
                             original_name = (name + "." if name else "") + child_name
                             lora_name = f"{pfx}.{original_name}".replace(".", "_")
 
                             # exclude/include filter
                             excluded = False
                             for pattern in exclude_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     excluded = True
                                     break
                             included = False
                             for pattern in include_re_patterns:
-                                if pattern.match(original_name):
+                                if pattern.fullmatch(original_name):
                                     included = True
                                     break
                             if excluded and not included:
@@ -543,7 +584,7 @@ class LoRANetwork(torch.nn.Module):
                                     alpha = modules_alpha[lora_name]
                             else:
                                 # 通常、すべて対象とする
-                                if is_linear or is_conv2d_1x1:
+                                if is_linear or is_conv2d_1x1 or is_conv3d_1x1:
                                     dim = default_dim if default_dim is not None else self.lora_dim
                                     alpha = self.alpha
                                 elif self.conv_lora_dim is not None:
@@ -552,7 +593,7 @@ class LoRANetwork(torch.nn.Module):
 
                             if dim is None or dim == 0:
                                 # skipした情報を出力
-                                if is_linear or is_conv2d_1x1 or (self.conv_lora_dim is not None):
+                                if is_linear or is_conv2d_1x1 or is_conv3d_1x1 or (self.conv_lora_dim is not None):
                                     skipped.append(lora_name)
                                 continue
 
@@ -565,6 +606,7 @@ class LoRANetwork(torch.nn.Module):
                                 dropout=dropout,
                                 rank_dropout=rank_dropout,
                                 module_dropout=module_dropout,
+                                **self.module_kwargs,
                             )
                             loras.append(lora)
 
@@ -712,6 +754,9 @@ class LoRANetwork(torch.nn.Module):
                     else:
                         param_groups["lora"][f"{lora.lora_name}.{name}"] = param
 
+            if loraplus_ratio is not None and len(param_groups["plus"]) == 0:
+                logger.warning("LoRA+ is not effective for this network type (no 'lora_up' parameters found)")
+
             params = []
             descriptions = []
             for key in param_groups.keys():
@@ -830,6 +875,12 @@ class LoRANetwork(torch.nn.Module):
         keys_scaled = 0
 
         state_dict = self.state_dict()
+
+        # guard: only supported for LoRA (lora_down/lora_up parameterization)
+        if not any("lora_down" in k and "weight" in k for k in state_dict.keys()):
+            logger.warning("max_norm_regularization is only supported for LoRA")
+            return 0, 0.0, 0.0
+
         for key in state_dict.keys():
             if "lora_down" in key and "weight" in key:
                 downkeys.append(key)
@@ -887,6 +938,8 @@ def create_network_from_weights(
     text_encoders: Optional[List[nn.Module]] = None,
     unet: Optional[nn.Module] = None,
     for_inference: bool = False,
+    module_class: Optional[Type[object]] = None,
+    module_kwargs: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> LoRANetwork:
     # get dim/alpha mapping
@@ -904,7 +957,8 @@ def create_network_from_weights(
             modules_dim[lora_name] = dim
             # logger.info(lora_name, value.size(), dim)
 
-    module_class = LoRAInfModule if for_inference else LoRAModule
+    if module_class is None:
+        module_class = LoRAInfModule if for_inference else LoRAModule
 
     network = LoRANetwork(
         target_replace_modules,
@@ -915,5 +969,6 @@ def create_network_from_weights(
         modules_dim=modules_dim,
         modules_alpha=modules_alpha,
         module_class=module_class,
+        module_kwargs=module_kwargs,
     )
     return network

@@ -9,6 +9,7 @@ from accelerate import Accelerator
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_Z_IMAGE, ARCHITECTURE_Z_IMAGE_FULL
 from musubi_tuner.zimage import zimage_model, zimage_utils, zimage_autoencoder, zimage_config
 from musubi_tuner.hv_train_network import (
+    DiTOutput,
     NetworkTrainer,
     load_prompts,
     clean_memory_on_device,
@@ -272,7 +273,8 @@ class ZImageNetworkTrainer(NetworkTrainer):
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+        **kwargs,
+    ) -> DiTOutput:
         model: zimage_model.ZImageTransformer2DModel = accelerator.unwrap_model(transformer)
         bsize = latents.shape[0]
 
@@ -328,7 +330,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         # Target: Opposite of usual Flow matching
         target = latents - noise
 
-        return model_pred, target
+        return DiTOutput(pred=model_pred, target=target)
 
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
