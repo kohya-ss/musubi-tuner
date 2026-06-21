@@ -1,6 +1,7 @@
 import glob
 import gradio as gr
 import os
+import platform
 import toml
 from musubi_tuner.gui.config_manager import ConfigManager
 from musubi_tuner.gui.i18n_data import I18N_DATA
@@ -824,7 +825,7 @@ num_repeats = 1
                 "--network_dim",
                 str(int(dim)),
                 "--optimizer_type",
-                "adamw8bit",
+                "adamw" if platform.system() == "Darwin" else "adamw8bit",
                 "--learning_rate",
                 str(lr),
                 "--max_train_epochs",
@@ -920,19 +921,32 @@ num_repeats = 1
                 except Exception as e:
                     return f"Error parsing additional arguments / 追加引数の解析に失敗しました: {str(e)}"
 
-            # Construct the full command string for cmd /c
-            # list2cmdline will quote arguments as needed for Windows
+            # Construct the full command string
+            # list2cmdline will quote arguments as needed
             inner_cmd_str = subprocess.list2cmdline(inner_cmd)
+            is_windows = os.name == "nt"
 
             # Chain commands: Run training -> echo message -> pause >nul (hides default message)
-            final_cmd_str = f"{inner_cmd_str} & echo. & echo Training finished. Press any key to close this window... 学習が完了しました。このウィンドウを閉じるには任意のキーを押してください。 & pause >nul"
+            if is_windows:
+                final_cmd_str = f"{inner_cmd_str} & echo. & echo Training finished. Press any key to close this window... 学習が完了しました。このウィンドウを閉じるには任意のキーを押してください。 & pause >nul"
+            else:
+                final_cmd_str = f"{inner_cmd_str} && echo. && echo Training finished. 学習が完了しました。"
 
             try:
-                # Open in new console window
-                flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
-                # Pass explicit 'cmd', '/c', string to ensure proper execution
-                subprocess.Popen(["cmd", "/c", final_cmd_str], creationflags=flags, shell=False)
-                return f"Training started in a new window! / 新しいウィンドウで学習が開始されました！\nCommand: {inner_cmd_str}"
+                cmd_list = [final_cmd_str]
+                flags = 0
+
+                # Open in new console window for Windows, otherwise default to re-using terminal session
+                if is_windows:
+                    flags = subprocess.CREATE_NEW_CONSOLE
+                    # Pass explicit 'cmd', '/c', string to ensure proper execution
+                    cmd_list = ["cmd", "/c"].extend(cmd_list)
+
+                subprocess.Popen(cmd_list, creationflags=flags, shell=(is_windows is False))
+                if is_windows:
+                    return f"Training started in a new window! / 新しいウィンドウで学習が開始されました！\nCommand: {inner_cmd_str}"
+                else:
+                    return f"Training started! (see terminal window) / 学習が始まりました\nCommand: {inner_cmd_str}"
             except Exception as e:
                 return f"Error starting training / 学習の開始に失敗しました: {str(e)}"
 
