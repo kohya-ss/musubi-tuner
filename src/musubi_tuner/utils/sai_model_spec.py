@@ -22,6 +22,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_FLUX_2_KLEIN_4B,
     ARCHITECTURE_FLUX_2_KLEIN_9B,
     ARCHITECTURE_KANDINSKY5,
+    ARCHITECTURE_KREA2,
     ARCHITECTURE_Z_IMAGE,
 )
 
@@ -92,6 +93,7 @@ ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
 ARCH_Z_IMAGE = "Z-Image"
 ARCH_HIDREAM_O1 = "HiDream-O1-Image"
 ARCH_IDEOGRAM4 = "Ideogram-4"
+ARCH_KREA2 = "Krea-2"
 
 ADAPTER_LORA = "lora"
 
@@ -108,6 +110,7 @@ IMPL_HUNYUAN_VIDEO_1_5 = "https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5"
 IMPL_Z_IMAGE = "https://github.com/Tongyi-MAI/Z-Image"
 IMPL_HIDREAM_O1 = "https://github.com/HiDream-ai/HiDream-O1-Image"
 IMPL_IDEOGRAM4 = "https://huggingface.co/Comfy-Org/Ideogram-4"
+IMPL_KREA2 = "https://github.com/krea-ai/krea-2"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -225,6 +228,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_IDEOGRAM4:
         arch = ARCH_IDEOGRAM4
         impl = IMPL_IDEOGRAM4
+    elif architecture == ARCHITECTURE_KREA2:
+        arch = ARCH_KREA2
+        impl = IMPL_KREA2
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 
@@ -293,6 +299,8 @@ def build_metadata(
         elif architecture == ARCHITECTURE_HIDREAM_O1:
             reso = (2048, 2048)
         elif architecture == ARCHITECTURE_IDEOGRAM4:
+            reso = (1024, 1024)
+        elif architecture == ARCHITECTURE_KREA2:
             reso = (1024, 1024)
         else:
             reso = (1280, 720)

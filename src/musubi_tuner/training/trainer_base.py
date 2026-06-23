@@ -549,6 +549,7 @@ class NetworkTrainer:
             or args.timestep_sampling == "shift"
             or args.timestep_sampling == "flux_shift"
             or args.timestep_sampling == "qwen_shift"
+            or args.timestep_sampling == "krea2_shift"
             or args.timestep_sampling == "ideogram4_shift"
             or args.timestep_sampling == "logsnr"
             or args.timestep_sampling == "qinglong_flux"
@@ -597,6 +598,10 @@ class NetworkTrainer:
                             mu = train_utils.get_lin_function(y1=0.5, y2=1.15)(h * w)
                         elif args.timestep_sampling == "qwen_shift":
                             mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)((h // 2) * (w // 2))
+                        elif args.timestep_sampling == "krea2_shift":
+                            # Matches krea2_sampling.timesteps at inference defaults (minres=256, maxres=1280):
+                            # x1=(256//16)**2=256, x2=(1280//16)**2=6400, y1=0.5, y2=1.15.
+                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=6400, y2=1.15)((h // 2) * (w // 2))
                         # def time_shift(mu: float, sigma: float, t: torch.Tensor):
                         #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
                         shift = math.exp(mu)
