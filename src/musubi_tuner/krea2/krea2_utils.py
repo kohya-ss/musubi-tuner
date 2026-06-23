@@ -31,9 +31,14 @@ SELECT_LAYERS = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
 NUM_SELECT_LAYERS = len(SELECT_LAYERS)  # 12
 TEXT_HIDDEN_DIM = 2560
 MAX_LENGTH = 512
-PROMPT_TEMPLATE_ENCODE_START_IDX = 34
+PROMPT_TEMPLATE_ENCODE_START_IDX = 34  # tokens to drop from the front (prefix)
+PROMPT_TEMPLATE_ENCODE_SUFFIX_START_IDX = 5  # leading tokens of the separately-tokenized suffix
 SYSTEM_PROMPT = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:"
-PROMPT_TEMPLATE = "<|im_start|>system\n" + SYSTEM_PROMPT + "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+# Official encoder.py tokenizes (prefix + user_text) and (suffix) SEPARATELY, padding the
+# former to a fixed length and only then concatenating the suffix at the very end. Keep the
+# two pieces apart so we can reproduce that scheme exactly.
+PROMPT_TEMPLATE_ENCODE_PREFIX = "<|im_start|>system\n" + SYSTEM_PROMPT + "<|im_end|>\n<|im_start|>user\n"
+PROMPT_TEMPLATE_ENCODE_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 
 
 def load_vae(vae_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False) -> AutoencoderKLQwenImage:
@@ -97,18 +102,36 @@ def get_krea2_prompt_embeds(
     device: torch.device,
     dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Encode prompts with Qwen3-VL, reproducing official krea-2 encoder.py exactly.
+
+    The prefix (system + user header) + user text is tokenized and padded to a fixed
+    ``max_length``, then the suffix (assistant header) is tokenized separately and
+    concatenated at the very end. Finally the leading ``PROMPT_TEMPLATE_ENCODE_START_IDX``
+    (34) prefix tokens are dropped. Output: hidden ``(B, T, 12, 2560)`` + mask ``(B, T)``.
+    """
     tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
 
     if isinstance(prompt, str):
         prompt = [prompt]
 
-    template = PROMPT_TEMPLATE
-    drop_idx = PROMPT_TEMPLATE_ENCODE_START_IDX
+    prefix_idx = PROMPT_TEMPLATE_ENCODE_START_IDX
 
-    texts = [template.format(p) for p in prompt]
-    tokens = tokenizer(texts, max_length=MAX_LENGTH + drop_idx, padding=True, truncation=True, return_tensors="pt")
-    input_ids = tokens.input_ids.to(device)
-    attention_mask = tokens.attention_mask.to(device)
+    # Prefix + user text, padded to a fixed length (suffix is NOT included here).
+    texts = [PROMPT_TEMPLATE_ENCODE_PREFIX + p for p in prompt]
+    main_max_length = MAX_LENGTH + prefix_idx - PROMPT_TEMPLATE_ENCODE_SUFFIX_START_IDX
+    main = tokenizer(
+        texts,
+        truncation=True,
+        padding="max_length",
+        max_length=main_max_length,
+        return_tensors="pt",
+    )
+
+    # Suffix tokenized separately and appended after the padded main block.
+    suffix = tokenizer([PROMPT_TEMPLATE_ENCODE_SUFFIX] * len(texts), return_tensors="pt")
+
+    input_ids = torch.cat([main.input_ids, suffix.input_ids], dim=1).to(device)
+    attention_mask = torch.cat([main.attention_mask, suffix.attention_mask], dim=1).to(device)
 
     with torch.no_grad():
         outputs = text_encoder(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
@@ -117,11 +140,11 @@ def get_krea2_prompt_embeds(
     selected = [hidden_states[i] for i in SELECT_LAYERS]
     stacked = torch.stack(selected, dim=2)  # (B, T, 12, 2560)
 
-    # drop prefix tokens
-    stacked = stacked[:, drop_idx:]
-    mask = attention_mask[:, drop_idx:]
+    # Drop the leading prefix tokens.
+    stacked = stacked[:, prefix_idx:]
+    mask = attention_mask[:, prefix_idx:]
 
-    # extract per-sample valid tokens, then pad to max length
+    # extract per-sample valid tokens, then pad to the batch max length
     bool_mask = mask.bool()
     valid_lengths = bool_mask.sum(dim=1)
     max_len = valid_lengths.max().item()

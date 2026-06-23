@@ -355,13 +355,14 @@ last.norm.scale                           F32 [6144]          # RMSNorm
 last.modulation.lin                       F32 [2, 6144]       # 最终 shift/scale
 last.linear.weight                        F8  [64, 6144]      # 6144 -> 64
 last.linear.bias                          F32 [64]
-last.up.weight                            F8  [6144, 6144]    # 终层精炼
-last.down.weight                          F8  [6144, 6144]
+# 更正：官方 krea-ai/krea-2 `mmdit.py` 的 LastLayer 只有 norm/modulation/linear，
+# 没有 up/down 终层精炼层。早期 FP8 dump 误列的 last.up/last.down 不存在于官方
+# SingleStreamDiT（已用官方源码 strict=True 核实，见 §12.2）。
 ```
 
-顶层前缀统计：`blocks`(364) + `txtfusion`(49) + `last`(6) + `txtmlp`(5) + `tmlp`(4) + `first`(2) + `tproj`(2) = 432。
+顶层前缀统计（以官方 `SingleStreamDiT` 为准）：`blocks`(364) + `txtfusion`(49) + `txtmlp`(5) + `tmlp`(4) + `last`(4) + `first`(2) + `tproj`(2) = **430**。
 
-> 注：该文件是 FP8 作者 repack 版，命名与官方 `SingleStreamDiT` 完全一致。实现时以此 432 key 为唯一真相，`strict=True` 对齐。
+> 注：早期记录的 432（含 last.up/down）来自 FP8 repack 版的误判。**以官方 `mmdit.py` 的 `SingleStreamDiT` 为唯一真相**，`strict=True` 对齐 430 个 key。RMSNorm 为 zero-centered（`weight=scale+1.0`，eps=1e-5），timestep 嵌入内部 `t*1000`，LastLayer modulation 输入是 `t`（tmlp 输出）。
 
 ---
 
