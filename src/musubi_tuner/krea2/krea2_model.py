@@ -96,7 +96,7 @@ def compute_rope_freqs(pos, axes_dim, theta=1e3):
         # (L, d//2) frequencies
         inv_freq = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float32, device=pos.device) / d))
         # pos[:, i]: (L,) -> (L, d//2)
-        freqs_i = pos[:, i:i+1].float() * inv_freq[None]  # (L, d//2)
+        freqs_i = pos[:, i : i + 1].float() * inv_freq[None]  # (L, d//2)
         freqs_i = torch.polar(torch.ones_like(freqs_i), freqs_i)  # (L, d//2) complex
         freqs.append(freqs_i)
     return torch.cat(freqs, dim=-1)  # (L, HEAD_DIM//2) complex
@@ -217,14 +217,8 @@ class TxtFusion(nn.Module):
         # 2 layerwise blocks + 2 refiner blocks = 4 blocks
         # mlp_dim for txtfusion: ceil_to_128(int(2*2560/3)*4) = 6912
         txt_mlp_dim = 6912
-        self.layerwise_blocks = nn.ModuleList([
-            TxtFusionBlock(dim, heads, kv_heads, txt_mlp_dim, head_dim)
-            for _ in range(2)
-        ])
-        self.refiner_blocks = nn.ModuleList([
-            TxtFusionBlock(dim, heads, kv_heads, txt_mlp_dim, head_dim)
-            for _ in range(2)
-        ])
+        self.layerwise_blocks = nn.ModuleList([TxtFusionBlock(dim, heads, kv_heads, txt_mlp_dim, head_dim) for _ in range(2)])
+        self.refiner_blocks = nn.ModuleList([TxtFusionBlock(dim, heads, kv_heads, txt_mlp_dim, head_dim) for _ in range(2)])
 
     def forward(self, context, mask=None):
         """context: (B, L, 12, 2560) -> (B, L, 2560)
@@ -475,10 +469,9 @@ class Krea2Transformer2DModel(nn.Module):
         )
 
         # Main blocks
-        self.blocks = nn.ModuleList([
-            SingleStreamBlock(DIM, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, attn_mode, split_attn)
-            for _ in range(NUM_LAYERS)
-        ])
+        self.blocks = nn.ModuleList(
+            [SingleStreamBlock(DIM, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM, attn_mode, split_attn) for _ in range(NUM_LAYERS)]
+        )
 
         # Last layer
         self.last = LastLayer(DIM, IN_CHANNELS)
@@ -622,9 +615,7 @@ class Krea2Transformer2DModel(nn.Module):
                 self.offloader.wait_for_block(index_block)
 
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-                combined = self._gradient_checkpointing_func(
-                    block, combined, tvec, freqs, full_mask, txt_len
-                )
+                combined = self._gradient_checkpointing_func(block, combined, tvec, freqs, full_mask, txt_len)
             else:
                 combined = block(combined, tvec, freqs, full_mask, txt_len)
 
@@ -635,7 +626,7 @@ class Krea2Transformer2DModel(nn.Module):
         out = self.last(combined, t)  # (B, pad_to, 64)
 
         # Extract only the image portion: [txt_len : txt_len + N_img]
-        out = out[:, txt_len:txt_len + img.shape[1]]
+        out = out[:, txt_len : txt_len + img.shape[1]]
 
         return out
 

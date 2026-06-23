@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple, Union
 
 import numpy as np
 import torch
@@ -129,10 +129,15 @@ def get_krea2_prompt_embeds(
     result = []
     result_mask = []
     for b in range(stacked.shape[0]):
-        valid = stacked[b, :valid_lengths[b]]
+        valid = stacked[b, : valid_lengths[b]]
         padded = torch.cat([valid, valid.new_zeros(max_len - valid_lengths[b], NUM_SELECT_LAYERS, TEXT_HIDDEN_DIM)], dim=0)
         result.append(padded)
-        m = torch.cat([torch.ones(valid_lengths[b], dtype=torch.long, device=device), torch.zeros(max_len - valid_lengths[b], dtype=torch.long, device=device)])
+        m = torch.cat(
+            [
+                torch.ones(valid_lengths[b], dtype=torch.long, device=device),
+                torch.zeros(max_len - valid_lengths[b], dtype=torch.long, device=device),
+            ]
+        )
         result_mask.append(m)
 
     hidden = torch.stack(result, dim=0).to(dtype=dtype, device=device)

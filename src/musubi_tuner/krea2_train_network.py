@@ -2,7 +2,6 @@ import argparse
 import gc
 from typing import Optional
 
-import numpy as np
 import torch
 from tqdm import tqdm
 from accelerate import Accelerator
@@ -73,9 +72,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
                         continue
 
                     logger.info(f"cache Text Encoder outputs for prompt: {p}")
-                    hidden, mask = krea2_utils.get_krea2_prompt_embeds(
-                        processor, text_encoder, [p], device=device, dtype=vl_dtype
-                    )
+                    hidden, mask = krea2_utils.get_krea2_prompt_embeds(processor, text_encoder, [p], device=device, dtype=vl_dtype)
                     txt_len = mask[0].to(dtype=torch.bool).sum().item()
                     hidden_i = hidden[0, :txt_len]
                     mask_i = mask[0, :txt_len]
@@ -138,9 +135,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
         negative_vl_mask = sample_parameter["negative_vl_mask"].to(device=device, dtype=torch.bool)
 
         num_channels_latents = krea2_utils.VAE_CHANNELS
-        latents = krea2_utils.prepare_latents(
-            1, num_channels_latents, height, width, torch.bfloat16, device, generator
-        )
+        latents = krea2_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, generator)
 
         img_h = height // krea2_utils.VAE_SCALE_FACTOR // krea2_utils.PATCH_SIZE
         img_w = width // krea2_utils.VAE_SCALE_FACTOR // krea2_utils.PATCH_SIZE
@@ -229,9 +224,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
 
     def compile_transformer(self, args, transformer):
         transformer: krea2_model.Krea2Transformer2DModel = transformer
-        return model_utils.compile_transformer(
-            args, transformer, [transformer.blocks], disable_linear=self.blocks_to_swap > 0
-        )
+        return model_utils.compile_transformer(args, transformer, [transformer.blocks], disable_linear=self.blocks_to_swap > 0)
 
     def scale_shift_latents(self, latents):
         return latents

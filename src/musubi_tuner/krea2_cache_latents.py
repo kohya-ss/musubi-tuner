@@ -39,7 +39,7 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
     with torch.no_grad():
         latents = []
         for l in range(contents.shape[2]):
-            lat = vae.encode_pixels_to_latents(contents[:, :, l:l+1, :, :].to(vae.device, dtype=vae.dtype))
+            lat = vae.encode_pixels_to_latents(contents[:, :, l : l + 1, :, :].to(vae.device, dtype=vae.dtype))
             latents.append(lat)
         latents = torch.cat(latents, dim=2)  # (B, C, F, H, W)
 

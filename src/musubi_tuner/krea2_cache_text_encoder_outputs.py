@@ -84,6 +84,7 @@ def main():
     logger.info("Encoding with Qwen3-VL")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
+        nonlocal text_encoder
         encode_and_save_batch(processor, text_encoder, batch, device, accelerator)
 
     cache_text_encoder_outputs.process_text_encoder_batches(

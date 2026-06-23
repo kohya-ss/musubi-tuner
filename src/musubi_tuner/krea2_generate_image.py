@@ -2,9 +2,7 @@ import argparse
 import gc
 import os
 import random
-from typing import Optional, List, Dict, Any
 
-import numpy as np
 import torch
 from safetensors.torch import save_file
 from tqdm import tqdm
@@ -25,6 +23,7 @@ logging.basicConfig(level=logging.INFO)
 lycoris_available = False
 try:
     import lycoris  # noqa: F401
+
     lycoris_available = True
 except ImportError:
     pass
@@ -63,7 +62,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder")
     parser.add_argument("--text_encoder_cpu", action="store_true", help="Inference on CPU for Text Encoder")
     parser.add_argument("--device", type=str, default=None, help="device to use for inference")
-    parser.add_argument("--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode")
+    parser.add_argument(
+        "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode"
+    )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap")
     parser.add_argument("--use_pinned_memory_for_block_swap", action="store_true", help="use pinned memory for block swap")
     parser.add_argument("--output_type", type=str, default="images", choices=["images", "latent"], help="output type")
@@ -147,6 +148,7 @@ def load_dit_model(args, device, dit_weight_dtype):
 
 def load_safetensors_or_load_file(path):
     from safetensors.torch import load_file
+
     return load_file(path)
 
 
@@ -160,10 +162,11 @@ def prepare_text_inputs(args, device):
     prompt = args.prompt or ""
     negative_prompt = args.negative_prompt or " "
 
-    with torch.amp.autocast(device_type=te_device.type if hasattr(te_device, 'type') else str(te_device), dtype=vl_dtype), torch.no_grad():
-        hidden, mask = krea2_utils.get_krea2_prompt_embeds(
-            processor, text_encoder, [prompt], device=te_device, dtype=vl_dtype
-        )
+    with (
+        torch.amp.autocast(device_type=te_device.type if hasattr(te_device, "type") else str(te_device), dtype=vl_dtype),
+        torch.no_grad(),
+    ):
+        hidden, mask = krea2_utils.get_krea2_prompt_embeds(processor, text_encoder, [prompt], device=te_device, dtype=vl_dtype)
         neg_hidden, neg_mask = krea2_utils.get_krea2_prompt_embeds(
             processor, text_encoder, [negative_prompt], device=te_device, dtype=vl_dtype
         )
@@ -223,9 +226,7 @@ def generate(args, device, dit_weight_dtype):
 
     # Prepare latents
     num_channels_latents = krea2_utils.VAE_CHANNELS
-    latents = krea2_utils.prepare_latents(
-        1, num_channels_latents, height, width, torch.bfloat16, device, seed_g
-    )
+    latents = krea2_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, seed_g)
 
     img_h = height // krea2_utils.VAE_SCALE_FACTOR // krea2_utils.PATCH_SIZE
     img_w = width // krea2_utils.VAE_SCALE_FACTOR // krea2_utils.PATCH_SIZE
@@ -235,9 +236,7 @@ def generate(args, device, dit_weight_dtype):
     logger.info(f"Image seq len: {image_seq_len}, embed shape: {embed.shape}")
 
     # Get timesteps
-    timesteps = krea2_utils.get_timesteps(
-        args.infer_steps, image_seq_len, device, is_turbo=args.turbo
-    )
+    timesteps = krea2_utils.get_timesteps(args.infer_steps, image_seq_len, device, is_turbo=args.turbo)
 
     do_cfg = args.guidance_scale > 0.0
 
