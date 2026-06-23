@@ -550,6 +550,7 @@ class NetworkTrainer:
             or args.timestep_sampling == "flux_shift"
             or args.timestep_sampling == "qwen_shift"
             or args.timestep_sampling == "ideogram4_shift"
+            or args.timestep_sampling == "krea2_shift"
             or args.timestep_sampling == "logsnr"
             or args.timestep_sampling == "qinglong_flux"
             or args.timestep_sampling == "qinglong_qwen"
@@ -597,6 +598,11 @@ class NetworkTrainer:
                             mu = train_utils.get_lin_function(y1=0.5, y2=1.15)(h * w)
                         elif args.timestep_sampling == "qwen_shift":
                             mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)((h // 2) * (w // 2))
+                        elif args.timestep_sampling == "krea2_shift":
+                            # Krea 2 resolution-dependent shift (official sampling.py): linear mu over the
+                            # packed image token count between (256, 0.5) and (6400, 1.15). Matches the
+                            # inference-time krea2_utils.calculate_shift_krea2 so training/inference agree.
+                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=6400, y2=1.15)((h // 2) * (w // 2))
                         # def time_shift(mu: float, sigma: float, t: torch.Tensor):
                         #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
                         shift = math.exp(mu)

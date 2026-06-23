@@ -14,6 +14,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL,
     ARCHITECTURE_IDEOGRAM4_FULL,
     ARCHITECTURE_KANDINSKY5_FULL,
+    ARCHITECTURE_KREA2_FULL,
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_WAN_FULL,
     ARCHITECTURE_Z_IMAGE_FULL,
@@ -175,6 +176,17 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
             sd[f"latents_control_{i}_{F}x{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor):
+    """Krea 2 architecture. Same latent format as Qwen-Image (F, C, H, W) but no control latents."""
+    assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 
 
 def save_latent_cache_kandinsky5(
@@ -446,6 +458,22 @@ def save_text_encoder_output_cache_hidream_o1(
     sd = {f"{name}_{dtype_to_str(t.dtype)}": t.detach().cpu() for name, t in tensors.items() if t is not None}
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HIDREAM_O1_FULL, merge_existing=False)
+
+
+def save_text_encoder_output_cache_krea2(item_info: ItemInfo, hidden_states: torch.Tensor):
+    """Krea 2 architecture. Stores multi-layer hidden states stacked as (T, num_layers, hidden_dim).
+
+    The tensor is already trimmed to the valid token length by the caller, so the attention mask
+    is reconstructed from the per-sample length at training time (same convention as Qwen-Image).
+    The ``varlen_`` prefix keeps these per-item tensors out of the batch ``torch.stack`` (see
+    ``BucketBatchManager.__getitem__``); the loader strips ``varlen_`` and the dtype suffix, so the
+    batch key becomes ``vl_embed`` to match ``Krea2NetworkTrainer.call_dit``.
+    """
+    sd = {}
+    dtype_str = dtype_to_str(hidden_states.dtype)
+    sd[f"varlen_vl_embed_{dtype_str}"] = hidden_states.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL, merge_existing=False)
 
 
 def save_text_encoder_output_cache_common(
