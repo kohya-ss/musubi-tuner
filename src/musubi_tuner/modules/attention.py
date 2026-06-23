@@ -114,6 +114,14 @@ def attention(
     if attn_params is None:
         attn_params = AttentionParams.create_attention_params("torch", False)
 
+    # GQA: q may carry more heads than k/v (e.g. Krea 2 = 48 query / 12 kv heads). flash and
+    # sageattn group heads natively inside the kernel (verified), so they ignore this. For the
+    # torch (SDPA) path we expand k/v to q's head count below instead of passing enable_gqa=True,
+    # because enable_gqa forces SDPA onto the slow math kernel (~7x slower than the fused kernels
+    # at K2 scale); the repeat is numerically identical. Revert to enable_gqa=True once PyTorch's
+    # fused (flash / mem-efficient) kernels gain native GQA support. (q/k/v here are [B, L, H, D].)
+    enable_gqa = q.shape[-2] != k.shape[-2]
+
     # If split attn is False, attention mask is provided and all sequence lengths are same, we can trim the sequence
     seqlen_trimmed = False
     # Trim if all seqlens are the same, for attention modes other than flash or sageattn (which can handle masks efficiently)
@@ -164,7 +172,12 @@ def attention(
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
-                x_i = torch.nn.functional.scaled_dot_product_attention(q[i], k[i], v[i], dropout_p=drop_rate)
+                qi, ki, vi = q[i], k[i], v[i]
+                if enable_gqa:  # expand k/v heads to avoid SDPA's slow enable_gqa math path
+                    g = qi.shape[1] // ki.shape[1]  # [B, H, L, D] -> heads at dim 1
+                    ki = ki.repeat_interleave(g, dim=1)
+                    vi = vi.repeat_interleave(g, dim=1)
+                x_i = torch.nn.functional.scaled_dot_product_attention(qi, ki, vi, dropout_p=drop_rate)
                 q[i] = None
                 k[i] = None
                 v[i] = None
@@ -173,6 +186,10 @@ def attention(
             q, k, v = None, None, None
 
         else:
+            if enable_gqa:  # expand k/v heads to avoid SDPA's slow enable_gqa math path
+                g = q.shape[1] // k.shape[1]  # [B, H, L, D] -> heads at dim 1
+                k = k.repeat_interleave(g, dim=1)
+                v = v.repeat_interleave(g, dim=1)
             x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate)
             q, k, v = None, None, None
 
@@ -180,7 +197,12 @@ def attention(
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
-                x_i = xops.memory_efficient_attention(q[i], k[i], v[i], p=drop_rate)
+                qi, ki, vi = q[i], k[i], v[i]
+                if enable_gqa:  # expand k/v heads to q's count; xformers 4D has no native GQA ([B, L, H, D] -> dim 2)
+                    g = qi.shape[2] // ki.shape[2]
+                    ki = ki.repeat_interleave(g, dim=2)
+                    vi = vi.repeat_interleave(g, dim=2)
+                x_i = xops.memory_efficient_attention(qi, ki, vi, p=drop_rate)
                 q[i] = None
                 k[i] = None
                 v[i] = None
@@ -189,6 +211,10 @@ def attention(
             q, k, v = None, None, None
 
         else:
+            if enable_gqa:  # expand k/v heads to q's count; xformers 4D has no native GQA ([B, L, H, D] -> dim 2)
+                g = q.shape[2] // k.shape[2]
+                k = k.repeat_interleave(g, dim=2)
+                v = v.repeat_interleave(g, dim=2)
             x = xops.memory_efficient_attention(q, k, v, attn_bias=attn_params.attention_mask, p=drop_rate)
             q, k, v = None, None, None
 
@@ -210,9 +236,11 @@ def attention(
         else:
             # Reshape to [(bxs), a, d]
             batch_size, seqlen = q.shape[0], q.shape[1]
-            q = q.view(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
-            k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
-            v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
+            # reshape (not view): callers may pass non-contiguous q/k/v (e.g. Krea 2 transposes
+            # [B,H,L,D]->[B,L,H,D] after RoPE); reshape copies only when needed, view-equivalent otherwise.
+            q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
+            k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
+            v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
 
             # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv. No dropout support
             x = sageattn_varlen(
@@ -241,9 +269,11 @@ def attention(
         else:
             # Reshape to [(bxs), a, d]
             batch_size, seqlen = q.shape[0], q.shape[1]
-            q = q.view(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
-            k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
-            v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
+            # reshape (not view): callers may pass non-contiguous q/k/v (e.g. Krea 2 transposes
+            # [B,H,L,D]->[B,L,H,D] after RoPE); reshape copies only when needed, view-equivalent otherwise.
+            q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
+            k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
+            v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
 
             # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv
             x = flash_attn_varlen_func(

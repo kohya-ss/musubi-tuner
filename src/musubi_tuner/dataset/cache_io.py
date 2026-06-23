@@ -14,6 +14,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL,
     ARCHITECTURE_IDEOGRAM4_FULL,
     ARCHITECTURE_KANDINSKY5_FULL,
+    ARCHITECTURE_KREA2_FULL,
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_WAN_FULL,
     ARCHITECTURE_Z_IMAGE_FULL,
@@ -175,6 +176,22 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
             sd[f"latents_control_{i}_{F}x{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor):
+    """Krea 2 (K2) architecture. Single image (F=1), Qwen-Image VAE latents (normalized).
+
+    The latent uses the *same* normalization as the Qwen-Image VAE
+    (`(raw - mean) / std`), which is exactly what K2's decoder inverts, so the
+    Qwen-Image latent caching is reused as-is. No control latent for plain t2i.
+    """
+    assert latent.dim() == 4, "latent should be 4D tensor (channel, frame, height, width)"
+
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 
 
 def save_latent_cache_kandinsky5(
@@ -378,6 +395,25 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tensor):
+    """Krea 2 (K2) architecture.
+
+    `embed` is the per-item stack of *selected* Qwen3-VL hidden-state layers for the
+    valid (non-padding) tokens only: shape (valid_len, num_select_layers, hidden).
+    Stored varlen (no padding, no mask): K2 gives text tokens zero RoPE position and
+    masks padding in attention, so dropping padding is lossless for the image outputs.
+    The layerwise fusion (TextFusionTransformer) is trainable and lives in the DiT, so
+    the raw selected-layer stack is what gets cached.
+    """
+    assert embed.dim() == 3, "embed should be 3D tensor (valid_len, num_select_layers, hidden)"
+
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_krea2_vl_embed_{dtype_str}"] = embed.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 
 
 def save_text_encoder_output_cache_kandinsky5(

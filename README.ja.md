@@ -58,6 +58,10 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/06/24
+    - Krea 2に実験的に対応しました（LoRA学習、推論）。[PR #980](https://github.com/kohya-ss/musubi-tuner/pull/980)
+        - 詳細は[ドキュメント](./docs/krea2.md)を参照してください。
+
 - 2026/06/19
     - Ideogram4に実験的に対応しました（LoRA学習、推論）。[PR #966](https://github.com/kohya-ss/musubi-tuner/pull/966) について、sdbds氏に深く感謝します。フォローアップは [PR #975](https://github.com/kohya-ss/musubi-tuner/pull/975) および [PR #977](https://github.com/kohya-ss/musubi-tuner/pull/977) で行われました。変更内容の詳細を確認されたい場合はPRをご覧ください。
         - 詳細は[ドキュメント](./docs/ideogram4.md)を参照してください。
