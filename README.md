@@ -63,6 +63,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 24, 2026
+    - Added experimental support for Krea 2 (LoRA training and inference). See [PR #980](https://github.com/kohya-ss/musubi-tuner/pull/980) for details.
+        - For details, please refer to the [documentation](./docs/krea2.md).
+
 - June 19, 2026
     - Added experimental support for Ideogram4 (LoRA training and inference). Many thanks to sdbds for [PR #966](https://github.com/kohya-ss/musubi-tuner/pull/966). Follow-ups were made in [PR #975](https://github.com/kohya-ss/musubi-tuner/pull/975) and [PR #977](https://github.com/kohya-ss/musubi-tuner/pull/977). Please refer to the PRs for detailed changes.
         - For details, please refer to the [documentation](./docs/ideogram4.md).
