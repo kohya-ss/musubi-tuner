@@ -190,9 +190,7 @@ def attention(
                 g = q.shape[1] // k.shape[1]  # [B, H, L, D] -> heads at dim 1
                 k = k.repeat_interleave(g, dim=1)
                 v = v.repeat_interleave(g, dim=1)
-            x = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate
-            )
+            x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate)
             q, k, v = None, None, None
 
     elif attn_params.attn_mode == "xformers":

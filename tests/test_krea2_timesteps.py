@@ -79,9 +79,7 @@ def test_krea2_shift_is_resolution_aware():
     def shifted_t_for(latent_side):
         latents = torch.zeros(1, 16, 1, latent_side, latent_side, dtype=torch.float32)
         noise = torch.ones_like(latents)
-        out, _ = trainer.get_noisy_model_input_and_timesteps(
-            args, noise, latents, [0.5], None, torch.device("cpu"), torch.float32
-        )
+        out, _ = trainer.get_noisy_model_input_and_timesteps(args, noise, latents, [0.5], None, torch.device("cpu"), torch.float32)
         return out.flatten()[0].item()
 
     t_256 = shifted_t_for(32)  # 256px image

@@ -1,6 +1,5 @@
 # LoRA module for Krea 2 (K2)
 
-import ast
 from typing import Dict, List, Optional
 import torch
 import torch.nn as nn

@@ -223,9 +223,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
             img = img + (tprev - tcurr) * v
 
         # Unpatchify token sequence back to a latent (1, C, 1, H, W) for the VAE.
-        latent = rearrange(
-            img, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=patch, pw=patch, h=lat_h // patch, w=lat_w // patch
-        )
+        latent = rearrange(img, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=patch, pw=patch, h=lat_h // patch, w=lat_w // patch)
         latent = latent.unsqueeze(2)  # (1, C, 1, H, W)
 
         vae.to(device)
@@ -401,9 +399,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # Compile the per-block SingleStreamBlocks (the heavy, repeated compute). The forward
         # already pads the combined sequence to a multiple of 256 to keep kernel shapes stable.
         # When block swap is on, exclude the swap blocks' Linears from compile (cf. zimage/qwen_image).
-        return model_utils.compile_transformer(
-            args, model, [model.blocks], disable_linear=self.blocks_to_swap > 0
-        )
+        return model_utils.compile_transformer(args, model, [model.blocks], disable_linear=self.blocks_to_swap > 0)
 
     def scale_shift_latents(self, latents):
         # K2 latents are already normalized by the Qwen-Image VAE caching ((raw-mean)/std).
@@ -471,9 +467,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
             model_pred = model(img=img_tokens, context=context, t=t, pos=pos, mask=mask)  # (B, h*w, c*ph*pw)
 
         # unpatchify to latent space (B, C, 1, H, W)
-        model_pred = rearrange(
-            model_pred, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=patch, pw=patch, h=h_, w=w_
-        )
+        model_pred = rearrange(model_pred, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=patch, pw=patch, h=h_, w=w_)
         model_pred = model_pred.unsqueeze(2)  # (B, C, 1, H, W)
 
         # flow matching target (velocity): noise - data

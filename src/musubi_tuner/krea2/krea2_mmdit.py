@@ -25,9 +25,7 @@ def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
     omega = 1.0 / ((theta * ntk) ** scale)
     out = torch.einsum("...n,d->...nd", pos, omega)
-    out = torch.stack(
-        [torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1
-    )
+    out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
     out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
     return out.float()
 
@@ -50,11 +48,7 @@ def temb(
     dtype: torch.dtype = None,
 ) -> Tensor:
     half = dim // 2
-    freqs = torch.exp(
-        -math.log(period)
-        * torch.arange(half, dtype=torch.float32, device=device)
-        / half
-    )
+    freqs = torch.exp(-math.log(period) * torch.arange(half, dtype=torch.float32, device=device) / half)
     # t: (B,) -> args: (B, 1, half), so the embedding broadcasts as a per-sample vec.
     args = (t.float() * tfactor)[:, None, None] * freqs
     sin, cos = torch.sin(args), torch.cos(args)
@@ -100,9 +94,7 @@ class DoubleSharedModulation(torch.nn.Module):
     # vec (b (6 d))
     def forward(self, vec: Tensor):
         out = vec + self.lin
-        prescale, preshift, pregate, postscale, postshift, postgate = out.chunk(
-            6, dim=-1
-        )
+        prescale, preshift, pregate, postscale, postshift, postgate = out.chunk(6, dim=-1)
         return prescale, preshift, pregate, postscale, postshift, postgate
 
 
@@ -116,10 +108,7 @@ class PositionalEncoding(torch.nn.Module):
     # @torch.compile(fullgraph=True)
     def forward(self, pos: Tensor) -> Tensor:
         return torch.cat(
-            [
-                rope(pos[..., i], d, self.theta, self.ntk)
-                for i, d in enumerate(self.axdims)
-            ],
+            [rope(pos[..., i], d, self.theta, self.ntk) for i, d in enumerate(self.axdims)],
             dim=-3,
         )
 
@@ -139,23 +128,17 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.features = features
         self.eps = eps
-        self.scale = torch.nn.Parameter(
-            torch.zeros(features, device=device, dtype=torch.float32)
-        )
+        self.scale = torch.nn.Parameter(torch.zeros(features, device=device, dtype=torch.float32))
 
     # @torch.compile(fullgraph=True)
     def forward(self, x: Tensor) -> Tensor:
         t, dtype = x.float(), x.dtype
-        t = F.rms_norm(
-            t, (self.features,), eps=self.eps, weight=(self.scale.float() + 1.0)
-        )
+        t = F.rms_norm(t, (self.features,), eps=self.eps, weight=(self.scale.float() + 1.0))
         return t.to(dtype)
 
 
 class SwiGLU(torch.nn.Module):
-    def __init__(
-        self, features: int, multiplier: int, bias: bool = False, multiple: int = 128
-    ):
+    def __init__(self, features: int, multiplier: int, bias: bool = False, multiple: int = 128):
         super().__init__()
 
         mlpdim = int(2 * features / 3) * multiplier
@@ -183,9 +166,7 @@ class Attention(torch.nn.Module):
         self.qknorm = QKNorm(self.headdim)
         self.wo = torch.nn.Linear(dim, dim, bias=bias)
 
-    def forward(
-        self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None
-    ) -> Tensor:
+    def forward(self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None) -> Tensor:
         q, k, v, gate = self.wq(qkv), self.wk(qkv), self.wv(qkv), self.gate(qkv)
 
         # QKNorm + RoPE run in [B, H, L, D] (K2-native layout) to preserve the reference numerics.
@@ -258,19 +239,9 @@ class TextFusionTransformer(torch.nn.Module):
         kvheads: int = None,
     ):
         super().__init__()
-        self.layerwise_blocks = torch.nn.ModuleList(
-            [
-                TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads)
-                for _ in range(2)
-            ]
-        )
+        self.layerwise_blocks = torch.nn.ModuleList([TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads) for _ in range(2)])
         self.projector = torch.nn.Linear(num_txt_layers, 1, bias=False)
-        self.refiner_blocks = torch.nn.ModuleList(
-            [
-                TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads)
-                for _ in range(2)
-            ]
-        )
+        self.refiner_blocks = torch.nn.ModuleList([TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads) for _ in range(2)])
 
     def forward(
         self,
@@ -308,13 +279,9 @@ class SingleStreamBlock(nn.Module):
         self.attn = Attention(dim=features, heads=heads, bias=bias, kvheads=kvheads)
         self.mlp = SwiGLU(features, multiplier, bias)
 
-    def forward(
-        self, x: Tensor, vec: Tensor, freqs: Tensor, attn_params: AttentionParams | None = None
-    ) -> Tensor:
+    def forward(self, x: Tensor, vec: Tensor, freqs: Tensor, attn_params: AttentionParams | None = None) -> Tensor:
         prescale, preshift, pregate, postscale, postshift, postgate = self.mod(vec)
-        x = x + pregate * self.attn(
-            (1 + prescale) * self.prenorm(x) + preshift, freqs, attn_params
-        )
+        x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, attn_params)
         x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
 
         return x
@@ -337,12 +304,8 @@ class SingleStreamDiT(nn.Module):
         assert sum(axes) == headdim, f"sum(axes) = {sum(axes)}, headdim = {headdim}"
         assert all(a % 2 == 0 for a in axes), f"axes = {axes}"
 
-        self.posemb = PositionalEncoding(
-            config.features, axes, theta=config.theta, ntk=1.0
-        )
-        self.first = nn.Linear(
-            config.channels * config.patch**2, config.features, bias=True
-        )
+        self.posemb = PositionalEncoding(config.features, axes, theta=config.theta, ntk=1.0)
+        self.first = nn.Linear(config.channels * config.patch**2, config.features, bias=True)
 
         self.blocks = nn.ModuleList(
             [
@@ -377,9 +340,7 @@ class SingleStreamDiT(nn.Module):
         )
         self.last = LastLayer(config.features, config.patch, config.channels)
 
-        self.tproj = nn.Sequential(
-            nn.GELU(approximate="tanh"), nn.Linear(config.features, config.features * 6)
-        )
+        self.tproj = nn.Sequential(nn.GELU(approximate="tanh"), nn.Linear(config.features, config.features * 6))
 
         # musubi training hooks
         self.gradient_checkpointing = False
@@ -399,9 +360,7 @@ class SingleStreamDiT(nn.Module):
     def enable_block_swap(self, num_blocks: int, config: BlockSwapConfig):
         self.blocks_to_swap = num_blocks
         num_main_blocks = len(self.blocks)
-        assert num_blocks <= num_main_blocks - 2, (
-            f"Cannot swap more than {num_main_blocks - 2} blocks. Requested {num_blocks}."
-        )
+        assert num_blocks <= num_main_blocks - 2, f"Cannot swap more than {num_main_blocks - 2} blocks. Requested {num_blocks}."
         self.offloader = create_offloader("single", self.blocks, num_main_blocks, num_blocks, config)
         print(
             f"Krea 2: Block swap enabled. Swapping {num_blocks} of {num_main_blocks} blocks "
@@ -451,12 +410,8 @@ class SingleStreamDiT(nn.Module):
 
         # Text fusion is a self-attention over text tokens only (img_len=0). The per-layer
         # blocks see every token (no mask); the refiner masks padding via txtmask.
-        txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(
-            self.attn_mode, self.split_attn, 0, None
-        )
-        txt_attn_params = AttentionParams.create_attention_params_from_mask(
-            self.attn_mode, self.split_attn, 0, txtmask
-        )
+        txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, None)
+        txt_attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, txtmask)
         context = self.txtfusion(context, txt_attn_params_nomask, txt_attn_params)
         context = self.txtmlp(context)
 
@@ -475,9 +430,7 @@ class SingleStreamDiT(nn.Module):
         # Main blocks: bidirectional attention over [image (img_len, all valid) + text (padded)].
         # Image-first ordering keeps each sample's valid tokens a contiguous prefix, which the
         # shared varlen path requires.
-        attn_params = AttentionParams.create_attention_params_from_mask(
-            self.attn_mode, self.split_attn, imglen, txtmask
-        )
+        attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, imglen, txtmask)
 
         freqs = self.posemb(pos)
 

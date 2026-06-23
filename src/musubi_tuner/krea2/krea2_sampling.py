@@ -16,9 +16,7 @@ def roundup(value, multiple, name):
     """Round `value` up to the nearest multiple, logging when padding is applied."""
     aligned = ((value + multiple - 1) // multiple) * multiple
     if aligned != value:
-        print(
-            f"[sample] {name}={value} is not a multiple of {multiple}; padding to {aligned}"
-        )
+        print(f"[sample] {name}={value} is not a multiple of {multiple}; padding to {aligned}")
     return aligned
 
 

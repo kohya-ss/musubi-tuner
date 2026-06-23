@@ -141,8 +141,7 @@ def _load_qwen3_vl_model(
     missing = [k for k in info.missing_keys if k != "lm_head.weight"]
     if unexpected or missing:
         raise RuntimeError(
-            f"Qwen3-VL text encoder checkpoint did not match the model: "
-            f"missing={missing[:10]}, unexpected={unexpected[:10]}"
+            f"Qwen3-VL text encoder checkpoint did not match the model: missing={missing[:10]}, unexpected={unexpected[:10]}"
         )
 
     model.to(device)
@@ -194,9 +193,7 @@ class Qwen3VLConditioner(torch.nn.Module):
         prefix_idx = self.prompt_template_encode_start_idx
         text = [self.prompt_template_encode_prefix + item for item in text]
         suffix_text = [self.prompt_template_encode_suffix] * len(text)
-        suffix_inputs = self.processor(text=suffix_text, return_tensors="pt").to(
-            self.qwen.device, non_blocking=True
-        )
+        suffix_inputs = self.processor(text=suffix_text, return_tensors="pt").to(self.qwen.device, non_blocking=True)
         suffix_ids, suffix_mask = (
             suffix_inputs["input_ids"],
             suffix_inputs["attention_mask"].bool(),
@@ -209,20 +206,14 @@ class Qwen3VLConditioner(torch.nn.Module):
                 return_length=False,
                 return_overflowing_tokens=False,
                 padding="max_length",
-                max_length=self.max_length
-                + prefix_idx
-                - self.prompt_template_encode_suffix_start_idx,
+                max_length=self.max_length + prefix_idx - self.prompt_template_encode_suffix_start_idx,
                 return_tensors="pt",
             ).to(self.qwen.device, non_blocking=True)
             input_ids = torch.cat([inputs["input_ids"], suffix_ids], dim=1)
             mask = torch.cat([inputs["attention_mask"].bool(), suffix_mask], dim=1)
-            states = self.qwen(
-                input_ids=input_ids, attention_mask=mask, output_hidden_states=True
-            )
+            states = self.qwen(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
 
-            hiddens = torch.stack(
-                [states.hidden_states[i] for i in self.select_layers], dim=2
-            )
+            hiddens = torch.stack([states.hidden_states[i] for i in self.select_layers], dim=2)
             hiddens = hiddens[:, prefix_idx:]
             mask = mask[:, prefix_idx:]
 

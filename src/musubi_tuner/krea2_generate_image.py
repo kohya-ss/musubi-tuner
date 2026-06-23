@@ -247,26 +247,18 @@ def apply_overrides(args: argparse.Namespace, overrides: Dict[str, Any]) -> argp
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate images with Krea 2 (K2).")
-    parser.add_argument(
-        "prompt", type=str, nargs="?", default=None, help="Prompt for image generation (single-prompt mode)"
-    )
+    parser.add_argument("prompt", type=str, nargs="?", default=None, help="Prompt for image generation (single-prompt mode)")
     parser.add_argument("--dit", type=str, required=True, help="Path to the MMDiT checkpoint (.safetensors)")
-    parser.add_argument(
-        "--vae", type=str, required=True, help="Path to the Qwen-Image VAE checkpoint (.safetensors)"
-    )
+    parser.add_argument("--vae", type=str, required=True, help="Path to the Qwen-Image VAE checkpoint (.safetensors)")
     parser.add_argument(
         "--text_encoder",
         type=str,
         required=True,
         help="Qwen3-VL-4B text encoder safetensors path (official or ComfyUI key layout)",
     )
-    parser.add_argument(
-        "--negative_prompt", type=str, default="", help="Negative prompt (used only when --guidance_scale > 1)"
-    )
+    parser.add_argument("--negative_prompt", type=str, default="", help="Negative prompt (used only when --guidance_scale > 1)")
     parser.add_argument("--steps", type=int, default=28, help="Number of denoising steps")
-    parser.add_argument(
-        "--guidance_scale", type=float, default=5.5, help="Classifier-free guidance scale (<= 1 disables CFG)"
-    )
+    parser.add_argument("--guidance_scale", type=float, default=5.5, help="Classifier-free guidance scale (<= 1 disables CFG)")
     parser.add_argument("--y1", type=float, default=0.5, help="Timestep-shift mu at min resolution")
     parser.add_argument("--y2", type=float, default=1.15, help="Timestep-shift mu at max resolution")
     parser.add_argument("--mu", type=float, default=None, help="Pin a constant timestep-shift mu (overrides y1/y2)")

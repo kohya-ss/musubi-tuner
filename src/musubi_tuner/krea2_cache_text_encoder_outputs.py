@@ -46,9 +46,7 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         required=True,
         help="Qwen3-VL-4B text encoder safetensors path (official or ComfyUI key layout)",
     )
-    parser.add_argument(
-        "--text_encoder_dtype", type=str, default=None, help="data type for the text encoder, default is bfloat16"
-    )
+    parser.add_argument("--text_encoder_dtype", type=str, default=None, help="data type for the text encoder, default is bfloat16")
     return parser
 
 
@@ -83,6 +81,7 @@ def main():
     logger.info("Encoding with Qwen3-VL")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
+        nonlocal encoder
         encode_and_save_batch(encoder, batch)
 
     cache_text_encoder_outputs.process_text_encoder_batches(

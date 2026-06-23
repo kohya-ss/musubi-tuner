@@ -5,7 +5,6 @@ latent normalization (`(raw - mean) / std`), so this reuses `qwen_image_utils.lo
 and `encode_pixels_to_latents` directly. Plain text-to-image only (no control/edit).
 """
 
-import argparse
 import logging
 from typing import List
 
@@ -40,9 +39,7 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
     for b, item in enumerate(batch):
         target_latent = latents[b]  # (C, 1, H, W)
-        print(
-            f"Saving cache for item {item.item_key} at {item.latent_cache_path}, latents shape: {target_latent.shape}"
-        )
+        print(f"Saving cache for item {item.item_key} at {item.latent_cache_path}, latents shape: {target_latent.shape}")
         save_latent_cache_krea2(item_info=item, latent=target_latent)
 
 
