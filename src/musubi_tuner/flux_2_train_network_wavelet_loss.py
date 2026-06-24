@@ -148,11 +148,16 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Weighted flow-matching MSE + optional wavelet auxiliary loss.
 
-        The wavelet term runs on estimated clean latents (x0) recovered from the
-        velocity prediction and the velocity target:
+        With ``--wavelet_loss_rectified_flow`` (default) the wavelet term runs on
+        estimated clean latents (x0) recovered from the velocity prediction and
+        the velocity target:
 
             x0_pred   = noisy_model_input - sigma * output.pred
             x0_target = noisy_model_input - sigma * output.target  (= latents)
+
+        With ``--no-wavelet_loss_rectified_flow`` it runs directly on the raw
+        velocity prediction vs target (AWWL-style), dropping the implicit sigma^2
+        weighting that x0 reconstruction introduces.
 
         Combination is additive: ``mse.mean() + alpha * wavelet_loss``.
         """
@@ -167,23 +172,6 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
             return mse_loss.mean(), {}
 
         # --- wavelet path ---
-        noisy_model_input = output.extra["noisy_model_input"]
-
-        # sigma for x0 recovery == timesteps/1000, the same value the DiT is
-        # conditioned on (see call_dit). Continuous samplers (incl. flux2_shift)
-        # draw an independent t per step, build noisy = (1-t)*latents + t*noise,
-        # and return timesteps on the scheduler's 1..1000 footing -- so any
-        # sampling-time shift is already baked into t/timesteps. A get_sigmas
-        # lookup would instead snap these off-schedule timesteps to the nearest
-        # discrete entry (logging "not in the schedule" every step) and discard
-        # the shift. The same sigma scales both x0_pred and x0_target, so it only
-        # weights the residual; compute it directly.
-        sigmas = (timesteps.to(noisy_model_input.device, dtype=output.pred.dtype) / 1000.0).view(
-            -1, *([1] * (output.pred.ndim - 1))
-        )
-        x0_pred = noisy_model_input - sigmas * output.pred.to(noisy_model_input.dtype)
-        x0_target = noisy_model_input - sigmas * output.target.to(noisy_model_input.dtype)
-
         loss_type = args.wavelet_loss_type if args.wavelet_loss_type is not None else args.loss_type
 
         def _loss_fn(input: torch.Tensor, target: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
@@ -195,7 +183,36 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
 
         self.wavelet_loss.set_loss_fn(_loss_fn)
 
-        wav_loss, wav_metrics = self.wavelet_loss(x0_pred.float(), x0_target.float(), timesteps)
+        if getattr(args, "wavelet_loss_rectified_flow", True):
+            # x0 space: reconstruct estimated clean latents from the velocity
+            # prediction/target. Correct for rectified-flow FLUX -- the wavelet
+            # term then penalises the structure of the estimated clean image.
+            noisy_model_input = output.extra["noisy_model_input"]
+
+            # sigma for x0 recovery == timesteps/1000, the same value the DiT is
+            # conditioned on (see call_dit). Continuous samplers (incl. flux2_shift)
+            # draw an independent t per step, build noisy = (1-t)*latents + t*noise,
+            # and return timesteps on the scheduler's 1..1000 footing -- so any
+            # sampling-time shift is already baked into t/timesteps. A get_sigmas
+            # lookup would instead snap these off-schedule timesteps to the nearest
+            # discrete entry (logging "not in the schedule" every step) and discard
+            # the shift. The same sigma scales both x0_pred and x0_target, so it only
+            # weights the residual; compute it directly.
+            sigmas = (timesteps.to(noisy_model_input.device, dtype=output.pred.dtype) / 1000.0).view(
+                -1, *([1] * (output.pred.ndim - 1))
+            )
+            wav_pred = noisy_model_input - sigmas * output.pred.to(noisy_model_input.dtype)
+            wav_target = noisy_model_input - sigmas * output.target.to(noisy_model_input.dtype)
+        else:
+            # Raw velocity space (AWWL-style): run the wavelet term directly on the
+            # model's prediction vs target. The same structure is penalised (the
+            # wavelet transform is linear and the shared noisy term cancels in x0
+            # space), minus the implicit sigma^2 timestep weighting; band metrics
+            # are no longer inflated by the shared noisy component.
+            wav_pred = output.pred
+            wav_target = output.target
+
+        wav_loss, wav_metrics = self.wavelet_loss(wav_pred.float(), wav_target.float(), timesteps)
         loss_metrics = dict(wav_metrics)
 
         return mse_loss.mean() + args.wavelet_loss_alpha * wav_loss, loss_metrics
@@ -223,6 +240,7 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
             if args.wavelet_loss_quaternion_component_weights
             else None,
             "ss_wavelet_loss_ll_level_threshold": args.wavelet_loss_ll_level_threshold,
+            "ss_wavelet_loss_rectified_flow": getattr(args, "wavelet_loss_rectified_flow", True),
         }
 
 
@@ -251,6 +269,18 @@ def wavelet_loss_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argum
     """Wavelet-loss-specific CLI arguments."""
     parser.add_argument("--wavelet_loss", action="store_true", help="Enable wavelet auxiliary loss. Default: False")
     parser.add_argument("--wavelet_loss_alpha", type=float, default=0.1, help="Wavelet loss weight. Default: 0.1")
+    parser.add_argument(
+        "--wavelet_loss_rectified_flow",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run the wavelet term on reconstructed clean latents x0 = noisy - sigma*v "
+            "(correct for rectified-flow / flow-matching FLUX: you penalise the structure "
+            "of the estimated clean image). Pass --no-wavelet_loss_rectified_flow to instead "
+            "run it directly on the raw velocity prediction vs target (AWWL-style); this drops "
+            "the implicit sigma^2 weighting and gives un-inflated band metrics. Default: True."
+        ),
+    )
     parser.add_argument(
         "--wavelet_loss_type",
         default=None,

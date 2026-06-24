@@ -56,6 +56,15 @@ def test_parser_band_weights_parsed():
     assert args.wavelet_loss_band_weights == {"ll": 0.1, "hh": 0.05}
 
 
+def test_parser_rectified_flow_default_and_toggle():
+    parser = _wavelet_only_parser()
+    # Default preserves the historical behaviour: reconstruct x0 (rectified-flow).
+    assert parser.parse_args([]).wavelet_loss_rectified_flow is True
+    assert parser.parse_args(["--wavelet_loss_rectified_flow"]).wavelet_loss_rectified_flow is True
+    # --no- variant switches to raw velocity-space (AWWL-style).
+    assert parser.parse_args(["--no-wavelet_loss_rectified_flow"]).wavelet_loss_rectified_flow is False
+
+
 def test_parser_does_not_define_dropped_args():
     parser = _wavelet_only_parser()
     args = parser.parse_args([])
@@ -107,6 +116,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         wavelet_loss_ll_level_threshold=None,
         wavelet_loss_normalize_bands=None,
         wavelet_loss_metrics=False,
+        wavelet_loss_rectified_flow=True,
         weighting_scheme="none",
         loss_type="l2",
     )
@@ -210,6 +220,59 @@ def test_compute_loss_continuous_timesteps_no_schedule_warning(caplog):
 
     assert torch.isfinite(loss)
     assert "not in the schedule" not in caplog.text
+
+
+class _CapturingWavelet:
+    """Records the (pred, target) handed to the wavelet module so a test can
+    assert which space (x0 vs raw velocity) compute_loss passed in."""
+
+    def __init__(self):
+        self.received = None
+
+    def set_loss_fn(self, fn):
+        self._fn = fn
+
+    def __call__(self, pred, target, timesteps):
+        self.received = (pred, target)
+        return torch.zeros(()), {"wavelet_loss/total": 0.0}
+
+
+def test_compute_loss_rectified_flow_passes_x0():
+    trainer, args, latents, noise, noisy, target, timesteps, scheduler, sigma = _setup_trainer_and_batch()
+    args.wavelet_loss_rectified_flow = True
+    pred = target + 0.1 * torch.randn_like(target)
+    output = DiTOutput(pred=pred, target=target, extra={"noisy_model_input": noisy})
+    cap = _CapturingWavelet()
+    trainer.wavelet_loss = cap
+
+    trainer.compute_loss(args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0)
+
+    wav_pred, wav_target = cap.received
+    assert torch.allclose(wav_pred, noisy - sigma * pred, atol=1e-5)
+    assert torch.allclose(wav_target, noisy - sigma * target, atol=1e-5)
+
+
+def test_compute_loss_velocity_space_passes_raw_pred():
+    trainer, args, latents, noise, noisy, target, timesteps, scheduler, sigma = _setup_trainer_and_batch()
+    args.wavelet_loss_rectified_flow = False
+    pred = target + 0.1 * torch.randn_like(target)
+    output = DiTOutput(pred=pred, target=target, extra={"noisy_model_input": noisy})
+    cap = _CapturingWavelet()
+    trainer.wavelet_loss = cap
+
+    trainer.compute_loss(args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0)
+
+    wav_pred, wav_target = cap.received
+    # Raw velocity space: model_pred vs target verbatim, no x0 reconstruction.
+    assert torch.allclose(wav_pred, pred, atol=1e-6)
+    assert torch.allclose(wav_target, target, atol=1e-6)
+
+
+def test_extra_metadata_includes_rectified_flow():
+    trainer = Flux2WaveletLossNetworkTrainer()
+    assert trainer.extra_metadata(_make_args())["ss_wavelet_loss_rectified_flow"] is True
+    meta_off = trainer.extra_metadata(_make_args(wavelet_loss_rectified_flow=False))
+    assert meta_off["ss_wavelet_loss_rectified_flow"] is False
 
 
 def test_extra_metadata_enabled():
