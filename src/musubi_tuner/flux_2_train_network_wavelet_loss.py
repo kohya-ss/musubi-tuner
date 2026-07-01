@@ -70,7 +70,7 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
         # Check the optional-dependency guard FIRST so a clear error is raised
         # before any FLUX.2-specific model-version logic runs.
         if args.wavelet_loss and WaveletLoss is None:
-            raise ImportError("wavelet-loss package is not installed. Install it with: pip install -e /path/to/wavelet-loss")
+            raise ImportError("wavelet-loss package is not installed. Install it with: pip install wavelet-loss")
         super().handle_model_specific_args(args)
 
     def call_dit(
