@@ -172,9 +172,7 @@ def test_compute_loss_with_wavelet_returns_metrics():
     pred = target + 0.1 * torch.randn_like(target)  # imperfect prediction
     output = DiTOutput(pred=pred, target=target, extra={"noisy_model_input": noisy})
 
-    loss, metrics = trainer.compute_loss(
-        args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0
-    )
+    loss, metrics = trainer.compute_loss(args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0)
     assert loss.ndim == 0
     assert torch.isfinite(loss)
     assert len(metrics) > 0
@@ -193,9 +191,7 @@ def test_compute_loss_disabled_equals_weighted_mse():
     pred = target + 0.1 * torch.randn_like(target)
     output = DiTOutput(pred=pred, target=target, extra={"noisy_model_input": noisy})
 
-    loss, metrics = trainer.compute_loss(
-        args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0
-    )
+    loss, metrics = trainer.compute_loss(args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0)
     expected = F.mse_loss(pred, target).detach()
     assert metrics == {}
     assert torch.allclose(loss, expected, atol=1e-6)
@@ -223,9 +219,7 @@ def test_compute_loss_continuous_timesteps_no_schedule_warning(caplog):
     output = DiTOutput(pred=pred, target=target, extra={"noisy_model_input": noisy})
 
     with caplog.at_level("WARNING", logger="musubi_tuner.training.timesteps"):
-        loss, metrics = trainer.compute_loss(
-            args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0
-        )
+        loss, metrics = trainer.compute_loss(args, output, timesteps, scheduler, torch.float32, torch.float32, global_step=0)
 
     assert torch.isfinite(loss)
     assert "not in the schedule" not in caplog.text
@@ -295,6 +289,7 @@ def test_extra_metadata_enabled():
     assert meta["ss_wavelet_loss_level"] == 1
     # dict-valued args are JSON-encoded strings
     import json
+
     assert json.loads(meta["ss_wavelet_loss_band_weights"]) == {"ll": 0.1, "hh": 0.05}
 
 

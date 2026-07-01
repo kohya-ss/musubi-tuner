@@ -70,9 +70,7 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
         # Check the optional-dependency guard FIRST so a clear error is raised
         # before any FLUX.2-specific model-version logic runs.
         if args.wavelet_loss and WaveletLoss is None:
-            raise ImportError(
-                "wavelet-loss package is not installed. Install it with: pip install -e /path/to/wavelet-loss"
-            )
+            raise ImportError("wavelet-loss package is not installed. Install it with: pip install -e /path/to/wavelet-loss")
         super().handle_model_specific_args(args)
 
     def call_dit(
@@ -169,9 +167,7 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
 
         Combination is additive: ``mse.mean() + alpha * wavelet_loss``.
         """
-        weighting = compute_loss_weighting_for_sd3(
-            args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype
-        )
+        weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
         mse_loss = F.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
             mse_loss = mse_loss * weighting
@@ -238,9 +234,7 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
             "ss_wavelet_loss_transform": args.wavelet_loss_transform,
             "ss_wavelet_loss_wavelet": args.wavelet_loss_wavelet,
             "ss_wavelet_loss_level": args.wavelet_loss_level,
-            "ss_wavelet_loss_band_weights": json.dumps(args.wavelet_loss_band_weights)
-            if args.wavelet_loss_band_weights
-            else None,
+            "ss_wavelet_loss_band_weights": json.dumps(args.wavelet_loss_band_weights) if args.wavelet_loss_band_weights else None,
             "ss_wavelet_loss_band_level_weights": json.dumps(args.wavelet_loss_band_level_weights)
             if args.wavelet_loss_band_level_weights
             else None,
@@ -357,10 +351,7 @@ def wavelet_loss_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argum
         "--wavelet_loss_timestep_transition_width",
         type=float,
         default=0.4,
-        help=(
-            "Fraction of the timestep range the sigmoid fade is spread over. "
-            "Smaller = harder cutoff. Default: 0.4"
-        ),
+        help=("Fraction of the timestep range the sigmoid fade is spread over. Smaller = harder cutoff. Default: 0.4"),
     )
     parser.add_argument(
         "--wavelet_loss_normalize_bands",
