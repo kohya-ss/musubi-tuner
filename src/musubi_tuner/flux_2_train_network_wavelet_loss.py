@@ -124,6 +124,9 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
             ll_level_threshold=args.wavelet_loss_ll_level_threshold,
             metrics=args.wavelet_loss_metrics,
             normalize_bands=args.wavelet_loss_normalize_bands,
+            max_timestep=args.wavelet_loss_max_timestep,
+            timestep_cutoff=args.wavelet_loss_timestep_cutoff,
+            timestep_transition_width=args.wavelet_loss_timestep_transition_width,
             device=device,
         )
         self.wavelet_loss.to(device)
@@ -133,6 +136,11 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
         logger.info(f"\tWavelet:   {args.wavelet_loss_wavelet}")
         logger.info(f"\tLevel:     {args.wavelet_loss_level}")
         logger.info(f"\tAlpha:     {args.wavelet_loss_alpha}")
+        logger.info(
+            f"\tTimestep weight: cutoff={args.wavelet_loss_timestep_cutoff}, "
+            f"transition_width={args.wavelet_loss_timestep_transition_width}, "
+            f"max_timestep={args.wavelet_loss_max_timestep}"
+        )
         if args.wavelet_loss_band_weights:
             logger.info(f"\tBand weights: {args.wavelet_loss_band_weights}")
 
@@ -240,6 +248,9 @@ class Flux2WaveletLossNetworkTrainer(Flux2NetworkTrainer):
             if args.wavelet_loss_quaternion_component_weights
             else None,
             "ss_wavelet_loss_ll_level_threshold": args.wavelet_loss_ll_level_threshold,
+            "ss_wavelet_loss_max_timestep": args.wavelet_loss_max_timestep,
+            "ss_wavelet_loss_timestep_cutoff": args.wavelet_loss_timestep_cutoff,
+            "ss_wavelet_loss_timestep_transition_width": args.wavelet_loss_timestep_transition_width,
             "ss_wavelet_loss_rectified_flow": getattr(args, "wavelet_loss_rectified_flow", True),
         }
 
@@ -322,6 +333,34 @@ def wavelet_loss_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argum
         type=int,
         default=None,
         help="Level at which to include LL (low-frequency) band. -1 = last level only. Default: None (use all).",
+    )
+    parser.add_argument(
+        "--wavelet_loss_max_timestep",
+        type=float,
+        default=1000.0,
+        help=(
+            "Maximum value of the trainer's timestep convention, used to normalise timesteps "
+            "for the timestep weight. This trainer passes timesteps on the scheduler's 1..1000 "
+            "footing, so the default is 1000. Timesteps outside [0, max] raise an error. Default: 1000"
+        ),
+    )
+    parser.add_argument(
+        "--wavelet_loss_timestep_cutoff",
+        type=float,
+        default=0.7,
+        help=(
+            "Fraction of max_timestep at which the timestep weight crosses 0.5. Below the cutoff "
+            "(less noise) the weight is ~1; above it the weight fades toward 0. Default: 0.7"
+        ),
+    )
+    parser.add_argument(
+        "--wavelet_loss_timestep_transition_width",
+        type=float,
+        default=0.4,
+        help=(
+            "Fraction of the timestep range the sigmoid fade is spread over. "
+            "Smaller = harder cutoff. Default: 0.4"
+        ),
     )
     parser.add_argument(
         "--wavelet_loss_normalize_bands",

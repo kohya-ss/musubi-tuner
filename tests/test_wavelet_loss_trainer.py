@@ -115,6 +115,9 @@ def _make_args(**overrides) -> argparse.Namespace:
         wavelet_loss_quaternion_component_weights=None,
         wavelet_loss_ll_level_threshold=None,
         wavelet_loss_normalize_bands=None,
+        wavelet_loss_max_timestep=1000.0,
+        wavelet_loss_timestep_cutoff=0.7,
+        wavelet_loss_timestep_transition_width=0.4,
         wavelet_loss_metrics=False,
         wavelet_loss_rectified_flow=True,
         weighting_scheme="none",
@@ -144,7 +147,13 @@ def _setup_trainer_and_batch():
     trainer = Flux2WaveletLossNetworkTrainer()
     args = _make_args()
     trainer.wavelet_loss = _WL(
-        transform_type="swt", wavelet="sym7", level=1, ll_level_threshold=None, device=torch.device("cpu")
+        transform_type="swt",
+        wavelet="sym7",
+        level=1,
+        ll_level_threshold=None,
+        max_timestep=1000.0,
+        metrics=True,
+        device=torch.device("cpu"),
     )
     return trainer, args, latents, noise, noisy, target, timesteps, scheduler, sigma
 
