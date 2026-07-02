@@ -160,6 +160,26 @@ class NetworkTrainer:
 
         return logs
 
+    def collect_grad_metrics(self, params) -> dict:
+        """Collect gradient diagnostics for logging.
+
+        Returns grad/norm (total L2, pre-clip), grad/mean_norm (mean of per-parameter
+        L2 norms) and grad/max (max absolute element).
+        Returns empty dict if no parameters have gradients.
+        """
+        grads = [p.grad.detach() for p in params if p.grad is not None]
+        if not grads:
+            return {}
+        per_norm = torch.stack([g.norm() for g in grads])
+        total_norm = per_norm.norm()
+        mean_norm = per_norm.mean()
+        max_grad = torch.stack([g.abs().max() for g in grads]).max()
+        return {
+            "grad/norm": total_norm.item(),
+            "grad/mean_norm": mean_norm.item(),
+            "grad/max": max_grad.item(),
+        }
+
     def get_optimizer(self, args, trainable_params: list[torch.nn.Parameter]) -> tuple[str, str, torch.optim.Optimizer]:
         # adamw, adamw8bit, adafactor
 
@@ -2053,6 +2073,7 @@ class NetworkTrainer:
                         global_step,
                     )
 
+                    grad_metrics = {}
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
                         # self.all_reduce_network(accelerator, network)  # sync DDP grad manually
@@ -2061,6 +2082,9 @@ class NetworkTrainer:
                             for param in network.parameters():
                                 if param.grad is not None:
                                     param.grad = accelerator.reduce(param.grad, reduction="mean")
+
+                        if args.log_grad_metrics and len(accelerator.trackers) > 0:
+                            grad_metrics = self.collect_grad_metrics(network.parameters())
 
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
@@ -2125,6 +2149,7 @@ class NetworkTrainer:
                         args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
                     logs.update(loss_metrics)
+                    logs.update(grad_metrics)
                     logs.update(self.extra_step_logs(args, logs))
                     accelerator.log(logs, step=global_step)
 
