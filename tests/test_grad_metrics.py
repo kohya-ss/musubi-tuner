@@ -82,3 +82,14 @@ def test_skips_params_without_grad(trainer):
     metrics = trainer.collect_grad_metrics([p_with, p_without])
     assert metrics["grad/norm"] == pytest.approx(5.0)
     assert metrics["grad/max"] == pytest.approx(4.0)
+
+
+def test_log_grad_metrics_flag_default_off():
+    """--log_grad_metrics exists in the common parser and defaults to False."""
+    from musubi_tuner.training.parser_common import setup_parser_common
+
+    parser = setup_parser_common()
+    args, _ = parser.parse_known_args([])
+    assert args.log_grad_metrics is False
+    args, _ = parser.parse_known_args(["--log_grad_metrics"])
+    assert args.log_grad_metrics is True

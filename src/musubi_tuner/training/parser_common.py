@@ -253,6 +253,13 @@ def _add_logging_args(parser: argparse.ArgumentParser) -> None:
         help="specify WandB API key to log in before starting training (optional). / WandB APIキーを指定して学習開始前にログインする（オプション）",
     )
     parser.add_argument("--log_config", action="store_true", help="log training configuration / 学習設定をログに出力する")
+    parser.add_argument(
+        "--log_grad_metrics",
+        action="store_true",
+        help="log gradient norm metrics (grad/norm, grad/mean_norm, grad/max, pre-clipping) to the tracker."
+        " Adds a small per-step GPU sync overhead"
+        " / 勾配ノルムのメトリクス（grad/norm, grad/mean_norm, grad/max、クリッピング前）をトラッカーに出力する。ステップごとにわずかなGPU同期のオーバーヘッドが発生する",
+    )
 
 
 def _add_ddp_args(parser: argparse.ArgumentParser) -> None:
