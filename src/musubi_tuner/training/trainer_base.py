@@ -160,6 +160,26 @@ class NetworkTrainer:
 
         return logs
 
+    def collect_grad_metrics(self, params) -> dict:
+        """Collect gradient diagnostics for logging.
+
+        Returns grad/norm (total L2, pre-clip), grad/mean_norm (mean of per-parameter
+        L2 norms) and grad/max (max absolute element).
+        Returns empty dict if no parameters have gradients.
+        """
+        grads = [p.grad.detach() for p in params if p.grad is not None]
+        if not grads:
+            return {}
+        per_norm = torch.stack([g.norm() for g in grads])
+        total_norm = per_norm.norm()
+        mean_norm = per_norm.mean()
+        max_grad = torch.stack([g.abs().max() for g in grads]).max()
+        return {
+            "grad/norm": total_norm.item(),
+            "grad/mean_norm": mean_norm.item(),
+            "grad/max": max_grad.item(),
+        }
+
     def get_optimizer(self, args, trainable_params: list[torch.nn.Parameter]) -> tuple[str, str, torch.optim.Optimizer]:
         # adamw, adamw8bit, adafactor
 
