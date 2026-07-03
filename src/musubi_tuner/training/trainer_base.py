@@ -57,6 +57,7 @@ from musubi_tuner.training.accelerator_setup import (
     collator_class,
     prepare_accelerator,
 )
+from musubi_tuner.training.loss import normalize_loss_output, resolve_loss_fn
 from musubi_tuner.training.sampling_prompts import should_sample_images
 from musubi_tuner.training.timesteps import (
     compute_density_for_timestep_sampling,
@@ -106,6 +107,7 @@ class NetworkTrainer:
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
+        self._resolved_loss_fn = None  # resolved --loss_fn callable, set at startup
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1172,6 +1174,10 @@ class NetworkTrainer:
         )
 
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
+        # standard extras for pluggable losses (x0 recovery, model-dynamics terms)
+        output.extra.setdefault("noisy_model_input", noisy_model_input)
+        output.extra.setdefault("latents", latents)
+        output.extra.setdefault("noise", noise)
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def compute_loss(
@@ -1186,24 +1192,27 @@ class NetworkTrainer:
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
-        Default implementation: weighted MSE between ``output.pred`` and
-        ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
-        then ``.mean()``. Override to swap the loss formulation entirely
-        (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary terms
-        (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses are
-        responsible for whatever weighting/reduction they need — this hook owns
-        the full loss computation, not just the per-element MSE.
+        Default implementation: delegates to the callable resolved from
+        ``--loss_fn`` (default ``"mse"``: weighted MSE between ``output.pred``
+        and ``output.target`` with the SD3-style ``args.weighting_scheme``
+        applied, then ``.mean()``). Override to swap the loss formulation
+        entirely (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary
+        terms (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses
+        are responsible for whatever weighting/reduction they need — this hook
+        owns the full loss computation, not just the per-element MSE.
 
         ``global_step`` is provided for step-gated terms (e.g. computing an
         auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
         populate with named scalars for loss-decomposition logging
         (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
-        weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
-        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
-        if weighting is not None:
-            loss = loss * weighting
-        return loss.mean(), {}
+        if self._resolved_loss_fn is None:
+            self._resolved_loss_fn = resolve_loss_fn(args.loss_fn, args.loss_fn_args)
+        if isinstance(self._resolved_loss_fn, torch.nn.Module):
+            # one-time device move for losses with buffers/submodules; no-op afterwards
+            self._resolved_loss_fn.to(output.pred.device)
+        result = self._resolved_loss_fn(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        return normalize_loss_output(result)
 
     def on_transformer_loaded(
         self,
@@ -1396,6 +1405,14 @@ class NetworkTrainer:
             network_dtype,
         )
 
+    def _resolve_loss_fn_from_args(self, args) -> None:
+        """Resolve ``args.loss_fn``/``args.loss_fn_args`` and cache on ``self``.
+
+        Called eagerly from ``_validate_args_and_init`` so a bad ``--loss_fn``
+        config fails fast at startup, before models load.
+        """
+        self._resolved_loss_fn = resolve_loss_fn(args.loss_fn, args.loss_fn_args)
+
     def _validate_args_and_init(self, args) -> bool:
         """Validate required args, configure CUDA flags, handle `--show_timesteps`.
 
@@ -1416,6 +1433,9 @@ class NetworkTrainer:
         if args.dit is None:
             raise ValueError("path to DiT model is required / DiTモデルのパスが必要です")
         assert not args.fp8_scaled or args.fp8_base, "fp8_scaled requires fp8_base / fp8_scaledはfp8_baseが必要です"
+
+        # resolve --loss_fn eagerly so bad config fails before models load
+        self._resolve_loss_fn_from_args(args)
 
         if args.sage_attn:
             raise ValueError(

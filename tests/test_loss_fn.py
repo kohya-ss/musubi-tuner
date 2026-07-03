@@ -169,3 +169,132 @@ def test_parser_defaults_and_values():
     )
     assert args.loss_fn == "wavelet_loss.musubi.WaveletPlusMSE"
     assert args.loss_fn_args == ["alpha=0.1", "transform=swt"]
+
+
+# --- trainer integration ---
+
+
+def _make_trainer():
+    from musubi_tuner.training.trainer_base import NetworkTrainer
+
+    return NetworkTrainer()
+
+
+def test_default_compute_loss_matches_legacy_mse():
+    torch.manual_seed(0)
+    from musubi_tuner.training.trainer_base import DiTOutput
+
+    trainer = _make_trainer()
+    pred = torch.randn(2, 4, 8)
+    target = torch.randn(2, 4, 8)
+    args = _make_args()  # loss_fn="mse", weighting_scheme="none"
+    trainer._resolved_loss_fn = None  # simulate startup resolution not yet run
+    loss, metrics = trainer.compute_loss(
+        args, DiTOutput(pred=pred, target=target), torch.tensor([100.0, 500.0]), None, torch.float32, torch.float32, 0
+    )
+    assert torch.allclose(loss, torch.nn.functional.mse_loss(pred, target))
+    assert metrics == {}
+
+
+def test_compute_loss_uses_custom_function_and_normalizes_bare_tensor():
+    from musubi_tuner.training.trainer_base import DiTOutput
+
+    mod = types.ModuleType("fake_losses_trainer")
+
+    def bare_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
+        return torch.nn.functional.l1_loss(output.pred, output.target)  # bare tensor, no metrics
+
+    mod.bare_loss = bare_loss
+    sys.modules["fake_losses_trainer"] = mod
+    try:
+        trainer = _make_trainer()
+        args = _make_args(loss_fn="fake_losses_trainer.bare_loss")
+        pred, target = torch.ones(2, 2), torch.zeros(2, 2)
+        loss, metrics = trainer.compute_loss(
+            args, DiTOutput(pred=pred, target=target), torch.tensor([1.0, 2.0]), None, torch.float32, torch.float32, 0
+        )
+        assert torch.allclose(loss, torch.tensor(1.0))
+        assert metrics == {}
+    finally:
+        del sys.modules["fake_losses_trainer"]
+
+
+def test_compute_loss_resolves_once_and_caches():
+    trainer = _make_trainer()
+    from musubi_tuner.training.trainer_base import DiTOutput
+
+    calls = []
+    trainer._resolved_loss_fn = lambda *a: (calls.append(1) or torch.tensor(0.0), {})
+    trainer.compute_loss(
+        _make_args(), DiTOutput(pred=torch.zeros(1), target=torch.zeros(1)), torch.tensor([1.0]), None, torch.float32, torch.float32, 0
+    )
+    assert calls == [1]  # pre-set callable used, not re-resolved
+
+
+def test_process_batch_stashes_extra_inputs():
+    from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
+
+    captured = {}
+
+    class StubTrainer(NetworkTrainer):
+        def get_noisy_model_input_and_timesteps(self, args, noise, latents, timesteps, noise_scheduler, device, dtype):
+            return latents + noise, torch.tensor([500.0])
+
+        def call_dit(self, args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs):
+            return DiTOutput(pred=torch.zeros_like(latents), target=torch.zeros_like(latents))
+
+        def compute_loss(self, args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
+            captured.update(output.extra)
+            return torch.tensor(0.0), {}
+
+    class _FakeAccelerator:
+        device = torch.device("cpu")
+
+    latents = torch.ones(1, 4)
+    noise = torch.full((1, 4), 2.0)
+    StubTrainer().process_batch(
+        _make_args(), _FakeAccelerator(), None, None, {"timesteps": None}, latents, noise, None,
+        torch.float32, torch.float32, None, 0,
+    )
+    assert torch.equal(captured["latents"], latents)
+    assert torch.equal(captured["noise"], noise)
+    assert torch.equal(captured["noisy_model_input"], latents + noise)
+
+
+def test_validate_args_resolves_loss_fn_at_startup():
+    # NetworkTrainer.handle_model_specific_args (called later in
+    # _validate_args_and_init) is an abstract hook that unconditionally raises
+    # NotImplementedError on the base class -- there's no reasonable minimal
+    # args namespace that gets a bare NetworkTrainer instance all the way
+    # through _validate_args_and_init. Per the task note, resolution is
+    # factored into `_resolve_loss_fn_from_args`, called eagerly (before
+    # `handle_model_specific_args`) from `_validate_args_and_init`; test the
+    # helper directly, which is what actually performs the startup resolution.
+    trainer = _make_trainer()
+    args = _make_args(loss_fn="mse")
+    trainer._resolve_loss_fn_from_args(args)
+    assert trainer._resolved_loss_fn is BUILTIN_LOSS_FNS["mse"]
+
+    trainer2 = _make_trainer()
+    args.loss_fn = "nonexistent_module_xyz.Loss"
+    with pytest.raises(ImportError):
+        trainer2._resolve_loss_fn_from_args(args)
+
+    # confirm the real call site: _validate_args_and_init resolves before it
+    # reaches the abstract handle_model_specific_args hook (proves ordering,
+    # not just that the helper works in isolation).
+    trainer3 = _make_trainer()
+    args3 = _make_args(
+        loss_fn="mse",
+        cuda_allow_tf32=False,
+        cuda_cudnn_benchmark=False,
+        dataset_config="dummy.toml",
+        dit="dummy.safetensors",
+        fp8_scaled=False,
+        fp8_base=False,
+        sage_attn=False,
+        disable_numpy_memmap=False,
+    )
+    with pytest.raises(NotImplementedError, match="handle_model_specific_args"):
+        trainer3._validate_args_and_init(args3)
+    assert trainer3._resolved_loss_fn is BUILTIN_LOSS_FNS["mse"]
