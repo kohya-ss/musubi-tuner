@@ -75,6 +75,8 @@ SS_METADATA_KEY_NETWORK_MODULE = "ss_network_module"
 SS_METADATA_KEY_NETWORK_DIM = "ss_network_dim"
 SS_METADATA_KEY_NETWORK_ALPHA = "ss_network_alpha"
 SS_METADATA_KEY_NETWORK_ARGS = "ss_network_args"
+SS_METADATA_KEY_LOSS_FN = "ss_loss_fn"
+SS_METADATA_KEY_LOSS_FN_ARGS = "ss_loss_fn_args"
 
 SS_METADATA_MINIMUM_KEYS = [
     SS_METADATA_KEY_BASE_MODEL_VERSION,
@@ -1913,6 +1915,10 @@ class NetworkTrainer:
         if args.network_args:
             # metadata["ss_network_args"] = json.dumps(net_kwargs)
             metadata[SS_METADATA_KEY_NETWORK_ARGS] = json.dumps(net_kwargs)
+
+        metadata[SS_METADATA_KEY_LOSS_FN] = args.loss_fn
+        if args.loss_fn_args:
+            metadata[SS_METADATA_KEY_LOSS_FN_ARGS] = json.dumps(args.loss_fn_args)
 
         # model name and hash
         # calculate hash takes time, so we omit it for now
