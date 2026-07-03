@@ -21,11 +21,14 @@ import ast
 import functools
 import importlib
 import inspect
+import logging
 from typing import Any, Callable, Optional
 
 import torch
 
 from musubi_tuner.training.timesteps import compute_loss_weighting_for_sd3
+
+logger = logging.getLogger(__name__)
 
 
 def mse_loss(
@@ -79,6 +82,7 @@ def resolve_loss_fn(loss_fn: str, loss_fn_args: Optional[list[str]] = None) -> C
     ``functools.partial``.
     """
     kwargs = parse_loss_fn_args(loss_fn_args)
+    logger.info(f"use loss function {loss_fn} | {kwargs}")
 
     if "." not in loss_fn:
         try:
