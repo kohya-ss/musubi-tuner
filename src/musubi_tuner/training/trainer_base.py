@@ -1209,6 +1209,8 @@ class NetworkTrainer:
         (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
         if self._resolved_loss_fn is None:
+            # defensive fallback for direct calls (unit tests); real runs resolve
+            # eagerly in _validate_args_and_init so bad --loss_fn fails at startup
             self._resolved_loss_fn = resolve_loss_fn(args.loss_fn, args.loss_fn_args)
         if isinstance(self._resolved_loss_fn, torch.nn.Module):
             # one-time device move for losses with buffers/submodules; no-op afterwards
