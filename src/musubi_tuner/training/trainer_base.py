@@ -1176,10 +1176,6 @@ class NetworkTrainer:
         )
 
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
-        # standard extras for pluggable losses (x0 recovery, model-dynamics terms)
-        output.extra.setdefault("noisy_model_input", noisy_model_input)
-        output.extra.setdefault("latents", latents)
-        output.extra.setdefault("noise", noise)
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def compute_loss(

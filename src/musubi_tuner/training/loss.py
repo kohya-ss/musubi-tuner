@@ -11,8 +11,9 @@ The resolved callable has the exact signature of
 
 and returns either a bare scalar loss tensor or ``(loss, metrics_dict)``.
 Losses needing more than ``output.pred``/``output.target`` read from
-``output.extra`` (the base trainer stashes ``noisy_model_input``, ``latents``
-and ``noise`` there).
+``output.extra``; trainers that support such losses are responsible for
+stashing the required tensors there (e.g. a ``call_dit`` override stashing
+``noisy_model_input`` for x0 recovery).
 """
 
 import argparse

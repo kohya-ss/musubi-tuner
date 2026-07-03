@@ -231,7 +231,10 @@ def test_compute_loss_resolves_once_and_caches():
     assert calls == [1]  # pre-set callable used, not re-resolved
 
 
-def test_process_batch_stashes_extra_inputs():
+def test_process_batch_passes_call_dit_extras_to_loss():
+    # Trainers that support extra-input losses (wavelet x0 recovery, DiNO/PO)
+    # stash tensors into output.extra themselves (e.g. in call_dit); the base
+    # process_batch must hand that dict through to compute_loss untouched.
     from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
 
     captured = {}
@@ -241,7 +244,9 @@ def test_process_batch_stashes_extra_inputs():
             return latents + noise, torch.tensor([500.0])
 
         def call_dit(self, args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs):
-            return DiTOutput(pred=torch.zeros_like(latents), target=torch.zeros_like(latents))
+            output = DiTOutput(pred=torch.zeros_like(latents), target=torch.zeros_like(latents))
+            output.extra["noisy_model_input"] = noisy_model_input
+            return output
 
         def compute_loss(self, args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
             captured.update(output.extra)
@@ -256,8 +261,7 @@ def test_process_batch_stashes_extra_inputs():
         _make_args(), _FakeAccelerator(), None, None, {"timesteps": None}, latents, noise, None,
         torch.float32, torch.float32, None, 0,
     )
-    assert torch.equal(captured["latents"], latents)
-    assert torch.equal(captured["noise"], noise)
+    assert set(captured) == {"noisy_model_input"}  # only what the trainer stashed
     assert torch.equal(captured["noisy_model_input"], latents + noise)
 
 
