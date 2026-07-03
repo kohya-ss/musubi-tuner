@@ -151,3 +151,21 @@ def test_normalize_tuple():
     loss, metrics = normalize_loss_output((t, {"loss/aux": 0.5}))
     assert loss is t
     assert metrics == {"loss/aux": 0.5}
+
+
+# --- CLI args ---
+
+
+def test_parser_defaults_and_values():
+    from musubi_tuner.training.parser_common import setup_parser_common
+
+    parser = setup_parser_common()
+    args, _ = parser.parse_known_args([])
+    assert args.loss_fn == "mse"
+    assert args.loss_fn_args is None
+
+    args, _ = parser.parse_known_args(
+        ["--loss_fn", "wavelet_loss.musubi.WaveletPlusMSE", "--loss_fn_args", "alpha=0.1", "transform=swt"]
+    )
+    assert args.loss_fn == "wavelet_loss.musubi.WaveletPlusMSE"
+    assert args.loss_fn_args == ["alpha=0.1", "transform=swt"]
