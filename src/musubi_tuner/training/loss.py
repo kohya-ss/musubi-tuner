@@ -3,6 +3,8 @@
 ``--loss_fn`` selects the loss the same way ``--optimizer_type`` selects the
 optimizer: a built-in name (no dot) or a dotted import path. ``--loss_fn_args``
 supplies ``key=value`` construction arguments, mirroring ``--optimizer_args``.
+Values must be Python literals (strings must be quoted); non-literals raise at
+startup with a helpful error message.
 
 The resolved callable has the exact signature of
 ``NetworkTrainer.compute_loss`` (minus ``self``)::
@@ -54,10 +56,13 @@ BUILTIN_LOSS_FNS: dict[str, Callable] = {
 
 
 def parse_loss_fn_args(loss_fn_args: Optional[list[str]]) -> dict[str, Any]:
-    """Parse ``key=value`` strings; literal values via ast, else raw string.
+    """Parse ``key=value`` strings into kwargs via ``ast.literal_eval``.
 
-    Unlike ``optimizer_args``, non-literal values (``transform=swt``) are kept
-    as strings instead of raising, matching ``network_args`` ergonomics.
+    Values must be Python literals (numbers, bools, quoted strings,
+    dicts/lists/tuples), matching ``--optimizer_args`` semantics. Loss
+    functions are third-party code with unknown schemas, so a non-literal
+    value raises at startup with a quoting hint instead of silently falling
+    back to a raw string (which would mask typos like ``alpha=0.1.``).
     """
     kwargs: dict[str, Any] = {}
     if not loss_fn_args:
@@ -69,7 +74,10 @@ def parse_loss_fn_args(loss_fn_args: Optional[list[str]]) -> dict[str, Any]:
         try:
             kwargs[key] = ast.literal_eval(value)
         except (ValueError, SyntaxError):
-            kwargs[key] = value
+            raise ValueError(
+                f"--loss_fn_args entry {arg!r}: value {value!r} is not a Python literal."
+                f" If you meant a string, quote it: \"{key}='{value}'\""
+            ) from None
     return kwargs
 
 

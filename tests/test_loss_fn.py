@@ -43,13 +43,27 @@ def test_parse_literal_values():
     assert kwargs == {"weight": 0.1, "level": 2, "normalize": True}
 
 
-def test_parse_bare_string_falls_back():
-    # transform=swt: "swt" is not a Python literal -> kept as raw string
-    assert parse_loss_fn_args(["transform=swt"]) == {"transform": "swt"}
+def test_parse_bare_string_raises_with_quoting_hint():
+    # transform=swt: "swt" is not a Python literal -> hard error at startup,
+    # message shows exactly how to quote it (optimizer_args semantics)
+    with pytest.raises(ValueError, match=r"transform='swt'"):
+        parse_loss_fn_args(["transform=swt"])
 
 
-def test_parse_value_containing_equals():
-    assert parse_loss_fn_args(["expr=a=b"]) == {"expr": "a=b"}
+def test_parse_quoted_string_value():
+    assert parse_loss_fn_args(["transform='swt'"]) == {"transform": "swt"}
+
+
+def test_parse_dict_value():
+    kwargs = parse_loss_fn_args(["band_weights={'ll0': 1.0, 'lh2': 0.2}"])
+    assert kwargs == {"band_weights": {"ll0": 1.0, "lh2": 0.2}}
+
+
+def test_parse_numeric_typo_raises():
+    # the whole point of strict parsing: a typo'd float must fail loudly,
+    # not silently become the string "0.1."
+    with pytest.raises(ValueError, match="not a Python literal"):
+        parse_loss_fn_args(["alpha=0.1."])
 
 
 def test_parse_missing_equals_raises():
@@ -165,10 +179,10 @@ def test_parser_defaults_and_values():
     assert args.loss_fn_args is None
 
     args, _ = parser.parse_known_args(
-        ["--loss_fn", "wavelet_loss.musubi.WaveletPlusMSE", "--loss_fn_args", "alpha=0.1", "transform=swt"]
+        ["--loss_fn", "wavelet_loss.musubi.WaveletPlusMSE", "--loss_fn_args", "alpha=0.1", "transform='swt'"]
     )
     assert args.loss_fn == "wavelet_loss.musubi.WaveletPlusMSE"
-    assert args.loss_fn_args == ["alpha=0.1", "transform=swt"]
+    assert args.loss_fn_args == ["alpha=0.1", "transform='swt'"]
 
 
 # --- trainer integration ---
