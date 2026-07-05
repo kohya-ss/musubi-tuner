@@ -132,6 +132,10 @@ def resolve_loss_fn(loss_fn: str, loss_fn_args: Optional[list[str]] = None) -> C
     if inspect.isclass(fn):
         return fn(**kwargs)
     if kwargs:
+        try:
+            inspect.signature(fn).bind_partial(**kwargs)
+        except TypeError as e:
+            raise ValueError(f"--loss_fn_args do not match the parameters of --loss_fn {loss_fn!r}: {e}") from None
         return functools.partial(fn, **kwargs)
     return fn
 

@@ -1419,9 +1419,17 @@ class NetworkTrainer:
         """Resolve ``args.loss_fn``/``args.loss_fn_args`` and cache on ``self``.
 
         Called eagerly from ``_validate_args_and_init`` so a bad ``--loss_fn``
-        config fails fast at startup, before models load.
+        config fails fast at startup, before models load. Also warns if a
+        non-default ``--loss_fn`` was requested on a subclass that overrides
+        ``compute_loss``, since such overrides may never invoke the resolved plugin.
         """
         self._resolved_loss_fn = resolve_loss_fn(args.loss_fn, args.loss_fn_args)
+        if args.loss_fn != "mse" and type(self).compute_loss is not NetworkTrainer.compute_loss:
+            logger.warning(
+                f"--loss_fn {args.loss_fn!r} was requested, but {type(self).__name__} overrides compute_loss;"
+                " the custom loss is only used if that override routes through the default loss path"
+                " (e.g. via super().compute_loss)"
+            )
 
     def _validate_args_and_init(self, args) -> bool:
         """Validate required args, configure CUDA flags, handle `--show_timesteps`.

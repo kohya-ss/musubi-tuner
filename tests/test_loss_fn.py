@@ -1,5 +1,6 @@
 """Tests for the pluggable loss function resolver (training/loss.py)."""
 
+import logging
 import sys
 import types
 from dataclasses import dataclass, field
@@ -138,6 +139,38 @@ def test_resolve_dotted_function_binds_kwargs():
         assert torch.allclose(loss, torch.tensor(2.0))
     finally:
         del sys.modules["fake_losses"]
+
+
+def test_resolve_dotted_function_rejects_mismatched_kwargs():
+    mod = types.ModuleType("fake_losses_bad_kwargs")
+
+    def fn_loss(ctx, scale=1.0):
+        return torch.nn.functional.mse_loss(ctx.output.pred, ctx.output.target) * scale
+
+    mod.fn_loss = fn_loss
+    sys.modules["fake_losses_bad_kwargs"] = mod
+    try:
+        with pytest.raises(ValueError, match="fake_losses_bad_kwargs.fn_loss"):
+            resolve_loss_fn("fake_losses_bad_kwargs.fn_loss", ["scael=2.0"])
+    finally:
+        del sys.modules["fake_losses_bad_kwargs"]
+
+
+def test_resolve_dotted_function_accepts_matching_kwargs():
+    mod = types.ModuleType("fake_losses_good_kwargs")
+
+    def fn_loss(ctx, scale=1.0):
+        return torch.nn.functional.mse_loss(ctx.output.pred, ctx.output.target) * scale
+
+    mod.fn_loss = fn_loss
+    sys.modules["fake_losses_good_kwargs"] = mod
+    try:
+        fn = resolve_loss_fn("fake_losses_good_kwargs.fn_loss", ["scale=2.0"])
+        output = _FakeOutput(pred=torch.ones(2, 2), target=torch.zeros(2, 2))
+        loss = fn(_make_ctx(output, timesteps=torch.tensor([1.0, 2.0])))
+        assert torch.allclose(loss, torch.tensor(2.0))
+    finally:
+        del sys.modules["fake_losses_good_kwargs"]
 
 
 def test_resolve_dotted_class_instantiates_with_kwargs():
@@ -354,3 +387,42 @@ def test_trainer_builds_loss_context():
     assert seen["dit_dtype"] is torch.float16
     assert seen["network_dtype"] is torch.bfloat16
     assert seen["global_step"] == 7
+
+
+def test_resolve_loss_fn_warns_when_compute_loss_overridden_and_non_default_loss_fn(caplog):
+    from musubi_tuner.training.trainer_base import NetworkTrainer
+
+    class OverridingTrainer(NetworkTrainer):
+        def compute_loss(self, args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
+            return torch.tensor(0.0), {}
+
+    mod = types.ModuleType("fake_losses_warn_check")
+
+    def fn_loss(ctx):
+        return torch.nn.functional.mse_loss(ctx.output.pred, ctx.output.target)
+
+    mod.fn_loss = fn_loss
+    sys.modules["fake_losses_warn_check"] = mod
+    try:
+        # default "mse" loss_fn on an overriding trainer -> no warning
+        trainer_mse = OverridingTrainer()
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            trainer_mse._resolve_loss_fn_from_args(_make_args(loss_fn="mse"))
+        assert not any("overrides compute_loss" in r.message for r in caplog.records)
+
+        # non-default loss_fn on an overriding trainer -> warning
+        trainer_custom = OverridingTrainer()
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            trainer_custom._resolve_loss_fn_from_args(_make_args(loss_fn="fake_losses_warn_check.fn_loss"))
+        assert any("overrides compute_loss" in r.message for r in caplog.records)
+
+        # non-default loss_fn on a plain NetworkTrainer (no override) -> no warning
+        trainer_plain = NetworkTrainer()
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            trainer_plain._resolve_loss_fn_from_args(_make_args(loss_fn="fake_losses_warn_check.fn_loss"))
+        assert not any("overrides compute_loss" in r.message for r in caplog.records)
+    finally:
+        del sys.modules["fake_losses_warn_check"]
