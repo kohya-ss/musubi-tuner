@@ -6,10 +6,10 @@ supplies ``key=value`` construction arguments, mirroring ``--optimizer_args``.
 Values must be Python literals (strings must be quoted); non-literals raise at
 startup with a helpful error message.
 
-The resolved callable has the exact signature of
-``NetworkTrainer.compute_loss`` (minus ``self``)::
+The resolved callable is invoked with a single :class:`LossContext`::
 
-    loss_fn(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+    loss_fn(ctx)  # ctx.args, ctx.output, ctx.timesteps, ctx.noise_scheduler,
+                  # ctx.dit_dtype, ctx.network_dtype, ctx.global_step
 
 and returns either a bare scalar loss tensor or ``(loss, metrics_dict)``.
 Losses needing more than ``output.pred``/``output.target`` read from
@@ -24,6 +24,7 @@ import functools
 import importlib
 import inspect
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import torch
@@ -33,18 +34,35 @@ from musubi_tuner.training.timesteps import compute_loss_weighting_for_sd3
 logger = logging.getLogger(__name__)
 
 
-def mse_loss(
-    args: argparse.Namespace,
-    output,
-    timesteps: torch.Tensor,
-    noise_scheduler,
-    dit_dtype: torch.dtype,
-    network_dtype: torch.dtype,
-    global_step: int,
-) -> tuple[torch.Tensor, dict[str, float]]:
+@dataclass
+class LossContext:
+    """Everything a pluggable ``--loss_fn`` callable receives, as one object.
+
+    Additive by design: new fields may be appended in future versions without
+    breaking existing third-party losses (unlike a positional signature).
+    ``output`` is the trainer's ``DiTOutput`` (``.pred`` / ``.target`` /
+    ``.extra``) — typed ``Any`` because ``trainer_base`` imports this module,
+    so importing ``DiTOutput`` here would be circular. ``output.extra`` is the
+    trainer→loss escape hatch for tensors only specific trainers provide
+    (e.g. ``noisy_model_input`` for x0 recovery); the fields here are values
+    every trainer can supply.
+    """
+
+    args: argparse.Namespace
+    output: Any
+    timesteps: torch.Tensor
+    noise_scheduler: Any
+    dit_dtype: torch.dtype
+    network_dtype: torch.dtype
+    global_step: int
+
+
+def mse_loss(ctx: LossContext) -> tuple[torch.Tensor, dict[str, float]]:
     """Default weighted MSE: SD3-style ``args.weighting_scheme``, then mean."""
-    weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
-    loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
+    weighting = compute_loss_weighting_for_sd3(
+        ctx.args.weighting_scheme, ctx.noise_scheduler, ctx.timesteps, ctx.timesteps.device, ctx.dit_dtype
+    )
+    loss = torch.nn.functional.mse_loss(ctx.output.pred.to(ctx.network_dtype), ctx.output.target, reduction="none")
     if weighting is not None:
         loss = loss * weighting
     return loss.mean(), {}
@@ -82,7 +100,7 @@ def parse_loss_fn_args(loss_fn_args: Optional[list[str]]) -> dict[str, Any]:
 
 
 def resolve_loss_fn(loss_fn: str, loss_fn_args: Optional[list[str]] = None) -> Callable:
-    """Resolve ``--loss_fn`` to a callable with the ``compute_loss`` signature.
+    """Resolve ``--loss_fn`` to a callable invoked as ``loss_fn(ctx: LossContext)``.
 
     No dot: look up ``BUILTIN_LOSS_FNS``. Dotted path: import the module and
     fetch the attribute (same pattern as ``get_optimizer``). Classes are

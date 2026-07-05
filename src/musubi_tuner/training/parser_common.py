@@ -335,8 +335,8 @@ def _add_loss_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default="mse",
         help="Loss function to use: mse (default), or a dotted import path to a class or function"
-        " with the compute_loss signature, like 'wavelet_loss.musubi.WaveletPlusMSE'"
-        " / 損失関数: mse（デフォルト）、または compute_loss と同じシグネチャを持つクラス/関数へのドットパス",
+        " invoked with a single LossContext, like 'wavelet_loss.musubi.WaveletPlusMSE'"
+        " / 損失関数: mse（デフォルト）、または LossContext を受け取るクラス/関数へのドットパス",
     )
     parser.add_argument(
         "--loss_fn_args",

@@ -57,7 +57,7 @@ from musubi_tuner.training.accelerator_setup import (
     collator_class,
     prepare_accelerator,
 )
-from musubi_tuner.training.loss import normalize_loss_output, resolve_loss_fn
+from musubi_tuner.training.loss import LossContext, normalize_loss_output, resolve_loss_fn
 from musubi_tuner.training.sampling_prompts import should_sample_images
 from musubi_tuner.training.timesteps import (
     compute_density_for_timestep_sampling,
@@ -1191,10 +1191,11 @@ class NetworkTrainer:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
         Default implementation: delegates to the callable resolved from
-        ``--loss_fn`` (default ``"mse"``: weighted MSE between ``output.pred``
-        and ``output.target`` with the SD3-style ``args.weighting_scheme``
-        applied, then ``.mean()``). Override to swap the loss formulation
-        entirely (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary
+        ``--loss_fn`` (invoked with a single ``LossContext`` carrying these
+        same parameters), default ``"mse"``: weighted MSE between
+        ``output.pred`` and ``output.target`` with the SD3-style
+        ``args.weighting_scheme`` applied, then ``.mean()``. Override to swap
+        the loss formulation entirely (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary
         terms (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses
         are responsible for whatever weighting/reduction they need — this hook
         owns the full loss computation, not just the per-element MSE.
@@ -1211,7 +1212,16 @@ class NetworkTrainer:
         if isinstance(self._resolved_loss_fn, torch.nn.Module):
             # one-time device move for losses with buffers/submodules; no-op afterwards
             self._resolved_loss_fn.to(output.pred.device)
-        result = self._resolved_loss_fn(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        ctx = LossContext(
+            args=args,
+            output=output,
+            timesteps=timesteps,
+            noise_scheduler=noise_scheduler,
+            dit_dtype=dit_dtype,
+            network_dtype=network_dtype,
+            global_step=global_step,
+        )
+        result = self._resolved_loss_fn(ctx)
         return normalize_loss_output(result)
 
     def on_transformer_loaded(

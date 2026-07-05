@@ -9,6 +9,7 @@ import torch
 
 from musubi_tuner.training.loss import (
     BUILTIN_LOSS_FNS,
+    LossContext,
     mse_loss,
     normalize_loss_output,
     parse_loss_fn_args,
@@ -28,6 +29,18 @@ def _make_args(**overrides):
     for k, v in overrides.items():
         setattr(ns, k, v)
     return ns
+
+
+def _make_ctx(output, args=None, timesteps=None):
+    return LossContext(
+        args=args if args is not None else _make_args(),
+        output=output,
+        timesteps=timesteps if timesteps is not None else torch.tensor([100.0, 500.0]),
+        noise_scheduler=None,
+        dit_dtype=torch.float32,
+        network_dtype=torch.float32,
+        global_step=0,
+    )
 
 
 # --- parse_loss_fn_args ---
@@ -78,10 +91,9 @@ def test_mse_matches_manual_computation():
     torch.manual_seed(0)
     pred = torch.randn(2, 4, 8)
     target = torch.randn(2, 4, 8)
-    output = _FakeOutput(pred=pred, target=target)
-    timesteps = torch.tensor([100.0, 500.0])
+    ctx = _make_ctx(_FakeOutput(pred=pred, target=target))
 
-    loss, metrics = mse_loss(_make_args(), output, timesteps, None, torch.float32, torch.float32, 0)
+    loss, metrics = mse_loss(ctx)
 
     expected = torch.nn.functional.mse_loss(pred, target)
     assert torch.allclose(loss, expected)
@@ -114,15 +126,15 @@ def test_resolve_missing_attribute():
 def test_resolve_dotted_function_binds_kwargs():
     mod = types.ModuleType("fake_losses")
 
-    def fn_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step, scale=1.0):
-        return torch.nn.functional.mse_loss(output.pred, output.target) * scale
+    def fn_loss(ctx, scale=1.0):
+        return torch.nn.functional.mse_loss(ctx.output.pred, ctx.output.target) * scale
 
     mod.fn_loss = fn_loss
     sys.modules["fake_losses"] = mod
     try:
         fn = resolve_loss_fn("fake_losses.fn_loss", ["scale=2.0"])
         output = _FakeOutput(pred=torch.ones(2, 2), target=torch.zeros(2, 2))
-        loss = fn(_make_args(), output, torch.tensor([1.0, 2.0]), None, torch.float32, torch.float32, 0)
+        loss = fn(_make_ctx(output, timesteps=torch.tensor([1.0, 2.0])))
         assert torch.allclose(loss, torch.tensor(2.0))
     finally:
         del sys.modules["fake_losses"]
@@ -136,8 +148,8 @@ def test_resolve_dotted_class_instantiates_with_kwargs():
             super().__init__()
             self.scale = scale
 
-        def forward(self, args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
-            loss = torch.nn.functional.mse_loss(output.pred, output.target) * self.scale
+        def forward(self, ctx):
+            loss = torch.nn.functional.mse_loss(ctx.output.pred, ctx.output.target) * self.scale
             return loss, {"loss/scaled": float(loss)}
 
     mod.ClassLoss = ClassLoss
@@ -215,8 +227,8 @@ def test_compute_loss_uses_custom_function_and_normalizes_bare_tensor():
 
     mod = types.ModuleType("fake_losses_trainer")
 
-    def bare_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
-        return torch.nn.functional.l1_loss(output.pred, output.target)  # bare tensor, no metrics
+    def bare_loss(ctx):
+        return torch.nn.functional.l1_loss(ctx.output.pred, ctx.output.target)  # bare tensor, no metrics
 
     mod.bare_loss = bare_loss
     sys.modules["fake_losses_trainer"] = mod
@@ -316,3 +328,29 @@ def test_validate_args_resolves_loss_fn_at_startup():
     with pytest.raises(NotImplementedError, match="handle_model_specific_args"):
         trainer3._validate_args_and_init(args3)
     assert trainer3._resolved_loss_fn is BUILTIN_LOSS_FNS["mse"]
+
+
+def test_trainer_builds_loss_context():
+    from musubi_tuner.training.trainer_base import DiTOutput
+
+    trainer = _make_trainer()
+    seen = {}
+
+    def capture(ctx):
+        assert isinstance(ctx, LossContext)
+        seen.update(vars(ctx))
+        return torch.tensor(0.0)
+
+    trainer._resolved_loss_fn = capture
+    args = _make_args()
+    output = DiTOutput(pred=torch.zeros(1), target=torch.zeros(1))
+    ts = torch.tensor([42.0])
+    trainer.compute_loss(args, output, ts, "sched", torch.float16, torch.bfloat16, 7)
+
+    assert seen["args"] is args
+    assert seen["output"] is output
+    assert seen["timesteps"] is ts
+    assert seen["noise_scheduler"] == "sched"
+    assert seen["dit_dtype"] is torch.float16
+    assert seen["network_dtype"] is torch.bfloat16
+    assert seen["global_step"] == 7
