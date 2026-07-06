@@ -488,6 +488,13 @@ def load_flow_model(
             for key in sd.keys():
                 sd[key] = sd[key].to(loading_device)
 
+    # Strip ComfyUI fp8 scale keys (input_scale/weight_scale) that are not part of the model
+    scale_keys = [k for k in sd.keys() if k.endswith(("input_scale", "weight_scale"))]
+    if scale_keys:
+        logger.info(f"Stripping {len(scale_keys)} fp8 scale keys from state dict")
+        for k in scale_keys:
+            del sd[k]
+
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Flux 2: {info}")
 
