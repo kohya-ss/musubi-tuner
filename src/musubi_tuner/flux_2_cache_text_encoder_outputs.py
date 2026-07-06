@@ -35,7 +35,7 @@ def main():
     args = parser.parse_args()
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device if args.device is not None else "xpu" if torch.xpu.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
     # Load dataset config

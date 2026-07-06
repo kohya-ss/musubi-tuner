@@ -82,13 +82,13 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
     kwargs_handlers = [
         (
             InitProcessGroupKwargs(
-                backend="gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl",
+                backend="gloo" if os.name == "nt" or not (torch.cuda.is_available() or torch.xpu.is_available()) else "nccl",
                 init_method=(
                     "env://?use_libuv=False" if os.name == "nt" and Version(torch.__version__) >= Version("2.4.0") else None
                 ),
                 timeout=timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
             )
-            if torch.cuda.device_count() > 1
+            if max(torch.cuda.device_count(), torch.xpu.device_count()) > 1
             else None
         ),
         (
