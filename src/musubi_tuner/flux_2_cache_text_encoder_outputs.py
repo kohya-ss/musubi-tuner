@@ -53,7 +53,8 @@ def main():
     # Load Mistral 3 or Qwen-3 text encoder
     m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
-        model_version_info, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+        model_version_info, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True,
+        device_map_auto=args.device_map_auto,
     )
 
     # Encode with Mistral 3 or Qwen-3 text encoder
@@ -83,6 +84,10 @@ def main():
 def flux_2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder", type=str, default=None, required=True, help="text encoder (mistral 3) checkpoint path")
     parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument(
+        "--device_map_auto", action="store_true",
+        help="split Mistral 3 text encoder across GPU+CPU via device_map=auto (reduces VRAM usage)",
+    )
     flux2_utils.add_model_version_args(parser)
     return parser
 

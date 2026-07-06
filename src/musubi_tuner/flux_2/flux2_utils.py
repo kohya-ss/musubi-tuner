@@ -524,8 +524,22 @@ class Mistral3Embedder(nn.Module):
         device: Union[str, torch.device],
         disable_mmap: bool = False,
         state_dict: Optional[dict] = None,
+        device_map_auto: bool = False,
     ) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
         super().__init__()
+
+        if device_map_auto:
+            import os
+
+            model_dir = os.path.dirname(ckpt_path) if os.path.isfile(ckpt_path) else ckpt_path
+            logger.info(f"Loading Mistral 3 with device_map=auto (GPU+CPU split) from {model_dir}")
+            self.mistral3 = Mistral3ForConditionalGeneration.from_pretrained(
+                model_dir,
+                device_map="auto",
+                dtype=torch.bfloat16,
+            )
+            self.tokenizer = AutoProcessor.from_pretrained(M3_TOKENIZER_ID, use_fast=False)
+            return
 
         M3_CONFIG_JSON = """
 {
@@ -812,9 +826,10 @@ def load_text_embedder(
     device: Union[str, torch.device],
     disable_mmap: bool = False,
     state_dict: Optional[dict] = None,
+    device_map_auto: bool = False,
 ) -> Union[Mistral3Embedder, Qwen3Embedder]:
     if model_version_info.qwen_variant is None:
-        return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict)
+        return Mistral3Embedder(ckpt_path, dtype, device, disable_mmap, state_dict, device_map_auto=device_map_auto)
 
     variant = model_version_info.qwen_variant
     is_8b = variant == "8B"
