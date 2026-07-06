@@ -20,6 +20,53 @@ logging.basicConfig(level=logging.INFO)
 HUNYUAN_TARGET_REPLACE_MODULES = ["MMDoubleStreamBlock", "MMSingleStreamBlock"]
 
 
+class FusedLoRAAdd(torch.autograd.Function):
+    """Fused LoRA addition: computes org_forwarded + scale * lx @ lora_up_weight.T
+    without materializing the full [seq_len, out_dim] intermediate from lora_up.
+
+    Memory: saves one [seq_len, out_dim] tensor vs the unfused path. For backward,
+    only the tiny [seq_len, rank] tensor lx is saved (not the large lora_up output).
+
+    Dtype contract (matches the unfused path + _match_org_dtype): all three matmul
+    operands run in lx's dtype -- callers must pass org_forwarded already cast to
+    lx.dtype (the delta dtype) and round the result back via _match_org_dtype, so
+    the sum happens in the (possibly higher-precision) delta dtype and is rounded
+    exactly once, identical to `org_forwarded + lx * multiplier * scale`.
+    """
+
+    @staticmethod
+    def forward(ctx, org_forwarded, lx, lora_up_weight, scale):
+        shape = org_forwarded.shape
+        # cast weight to activation dtype for mixed precision (weights fp32, activations bf16)
+        up_w = lora_up_weight.to(lx.dtype)
+        result = torch.addmm(
+            org_forwarded.reshape(-1, shape[-1]),
+            lx.reshape(-1, lx.shape[-1]),
+            up_w.t(),
+            beta=1.0,
+            alpha=scale,
+        ).reshape(shape)
+        ctx.save_for_backward(lx, lora_up_weight)
+        ctx.scale = scale
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        lx, lora_up_weight = ctx.saved_tensors
+        scale = ctx.scale
+        go_2d = grad_output.reshape(-1, grad_output.shape[-1])
+        lx_2d = lx.reshape(-1, lx.shape[-1])
+        # grad for org_forwarded: identity pass-through
+        grad_org = grad_output
+        # grad for lx: [N, rank] -- tiny
+        # cast weight to match grad dtype (mixed precision: weights fp32, activations bf16)
+        up_w = lora_up_weight.to(go_2d.dtype)
+        grad_lx = torch.mm(go_2d, up_w).mul_(scale).reshape_as(lx)
+        # grad for lora_up_weight: [out_dim, rank] -- tiny (compute in weight dtype for optimizer)
+        grad_up = torch.mm(go_2d.t(), lx_2d).mul_(scale).to(lora_up_weight.dtype)
+        return grad_org, grad_lx, grad_up, None
+
+
 class LoRAModule(torch.nn.Module):
     """
     replaces forward method of the original Linear, instead of replacing the original Linear module.
@@ -167,6 +214,16 @@ class LoRAModule(torch.nn.Module):
             else:
                 scale = self.scale
 
+            # Fused path (Linear, 2D/3D): org + scale * lx @ up.T in one addmm, avoiding
+            # materialization of the full [seq, out_dim] lora_up output. org_forwarded is
+            # cast to the delta dtype first and the sum rounded once via _match_org_dtype,
+            # which is numerically identical to the unfused add-then-round below.
+            if lx.dim() <= 3:
+                org_c = org_forwarded if org_forwarded.dtype == lx.dtype else org_forwarded.to(lx.dtype)
+                fused = FusedLoRAAdd.apply(org_c, lx, self.lora_up.weight, self.multiplier * scale)
+                return self._match_org_dtype(fused, org_forwarded)
+
+            # Conv2d/Conv3d fallback (4D/5D tensors): standard path
             lx = self.lora_up(lx)
 
             # Add in the (possibly higher-precision) delta dtype, then round the sum once.
@@ -344,8 +401,13 @@ class LoRAInfModule(LoRAModule):
         lora_input = self._lora_input(x)
         if self.split_dims is None:
             lx = self.lora_down(lora_input)
-            lx = self.lora_up(lx)
             org_forwarded = self.org_forward(x)
+            # Fused path (Linear, 2D/3D): see LoRAModule.forward for the dtype contract.
+            if lx.dim() <= 3:
+                org_c = org_forwarded if org_forwarded.dtype == lx.dtype else org_forwarded.to(lx.dtype)
+                fused = FusedLoRAAdd.apply(org_c, lx, self.lora_up.weight, self.multiplier * self.scale)
+                return self._match_org_dtype(fused, org_forwarded)
+            lx = self.lora_up(lx)
             # Add in the (possibly higher-precision) delta dtype, then round the sum once.
             return self._match_org_dtype(org_forwarded + lx * self.multiplier * self.scale, org_forwarded)
         else:
