@@ -285,7 +285,13 @@ def test_compute_loss_resolves_once_and_caches():
     calls = []
     trainer._resolved_loss_fn = lambda *a: (calls.append(1) or torch.tensor(0.0), {})
     trainer.compute_loss(
-        _make_args(), DiTOutput(pred=torch.zeros(1), target=torch.zeros(1)), torch.tensor([1.0]), None, torch.float32, torch.float32, 0
+        _make_args(),
+        DiTOutput(pred=torch.zeros(1), target=torch.zeros(1)),
+        torch.tensor([1.0]),
+        None,
+        torch.float32,
+        torch.float32,
+        0,
     )
     assert calls == [1]  # pre-set callable used, not re-resolved
 
@@ -302,7 +308,9 @@ def test_process_batch_passes_call_dit_extras_to_loss():
         def get_noisy_model_input_and_timesteps(self, args, noise, latents, timesteps, noise_scheduler, device, dtype):
             return latents + noise, torch.tensor([500.0])
 
-        def call_dit(self, args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs):
+        def call_dit(
+            self, args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs
+        ):
             output = DiTOutput(pred=torch.zeros_like(latents), target=torch.zeros_like(latents))
             output.extra["noisy_model_input"] = noisy_model_input
             return output
@@ -317,8 +325,18 @@ def test_process_batch_passes_call_dit_extras_to_loss():
     latents = torch.ones(1, 4)
     noise = torch.full((1, 4), 2.0)
     StubTrainer().process_batch(
-        _make_args(), _FakeAccelerator(), None, None, {"timesteps": None}, latents, noise, None,
-        torch.float32, torch.float32, None, 0,
+        _make_args(),
+        _FakeAccelerator(),
+        None,
+        None,
+        {"timesteps": None},
+        latents,
+        noise,
+        None,
+        torch.float32,
+        torch.float32,
+        None,
+        0,
     )
     assert set(captured) == {"noisy_model_input"}  # only what the trainer stashed
     assert torch.equal(captured["noisy_model_input"], latents + noise)

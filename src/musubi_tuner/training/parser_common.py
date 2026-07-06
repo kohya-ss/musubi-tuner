@@ -344,8 +344,8 @@ def _add_loss_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         nargs="*",
         help="additional key=value arguments for the loss function; values must be Python literals,"
-        " strings need quotes (like \"alpha=0.1\" \"transform='swt'\" \"band_weights={'ll0': 1.0}\")"
-        " / 損失関数の追加引数（値はPythonリテラル。文字列は引用符が必要。例：\"alpha=0.1\" \"transform='swt'\"）",
+        ' strings need quotes (like "alpha=0.1" "transform=\'swt\'" "band_weights={\'ll0\': 1.0}")'
+        ' / 損失関数の追加引数（値はPythonリテラル。文字列は引用符が必要。例："alpha=0.1" "transform=\'swt\'"）',
     )
 
 
