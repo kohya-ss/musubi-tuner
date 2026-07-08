@@ -509,25 +509,13 @@ class Flux2(nn.Module):
             double_blocks_to_swap = num_blocks
             single_blocks_to_swap = 0
         else:
-            swap_ratio = self.num_single_blocks / self.num_double_blocks
-            double_blocks_to_swap = int(round(num_blocks / (1.0 + swap_ratio / 2.0)))
-            single_blocks_to_swap = int(round(double_blocks_to_swap * swap_ratio))
-
-            # adjust if we exceed available blocks
-            if self.num_double_blocks * 2 < self.num_single_blocks:
-                while double_blocks_to_swap >= 1 and double_blocks_to_swap > self.num_double_blocks - 2:
-                    double_blocks_to_swap -= 1
-                    single_blocks_to_swap += 2
-            else:
-                while single_blocks_to_swap >= 2 and single_blocks_to_swap > self.num_single_blocks - 2:
-                    single_blocks_to_swap -= 2
-                    double_blocks_to_swap += 1
-
-            if double_blocks_to_swap == 0 and single_blocks_to_swap == 0:
-                if self.num_single_blocks >= self.num_double_blocks:
-                    single_blocks_to_swap = 1
-                else:
-                    double_blocks_to_swap = 1
+            # Clamp double swap to max, overflow remaining budget into single swap.
+            # The *2+1 accounts for single blocks being ~half the size of double blocks.
+            # This is needed for Flux2's 8:48 double:single ratio where the old proportional
+            # formula overflows single_blocks for large swap counts.
+            double_blocks_to_swap = min(num_blocks // 2, self.num_double_blocks - 2)
+            remaining_budget = num_blocks - double_blocks_to_swap
+            single_blocks_to_swap = min(remaining_budget * 2 + 1, self.num_single_blocks - 2)
 
         assert double_blocks_to_swap <= self.num_double_blocks - 2 and single_blocks_to_swap <= self.num_single_blocks - 2, (
             f"Cannot swap more than {self.num_double_blocks - 2} double blocks and {self.num_single_blocks - 2} single blocks. "
@@ -669,12 +657,9 @@ class Modulation(nn.Module):
         self.lin = nn.Linear(dim, self.multiplier * dim, bias=not disable_bias)
 
     def forward(self, vec: torch.Tensor):
-        org_dtype = vec.dtype
-        vec = vec.to(torch.float32)  # for numerical stability
         out = self.lin(nn.functional.silu(vec))
         if out.ndim == 2:
             out = out[:, None, :]
-        out = out.to(org_dtype)
         out = out.chunk(self.multiplier, dim=-1)
         return out[:3], out[3:] if self.is_double else None
 
@@ -687,17 +672,14 @@ class LastLayer(nn.Module):
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=False))
 
     def forward(self, x: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
-        org_dtype = x.dtype
-        vec = vec.to(torch.float32)  # for numerical stability
         mod = self.adaLN_modulation(vec)
         shift, scale = mod.chunk(2, dim=-1)
         if shift.ndim == 2:
             shift = shift[:, None, :]
             scale = scale[:, None, :]
-        x = x.to(torch.float32)  # for numerical stability
         x = (1 + scale) * self.norm_final(x) + shift
         x = self.linear(x)
-        return x.to(org_dtype)
+        return x
 
 
 class SingleStreamBlock(nn.Module):
