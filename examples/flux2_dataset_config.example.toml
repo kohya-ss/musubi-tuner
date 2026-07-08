@@ -1,0 +1,18 @@
+# Flux2 LoRA dataset config — working example (validated on Intel Arc B70, XPU)
+# Images + same-named .txt caption files in image_directory; images without a
+# .txt caption are skipped by the trainer.
+
+[general]
+resolution = [
+    1024,
+    1024,
+]
+caption_extension = ".txt"
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = true
+
+[[datasets]]
+image_directory = "/path/to/dataset"
+cache_directory = "/path/to/dataset/cache"
+num_repeats = 1
