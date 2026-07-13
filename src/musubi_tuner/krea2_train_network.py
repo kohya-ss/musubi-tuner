@@ -32,6 +32,7 @@ from musubi_tuner.hv_train_network import (
 )
 from musubi_tuner.krea2 import krea2_utils
 from musubi_tuner.krea2 import krea2_sampling
+from musubi_tuner.modules.attention import should_use_external_flash_for_sdpa
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
 
@@ -73,6 +74,13 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # whole DiT (incl. norms) to fp8, which breaks. Require --fp8_scaled with --fp8_base.
         if args.fp8_base and not args.fp8_scaled:
             raise ValueError("Krea 2 fp8 supports only scaled fp8: pass --fp8_scaled together with --fp8_base.")
+        if args.sdpa and should_use_external_flash_for_sdpa():
+            args.sdpa = False
+            args.flash_attn = True
+            logger.info(
+                "PyTorch native FlashAttention is unavailable; using the external FlashAttention backend for SDPA. "
+                "Set MUSUBI_DISABLE_EXTERNAL_FLASH_SDPA=1 to keep PyTorch's fallback backend."
+            )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
         # generation during training swap the base weights to Turbo (LoRA, hooked on the live
