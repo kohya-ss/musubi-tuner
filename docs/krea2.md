@@ -194,6 +194,49 @@ Because the default already targets everything, both `exclude_patterns` and `inc
 
 </details>
 
+### ConvRot int8 / ConvRot int8
+
+`--convrot_int8` quantizes the frozen DiT base weights to int8 with ConvRot ([arXiv:2512.03673](https://arxiv.org/abs/2512.03673)): a block-diagonal Hadamard rotation smooths activation outliers, then weights are quantized per-channel to int8. The forward pass runs a fused Triton int8 GEMM (online activation rotation + dynamic row-wise int8 quantization + dequantization fused into the matmul). This is an **alternative to fp8** and cannot be combined with `--fp8_base`/`--fp8_scaled`.
+
+- Weight VRAM is halved vs bf16 (same as fp8). The main benefit is **speed on GPUs without fp8 support** (RTX 30 series and older): roughly 1.3–3x faster Linear forward vs bf16. On fp8-capable GPUs the gain is smaller.
+- Quantization noise is comparable to scaled fp8 (per-channel int8 after rotation).
+- Requires **triton** for the fused kernels (`pip install triton-windows` on Windows, matching your torch version). Without triton, training still works via a dequantized bf16 fallback: VRAM savings remain but there is no speedup.
+- `--convrot_int8_bwd int8` (opt-in) also routes the backward grad_x through the fused int8 GEMM: faster, at the cost of slightly quantized gradients. The default `bf16` dequantizes transiently and is the most accurate.
+- Same scope as fp8: the 28 main blocks only; the quantized layers are still LoRA-trainable (the LoRA branch receives the unrotated input and its gradients are unaffected by the base quantization).
+- Composes with `--blocks_to_swap` and `--gradient_checkpointing`. With `--compile`, the quantized Linears are excluded from compilation automatically. Not supported together with `--turbo_dit` yet. Multi-GPU training is untested.
+
+Reference speed (rough 20-step measurement; LoRA training, 1024x1024, batch size 1, `--flash_attn`, gradient checkpointing):
+
+| GPU | bf16 | fp8_scaled | convrot_int8 |
+|---|---|---|---|
+| RTX 3090 | (does not fit) | 7.1 s/step | 5.3 s/step |
+| RTX PRO 6000 Blackwell Max-Q | 2.0 s/step | 2.3 s/step | 1.9 s/step |
+
+Loss curves match the fp8/bf16 baselines closely (both backward modes). `--convrot_int8_bwd int8` shows no measurable step-time gain under gradient checkpointing (the backward is dominated by the forward recomputation); it is mainly useful on pre-fp8 GPUs without checkpointing. fp8 is slower than bf16 here because the K2 fp8 path dequantizes to bf16 per forward (no scaled_mm); ConvRot runs a true int8 GEMM, which is why it wins on GPUs without fp8 support.
+
+<details>
+<summary>日本語</summary>
+
+`--convrot_int8`で、凍結されたDiTのbase重みをConvRot（[arXiv:2512.03673](https://arxiv.org/abs/2512.03673)）でint8量子化します。ブロック対角Hadamard回転でactivationの外れ値を平滑化してから、重みをper-channelでint8量子化します。forwardは融合Triton int8 GEMM（オンラインのactivation回転＋動的な行単位int8量子化＋逆量子化をmatmulに融合）で実行されます。**fp8の代替**であり、`--fp8_base`/`--fp8_scaled`とは併用できません。
+
+- 重みのVRAMはbf16比で半減します（fp8と同等）。主な利点は **fp8非対応GPU（RTX 30シリーズ以前）での速度** で、Linear forwardがbf16比でおよそ1.3〜3倍高速です。fp8対応GPUでは効果は小さくなります。
+- 量子化ノイズはscaled fp8と同程度です（回転後のper-channel int8）。
+- 融合カーネルには **triton** が必要です（Windowsではtorchのバージョンに対応する`pip install triton-windows`）。tritonがなくても逆量子化bf16フォールバックで学習は可能です（VRAM削減は維持、速度向上はなし）。
+- `--convrot_int8_bwd int8`（opt-in）を指定すると、backwardのgrad_xも融合int8 GEMMを通ります。高速ですが勾配がわずかに量子化されます。デフォルトの`bf16`は一時的に逆量子化する方式で、最も高精度です。
+- 適用範囲はfp8と同じく28個のメインブロックのみです。量子化された層もLoRA学習可能です（LoRA枝には回転前の入力が渡され、その勾配はbase量子化の影響を受けません）。
+- `--blocks_to_swap`、`--gradient_checkpointing`と併用できます。`--compile`使用時は量子化されたLinearは自動的にコンパイル対象から除外されます。`--turbo_dit`との併用は現時点では未対応です。マルチGPU学習は未検証です。
+
+参考速度（20ステップの粗い計測。LoRA学習、1024x1024、batch size 1、`--flash_attn`、gradient checkpointing使用）:
+
+| GPU | bf16 | fp8_scaled | convrot_int8 |
+|---|---|---|---|
+| RTX 3090 | （載らない） | 7.1 s/step | 5.3 s/step |
+| RTX PRO 6000 Blackwell Max-Q | 2.0 s/step | 2.3 s/step | 1.9 s/step |
+
+loss curveはfp8/bf16基準とほぼ一致します（backward両モードとも）。`--convrot_int8_bwd int8`はgradient checkpointing使用時にはステップ速度の差がほぼ出ません（backwardの大半がforward再計算のため）。主にfp8非対応GPUでcheckpointingを使わない場合に有効です。fp8がbf16より遅いのは、K2のfp8経路がforwardごとにbf16へ逆量子化するため（scaled_mm不使用）です。ConvRotは真のint8 GEMMを実行するため、fp8非対応GPUで優位になります。
+
+</details>
+
 ### Attention / Attention
 
 - `--sdpa` for PyTorch's scaled dot product attention (default, no extra dependencies).

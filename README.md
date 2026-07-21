@@ -326,4 +326,6 @@ Code under the `wan` directory is modified from [Wan2.1](https://github.com/Wan-
 
 Code under the `frame_pack` directory is modified from [FramePack](https://github.com/lllyasviel/FramePack). The license is under the Apache License 2.0.
 
+Code in `modules/convrot_int8_kernels.py` is modified from [comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen) (in turn derived from dxqb/OneTrainer and ComfyUI-Flux2-INT8). The license is under the Apache License 2.0.
+
 Other code is under the Apache License 2.0. Some code is copied and modified from Diffusers.
