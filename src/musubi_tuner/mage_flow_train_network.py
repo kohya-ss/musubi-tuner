@@ -62,6 +62,8 @@ class MageFlowNetworkTrainer(NetworkTrainer):
 
     def handle_model_specific_args(self, args):
         self.is_edit = bool(args.is_edit)
+        if bool(getattr(args, "compile", False)) and bool(getattr(args, "compile_fullgraph", False)):
+            raise ValueError("Mage-Flow does not support --compile_fullgraph; use --compile without fullgraph")
         if args.fp8_base and not args.fp8_scaled:
             raise ValueError("Mage-Flow --fp8_base requires --fp8_scaled; unscaled FP8 is unsupported")
         if args.network_module != "musubi_tuner.networks.lora_mage_flow":

@@ -173,7 +173,8 @@ def load_mage_flow_transformer(
     config = MageFlowConfig.released() if _config is None else _config
     inspection = inspect_component(path, "dit", config=config)
     state_dict = normalize_dit_state_dict(load_file(str(inspection.path), device="cpu"))
-    model = MageFlow(config, attention_backend=attention_backend)
+    with torch.device("meta"):
+        model = MageFlow(config, attention_backend=attention_backend)
     if fp8_scaled:
         compute_dtype = torch.bfloat16 if dtype is None else dtype
         state_dict = {key: value.to(compute_dtype) if value.is_floating_point() else value for key, value in state_dict.items()}

@@ -80,8 +80,10 @@ class MageFlowEmbedRope(nn.Module):
         super().__init__()
         self.theta = theta
         self.axes_dim = tuple(axes_dim)
-        positive = torch.arange(4096)
-        negative = torch.arange(4096).flip(0) * -1 - 1
+        # These lookup tables are not checkpoint parameters. Keep them materialized
+        # while the 4B transformer skeleton is constructed on the meta device.
+        positive = torch.arange(4096, device="cpu")
+        negative = torch.arange(4096, device="cpu").flip(0) * -1 - 1
         self.pos_freqs = torch.cat(
             [self.rope_params(positive, axis_dim, theta) for axis_dim in self.axes_dim],
             dim=1,
@@ -99,7 +101,7 @@ class MageFlowEmbedRope(nn.Module):
             raise ValueError("each RoPE axis dimension must be even")
         frequencies = torch.outer(
             index,
-            1.0 / torch.pow(theta, torch.arange(0, dim, 2, dtype=torch.float32).div(dim)),
+            1.0 / torch.pow(theta, torch.arange(0, dim, 2, dtype=torch.float32, device=index.device).div(dim)),
         )
         return torch.polar(torch.ones_like(frequencies), frequencies)
 

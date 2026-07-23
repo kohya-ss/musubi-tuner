@@ -167,6 +167,10 @@ Useful memory options:
 --compile
 ```
 
+`--compile` permits graph breaks around packed-segment validation.
+`--compile_fullgraph` is rejected because those data-dependent packed lengths
+cannot be captured as one static graph.
+
 Plain `--fp8_base` is rejected. Scaled FP8 quantizes only supported repeated
 block attention/MLP weights; modulation, norms and global projections stay in
 the compute dtype. Eligible frozen base weights are converted while the DiT is
@@ -387,6 +391,10 @@ projection は対象外です。`include_patterns` / `exclude_patterns` を指�
 --fp8_base --fp8_scaled
 --compile
 ```
+
+`--compile` は packed segment 検証部分での graph break を許可します。
+data-dependent な packed length を単一の静的 graph に取り込めないため、
+`--compile_fullgraph` は拒否します。
 
 unscaled の `--fp8_base` は拒否します。scaled FP8 変換は DiT load 中に対象の
 凍結 base weight だけへ適用され、その後 compute dtype の LoRA を付加します。

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 from safetensors import safe_open
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 from musubi_tuner.dataset.cache_io import save_latent_cache_mage_flow, save_text_encoder_output_cache_mage_flow
 from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo
@@ -130,6 +130,50 @@ def test_mage_training_cache_rejects_mode_metadata_mismatch(tmp_path):
     )
 
     with pytest.raises(ValueError, match=r"cache architecture mismatch.*expected mage_flow_edit.*got mage_flow"):
+        dataset.prepare_for_training()
+
+
+def test_mage_training_cache_rejects_format_version_mismatch(tmp_path):
+    image_dir = tmp_path / "images"
+    cache_dir = tmp_path / "cache"
+    image_dir.mkdir()
+    cache_dir.mkdir()
+    item = ItemInfo(
+        item_key="stale",
+        caption="caption",
+        original_size=(32, 32),
+        bucket_size=(32, 32),
+        latent_cache_path=str(cache_dir / "stale_0032x0032_mf.safetensors"),
+    )
+    item.text_encoder_output_cache_path = str(cache_dir / "stale_mf_te.safetensors")
+    save_file(
+        {"latents_1x2x2_bfloat16": torch.zeros(128, 2, 2, dtype=torch.bfloat16)},
+        item.latent_cache_path,
+        metadata={
+            "architecture": "mage_flow",
+            "width": "32",
+            "height": "32",
+            "format_version": "0.9.0",
+        },
+    )
+    save_text_encoder_output_cache_mage_flow(
+        item,
+        torch.zeros(3, 2560, dtype=torch.bfloat16),
+        is_edit=False,
+    )
+    dataset = ImageDataset(
+        resolution=(32, 32),
+        caption_extension=None,
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        cache_directory=str(cache_dir),
+        architecture="mf",
+    )
+
+    with pytest.raises(ValueError, match=r"cache format version mismatch.*expected 1\.0\.1.*got 0\.9\.0"):
         dataset.prepare_for_training()
 
 

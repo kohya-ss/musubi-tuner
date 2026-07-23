@@ -41,6 +41,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
 )
+from musubi_tuner.dataset.cache_io import CACHE_FORMAT_VERSION
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
 
@@ -53,6 +54,12 @@ def _validate_mage_cache_metadata(path: str, expected_architecture: str) -> None
         raise ValueError(
             f"Mage-Flow cache architecture mismatch for {path}: "
             f"expected {expected_architecture}, got {actual_architecture or '<missing>'}"
+        )
+    actual_format_version = metadata.get("format_version")
+    if actual_format_version != CACHE_FORMAT_VERSION:
+        raise ValueError(
+            f"Mage-Flow cache format version mismatch for {path}: "
+            f"expected {CACHE_FORMAT_VERSION}, got {actual_format_version or '<missing>'}"
         )
 
 

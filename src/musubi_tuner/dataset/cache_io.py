@@ -31,6 +31,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+CACHE_FORMAT_VERSION = "1.0.1"
+
 
 # We use simple if-else approach to support multiple architectures.
 # Maybe we can use a plugin system in the future.
@@ -225,9 +227,7 @@ def save_latent_cache_mage_flow(
     for index, control in enumerate(controls):
         validate(f"control latent {index}", control)
         _, control_height, control_width = control.shape
-        state_dict[f"latents_control_{index}_1x{control_height}x{control_width}_bfloat16"] = (
-            control.detach().cpu().contiguous()
-        )
+        state_dict[f"latents_control_{index}_1x{control_height}x{control_width}_bfloat16"] = control.detach().cpu().contiguous()
     architecture = ARCHITECTURE_MAGE_FLOW_EDIT_FULL if is_edit else ARCHITECTURE_MAGE_FLOW_FULL
     save_latent_cache_common(item_info, state_dict, architecture)
 
@@ -345,7 +345,7 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
         "architecture": arch_fullname,
         "width": f"{item_info.original_size[0]}",
         "height": f"{item_info.original_size[1]}",
-        "format_version": "1.0.1",
+        "format_version": CACHE_FORMAT_VERSION,
     }
     if item_info.frame_count is not None:
         metadata["frame_count"] = f"{item_info.frame_count}"
@@ -560,7 +560,7 @@ def save_text_encoder_output_cache_common(
     metadata = {
         "architecture": arch_fullname,
         "caption1": item_info.caption,
-        "format_version": "1.0.1",
+        "format_version": CACHE_FORMAT_VERSION,
     }
     if merge_existing and os.path.exists(item_info.text_encoder_output_cache_path):
         # load existing cache and update metadata

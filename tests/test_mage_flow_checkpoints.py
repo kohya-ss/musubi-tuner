@@ -47,6 +47,24 @@ def test_loader_round_trips_a_strict_canonical_checkpoint(tmp_path):
         torch.testing.assert_close(value, expected[key])
 
 
+def test_loader_constructs_transformer_on_meta(tmp_path, monkeypatch):
+    path = tmp_path / "dit.safetensors"
+    write_checkpoint(path)
+    real_model = model_module.MageFlow
+    construction_devices = []
+
+    def tracked_model(*args, **kwargs):
+        construction_devices.append(torch.empty(0).device.type)
+        return real_model(*args, **kwargs)
+
+    monkeypatch.setattr(model_module, "MageFlow", tracked_model)
+
+    loaded = load_mage_flow_transformer(path, device="cpu", dtype=torch.float32, _config=tiny_config())
+
+    assert construction_devices == ["meta"]
+    assert all(parameter.device.type == "cpu" for parameter in loaded.parameters())
+
+
 @pytest.mark.parametrize("prefix", ["_orig_mod.", "transformer."])
 def test_loader_accepts_only_documented_exact_prefix_layouts(tmp_path, prefix):
     path = tmp_path / "dit.safetensors"

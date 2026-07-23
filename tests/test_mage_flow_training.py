@@ -197,6 +197,27 @@ def test_trainer_rejects_plain_fp8_and_non_mage_network_module():
         trainer.handle_model_specific_args(SimpleNamespace(**{**common, "blocks_to_swap": 11}))
 
 
+def test_trainer_rejects_compile_fullgraph_before_model_loading():
+    args = SimpleNamespace(
+        is_edit=False,
+        mixed_precision="bf16",
+        fp8_base=False,
+        fp8_scaled=False,
+        network_module="musubi_tuner.networks.lora_mage_flow",
+        sage_attn=False,
+        xformers=False,
+        flash3=False,
+        sdpa=True,
+        flash_attn=False,
+        blocks_to_swap=0,
+        compile=True,
+        compile_fullgraph=True,
+    )
+
+    with pytest.raises(ValueError, match="compile_fullgraph"):
+        MageFlowNetworkTrainer().handle_model_specific_args(args)
+
+
 def test_dim_from_weights_preflight_validates_network_weights_path(monkeypatch):
     validated = []
     monkeypatch.setattr(
