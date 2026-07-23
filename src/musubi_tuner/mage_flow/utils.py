@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import re
+from collections.abc import Mapping
 from typing import Sequence
 
 import torch
+from safetensors import safe_open
 
 from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_MAGE_FLOW,
@@ -14,6 +18,20 @@ from musubi_tuner.dataset.architectures import (
 
 
 ImageShape = tuple[int, int, int]
+
+
+class ComponentValidationError(ValueError):
+    """A component file failed structural validation before model allocation."""
+
+
+@dataclass(frozen=True)
+class ComponentInspection:
+    component: str
+    path: Path
+    layout: str
+    shapes: dict[str, tuple[int, ...]]
+    dtypes: dict[str, str]
+    metadata: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -81,6 +99,179 @@ def architecture_for_mode(is_edit: bool) -> tuple[str, str]:
     if is_edit:
         return ARCHITECTURE_MAGE_FLOW_EDIT, ARCHITECTURE_MAGE_FLOW_EDIT_FULL
     return ARCHITECTURE_MAGE_FLOW, ARCHITECTURE_MAGE_FLOW_FULL
+
+
+def _validate_component_path(path: str | Path, component: str) -> Path:
+    normalized = Path(path)
+    if not normalized.exists():
+        raise ComponentValidationError(f"{component} component file does not exist: {normalized}")
+    if not normalized.is_file():
+        raise ComponentValidationError(f"{component} component path must be one regular file: {normalized}")
+    if normalized.suffix.lower() != ".safetensors":
+        raise ComponentValidationError(f"{component} component must be one .safetensors file: {normalized}")
+    return normalized
+
+
+def _detect_dit_layout(keys: Sequence[str]) -> tuple[str, str]:
+    if not keys:
+        raise ComponentValidationError("DiT checkpoint has an empty safetensors header")
+    prefixes = []
+    for key in keys:
+        if key.startswith("_orig_mod."):
+            prefixes.append("_orig_mod.")
+        elif key.startswith("transformer."):
+            prefixes.append("transformer.")
+        elif key.startswith(("img_in.", "txt_norm.", "txt_in.", "time_text_embed.", "transformer_blocks.", "norm_out.", "proj_out.")):
+            prefixes.append("")
+        else:
+            prefixes.append("unknown")
+    categories = set(prefixes) - {"unknown"}
+    if not categories:
+        raise ComponentValidationError(
+            "DiT checkpoint uses an unknown key layout; expected canonical, _orig_mod., or transformer. keys"
+        )
+    if len(categories) != 1:
+        raise ComponentValidationError("DiT checkpoint uses a mixed key layout; all keys must share one exact layout")
+    prefix = categories.pop()
+    layout = {"": "canonical", "_orig_mod.": "official_compiled", "transformer.": "component_prefixed"}[prefix]
+    return layout, prefix
+
+
+def normalize_dit_state_dict(state_dict: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    layout, prefix = _detect_dit_layout(list(state_dict))
+    del layout
+    normalized = {
+        (key[len(prefix) :] if not prefix or key.startswith(prefix) else key): value for key, value in state_dict.items()
+    }
+    if len(normalized) != len(state_dict):
+        raise ComponentValidationError("DiT key normalization produced duplicate canonical keys")
+    return normalized
+
+
+def _dit_expected_shapes(config: MageFlowConfig) -> dict[str, tuple[int, ...]]:
+    hidden = config.hidden_size
+    head_dim = hidden // config.num_heads
+    mlp_hidden = hidden * 4
+    shapes: dict[str, tuple[int, ...]] = {
+        "img_in.weight": (hidden, config.in_channels),
+        "img_in.bias": (hidden,),
+        "txt_norm.weight": (config.context_in_dim,),
+        "txt_in.weight": (hidden, config.context_in_dim),
+        "txt_in.bias": (hidden,),
+        "time_text_embed.timestep_embedder.linear_1.weight": (hidden, 256),
+        "time_text_embed.timestep_embedder.linear_1.bias": (hidden,),
+        "time_text_embed.timestep_embedder.linear_2.weight": (hidden, hidden),
+        "time_text_embed.timestep_embedder.linear_2.bias": (hidden,),
+        "norm_out.linear.weight": (hidden * 2, hidden),
+        "norm_out.linear.bias": (hidden * 2,),
+        "proj_out.weight": (config.patch_size * config.patch_size * config.out_channels, hidden),
+        "proj_out.bias": (config.patch_size * config.patch_size * config.out_channels,),
+    }
+    for block_index in range(config.depth):
+        prefix = f"transformer_blocks.{block_index}."
+        shapes.update(
+            {
+                prefix + "img_mod.1.weight": (hidden * 6, hidden),
+                prefix + "img_mod.1.bias": (hidden * 6,),
+                prefix + "attn.norm_q.weight": (head_dim,),
+                prefix + "attn.norm_k.weight": (head_dim,),
+                prefix + "attn.norm_added_q.weight": (head_dim,),
+                prefix + "attn.norm_added_k.weight": (head_dim,),
+                prefix + "img_mlp.net.0.proj.weight": (mlp_hidden, hidden),
+                prefix + "img_mlp.net.0.proj.bias": (mlp_hidden,),
+                prefix + "img_mlp.net.2.weight": (hidden, mlp_hidden),
+                prefix + "img_mlp.net.2.bias": (hidden,),
+                prefix + "txt_mod.1.weight": (hidden * 6, hidden),
+                prefix + "txt_mod.1.bias": (hidden * 6,),
+                prefix + "txt_mlp.net.0.proj.weight": (mlp_hidden, hidden),
+                prefix + "txt_mlp.net.0.proj.bias": (mlp_hidden,),
+                prefix + "txt_mlp.net.2.weight": (hidden, mlp_hidden),
+                prefix + "txt_mlp.net.2.bias": (hidden,),
+            }
+        )
+        for projection in (
+            "to_q",
+            "to_k",
+            "to_v",
+            "add_q_proj",
+            "add_k_proj",
+            "add_v_proj",
+            "to_out.0",
+            "to_add_out",
+        ):
+            shapes[prefix + f"attn.{projection}.weight"] = (hidden, hidden)
+            shapes[prefix + f"attn.{projection}.bias"] = (hidden,)
+    return shapes
+
+
+def _format_key_list(keys: Sequence[str]) -> str:
+    return ", ".join(keys[:10]) if keys else "none"
+
+
+def inspect_component(
+    path: str | Path,
+    component: str,
+    *,
+    config: MageFlowConfig | None = None,
+    require_decoder: bool = False,
+) -> ComponentInspection:
+    del require_decoder
+    component_name = component.lower().strip()
+    normalized_path = _validate_component_path(path, component_name)
+    if component_name != "dit":
+        raise ComponentValidationError(f"unsupported Mage-Flow component inspection request: {component!r}")
+    config = MageFlowConfig.released() if config is None else config
+
+    try:
+        with safe_open(normalized_path, framework="pt", device="cpu") as handle:
+            raw_keys = list(handle.keys())
+            layout, prefix = _detect_dit_layout(raw_keys)
+            canonical_keys = {key: key[len(prefix) :] if not prefix or key.startswith(prefix) else key for key in raw_keys}
+            shapes = {canonical_keys[key]: tuple(handle.get_slice(key).get_shape()) for key in raw_keys}
+            dtypes = {canonical_keys[key]: handle.get_slice(key).get_dtype() for key in raw_keys}
+            metadata = handle.metadata() or {}
+    except ComponentValidationError:
+        raise
+    except Exception as exc:
+        raise ComponentValidationError(f"cannot read DiT safetensors header from {normalized_path}: {exc}") from exc
+
+    if len(shapes) != len(raw_keys):
+        raise ComponentValidationError("DiT key normalization produced duplicate canonical keys")
+    block_pattern = re.compile(r"^transformer_blocks\.(\d+)\.")
+    actual_blocks = sorted({int(match.group(1)) for key in shapes if (match := block_pattern.match(key))})
+    expected_blocks = list(range(config.depth))
+    if actual_blocks != expected_blocks:
+        raise ComponentValidationError(
+            f"DiT ({layout}) transformer blocks mismatch: expected {expected_blocks}, actual {actual_blocks}"
+        )
+
+    expected_shapes = _dit_expected_shapes(config)
+    missing = sorted(set(expected_shapes) - set(shapes))
+    unexpected = sorted(set(shapes) - set(expected_shapes))
+    shape_errors = [
+        f"{key}: expected {expected_shapes[key]}, actual {shapes[key]}"
+        for key in sorted(set(expected_shapes) & set(shapes))
+        if expected_shapes[key] != shapes[key]
+    ]
+    allowed_dtypes = {"BF16", "F16", "F32", "F64", "F8_E4M3", "F8_E5M2"}
+    dtype_errors = [f"{key}: unsupported dtype {dtype}" for key, dtype in dtypes.items() if dtype not in allowed_dtypes]
+    if missing or unexpected or shape_errors or dtype_errors:
+        details = [
+            f"DiT component structural mismatch in {normalized_path} (layout={layout})",
+            f"missing keys (first 10): {_format_key_list(missing)}",
+            f"unexpected keys (first 10): {_format_key_list(unexpected)}",
+            f"shape mismatches (first 10): {_format_key_list(shape_errors)}",
+            f"dtype mismatches (first 10): {_format_key_list(dtype_errors)}",
+        ]
+        raise ComponentValidationError("; ".join(details))
+    return ComponentInspection(
+        component="dit",
+        path=normalized_path,
+        layout=layout,
+        shapes=shapes,
+        dtypes=dtypes,
+        metadata=metadata,
+    )
 
 
 def _validate_cumulative_lengths(name: str, cu: torch.Tensor, token_count: int) -> list[int]:

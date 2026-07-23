@@ -8,9 +8,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from diffusers.models.normalization import RMSNorm
+from safetensors.torch import load_file
 
 from .layers import AdaLayerNormContinuous, MageFlowEmbedRope, MageFlowTimestepProjEmbeddings, MageFlowTransformerBlock
-from .utils import MageFlowConfig, PackedMageFlowInputs
+from .utils import ComponentValidationError, MageFlowConfig, PackedMageFlowInputs, inspect_component, normalize_dit_state_dict
 
 
 class MageFlow(nn.Module):
@@ -100,4 +101,31 @@ class MageFlow(nn.Module):
         return self.proj_out(image)
 
 
-__all__ = ["MageFlow"]
+def load_mage_flow_transformer(
+    path,
+    *,
+    device: str | torch.device = "cpu",
+    dtype: torch.dtype | None = torch.bfloat16,
+    attention_backend: str = "sdpa",
+    fp8_scaled: bool = False,
+    _config: MageFlowConfig | None = None,
+) -> MageFlow:
+    if fp8_scaled:
+        raise NotImplementedError("scaled FP8 conversion is applied by the trainer after strict Mage-Flow loading")
+    config = MageFlowConfig.released() if _config is None else _config
+    inspection = inspect_component(path, "dit", config=config)
+    state_dict = normalize_dit_state_dict(load_file(str(inspection.path), device="cpu"))
+    model = MageFlow(config, attention_backend=attention_backend)
+    try:
+        model.load_state_dict(state_dict, strict=True, assign=True)
+    except RuntimeError as exc:
+        raise ComponentValidationError(f"DiT strict state-dict load failed after header validation: {exc}") from exc
+    if dtype is not None:
+        model.to(device=device, dtype=dtype)
+    else:
+        model.to(device=device)
+    model.eval()
+    return model
+
+
+__all__ = ["MageFlow", "load_mage_flow_transformer"]
