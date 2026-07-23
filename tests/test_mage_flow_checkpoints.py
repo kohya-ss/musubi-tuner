@@ -6,7 +6,13 @@ from safetensors.torch import save_file
 
 from musubi_tuner.mage_flow import model as model_module
 from musubi_tuner.mage_flow.model import MageFlow, load_mage_flow_transformer
-from musubi_tuner.mage_flow.utils import ComponentValidationError, MageFlowConfig, inspect_component, normalize_dit_state_dict
+from musubi_tuner.mage_flow.utils import (
+    ComponentValidationError,
+    MageFlowConfig,
+    inspect_component,
+    normalize_dit_state_dict,
+    pack_training_batch,
+)
 
 
 def tiny_config(depth=2):
@@ -115,3 +121,31 @@ def test_released_loader_rejects_tiny_architecture_before_allocation(tmp_path, m
 
     with pytest.raises(ComponentValidationError, match="transformer blocks"):
         load_mage_flow_transformer(path, device="cpu")
+
+
+def test_scaled_fp8_quantizes_only_supported_block_linears(tmp_path):
+    path = tmp_path / "dit.safetensors"
+    write_checkpoint(path)
+
+    loaded = load_mage_flow_transformer(
+        path,
+        device="cpu",
+        dtype=torch.bfloat16,
+        fp8_scaled=True,
+        _config=tiny_config(),
+    )
+
+    assert loaded.transformer_blocks[0].attn.to_q.weight.dtype == torch.float8_e4m3fn
+    assert loaded.transformer_blocks[0].attn.to_q.scale_weight.dtype == torch.bfloat16
+    assert loaded.transformer_blocks[0].img_mlp.net[0].proj.weight.dtype == torch.float8_e4m3fn
+    assert loaded.transformer_blocks[0].img_mod[1].weight.dtype == torch.bfloat16
+    assert loaded.img_in.weight.dtype == torch.bfloat16
+
+    packed = pack_training_batch(
+        torch.randn(1, 4, 2, 2, dtype=torch.bfloat16),
+        [torch.randn(2, 7, dtype=torch.bfloat16)],
+        torch.tensor([0.5]),
+    )
+    with torch.no_grad():
+        output = loaded(packed)
+    assert torch.isfinite(output).all()

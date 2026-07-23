@@ -184,11 +184,16 @@ def test_trainer_rejects_plain_fp8_and_non_mage_network_module():
         "sage_attn": False,
         "xformers": False,
         "flash3": False,
+        "sdpa": True,
+        "flash_attn": False,
+        "blocks_to_swap": 0,
     }
     with pytest.raises(ValueError, match="fp8_scaled"):
         trainer.handle_model_specific_args(SimpleNamespace(**{**common, "fp8_base": True}))
     with pytest.raises(ValueError, match="LoRA-only"):
         trainer.handle_model_specific_args(SimpleNamespace(**{**common, "network_module": "some.other.network"}))
+    with pytest.raises(ValueError, match="0 through 10"):
+        trainer.handle_model_specific_args(SimpleNamespace(**{**common, "blocks_to_swap": 11}))
 
 
 def test_training_sample_vae_load_requires_decoder(monkeypatch):

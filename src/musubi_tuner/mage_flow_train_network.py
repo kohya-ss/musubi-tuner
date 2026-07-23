@@ -64,11 +64,18 @@ class MageFlowNetworkTrainer(NetworkTrainer):
             raise ValueError("Mage-Flow --fp8_base requires --fp8_scaled; unscaled FP8 is unsupported")
         if args.network_module != "musubi_tuner.networks.lora_mage_flow":
             raise ValueError("Mage-Flow is LoRA-only and requires --network_module musubi_tuner.networks.lora_mage_flow")
+        blocks_to_swap = int(getattr(args, "blocks_to_swap", 0) or 0)
+        if not 0 <= blocks_to_swap <= 10:
+            raise ValueError(f"Mage-Flow --blocks_to_swap must be from 0 through 10, got {blocks_to_swap}")
         unsupported_attention = [name for name in ("sage_attn", "xformers", "flash3") if bool(getattr(args, name, False))]
         if unsupported_attention:
             raise ValueError(
                 f"Mage-Flow supports SDPA and optional FlashAttention 2 only; unsupported flags: {', '.join(unsupported_attention)}"
             )
+        if getattr(args, "flash_attn", False):
+            args.sdpa = False
+        elif not getattr(args, "sdpa", False):
+            args.sdpa = True
         self.is_edit = bool(args.is_edit)
         self.dit_dtype = (
             torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32

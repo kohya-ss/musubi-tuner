@@ -10,8 +10,15 @@ import torch.nn as nn
 from diffusers.models.normalization import RMSNorm
 from safetensors.torch import load_file
 
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
+from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+
 from .layers import AdaLayerNormContinuous, MageFlowEmbedRope, MageFlowTimestepProjEmbeddings, MageFlowTransformerBlock
 from .utils import ComponentValidationError, MageFlowConfig, PackedMageFlowInputs, inspect_component, normalize_dit_state_dict
+
+
+FP8_OPTIMIZATION_TARGET_KEYS = ["transformer_blocks."]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["img_mod", "txt_mod", "norm"]
 
 
 class MageFlow(nn.Module):
@@ -52,9 +59,58 @@ class MageFlow(nn.Module):
             eps=1e-6,
         )
         self.proj_out = nn.Linear(config.hidden_size, config.patch_size * config.patch_size * config.out_channels)
+        self.blocks_to_swap = 0
+        self.offloader = None
 
     def set_gradient_checkpointing(self, enabled: bool = True) -> None:
         self.checkpoint = enabled
+
+    def enable_gradient_checkpointing(self, cpu_offload: bool = False) -> None:
+        if cpu_offload:
+            raise ValueError("Mage-Flow activation CPU offload is not implemented; use block swap instead")
+        self.set_gradient_checkpointing(True)
+
+    def disable_gradient_checkpointing(self) -> None:
+        self.set_gradient_checkpointing(False)
+
+    def enable_block_swap(self, num_blocks: int, config: BlockSwapConfig) -> None:
+        maximum = max(0, len(self.transformer_blocks) - 2)
+        if not isinstance(num_blocks, int) or not 0 <= num_blocks <= maximum:
+            raise ValueError(f"Mage-Flow blocks_to_swap must be from 0 through {maximum}, got {num_blocks}")
+        self.blocks_to_swap = num_blocks
+        self.offloader = (
+            create_offloader(
+                "mage-flow",
+                self.transformer_blocks,
+                len(self.transformer_blocks),
+                num_blocks,
+                config,
+            )
+            if num_blocks
+            else None
+        )
+
+    def move_to_device_except_swap_blocks(self, device: torch.device) -> None:
+        if self.blocks_to_swap:
+            blocks = self.transformer_blocks
+            self.transformer_blocks = nn.ModuleList()
+        self.to(device)
+        if self.blocks_to_swap:
+            self.transformer_blocks = blocks
+
+    def prepare_block_swap_before_forward(self) -> None:
+        if self.offloader is not None:
+            self.offloader.prepare_block_devices_before_forward(self.transformer_blocks)
+
+    def switch_block_swap_for_inference(self) -> None:
+        if self.offloader is not None:
+            self.offloader.set_forward_only(True)
+            self.prepare_block_swap_before_forward()
+
+    def switch_block_swap_for_training(self) -> None:
+        if self.offloader is not None:
+            self.offloader.set_forward_only(False)
+            self.prepare_block_swap_before_forward()
 
     def set_attention_backend(self, backend: str) -> None:
         normalized = backend.lower().strip()
@@ -75,7 +131,9 @@ class MageFlow(nn.Module):
         text = self.txt_in(self.txt_norm(packed.text_tokens))
         timestep_embedding = self.time_text_embed(packed.timesteps.to(image.dtype), image)
 
-        for block in self.transformer_blocks:
+        for block_index, block in enumerate(self.transformer_blocks):
+            if self.offloader is not None:
+                self.offloader.wait_for_block(block_index)
             if self.training and self.checkpoint:
                 text, image = torch.utils.checkpoint.checkpoint(
                     block,
@@ -96,6 +154,8 @@ class MageFlow(nn.Module):
                     txt_cu_lens=packed.text_cu_seqlens,
                     img_cu_lens=packed.image_cu_seqlens,
                 )
+            if self.offloader is not None:
+                self.offloader.submit_move_blocks_forward(self.transformer_blocks, block_index)
 
         image = self.norm_out(image, timestep_embedding, cu_seqlens=packed.image_cu_seqlens)
         return self.proj_out(image)
@@ -110,17 +170,28 @@ def load_mage_flow_transformer(
     fp8_scaled: bool = False,
     _config: MageFlowConfig | None = None,
 ) -> MageFlow:
-    if fp8_scaled:
-        raise NotImplementedError("scaled FP8 conversion is applied by the trainer after strict Mage-Flow loading")
     config = MageFlowConfig.released() if _config is None else _config
     inspection = inspect_component(path, "dit", config=config)
     state_dict = normalize_dit_state_dict(load_file(str(inspection.path), device="cpu"))
     model = MageFlow(config, attention_backend=attention_backend)
+    if fp8_scaled:
+        compute_dtype = torch.bfloat16 if dtype is None else dtype
+        state_dict = {key: value.to(compute_dtype) if value.is_floating_point() else value for key, value in state_dict.items()}
+        state_dict = optimize_state_dict_with_fp8(
+            state_dict,
+            torch.device(device),
+            FP8_OPTIMIZATION_TARGET_KEYS,
+            FP8_OPTIMIZATION_EXCLUDE_KEYS,
+            move_to_device=False,
+        )
+        apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)
     try:
         model.load_state_dict(state_dict, strict=True, assign=True)
     except RuntimeError as exc:
         raise ComponentValidationError(f"DiT strict state-dict load failed after header validation: {exc}") from exc
-    if dtype is not None:
+    if fp8_scaled:
+        model.to(device=device)
+    elif dtype is not None:
         model.to(device=device, dtype=dtype)
     else:
         model.to(device=device)
