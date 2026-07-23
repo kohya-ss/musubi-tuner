@@ -1,6 +1,6 @@
 # Mage-Flow and Mage-Flow-Edit Integration Design
 
-- Status: Approved for implementation planning
+- Status: Revised after external review; awaiting final approval
 - Date: 2026-07-23
 - Target branch: `codex/mage-flow`, based on `upstream/main` at `8934cfbbb4b9bcfa8071ce209129f0c5eb5df2e6`
 
@@ -58,8 +58,9 @@ Implementation behavior is derived from these sources, in this order:
    - `microsoft/Mage-Flow-Edit-Base`
    - `microsoft/Mage-Flow-Edit`
    - `microsoft/Mage-Flow-Edit-Turbo`
+5. [Qwen3-VL-4B-Instruct config pinned at `ebb281ec70b05090aa6165b016eac8ec08e71b17`](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct/blob/ebb281ec70b05090aa6165b016eac8ec08e71b17/config.json)
 
-The source revision is pinned because the upstream `main` branch can move during implementation. Ported source must retain the Microsoft MIT copyright and license notice where required.
+The Mage source revision is pinned because its upstream `main` branch can move during implementation. The Qwen config is pinned separately so checkpoint validation cannot drift with a mutable Hub branch. Ported source must retain the Microsoft MIT copyright and license notice where required.
 
 ### 3.1 Fixed released architecture
 
@@ -92,6 +93,7 @@ T2I and Edit use the exact official prompt templates from the pinned source.
 - The cached conditioning is the final Qwen3-VL hidden state only, with shape `[L, 2560]` after the template prefix is removed.
 - The effective post-prefix length must be between 1 and 2048.
 - Edit feeds the ordered reference images through Qwen3-VL's visual path and caps each visual-conditioning image's long edge at 384 pixels, preserving aspect ratio.
+- The conditioning path returns the multimodal backbone's final hidden state directly. It does not compute logits or execute an LM head.
 
 The tokenizer and processor are non-weight assets. Following the existing Krea 2 integration, they come from `Qwen/Qwen3-VL-4B-Instruct` or its local Hugging Face cache while `--text_encoder` remains a single local safetensors weight file.
 
@@ -185,10 +187,12 @@ MageVAE validation must prove:
 Qwen3-VL validation must prove:
 
 - text hidden size is 2560;
-- the language model has 36 layers and the fixed Qwen3-VL-4B dimensions;
+- the language model has 36 layers and the fixed Qwen3-VL-4B dimensions from the pinned Qwen config in section 3;
 - the visual component required by Edit is present;
-- tied `lm_head.weight` omission is allowed only when it can be re-tied to the input embedding;
+- `lm_head.weight` is not a required conditioning key; if present, it is an explicitly recognized unused key and is not loaded, allocated, or re-tied merely to satisfy state-dict loading;
 - an 8B or otherwise shape-incompatible Qwen checkpoint is rejected.
+
+The 8B rejection must use the complete pinned dimensional signature, not the 36-layer count alone.
 
 On failure, report the component, detected layout, expected shape, actual shape, and the first ten missing or unexpected keys. Do not continue with `strict=False` warnings after a structural mismatch.
 
@@ -203,7 +207,7 @@ Add two architecture identities:
 
 Short names contain no underscore, as required by `dataset/architectures.py`. Separate full names prevent T2I and Edit cache files from being mistaken for one another even when target paths and captions are the same.
 
-MageVAE requires image dimensions divisible by 16. Register a 16-pixel bucket step for both identities. This is an additive registration; the resolution and batching behavior of every existing architecture remains unchanged.
+MageVAE requires image dimensions divisible by 16. Register a 16-pixel bucket step for both identities in the existing per-architecture `BucketSelector.ARCHITECTURE_STEPS_MAP`. The map has no global resolution-step fallback: selection looks up the requested architecture key and rejects an unknown key. Implementation adds only `mf` and `mfe` entries and must not mutate any pre-existing entry. A regression test records the key/value pairs present at base commit `8934cfb` and proves they remain unchanged while both new identities resolve to 16.
 
 ## 7. Cache Data Contract
 
@@ -294,6 +298,8 @@ Text segments are already truly variable length and are concatenated without pad
 
 This is not native-resolution packing because the current image segment lengths are equal. It is nevertheless the same model ABI. A future token-budget sampler and collator can provide heterogeneous segment lengths without changing checkpoint loading, cache tensor formats, model forward, attention, edit masking, or LoRA.
 
+The arithmetic example above is T2I-only. For Edit, each `image_cu_seqlens` increment is the complete target-plus-references segment defined in section 8.4; it must not be derived from target `H*W` alone.
+
 ### 8.4 Packed forward contract
 
 In this contract, `Li` means the complete image-token segment owned by sample `i`. For T2I it is the target `H*W`; for Edit it is the target token count plus every reference token count. The Mage-specific packer produces a validated internal object with:
@@ -305,7 +311,7 @@ In this contract, `Li` means the complete image-token segment owned by sample `i
 | `text_tokens` | `[1, sum(Ti), 2560]` | Same sample order as images |
 | `text_cu_seqlens` | int32 `[B+1]` | Same boundary invariants |
 | `image_shapes` | `list[list[tuple[int, int, int]]]` | Outer length is `B`; each inner list is ordered target then references |
-| `timesteps` | `[B]` | One scalar per isolated sample |
+| `timesteps` | `[B]` | One current denoising sigma per isolated sample, shared by every token in that sample |
 | `target_token_mask` | bool `[sum(Li)]` | True only for tokens participating in loss or scheduler updates |
 
 For T2I, each sample contains one frame and every image token is a target. For Edit, sample `i` is ordered as:
@@ -316,6 +322,8 @@ For T2I, each sample contains one frame and every image token is a target. For E
 
 Every shape tuple is `(1, H, W)`: the first value is a frame count, not a frame coordinate. The tuple's position inside its sample list supplies the RoPE frame coordinate, which resets for every sample. The target is position 0 and references are positions 1 through N in semantic order. The sum of each tuple's `1*H*W` product must equal that sample's image-segment length. Attention boundaries isolate complete samples; frame coordinates distinguish target and references within a sample. Only target tokens are selected by `target_token_mask` for loss and denoising updates.
 
+Edit has two separate concepts that must not be conflated. Reference latent values stay clean and are never stepped by the scheduler, but their transformer modulation is not evaluated at a separate sigma zero. Matching pinned official revision `ea7109b`, the current sample sigma produces one timestep embedding, and image cumulative lengths broadcast that embedding across the sample's target and all reference tokens. Text tokens for the same sample receive the same sample-level embedding. Implementations must not add per-segment reference timesteps or replace reference modulation with `t=0`.
+
 The packer must prove all length and shape invariants before calling the first transformer block. Attention code must not reconstruct boundaries from assumed equal resolutions.
 
 ## 9. Attention Backends
@@ -325,7 +333,9 @@ The supported first-release backends are:
 - PyTorch scaled dot-product attention, selected by `--sdpa`, as the dependency-free default;
 - FlashAttention 2 variable-length attention, selected by the repository's `--flash_attn` flag when the optional package is installed.
 
-SDPA implements packed isolation by iterating or grouping sample slices internally and calling `torch.nn.functional.scaled_dot_product_attention` on each isolated joint text/image sequence. It must never run one unmasked attention operation over the concatenated samples.
+SDPA first computes each isolated joint length `Ji = Ti + Li`. When every `Ji` is equal, the required fast path reshapes packed joint Q/K/V into `[B, heads, J, head_dim]`, performs one batched `torch.nn.functional.scaled_dot_product_attention` call, and flattens the result back into packed order. The batch dimension itself provides complete sample isolation, so this call needs no cross-sample mask.
+
+Bucket grouping guarantees equal image lengths in the first release, but cached text remains variable length, so equal image lengths do not imply equal joint lengths. When `Ji` differs, the backend groups equal joint lengths into batched SDPA calls and falls back to isolated per-sequence calls for unmatched lengths. This preserves the packed ABI without sacrificing the common equal-joint-length path. It must never pass `[1, sum(Ji), ...]` to one unmasked SDPA call, because that representation would allow cross-sample attention.
 
 FlashAttention 2 uses cumulative lengths directly. Text and image boundaries are joined per sample before the varlen kernel, then outputs are split back into their original streams.
 
@@ -460,8 +470,11 @@ Add deterministic tests for:
 - equal-size packed forward versus separate per-sample forwards;
 - packed sample isolation by perturbing one sample and proving another output is unchanged;
 - SDPA isolation with different text lengths;
+- equal-joint-length SDPA dispatch through one batched call rather than one call per sample;
+- heterogeneous joint-length grouping/fallback parity with separate per-sample forwards;
 - T2I all-target masking;
 - Edit target-only loss masking for one, two and three references;
+- official Edit timestep semantics: one sample timestep is broadcast across target and reference modulation while reference latent values remain clean and unstepped;
 - the `epsilon - z` target and one-step Euler sign;
 - deterministic VAE posterior sampling across item order and cache batch size;
 - invalid mode, control count, shape, dtype and metadata errors.
@@ -476,6 +489,7 @@ Use temporary safetensors files to test:
 - architecture identity mismatch rejection;
 - non-contiguous control rejection;
 - existing `BucketBatchManager` behavior for varlen text and control-shape grouping;
+- preservation of every pre-Mage entry in the per-architecture bucket-step map, plus 16-pixel resolution for `mf` and `mfe`;
 - equal-size bucket conversion into the future-compatible packed ABI.
 
 These tests must not require changing the common collator.
@@ -487,8 +501,10 @@ Synthetic header/key fixtures verify:
 - canonical official component layouts are accepted;
 - prefix normalization is deterministic;
 - missing, unexpected and wrong-shape keys are rejected before allocation;
+- Qwen layer indices and dimensions match the pinned 4B config, including language layers 0 through 35 and vision blocks 0 through 23;
 - a Qwen3-VL-8B-shaped fixture is rejected;
-- allowed tied or training-only exceptions are narrow and documented;
+- Qwen core checkpoints with or without an unused `lm_head.weight` are accepted without allocating or re-tying an LM head;
+- allowed unused or training-only exceptions are narrow and documented;
 - one file is required per component.
 
 Do not add a fabricated Comfy-Org fixture. Add that compatibility only when the real release exists.
@@ -581,6 +597,8 @@ Implementation is expected to be additive and localized to:
 
 No generic abstraction is required unless implementation proves unavoidable duplication with an existing, stable helper. In particular, the shared bucket collator is not redesigned for a feature intentionally deferred from this release.
 
+The implementation plan must keep review units ordered and independently testable: first land the T2I packed ABI and tiny-model parity, then add Edit with its one-to-three-reference and shared-timestep contract, and only then layer on FlashAttention 2, scaled FP8, block swap and compile support. This sequencing constrains delivery, not the final feature scope.
+
 ## 18. Acceptance Criteria
 
 The implementation is acceptable when all of the following are true:
@@ -591,9 +609,11 @@ The implementation is acceptable when all of the following are true:
 4. The first-release trainer uses existing same-resolution buckets and makes no semantic change to the common collator.
 5. The model, cache and attention interfaces accept heterogeneous segment lengths in unit tests even though the production data loader does not yet construct such image batches.
 6. Checkpoint and cache structural mismatches fail before a large allocation or first training step.
-7. SDPA is correct without an optional attention package, and FlashAttention 2 passes its gated parity test when installed.
-8. LoRA targets and exclusions match section 10.3 and round-trip through safetensors metadata.
-9. The existing test suite remains green.
-10. `pyproject.toml` dependency pins are unchanged.
-11. Real-weight manual tests document results against pinned official revision `ea7109b` before the integration is declared ready for general use.
-12. No claim of Comfy-Org compatibility is made until an actual released file passes a loader fixture and smoke test.
+7. SDPA is correct without an optional attention package; equal joint lengths use one batched call, heterogeneous joint lengths remain isolated, and FlashAttention 2 passes its gated parity test when installed.
+8. Edit uses one sample-level timestep embedding for target and reference modulation while keeping reference latent values clean and excluding them from loss and scheduler updates.
+9. LoRA targets and exclusions match section 10.3 and round-trip through safetensors metadata.
+10. Every pre-existing architecture retains its bucket-step value, while `mf` and `mfe` resolve to 16.
+11. The existing test suite remains green.
+12. `pyproject.toml` dependency pins are unchanged.
+13. Real-weight manual tests document results against pinned official revision `ea7109b` before the integration is declared ready for general use.
+14. No claim of Comfy-Org compatibility is made until an actual released file passes a loader fixture and smoke test.
