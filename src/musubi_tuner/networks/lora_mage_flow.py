@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import logging
+from pathlib import Path
 import re
 from typing import Optional
 
+from safetensors import safe_open
 import torch
 import torch.nn as nn
 
@@ -15,6 +17,33 @@ logger = logging.getLogger(__name__)
 
 _MAGE_FLOW_INCLUDE = r"transformer_blocks\.\d+\.(?:attn|img_mlp|txt_mlp)\..*"
 _MAGE_FLOW_WEIGHT_NAME = re.compile(r"^lora_unet_transformer_blocks_\d+_(?:attn|img_mlp|txt_mlp)_")
+_MAGE_ARCHITECTURES = {"mage_flow", "mage_flow_edit"}
+
+
+def validate_adapter_architecture(
+    path: str | Path,
+    *,
+    expected: str,
+    allow_mismatch: bool,
+) -> None:
+    if expected not in _MAGE_ARCHITECTURES:
+        raise ValueError(f"unknown expected Mage-Flow architecture {expected!r}")
+    try:
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            metadata = handle.metadata() or {}
+    except Exception as exc:
+        raise ValueError(f"cannot inspect Mage-Flow LoRA safetensors metadata from {path}: {exc}") from exc
+    actual = metadata.get("ss_base_model_version")
+    if actual is None:
+        logger.warning("LoRA %s has no ss_base_model_version metadata; architecture cannot be verified", path)
+        return
+    if actual not in _MAGE_ARCHITECTURES:
+        raise ValueError(f"LoRA architecture {actual!r} is not a Mage-Flow architecture")
+    if actual != expected and not allow_mismatch:
+        raise ValueError(
+            f"LoRA architecture mismatch: checkpoint is {actual}, current mode is {expected}; "
+            "use the explicit architecture-mismatch override only if this is intentional"
+        )
 
 
 def create_arch_network(
@@ -63,7 +92,8 @@ def create_arch_network_from_weights(
     **kwargs,
 ) -> lora.LoRANetwork:
     _validate_weight_scope(weights_sd)
-    return lora.create_network_from_weights(
+    requested = {key.split(".", 1)[0] for key in weights_sd if key.endswith(".lora_down.weight")}
+    network = lora.create_network_from_weights(
         None,
         multiplier,
         weights_sd,
@@ -72,6 +102,13 @@ def create_arch_network_from_weights(
         for_inference,
         **kwargs,
     )
+    created = {module.lora_name for module in network.unet_loras}
+    missing = sorted(requested - created)
+    if missing:
+        raise ValueError("LoRA weights do not map to modules in this Mage-Flow transformer: " + ", ".join(missing[:10]))
+    if not requested:
+        raise ValueError("Mage-Flow LoRA weights do not contain any lora_down tensors")
+    return network
 
 
-__all__ = ["create_arch_network", "create_arch_network_from_weights"]
+__all__ = ["create_arch_network", "create_arch_network_from_weights", "validate_adapter_architecture"]

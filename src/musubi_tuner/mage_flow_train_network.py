@@ -29,6 +29,7 @@ from musubi_tuner.mage_flow.training import (
     unpack_target_predictions,
 )
 from musubi_tuner.mage_flow.utils import architecture_for_mode, pack_training_batch
+from musubi_tuner.networks import lora_mage_flow
 from musubi_tuner.utils import model_utils
 
 
@@ -60,6 +61,7 @@ class MageFlowNetworkTrainer(NetworkTrainer):
         return architecture_for_mode(self.is_edit)[1]
 
     def handle_model_specific_args(self, args):
+        self.is_edit = bool(args.is_edit)
         if args.fp8_base and not args.fp8_scaled:
             raise ValueError("Mage-Flow --fp8_base requires --fp8_scaled; unscaled FP8 is unsupported")
         if args.network_module != "musubi_tuner.networks.lora_mage_flow":
@@ -76,7 +78,20 @@ class MageFlowNetworkTrainer(NetworkTrainer):
             args.sdpa = False
         elif not getattr(args, "sdpa", False):
             args.sdpa = True
-        self.is_edit = bool(args.is_edit)
+        adapter_paths = []
+        for name in ("network_weights", "dim_from_weights"):
+            value = getattr(args, name, None)
+            if value:
+                adapter_paths.append(value)
+        adapter_paths.extend(getattr(args, "base_weights", None) or [])
+        for path in dict.fromkeys(adapter_paths):
+            lora_mage_flow.validate_adapter_architecture(
+                path,
+                expected=self.architecture_full_name,
+                allow_mismatch=bool(getattr(args, "allow_mage_architecture_mismatch", False)),
+            )
+        if getattr(args, "vae_dtype", None) is None:
+            args.vae_dtype = "bfloat16"
         self.dit_dtype = (
             torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32
         )
@@ -320,8 +335,14 @@ def mage_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled FP8 for the Mage-Flow transformer")
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL-4B safetensors checkpoint")
     parser.add_argument("--processor", type=str, default=None, help="Qwen3-VL processor directory or pinned repository")
+    parser.add_argument(
+        "--allow_mage_architecture_mismatch",
+        action="store_true",
+        help="explicitly allow loading a mage_flow LoRA in mage_flow_edit mode or the reverse",
+    )
     parser.set_defaults(
         network_module="musubi_tuner.networks.lora_mage_flow",
+        mixed_precision="bf16",
         timestep_sampling="shift",
         discrete_flow_shift=6.0,
         weighting_scheme="none",

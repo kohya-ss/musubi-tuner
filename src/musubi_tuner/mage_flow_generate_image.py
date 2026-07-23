@@ -60,12 +60,25 @@ def _free_model(model, device: torch.device) -> None:
     clean_memory_on_device(device)
 
 
-def _apply_loras(transformer, paths: list[str] | None, multipliers: list[float] | None, device: torch.device) -> None:
+def _apply_loras(
+    transformer,
+    paths: list[str] | None,
+    multipliers: list[float] | None,
+    device: torch.device,
+    *,
+    expected_architecture: str,
+    allow_architecture_mismatch: bool,
+) -> None:
     if not paths:
         return
     if multipliers is not None and len(multipliers) > len(paths):
         raise ValueError("--lora_multiplier cannot contain more values than --lora_weight")
     for index, path in enumerate(paths):
+        lora_mage_flow.validate_adapter_architecture(
+            path,
+            expected=expected_architecture,
+            allow_mismatch=allow_architecture_mismatch,
+        )
         multiplier = multipliers[index] if multipliers is not None and index < len(multipliers) else 1.0
         logger.info("Loading Mage-Flow LoRA %s with multiplier %s", path, multiplier)
         weights = load_file(path, device="cpu")
@@ -120,6 +133,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--renormalize_cfg", action="store_true")
     parser.add_argument("--lora_weight", nargs="*", default=None)
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None)
+    parser.add_argument("--allow_mage_architecture_mismatch", action="store_true")
     return parser
 
 
@@ -185,7 +199,14 @@ def generate(args: argparse.Namespace, parser: argparse.ArgumentParser | None = 
         dtype=dtype,
         attention_backend=args.attn_mode,
     )
-    _apply_loras(transformer, args.lora_weight, args.lora_multiplier, device)
+    _apply_loras(
+        transformer,
+        args.lora_weight,
+        args.lora_multiplier,
+        device,
+        expected_architecture="mage_flow_edit" if args.is_edit else "mage_flow",
+        allow_architecture_mismatch=args.allow_mage_architecture_mismatch,
+    )
     positive = positive.to(device=device, dtype=dtype)
     negative_tokens = [negative.to(device=device, dtype=dtype)] if negative is not None else None
     if control_latents is not None:

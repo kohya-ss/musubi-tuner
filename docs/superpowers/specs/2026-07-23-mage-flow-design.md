@@ -395,7 +395,11 @@ The default excludes:
 - final adaptive normalization and output projection;
 - VAE and text encoder modules.
 
-The adapter supports existing include and exclude pattern overrides. Documentation recommends rank and alpha 32 as a starting point, but code does not hardcode them.
+The adapter keeps this as a fixed supported scope. Existing include and exclude
+pattern arguments cannot expand it, because doing so would silently turn an
+experimentally supported LoRA path into untested modulation or global-projection
+training. Documentation recommends rank and alpha 32 as a starting point, but
+code does not hardcode them.
 
 T2I and Edit DiTs use the same LoRA key layout. Saved metadata records the exact architecture identity. Loading a T2I adapter in Edit mode or the reverse requires an explicit Mage architecture-mismatch override and carries no quality guarantee. Base, aligned, and Turbo variant identity is not guessed from filenames.
 

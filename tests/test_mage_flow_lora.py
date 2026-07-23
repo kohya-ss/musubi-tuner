@@ -1,4 +1,5 @@
 import pytest
+from safetensors.torch import save_file
 
 from musubi_tuner.mage_flow.model import MageFlow
 from musubi_tuner.mage_flow.utils import MageFlowConfig
@@ -58,3 +59,27 @@ def test_loading_rejects_lora_weights_outside_fixed_scope():
 
     with pytest.raises(ValueError, match="outside the supported Mage-Flow scope"):
         lora_mage_flow.create_arch_network_from_weights(1.0, weights, unet=_tiny_model())
+
+
+def test_loading_rejects_unknown_module_even_when_name_looks_in_scope():
+    torch = pytest.importorskip("torch")
+    weights = {
+        "lora_unet_transformer_blocks_99_attn_to_q.lora_down.weight": torch.zeros(2, 16),
+        "lora_unet_transformer_blocks_99_attn_to_q.lora_up.weight": torch.zeros(16, 2),
+        "lora_unet_transformer_blocks_99_attn_to_q.alpha": torch.tensor(2.0),
+    }
+
+    with pytest.raises(ValueError, match="do not map"):
+        lora_mage_flow.create_arch_network_from_weights(1.0, weights, unet=_tiny_model())
+
+
+def test_adapter_architecture_metadata_requires_explicit_cross_mode_override(tmp_path):
+    torch = pytest.importorskip("torch")
+    path = tmp_path / "edit.safetensors"
+    save_file({"weight": torch.zeros(1)}, path, metadata={"ss_base_model_version": "mage_flow_edit"})
+
+    with pytest.raises(ValueError, match="architecture mismatch"):
+        lora_mage_flow.validate_adapter_architecture(path, expected="mage_flow", allow_mismatch=False)
+
+    lora_mage_flow.validate_adapter_architecture(path, expected="mage_flow_edit", allow_mismatch=False)
+    lora_mage_flow.validate_adapter_architecture(path, expected="mage_flow", allow_mismatch=True)

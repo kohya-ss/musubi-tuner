@@ -147,6 +147,7 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 各アーキテクチャの詳細、設定、高度な機能については、以下のドキュメントを参照してください。
 
 **アーキテクチャ別:**
+- [Mage-Flow / Mage-Flow-Edit（実験的、英語）](./docs/mage_flow.md)
 - [HunyuanVideo](./docs/hunyuan_video.md)
 - [Wan2.1/2.2](./docs/wan.md)
 - [Wan2.1/2.2 (1フレーム推論)](./docs/wan_1f.md)
