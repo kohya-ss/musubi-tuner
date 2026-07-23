@@ -1,6 +1,6 @@
 # Mage-Flow and Mage-Flow-Edit Integration Design
 
-- Status: Revised after external review; awaiting final approval
+- Status: Approved for implementation
 - Date: 2026-07-23
 - Target branch: `codex/mage-flow`, based on `upstream/main` at `8934cfbbb4b9bcfa8071ce209129f0c5eb5df2e6`
 
