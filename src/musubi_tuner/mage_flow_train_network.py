@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import argparse
+import re
+from typing import Optional
+
+import torch
+from accelerate import Accelerator
+
+from musubi_tuner.hv_train_network import DiTOutput, NetworkTrainer, read_config_from_file, setup_parser_common
+from musubi_tuner.mage_flow.mage_vae import load_mage_vae
+from musubi_tuner.mage_flow.model import MageFlow, load_mage_flow_transformer
+from musubi_tuner.mage_flow.training import (
+    sigma_from_training_timesteps,
+    stack_bucketed_targets,
+    unpack_target_predictions,
+)
+from musubi_tuner.mage_flow.utils import architecture_for_mode, pack_training_batch
+from musubi_tuner.utils import model_utils
+
+
+_CONTROL_KEY = re.compile(r"^latents_control_(\d+)$")
+
+
+def _ordered_controls(batch: dict[str, object]) -> list[torch.Tensor]:
+    indexed = sorted((int(match.group(1)), value) for key, value in batch.items() if (match := _CONTROL_KEY.match(key)))
+    if indexed and [index for index, _ in indexed] != list(range(len(indexed))):
+        raise ValueError("Mage-Flow Edit reference cache keys must be contiguous from latents_control_0")
+    controls = [value for _, value in indexed]
+    if any(not isinstance(control, torch.Tensor) or control.ndim != 4 for control in controls):
+        raise ValueError("Mage-Flow Edit reference latents must have shape [B,C,H,W]")
+    return controls
+
+
+class MageFlowNetworkTrainer(NetworkTrainer):
+    def __init__(self):
+        super().__init__()
+        self.is_edit = False
+
+    @property
+    def architecture(self) -> str:
+        return architecture_for_mode(self.is_edit)[0]
+
+    @property
+    def architecture_full_name(self) -> str:
+        return architecture_for_mode(self.is_edit)[1]
+
+    def handle_model_specific_args(self, args):
+        self.is_edit = bool(args.is_edit)
+        self.dit_dtype = (
+            torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32
+        )
+        args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
+        self._i2v_training = False
+        self._control_training = False
+        self.default_guidance_scale = 1.0
+        self.default_discrete_flow_shift = 6.0
+        self.vae_frame_stride = 1
+
+    def scale_shift_latents(self, latents):
+        return latents
+
+    def load_transformer(
+        self,
+        accelerator: Accelerator,
+        args: argparse.Namespace,
+        dit_path: str,
+        attn_mode: str,
+        split_attn: bool,
+        loading_device: str,
+        dit_weight_dtype: Optional[torch.dtype],
+    ):
+        del accelerator, split_attn
+        backend = {
+            "torch": "sdpa",
+            "sdpa": "sdpa",
+            "flash": "flash2",
+            "flash2": "flash2",
+        }.get(attn_mode, attn_mode)
+        return load_mage_flow_transformer(
+            dit_path,
+            device=loading_device,
+            dtype=dit_weight_dtype,
+            attention_backend=backend,
+            fp8_scaled=args.fp8_scaled,
+        )
+
+    def load_vae(self, args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
+        del vae_path
+        return load_mage_vae(args.vae, device="cpu", dtype=vae_dtype, encoder_only=False)
+
+    def compile_transformer(self, args, transformer):
+        model: MageFlow = transformer
+        return model_utils.compile_transformer(
+            args,
+            model,
+            [model.transformer_blocks],
+            disable_linear=bool(self.blocks_to_swap),
+        )
+
+    def call_dit(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer_arg,
+        latents: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        noise: torch.Tensor,
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        **kwargs,
+    ) -> DiTOutput:
+        del kwargs
+        if latents.ndim != 4 or noisy_model_input.shape != latents.shape or noise.shape != latents.shape:
+            raise ValueError("Mage-Flow target, noise, and noisy target must share shape [B,C,H,W]")
+        controls = _ordered_controls(batch)
+        if self.is_edit and not 1 <= len(controls) <= 3:
+            raise ValueError(f"Mage-Flow Edit requires between 1 and 3 references, got {len(controls)}")
+        if not self.is_edit and controls:
+            raise ValueError("Mage-Flow T2I batches must not contain Edit reference latents")
+
+        text = batch.get("mage_flow_embed")
+        if not isinstance(text, (list, tuple)) or len(text) != latents.shape[0]:
+            raise ValueError("mage_flow_embed must contain one unpadded [L,D] tensor per sample")
+        device = accelerator.device
+        target = noisy_model_input.to(device=device, dtype=network_dtype)
+        clean_controls = [control.to(device=device, dtype=network_dtype) for control in controls]
+        text_tokens = [item.to(device=device, dtype=network_dtype) for item in text]
+        uses_offset = getattr(args, "timestep_sampling", "uniform") != "sigma"
+        sigmas = sigma_from_training_timesteps(timesteps.to(device), one_based_offset=uses_offset)
+
+        packed = pack_training_batch(
+            target,
+            text_tokens,
+            sigmas,
+            clean_controls if self.is_edit else None,
+            image_dim=target.shape[1],
+            text_dim=text_tokens[0].shape[-1],
+        )
+        if args.gradient_checkpointing:
+            packed.image_tokens.requires_grad_(True)
+            packed.text_tokens.requires_grad_(True)
+
+        with accelerator.autocast():
+            packed_prediction = transformer_arg(packed)
+        prediction = stack_bucketed_targets(unpack_target_predictions(packed_prediction, packed))
+        flow_target = noise.to(device=device, dtype=prediction.dtype) - latents.to(device=device, dtype=prediction.dtype)
+        return DiTOutput(pred=prediction, target=flow_target)
+
+
+def mage_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--is_edit", action="store_true", help="train Mage-Flow-Edit instead of Mage-Flow T2I")
+    parser.add_argument("--fp8_scaled", action="store_true", help="use scaled FP8 for the Mage-Flow transformer")
+    parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL-4B safetensors checkpoint")
+    return parser
+
+
+def main() -> None:
+    parser = mage_flow_setup_parser(setup_parser_common())
+    args = read_config_from_file(parser.parse_args(), parser)
+    MageFlowNetworkTrainer().train(args)
+
+
+if __name__ == "__main__":
+    main()
