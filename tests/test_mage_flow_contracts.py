@@ -1,5 +1,8 @@
+import os
+
 import pytest
 import torch
+from PIL import Image
 
 from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_MAGE_FLOW,
@@ -8,6 +11,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_MAGE_FLOW_FULL,
 )
 from musubi_tuner.dataset.bucket import BucketSelector
+from musubi_tuner.dataset.image_video_dataset import ImageDataset
 from musubi_tuner.mage_flow.utils import MageFlowConfig, PackedMageFlowInputs, architecture_for_mode, pack_training_batch
 
 
@@ -43,6 +47,35 @@ def test_bucket_registration_is_additive_and_per_architecture():
     assert BucketSelector.ARCHITECTURE_STEPS_MAP["mf"] == 16
     assert BucketSelector.ARCHITECTURE_STEPS_MAP["mfe"] == 16
     assert set(BucketSelector.ARCHITECTURE_STEPS_MAP) == set(BASE_ARCHITECTURE_STEPS) | {"mf", "mfe"}
+
+
+@pytest.mark.parametrize("control_count", [1, 2, 3])
+def test_edit_dataset_keeps_one_to_three_ordered_control_images(tmp_path, control_count):
+    targets = tmp_path / "targets"
+    controls = tmp_path / "controls"
+    targets.mkdir()
+    controls.mkdir()
+    Image.new("RGB", (32, 16)).save(targets / "sample.png")
+    (targets / "sample.txt").write_text("caption", encoding="utf-8")
+    for index in range(control_count):
+        Image.new("RGB", (32, 16), color=(index, 0, 0)).save(controls / f"sample_{index}.png")
+
+    dataset = ImageDataset(
+        resolution=(32, 16),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        image_directory=str(targets),
+        control_directory=str(controls),
+        cache_directory=str(tmp_path / "cache"),
+        architecture=ARCHITECTURE_MAGE_FLOW_EDIT,
+    )
+    assert dataset.datasource.control_count_per_image is None
+    assert [os.path.basename(path) for path in next(iter(dataset.datasource.control_paths.values()))] == [
+        f"sample_{index}.png" for index in range(control_count)
+    ]
 
 
 def test_released_config_matches_the_pinned_public_architecture():

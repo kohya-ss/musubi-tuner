@@ -78,11 +78,10 @@ class MageFlowNetworkTrainer(NetworkTrainer):
             args.sdpa = False
         elif not getattr(args, "sdpa", False):
             args.sdpa = True
-        adapter_paths = []
-        for name in ("network_weights", "dim_from_weights"):
-            value = getattr(args, name, None)
-            if value:
-                adapter_paths.append(value)
+        network_weights = getattr(args, "network_weights", None)
+        if getattr(args, "dim_from_weights", False) and not network_weights:
+            raise ValueError("--dim_from_weights requires --network_weights")
+        adapter_paths = [network_weights] if network_weights else []
         adapter_paths.extend(getattr(args, "base_weights", None) or [])
         for path in dict.fromkeys(adapter_paths):
             lora_mage_flow.validate_adapter_architecture(

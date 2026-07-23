@@ -1584,8 +1584,10 @@ class NetworkTrainer:
                 net_kwargs[key] = value
 
         if args.dim_from_weights:
-            logger.info(f"Loading network from weights: {args.dim_from_weights}")
-            weights_sd = load_file(args.dim_from_weights)
+            if not args.network_weights:
+                raise ValueError("--dim_from_weights requires --network_weights")
+            logger.info(f"Loading network dimensions from weights: {args.network_weights}")
+            weights_sd = load_file(args.network_weights)
             network, _ = network_module.create_arch_network_from_weights(1, weights_sd, unet=transformer)
         else:
             # We use the name create_arch_network for compatibility with LyCORIS

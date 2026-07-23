@@ -34,11 +34,26 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_HUNYUAN_VIDEO,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ARCHITECTURE_KANDINSKY5,
+    ARCHITECTURE_MAGE_FLOW,
+    ARCHITECTURE_MAGE_FLOW_EDIT,
+    ARCHITECTURE_MAGE_FLOW_EDIT_FULL,
+    ARCHITECTURE_MAGE_FLOW_FULL,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
 )
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
+
+
+def _validate_mage_cache_metadata(path: str, expected_architecture: str) -> None:
+    with safetensors_utils.MemoryEfficientSafeOpen(path) as handle:
+        metadata = handle.metadata() or {}
+    actual_architecture = metadata.get("architecture")
+    if actual_architecture != expected_architecture:
+        raise ValueError(
+            f"Mage-Flow cache architecture mismatch for {path}: "
+            f"expected {expected_architecture}, got {actual_architecture or '<missing>'}"
+        )
 
 
 class ItemInfo:
@@ -324,7 +339,7 @@ class ImageDataset(BaseDataset):
             or self.architecture == ARCHITECTURE_FLUX_2_KLEIN_9B
         ):
             control_count_per_image = None  # can be multiple control images
-        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT or self.architecture == ARCHITECTURE_MAGE_FLOW_EDIT:
             control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_HIDREAM_O1:
             control_count_per_image = None  # can be multiple control/reference images
@@ -503,6 +518,10 @@ class ImageDataset(BaseDataset):
 
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
+        expected_cache_architecture = {
+            ARCHITECTURE_MAGE_FLOW: ARCHITECTURE_MAGE_FLOW_FULL,
+            ARCHITECTURE_MAGE_FLOW_EDIT: ARCHITECTURE_MAGE_FLOW_EDIT_FULL,
+        }.get(self.architecture)
 
         # glob cache files
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
@@ -522,6 +541,9 @@ class ImageDataset(BaseDataset):
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue
+            if expected_cache_architecture is not None:
+                _validate_mage_cache_metadata(cache_file, expected_cache_architecture)
+                _validate_mage_cache_metadata(text_encoder_output_cache_file, expected_cache_architecture)
 
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
 

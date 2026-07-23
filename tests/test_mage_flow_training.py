@@ -8,6 +8,7 @@ from musubi_tuner.mage_flow.sampling import build_scheduler, euler_step, sample_
 from musubi_tuner.mage_flow.training import sigma_from_training_timesteps, unpack_target_predictions
 import musubi_tuner.mage_flow_train_network as train_module
 from musubi_tuner.mage_flow_train_network import MageFlowNetworkTrainer
+import musubi_tuner.training.trainer_base as trainer_base_module
 
 
 class _FakeAccelerator:
@@ -194,6 +195,96 @@ def test_trainer_rejects_plain_fp8_and_non_mage_network_module():
         trainer.handle_model_specific_args(SimpleNamespace(**{**common, "network_module": "some.other.network"}))
     with pytest.raises(ValueError, match="0 through 10"):
         trainer.handle_model_specific_args(SimpleNamespace(**{**common, "blocks_to_swap": 11}))
+
+
+def test_dim_from_weights_preflight_validates_network_weights_path(monkeypatch):
+    validated = []
+    monkeypatch.setattr(
+        train_module.lora_mage_flow,
+        "validate_adapter_architecture",
+        lambda path, **_kwargs: validated.append(path),
+    )
+    args = SimpleNamespace(
+        is_edit=False,
+        mixed_precision="bf16",
+        fp8_base=False,
+        fp8_scaled=False,
+        network_module="musubi_tuner.networks.lora_mage_flow",
+        sage_attn=False,
+        xformers=False,
+        flash3=False,
+        sdpa=True,
+        flash_attn=False,
+        blocks_to_swap=0,
+        network_weights="adapter.safetensors",
+        dim_from_weights=True,
+        base_weights=None,
+        allow_mage_architecture_mismatch=False,
+        vae_dtype=None,
+    )
+
+    MageFlowNetworkTrainer().handle_model_specific_args(args)
+
+    assert validated == ["adapter.safetensors"]
+
+
+def test_dim_from_weights_requires_network_weights_before_model_loading():
+    args = SimpleNamespace(
+        is_edit=False,
+        mixed_precision="bf16",
+        fp8_base=False,
+        fp8_scaled=False,
+        network_module="musubi_tuner.networks.lora_mage_flow",
+        sage_attn=False,
+        xformers=False,
+        flash3=False,
+        sdpa=True,
+        flash_attn=False,
+        blocks_to_swap=0,
+        network_weights=None,
+        dim_from_weights=True,
+        base_weights=None,
+        allow_mage_architecture_mismatch=False,
+        vae_dtype=None,
+    )
+
+    with pytest.raises(ValueError, match="--dim_from_weights requires --network_weights"):
+        MageFlowNetworkTrainer().handle_model_specific_args(args)
+
+
+def test_dim_from_weights_loads_rank_from_network_weights_path(monkeypatch):
+    loaded_paths = []
+
+    class FakeNetwork:
+        def apply_to(self, *_args, **_kwargs):
+            pass
+
+        def load_weights(self, _path):
+            return None
+
+    fake_network = FakeNetwork()
+    fake_module = SimpleNamespace(
+        create_arch_network_from_weights=lambda *_args, **_kwargs: (fake_network, None),
+    )
+    monkeypatch.setattr(trainer_base_module.importlib, "import_module", lambda _name: fake_module)
+    monkeypatch.setattr(
+        trainer_base_module,
+        "load_file",
+        lambda path: loaded_paths.append(path) or {"lora": torch.zeros(1)},
+    )
+    args = SimpleNamespace(
+        network_module="musubi_tuner.networks.lora_mage_flow",
+        base_weights=None,
+        network_args=None,
+        dim_from_weights=True,
+        network_weights="adapter.safetensors",
+        gradient_checkpointing=False,
+    )
+    accelerator = SimpleNamespace(print=lambda *_args: None)
+
+    MageFlowNetworkTrainer()._build_network(args, accelerator, object(), None, torch.bfloat16)
+
+    assert loaded_paths == ["adapter.safetensors"]
 
 
 def test_training_sample_vae_load_requires_decoder(monkeypatch):

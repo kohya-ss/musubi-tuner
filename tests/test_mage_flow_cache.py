@@ -7,8 +7,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
 
-from musubi_tuner.dataset.cache_io import save_latent_cache_mage_flow
-from musubi_tuner.dataset.image_video_dataset import ItemInfo
+from musubi_tuner.dataset.cache_io import save_latent_cache_mage_flow, save_text_encoder_output_cache_mage_flow
+from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo
 from musubi_tuner.mage_flow.mage_vae import posterior_seed, sample_posterior
 from musubi_tuner.mage_flow_cache_latents import encode_and_save_batch
 
@@ -38,6 +38,99 @@ def make_item(tmp_path: Path, key: str, value: int, controls=()):
     )
     item.control_content = [np.full((16, 32, 3), control, dtype=np.uint8) for control in controls] or None
     return item
+
+
+def test_bucket_manager_keeps_varlen_text_and_groups_edit_control_shapes(tmp_path):
+    image_dir = tmp_path / "images"
+    cache_dir = tmp_path / "cache"
+    image_dir.mkdir()
+    cache_dir.mkdir()
+
+    def save_cached_item(key, text_length, control_shapes):
+        item = ItemInfo(
+            item_key=key,
+            caption="caption",
+            original_size=(32, 32),
+            bucket_size=(32, 32),
+            latent_cache_path=str(cache_dir / f"{key}_0032x0032_mfe.safetensors"),
+        )
+        item.text_encoder_output_cache_path = str(cache_dir / f"{key}_mfe_te.safetensors")
+        controls = [torch.zeros(128, height, width, dtype=torch.bfloat16) for height, width in control_shapes]
+        save_latent_cache_mage_flow(
+            item,
+            torch.zeros(128, 2, 2, dtype=torch.bfloat16),
+            controls,
+            is_edit=True,
+        )
+        save_text_encoder_output_cache_mage_flow(
+            item,
+            torch.zeros(text_length, 2560, dtype=torch.bfloat16),
+            is_edit=True,
+        )
+
+    save_cached_item("a", 3, [(1, 2), (1, 1)])
+    save_cached_item("b", 5, [(1, 2), (1, 1)])
+    save_cached_item("c", 4, [(2, 1), (1, 1)])
+    dataset = ImageDataset(
+        resolution=(32, 32),
+        caption_extension=None,
+        batch_size=2,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        cache_directory=str(cache_dir),
+        architecture="mfe",
+    )
+
+    dataset.prepare_for_training()
+
+    assert len(dataset.batch_manager.buckets) == 2
+    batches = [dataset.batch_manager[index] for index in range(len(dataset.batch_manager))]
+    paired = next(batch for batch in batches if batch["latents"].shape[0] == 2)
+    assert [embedding.shape[0] for embedding in paired["mage_flow_embed"]] == [3, 5]
+    assert paired["latents_control_0"].shape == (2, 128, 1, 2)
+    assert paired["latents_control_1"].shape == (2, 128, 1, 1)
+
+
+def test_mage_training_cache_rejects_mode_metadata_mismatch(tmp_path):
+    image_dir = tmp_path / "images"
+    cache_dir = tmp_path / "cache"
+    image_dir.mkdir()
+    cache_dir.mkdir()
+    item = ItemInfo(
+        item_key="renamed",
+        caption="caption",
+        original_size=(32, 32),
+        bucket_size=(32, 32),
+        latent_cache_path=str(cache_dir / "renamed_0032x0032_mfe.safetensors"),
+    )
+    item.text_encoder_output_cache_path = str(cache_dir / "renamed_mfe_te.safetensors")
+    save_latent_cache_mage_flow(
+        item,
+        torch.zeros(128, 2, 2, dtype=torch.bfloat16),
+        None,
+        is_edit=False,
+    )
+    save_text_encoder_output_cache_mage_flow(
+        item,
+        torch.zeros(3, 2560, dtype=torch.bfloat16),
+        is_edit=True,
+    )
+    dataset = ImageDataset(
+        resolution=(32, 32),
+        caption_extension=None,
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        cache_directory=str(cache_dir),
+        architecture="mfe",
+    )
+
+    with pytest.raises(ValueError, match=r"cache architecture mismatch.*expected mage_flow_edit.*got mage_flow"):
+        dataset.prepare_for_training()
 
 
 def test_posterior_seed_uses_stable_sha256_identity():

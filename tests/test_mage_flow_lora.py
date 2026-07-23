@@ -36,7 +36,7 @@ def test_lora_targets_only_attention_and_image_text_mlps():
     assert not any(name.startswith(("img_in", "txt_in", "time_text_embed", "proj_out")) for name in target_names)
 
 
-def test_user_patterns_cannot_expand_mage_flow_lora_scope():
+def test_user_patterns_are_warned_and_cannot_change_mage_flow_lora_scope(caplog):
     network = lora_mage_flow.create_arch_network(
         1.0,
         2,
@@ -44,10 +44,11 @@ def test_user_patterns_cannot_expand_mage_flow_lora_scope():
         None,
         [],
         _tiny_model(depth=1),
-        include_patterns="['.*']",
-        exclude_patterns="[]",
+        include_patterns="['img_in']",
+        exclude_patterns="['.*attn.*']",
     )
 
+    assert "ignores include/exclude patterns" in caplog.text
     assert len(network.unet_loras) == 12
     assert all("transformer_blocks_0_" in module.lora_name for module in network.unet_loras)
 

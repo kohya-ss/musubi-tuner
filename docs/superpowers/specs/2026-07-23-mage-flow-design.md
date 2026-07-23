@@ -110,7 +110,9 @@ Create `src/musubi_tuner/mage_flow/` with these ownership boundaries:
 | `attention.py` | Packed joint attention using PyTorch SDPA or optional FlashAttention 2 |
 | `mage_vae.py` | MageVAE encoder/decoder, deterministic posterior sampling hook and component loading |
 | `text_encoder.py` | Qwen3-VL-4B config, single-file weight loading, exact T2I/Edit templates and multimodal conditioning |
-| `utils.py` | Fixed config, component key normalization, header validation, pack/unpack helpers and sampling utilities |
+| `utils.py` | Fixed config, component key normalization, header validation and pack/unpack helpers |
+| `sampling.py` | Scheduler construction, packed CFG sampling, Euler updates and Edit output-size resolution |
+| `training.py` | Training timestep conversion, bucket-target stacking and target-token unpacking |
 | `__init__.py` | Package marker and intentionally small public exports |
 
 Do not copy the official monolithic `MageFlowModel` ownership model. Musubi must be able to load and free the VAE, text encoder, and DiT independently.
@@ -330,8 +332,8 @@ The packer must prove all length and shape invariants before calling the first t
 
 The supported first-release backends are:
 
-- PyTorch scaled dot-product attention, selected by `--sdpa`, as the dependency-free default;
-- FlashAttention 2 variable-length attention, selected by the repository's `--flash_attn` flag when the optional package is installed.
+- PyTorch scaled dot-product attention, selected by training's `--sdpa` flag or generation's `--attn_mode sdpa`, as the dependency-free default;
+- FlashAttention 2 variable-length attention, selected by training's `--flash_attn` flag or generation's `--attn_mode flash2` when the optional package is installed.
 
 SDPA first computes each isolated joint length `Ji = Ti + Li`. When every `Ji` is equal, the required fast path reshapes packed joint Q/K/V into `[B, heads, J, head_dim]`, performs one batched `torch.nn.functional.scaled_dot_product_attention` call, and flattens the result back into packed order. The batch dimension itself provides complete sample isolation, so this call needs no cross-sample mask.
 
@@ -396,10 +398,12 @@ The default excludes:
 - VAE and text encoder modules.
 
 The adapter keeps this as a fixed supported scope. Existing include and exclude
-pattern arguments cannot expand it, because doing so would silently turn an
-experimentally supported LoRA path into untested modulation or global-projection
-training. Documentation recommends rank and alpha 32 as a starting point, but
-code does not hardcode them.
+pattern arguments are ignored with an explicit warning; they can neither narrow
+nor expand the target set. Allowing training outside this scope would produce
+adapters that the strict Mage loader refuses to reload, while allowing
+per-adapter narrowing would make the first-release compatibility matrix
+needlessly ambiguous. Documentation recommends rank and alpha 32 as a starting
+point, but code does not hardcode them.
 
 T2I and Edit DiTs use the same LoRA key layout. Saved metadata records the exact architecture identity. Loading a T2I adapter in Edit mode or the reverse requires an explicit Mage architecture-mismatch override and carries no quality guarantee. Base, aligned, and Turbo variant identity is not guessed from filenames.
 
@@ -434,7 +438,7 @@ The official content-policy screen and Gaussian-Shading watermark are product-la
 - `--blocks_to_swap` accepts 0 through 10, preserving two resident blocks as required by the existing swap design.
 - `--fp8_base` is accepted only with `--fp8_scaled`; plain unscaled FP8 is rejected.
 - Scaled FP8 conversion applies only to explicitly supported repeated-block linear weights. Norms, modulation arithmetic, LoRA weights, and numerically sensitive projections remain in their supported higher precision.
-- LoRA modules are attached to the BF16 base model before eligible base linears are converted to scaled FP8.
+- Eligible frozen base linears are converted to scaled FP8 while the transformer checkpoint is loaded. LoRA modules are created and attached afterward, so conversion cannot discover or rewrite LoRA weights; LoRA parameters remain in the supported compute dtype.
 - Repeated transformer blocks expose the repository's compile hook.
 - Block swap, compile, checkpointing and FP8 combinations must either pass their gated composition tests or fail at argument validation. They must not fail after allocating the 4B model.
 - The text encoder is used for cache generation and then freed.
@@ -519,7 +523,7 @@ Verify:
 
 - the default target enumeration contains attention and both stream FFNs in all 12 blocks;
 - modulation, norms and global projections are excluded;
-- include/exclude overrides remain functional;
+- include/exclude overrides are ignored with an explicit warning and cannot alter the fixed target set;
 - save/load round trips preserve keys and architecture metadata;
 - applying a nonzero adapter changes a tiny model output;
 - T2I/Edit metadata mismatch is rejected without the explicit override.
@@ -595,6 +599,7 @@ Implementation is expected to be additive and localized to:
 - four root wrappers;
 - `networks/lora_mage_flow.py`;
 - architecture constant and 16-pixel bucket-step registration;
+- additive Mage-Edit routing into existing multi-control discovery and Mage-only cache metadata preflight;
 - Mage-specific cache serialization helpers;
 - README links and `docs/mage_flow.md`;
 - focused Mage-Flow tests plus the existing top-level entrypoint test.
