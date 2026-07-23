@@ -3,6 +3,10 @@ import subprocess
 import sys
 
 import pytest
+from safetensors.torch import save_file
+import torch
+
+import musubi_tuner.mage_flow_generate_image as generate_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,3 +32,57 @@ def test_help_does_not_allocate_models(script):
 
     assert result.returncode == 0, result.stderr
     assert "usage:" in result.stdout.lower()
+
+
+def test_generation_rejects_invalid_steps_before_model_loading(monkeypatch):
+    parser = generate_module.setup_parser()
+    args = parser.parse_args(
+        [
+            "--dit",
+            "dit.safetensors",
+            "--vae",
+            "vae.safetensors",
+            "--text_encoder",
+            "text.safetensors",
+            "--prompt",
+            "test",
+            "--steps",
+            "0",
+        ]
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "load_mage_flow_text_encoder",
+        lambda *_args, **_kwargs: pytest.fail("allocated text encoder before argument validation"),
+    )
+
+    with pytest.raises(ValueError, match="steps"):
+        generate_module.generate(args, parser)
+
+
+def test_generation_checks_lora_mode_before_model_loading(tmp_path, monkeypatch):
+    adapter = tmp_path / "edit.safetensors"
+    save_file({"weight": torch.zeros(1)}, adapter, metadata={"ss_base_model_version": "mage_flow_edit"})
+    parser = generate_module.setup_parser()
+    args = parser.parse_args(
+        [
+            "--dit",
+            "dit.safetensors",
+            "--vae",
+            "vae.safetensors",
+            "--text_encoder",
+            "text.safetensors",
+            "--prompt",
+            "test",
+            "--lora_weight",
+            str(adapter),
+        ]
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "load_mage_flow_text_encoder",
+        lambda *_args, **_kwargs: pytest.fail("allocated text encoder before LoRA metadata validation"),
+    )
+
+    with pytest.raises(ValueError, match="architecture mismatch"):
+        generate_module.generate(args, parser)

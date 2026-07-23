@@ -80,3 +80,16 @@ def test_attention_rejects_unknown_backend():
     q = torch.randn(2, 1, 4)
     with pytest.raises(ValueError, match="backend"):
         packed_attention(q, q, q, torch.tensor([0, 2], dtype=torch.int32), backend="magic")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for FlashAttention 2 parity")
+def test_flash_attention_2_matches_sdpa_when_available():
+    pytest.importorskip("flash_attn", reason="optional flash-attn package is not installed")
+    torch.manual_seed(42)
+    q = torch.randn(7, 2, 16, device="cuda", dtype=torch.bfloat16)
+    cu = torch.tensor([0, 3, 7], device="cuda", dtype=torch.int32)
+
+    expected = packed_attention(q, q, q, cu, backend="sdpa")
+    actual = packed_attention(q, q, q, cu, backend="flash2")
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)

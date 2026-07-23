@@ -66,8 +66,7 @@ class MageFlowConfig:
             raise ValueError("hidden_size must be divisible by num_heads")
         if sum(self.axes_dim) != self.hidden_size // self.num_heads:
             raise ValueError(
-                f"RoPE axes sum ({sum(self.axes_dim)}) must equal head dimension "
-                f"({self.hidden_size // self.num_heads})"
+                f"RoPE axes sum ({sum(self.axes_dim)}) must equal head dimension ({self.hidden_size // self.num_heads})"
             )
         if any(axis <= 0 or axis % 2 for axis in self.axes_dim):
             raise ValueError(f"RoPE axes must contain positive even dimensions, got {self.axes_dim}")
@@ -121,7 +120,9 @@ def _detect_dit_layout(keys: Sequence[str]) -> tuple[str, str]:
             prefixes.append("_orig_mod.")
         elif key.startswith("transformer."):
             prefixes.append("transformer.")
-        elif key.startswith(("img_in.", "txt_norm.", "txt_in.", "time_text_embed.", "transformer_blocks.", "norm_out.", "proj_out.")):
+        elif key.startswith(
+            ("img_in.", "txt_norm.", "txt_in.", "time_text_embed.", "transformer_blocks.", "norm_out.", "proj_out.")
+        ):
             prefixes.append("")
         else:
             prefixes.append("unknown")
@@ -140,9 +141,7 @@ def _detect_dit_layout(keys: Sequence[str]) -> tuple[str, str]:
 def normalize_dit_state_dict(state_dict: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     layout, prefix = _detect_dit_layout(list(state_dict))
     del layout
-    normalized = {
-        (key[len(prefix) :] if not prefix or key.startswith(prefix) else key): value for key, value in state_dict.items()
-    }
+    normalized = {(key[len(prefix) :] if not prefix or key.startswith(prefix) else key): value for key, value in state_dict.items()}
     if len(normalized) != len(state_dict):
         raise ComponentValidationError("DiT key normalization produced duplicate canonical keys")
     return normalized
@@ -307,9 +306,7 @@ def validate_packed_inputs(
     if not torch.isfinite(packed.image_tokens).all() or not torch.isfinite(packed.text_tokens).all():
         raise ValueError("packed image and text tokens must contain only finite values")
 
-    image_cu = _validate_cumulative_lengths(
-        "image_cu_seqlens", packed.image_cu_seqlens, packed.image_tokens.shape[1]
-    )
+    image_cu = _validate_cumulative_lengths("image_cu_seqlens", packed.image_cu_seqlens, packed.image_tokens.shape[1])
     text_cu = _validate_cumulative_lengths("text_cu_seqlens", packed.text_cu_seqlens, packed.text_tokens.shape[1])
     batch_size = len(image_cu) - 1
     if len(text_cu) - 1 != batch_size:
@@ -332,9 +329,7 @@ def validate_packed_inputs(
     ):
         text_length = txt_end - txt_start
         if not 1 <= text_length <= text_max_length:
-            raise ValueError(
-                f"text segment {sample_index} length must be between 1 and {text_max_length}, got {text_length}"
-            )
+            raise ValueError(f"text segment {sample_index} length must be between 1 and {text_max_length}, got {text_length}")
         if not 1 <= len(shapes) <= 4:
             raise ValueError(f"sample {sample_index} must contain one target and at most three references")
         segment_length = 0
@@ -380,9 +375,7 @@ def _normalize_controls(
     if raw and all(isinstance(control, torch.Tensor) and control.ndim == 4 for control in raw):
         for control_index, control in enumerate(raw):
             if control.shape[0] != batch_size:
-                raise ValueError(
-                    f"control batch {control_index} has batch size {control.shape[0]}, expected {batch_size}"
-                )
+                raise ValueError(f"control batch {control_index} has batch size {control.shape[0]}, expected {batch_size}")
         per_sample = [[control[sample_index] for control in raw] for sample_index in range(batch_size)]
     else:
         if len(raw) != batch_size:
@@ -392,8 +385,7 @@ def _normalize_controls(
     for sample_index, sample_controls in enumerate(per_sample):
         if not 1 <= len(sample_controls) <= 3:
             raise ValueError(
-                f"Edit sample {sample_index} must contain between 1 and 3 ordered references, "
-                f"got {len(sample_controls)}"
+                f"Edit sample {sample_index} must contain between 1 and 3 ordered references, got {len(sample_controls)}"
             )
         for control_index, control in enumerate(sample_controls):
             if not isinstance(control, torch.Tensor) or control.ndim != 3:
@@ -444,9 +436,7 @@ def pack_training_batch(
     image_lengths: list[int] = []
     text_lengths: list[int] = []
 
-    for sample_index, (target, sample_text, sample_controls) in enumerate(
-        zip(target_list, text_list, per_sample_controls)
-    ):
+    for sample_index, (target, sample_text, sample_controls) in enumerate(zip(target_list, text_list, per_sample_controls)):
         if not isinstance(sample_text, torch.Tensor) or sample_text.ndim != 2:
             raise ValueError(f"text sample {sample_index} must have shape [L,D]")
         if sample_text.shape[0] < 1 or sample_text.shape[0] > text_max_length:
@@ -460,8 +450,7 @@ def pack_training_batch(
         for control_index, control in enumerate(sample_controls):
             if control.shape[0] != image_dim:
                 raise ValueError(
-                    f"control {control_index} for sample {sample_index} has {control.shape[0]} channels, "
-                    f"expected {image_dim}"
+                    f"control {control_index} for sample {sample_index} has {control.shape[0]} channels, expected {image_dim}"
                 )
             sample_images.append(control.to(device=device, dtype=dtype))
 

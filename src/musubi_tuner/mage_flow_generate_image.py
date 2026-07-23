@@ -102,6 +102,19 @@ def _validate_mode(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--width and --height must be provided together")
     if not args.is_edit and args.max_size is not None:
         parser.error("--max_size is only valid with --is_edit")
+    if args.steps <= 0:
+        raise ValueError("--steps must be positive")
+    if args.flow_shift <= 0:
+        raise ValueError("--flow_shift must be positive")
+    if args.lora_multiplier is not None and len(args.lora_multiplier) > len(args.lora_weight or []):
+        raise ValueError("--lora_multiplier cannot contain more values than --lora_weight")
+    expected_architecture = "mage_flow_edit" if args.is_edit else "mage_flow"
+    for path in args.lora_weight or []:
+        lora_mage_flow.validate_adapter_architecture(
+            path,
+            expected=expected_architecture,
+            allow_mismatch=args.allow_mage_architecture_mismatch,
+        )
     return [Image.open(path).convert("RGB") for path in control_paths]
 
 

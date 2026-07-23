@@ -1,3 +1,8 @@
+"""Qwen3-VL conditioning adapted from Microsoft Mage commit ea7109b.
+
+Copyright (c) 2026 Microsoft. Licensed under the MIT License.
+"""
+
 from __future__ import annotations
 
 import re
@@ -100,18 +105,12 @@ def _detect_qwen_layout(keys: Sequence[str]) -> tuple[str, str]:
     known_canonical = any(key.startswith(("language_model.", "visual.")) for key in meaningful)
     if known_official or known_canonical:
         raise ComponentValidationError("Qwen3-VL checkpoint uses a mixed key layout")
-    raise ComponentValidationError(
-        "Qwen3-VL checkpoint uses an unknown key layout; future Comfy-Org key mappings are not guessed"
-    )
+    raise ComponentValidationError("Qwen3-VL checkpoint uses an unknown key layout; future Comfy-Org key mappings are not guessed")
 
 
 def normalize_qwen_state_dict(state_dict: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     _, prefix = _detect_qwen_layout(list(state_dict))
-    return {
-        key[len(prefix) :]: value
-        for key, value in state_dict.items()
-        if key != "lm_head.weight"
-    }
+    return {key[len(prefix) :]: value for key, value in state_dict.items() if key != "lm_head.weight"}
 
 
 @lru_cache(maxsize=1)
@@ -134,31 +133,13 @@ def _inspect_qwen_header(path: str | Path) -> tuple[Path, str, dict[str, tuple[i
         raw_keys = list(handle.keys())
         layout, prefix = _detect_qwen_layout(raw_keys)
         canonical_keys = [key[len(prefix) :] for key in raw_keys if key != "lm_head.weight"]
-        shapes = {
-            key[len(prefix) :]: tuple(handle.get_slice(key).get_shape())
-            for key in raw_keys
-            if key != "lm_head.weight"
-        }
-        dtypes = {
-            key[len(prefix) :]: handle.get_slice(key).get_dtype()
-            for key in raw_keys
-            if key != "lm_head.weight"
-        }
+        shapes = {key[len(prefix) :]: tuple(handle.get_slice(key).get_shape()) for key in raw_keys if key != "lm_head.weight"}
+        dtypes = {key[len(prefix) :]: handle.get_slice(key).get_dtype() for key in raw_keys if key != "lm_head.weight"}
 
     language_layers = sorted(
-        {
-            int(match.group(1))
-            for key in canonical_keys
-            if (match := re.match(r"^language_model\.layers\.(\d+)\.", key))
-        }
+        {int(match.group(1)) for key in canonical_keys if (match := re.match(r"^language_model\.layers\.(\d+)\.", key))}
     )
-    visual_layers = sorted(
-        {
-            int(match.group(1))
-            for key in canonical_keys
-            if (match := re.match(r"^visual\.blocks\.(\d+)\.", key))
-        }
-    )
+    visual_layers = sorted({int(match.group(1)) for key in canonical_keys if (match := re.match(r"^visual\.blocks\.(\d+)\.", key))})
     if language_layers != list(range(36)) or visual_layers != list(range(24)):
         raise ComponentValidationError(
             "Qwen3-VL-4B layer signature mismatch: "
@@ -175,9 +156,7 @@ def _inspect_qwen_header(path: str | Path) -> tuple[Path, str, dict[str, tuple[i
         f"{key}: expected {shape}, actual {shapes.get(key)}" for key, shape in anchors.items() if shapes.get(key) != shape
     ]
     if anchor_errors:
-        raise ComponentValidationError(
-            f"Qwen3-VL-4B pinned dimensional signature mismatch (layout={layout}): {anchor_errors[:10]}"
-        )
+        raise ComponentValidationError(f"Qwen3-VL-4B pinned dimensional signature mismatch (layout={layout}): {anchor_errors[:10]}")
 
     expected = _expected_qwen_shapes()
     missing = sorted(set(expected) - set(shapes))
@@ -290,8 +269,7 @@ def encode_conditioning(
         for index, sample_references in enumerate(reference_lists):
             if not 1 <= len(sample_references) <= 3:
                 raise ValueError(
-                    f"Mage-Flow-Edit prompt {index} requires between 1 and 3 ordered references, "
-                    f"got {len(sample_references)}"
+                    f"Mage-Flow-Edit prompt {index} requires between 1 and 3 ordered references, got {len(sample_references)}"
                 )
     else:
         if references is not None and any(references):
@@ -334,8 +312,7 @@ def encode_conditioning(
         conditioned = valid[drop:]
         if not 1 <= conditioned.shape[0] <= 2048:
             raise ValueError(
-                f"Mage-Flow prompt {prompt_index} effective length must be between 1 and 2048, "
-                f"got {conditioned.shape[0]}"
+                f"Mage-Flow prompt {prompt_index} effective length must be between 1 and 2048, got {conditioned.shape[0]}"
             )
         if conditioned.ndim != 2 or conditioned.shape[1] != 2560:
             raise ValueError(f"Qwen3-VL final hidden state must have shape [L,2560], got {tuple(conditioned.shape)}")

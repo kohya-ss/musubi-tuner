@@ -128,9 +128,7 @@ class MageFlowEmbedRope(nn.Module):
             raise ValueError("Mage-Flow RoPE supports axis indices below 4096")
         positive = self.pos_freqs.split([axis // 2 for axis in self.axes_dim], dim=1)
         negative = self.neg_freqs.split([axis // 2 for axis in self.axes_dim], dim=1)
-        frame_freqs = (
-            positive[0][frame_index : frame_index + frames].view(frames, 1, 1, -1).expand(frames, height, width, -1)
-        )
+        frame_freqs = positive[0][frame_index : frame_index + frames].view(frames, 1, 1, -1).expand(frames, height, width, -1)
         if self.scale_rope:
             height_freqs = torch.cat(
                 [negative[1][-(height - height // 2) :], positive[1][: height // 2]],

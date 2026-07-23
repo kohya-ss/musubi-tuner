@@ -1,8 +1,10 @@
 import pytest
+from safetensors.torch import load_file
 from safetensors.torch import save_file
+import torch
 
 from musubi_tuner.mage_flow.model import MageFlow
-from musubi_tuner.mage_flow.utils import MageFlowConfig
+from musubi_tuner.mage_flow.utils import MageFlowConfig, pack_training_batch
 from musubi_tuner.networks import lora_mage_flow
 
 
@@ -74,7 +76,6 @@ def test_loading_rejects_unknown_module_even_when_name_looks_in_scope():
 
 
 def test_adapter_architecture_metadata_requires_explicit_cross_mode_override(tmp_path):
-    torch = pytest.importorskip("torch")
     path = tmp_path / "edit.safetensors"
     save_file({"weight": torch.zeros(1)}, path, metadata={"ss_base_model_version": "mage_flow_edit"})
 
@@ -83,3 +84,43 @@ def test_adapter_architecture_metadata_requires_explicit_cross_mode_override(tmp
 
     lora_mage_flow.validate_adapter_architecture(path, expected="mage_flow_edit", allow_mismatch=False)
     lora_mage_flow.validate_adapter_architecture(path, expected="mage_flow", allow_mismatch=True)
+
+
+def test_one_lora_step_and_safetensors_round_trip(tmp_path):
+    torch.manual_seed(123)
+    model = _tiny_model(depth=1).eval().requires_grad_(False)
+    base_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+    packed = pack_training_batch(
+        torch.randn(1, 4, 2, 2),
+        [torch.randn(3, 6)],
+        torch.tensor([0.4]),
+    )
+    network = lora_mage_flow.create_arch_network(1.0, 2, 2.0, None, [], model)
+    network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+    optimizer = torch.optim.SGD(network.parameters(), lr=0.5)
+
+    before = model(packed).detach()
+    loss = (model(packed) - torch.ones_like(before)).square().mean()
+    loss.backward()
+    optimizer.step()
+    after = model(packed).detach()
+
+    assert not torch.equal(before, after)
+    path = tmp_path / "adapter.safetensors"
+    network.save_weights(path, torch.float32, {"ss_base_model_version": "mage_flow"})
+    weights = load_file(path)
+
+    reloaded_model = _tiny_model(depth=1).eval()
+    reloaded_model.load_state_dict(base_state, strict=True)
+    reloaded_model.requires_grad_(False)
+    reloaded_network = lora_mage_flow.create_arch_network_from_weights(
+        1.0,
+        weights,
+        unet=reloaded_model,
+    )
+    reloaded_network.apply_to(None, reloaded_model, apply_text_encoder=False, apply_unet=True)
+    info = reloaded_network.load_state_dict(weights, strict=True)
+
+    assert not info.missing_keys
+    assert not info.unexpected_keys
+    torch.testing.assert_close(reloaded_model(packed), after)

@@ -123,16 +123,12 @@ class DiCoBlock(nn.Module):
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size))
 
     def forward(self, inp, conditioning):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(conditioning).chunk(
-            6, dim=1
-        )
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(conditioning).chunk(6, dim=1)
         value = modulate(self.norm1(inp), shift_msa, scale_msa)
         value = F.gelu(self.conv2(self.conv1(value)))
         value = self.conv3(value * self.ca(value))
         value = inp + gate_msa[..., None, None] * value
-        return value + gate_mlp[..., None, None] * self.conv5(
-            F.gelu(self.conv4(modulate(self.norm2(value), shift_mlp, scale_mlp)))
-        )
+        return value + gate_mlp[..., None, None] * self.conv5(F.gelu(self.conv4(modulate(self.norm2(value), shift_mlp, scale_mlp))))
 
 
 class _EncoderDiCoBlock(nn.Module):
@@ -327,9 +323,7 @@ class _DConvEncoder(nn.Module):
         self.z_ch = z_ch
         self.patch_size = patch_size
         self.patch_cond_embed = nn.Conv2d(3, head_size, kernel_size=patch_size, stride=patch_size)
-        self.head_blocks = nn.ModuleList(
-            [_EncoderDiCoBlock(head_size, mlp_ratio=mlp_ratio) for _ in range(num_head_blocks)]
-        )
+        self.head_blocks = nn.ModuleList([_EncoderDiCoBlock(head_size, mlp_ratio=mlp_ratio) for _ in range(num_head_blocks)])
         self.proj_down = nn.Conv2d(head_size, hidden_size, 1)
         self.z_proj = nn.Conv2d(z_ch, hidden_size, 1)
         self.fuse_proj = nn.Conv2d(hidden_size * 2, hidden_size, 1)
@@ -376,9 +370,7 @@ class _DConvDenoiser(nn.Module):
         self.y_embedder_x = nn.Conv2d(hidden_size, hidden_size_x * patch_size**2, 1)
         self.x_embedder = NerfEmbedder(in_channels + hidden_size_x, hidden_size_x, max_freqs=8)
         self.s_embedder = BottleneckPatchEmbed(patch_size, in_channels, bottleneck_dim, hidden_size, bias=True)
-        self.blocks = nn.ModuleList(
-            [DiCoBlock(hidden_size, mlp_ratio=mlp_ratio) for _ in range(num_cond_blocks)]
-        )
+        self.blocks = nn.ModuleList([DiCoBlock(hidden_size, mlp_ratio=mlp_ratio) for _ in range(num_cond_blocks)])
         self.dec_net = SimpleMLPAdaLN(
             in_channels=hidden_size_x,
             model_channels=hidden_size_x,
@@ -436,9 +428,7 @@ def _inspect_vae(path: str | Path, require_decoder: bool):
         encoder_prefix = "student.dconv_encoder." if official else "dconv_encoder."
         decoder_prefix = "pipeline." if official else "decoder_model."
         encoder_shapes = {
-            key[len(encoder_prefix) :]: tuple(handle.get_slice(key).get_shape())
-            for key in keys
-            if key.startswith(encoder_prefix)
+            key[len(encoder_prefix) :]: tuple(handle.get_slice(key).get_shape()) for key in keys if key.startswith(encoder_prefix)
         }
         decoder_shapes = {
             key[len(decoder_prefix) :]: tuple(handle.get_slice(key).get_shape())
@@ -459,16 +449,12 @@ def _inspect_vae(path: str | Path, require_decoder: bool):
     missing_encoder = sorted(set(expected_encoder) - set(encoder_shapes))
     unexpected_encoder = sorted(set(encoder_shapes) - set(expected_encoder))
     mismatched_encoder = sorted(
-        key
-        for key in set(expected_encoder) & set(encoder_shapes)
-        if expected_encoder[key] != encoder_shapes[key]
+        key for key in set(expected_encoder) & set(encoder_shapes) if expected_encoder[key] != encoder_shapes[key]
     )
     missing_decoder = sorted(set(expected_decoder) - set(decoder_shapes))
     unexpected_decoder = sorted(set(decoder_shapes) - set(expected_decoder)) if require_decoder else []
     mismatched_decoder = sorted(
-        key
-        for key in set(expected_decoder) & set(decoder_shapes)
-        if expected_decoder[key] != decoder_shapes[key]
+        key for key in set(expected_decoder) & set(decoder_shapes) if expected_decoder[key] != decoder_shapes[key]
     )
     allowed_dtypes = {"BF16", "F16", "F32"}
     bad_dtypes = [f"{key}:{dtype}" for key, dtype in dtypes.items() if dtype not in allowed_dtypes]
@@ -479,9 +465,7 @@ def _inspect_vae(path: str | Path, require_decoder: bool):
         recognized_keys.update(key for key in keys if key.startswith(decoder_prefix))
     if official:
         recognized_keys.update(
-            key
-            for key in keys
-            if key.startswith(("pipeline.y_embedder.encoder.", "pipeline.y_embedder.bottleneck."))
+            key for key in keys if key.startswith(("pipeline.y_embedder.encoder.", "pipeline.y_embedder.bottleneck."))
         )
     unknown_keys = sorted(set(keys) - recognized_keys)
     if (
@@ -544,7 +528,10 @@ class MageVAE(nn.Module):
         if len(generators) != mean.shape[0]:
             raise ValueError("one posterior generator is required per image")
         return torch.cat(
-            [sample_posterior(mean[index : index + 1], logvar[index : index + 1], generators[index]) for index in range(len(generators))]
+            [
+                sample_posterior(mean[index : index + 1], logvar[index : index + 1], generators[index])
+                for index in range(len(generators))
+            ]
         )
 
     @torch.no_grad()
