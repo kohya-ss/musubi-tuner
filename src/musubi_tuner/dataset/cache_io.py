@@ -454,6 +454,26 @@ def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tenso
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 
 
+def save_text_encoder_output_cache_mage_flow(item_info: ItemInfo, embed: torch.Tensor, *, is_edit: bool):
+    """Save the unpadded final Qwen3-VL backbone hidden state used by Mage-Flow."""
+
+    if embed.ndim != 2 or embed.shape[1] != 2560:
+        raise ValueError(f"Mage-Flow text embedding must have shape [L,2560], got {tuple(embed.shape)}")
+    if not 1 <= embed.shape[0] <= 2048:
+        raise ValueError(f"Mage-Flow text embedding length must be between 1 and 2048, got {embed.shape[0]}")
+    if embed.dtype != torch.bfloat16:
+        raise ValueError(f"Mage-Flow text embedding must use torch.bfloat16, got {embed.dtype}")
+    if not torch.isfinite(embed).all():
+        raise ValueError("Mage-Flow text embedding must contain only finite values")
+    architecture = ARCHITECTURE_MAGE_FLOW_EDIT_FULL if is_edit else ARCHITECTURE_MAGE_FLOW_FULL
+    save_text_encoder_output_cache_common(
+        item_info,
+        {"varlen_mage_flow_embed_bfloat16": embed.detach().cpu().contiguous()},
+        architecture,
+        merge_existing=False,
+    )
+
+
 def save_text_encoder_output_cache_kandinsky5(
     item_info: ItemInfo, text_embeds: torch.Tensor, pooled_embed: torch.Tensor, attention_mask: torch.Tensor
 ):
