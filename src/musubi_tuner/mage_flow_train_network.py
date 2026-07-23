@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import gc
+import logging
 import re
 from typing import Optional
 
+from PIL import Image
 import torch
 from accelerate import Accelerator
 
-from musubi_tuner.hv_train_network import DiTOutput, NetworkTrainer, read_config_from_file, setup_parser_common
+from musubi_tuner.hv_train_network import (
+    DiTOutput,
+    NetworkTrainer,
+    clean_memory_on_device,
+    load_prompts,
+    read_config_from_file,
+    setup_parser_common,
+)
+from musubi_tuner.mage_flow_generate_image import image_to_tensor
 from musubi_tuner.mage_flow.mage_vae import load_mage_vae
 from musubi_tuner.mage_flow.model import MageFlow, load_mage_flow_transformer
+from musubi_tuner.mage_flow.sampling import resolve_output_size, sample_latents
+from musubi_tuner.mage_flow.text_encoder import encode_conditioning, load_mage_flow_text_encoder
 from musubi_tuner.mage_flow.training import (
     sigma_from_training_timesteps,
     stack_bucketed_targets,
@@ -20,6 +33,7 @@ from musubi_tuner.utils import model_utils
 
 
 _CONTROL_KEY = re.compile(r"^latents_control_(\d+)$")
+logger = logging.getLogger(__name__)
 
 
 def _ordered_controls(batch: dict[str, object]) -> list[torch.Tensor]:
@@ -46,6 +60,15 @@ class MageFlowNetworkTrainer(NetworkTrainer):
         return architecture_for_mode(self.is_edit)[1]
 
     def handle_model_specific_args(self, args):
+        if args.fp8_base and not args.fp8_scaled:
+            raise ValueError("Mage-Flow --fp8_base requires --fp8_scaled; unscaled FP8 is unsupported")
+        if args.network_module != "musubi_tuner.networks.lora_mage_flow":
+            raise ValueError("Mage-Flow is LoRA-only and requires --network_module musubi_tuner.networks.lora_mage_flow")
+        unsupported_attention = [name for name in ("sage_attn", "xformers", "flash3") if bool(getattr(args, name, False))]
+        if unsupported_attention:
+            raise ValueError(
+                f"Mage-Flow supports SDPA and optional FlashAttention 2 only; unsupported flags: {', '.join(unsupported_attention)}"
+            )
         self.is_edit = bool(args.is_edit)
         self.dit_dtype = (
             torch.float16 if args.mixed_precision == "fp16" else torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32
@@ -59,6 +82,142 @@ class MageFlowNetworkTrainer(NetworkTrainer):
 
     def scale_shift_latents(self, latents):
         return latents
+
+    @staticmethod
+    def _sample_reference_paths(prompt_dict: dict) -> list[str]:
+        raw = prompt_dict.get("control_image_path", [])
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [raw]
+        return list(raw)
+
+    def process_sample_prompts(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        sample_prompts: str,
+    ):
+        if not args.text_encoder:
+            raise ValueError("--text_encoder is required when --sample_prompts is used")
+        prompts = load_prompts(sample_prompts)
+        reference_lists: list[list[Image.Image]] = []
+        for index, prompt_dict in enumerate(prompts):
+            paths = self._sample_reference_paths(prompt_dict)
+            if self.is_edit and not 1 <= len(paths) <= 3:
+                raise ValueError(f"Edit sample prompt {index} requires one to three control_image_path values")
+            if not self.is_edit and paths:
+                raise ValueError(f"T2I sample prompt {index} must not contain control_image_path")
+            reference_lists.append([Image.open(path).convert("RGB") for path in paths])
+
+        processor_source = args.processor if args.processor else None
+        loader_kwargs = {
+            "device": accelerator.device,
+            "dtype": torch.bfloat16,
+        }
+        if processor_source is not None:
+            loader_kwargs["processor_source"] = processor_source
+        encoder = load_mage_flow_text_encoder(args.text_encoder, **loader_kwargs)
+        sample_parameters = []
+        for prompt_dict, references in zip(prompts, reference_lists):
+            item = prompt_dict.copy()
+            prompt = item.get("prompt", "")
+            negative_prompt = item.get("negative_prompt", " ")
+            item["negative_prompt"] = negative_prompt
+            encoded = encode_conditioning(
+                encoder,
+                [prompt, negative_prompt],
+                references=[references, references] if self.is_edit else None,
+                is_edit=self.is_edit,
+            )
+            item["mage_flow_embed"] = encoded[0].cpu()
+            item["negative_mage_flow_embed"] = encoded[1].cpu()
+            if self.is_edit:
+                width, height = resolve_output_size(
+                    references[0].size,
+                    width=item.get("width"),
+                    height=item.get("height"),
+                    max_size=item.get("max_size"),
+                )
+                item["width"] = width
+                item["height"] = height
+                item["mage_flow_reference_images"] = references
+            sample_parameters.append(item)
+        encoder.to("cpu")
+        del encoder
+        gc.collect()
+        clean_memory_on_device(accelerator.device)
+        return sample_parameters
+
+    def do_inference(
+        self,
+        accelerator,
+        args,
+        sample_parameter,
+        vae,
+        dit_dtype,
+        transformer,
+        discrete_flow_shift,
+        sample_steps,
+        width,
+        height,
+        frame_count,
+        generator,
+        do_classifier_free_guidance,
+        guidance_scale,
+        cfg_scale,
+        image_path=None,
+        control_video_path=None,
+    ):
+        del args, guidance_scale, image_path, control_video_path
+        if frame_count != 1:
+            raise ValueError("Mage-Flow sampling supports images only")
+        width = max(16, width // 16 * 16)
+        height = max(16, height // 16 * 16)
+        device = accelerator.device
+        positive = sample_parameter["mage_flow_embed"].to(device=device, dtype=dit_dtype)
+        cfg_scale = 5.0 if cfg_scale is None else cfg_scale
+        negative = None
+        if do_classifier_free_guidance and cfg_scale > 1.0:
+            negative = [sample_parameter["negative_mage_flow_embed"].to(device=device, dtype=dit_dtype)]
+
+        controls = None
+        if self.is_edit:
+            references = sample_parameter.get("mage_flow_reference_images", [])
+            if not 1 <= len(references) <= 3:
+                raise ValueError("Mage-Flow-Edit sampling requires one to three ordered references")
+            vae.to(device)
+            pixels = torch.stack(
+                [image_to_tensor(image, width=width, height=height, device=device, dtype=vae.dtype) for image in references]
+            )
+            base_seed = generator.initial_seed()
+            reference_generators = [
+                torch.Generator(device=device).manual_seed(base_seed + 10_000 + index) for index in range(len(references))
+            ]
+            controls = [[latent.to(dit_dtype) for latent in vae.encode(pixels, generators=reference_generators)]]
+            vae.to("cpu")
+            clean_memory_on_device(device)
+
+        latents = sample_latents(
+            transformer,
+            [positive],
+            [(height // 16, width // 16)],
+            steps=sample_steps,
+            seeds=[generator.initial_seed()],
+            device=device,
+            dtype=dit_dtype,
+            controls=controls,
+            negative_text_tokens=negative,
+            cfg_scale=cfg_scale if negative is not None else 1.0,
+            shift=discrete_flow_shift,
+        )
+        vae.to(device)
+        with torch.no_grad():
+            pixels = vae.decode(latents[0].unsqueeze(0).to(device=device, dtype=vae.dtype))
+        pixels = pixels.float().cpu().clamp(-1, 1).add(1).div(2)
+        vae.to("cpu")
+        clean_memory_on_device(device)
+        return pixels.unsqueeze(2)
 
     def load_transformer(
         self,
@@ -87,7 +246,7 @@ class MageFlowNetworkTrainer(NetworkTrainer):
 
     def load_vae(self, args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
         del vae_path
-        return load_mage_vae(args.vae, device="cpu", dtype=vae_dtype, encoder_only=False)
+        return load_mage_vae(args.vae, device="cpu", dtype=vae_dtype, require_decoder=True)
 
     def compile_transformer(self, args, transformer):
         model: MageFlow = transformer
@@ -153,6 +312,13 @@ def mage_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--is_edit", action="store_true", help="train Mage-Flow-Edit instead of Mage-Flow T2I")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled FP8 for the Mage-Flow transformer")
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL-4B safetensors checkpoint")
+    parser.add_argument("--processor", type=str, default=None, help="Qwen3-VL processor directory or pinned repository")
+    parser.set_defaults(
+        network_module="musubi_tuner.networks.lora_mage_flow",
+        timestep_sampling="shift",
+        discrete_flow_shift=6.0,
+        weighting_scheme="none",
+    )
     return parser
 
 

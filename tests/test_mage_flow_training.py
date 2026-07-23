@@ -4,8 +4,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from musubi_tuner.mage_flow.sampling import build_scheduler, euler_step
+from musubi_tuner.mage_flow.sampling import build_scheduler, euler_step, sample_latents
 from musubi_tuner.mage_flow.training import sigma_from_training_timesteps, unpack_target_predictions
+import musubi_tuner.mage_flow_train_network as train_module
 from musubi_tuner.mage_flow_train_network import MageFlowNetworkTrainer
 
 
@@ -31,6 +32,11 @@ class _EchoTransformer(torch.nn.Module):
         return packed.image_tokens
 
 
+class _ZeroVelocity(torch.nn.Module):
+    def forward(self, packed):
+        return torch.zeros_like(packed.image_tokens)
+
+
 def test_euler_step_uses_official_epsilon_minus_z_direction():
     latent = torch.tensor([5.0])
     velocity = torch.tensor([3.0])
@@ -46,6 +52,26 @@ def test_scheduler_uses_static_shift_and_terminal_zero():
     expected = 6.0 * base / (1.0 + 5.0 * base)
 
     torch.testing.assert_close(scheduler.sigmas, torch.cat([expected, torch.zeros(1)]))
+
+
+def test_fixed_seed_sampling_is_deterministic():
+    kwargs = {
+        "transformer": _ZeroVelocity(),
+        "text_tokens": [torch.zeros(2, 5)],
+        "latent_shapes": [(2, 3)],
+        "steps": 2,
+        "seeds": [42],
+        "channels": 4,
+        "device": "cpu",
+        "dtype": torch.float32,
+    }
+
+    first = sample_latents(**kwargs)
+    second = sample_latents(**kwargs)
+    different = sample_latents(**{**kwargs, "seeds": [43]})
+
+    torch.testing.assert_close(first[0], second[0])
+    assert not torch.equal(first[0], different[0])
 
 
 def test_training_timesteps_recover_exact_sigmas():
@@ -135,3 +161,52 @@ def test_trainer_rejects_missing_or_noncontiguous_edit_references():
             },
             **common,
         )
+
+
+def test_parser_defaults_to_the_fixed_mage_flow_lora_and_official_training_schedule():
+    parser = train_module.mage_flow_setup_parser(train_module.setup_parser_common())
+    args = parser.parse_args([])
+
+    assert args.network_module == "musubi_tuner.networks.lora_mage_flow"
+    assert args.timestep_sampling == "shift"
+    assert args.discrete_flow_shift == 6.0
+    assert args.weighting_scheme == "none"
+
+
+def test_trainer_rejects_plain_fp8_and_non_mage_network_module():
+    trainer = MageFlowNetworkTrainer()
+    common = {
+        "is_edit": False,
+        "mixed_precision": "bf16",
+        "fp8_base": False,
+        "fp8_scaled": False,
+        "network_module": "musubi_tuner.networks.lora_mage_flow",
+        "sage_attn": False,
+        "xformers": False,
+        "flash3": False,
+    }
+    with pytest.raises(ValueError, match="fp8_scaled"):
+        trainer.handle_model_specific_args(SimpleNamespace(**{**common, "fp8_base": True}))
+    with pytest.raises(ValueError, match="LoRA-only"):
+        trainer.handle_model_specific_args(SimpleNamespace(**{**common, "network_module": "some.other.network"}))
+
+
+def test_training_sample_vae_load_requires_decoder(monkeypatch):
+    captured = {}
+
+    def fake_loader(path, **kwargs):
+        captured.update(path=path, **kwargs)
+        return object()
+
+    monkeypatch.setattr(train_module, "load_mage_vae", fake_loader)
+    args = SimpleNamespace(vae="vae.safetensors")
+
+    result = MageFlowNetworkTrainer().load_vae(args, torch.bfloat16, args.vae)
+
+    assert result is not None
+    assert captured == {
+        "path": "vae.safetensors",
+        "device": "cpu",
+        "dtype": torch.bfloat16,
+        "require_decoder": True,
+    }
