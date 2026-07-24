@@ -194,13 +194,14 @@ class BucketBatchManager:
 
         logger.info(f"total batches: {len(self)}")
 
-    def shuffle(self):
+    def shuffle(self, rng: Optional[random.Random] = None):
+        rng = rng if rng is not None else random
         # shuffle each bucket
         for bucket in self.buckets.values():
-            random.shuffle(bucket)
+            rng.shuffle(bucket)
 
         # shuffle the order of batches
-        random.shuffle(self.bucket_batch_indices)
+        rng.shuffle(self.bucket_batch_indices)
 
         if self.num_timestep_buckets is not None and self.num_timestep_buckets > 1:
             # prepare timesteps for each timestep buckets
@@ -217,10 +218,10 @@ class BucketBatchManager:
                 min_t = i / self.num_timestep_buckets
                 max_t = (i + 1) / self.num_timestep_buckets
                 for _ in range(samples_per_bucket):
-                    all_timesteps.append(random.uniform(min_t, max_t))
+                    all_timesteps.append(rng.uniform(min_t, max_t))
 
             # 3. Shuffle the entire pool thoroughly
-            random.shuffle(all_timesteps)
+            rng.shuffle(all_timesteps)
 
             # Trim the excess timesteps to match the exact number needed
             all_timesteps = all_timesteps[:total_timesteps_needed]
