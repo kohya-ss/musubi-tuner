@@ -13,6 +13,10 @@ integration:
 - `text_encoders/qwen3vl_4b_bf16.safetensors`
 - `vae/mage_flow_vae_bf16.safetensors`
 
+Their released headers contain 397 DiT tensors, 713 Qwen tensors, and 839 VAE
+tensors respectively. The key prefixes, BF16 dtypes, and shapes match the
+existing strict single-file loaders, so no weight-key fallback is required.
+
 The current Mage-Flow commands still expose `--processor`, even though users
 should not select tokenizer or image-preprocessor assets independently from
 the released model family. Mage-Flow has no `--tokenizer` argument today, and
