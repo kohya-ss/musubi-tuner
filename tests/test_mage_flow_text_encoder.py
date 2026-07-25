@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,6 +9,7 @@ from safetensors.torch import load_file
 
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_mage_flow
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
+import musubi_tuner.mage_flow.text_encoder as text_encoder_module
 from musubi_tuner.mage_flow.text_encoder import (
     EDIT_IMAGE_PLACEHOLDER,
     MAGE_FLOW_EDIT_PROMPT_TEMPLATE,
@@ -16,6 +18,27 @@ from musubi_tuner.mage_flow.text_encoder import (
     encode_conditioning,
     normalize_qwen_state_dict,
 )
+
+
+def test_processor_loader_uses_pinned_official_mage_assets(monkeypatch):
+    captured = {}
+    sentinel = object()
+
+    def fake_from_pretrained(repo_id, **kwargs):
+        captured.update(repo_id=repo_id, **kwargs)
+        return sentinel
+
+    monkeypatch.setattr(text_encoder_module.AutoProcessor, "from_pretrained", fake_from_pretrained)
+    loader = getattr(text_encoder_module, "load_mage_flow_processor", None)
+
+    assert loader is not None
+    assert loader() is sentinel
+    assert captured == {
+        "repo_id": "microsoft/Mage-Flow",
+        "revision": "faca09c18c1c19458e7fbc3f7bce6f7a7d4d01a9",
+        "subfolder": "text_encoder",
+    }
+    assert "processor_source" not in inspect.signature(text_encoder_module.load_mage_flow_text_encoder).parameters
 
 
 class FakeProcessor:

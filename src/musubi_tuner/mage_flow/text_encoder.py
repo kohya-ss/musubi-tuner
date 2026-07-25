@@ -21,6 +21,10 @@ from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLModel
 from .utils import ComponentValidationError
 
 
+MAGE_FLOW_REPO_ID = "microsoft/Mage-Flow"
+MAGE_FLOW_REPO_REVISION = "faca09c18c1c19458e7fbc3f7bce6f7a7d4d01a9"
+MAGE_FLOW_TEXT_ENCODER_SUBFOLDER = "text_encoder"
+# Removed with the entrypoint overrides in the next migration step.
 QWEN3_VL_4B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-4B-Instruct"
 QWEN3_VL_4B_INSTRUCT_REVISION = "ebb281ec70b05090aa6165b016eac8ec08e71b17"
 
@@ -198,12 +202,19 @@ class MageFlowTextEncoder(nn.Module):
             return torch.float32
 
 
+def load_mage_flow_processor():
+    return AutoProcessor.from_pretrained(
+        MAGE_FLOW_REPO_ID,
+        revision=MAGE_FLOW_REPO_REVISION,
+        subfolder=MAGE_FLOW_TEXT_ENCODER_SUBFOLDER,
+    )
+
+
 def load_mage_flow_text_encoder(
     path: str | Path,
     *,
     device: str | torch.device = "cpu",
     dtype: torch.dtype = torch.bfloat16,
-    processor_source: str | Path = QWEN3_VL_4B_INSTRUCT_REPO_ID,
 ) -> MageFlowTextEncoder:
     component_path, prefix, expected = _inspect_qwen_header(path)
     with safe_open(component_path, framework="pt", device="cpu") as handle:
@@ -212,11 +223,7 @@ def load_mage_flow_text_encoder(
         backbone = Qwen3VLModel._from_config(_qwen_config())
     backbone.load_state_dict(state_dict, strict=True, assign=True)
     backbone.to(device=device, dtype=dtype).eval().requires_grad_(False)
-    source = str(processor_source)
-    processor_kwargs = {}
-    if source == QWEN3_VL_4B_INSTRUCT_REPO_ID:
-        processor_kwargs["revision"] = QWEN3_VL_4B_INSTRUCT_REVISION
-    processor = AutoProcessor.from_pretrained(source, **processor_kwargs)
+    processor = load_mage_flow_processor()
     return MageFlowTextEncoder(backbone, processor)
 
 
