@@ -174,6 +174,38 @@ def test_parser_defaults_to_the_fixed_mage_flow_lora_and_official_training_sched
     assert args.weighting_scheme == "none"
 
 
+def test_training_sample_prompts_loads_fixed_processor_contract(monkeypatch):
+    captured = {}
+    trainer = MageFlowNetworkTrainer()
+    trainer.is_edit = False
+    encoder = torch.nn.Module()
+
+    monkeypatch.setattr(train_module, "load_prompts", lambda _path: [{"prompt": "test"}])
+    monkeypatch.setattr(
+        train_module,
+        "load_mage_flow_text_encoder",
+        lambda path, **kwargs: captured.update(path=path, **kwargs) or encoder,
+    )
+    monkeypatch.setattr(
+        train_module,
+        "encode_conditioning",
+        lambda *_args, **_kwargs: [torch.zeros(1, 2560), torch.zeros(1, 2560)],
+    )
+    monkeypatch.setattr(train_module, "clean_memory_on_device", lambda _device: None)
+
+    trainer.process_sample_prompts(
+        SimpleNamespace(text_encoder="text.safetensors"),
+        SimpleNamespace(device=torch.device("cpu")),
+        "prompts.toml",
+    )
+
+    assert captured == {
+        "path": "text.safetensors",
+        "device": torch.device("cpu"),
+        "dtype": torch.bfloat16,
+    }
+
+
 def test_trainer_rejects_plain_fp8_and_non_mage_network_module():
     trainer = MageFlowNetworkTrainer()
     common = {

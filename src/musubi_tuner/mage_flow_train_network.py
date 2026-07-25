@@ -133,14 +133,11 @@ class MageFlowNetworkTrainer(NetworkTrainer):
                 raise ValueError(f"T2I sample prompt {index} must not contain control_image_path")
             reference_lists.append([Image.open(path).convert("RGB") for path in paths])
 
-        processor_source = args.processor if args.processor else None
-        loader_kwargs = {
-            "device": accelerator.device,
-            "dtype": torch.bfloat16,
-        }
-        if processor_source is not None:
-            loader_kwargs["processor_source"] = processor_source
-        encoder = load_mage_flow_text_encoder(args.text_encoder, **loader_kwargs)
+        encoder = load_mage_flow_text_encoder(
+            args.text_encoder,
+            device=accelerator.device,
+            dtype=torch.bfloat16,
+        )
         sample_parameters = []
         for prompt_dict, references in zip(prompts, reference_lists):
             item = prompt_dict.copy()
@@ -335,7 +332,6 @@ def mage_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--is_edit", action="store_true", help="train Mage-Flow-Edit instead of Mage-Flow T2I")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled FP8 for the Mage-Flow transformer")
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL-4B safetensors checkpoint")
-    parser.add_argument("--processor", type=str, default=None, help="Qwen3-VL processor directory or pinned repository")
     parser.add_argument(
         "--allow_mage_architecture_mismatch",
         action="store_true",

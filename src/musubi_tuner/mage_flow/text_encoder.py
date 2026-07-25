@@ -24,9 +24,6 @@ from .utils import ComponentValidationError
 MAGE_FLOW_REPO_ID = "microsoft/Mage-Flow"
 MAGE_FLOW_REPO_REVISION = "faca09c18c1c19458e7fbc3f7bce6f7a7d4d01a9"
 MAGE_FLOW_TEXT_ENCODER_SUBFOLDER = "text_encoder"
-# Removed with the entrypoint overrides in the next migration step.
-QWEN3_VL_4B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-4B-Instruct"
-QWEN3_VL_4B_INSTRUCT_REVISION = "ebb281ec70b05090aa6165b016eac8ec08e71b17"
 
 QWEN3_VL_4B_INSTRUCT_CONFIG = {
     "architectures": ["Qwen3VLForConditionalGeneration"],

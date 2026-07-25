@@ -6,10 +6,27 @@ import pytest
 from safetensors.torch import save_file
 import torch
 
+import musubi_tuner.mage_flow_cache_text_encoder_outputs as cache_text_module
 import musubi_tuner.mage_flow_generate_image as generate_module
+import musubi_tuner.mage_flow_train_network as train_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [
+        cache_text_module.setup_parser(),
+        generate_module.setup_parser(),
+        train_module.mage_flow_setup_parser(train_module.setup_parser_common()),
+    ],
+)
+def test_mage_parsers_do_not_expose_processor_or_tokenizer(parser):
+    option_strings = {option for action in parser._actions for option in action.option_strings}
+
+    assert "--processor" not in option_strings
+    assert "--tokenizer" not in option_strings
 
 
 @pytest.mark.parametrize(
@@ -58,6 +75,43 @@ def test_generation_rejects_invalid_steps_before_model_loading(monkeypatch):
 
     with pytest.raises(ValueError, match="steps"):
         generate_module.generate(args, parser)
+
+
+def test_generation_loads_text_encoder_without_processor_override(monkeypatch):
+    class StopAfterTextEncoder(Exception):
+        pass
+
+    captured = {}
+    parser = generate_module.setup_parser()
+    args = parser.parse_args(
+        [
+            "--dit",
+            "dit.safetensors",
+            "--vae",
+            "vae.safetensors",
+            "--text_encoder",
+            "text.safetensors",
+            "--prompt",
+            "test",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    def stop_loader(path, **kwargs):
+        captured.update(path=path, **kwargs)
+        raise StopAfterTextEncoder
+
+    monkeypatch.setattr(generate_module, "load_mage_flow_text_encoder", stop_loader)
+
+    with pytest.raises(StopAfterTextEncoder):
+        generate_module.generate(args, parser)
+
+    assert captured == {
+        "path": "text.safetensors",
+        "device": torch.device("cpu"),
+        "dtype": torch.bfloat16,
+    }
 
 
 def test_generation_checks_lora_mode_before_model_loading(tmp_path, monkeypatch):

@@ -13,11 +13,7 @@ import torch
 from musubi_tuner.mage_flow.mage_vae import load_mage_vae
 from musubi_tuner.mage_flow.model import load_mage_flow_transformer
 from musubi_tuner.mage_flow.sampling import resolve_output_size, sample_latents
-from musubi_tuner.mage_flow.text_encoder import (
-    QWEN3_VL_4B_INSTRUCT_REPO_ID,
-    encode_conditioning,
-    load_mage_flow_text_encoder,
-)
+from musubi_tuner.mage_flow.text_encoder import encode_conditioning, load_mage_flow_text_encoder
 from musubi_tuner.networks import lora_mage_flow
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.utils.model_utils import str_to_dtype
@@ -123,11 +119,6 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dit", required=True, help="single Mage-Flow DiT safetensors file")
     parser.add_argument("--vae", required=True, help="single MageVAE safetensors file")
     parser.add_argument("--text_encoder", required=True, help="single Qwen3-VL-4B safetensors file")
-    parser.add_argument(
-        "--processor",
-        default=QWEN3_VL_4B_INSTRUCT_REPO_ID,
-        help="Qwen3-VL processor directory or pinned Hugging Face repository",
-    )
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--negative_prompt", default=" ")
     parser.add_argument("--output", default="mage_flow.png")
@@ -172,7 +163,6 @@ def generate(args: argparse.Namespace, parser: argparse.ArgumentParser | None = 
         args.text_encoder,
         device=device,
         dtype=dtype,
-        processor_source=args.processor,
     )
     prompts = [args.prompt]
     conditioning_references = [references] if args.is_edit else None

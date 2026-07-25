@@ -10,11 +10,7 @@ from musubi_tuner.dataset.architectures import ARCHITECTURE_MAGE_FLOW, ARCHITECT
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_mage_flow
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
-from musubi_tuner.mage_flow.text_encoder import (
-    QWEN3_VL_4B_INSTRUCT_REPO_ID,
-    encode_conditioning,
-    load_mage_flow_text_encoder,
-)
+from musubi_tuner.mage_flow.text_encoder import encode_conditioning, load_mage_flow_text_encoder
 from musubi_tuner.utils.model_utils import str_to_dtype
 
 
@@ -48,7 +44,6 @@ def setup_parser() -> argparse.ArgumentParser:
     parser = cache_text.setup_parser_common()
     parser.add_argument("--text_encoder", type=str, required=True, help="single Qwen3-VL-4B safetensors component")
     parser.add_argument("--text_encoder_dtype", type=str, default="bfloat16")
-    parser.add_argument("--processor", type=str, default=QWEN3_VL_4B_INSTRUCT_REPO_ID)
     parser.add_argument("--is_edit", action="store_true", help="condition on one to three ordered reference images")
     return parser
 
@@ -68,7 +63,6 @@ def main() -> None:
         args.text_encoder,
         device=device,
         dtype=dtype,
-        processor_source=args.processor,
     )
     cache_text.process_text_encoder_batches(
         args.num_workers,
