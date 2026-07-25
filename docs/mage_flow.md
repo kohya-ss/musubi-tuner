@@ -27,22 +27,29 @@ Not supported:
 - inferred T2I/Edit or Base/aligned/Turbo identity from filenames
 - SageAttention, xFormers, FlashAttention 3/4
 - official content screening or Gaussian-Shading watermarking
-- unverified Comfy-Org checkpoint layouts
+- Comfy-Org INT8 ConvRot checkpoints
 
 ## Component Files
 
-Pass one regular `.safetensors` file for each component:
+Download the released single-file components from
+[Comfy-Org/Mage-Flow](https://huggingface.co/Comfy-Org/Mage-Flow) and pass one
+regular `.safetensors` file for each component:
 
 ```text
---dit            Mage-Flow DiT
---vae            combined MageVAE encoder and decoder
---text_encoder   Qwen3-VL-4B backbone
+--dit            diffusion_models/mage_flow_bf16.safetensors
+--vae            vae/mage_flow_vae_bf16.safetensors
+--text_encoder   text_encoders/qwen3vl_4b_bf16.safetensors
 ```
 
 Directories and shard lists are rejected. The loaders inspect every key, shape
 and dtype before allocating the released model and then load strictly. The Qwen
 language-model head is not needed because conditioning uses only the final
 backbone hidden state.
+
+There are no `--processor` or `--tokenizer` options. Tokenizer, chat-template,
+and image-processor assets are downloaded on first use from the pinned
+`microsoft/Mage-Flow/text_encoder` directory and then reused from the Hugging
+Face cache. The three large model weights are never downloaded implicitly.
 
 The current loader recognizes the pinned Microsoft key layouts documented by
 the command errors. It does not guess a layout from a filename or tensor shape.
@@ -105,7 +112,6 @@ python mage_flow_cache_latents.py \
 python mage_flow_cache_text_encoder_outputs.py \
   --dataset_config dataset.toml \
   --text_encoder path/to/qwen3_vl_4b.safetensors \
-  --processor Qwen/Qwen3-VL-4B-Instruct \
   --text_encoder_dtype bfloat16 \
   --batch_size 1
 ```
@@ -279,22 +285,29 @@ Musubi Tuner は Microsoft Mage-Flow と Mage-Flow-Edit の LoRA 学習および
 
 full-model fine-tuning、公開データローダーでの native-resolution packing、
 directory/shard 形式の component、ファイル名からのモデル種別推測、
-SageAttention、xFormers、FlashAttention 3/4、未確認の Comfy-Org key layout
-には対応していません。
+SageAttention、xFormers、FlashAttention 3/4、Comfy-Org の INT8 ConvRot
+checkpoint には対応していません。
 
 ### コンポーネント
 
-各 component には通常の `.safetensors` ファイルを 1 個ずつ指定します。
+[Comfy-Org/Mage-Flow](https://huggingface.co/Comfy-Org/Mage-Flow) から公開済み
+single-file component を取得し、各 component に通常の `.safetensors` ファイル
+を 1 個ずつ指定します。
 
 ```text
---dit            Mage-Flow DiT
---vae            encoder と decoder を含む MageVAE
---text_encoder   Qwen3-VL-4B backbone
+--dit            diffusion_models/mage_flow_bf16.safetensors
+--vae            vae/mage_flow_vae_bf16.safetensors
+--text_encoder   text_encoders/qwen3vl_4b_bf16.safetensors
 ```
 
 loader は大きなモデルを確保する前に全 key、shape、dtype を検証し、その後
 strict load します。conditioning は最終 backbone hidden state のみを使うため、
 Qwen の `lm_head.weight` は不要です。
+
+`--processor` と `--tokenizer` option はありません。tokenizer、chat template、
+image processor は pinned `microsoft/Mage-Flow/text_encoder` から初回に取得し、
+以後は Hugging Face cache を再利用します。3 個の大きな model weight を暗黙に
+download することはありません。
 
 ### データセットと bucket
 
@@ -343,7 +356,6 @@ python mage_flow_cache_latents.py \
 python mage_flow_cache_text_encoder_outputs.py \
   --dataset_config dataset.toml \
   --text_encoder path/to/qwen3_vl_4b.safetensors \
-  --processor Qwen/Qwen3-VL-4B-Instruct \
   --text_encoder_dtype bfloat16 \
   --batch_size 1
 ```
