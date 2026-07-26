@@ -230,7 +230,7 @@ class MageFlowNetworkTrainer(NetworkTrainer):
             negative_text_tokens=negative,
             cfg_scale=cfg_scale if negative is not None else 1.0,
             shift=discrete_flow_shift,
-            renormalize_cfg=True,
+            renormalize_cfg=False,
         )
         vae.to(device)
         pixels = decode_mage_vae_latents(vae, latents[0].unsqueeze(0))

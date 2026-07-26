@@ -75,7 +75,7 @@ def test_fixed_seed_sampling_is_deterministic():
     assert not torch.equal(first[0], different[0])
 
 
-def test_training_preview_always_enables_mage_cfg_renormalization(monkeypatch):
+def test_training_preview_disables_mage_cfg_renormalization_by_default(monkeypatch):
     captured = {}
 
     class FakeVAE:
@@ -113,7 +113,7 @@ def test_training_preview_always_enables_mage_cfg_renormalization(monkeypatch):
         1.0,
     )
 
-    assert captured.get("renormalize_cfg") is True
+    assert captured.get("renormalize_cfg") is False
 
 
 def test_training_preview_decode_matches_official_precision_boundary(monkeypatch):
