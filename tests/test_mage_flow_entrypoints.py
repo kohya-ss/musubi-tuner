@@ -114,6 +114,29 @@ def test_generation_loads_text_encoder_without_processor_override(monkeypatch):
     }
 
 
+def test_generation_decode_matches_official_precision_boundary():
+    captured = {}
+
+    class FakeVAE:
+        device = torch.device("cpu")
+        dtype = torch.bfloat16
+
+        def decode(self, latents):
+            captured["latent_dtype"] = latents.dtype
+            captured["autocast_enabled"] = torch.is_autocast_enabled("cpu")
+            captured["autocast_dtype"] = torch.get_autocast_dtype("cpu")
+            return torch.zeros(1, 3, 16, 16)
+
+    image = generate_module.latent_to_pil(FakeVAE(), torch.zeros(128, 1, 1, dtype=torch.bfloat16))
+
+    assert image.size == (16, 16)
+    assert captured == {
+        "latent_dtype": torch.float32,
+        "autocast_enabled": True,
+        "autocast_dtype": torch.bfloat16,
+    }
+
+
 def test_generation_checks_lora_mode_before_model_loading(tmp_path, monkeypatch):
     adapter = tmp_path / "edit.safetensors"
     save_file({"weight": torch.zeros(1)}, adapter, metadata={"ss_base_model_version": "mage_flow_edit"})

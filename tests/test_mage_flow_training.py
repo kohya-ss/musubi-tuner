@@ -75,6 +75,51 @@ def test_fixed_seed_sampling_is_deterministic():
     assert not torch.equal(first[0], different[0])
 
 
+def test_training_preview_decode_matches_official_precision_boundary(monkeypatch):
+    captured = {}
+
+    class FakeVAE:
+        device = torch.device("cpu")
+        dtype = torch.bfloat16
+
+        def to(self, device):
+            self.device = torch.device(device)
+            return self
+
+        def decode(self, latents):
+            captured["latent_dtype"] = latents.dtype
+            captured["autocast_enabled"] = torch.is_autocast_enabled("cpu")
+            captured["autocast_dtype"] = torch.get_autocast_dtype("cpu")
+            return torch.zeros(1, 3, 2, 2)
+
+    monkeypatch.setattr(train_module, "sample_latents", lambda *_args, **_kwargs: [torch.zeros(3, 2, 2)])
+    monkeypatch.setattr(train_module, "clean_memory_on_device", lambda _device: None)
+
+    MageFlowNetworkTrainer().do_inference(
+        SimpleNamespace(device=torch.device("cpu")),
+        SimpleNamespace(),
+        {"mage_flow_embed": torch.zeros(2, 5)},
+        FakeVAE(),
+        torch.float32,
+        object(),
+        6.0,
+        2,
+        32,
+        32,
+        1,
+        torch.Generator(device="cpu").manual_seed(42),
+        False,
+        1.0,
+        1.0,
+    )
+
+    assert captured == {
+        "latent_dtype": torch.float32,
+        "autocast_enabled": True,
+        "autocast_dtype": torch.bfloat16,
+    }
+
+
 def test_training_timesteps_recover_exact_sigmas():
     timesteps = torch.tensor([201.0, 801.0])
 

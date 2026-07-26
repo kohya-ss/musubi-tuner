@@ -555,6 +555,13 @@ class MageVAE(nn.Module):
         return next(self.parameters()).dtype
 
 
+@torch.no_grad()
+def decode_mage_vae_latents(vae: MageVAE, latents: torch.Tensor) -> torch.Tensor:
+    device = vae.device
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        return vae.decode(latents.to(device=device, dtype=torch.float32))
+
+
 def load_mage_vae(
     path: str | Path,
     *,
@@ -579,4 +586,4 @@ def load_mage_vae(
     return model
 
 
-__all__ = ["MageVAE", "load_mage_vae", "posterior_seed", "sample_posterior"]
+__all__ = ["MageVAE", "decode_mage_vae_latents", "load_mage_vae", "posterior_seed", "sample_posterior"]

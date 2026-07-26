@@ -10,7 +10,7 @@ from PIL import Image
 from safetensors.torch import load_file
 import torch
 
-from musubi_tuner.mage_flow.mage_vae import load_mage_vae
+from musubi_tuner.mage_flow.mage_vae import decode_mage_vae_latents, load_mage_vae
 from musubi_tuner.mage_flow.model import load_mage_flow_transformer
 from musubi_tuner.mage_flow.sampling import resolve_output_size, sample_latents
 from musubi_tuner.mage_flow.text_encoder import encode_conditioning, load_mage_flow_text_encoder
@@ -43,8 +43,7 @@ def image_to_tensor(
 
 
 def latent_to_pil(vae, latent: torch.Tensor) -> Image.Image:
-    with torch.no_grad():
-        pixels = vae.decode(latent.unsqueeze(0).to(device=vae.device, dtype=vae.dtype))
+    pixels = decode_mage_vae_latents(vae, latent.unsqueeze(0))
     pixels = pixels[0].float().clamp(-1, 1).add(1).mul(127.5).byte().permute(1, 2, 0).cpu().numpy()
     return Image.fromarray(pixels, mode="RGB")
 

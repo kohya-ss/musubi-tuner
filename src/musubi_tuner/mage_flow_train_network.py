@@ -19,7 +19,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
 )
 from musubi_tuner.mage_flow_generate_image import image_to_tensor
-from musubi_tuner.mage_flow.mage_vae import load_mage_vae
+from musubi_tuner.mage_flow.mage_vae import decode_mage_vae_latents, load_mage_vae
 from musubi_tuner.mage_flow.model import MageFlow, load_mage_flow_transformer
 from musubi_tuner.mage_flow.sampling import resolve_output_size, sample_latents
 from musubi_tuner.mage_flow.text_encoder import encode_conditioning, load_mage_flow_text_encoder
@@ -232,8 +232,7 @@ class MageFlowNetworkTrainer(NetworkTrainer):
             shift=discrete_flow_shift,
         )
         vae.to(device)
-        with torch.no_grad():
-            pixels = vae.decode(latents[0].unsqueeze(0).to(device=device, dtype=vae.dtype))
+        pixels = decode_mage_vae_latents(vae, latents[0].unsqueeze(0))
         pixels = pixels.float().cpu().clamp(-1, 1).add(1).div(2)
         vae.to("cpu")
         clean_memory_on_device(device)
