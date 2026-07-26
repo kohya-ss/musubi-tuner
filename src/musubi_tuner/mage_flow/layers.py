@@ -115,12 +115,12 @@ class MageFlowEmbedRope(nn.Module):
             self.neg_freqs = self.neg_freqs.to(device)
 
         packed_frequencies = []
-        for sample_shapes in image_shapes:
-            for frame_index, (frames, height, width) in enumerate(sample_shapes):
-                key = (frames, height, width, frame_index)
-                if key not in self.video_freq_cache:
-                    self.video_freq_cache[key] = self._compute_video_freqs(frames, height, width, frame_index).cpu()
-                packed_frequencies.append(self.video_freq_cache[key].to(device))
+        packed_shapes = (shape for sample_shapes in image_shapes for shape in sample_shapes)
+        for frame_index, (frames, height, width) in enumerate(packed_shapes):
+            key = (frames, height, width, frame_index)
+            if key not in self.video_freq_cache:
+                self.video_freq_cache[key] = self._compute_video_freqs(frames, height, width, frame_index).cpu()
+            packed_frequencies.append(self.video_freq_cache[key].to(device))
         if not packed_frequencies:
             raise ValueError("image_shapes must contain at least one image")
         return torch.cat(packed_frequencies, dim=0)

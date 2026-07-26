@@ -19,35 +19,29 @@ def tiny_config(checkpoint=False):
     )
 
 
-def test_tiny_model_packed_batch_matches_individual_samples():
+def test_tiny_model_packed_batch_preserves_sample_boundaries():
     torch.manual_seed(123)
     model = MageFlow(tiny_config()).eval()
     targets = [torch.randn(4, 2, 2), torch.randn(4, 1, 3)]
     text = [torch.randn(2, 7), torch.randn(3, 7)]
     timesteps = torch.tensor([0.2, 0.8])
     packed = pack_training_batch(targets, text, timesteps, image_dim=4, text_dim=7, text_max_length=16)
+    changed = pack_training_batch(
+        [targets[0], torch.randn_like(targets[1])],
+        [text[0], torch.randn_like(text[1])],
+        timesteps,
+        image_dim=4,
+        text_dim=7,
+        text_max_length=16,
+    )
 
     with torch.no_grad():
         batched = model(packed)
-        singles = torch.cat(
-            [
-                model(
-                    pack_training_batch(
-                        [targets[index]],
-                        [text[index]],
-                        timesteps[index : index + 1],
-                        image_dim=4,
-                        text_dim=7,
-                        text_max_length=16,
-                    )
-                )
-                for index in range(2)
-            ],
-            dim=1,
-        )
+        changed_batched = model(changed)
 
     assert batched.shape == (1, 7, 4)
-    torch.testing.assert_close(batched, singles, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(batched[:, :4], changed_batched[:, :4], rtol=1e-5, atol=1e-5)
+    assert not torch.allclose(batched[:, 4:], changed_batched[:, 4:])
 
 
 def test_edit_reference_tokens_share_the_sample_timestep_modulation():
@@ -84,17 +78,16 @@ def test_edit_reference_tokens_share_the_sample_timestep_modulation():
     torch.testing.assert_close(low.image_tokens[:, 4:], high.image_tokens[:, 4:])
 
 
-def test_rope_resets_frame_coordinates_for_each_sample():
+def test_rope_frame_coordinates_follow_global_packed_image_order():
     rope = MageFlowEmbedRope(theta=10000, axes_dim=(2, 2, 4), scale_rope=True)
+    shapes = [[(1, 2, 2), (1, 1, 2)], [(1, 2, 2), (1, 1, 2)]]
 
-    freqs = rope(
-        [[(1, 2, 2), (1, 1, 2)], [(1, 2, 2), (1, 1, 2)]],
-        device=torch.device("cpu"),
-    )
+    nested = rope(shapes, device=torch.device("cpu"))
+    flattened = rope([[shape for sample in shapes for shape in sample]], device=torch.device("cpu"))
 
-    assert freqs.shape == (12, 4)
-    torch.testing.assert_close(freqs[:6], freqs[6:])
-    assert not torch.equal(freqs[0, :1], freqs[4, :1])
+    assert nested.shape == (12, 4)
+    torch.testing.assert_close(nested, flattened)
+    assert not torch.equal(nested[:6, :1], nested[6:, :1])
 
 
 def test_block_modulation_repeats_one_embedding_over_complete_sample_segments():
