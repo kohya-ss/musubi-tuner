@@ -113,13 +113,14 @@ class MageFlowEmbedRope(nn.Module):
         if self.pos_freqs.device != device:
             self.pos_freqs = self.pos_freqs.to(device)
             self.neg_freqs = self.neg_freqs.to(device)
+            self.video_freq_cache.clear()
 
         packed_frequencies = []
         packed_shapes = (shape for sample_shapes in image_shapes for shape in sample_shapes)
         for frame_index, (frames, height, width) in enumerate(packed_shapes):
             key = (frames, height, width, frame_index)
             if key not in self.video_freq_cache:
-                self.video_freq_cache[key] = self._compute_video_freqs(frames, height, width, frame_index).cpu()
+                self.video_freq_cache[key] = self._compute_video_freqs(frames, height, width, frame_index)
             packed_frequencies.append(self.video_freq_cache[key].to(device))
         if not packed_frequencies:
             raise ValueError("image_shapes must contain at least one image")

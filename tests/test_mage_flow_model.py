@@ -82,12 +82,23 @@ def test_rope_frame_coordinates_follow_global_packed_image_order():
     rope = MageFlowEmbedRope(theta=10000, axes_dim=(2, 2, 4), scale_rope=True)
     shapes = [[(1, 2, 2), (1, 1, 2)], [(1, 2, 2), (1, 1, 2)]]
 
-    nested = rope(shapes, device=torch.device("cpu"))
-    flattened = rope([[shape for sample in shapes for shape in sample]], device=torch.device("cpu"))
+    frequencies = rope(shapes, device=torch.device("cpu"))
 
-    assert nested.shape == (12, 4)
-    torch.testing.assert_close(nested, flattened)
-    assert not torch.equal(nested[:6, :1], nested[6:, :1])
+    assert frequencies.shape == (12, 4)
+    torch.testing.assert_close(frequencies[6:10], rope._compute_video_freqs(1, 2, 2, frame_index=2))
+    torch.testing.assert_close(frequencies[10:], rope._compute_video_freqs(1, 1, 2, frame_index=3))
+
+
+def test_rope_frequency_cache_stays_on_requested_device():
+    rope = MageFlowEmbedRope(theta=10000, axes_dim=(2, 2, 4), scale_rope=True)
+    shapes = [[(1, 2, 2)]]
+    rope(shapes, device=torch.device("cpu"))
+    device = torch.device("meta")
+
+    frequencies = rope(shapes, device=device)
+
+    assert frequencies.device == device
+    assert {cached.device for cached in rope.video_freq_cache.values()} == {device}
 
 
 def test_block_modulation_repeats_one_embedding_over_complete_sample_segments():

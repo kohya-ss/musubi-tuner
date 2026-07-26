@@ -89,6 +89,10 @@ text_tokens  + text_cu_seqlens
 image_shapes + target_token_mask
 ```
 
+RoPE frame coordinates follow the flattened order of all image shape tuples in
+the packed token stream. They continue across sample boundaries instead of
+resetting for each sample.
+
 This internal ABI already accepts heterogeneous segment lengths and prevents
 cross-sample attention. It is not the same as native-resolution packing:
 native packing would form a batch directly from unrelated resolutions according
@@ -340,6 +344,9 @@ image_tokens + image_cu_seqlens
 text_tokens  + text_cu_seqlens
 image_shapes + target_token_mask
 ```
+
+RoPE の frame coordinate は、packed token stream 内の全 image shape tuple を
+平坦化した順序に従い、sample 境界でもリセットせず連続します。
 
 この ABI 自体は異なる segment 長を処理できますが、native-resolution packing
 ではありません。native packing は、解像度 bucket を先に選ばず、異なる解像度
