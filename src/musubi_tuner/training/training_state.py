@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 
 TRAINING_STATE_FILE = "musubi_training_state.json"
-TRAINING_STATE_VERSION = 1
+TRAINING_STATE_VERSION = 2
 
 
 @dataclass
@@ -38,6 +38,7 @@ class TrainingProgressState:
     session_id: Optional[int] = None
     training_started_at: Optional[float] = None
     checkpoint_saved_at: Optional[float] = None
+    epoch_log_step_mode: str = "epoch"
     timestep_range_pool: list[tuple[float, float]] = field(default_factory=list)
     loss_list: list[float] = field(default_factory=list)
     loss_total: float = 0.0
@@ -61,9 +62,16 @@ class TrainingProgressState:
             if key in state:
                 setattr(self, key, state[key])
 
+        # Version-1 seamless states were created while loss/epoch used the
+        # optimization step as its TensorBoard x-axis. Mark them for a
+        # one-time migration when the event history is compacted on resume.
+        if "epoch_log_step_mode" not in state:
+            self.epoch_log_step_mode = "global_step"
+
         self.timestep_range_pool = [tuple(item) for item in self.timestep_range_pool]
         self.loss_list = [float(item) for item in self.loss_list]
         self.loss_total = float(self.loss_total)
+        self.version = TRAINING_STATE_VERSION
         self.loaded = True
 
     def write_json(self, state_dir: str) -> str:

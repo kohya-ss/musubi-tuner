@@ -67,6 +67,13 @@ class TrainingProgressStateTest(unittest.TestCase):
 
             self.assertEqual(resolve_logging_dir(args), os.path.abspath(log_dir))
 
+    def test_version_one_state_marks_epoch_logs_for_migration(self):
+        state = TrainingProgressState()
+        state.load_state_dict({"version": 1, "global_step": 80, "epoch": 8})
+
+        self.assertEqual(state.epoch_log_step_mode, "global_step")
+        self.assertEqual(state.version, 2)
+
     def test_resume_rolls_trackers_back_to_checkpoint_boundary(self):
         state = TrainingProgressState(global_step=2000, log_with="all", wandb_run_id="wandb-id")
         state.loaded = True
@@ -96,10 +103,8 @@ class TrainingProgressStateTest(unittest.TestCase):
             run_dir = os.path.join(logging_dir, "network_train")
             writer = EventFileWriter(run_dir)
 
-            def add_scalar(step, wall_time, value):
-                summary = summary_pb2.Summary(
-                    value=[summary_pb2.Summary.Value(tag="loss/current", simple_value=value)]
-                )
+            def add_scalar(step, wall_time, value, tag="loss/current"):
+                summary = summary_pb2.Summary(value=[summary_pb2.Summary.Value(tag=tag, simple_value=value)])
                 writer.add_event(event_pb2.Event(step=step, wall_time=wall_time, summary=summary))
 
             add_scalar(10, 100.0, 1.0)
@@ -107,6 +112,8 @@ class TrainingProgressStateTest(unittest.TestCase):
             add_scalar(30, 220.0, 3.0)  # newer step
             add_scalar(5, 300.0, 4.0)  # low step written after the checkpoint
             add_scalar(20, 205.0, 2.5)  # retry: latest value for the same tag+step wins
+            add_scalar(2, 205.0, 0.75, tag="loss/epoch")  # valid epoch-axis summary
+            add_scalar(3, 220.0, 0.5, tag="loss/epoch")  # orphaned epoch-axis summary
             writer.add_event(
                 event_pb2.Event(
                     step=21,
@@ -138,11 +145,47 @@ class TrainingProgressStateTest(unittest.TestCase):
                         remaining_values.extend(value.simple_value for value in event.summary.value)
                     has_session_log = has_session_log or event.HasField("session_log")
 
-            self.assertEqual(remaining_steps, [10, 20])
-            self.assertEqual(remaining_values, [1.0, 2.5])
+            self.assertEqual(remaining_steps, [10, 20, 2])
+            self.assertEqual(remaining_values, [1.0, 2.5, 0.75])
             self.assertFalse(has_session_log)
             self.assertEqual(result.event_files, 1)
             self.assertGreaterEqual(result.removed_events, 4)
+
+    def test_version_one_epoch_logs_are_migrated_to_epoch_axis(self):
+        try:
+            from tensorboard.backend.event_processing.event_file_loader import LegacyEventFileLoader
+            from tensorboard.compat.proto import event_pb2, summary_pb2
+            from tensorboard.summary.writer.event_file_writer import EventFileWriter
+        except ImportError:
+            self.skipTest("tensorboard is not installed")
+
+        with tempfile.TemporaryDirectory() as logging_dir:
+            run_dir = os.path.join(logging_dir, "network_train")
+            writer = EventFileWriter(run_dir)
+            for global_step, loss in ((10, 1.0), (20, 0.5)):
+                summary = summary_pb2.Summary(
+                    value=[summary_pb2.Summary.Value(tag="loss/epoch", simple_value=loss)]
+                )
+                writer.add_event(event_pb2.Event(step=global_step, wall_time=100.0 + global_step, summary=summary))
+            writer.close()
+
+            trim_tensorboard_log_to_checkpoint(
+                logging_dir,
+                "network_train",
+                20,
+                125.0,
+                epoch_log_step_mode="global_step",
+                num_update_steps_per_epoch=10,
+            )
+
+            remaining_steps = []
+            for name in os.listdir(run_dir):
+                if name.startswith("events.out.tfevents."):
+                    for event in LegacyEventFileLoader(os.path.join(run_dir, name)).Load():
+                        if event.HasField("summary"):
+                            remaining_steps.append(event.step)
+
+            self.assertEqual(remaining_steps, [1, 2])
 
 
 class DeterministicDataOrderTest(unittest.TestCase):

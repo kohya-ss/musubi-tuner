@@ -21,11 +21,35 @@ class TensorBoardTrimResult:
     removed_events: int
 
 
+def _normalize_epoch_summary_step(event, epoch_log_step_mode: str, num_update_steps_per_epoch: Optional[int]):
+    """Migrate version-1 loss/epoch records from global-step to epoch-step."""
+
+    if (
+        epoch_log_step_mode != "global_step"
+        or not num_update_steps_per_epoch
+        or not event.HasField("summary")
+        or not event.summary.value
+        or any(value.tag != "loss/epoch" for value in event.summary.value)
+    ):
+        return event
+
+    epoch_step, remainder = divmod(int(event.step), int(num_update_steps_per_epoch))
+    if epoch_step <= 0 or remainder != 0:
+        return event
+
+    normalized_event = type(event)()
+    normalized_event.CopyFrom(event)
+    normalized_event.step = epoch_step
+    return normalized_event
+
+
 def trim_tensorboard_log_to_checkpoint(
     logging_dir: str,
     tracker_name: str,
     global_step: int,
     checkpoint_saved_at: Optional[float],
+    epoch_log_step_mode: str = "epoch",
+    num_update_steps_per_epoch: Optional[int] = None,
 ) -> TensorBoardTrimResult:
     """Physically remove TensorBoard events newer than a training state.
 
@@ -58,6 +82,7 @@ def trim_tensorboard_log_to_checkpoint(
 
     kept_events = 0
     removed_events = 0
+    migrated_events = 0
     wrote_file_version = False
     temp_fd, temp_path = tempfile.mkstemp(prefix=".musubi-tensorboard-", suffix=".tmp", dir=run_dir)
     os.close(temp_fd)
@@ -78,6 +103,7 @@ def trim_tensorboard_log_to_checkpoint(
                     continue
                 if checkpoint_saved_at is not None and float(event.wall_time) > float(checkpoint_saved_at):
                     continue
+                event = _normalize_epoch_summary_step(event, epoch_log_step_mode, num_update_steps_per_epoch)
                 if event.HasField("summary"):
                     for value in event.summary.value:
                         latest_summary_record[(int(event.step), value.tag)] = record_index
@@ -106,6 +132,11 @@ def trim_tensorboard_log_to_checkpoint(
                         removed_events += 1
                         continue
 
+                    original_event = event
+                    event = _normalize_epoch_summary_step(event, epoch_log_step_mode, num_update_steps_per_epoch)
+                    if event is not original_event:
+                        migrated_events += 1
+
                     event_to_write = event
                     if event.HasField("summary") and event.summary.value:
                         values_to_keep = [
@@ -128,7 +159,7 @@ def trim_tensorboard_log_to_checkpoint(
             os.fsync(compacted_file.fileno())
 
         # Do not rewrite a clean, single event file unnecessarily.
-        if removed_events == 0 and len(event_files) == 1:
+        if removed_events == 0 and migrated_events == 0 and len(event_files) == 1:
             os.remove(temp_path)
             return TensorBoardTrimResult(1, kept_events, 0)
 
@@ -198,6 +229,8 @@ def main() -> None:
         args.tracker_name or state.tracker_name or "network_train",
         state.global_step,
         checkpoint_saved_at,
+        state.epoch_log_step_mode,
+        state.num_update_steps_per_epoch,
     )
     print(
         f"TensorBoard compacted to step {state.global_step}: "

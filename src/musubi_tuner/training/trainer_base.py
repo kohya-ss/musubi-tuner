@@ -2096,6 +2096,8 @@ class NetworkTrainer:
                         training_state.tracker_name or "network_train",
                         training_state.global_step,
                         training_state.checkpoint_saved_at,
+                        training_state.epoch_log_step_mode,
+                        training_state.num_update_steps_per_epoch,
                     )
                     if trim_result.event_files:
                         logger.info(
@@ -2138,6 +2140,10 @@ class NetworkTrainer:
                 torch.set_rng_state(resume_rng_state["torch"])
                 if resume_rng_state["cuda"] is not None:
                     torch.cuda.set_rng_state_all(resume_rng_state["cuda"])
+
+        # All records written from this point use the epoch number for
+        # loss/epoch. Persist the mode so future resumes do not remap them.
+        training_state.epoch_log_step_mode = "epoch"
 
         epoch_to_start = training_state.epoch if training_state.loaded else 0
         global_step = training_state.global_step if training_state.loaded else 0
@@ -2405,9 +2411,10 @@ class NetworkTrainer:
 
             if epoch_completed and len(accelerator.trackers) > 0:
                 logs = {"loss/epoch": loss_recorder.moving_average}
-                # Keep every metric on the same monotonic axis so tracker
-                # rollback can remove stale epoch summaries as well.
-                accelerator.log(logs, step=global_step)
+                # Epoch summaries use the epoch number as their TensorBoard
+                # x-axis. Resume cleanup removes newer summaries by their
+                # checkpoint wall time, independently of this step value.
+                accelerator.log(logs, step=epoch + 1)
 
             accelerator.wait_for_everyone()
 
