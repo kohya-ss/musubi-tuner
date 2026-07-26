@@ -75,6 +75,47 @@ def test_fixed_seed_sampling_is_deterministic():
     assert not torch.equal(first[0], different[0])
 
 
+def test_training_preview_always_enables_mage_cfg_renormalization(monkeypatch):
+    captured = {}
+
+    class FakeVAE:
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        def to(self, _device):
+            return self
+
+        def decode(self, latents):
+            return latents
+
+    def fake_sample_latents(*_args, **kwargs):
+        captured.update(kwargs)
+        return [torch.zeros(3, 2, 2)]
+
+    monkeypatch.setattr(train_module, "sample_latents", fake_sample_latents)
+    monkeypatch.setattr(train_module, "clean_memory_on_device", lambda _device: None)
+
+    MageFlowNetworkTrainer().do_inference(
+        SimpleNamespace(device=torch.device("cpu")),
+        SimpleNamespace(),
+        {"mage_flow_embed": torch.zeros(2, 5)},
+        FakeVAE(),
+        torch.float32,
+        object(),
+        6.0,
+        2,
+        32,
+        32,
+        1,
+        torch.Generator(device="cpu").manual_seed(42),
+        False,
+        1.0,
+        1.0,
+    )
+
+    assert captured.get("renormalize_cfg") is True
+
+
 def test_training_preview_decode_matches_official_precision_boundary(monkeypatch):
     captured = {}
 
