@@ -137,8 +137,11 @@ therefore does not change an item's cached latent.
 
 ## Train
 
-The trainer defaults to the fixed Mage LoRA module, BF16, shifted flow matching
-with shift 6, and no loss weighting:
+The trainer defaults to the fixed Mage LoRA module, BF16, `uniform_shift`
+timestep sampling with static shift 6, and no loss weighting. `uniform_shift`
+samples `u` uniformly and maps it to `6u / (1 + 5u)`. This matches the
+released inference scheduler's static-shift transform; the official SFT
+timestep distribution has not been published.
 
 ```bash
 accelerate launch mage_flow_train_network.py \
@@ -147,6 +150,9 @@ accelerate launch mage_flow_train_network.py \
   --network_dim 32 \
   --network_alpha 32 \
   --learning_rate 1e-4 \
+  --timestep_sampling uniform_shift \
+  --discrete_flow_shift 6 \
+  --weighting_scheme none \
   --max_train_steps 1000 \
   --output_dir output \
   --output_name mage_flow_lora \
@@ -368,8 +374,11 @@ target/control の役割、`--seed` から決まるため、item 順や cache ba
 
 ### 学習
 
-既定値は固定 Mage LoRA module、BF16、shift 6 の flow matching、loss weighting
-なしです。
+既定値は固定 Mage LoRA module、BF16、static shift 6 の
+`uniform_shift` timestep sampling、loss weighting なしです。
+`uniform_shift` は一様分布から `u` をサンプルし、`6u / (1 + 5u)` に変換します。
+これは公開された推論 scheduler の static-shift 変換と一致しますが、公式 SFT の
+timestep 分布は公開されていません。
 
 ```bash
 accelerate launch mage_flow_train_network.py \
@@ -378,6 +387,9 @@ accelerate launch mage_flow_train_network.py \
   --network_dim 32 \
   --network_alpha 32 \
   --learning_rate 1e-4 \
+  --timestep_sampling uniform_shift \
+  --discrete_flow_shift 6 \
+  --weighting_scheme none \
   --max_train_steps 1000 \
   --output_dir output \
   --output_name mage_flow_lora \

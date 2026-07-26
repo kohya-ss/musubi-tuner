@@ -164,12 +164,12 @@ def test_trainer_rejects_missing_or_noncontiguous_edit_references():
         )
 
 
-def test_parser_defaults_to_the_fixed_mage_flow_lora_and_official_training_schedule():
+def test_parser_defaults_to_fixed_mage_flow_lora_and_static_shifted_uniform_timesteps():
     parser = train_module.mage_flow_setup_parser(train_module.setup_parser_common())
     args = parser.parse_args([])
 
     assert args.network_module == "musubi_tuner.networks.lora_mage_flow"
-    assert args.timestep_sampling == "shift"
+    assert args.timestep_sampling == "uniform_shift"
     assert args.discrete_flow_shift == 6.0
     assert args.weighting_scheme == "none"
 

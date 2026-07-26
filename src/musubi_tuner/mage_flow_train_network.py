@@ -340,7 +340,7 @@ def mage_flow_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.set_defaults(
         network_module="musubi_tuner.networks.lora_mage_flow",
         mixed_precision="bf16",
-        timestep_sampling="shift",
+        timestep_sampling="uniform_shift",
         discrete_flow_shift=6.0,
         weighting_scheme="none",
     )

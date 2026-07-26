@@ -565,6 +565,7 @@ class NetworkTrainer:
 
         if (
             args.timestep_sampling == "uniform"
+            or args.timestep_sampling == "uniform_shift"
             or args.timestep_sampling == "sigmoid"
             or args.timestep_sampling == "shift"
             or args.timestep_sampling == "flux_shift"
@@ -595,12 +596,15 @@ class NetworkTrainer:
                     )
                     return logsnr
 
-                if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
+                if args.timestep_sampling in ("uniform", "uniform_shift", "sigmoid"):
                     # Simple random t-based noise sampling
                     if args.timestep_sampling == "sigmoid":
                         t = torch.sigmoid(args.sigmoid_scale * randn(batch_size, org_timesteps))
                     else:
                         t = rand(batch_size, org_timesteps)
+                        if args.timestep_sampling == "uniform_shift":
+                            shift = args.discrete_flow_shift
+                            t = (t * shift) / (1 + (shift - 1) * t)
 
                 elif args.timestep_sampling == "ideogram4_shift":
                     h, w = latents.shape[-2:]
