@@ -74,10 +74,20 @@ class ConvRotInt8Quantizer:
         target_layer_keys: Optional[List[str]] = None,
         exclude_layer_keys: Optional[List[str]] = None,
         groupsize: int = CONVROT_GROUPSIZE,
+        dtype: Optional[torch.dtype] = None,
     ):
         self.target_layer_keys = target_layer_keys
         self.exclude_layer_keys = exclude_layer_keys
         self.groupsize = groupsize
+        # Cast non-quantized floating weights (excluded/indivisible/non-target) to this
+        # dtype. Checkpoints can store some of these (e.g. K2's "first" patch-embed) in
+        # fp32; left uncast, they mismatch the bf16 activations at forward time.
+        self.dtype = dtype
+
+    def _cast(self, value: torch.Tensor) -> torch.Tensor:
+        if self.dtype is not None and value.is_floating_point() and value.dtype != self.dtype:
+            return value.to(self.dtype)
+        return value
 
     def is_target_key(self, key: str) -> bool:
         is_target = (
@@ -116,7 +126,7 @@ class ConvRotInt8Quantizer:
 
                     if not self.is_target_key(key):
                         target_device = calc_device if (calc_device is not None and move_to_device) else original_device
-                        state_dict[key] = value.to(target_device)
+                        state_dict[key] = self._cast(value).to(target_device)
                         continue
 
                     if calc_device is not None:
@@ -132,7 +142,8 @@ class ConvRotInt8Quantizer:
 
                     result = quantize_weight_convrot(key, value, self.groupsize)
                     if result is None:
-                        # leave the layer unquantized (bf16)
+                        # leave the layer unquantized (cast to dtype, e.g. bf16)
+                        value = self._cast(value)
                         if not move_to_device:
                             value = value.to(original_device)
                         state_dict[key] = value

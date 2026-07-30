@@ -113,7 +113,7 @@ def load_krea2_dit(
             target_keys=KREA2_FP8_OPTIMIZATION_TARGET_KEYS if fp8_scaled else None,
             exclude_keys=KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS if fp8_scaled else None,
             quantizer=(
-                ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS)
+                ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS, dtype=dtype)
                 if convrot_int8
                 else None
             ),

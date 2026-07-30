@@ -272,6 +272,26 @@ def test_quantizer_patch_and_meta_load_state_dict_roundtrip(tmp_path):
     assert _relerr(fresh.head(x), F.linear(x, qsd["head.weight"])) < 1e-2
 
 
+def test_quantizer_casts_non_target_fp32_weights_to_dtype(tmp_path):
+    # Real K2 checkpoints store some non-block weights (e.g. the patch-embed "first"
+    # Linear) in fp32. Without a cast, those load as fp32 while the rest of the model
+    # runs bf16, breaking F.linear in the LoRA-wrapped module at inference/sample time.
+    torch.manual_seed(0)
+    model = _TinyModel()
+    sd = {k: v.to(torch.bfloat16) for k, v in model.state_dict().items()}
+    sd["first.weight"] = sd["first.weight"].to(torch.float32)
+    sd["head.weight"] = sd["head.weight"].to(torch.float32)
+    path = str(tmp_path / "tiny_fp32_head.safetensors")
+    save_file(sd, path)
+
+    quantizer = ConvRotInt8Quantizer(target_layer_keys=["blocks."], exclude_layer_keys=["norm"], dtype=torch.bfloat16)
+    qsd = quantizer.load_and_quantize([path], calc_device=None)
+
+    assert qsd["blocks.0.attn.weight"].dtype == torch.int8
+    assert qsd["first.weight"].dtype == torch.bfloat16  # indivisible, was fp32 -> must be cast
+    assert qsd["head.weight"].dtype == torch.bfloat16  # non-target, was fp32 -> must be cast
+
+
 def test_quantizer_rejects_prequantized_weights(tmp_path):
     sd = {"blocks.0.attn.weight": torch.zeros(N, K, dtype=torch.float8_e4m3fn)}
     path = str(tmp_path / "prequant.safetensors")
