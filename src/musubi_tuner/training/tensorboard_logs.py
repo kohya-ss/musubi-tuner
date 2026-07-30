@@ -177,9 +177,7 @@ def trim_tensorboard_log_to_checkpoint(
             # ``musubi-compacted`` suffix sorts after SummaryWriter's ``.0``,
             # making TensorBoard watch the static file instead of new logs.
             compacted_timestamp = max(0, int(time.time()) - 1)
-            compacted_name = (
-                f"{_EVENT_FILE_PREFIX}{compacted_timestamp:010d}.{socket.gethostname()}.{os.getpid()}.musubi-compacted"
-            )
+            compacted_name = f"{_EVENT_FILE_PREFIX}{compacted_timestamp:010d}.{socket.gethostname()}.{os.getpid()}.musubi-compacted"
             compacted_path = os.path.join(run_dir, compacted_name)
             os.replace(temp_path, compacted_path)
         except Exception:

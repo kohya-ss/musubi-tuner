@@ -1920,9 +1920,7 @@ class NetworkTrainer:
         if training_state.loaded:
             incompatibilities = []
             if training_state.max_train_steps != args.max_train_steps:
-                incompatibilities.append(
-                    f"max_train_steps changed ({training_state.max_train_steps} -> {args.max_train_steps})"
-                )
+                incompatibilities.append(f"max_train_steps changed ({training_state.max_train_steps} -> {args.max_train_steps})")
             if training_state.num_update_steps_per_epoch != num_update_steps_per_epoch:
                 incompatibilities.append(
                     "number of update steps per epoch changed "
@@ -1945,22 +1943,18 @@ class NetworkTrainer:
                 incompatibilities.append(f"seed changed ({training_state.seed} -> {args.seed})")
             if training_state.log_with != getattr(args, "resolved_log_with", args.log_with):
                 incompatibilities.append(
-                    f"logging backend changed ({training_state.log_with} -> "
-                    f"{getattr(args, 'resolved_log_with', args.log_with)})"
+                    f"logging backend changed ({training_state.log_with} -> {getattr(args, 'resolved_log_with', args.log_with)})"
                 )
             current_tracker_name = "network_train" if args.log_tracker_name is None else args.log_tracker_name
             if training_state.tracker_name != current_tracker_name:
-                incompatibilities.append(
-                    f"tracker name changed ({training_state.tracker_name} -> {current_tracker_name})"
-                )
+                incompatibilities.append(f"tracker name changed ({training_state.tracker_name} -> {current_tracker_name})")
             if training_state.step_in_epoch < 0 or training_state.step_in_epoch > len(train_dataloader):
                 incompatibilities.append(
                     f"saved step_in_epoch {training_state.step_in_epoch} is outside [0, {len(train_dataloader)}]"
                 )
             if incompatibilities:
                 raise ValueError(
-                    "Seamless resume requires the original training topology and schedule:\n- "
-                    + "\n- ".join(incompatibilities)
+                    "Seamless resume requires the original training topology and schedule:\n- " + "\n- ".join(incompatibilities)
                 )
         else:
             training_state.max_train_steps = args.max_train_steps
@@ -2422,11 +2416,7 @@ class NetworkTrainer:
             optimizer_eval_fn()
             saving = False
             if args.save_every_n_epochs is not None:
-                saving = (
-                    epoch_completed
-                    and (epoch + 1) % args.save_every_n_epochs == 0
-                    and (epoch + 1) < num_train_epochs
-                )
+                saving = epoch_completed and (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                 if is_main_process and saving:
                     ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, epoch + 1)
                     save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)

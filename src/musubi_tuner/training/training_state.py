@@ -54,9 +54,7 @@ class TrainingProgressState:
     def load_state_dict(self, state: dict[str, Any]) -> None:
         version = int(state.get("version", 0))
         if version > TRAINING_STATE_VERSION:
-            raise ValueError(
-                f"Training state version {version} is newer than supported version {TRAINING_STATE_VERSION}."
-            )
+            raise ValueError(f"Training state version {version} is newer than supported version {TRAINING_STATE_VERSION}.")
 
         for key in self.state_dict():
             if key in state:

@@ -163,9 +163,7 @@ class TrainingProgressStateTest(unittest.TestCase):
             run_dir = os.path.join(logging_dir, "network_train")
             writer = EventFileWriter(run_dir)
             for global_step, loss in ((10, 1.0), (20, 0.5)):
-                summary = summary_pb2.Summary(
-                    value=[summary_pb2.Summary.Value(tag="loss/epoch", simple_value=loss)]
-                )
+                summary = summary_pb2.Summary(value=[summary_pb2.Summary.Value(tag="loss/epoch", simple_value=loss)])
                 writer.add_event(event_pb2.Event(step=global_step, wall_time=100.0 + global_step, summary=summary))
             writer.close()
 

@@ -190,9 +190,7 @@ def save_and_remove_state_stepwise(
                 shutil.rmtree(state_dir_old)
 
 
-def save_state_on_train_end(
-    args: argparse.Namespace, accelerator: accelerate.Accelerator, training_state: Optional[Any] = None
-):
+def save_state_on_train_end(args: argparse.Namespace, accelerator: accelerate.Accelerator, training_state: Optional[Any] = None):
     model_name = args.output_name
 
     logger.info("")
