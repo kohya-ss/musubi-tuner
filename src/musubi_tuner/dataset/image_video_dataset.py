@@ -23,6 +23,13 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
+def _sorted_glob(pattern: str) -> list[str]:
+    """Return a stable file order across dataset reconstruction on resume."""
+
+    return sorted(glob.glob(pattern), key=os.path.normcase)
+
+
 from musubi_tuner.dataset.architectures import *  # noqa: F401,F403
 from musubi_tuner.dataset.architectures import (  # explicit imports for local use
     ARCHITECTURE_FLUX_2_DEV,
@@ -144,10 +151,10 @@ class BaseDataset(torch.utils.data.Dataset):
         return metadata
 
     def get_all_latent_cache_files(self):
-        return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        return _sorted_glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
     def get_all_text_encoder_output_cache_files(self):
-        return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}_te.safetensors"))
+        return _sorted_glob(os.path.join(self.cache_directory, f"*_{self.architecture}_te.safetensors"))
 
     def get_latent_cache_path(self, item_info: ItemInfo) -> str:
         """
@@ -505,7 +512,7 @@ class ImageDataset(BaseDataset):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = _sorted_glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
@@ -561,9 +568,9 @@ class ImageDataset(BaseDataset):
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
 
     def shuffle_buckets(self):
-        # set random seed for this epoch
-        random.seed(self.seed + self.current_epoch)
-        self.batch_manager.shuffle()
+        # Keep dataset shuffling independent from the model's Python RNG.
+        rng = random.Random(self.seed + self.current_epoch)
+        self.batch_manager.shuffle(rng)
 
     def __len__(self):
         if self.batch_manager is None:
@@ -858,7 +865,7 @@ class VideoDataset(BaseDataset):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = _sorted_glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
@@ -895,9 +902,9 @@ class VideoDataset(BaseDataset):
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
 
     def shuffle_buckets(self):
-        # set random seed for this epoch
-        random.seed(self.seed + self.current_epoch)
-        self.batch_manager.shuffle()
+        # Keep dataset shuffling independent from the model's Python RNG.
+        rng = random.Random(self.seed + self.current_epoch)
+        self.batch_manager.shuffle(rng)
 
     def __len__(self):
         if self.batch_manager is None:

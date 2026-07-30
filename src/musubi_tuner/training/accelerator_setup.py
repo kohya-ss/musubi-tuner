@@ -11,6 +11,8 @@ from packaging.version import Version
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs
 from accelerate.utils import TorchDynamoPlugin, DynamoBackend
 
+from musubi_tuner.training.training_state import TrainingProgressState
+
 
 def clean_memory_on_device(device: torch.device):
     r"""
@@ -46,15 +48,51 @@ class collator_class:
         return examples[0]  # batch size is always 1, so we unwrap it here
 
 
-def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
-    """
-    DeepSpeed is not supported in this script currently.
-    """
-    if args.logging_dir is None:
+class EpochSeededRandomSampler(torch.utils.data.Sampler[int]):
+    """Random sampler whose order is a pure function of seed and epoch."""
+
+    def __init__(self, data_source, seed: int, shared_epoch):
+        self.data_source = data_source
+        self.seed = int(seed)
+        self.shared_epoch = shared_epoch
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + int(self.shared_epoch.value))
+        yield from torch.randperm(len(self.data_source), generator=generator).tolist()
+
+    def __len__(self):
+        return len(self.data_source)
+
+
+def resolve_logging_dir(args: argparse.Namespace) -> str | None:
+    """Resolve a new timestamped log directory or reuse the saved one."""
+
+    resume_logging_dir = None
+    if args.resume and not getattr(args, "resume_from_huggingface", False):
+        resume_state = TrainingProgressState.read_json(os.path.expanduser(args.resume))
+        if resume_state is not None:
+            resume_logging_dir = resume_state.logging_dir
+
+    if resume_logging_dir is not None:
+        logging_dir = resume_logging_dir
+    elif args.logging_dir is None:
         logging_dir = None
     else:
         log_prefix = "" if args.log_prefix is None else args.log_prefix
         logging_dir = args.logging_dir + "/" + log_prefix + time.strftime("%Y%m%d%H%M%S", time.localtime())
+
+    if logging_dir is not None:
+        logging_dir = os.path.abspath(os.path.expanduser(logging_dir))
+    args.resolved_logging_dir = logging_dir
+    return logging_dir
+
+
+def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
+    """
+    DeepSpeed is not supported in this script currently.
+    """
+    logging_dir = resolve_logging_dir(args)
 
     if args.log_with is None:
         if logging_dir is not None:
@@ -78,6 +116,8 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
                 os.environ["WANDB_DIR"] = logging_dir
             if args.wandb_api_key is not None:
                 wandb.login(key=args.wandb_api_key)
+
+    args.resolved_log_with = log_with
 
     kwargs_handlers = [
         (

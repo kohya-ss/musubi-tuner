@@ -53,11 +53,18 @@ from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_
 # Helpers that used to live alongside NetworkTrainer in hv_train_network.py.
 # Imported by name so existing method bodies keep working unchanged.
 from musubi_tuner.training.accelerator_setup import (
+    EpochSeededRandomSampler,
     clean_memory_on_device,
     collator_class,
     prepare_accelerator,
 )
 from musubi_tuner.training.sampling_prompts import should_sample_images
+from musubi_tuner.training.tensorboard_logs import trim_tensorboard_log_to_checkpoint
+from musubi_tuner.training.training_state import (
+    TRAINING_STATE_FILE,
+    TrainingProgressState,
+    configure_resume_tracker_init_kwargs,
+)
 from musubi_tuner.training.timesteps import (
     compute_density_for_timestep_sampling,
     compute_ideogram4_shift_timestep,
@@ -448,16 +455,13 @@ class NetworkTrainer:
             **lr_scheduler_kwargs,
         )
 
-    def resume_from_local_or_hf_if_specified(self, accelerator: Accelerator, args: argparse.Namespace) -> bool:
+    def resolve_resume_state_path(self, args: argparse.Namespace) -> Optional[str]:
         if not args.resume:
-            return False
+            return None
 
         if not args.resume_from_huggingface:
-            logger.info(f"resume training from local state: {args.resume}")
-            accelerator.load_state(args.resume)
-            return True
+            return os.path.abspath(os.path.expanduser(args.resume))
 
-        logger.info(f"resume training from huggingface state: {args.resume}")
         repo_id = args.resume.split("/")[0] + "/" + args.resume.split("/")[1]
         path_in_repo = "/".join(args.resume.split("/")[2:])
         revision = None
@@ -498,8 +502,15 @@ class NetworkTrainer:
                 "No files found in the specified repo id/path/revision / 指定されたリポジトリID/パス/リビジョンにファイルが見つかりませんでした"
             )
         dirname = os.path.dirname(results[0])
-        accelerator.load_state(dirname)
+        return dirname
 
+    def resume_from_local_or_hf_if_specified(self, accelerator: Accelerator, args: argparse.Namespace) -> bool:
+        resume_path = getattr(args, "resolved_resume_state_path", None) or self.resolve_resume_state_path(args)
+        if resume_path is None:
+            return False
+
+        logger.info(f"resume training from state: {resume_path}")
+        accelerator.load_state(resume_path)
         return True
 
     def get_bucketed_timestep(self) -> float:
@@ -1333,6 +1344,16 @@ class NetworkTrainer:
         if not self._validate_args_and_init(args):
             return
 
+        resolved_resume_path = self.resolve_resume_state_path(args)
+        args.resolved_resume_state_path = resolved_resume_path
+
+        # The effective seed may have been generated automatically in the
+        # original process. Recover it before rebuilding the dataset.
+        if args.seed is None and resolved_resume_path is not None:
+            resume_preview = TrainingProgressState.read_json(resolved_resume_path)
+            if resume_preview is not None:
+                args.seed = resume_preview.seed
+
         session_id, training_started_at = self._init_session(args)
         train_dataset_group, collator, current_epoch = self._build_dataset(args)
         accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
@@ -1350,7 +1371,9 @@ class NetworkTrainer:
             lr_scheduler,
             lr_descriptions,
             train_dataloader,
-        ) = self._build_optimizer_and_dataloader(args, accelerator, network, train_dataset_group, collator, transformer)
+        ) = self._build_optimizer_and_dataloader(
+            args, accelerator, network, train_dataset_group, collator, current_epoch, transformer
+        )
         (
             transformer,
             network,
@@ -1371,7 +1394,19 @@ class NetworkTrainer:
             dit_dtype,
             dit_weight_dtype,
         )
-        self._register_hooks_and_resume(args, accelerator, network)
+        training_state = self._register_hooks_and_resume(
+            args,
+            accelerator,
+            network,
+            session_id,
+            training_started_at,
+        )
+        if training_state.loaded:
+            if training_state.session_id is not None:
+                session_id = training_state.session_id
+            if training_state.training_started_at is not None:
+                training_started_at = training_state.training_started_at
+            self.timestep_range_pool = list(training_state.timestep_range_pool)
         self._run_training_loop(
             args,
             accelerator,
@@ -1394,6 +1429,7 @@ class NetworkTrainer:
             sample_parameters,
             dit_dtype,
             network_dtype,
+            training_state,
         )
 
     def _validate_args_and_init(self, args) -> bool:
@@ -1632,7 +1668,9 @@ class NetworkTrainer:
         # net_kwargs is reconstructed in the metadata phase from args.network_args
         return network
 
-    def _build_optimizer_and_dataloader(self, args, accelerator, network, train_dataset_group, collator, transformer):
+    def _build_optimizer_and_dataloader(
+        self, args, accelerator, network, train_dataset_group, collator, current_epoch, transformer
+    ):
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
@@ -1650,10 +1688,13 @@ class NetworkTrainer:
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
             batch_size=1,
-            shuffle=True,
+            sampler=EpochSeededRandomSampler(train_dataset_group, args.seed, current_epoch),
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
+            # Worker base seeds must not consume the model RNG when an iterator
+            # is recreated during resume.
+            generator=torch.Generator().manual_seed(args.seed),
         )
 
         # calculate max_train_steps
@@ -1753,7 +1794,14 @@ class NetworkTrainer:
 
         return transformer, network, optimizer, train_dataloader, lr_scheduler, training_model, network_dtype
 
-    def _register_hooks_and_resume(self, args, accelerator, network):
+    def _register_hooks_and_resume(
+        self,
+        args,
+        accelerator,
+        network,
+        session_id: int,
+        training_started_at: float,
+    ) -> TrainingProgressState:
         # before resuming make hook for saving/loading to save/load the network weights only
         def save_model_hook(models, weights, output_dir):
             # pop weights of other models than network to save only network weights
@@ -1781,8 +1829,60 @@ class NetworkTrainer:
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-        # resume from local or huggingface. accelerator.step is set
-        self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
+        tracker_name = "network_train" if args.log_tracker_name is None else args.log_tracker_name
+        training_state = TrainingProgressState(
+            logging_dir=getattr(args, "resolved_logging_dir", None),
+            log_with=getattr(args, "resolved_log_with", args.log_with),
+            tracker_name=tracker_name,
+            session_id=session_id,
+            training_started_at=training_started_at,
+        )
+
+        resume_path = getattr(args, "resolved_resume_state_path", None) or self.resolve_resume_state_path(args)
+        has_seamless_state = TrainingProgressState.has_metadata(resume_path)
+
+        # New checkpoints contain one registered custom object. Legacy state
+        # directories do not, so loading them must happen before registration.
+        if resume_path is None or has_seamless_state:
+            accelerator.register_for_checkpointing(training_state)
+
+        if resume_path is not None:
+            logger.info(f"resume training from state: {resume_path}")
+            accelerator.load_state(resume_path)
+
+            if not has_seamless_state:
+                logger.warning(
+                    "The resume directory predates seamless resume metadata. Model/optimizer state was restored, "
+                    "but epoch and dataloader position cannot be recovered for this checkpoint. Future states from "
+                    "this run will contain seamless resume metadata."
+                )
+                accelerator.register_for_checkpointing(training_state)
+
+        if training_state.loaded and training_state.checkpoint_saved_at is None and resume_path is not None:
+            # Seamless states written before checkpoint_saved_at was added can
+            # use the atomic JSON sidecar's mtime as a local fallback.
+            state_metadata_path = os.path.join(resume_path, TRAINING_STATE_FILE)
+            if os.path.isfile(state_metadata_path):
+                training_state.checkpoint_saved_at = os.path.getmtime(state_metadata_path)
+
+        if training_state.loaded and training_state.logging_dir:
+            saved_logging_dir = os.path.abspath(os.path.expanduser(training_state.logging_dir))
+            can_reuse_logging_dir = not args.resume_from_huggingface or os.path.isdir(saved_logging_dir)
+            if can_reuse_logging_dir:
+                os.makedirs(saved_logging_dir, exist_ok=True)
+                accelerator.project_configuration.set_directories(saved_logging_dir)
+                accelerator.project_configuration.logging_dir = saved_logging_dir
+                args.resolved_logging_dir = saved_logging_dir
+                if args.log_with in ("wandb", "all"):
+                    os.environ["WANDB_DIR"] = saved_logging_dir
+                logger.info(f"resuming logs in: {saved_logging_dir}")
+            else:
+                logger.warning(
+                    f"Saved logging directory is not available locally: {saved_logging_dir}. "
+                    "TensorBoard will use the newly resolved directory; WandB can still resume by run id."
+                )
+
+        return training_state
 
     def _run_training_loop(
         self,
@@ -1807,6 +1907,7 @@ class NetworkTrainer:
         sample_parameters,
         dit_dtype,
         network_dtype,
+        training_state: TrainingProgressState,
     ):
         is_main_process = accelerator.is_main_process
 
@@ -1815,6 +1916,55 @@ class NetworkTrainer:
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+
+        if training_state.loaded:
+            incompatibilities = []
+            if training_state.max_train_steps != args.max_train_steps:
+                incompatibilities.append(f"max_train_steps changed ({training_state.max_train_steps} -> {args.max_train_steps})")
+            if training_state.num_update_steps_per_epoch != num_update_steps_per_epoch:
+                incompatibilities.append(
+                    "number of update steps per epoch changed "
+                    f"({training_state.num_update_steps_per_epoch} -> {num_update_steps_per_epoch})"
+                )
+            if training_state.num_batches_per_epoch != len(train_dataloader):
+                incompatibilities.append(
+                    f"number of batches per epoch changed ({training_state.num_batches_per_epoch} -> {len(train_dataloader)})"
+                )
+            if training_state.gradient_accumulation_steps != args.gradient_accumulation_steps:
+                incompatibilities.append(
+                    "gradient_accumulation_steps changed "
+                    f"({training_state.gradient_accumulation_steps} -> {args.gradient_accumulation_steps})"
+                )
+            if training_state.num_processes != accelerator.num_processes:
+                incompatibilities.append(
+                    f"number of processes changed ({training_state.num_processes} -> {accelerator.num_processes})"
+                )
+            if training_state.seed != args.seed:
+                incompatibilities.append(f"seed changed ({training_state.seed} -> {args.seed})")
+            if training_state.log_with != getattr(args, "resolved_log_with", args.log_with):
+                incompatibilities.append(
+                    f"logging backend changed ({training_state.log_with} -> {getattr(args, 'resolved_log_with', args.log_with)})"
+                )
+            current_tracker_name = "network_train" if args.log_tracker_name is None else args.log_tracker_name
+            if training_state.tracker_name != current_tracker_name:
+                incompatibilities.append(f"tracker name changed ({training_state.tracker_name} -> {current_tracker_name})")
+            if training_state.step_in_epoch < 0 or training_state.step_in_epoch > len(train_dataloader):
+                incompatibilities.append(
+                    f"saved step_in_epoch {training_state.step_in_epoch} is outside [0, {len(train_dataloader)}]"
+                )
+            if incompatibilities:
+                raise ValueError(
+                    "Seamless resume requires the original training topology and schedule:\n- " + "\n- ".join(incompatibilities)
+                )
+        else:
+            training_state.max_train_steps = args.max_train_steps
+            training_state.num_batches_per_epoch = len(train_dataloader)
+            training_state.num_update_steps_per_epoch = num_update_steps_per_epoch
+            training_state.gradient_accumulation_steps = args.gradient_accumulation_steps
+            training_state.num_processes = accelerator.num_processes
+            training_state.seed = args.seed
+
+        training_state.logging_dir = getattr(args, "resolved_logging_dir", None) or accelerator.project_dir
 
         # 学習する
         # total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -1925,25 +2075,85 @@ class NetworkTrainer:
                 minimum_metadata[key] = metadata[key]
 
         if accelerator.is_main_process:
+            resume_rng_state = None
+            if training_state.loaded:
+                resume_rng_state = {
+                    "python": random.getstate(),
+                    "numpy": np.random.get_state(),
+                    "torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                }
+
+                if training_state.log_with in ("tensorboard", "all") and training_state.logging_dir:
+                    trim_result = trim_tensorboard_log_to_checkpoint(
+                        training_state.logging_dir,
+                        training_state.tracker_name or "network_train",
+                        training_state.global_step,
+                        training_state.checkpoint_saved_at,
+                        training_state.epoch_log_step_mode,
+                        training_state.num_update_steps_per_epoch,
+                    )
+                    if trim_result.event_files:
+                        logger.info(
+                            "compacted TensorBoard history to checkpoint step %s: "
+                            "%s event file(s), %s event(s) kept, %s orphaned event(s) removed",
+                            training_state.global_step,
+                            trim_result.event_files,
+                            trim_result.kept_events,
+                            trim_result.removed_events,
+                        )
+
             init_kwargs = {}
-            if args.wandb_run_name:
-                init_kwargs["wandb"] = {"name": args.wandb_run_name}
             if args.log_tracker_config is not None:
                 init_kwargs = toml.load(args.log_tracker_config)
+            if args.wandb_run_name or training_state.wandb_run_id:
+                wandb_kwargs = init_kwargs.setdefault("wandb", {})
+                if args.wandb_run_name:
+                    wandb_kwargs["name"] = args.wandb_run_name
+                if training_state.wandb_run_id and not training_state.loaded:
+                    wandb_kwargs["id"] = training_state.wandb_run_id
+                    wandb_kwargs["resume"] = "must"
+            configure_resume_tracker_init_kwargs(init_kwargs, training_state)
             accelerator.init_trackers(
                 "network_train" if args.log_tracker_name is None else args.log_tracker_name,
                 config=train_utils.get_sanitized_config_or_none(args),
                 init_kwargs=init_kwargs,
             )
 
-        # TODO skip until initial step
-        progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
+            try:
+                wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
+                training_state.wandb_run_id = wandb_tracker.id
+            except (KeyError, RuntimeError, ValueError):
+                pass
 
-        epoch_to_start = 0
-        global_step = 0
+            # Recreating a tracker is resume bookkeeping, not a training RNG
+            # event. Restore the checkpoint RNG in case a backend consumed it.
+            if resume_rng_state is not None:
+                random.setstate(resume_rng_state["python"])
+                np.random.set_state(resume_rng_state["numpy"])
+                torch.set_rng_state(resume_rng_state["torch"])
+                if resume_rng_state["cuda"] is not None:
+                    torch.cuda.set_rng_state_all(resume_rng_state["cuda"])
+
+        # All records written from this point use the epoch number for
+        # loss/epoch. Persist the mode so future resumes do not remap them.
+        training_state.epoch_log_step_mode = "epoch"
+
+        epoch_to_start = training_state.epoch if training_state.loaded else 0
+        global_step = training_state.global_step if training_state.loaded else 0
+        progress_bar = tqdm(
+            total=args.max_train_steps,
+            initial=global_step,
+            smoothing=0,
+            disable=not accelerator.is_local_main_process,
+            desc="steps",
+        )
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
         loss_recorder = train_utils.LossRecorder()
+        if training_state.loaded:
+            loss_recorder.loss_list = list(training_state.loss_list)
+            loss_recorder.loss_total = training_state.loss_total
         del train_dataset_group
 
         # function for saving/removing
@@ -2015,12 +2225,12 @@ class NetworkTrainer:
                     accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
                 )
 
-        # For --sample_at_first
-        if should_sample_images(args, global_step, epoch=0):
+        # For --sample_at_first. Never repeat it when resuming.
+        if global_step == 0 and should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
             _do_sample(0, global_step)
             optimizer_train_fn()
-        if len(accelerator.trackers) > 0:
+        if global_step == 0 and len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
             accelerator.log({}, step=0)
 
@@ -2037,7 +2247,11 @@ class NetworkTrainer:
 
         optimizer_train_fn()  # Set training mode
 
+        stop_training = global_step >= args.max_train_steps
         for epoch in range(epoch_to_start, num_train_epochs):
+            if stop_training:
+                break
+
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
 
@@ -2045,7 +2259,20 @@ class NetworkTrainer:
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
-            for step, batch in enumerate(train_dataloader):
+            # Keep worker base seeds epoch-deterministic and separate from the
+            # model RNG. skip_first_batches reuses this generator.
+            data_loader_generator = getattr(train_dataloader, "generator", None)
+            if data_loader_generator is not None:
+                data_loader_generator.manual_seed(args.seed + epoch + 1)
+
+            step_to_start = training_state.step_in_epoch if training_state.loaded and epoch == epoch_to_start else 0
+            epoch_dataloader = train_dataloader
+            if step_to_start > 0:
+                accelerator.print(f"resuming epoch {epoch + 1} at batch {step_to_start + 1}/{len(train_dataloader)}")
+                epoch_dataloader = accelerator.skip_first_batches(train_dataloader, step_to_start)
+
+            consumed_in_epoch = step_to_start
+            for step, batch in enumerate(epoch_dataloader, start=step_to_start):
                 # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
 
                 latents = batch["latents"]
@@ -2104,12 +2331,26 @@ class NetworkTrainer:
                 else:
                     keys_scaled, mean_norm, maximum_norm = None, None, None
 
+                current_loss = loss.detach().item()
+                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                avr_loss: float = loss_recorder.moving_average
+                consumed_in_epoch = step + 1
+
+                training_state.epoch = epoch
+                training_state.step_in_epoch = consumed_in_epoch
+                training_state.timestep_range_pool = list(self.timestep_range_pool)
+                training_state.loss_list = list(loss_recorder.loss_list)
+                training_state.loss_total = loss_recorder.loss_total
+
                 # Checks if the accelerator has performed an optimization step behind the scenes
+                should_sampling = False
+                should_saving = False
                 if accelerator.sync_gradients:
-                    if global_step == 0:
+                    if global_step == 0 and not training_state.loaded:
                         progress_bar.reset()  # exclude first step from progress bar, because it may take long due to initializations
                     progress_bar.update(1)
                     global_step += 1
+                    training_state.global_step = global_step
 
                     # to avoid calling optimizer_eval_fn() too frequently, we call it only when we need to sample images or save the model
                     should_sampling = should_sample_images(args, global_step, epoch=None)
@@ -2125,19 +2366,8 @@ class NetworkTrainer:
                             if accelerator.is_main_process:
                                 ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
-
-                                if args.save_state:
-                                    train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
-
-                                remove_step_no = train_utils.get_remove_step_no(args, global_step)
-                                if remove_step_no is not None:
-                                    remove_ckpt_name = train_utils.get_step_ckpt_name(args.output_name, remove_step_no)
-                                    remove_model(remove_ckpt_name)
                         optimizer_train_fn()
 
-                current_loss = loss.detach().item()
-                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-                avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)
 
@@ -2153,47 +2383,74 @@ class NetworkTrainer:
                     logs.update(self.extra_step_logs(args, logs))
                     accelerator.log(logs, step=global_step)
 
+                # The state is saved after sampling and logging, so it always
+                # represents the exact next action on resume.
+                if should_saving and args.save_state:
+                    train_utils.save_and_remove_state_stepwise(args, accelerator, global_step, training_state)
+
+                if should_saving and accelerator.is_main_process:
+                    remove_step_no = train_utils.get_remove_step_no(args, global_step)
+                    if remove_step_no is not None:
+                        remove_ckpt_name = train_utils.get_step_ckpt_name(args.output_name, remove_step_no)
+                        remove_model(remove_ckpt_name)
+
                 if global_step >= args.max_train_steps:
+                    stop_training = True
                     break
 
-            if len(accelerator.trackers) > 0:
+            epoch_completed = consumed_in_epoch >= len(train_dataloader)
+            if epoch_completed:
+                training_state.epoch = epoch + 1
+                training_state.step_in_epoch = 0
+
+            if epoch_completed and len(accelerator.trackers) > 0:
                 logs = {"loss/epoch": loss_recorder.moving_average}
+                # Epoch summaries use the epoch number as their TensorBoard
+                # x-axis. Resume cleanup removes newer summaries by their
+                # checkpoint wall time, independently of this step value.
                 accelerator.log(logs, step=epoch + 1)
 
             accelerator.wait_for_everyone()
 
             # save model at the end of epoch if needed
             optimizer_eval_fn()
+            saving = False
             if args.save_every_n_epochs is not None:
-                saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                saving = epoch_completed and (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                 if is_main_process and saving:
                     ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, epoch + 1)
                     save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
-                    remove_epoch_no = train_utils.get_remove_epoch_no(args, epoch + 1)
-                    if remove_epoch_no is not None:
-                        remove_ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, remove_epoch_no)
-                        remove_model(remove_ckpt_name)
-
-                    if args.save_state:
-                        train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-
             _do_sample(epoch + 1, global_step)
+
+            if args.save_every_n_epochs is not None and saving and args.save_state:
+                train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1, training_state)
+
+            if args.save_every_n_epochs is not None and saving and is_main_process:
+                remove_epoch_no = train_utils.get_remove_epoch_no(args, epoch + 1)
+                if remove_epoch_no is not None:
+                    remove_ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, remove_epoch_no)
+                    remove_model(remove_ckpt_name)
+
             optimizer_train_fn()
 
             # end of epoch
 
+            if stop_training:
+                break
+
         # metadata["ss_epoch"] = str(num_train_epochs)
         metadata["ss_training_finished_at"] = str(time.time())
+
+        optimizer_eval_fn()
+
+        if args.save_state or args.save_state_on_train_end:
+            train_utils.save_state_on_train_end(args, accelerator, training_state)
 
         if is_main_process:
             network = accelerator.unwrap_model(network)
 
         accelerator.end_training()
-        optimizer_eval_fn()
-
-        if is_main_process and (args.save_state or args.save_state_on_train_end):
-            train_utils.save_state_on_train_end(args, accelerator)
 
         if is_main_process:
             ckpt_name = train_utils.get_last_ckpt_name(args.output_name)
