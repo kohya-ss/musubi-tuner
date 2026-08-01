@@ -1,12 +1,11 @@
-"""Functional flow-matching sampler for the K2 MMDiT (no Scheduler class).
-
-Ported verbatim from references/Krea2/sampling.py.
-"""
+"""Functional flow-matching sampler for K2 text-to-image and edit generation."""
 
 import gc
 import math
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
 from tqdm import tqdm
@@ -40,6 +39,135 @@ def gather_valid_text(txt, mask):
         out[i, : v.shape[0]] = v
         newmask[i, : v.shape[0]] = True
     return out, newmask
+
+
+def load_reference_images(paths: list[str]) -> list[torch.Tensor]:
+    """Load RGB reference images as CPU ``(C,H,W)`` float tensors in ``[0,1]``."""
+    images = []
+    for path in paths:
+        with Image.open(path) as image:
+            array = np.array(image.convert("RGB"), copy=True)
+        images.append(torch.from_numpy(array).permute(2, 0, 1).float().div_(255.0))
+    return images
+
+
+def resize_reference_image(
+    image: torch.Tensor,
+    max_pixels: int,
+    *,
+    snap: int = 1,
+    mode: str = "bilinear",
+    min_size: int | None = None,
+    antialias: bool = True,
+    allow_upscale: bool = False,
+) -> torch.Tensor:
+    """Resize a ``(C,H,W)`` image to a pixel-area budget, preserving aspect ratio."""
+    if image.ndim != 3:
+        raise ValueError(f"Expected a (C,H,W) reference image, got {tuple(image.shape)}")
+    _, height, width = image.shape
+    scale = math.sqrt(max_pixels / (height * width))
+    if not allow_upscale:
+        scale = min(1.0, scale)
+    new_height = max(round(height * scale / snap) * snap, snap)
+    new_width = max(round(width * scale / snap) * snap, snap)
+    if min_size is not None:
+        new_height = max(new_height, min_size)
+        new_width = max(new_width, min_size)
+    if (new_height, new_width) == (height, width):
+        return image
+    kwargs = {"mode": mode, "size": (new_height, new_width)}
+    if mode in ("bilinear", "bicubic"):
+        kwargs["align_corners"] = False
+        kwargs["antialias"] = antialias
+    return F.interpolate(image.unsqueeze(0).float(), **kwargs).squeeze(0).clamp_(0, 1)
+
+
+def prepare_vlm_reference_images(images: list[torch.Tensor], max_pixels: int = 384 * 384) -> list[torch.Tensor]:
+    """Prepare low-resolution reference copies for Qwen3-VL conditioning."""
+    return [resize_reference_image(image, max_pixels, mode="bicubic", min_size=28) for image in images]
+
+
+@torch.no_grad()
+def encode_reference_images(
+    ae,
+    images: list[torch.Tensor],
+    device: torch.device | str,
+    dtype: torch.dtype,
+    max_pixels: int = 1024 * 1024,
+    snap: int = 16,
+) -> list[torch.Tensor]:
+    """VAE-encode clean edit references for ``index_timestep_zero`` conditioning."""
+    if not images:
+        return []
+    ae.to(device)
+    ae.eval()
+    latents = []
+    for image in images:
+        # ai-toolkit uses plain bilinear interpolation for the VAE reference
+        # branch (antialias=False); the Qwen3-VL branch remains antialiased.
+        pixels = resize_reference_image(image, max_pixels, snap=snap, antialias=False)
+        # Musubi's Qwen-Image VAE encoder consumes pixels in [-1,1].
+        pixels = pixels.unsqueeze(0).mul(2).sub(1).to(device=device, dtype=ae.dtype)
+        # ai-toolkit samples the Qwen-Image VAE posterior for clean references.
+        # The normal dataset-cache path keeps using posterior.mode(); this
+        # stochastic path is scoped to Krea 2 Edit sampling only.
+        latent = ae.encode_pixels_to_latents(pixels, sample_posterior=True)
+        # Qwen-Image VAE emits (B,C,T,H,W); Krea 2 edit uses one-frame images.
+        latents.append(latent[0, :, 0].to(device=device, dtype=dtype))
+    ae.to("cpu")
+    return latents
+
+
+def pack_reference_latents(
+    ref_latents: list[torch.Tensor],
+    batch_size: int,
+    patch: int,
+    device: torch.device | str,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Patchify references and assign each one its own RoPE axis-0 index."""
+    tokens = []
+    positions = []
+    for index, ref in enumerate(ref_latents):
+        if ref.ndim == 3:
+            ref = ref.unsqueeze(0)
+        elif ref.ndim == 5:
+            ref = rearrange(ref, "b c t h w -> (b t) c h w")
+        if ref.ndim != 4:
+            raise ValueError(f"Expected reference latent with 3, 4 or 5 dimensions, got {tuple(ref.shape)}")
+        ref = ref.to(device=device, dtype=dtype)
+        if ref.shape[0] == 1 and batch_size > 1:
+            ref = ref.repeat(batch_size, 1, 1, 1)
+        if ref.shape[0] != batch_size:
+            raise ValueError(f"Reference batch size {ref.shape[0]} does not match sample batch size {batch_size}")
+
+        pad_height = (-ref.shape[-2]) % patch
+        pad_width = (-ref.shape[-1]) % patch
+        if pad_height or pad_width:
+            ref = F.pad(ref, (0, pad_width, 0, pad_height))
+        ref_height, ref_width = ref.shape[-2] // patch, ref.shape[-1] // patch
+        tokens.append(rearrange(ref, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch))
+
+        ref_ids = torch.zeros(ref_height, ref_width, 3, device=device)
+        ref_ids[..., 0] = index + 1
+        ref_ids[..., 1] = torch.arange(ref_height, device=device)[:, None]
+        ref_ids[..., 2] = torch.arange(ref_width, device=device)[None, :]
+        positions.append(repeat(ref_ids, "h w three -> b (h w) three", b=batch_size, three=3))
+
+    if not tokens:
+        raise ValueError("At least one reference latent is required")
+    return torch.cat(tokens, dim=1), torch.cat(positions, dim=1)
+
+
+def append_reference_latents(img, pos, mask, ref_latents, patch):
+    """Insert reference tokens between the noisy image tokens and text tokens."""
+    ref_tokens, ref_pos = pack_reference_latents(ref_latents, img.shape[0], patch, img.device, img.dtype)
+    image_len = img.shape[1]
+    ref_mask = torch.ones(img.shape[0], ref_tokens.shape[1], device=img.device, dtype=torch.bool)
+    img = torch.cat((img, ref_tokens), dim=1)
+    pos = torch.cat((pos[:, :image_len], ref_pos, pos[:, image_len:]), dim=1)
+    mask = torch.cat((mask[:, :image_len], ref_mask, mask[:, image_len:]), dim=1)
+    return img, pos, mask, ref_tokens.shape[1]
 
 
 def prepare(img, txtlen, patch, txtmask):
@@ -81,7 +209,7 @@ def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
 
 
 @torch.no_grad()
-def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True):
+def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True, images=None):
     """Encode prompts (and optional negatives) into gathered varlen text embeddings.
 
     Returns ``(txt, txtmask, untxt, untxtmask)``; the unconditional pair is ``None`` when
@@ -90,7 +218,7 @@ def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True):
     not fit at the same time. ``gather_valid_text`` drops the interior padding the encoder
     inserts between prompt and suffix so the valid tokens form a contiguous prefix.
     """
-    txt, txtmask = encoder(prompts)
+    txt, txtmask = encoder(prompts) if images is None else encoder(prompts, images=images)
     txt, txtmask = gather_valid_text(txt, txtmask)
 
     untxt = untxtmask = None
@@ -124,6 +252,8 @@ def sample(
     y1=0.5,
     y2=1.15,
     mu=None,
+    ref_latents=None,
+    kv_cache=False,
 ):
     """Denoise pre-encoded text embeddings to images: euler+CFG denoise -> decode.
 
@@ -159,7 +289,11 @@ def sample(
     if cfg:
         untxt, untxtmask = untxt.to(device=device, dtype=dtype), untxtmask.to(device)
 
-    # Per-prompt seeded gaussian latent noise.
+    if kv_cache and not ref_latents:
+        raise ValueError("Krea 2 kv_cache sampling requires at least one reference latent")
+
+    # Per-prompt seeded gaussian latent noise. Keep the ODE state in fp32 like
+    # ai-toolkit; only the tensor presented to the DiT is cast to model dtype.
     noise = torch.cat(
         [
             torch.randn(
@@ -167,41 +301,96 @@ def sample(
                 channels,
                 height // compression,
                 width // compression,
-                device=device,
-                dtype=dtype,
-                generator=torch.Generator(device=device).manual_seed(seed + i),
+                device="cpu",
+                dtype=torch.float32,
+                generator=torch.Generator(device="cpu").manual_seed(seed + i),
             )
             for i in range(n)
         ],
         dim=0,
-    )
+    ).to(device)
 
-    x, pos, mask = prepare(noise, txt.shape[1], patch, txtmask)
+    x, base_pos, base_mask = prepare(noise, txt.shape[1], patch, txtmask)
+    target_seq_len = x.shape[1]
+    pos, mask = base_pos, base_mask
+    reflen = 0
+    ref_tokens = None
+    if ref_latents:
+        model_img, pos, mask, reflen = append_reference_latents(x, pos, mask, ref_latents, patch)
+        ref_tokens = model_img[:, target_seq_len:].to(dtype=dtype)
+    unbase_pos = unbase_mask = None
     if cfg:
-        _, unpos, unmask = prepare(noise, untxt.shape[1], patch, untxtmask)
+        _, unbase_pos, unbase_mask = prepare(noise, untxt.shape[1], patch, untxtmask)
+        unpos, unmask = unbase_pos, unbase_mask
+        if ref_latents:
+            _, unpos, unmask, _ = append_reference_latents(x, unpos, unmask, ref_latents, patch)
 
     # min_res/max_res define the (x1,y1)-(x2,y2) interpolation endpoints for `mu`.
     x1 = (minres // (compression * patch)) ** 2
     x2 = (maxres // (compression * patch)) ** 2
-    ts = timesteps(x.shape[1], steps, x1, x2, y1=y1, y2=y2, mu=mu)
+    ts = timesteps(target_seq_len, steps, x1, x2, y1=y1, y2=y2, mu=mu)
 
     # Euler integration of the flow ODE with CFG. Run the DiT under autocast: with fp8 the
     # non-quantized layers (e.g. `first`) keep their checkpoint dtype (fp32), so without
     # autocast a bf16 activation hits "mat1 and mat2 must have the same dtype". This mirrors
     # how training wraps both call_dit and sample generation (trainer_base) in autocast; for
     # the non-fp8 (all-bf16) path it is effectively a no-op.
-    img = x
+    img = x.float()
+    ref_cache = None
     device_type = torch.device(device).type
     with torch.autocast(device_type=device_type, dtype=dtype):
         for tcurr, tprev in tqdm(zip(ts[:-1], ts[1:]), total=len(ts) - 1, desc="sampling"):
-            t = torch.full((len(img),), tcurr, dtype=img.dtype, device=img.device)
-            cond = model(img=img, context=txt, t=t, pos=pos, mask=mask)
+            t = torch.full((len(img),), tcurr, dtype=dtype, device=img.device)
+            live_img = img.to(dtype=dtype)
+
+            if kv_cache and ref_cache is not None:
+                cond = model(
+                    img=live_img,
+                    context=txt,
+                    t=t,
+                    pos=base_pos,
+                    mask=base_mask,
+                    ref_kv_cache=ref_cache,
+                )
+            else:
+                model_img = torch.cat((live_img, ref_tokens), dim=1) if ref_tokens is not None else live_img
+                capture = [] if kv_cache else None
+                cond_kwargs = dict(
+                    img=model_img,
+                    context=txt,
+                    t=t,
+                    pos=pos,
+                    mask=mask,
+                    reflen=reflen,
+                )
+                if kv_cache:
+                    cond_kwargs.update(isolate_refs=True, ref_kv_capture=capture)
+                cond = model(**cond_kwargs)
+                if capture is not None:
+                    if len(capture) != len(model.blocks):
+                        raise RuntimeError(
+                            f"Krea 2 reference K/V capture produced {len(capture)} entries for "
+                            f"{len(model.blocks)} transformer blocks"
+                        )
+                    ref_cache = [(cached_k.detach(), cached_v.detach()) for cached_k, cached_v in capture]
+
             if cfg:
-                uncond = model(img=img, context=untxt, t=t, pos=unpos, mask=unmask)
+                if kv_cache:
+                    uncond = model(
+                        img=live_img,
+                        context=untxt,
+                        t=t,
+                        pos=unbase_pos,
+                        mask=unbase_mask,
+                        ref_kv_cache=ref_cache,
+                    )
+                else:
+                    model_img = torch.cat((live_img, ref_tokens), dim=1) if ref_tokens is not None else live_img
+                    uncond = model(img=model_img, context=untxt, t=t, pos=unpos, mask=unmask, reflen=reflen)
                 v = uncond + cfg_scale * (cond - uncond)
             else:
                 v = cond
-            img = img + (tprev - tcurr) * v
+            img = img + (tprev - tcurr) * v.float()
 
     # Unpatchify back to a latent (add the VAE frame axis) and decode to pixels.
     img = rearrange(
@@ -219,7 +408,7 @@ def sample(
     ae = ae.to(img.device)
     pixels = ae.decode_to_pixels(img.to(torch.bfloat16))
     ae = ae.to("cpu")
-    pixels = rearrange(pixels * 255.0, "b c h w -> b h w c").cpu().byte().numpy()
+    pixels = rearrange(pixels * 255.0, "b c h w -> b h w c").round().clamp_(0, 255).cpu().to(torch.uint8).numpy()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

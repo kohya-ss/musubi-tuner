@@ -166,7 +166,15 @@ class Attention(torch.nn.Module):
         self.qknorm = QKNorm(self.headdim)
         self.wo = torch.nn.Linear(dim, dim, bias=bias)
 
-    def forward(self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None) -> Tensor:
+    def forward(
+        self,
+        qkv: Tensor,
+        freqs: Tensor | None = None,
+        attn_params: AttentionParams | None = None,
+        ref_span: tuple[int, int] | None = None,
+        kv_capture: list | None = None,
+        kv_cache: tuple[Tensor, Tensor] | None = None,
+    ) -> Tensor:
         q, k, v, gate = self.wq(qkv), self.wk(qkv), self.wv(qkv), self.gate(qkv)
 
         # QKNorm + RoPE run in [B, H, L, D] (K2-native layout) to preserve the reference numerics.
@@ -180,10 +188,55 @@ class Attention(torch.nn.Module):
         if freqs is not None:
             q, k = ropeapply(q, k, freqs)
 
+        if ref_span is not None and kv_cache is not None:
+            raise ValueError("ref_span and kv_cache are mutually exclusive")
+        if kv_capture is not None:
+            if ref_span is None:
+                raise ValueError("Krea 2 reference K/V capture requires ref_span")
+            ref_start, ref_end = ref_span
+            kv_capture.append(
+                (
+                    k[:, :, ref_start:ref_end].clone(),
+                    v[:, :, ref_start:ref_end].clone(),
+                )
+            )
+        if kv_cache is not None:
+            cached_k, cached_v = kv_cache
+            cached_k = cached_k.to(device=k.device, dtype=k.dtype)
+            cached_v = cached_v.to(device=v.device, dtype=v.dtype)
+            if cached_k.shape[:2] != k.shape[:2] or cached_v.shape[:2] != v.shape[:2]:
+                raise ValueError(
+                    "Cached Krea 2 reference K/V batch/head dimensions do not match "
+                    f"the live sequence: K={tuple(cached_k.shape)}, V={tuple(cached_v.shape)}, "
+                    f"live K={tuple(k.shape)}, live V={tuple(v.shape)}"
+                )
+            k = torch.cat((k, cached_k), dim=2)
+            v = torch.cat((v, cached_v), dim=2)
+
         # The shared attention expects [B, L, H, D] and returns [B, L, H*D]. GQA (heads != kvheads)
         # is detected and handled inside it (enable_gqa for SDPA; native for flash/sageattn).
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         x = common_attention([q, k, v], attn_params=attn_params)
+
+        if ref_span is not None:
+            # ai-toolkit's kv_cache training mode uses asymmetric attention:
+            # live target/text queries see the full sequence, while reference
+            # queries see reference keys only. Compute the ordinary full
+            # attention once, then replace only the reference-query rows with
+            # exact ref-only attention. This avoids backend-specific dense
+            # masks and works with torch/flash/sage/xformers alike.
+            ref_start, ref_end = ref_span
+            ref_attn_mode = attn_params.attn_mode if attn_params is not None else "torch"
+            ref_attn_params = AttentionParams.create_attention_params(ref_attn_mode, False)
+            ref_x = common_attention(
+                [
+                    q[:, ref_start:ref_end],
+                    k[:, ref_start:ref_end],
+                    v[:, ref_start:ref_end],
+                ],
+                attn_params=ref_attn_params,
+            )
+            x = torch.cat((x[:, :ref_start], ref_x, x[:, ref_end:]), dim=1)
         out = self.wo(x * F.sigmoid(gate))
 
         return out
@@ -279,9 +332,62 @@ class SingleStreamBlock(nn.Module):
         self.attn = Attention(dim=features, heads=heads, bias=bias, kvheads=kvheads)
         self.mlp = SwiGLU(features, multiplier, bias)
 
-    def forward(self, x: Tensor, vec: Tensor, freqs: Tensor, attn_params: AttentionParams | None = None) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        vec: Tensor,
+        freqs: Tensor,
+        attn_params: AttentionParams | None = None,
+        ref_span: tuple[int, int] | None = None,
+        kv_capture: list | None = None,
+        kv_cache: tuple[Tensor, Tensor] | None = None,
+    ) -> Tensor:
+        attn_kwargs = {}
+        if ref_span is not None:
+            attn_kwargs["ref_span"] = ref_span
+        if kv_capture is not None:
+            attn_kwargs["kv_capture"] = kv_capture
+        if kv_cache is not None:
+            attn_kwargs["kv_cache"] = kv_cache
+
+        if isinstance(vec, tuple):
+            # Edit conditioning: clean reference tokens occupy [ref_start:ref_end]
+            # and use the t=0 modulation vector; noisy target + text keep real t.
+            vec, refvec, ref_start, ref_end = vec
+            modulation = self.mod(vec)
+            ref_modulation = self.mod(refvec)
+
+            def modulate(hidden, scale_index, shift_index):
+                return torch.cat(
+                    (
+                        (1 + modulation[scale_index]) * hidden[:, :ref_start] + modulation[shift_index],
+                        (1 + ref_modulation[scale_index]) * hidden[:, ref_start:ref_end] + ref_modulation[shift_index],
+                        (1 + modulation[scale_index]) * hidden[:, ref_end:] + modulation[shift_index],
+                    ),
+                    dim=1,
+                )
+
+            def gate(hidden, gate_index):
+                return torch.cat(
+                    (
+                        modulation[gate_index] * hidden[:, :ref_start],
+                        ref_modulation[gate_index] * hidden[:, ref_start:ref_end],
+                        modulation[gate_index] * hidden[:, ref_end:],
+                    ),
+                    dim=1,
+                )
+
+            x = x + gate(self.attn(modulate(self.prenorm(x), 0, 1), freqs, attn_params, **attn_kwargs), 2)
+            x = x + gate(self.mlp(modulate(self.postnorm(x), 3, 4)), 5)
+            return x
+
         prescale, preshift, pregate, postscale, postshift, postgate = self.mod(vec)
-        x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, attn_params)
+        x = x + pregate * self.attn(
+            (1 + prescale) * self.prenorm(x) + preshift,
+            freqs,
+            attn_params,
+            **attn_kwargs,
+        )
         x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
 
         return x
@@ -398,9 +504,24 @@ class SingleStreamDiT(nn.Module):
         t: Tensor,
         pos: Tensor,
         mask: Tensor | None = None,
+        reflen: int = 0,
+        isolate_refs: bool = False,
+        ref_kv_capture: list | None = None,
+        ref_kv_cache: list[tuple[Tensor, Tensor]] | None = None,
     ) -> Tensor:
+        if mask is None:
+            raise ValueError("Krea 2 requires a combined image/text attention mask")
+        if ref_kv_capture is not None and not isolate_refs:
+            raise ValueError("Reference K/V capture requires isolate_refs=True")
+        if ref_kv_cache is not None:
+            if reflen != 0 or ref_kv_capture is not None:
+                raise ValueError("Cached reference K/V requires reflen=0 and cannot capture K/V simultaneously")
+            if len(ref_kv_cache) != len(self.blocks):
+                raise ValueError(f"Expected {len(self.blocks)} cached reference K/V entries, got {len(ref_kv_cache)}")
+
+        flow_t = t
         img = self.first(img)
-        t = self.tmlp(temb(t, self.config.tdim, device=img.device, dtype=img.dtype))
+        t = self.tmlp(temb(flow_t, self.config.tdim, device=img.device, dtype=img.dtype))
         tvec = self.tproj(t)
 
         # `mask`/`pos` arrive in image-first order: [img (all valid), text (valid prefix + pad)].
@@ -417,36 +538,75 @@ class SingleStreamDiT(nn.Module):
 
         combined = torch.cat((img, context), dim=1)  # image first, then text
 
-        # Pad the combined sequence to a multiple of 256 to keep compiled kernel shapes stable.
-        # The pad lands on the text tail; extending txtmask with False makes the shared attention
-        # machinery (cu_seqlens / key-padding mask / trim) exclude it, so it is numerically inert.
-        fulllen = combined.shape[1]
-        padlen = (-fulllen) % 256
-        if padlen > 0:
-            combined = F.pad(combined, (0, 0, 0, padlen))
-            pos = F.pad(pos, (0, 0, 0, padlen))
-            txtmask = F.pad(txtmask, (0, padlen), value=False)
+        blockvec = tvec
+        if reflen > 0:
+            if reflen >= imglen:
+                raise ValueError(f"Reference token count {reflen} must be smaller than image token count {imglen}")
+            t0 = self.tmlp(temb(torch.zeros_like(flow_t), self.config.tdim, device=img.device, dtype=img.dtype))
+            blockvec = (tvec, self.tproj(t0), imglen - reflen, imglen)
 
-        # Main blocks: bidirectional attention over [image (img_len, all valid) + text (padded)].
-        # Image-first ordering keeps each sample's valid tokens a contiguous prefix, which the
-        # shared varlen path requires.
-        attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, imglen, txtmask)
+        if ref_kv_cache is None:
+            # Pad the combined sequence to a multiple of 256 to keep compiled kernel shapes stable.
+            # The pad lands on the text tail; extending txtmask with False makes the shared attention
+            # machinery (cu_seqlens / key-padding mask / trim) exclude it, so it is numerically inert.
+            fulllen = combined.shape[1]
+            padlen = (-fulllen) % 256
+            if padlen > 0:
+                combined = F.pad(combined, (0, 0, 0, padlen))
+                pos = F.pad(pos, (0, 0, 0, padlen))
+                txtmask = F.pad(txtmask, (0, padlen), value=False)
+
+            # Main blocks: attention over [target, refs, text]. In isolate mode
+            # reference query rows are replaced with ref-only attention inside
+            # Attention.forward; all other queries retain full bidirectional attention.
+            attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, imglen, txtmask)
+        else:
+            # Cached reference K/V make key length larger than query length. The
+            # shared varlen mask assumes equal Q/K lengths, so run the naturally
+            # sized, unpadded live sequence. Sampling helpers gather valid text
+            # tokens before this path; reject padded direct callers explicitly.
+            if not bool(mask.all()):
+                raise ValueError("Cached Krea 2 reference K/V requires gathered, unpadded text tokens")
+            attn_params = AttentionParams.create_attention_params(self.attn_mode, False)
 
         freqs = self.posemb(pos)
+
+        ref_span = None
+        if reflen > 0 and isolate_refs:
+            ref_span = (imglen - reflen, imglen)
 
         for index, block in enumerate(self.blocks):
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(index)
 
-            if self.gradient_checkpointing and self.training:
-                combined = torch.utils.checkpoint.checkpoint(block, combined, tvec, freqs, attn_params, use_reentrant=False)
+            block_cache = ref_kv_cache[index] if ref_kv_cache is not None else None
+            if self.gradient_checkpointing and self.training and ref_kv_capture is None:
+                combined = torch.utils.checkpoint.checkpoint(
+                    block,
+                    combined,
+                    blockvec,
+                    freqs,
+                    attn_params,
+                    ref_span,
+                    None,
+                    block_cache,
+                    use_reentrant=False,
+                )
             else:
-                combined = block(combined, tvec, freqs, attn_params)
+                combined = block(
+                    combined,
+                    blockvec,
+                    freqs,
+                    attn_params,
+                    ref_span=ref_span,
+                    kv_capture=ref_kv_capture,
+                    kv_cache=block_cache,
+                )
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, index)
 
         final = self.last(combined, t)
-        output = final[:, :imglen, :]  # image tokens are the leading slice now
+        output = final[:, : imglen - reflen, :]  # noisy target tokens only; clean references are conditioning
 
         return output

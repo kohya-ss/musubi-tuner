@@ -15,6 +15,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_IDEOGRAM4_FULL,
     ARCHITECTURE_KANDINSKY5_FULL,
     ARCHITECTURE_KREA2_FULL,
+    ARCHITECTURE_KREA2_EDIT_FULL,
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_WAN_FULL,
     ARCHITECTURE_Z_IMAGE_FULL,
@@ -178,20 +179,38 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
-def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor):
-    """Krea 2 (K2) architecture. Single image (F=1), Qwen-Image VAE latents (normalized).
+def save_latent_cache_krea2(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    control_latent: Optional[list[torch.Tensor]] = None,
+    *,
+    edit: bool = False,
+    extra_metadata: Optional[dict[str, str]] = None,
+):
+    """Krea 2 architecture. Single-frame normalized Qwen-Image VAE latents.
 
     The latent uses the *same* normalization as the Qwen-Image VAE
     (`(raw - mean) / std`), which is exactly what K2's decoder inverts, so the
-    Qwen-Image latent caching is reused as-is. No control latent for plain t2i.
+    Qwen-Image latent caching is reused as-is. Edit caches additionally store
+    one ``latents_control_{i}`` tensor per clean reference image.
     """
     assert latent.dim() == 4, "latent should be 4D tensor (channel, frame, height, width)"
+    assert control_latent is None or all(cl.dim() == 4 for cl in control_latent), (
+        "Krea 2 control latents should be 4D tensors (channel, frame, height, width)"
+    )
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
 
-    save_latent_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
+    if control_latent is not None:
+        for index, ref in enumerate(control_latent):
+            _, ref_frames, ref_height, ref_width = ref.shape
+            ref_dtype = dtype_to_str(ref.dtype)
+            sd[f"latents_control_{index}_{ref_frames}x{ref_height}x{ref_width}_{ref_dtype}"] = ref.detach().cpu().contiguous()
+
+    architecture = ARCHITECTURE_KREA2_EDIT_FULL if edit else ARCHITECTURE_KREA2_FULL
+    save_latent_cache_common(item_info, sd, architecture, extra_metadata=extra_metadata)
 
 
 def save_latent_cache_kandinsky5(
@@ -302,7 +321,12 @@ def save_latent_cache_ideogram4(item_info: ItemInfo, latent: torch.Tensor):
     save_latent_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL)
 
 
-def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
+def save_latent_cache_common(
+    item_info: ItemInfo,
+    sd: dict[str, torch.Tensor],
+    arch_fullname: str,
+    extra_metadata: Optional[dict[str, str]] = None,
+):
     metadata = {
         "architecture": arch_fullname,
         "width": f"{item_info.original_size[0]}",
@@ -311,6 +335,8 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
     }
     if item_info.frame_count is not None:
         metadata["frame_count"] = f"{item_info.frame_count}"
+    if extra_metadata:
+        metadata.update({key: str(value) for key, value in extra_metadata.items()})
 
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
@@ -397,7 +423,7 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
-def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tensor):
+def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tensor, *, edit: bool = False):
     """Krea 2 (K2) architecture.
 
     `embed` is the per-item stack of *selected* Qwen3-VL hidden-state layers for the
@@ -413,7 +439,8 @@ def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tenso
     dtype_str = dtype_to_str(embed.dtype)
     sd[f"varlen_krea2_vl_embed_{dtype_str}"] = embed.detach().cpu()
 
-    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
+    architecture = ARCHITECTURE_KREA2_EDIT_FULL if edit else ARCHITECTURE_KREA2_FULL
+    save_text_encoder_output_cache_common(item_info, sd, architecture)
 
 
 def save_text_encoder_output_cache_kandinsky5(
