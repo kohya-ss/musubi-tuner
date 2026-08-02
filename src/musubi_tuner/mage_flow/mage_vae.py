@@ -558,8 +558,10 @@ class MageVAE(nn.Module):
 @torch.no_grad()
 def decode_mage_vae_latents(vae: MageVAE, latents: torch.Tensor) -> torch.Tensor:
     device = vae.device
-    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-        return vae.decode(latents.to(device=device, dtype=torch.float32))
+    if vae.dtype in {torch.bfloat16, torch.float16}:
+        with torch.autocast(device_type=device.type, dtype=vae.dtype):
+            return vae.decode(latents.to(device=device, dtype=torch.float32))
+    return vae.decode(latents.to(device=device, dtype=vae.dtype))
 
 
 def load_mage_vae(

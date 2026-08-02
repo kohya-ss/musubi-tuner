@@ -36,7 +36,11 @@ def euler_step(
     next_sigma: float | torch.Tensor,
 ) -> torch.Tensor:
     """Advance ``x`` along Mage-Flow's ``epsilon - z`` velocity field."""
-    return latent + (next_sigma - sigma) * velocity
+    # Preserve the pinned scheduler's FP32 accumulation without delegating the step.
+    sigma_tensor = torch.as_tensor(sigma, device=latent.device, dtype=torch.float32)
+    next_sigma_tensor = torch.as_tensor(next_sigma, device=latent.device, dtype=torch.float32)
+    stepped = latent.to(torch.float32) + (next_sigma_tensor - sigma_tensor) * velocity
+    return stepped.to(velocity.dtype)
 
 
 def scheduler_step_targets_only(
