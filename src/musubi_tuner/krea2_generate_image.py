@@ -1,4 +1,4 @@
-"""Krea 2 (K2) text-to-image generation.
+"""Krea 2 (K2) text-to-image and edit-LoRA generation.
 
 Mirrors the official `inference.py` end to end, parametrized for musubi: the DiT
 checkpoint, Qwen-Image VAE, and Qwen3-VL text encoder are passed via argparse, and
@@ -28,7 +28,8 @@ In ``--from_file`` / ``--interactive`` each line may carry per-prompt overrides 
 
 Supported per-prompt options: ``--w`` (width), ``--h`` (height), ``--s`` (steps),
 ``--d`` (seed), ``--g`` / ``--l`` (guidance_scale), ``--n`` (negative_prompt),
-``--y1``, ``--y2``, ``--mu`` (timestep-shift), ``--i`` (num images).
+``--ci`` (reference image, repeatable), ``--y1``, ``--y2``, ``--mu``
+(timestep-shift), ``--i`` (num images).
 """
 
 import argparse
@@ -45,7 +46,13 @@ import torch
 from safetensors.torch import load_file
 
 from musubi_tuner.krea2 import krea2_utils
-from musubi_tuner.krea2.krea2_sampling import encode_prompts, sample
+from musubi_tuner.krea2.krea2_sampling import (
+    encode_prompts,
+    encode_reference_images,
+    load_reference_images,
+    prepare_vlm_reference_images,
+    sample,
+)
 from musubi_tuner.krea2.krea2_utils import single_mmdit_large_wide
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.qwen_image import qwen_image_utils
@@ -66,7 +73,7 @@ def load_text_encoder(text_encoder: str, dtype: torch.dtype):
     return krea2_utils.load_krea2_text_encoder(text_encoder, dtype=dtype, device="cpu")
 
 
-def encode(encoder, prompts, negative_prompts, cfg: bool, te_device: str):
+def encode(encoder, prompts, negative_prompts, cfg: bool, te_device: str, reference_images=None, vlm_max_pixels=384 * 384):
     """Encode prompts with the Qwen3-VL conditioner, shuttling it to ``te_device`` for the call.
 
     The encoder is moved to ``te_device`` (the GPU, or CPU with ``--text_encoder_cpu``) just for
@@ -75,7 +82,11 @@ def encode(encoder, prompts, negative_prompts, cfg: bool, te_device: str):
     """
     logger.info("Encoding prompts with Qwen3-VL")
     encoder.to(te_device)
-    embeds = encode_prompts(encoder, prompts, negative_prompts, cfg=cfg)
+    images = None
+    if reference_images:
+        vlm_images = prepare_vlm_reference_images(reference_images, max_pixels=vlm_max_pixels)
+        images = [vlm_images] * len(prompts)
+    embeds = encode_prompts(encoder, prompts, negative_prompts, cfg=cfg, images=images)
     encoder.to("cpu")
     gc.collect()
     if torch.cuda.is_available():
@@ -160,12 +171,31 @@ def generate(args: argparse.Namespace, dit, ae, encoder, device: str, dtype: tor
     if args.seed is None:
         args.seed = random.randint(0, 2**32 - 1)
         logger.info(f"No seed specified; using random seed {args.seed}")
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
 
     prompts = [args.prompt] * args.num_images
     negative_prompts = [args.negative_prompt] * args.num_images
     cfg = args.guidance_scale > 1.0
+    reference_images = load_reference_images(args.control_image_path) if args.control_image_path else []
 
-    txt, txtmask, untxt, untxtmask = encode(encoder, prompts, negative_prompts, cfg, te_device)
+    txt, txtmask, untxt, untxtmask = encode(
+        encoder,
+        prompts,
+        negative_prompts,
+        cfg,
+        te_device,
+        reference_images=reference_images,
+        vlm_max_pixels=args.vlm_max_pixels,
+    )
+    ref_latents = encode_reference_images(
+        ae,
+        reference_images,
+        device,
+        dtype,
+        max_pixels=args.control_image_max_pixels,
+    )
 
     # Re-arm the block-swap offloader before each forward (no-op when block swap is off).
     if args.blocks_to_swap > 0:
@@ -188,6 +218,8 @@ def generate(args: argparse.Namespace, dit, ae, encoder, device: str, dtype: tor
         y1=args.y1,
         y2=args.y2,
         mu=args.mu,
+        ref_latents=ref_latents,
+        kv_cache=args.kv_cache,
     )
     return images
 
@@ -223,6 +255,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
             overrides["guidance_scale"] = float(value)
         elif option == "n":
             overrides["negative_prompt"] = value
+        elif option == "ci":
+            overrides.setdefault("control_image_path", []).append(value)
         elif option == "y1":
             overrides["y1"] = float(value)
         elif option == "y2":
@@ -264,6 +298,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mu", type=float, default=None, help="Pin a constant timestep-shift mu (overrides y1/y2)")
     parser.add_argument("--width", type=int, default=1024, help="Width of the generated image")
     parser.add_argument("--height", type=int, default=1024, help="Height of the generated image")
+    parser.add_argument(
+        "--control_image_path",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Reference image path(s) for Krea 2 Edit LoRA inference. Each image conditions Qwen3-VL and the DiT.",
+    )
+    parser.add_argument(
+        "--control_image_max_pixels",
+        type=int,
+        default=1024 * 1024,
+        help="Maximum pixel area per reference image for VAE latent conditioning (default: 1 MP).",
+    )
+    parser.add_argument(
+        "--vlm_max_pixels",
+        type=int,
+        default=384 * 384,
+        help="Maximum pixel area per reference image sent to Qwen3-VL.",
+    )
+    parser.add_argument(
+        "--kv_cache",
+        action="store_true",
+        help="Use isolated-reference attention and cache each block's reference K/V. "
+        "Required for Edit LoRAs trained with ai-toolkit model_kwargs.kv_cache=true.",
+    )
     parser.add_argument("--num-images", dest="num_images", type=int, default=1, help="Number of images to generate")
     parser.add_argument(
         "--seed", type=int, default=None, help="Base seed; image i uses seed + i. If omitted, a random seed is used."

@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import torch
 
-from musubi_tuner.training import parser_common
+from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+from musubi_tuner.training import parser_common, trainer_base
 from musubi_tuner.training.trainer_base import NetworkTrainer
 from musubi_tuner.utils import train_utils
 
@@ -40,6 +41,47 @@ def test_parser_accepts_krea2_shift_timestep_sampling():
     args = parser.parse_args(["--timestep_sampling", "krea2_shift"])
 
     assert args.timestep_sampling == "krea2_shift"
+
+
+def test_sigma_pure_noise_endpoint_fits_show_timesteps_histogram(monkeypatch):
+    trainer = NetworkTrainer()
+    args = SimpleNamespace(
+        timestep_sampling="sigma",
+        weighting_scheme="none",
+        logit_mean=0.0,
+        logit_std=1.0,
+        mode_scale=1.29,
+        min_timestep=None,
+        max_timestep=None,
+    )
+    scheduler = FlowMatchDiscreteScheduler(shift=1.0, reverse=True, solver="euler")
+    latents = torch.zeros(1, 1, 1, 2, 2, dtype=torch.float16)
+    noise = torch.ones_like(latents)
+
+    # u=0 selects scheduler index 0: sigma=1 and training timestep=1000.
+    monkeypatch.setattr(
+        trainer_base,
+        "compute_density_for_timestep_sampling",
+        lambda **kwargs: torch.zeros(kwargs["batch_size"]),
+    )
+    noisy_model_input, sampled = trainer.get_noisy_model_input_and_timesteps(
+        args, noise, latents, None, scheduler, torch.device("cpu"), torch.float16
+    )
+
+    assert torch.all(noisy_model_input == 1)
+    assert sampled.item() == 1000
+
+    histogram = [0] * scheduler.config.num_train_timesteps
+    trainer_base._accumulate_timestep_histogram(histogram, sampled, discrete=True)
+    assert histogram[-1] == 1
+    assert sum(histogram) == 1
+
+    # Float32 linspace does not represent every nominal integer exactly (for
+    # example 933 may be 932.999938). Every scheduler entry must nevertheless
+    # map to its own display bin rather than creating gaps and double spikes.
+    histogram = [0] * scheduler.config.num_train_timesteps
+    trainer_base._accumulate_timestep_histogram(histogram, scheduler.timesteps, discrete=True)
+    assert histogram == [1] * scheduler.config.num_train_timesteps
 
 
 def test_krea2_shift_matches_inference_endpoints_at_1024():

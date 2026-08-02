@@ -19,6 +19,7 @@ import torch
 from accelerate import init_empty_weights
 from torch import Tensor
 from transformers import (
+    AutoProcessor,
     AutoTokenizer,
     Qwen2TokenizerFast,
     Qwen3VLConfig,
@@ -165,7 +166,14 @@ def load_qwen3_vl_conditioner(
     qwen = _load_qwen3_vl_model(model_path, dtype=dtype, device=device, disable_mmap=disable_mmap)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_repo, max_length=max_length)
     processor = Qwen2TokenizerFast.from_pretrained(tokenizer_repo, max_length=max_length)
-    conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length, select_layers=select_layers)
+    conditioner = Qwen3VLConditioner(
+        qwen,
+        tokenizer,
+        processor,
+        max_length=max_length,
+        select_layers=select_layers,
+        tokenizer_repo=tokenizer_repo,
+    )
     return conditioner.eval().requires_grad_(False)
 
 
@@ -177,6 +185,7 @@ class Qwen3VLConditioner(torch.nn.Module):
         processor,
         max_length: int = 512,
         select_layers: tuple[int, ...] = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35),
+        tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,
     ):
         super().__init__()
         self.qwen = qwen.eval().requires_grad_(False)
@@ -184,12 +193,82 @@ class Qwen3VLConditioner(torch.nn.Module):
         self.processor = processor
         self.max_length = max_length
         self.select_layers = select_layers
+        self.tokenizer_repo = tokenizer_repo
+        self.vl_processor = None
         self.prompt_template_encode_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n"
         self.prompt_template_encode_suffix = "<|im_end|>\n<|im_start|>assistant\n"
         self.prompt_template_encode_start_idx = 34
         self.prompt_template_encode_suffix_start_idx = 5
 
-    def forward(self, text: list[str]) -> tuple[Tensor, Tensor]:
+    def _get_vl_processor(self):
+        if self.vl_processor is None:
+            self.vl_processor = AutoProcessor.from_pretrained(self.tokenizer_repo)
+        return self.vl_processor
+
+    def _forward_with_images(self, text: str, images: list[Tensor]) -> tuple[Tensor, Tensor]:
+        """Encode one edit prompt with Qwen3-VL reference-image tokens."""
+        prefix_idx = self.prompt_template_encode_start_idx
+        image_prompt = "".join(f"Picture {i + 1}: <|vision_start|><|image_pad|><|vision_end|>" for i in range(len(images)))
+        prompt = self.prompt_template_encode_prefix + image_prompt + text
+
+        suffix_inputs = self.processor(text=[self.prompt_template_encode_suffix], return_tensors="pt").to(
+            self.qwen.device, non_blocking=True
+        )
+        suffix_ids = suffix_inputs["input_ids"]
+        suffix_mask = suffix_inputs["attention_mask"].bool()
+
+        inputs = self._get_vl_processor()(
+            text=[prompt],
+            images=images,
+            return_tensors="pt",
+            do_rescale=False,
+        ).to(self.qwen.device)
+        input_ids = torch.cat([inputs["input_ids"], suffix_ids], dim=1)
+        mask = torch.cat([inputs["attention_mask"].bool(), suffix_mask], dim=1)
+
+        extra_inputs = {}
+        for key, value in inputs.items():
+            if key in ("input_ids", "attention_mask"):
+                continue
+            if isinstance(value, Tensor) and value.is_floating_point():
+                value = value.to(self.qwen.dtype)
+            extra_inputs[key] = value
+
+        # The appended assistant suffix is plain text, so extend Qwen3-VL's
+        # multimodal token-type ids with zeros when the processor supplies them.
+        if "mm_token_type_ids" in extra_inputs:
+            token_types = extra_inputs["mm_token_type_ids"]
+            extra_inputs["mm_token_type_ids"] = torch.cat(
+                [token_types, torch.zeros_like(suffix_ids, dtype=token_types.dtype)], dim=1
+            )
+
+        states = self.qwen(
+            input_ids=input_ids,
+            attention_mask=mask,
+            output_hidden_states=True,
+            **extra_inputs,
+        )
+        hiddens = torch.stack([states.hidden_states[i] for i in self.select_layers], dim=2)
+        return hiddens[:, prefix_idx:], mask[:, prefix_idx:]
+
+    def forward(
+        self,
+        text: list[str],
+        images: list[list[Tensor] | None] | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        if images is not None:
+            if len(images) != len(text):
+                raise ValueError(f"Expected one reference-image list per prompt, got {len(images)} for {len(text)} prompts")
+            encoded = [self._forward_with_images(prompt, refs) if refs else self([prompt]) for prompt, refs in zip(text, images)]
+            max_len = max(hidden.shape[1] for hidden, _ in encoded)
+            hiddens = encoded[0][0].new_zeros(len(encoded), max_len, encoded[0][0].shape[2], encoded[0][0].shape[3])
+            mask = torch.zeros(len(encoded), max_len, device=hiddens.device, dtype=torch.bool)
+            for index, (hidden, hidden_mask) in enumerate(encoded):
+                length = hidden.shape[1]
+                hiddens[index, :length] = hidden[0]
+                mask[index, :length] = hidden_mask[0]
+            return hiddens, mask
+
         prefix_idx = self.prompt_template_encode_start_idx
         text = [self.prompt_template_encode_prefix + item for item in text]
         suffix_text = [self.prompt_template_encode_suffix] * len(text)

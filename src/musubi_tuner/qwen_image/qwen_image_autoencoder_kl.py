@@ -1006,7 +1006,13 @@ class AutoencoderKLQwenImage(nn.Module):  # ModelMixin, ConfigMixin, FromOrigina
         image = self.decode(latents, return_dict=False)[0][:, :, 0]  # -1 to 1
         return (image * 0.5 + 0.5).clamp(0.0, 1.0)  # Convert to [0, 1] range
 
-    def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
+    def encode_pixels_to_latents(
+        self,
+        pixels: torch.Tensor,
+        *,
+        sample_posterior: bool = False,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
         """
         Convert pixel values to latents and apply normalization using mean/std.
 
@@ -1027,8 +1033,7 @@ class AutoencoderKLQwenImage(nn.Module):  # ModelMixin, ConfigMixin, FromOrigina
 
         # Encode to latent space
         posterior = self.encode(pixels, return_dict=False)[0]
-        latents = posterior.mode()  # Use mode instead of sampling for deterministic results
-        # latents = posterior.sample()
+        latents = posterior.sample(generator=generator) if sample_posterior else posterior.mode()
 
         # Apply normalization using mean/std
         latents_mean = torch.tensor(self.latents_mean).view(1, self.z_dim, 1, 1, 1).to(latents.device, latents.dtype)

@@ -46,6 +46,63 @@ single_mmdit_large_wide = SingleMMDiTConfig(
 )
 
 
+def normalize_krea2_lora_state_dict(lora_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Convert common Krea 2 LoRA layouts to Musubi's native Kohya-style keys.
+
+    ai-toolkit saves Krea 2 LoRAs in PEFT/ComfyUI form, for example
+    ``diffusion_model.blocks.0.attn.wq.lora_A.weight``. The shared Musubi
+    merge hook expects ``lora_unet_blocks_0_attn_wq.lora_down.weight``.
+    Native Musubi keys pass through unchanged.
+    """
+    normalized = {}
+    for key, value in lora_sd.items():
+        if key.startswith("lora_unet_"):
+            normalized[key] = value
+            continue
+        if key.startswith("lora_transformer_"):
+            normalized["lora_unet_" + key[len("lora_transformer_") :]] = value
+            continue
+
+        suffix = None
+        module_name = None
+        for source_suffix, target_suffix in (
+            (".lora_A.weight", ".lora_down.weight"),
+            (".lora_B.weight", ".lora_up.weight"),
+            (".lora_down.weight", ".lora_down.weight"),
+            (".lora_up.weight", ".lora_up.weight"),
+            (".alpha", ".alpha"),
+        ):
+            if key.endswith(source_suffix):
+                module_name = key[: -len(source_suffix)]
+                suffix = target_suffix
+                break
+        if module_name is None:
+            normalized[key] = value
+            continue
+
+        for prefix in ("model.diffusion_model.", "diffusion_model.", "transformer."):
+            if module_name.startswith(prefix):
+                module_name = module_name[len(prefix) :]
+                break
+        normalized["lora_unet_" + module_name.replace(".", "_") + suffix] = value
+    return normalized
+
+
+def validate_krea2_lora_state_dict(dit: SingleStreamDiT, lora_sd: dict[str, torch.Tensor], index: int) -> None:
+    """Fail loudly when a supplied LoRA cannot affect any Krea 2 Linear."""
+    expected = {
+        "lora_unet_" + name.replace(".", "_") for name, module in dit.named_modules() if isinstance(module, torch.nn.Linear)
+    }
+    down_modules = {key.removesuffix(".lora_down.weight") for key in lora_sd if key.endswith(".lora_down.weight")}
+    up_modules = {key.removesuffix(".lora_up.weight") for key in lora_sd if key.endswith(".lora_up.weight")}
+    complete_modules = down_modules & up_modules
+    matched = complete_modules & expected
+    if not matched:
+        examples = list(lora_sd)[:5]
+        raise ValueError(f"Krea 2 LoRA #{index + 1} matched 0 model layers after key conversion. Example keys: {examples}")
+    logger.info(f"Krea 2 LoRA #{index + 1}: matched {len(matched)}/{len(complete_modules)} complete LoRA modules")
+
+
 def load_krea2_dit(
     dit_path: str,
     device: Union[str, torch.device] = "cpu",
@@ -86,6 +143,11 @@ def load_krea2_dit(
     )
     with torch.device("meta"):
         dit = SingleStreamDiT(config, attn_mode=attn_mode, split_attn=split_attn)
+
+    if has_lora:
+        lora_weights = [normalize_krea2_lora_state_dict(sd) for sd in lora_weights]
+        for index, lora_sd in enumerate(lora_weights):
+            validate_krea2_lora_state_dict(dit, lora_sd, index)
 
     if fp8_scaled or has_lora:
         # Single load path that merges LoRA (if any) into the base weights and optionally
@@ -188,11 +250,15 @@ def load_krea2_text_encoder(
 
 
 @torch.no_grad()
-def get_krea2_prompt_embeds(encoder: Qwen3VLConditioner, prompts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+def get_krea2_prompt_embeds(
+    encoder: Qwen3VLConditioner,
+    prompts: list[str],
+    images: Optional[list[list[torch.Tensor] | None]] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Return (hiddens, mask).
 
     hiddens: (B, seq, num_select_layers, hidden) stacked selected hidden states.
     mask:    (B, seq) bool attention mask (valid tokens incl. suffix, padding=False).
     """
-    hiddens, mask = encoder(prompts)
+    hiddens, mask = encoder(prompts) if images is None else encoder(prompts, images=images)
     return hiddens, mask.to(dtype=torch.bool)

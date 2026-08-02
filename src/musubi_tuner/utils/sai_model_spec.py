@@ -23,6 +23,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_FLUX_2_KLEIN_9B,
     ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_KREA2,
+    ARCHITECTURE_KREA2_EDIT,
     ARCHITECTURE_Z_IMAGE,
 )
 
@@ -228,7 +229,7 @@ def build_metadata(
     elif architecture == ARCHITECTURE_IDEOGRAM4:
         arch = ARCH_IDEOGRAM4
         impl = IMPL_IDEOGRAM4
-    elif architecture == ARCHITECTURE_KREA2:
+    elif architecture == ARCHITECTURE_KREA2 or architecture == ARCHITECTURE_KREA2_EDIT:
         arch = ARCH_KREA2
         impl = IMPL_KREA2
     else:
@@ -300,7 +301,7 @@ def build_metadata(
             reso = (2048, 2048)
         elif architecture == ARCHITECTURE_IDEOGRAM4:
             reso = (1024, 1024)
-        elif architecture == ARCHITECTURE_KREA2:
+        elif architecture == ARCHITECTURE_KREA2 or architecture == ARCHITECTURE_KREA2_EDIT:
             reso = (1024, 1024)
         else:
             reso = (1280, 720)

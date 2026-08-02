@@ -34,6 +34,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_HUNYUAN_VIDEO,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ARCHITECTURE_KANDINSKY5,
+    ARCHITECTURE_KREA2_EDIT,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
 )
@@ -63,6 +64,11 @@ class ItemInfo:
 
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
+        # Per-dataset reference preprocessing policy. These are populated while
+        # retrieving source images and consumed by architecture-specific caches.
+        self.match_target_res: bool = False
+        self.no_resize_control: bool = False
+        self.control_resolution: Optional[tuple[int, int]] = None
 
         # FramePack architecture specific
         self.fp_latent_window_size: Optional[int] = None
@@ -285,6 +291,7 @@ class ImageDataset(BaseDataset):
         fp_1f_no_post: Optional[bool] = False,
         no_resize_control: Optional[bool] = False,
         control_resolution: Optional[Tuple[int, int]] = None,
+        match_target_res: Optional[bool] = False,
         debug_dataset: bool = False,
         architecture: str = "no_default",
     ):
@@ -309,6 +316,12 @@ class ImageDataset(BaseDataset):
         self.fp_1f_no_post = fp_1f_no_post
         self.no_resize_control = no_resize_control
         self.control_resolution = control_resolution
+        self.match_target_res = bool(match_target_res)
+
+        if self.match_target_res and self.architecture != ARCHITECTURE_KREA2_EDIT:
+            raise ValueError("match_target_res is only supported for Krea 2 Edit datasets")
+        if self.match_target_res and self.control_resolution is not None:
+            raise ValueError("Krea 2 Edit match_target_res cannot be combined with control_resolution")
 
         control_count_per_image: Optional[int] = 1
         if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
@@ -326,6 +339,8 @@ class ImageDataset(BaseDataset):
             control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
             control_count_per_image = None  # can be multiple control images
+        elif self.architecture == ARCHITECTURE_KREA2_EDIT:
+            control_count_per_image = None  # can be multiple reference images
         elif self.architecture == ARCHITECTURE_HIDREAM_O1:
             control_count_per_image = None  # can be multiple control/reference images
 
@@ -354,6 +369,9 @@ class ImageDataset(BaseDataset):
         if self.control_directory is not None:
             metadata["control_directory"] = os.path.basename(self.control_directory)
         metadata["has_control"] = self.has_control
+        metadata["no_resize_control"] = self.no_resize_control
+        metadata["control_resolution"] = self.control_resolution
+        metadata["match_target_res"] = self.match_target_res
         return metadata
 
     def get_total_image_count(self):
@@ -395,6 +413,9 @@ class ImageDataset(BaseDataset):
                     item_info.fp_1f_clean_indices = self.fp_1f_clean_indices
                     item_info.fp_1f_target_index = self.fp_1f_target_index
                     item_info.fp_1f_no_post = self.fp_1f_no_post
+                    item_info.match_target_res = self.match_target_res
+                    item_info.no_resize_control = self.no_resize_control
+                    item_info.control_resolution = self.control_resolution
 
                     if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
                         # we need to split the bucket with latent window size and optional 1f clean indices, zero post
@@ -448,7 +469,13 @@ class ImageDataset(BaseDataset):
                 resized_controls = None
                 if controls is not None:
                     resized_controls = []
-                    if self.no_resize_control:
+                    if self.architecture == ARCHITECTURE_KREA2_EDIT:
+                        # Krea 2 uses the same source reference in two independent branches:
+                        # Qwen3-VL only downsizes to its visual-token budget, while the VAE
+                        # follows match_target_res/no_resize_control. Keep the uncropped RGB
+                        # source here and apply those policies inside the architecture caches.
+                        resized_controls = [np.array(control) for control in controls]
+                    elif self.no_resize_control:
                         for control in controls:
                             # divisible by bucket reso steps
                             width, height = control.size

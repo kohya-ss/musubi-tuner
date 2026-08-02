@@ -84,6 +84,32 @@ SS_METADATA_MINIMUM_KEYS = [
 ]
 
 
+def _training_timestep_to_histogram_index(timestep: float, num_train_timesteps: int, *, discrete: bool = False) -> int:
+    """Map a one-based training timestep to a zero-based histogram bin.
+
+    Discrete samplers return nominal integer values in ``[1, N]``, but the
+    float32 scheduler grid can represent them as values such as
+    ``932.999938``. Round those values to the nearest integer. Continuous
+    samplers return ``t * N + 1`` and must instead be floored. Subtracting one
+    then maps both conventions onto the display bins ``[0, N-1]``.
+    """
+    if num_train_timesteps <= 0:
+        raise ValueError("num_train_timesteps must be positive")
+    value = float(timestep)
+    if not math.isfinite(value):
+        raise ValueError(f"Training timestep must be finite, got {value}")
+    one_based_bin = round(value) if discrete else math.floor(value)
+    return min(max(one_based_bin - 1, 0), num_train_timesteps - 1)
+
+
+def _accumulate_timestep_histogram(sampled_timesteps: list[int], timesteps: torch.Tensor, *, discrete: bool = False) -> None:
+    """Accumulate returned training timesteps into the display histogram."""
+    num_train_timesteps = len(sampled_timesteps)
+    for timestep in timesteps.flatten():
+        index = _training_timestep_to_histogram_index(timestep.item(), num_train_timesteps, discrete=discrete)
+        sampled_timesteps[index] += 1
+
+
 @dataclass
 class DiTOutput:
     """Return type for ``NetworkTrainer.call_dit``.
@@ -770,14 +796,18 @@ class NetworkTrainer:
                 self.num_timestep_buckets = args.num_timestep_buckets
                 bucketed_timesteps = [self.get_bucketed_timestep() for _ in range(BATCH_SIZE)]
 
-            # we use noise=1, so retured noisy_model_input is same as timestep, because `noisy_model_input = (1 - t) * latents + t * noise`
-            actual_timesteps, _ = self.get_noisy_model_input_and_timesteps(
+            # Use the returned one-based training timestep rather than inferring it
+            # from noisy_model_input. In sigma mode the pure-noise endpoint is a
+            # valid timestep 1000; treating its noise coefficient (1.0 * 1000) as
+            # a zero-based list index used to produce an out-of-range index 1000.
+            _, actual_timesteps = self.get_noisy_model_input_and_timesteps(
                 args, noise, latents, bucketed_timesteps, noise_scheduler, "cpu", torch.float16
             )
-            actual_timesteps = actual_timesteps[:, 0, 0, 0, 0] * 1000
-            for t in actual_timesteps:
-                t = int(t.item())
-                sampled_timesteps[t] += 1
+            _accumulate_timestep_histogram(
+                sampled_timesteps,
+                actual_timesteps,
+                discrete=args.timestep_sampling == "sigma",
+            )
 
         # sample weighting
         sampled_weighting = [0] * noise_scheduler.config.num_train_timesteps

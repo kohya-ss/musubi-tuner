@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -284,7 +284,13 @@ def encode_and_save_batch(vae: AutoencoderKLCausal3D, batch: list[ItemInfo]):
         save_latent_cache(item, l)
 
 
-def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argparse.Namespace, supports_alpha: bool = False):
+def encode_datasets(
+    datasets: list[BaseDataset],
+    encode: callable,
+    args: argparse.Namespace,
+    supports_alpha: bool = False,
+    existing_cache_validator: Optional[Callable[[ItemInfo], bool]] = None,
+):
     """Common function to encode datasets. This function is called from multiple architecture scripts."""
     num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
     for i, dataset in enumerate(datasets):
@@ -304,7 +310,12 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
             all_latent_cache_paths.extend([item.latent_cache_path for item in batch])
 
             if args.skip_existing:
-                filtered_batch = [item for item in batch if not os.path.exists(item.latent_cache_path)]
+                filtered_batch = [
+                    item
+                    for item in batch
+                    if not os.path.exists(item.latent_cache_path)
+                    or (existing_cache_validator is not None and not existing_cache_validator(item))
+                ]
                 if len(filtered_batch) == 0:
                     continue
                 batch = filtered_batch

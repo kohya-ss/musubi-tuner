@@ -57,6 +57,9 @@ class ImageDatasetParams(BaseDatasetParams):
 
     no_resize_control: Optional[bool] = False  # if True, control images are not resized to target resolution
     control_resolution: Optional[Tuple[int, int]] = None  # if set, control images are resized to this resolution
+    # Krea 2 Edit: resize each VAE reference to the target bucket's pixel area while preserving
+    # the reference aspect ratio. Qwen3-VL always receives an independently prepared raw reference.
+    match_target_res: Optional[bool] = False
 
 
 @dataclass
@@ -129,6 +132,7 @@ class ConfigSanitizer:
         "fp_1f_no_post": bool,
         "no_resize_control": bool,
         "control_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
+        "match_target_res": bool,
     }
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
@@ -324,6 +328,7 @@ def generate_dataset_group_by_blueprint(
         fp_1f_no_post: {dataset.fp_1f_no_post}
         no_resize_control: {dataset.no_resize_control}
         control_resolution: {dataset.control_resolution}
+        match_target_res: {dataset.match_target_res}
     \n"""
                 ),
                 "    ",

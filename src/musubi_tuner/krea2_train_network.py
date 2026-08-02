@@ -4,7 +4,7 @@ Implements the architecture-specific hooks of the shared NetworkTrainer for K2:
 build/load the single-stream MMDiT, reuse the Qwen-Image VAE, and run flow-matching
 in K2's token space (replicating sampling.prepare batched, with varlen text padding).
 
-Wired: bf16 + gradient checkpointing, sample generation during training (text-to-image,
+Wired: bf16 + gradient checkpointing, sample generation during training (text-to-image/edit,
 optional CFG), dynamic scaled fp8 for the DiT (--fp8_base --fp8_scaled), block swap
 (--blocks_to_swap, CPU offloading of the main blocks), and torch.compile of the main
 blocks (--compile).
@@ -21,7 +21,12 @@ from accelerate import Accelerator
 from tqdm import tqdm
 from einops import rearrange, repeat
 
-from musubi_tuner.dataset.architectures import ARCHITECTURE_KREA2, ARCHITECTURE_KREA2_FULL
+from musubi_tuner.dataset.architectures import (
+    ARCHITECTURE_KREA2,
+    ARCHITECTURE_KREA2_EDIT,
+    ARCHITECTURE_KREA2_EDIT_FULL,
+    ARCHITECTURE_KREA2_FULL,
+)
 from musubi_tuner.hv_train_network import (
     DiTOutput,
     NetworkTrainer,
@@ -44,6 +49,7 @@ logging.basicConfig(level=logging.INFO)
 class Krea2NetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
+        self.is_edit = None
         self.vae_frame_stride = 1  # single image
         # M1 (resident) weight stashes for RAW-train / Turbo-sample. Both None when unused or
         # in M2 (per-validation streaming) mode; built lazily on the first sample step.
@@ -57,17 +63,22 @@ class Krea2NetworkTrainer(NetworkTrainer):
 
     @property
     def architecture(self) -> str:
-        return ARCHITECTURE_KREA2
+        assert self.is_edit is not None
+        return ARCHITECTURE_KREA2_EDIT if self.is_edit else ARCHITECTURE_KREA2
 
     @property
     def architecture_full_name(self) -> str:
-        return ARCHITECTURE_KREA2_FULL
+        assert self.is_edit is not None
+        return ARCHITECTURE_KREA2_EDIT_FULL if self.is_edit else ARCHITECTURE_KREA2_FULL
 
     def handle_model_specific_args(self, args):
         self.dit_dtype = torch.bfloat16
         self._i2v_training = False
         self._control_training = False
+        self.is_edit = bool(args.edit)
         self.default_guidance_scale = 1.0  # K2 t2i, not used at train time
+        if args.kv_cache and not self.is_edit:
+            raise ValueError("Krea 2 --kv_cache training requires --edit")
         # self.blocks_to_swap is set by the base trainer (handle_model_specific_args runs first).
         # K2 fp8 supports only the scaled (dynamic) path; plain --fp8_base alone would cast the
         # whole DiT (incl. norms) to fp8, which breaks. Require --fp8_scaled with --fp8_base.
@@ -94,18 +105,19 @@ class Krea2NetworkTrainer(NetworkTrainer):
         if args.turbo_dit and not args.sample_prompts:
             logger.warning("--turbo_dit is set but --sample_prompts is not; Turbo is only used for sample generation.")
 
+    def extra_metadata(self, args: argparse.Namespace) -> dict:
+        return {
+            "ss_krea2_edit": str(bool(self.is_edit)).lower(),
+            "ss_krea2_kv_cache": str(bool(args.kv_cache)).lower(),
+        }
+
     def process_sample_prompts(
         self,
         args: argparse.Namespace,
         accelerator: Accelerator,
         sample_prompts: str,
     ):
-        """Encode the sample prompts with Qwen3-VL up front, cache the embeds, free the encoder.
-
-        Kept deliberately simple (text-to-image only): for each prompt and its optional
-        negative prompt we store the varlen selected-layer hidden stack (valid tokens only),
-        matching the training cache format, then drop the 4B encoder before training resumes.
-        """
+        """Cache text/edit conditioning for training-time sample generation."""
         device = accelerator.device
 
         assert args.text_encoder is not None, "--text_encoder is required for sample generation during training"
@@ -115,15 +127,34 @@ class Krea2NetworkTrainer(NetworkTrainer):
         encoder = krea2_utils.load_krea2_text_encoder(args.text_encoder, dtype=torch.bfloat16, device=device)
 
         logger.info("Encoding sample prompts with Qwen3-VL")
-        te_outputs = {}  # prompt str -> (valid_len, num_layers, hidden) on cpu
+        te_outputs = {}  # (prompt, reference paths) -> (valid_len, num_layers, hidden) on cpu
+        reference_images = {}  # reference path tuple -> full-resolution CPU tensors
         with torch.no_grad():
             for prompt_dict in prompts:
-                for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", None)]:
-                    if p is None or p in te_outputs:
+                paths = prompt_dict.get("control_image_path", [])
+                if isinstance(paths, str):
+                    paths = [paths]
+                paths = tuple(paths)
+                if paths and paths not in reference_images:
+                    reference_images[paths] = krea2_sampling.load_reference_images(list(paths))
+
+                entries = [
+                    (prompt_dict.get("prompt", ""), paths),
+                    # The CFG branch shares clean reference latents at the DiT, but
+                    # its text embedding is image-free, matching ai-toolkit.
+                    (prompt_dict.get("negative_prompt", None), ()),
+                ]
+                for p, embed_paths in entries:
+                    key = (p, embed_paths)
+                    if p is None or key in te_outputs:
                         continue
-                    hiddens, mask = krea2_utils.get_krea2_prompt_embeds(encoder, [p])  # (1, seq, L, D), (1, seq)
+                    images = None
+                    if embed_paths:
+                        vlm_images = krea2_sampling.prepare_vlm_reference_images(reference_images[embed_paths])
+                        images = [vlm_images]
+                    hiddens, mask = krea2_utils.get_krea2_prompt_embeds(encoder, [p], images=images)  # (1, seq, L, D), (1, seq)
                     embed = hiddens[0][mask[0]]  # gather valid tokens -> (valid_len, L, D), drops padding
-                    te_outputs[p] = embed.to("cpu")
+                    te_outputs[key] = embed.to("cpu")
 
         del encoder
         gc.collect()
@@ -132,10 +163,14 @@ class Krea2NetworkTrainer(NetworkTrainer):
         sample_parameters = []
         for prompt_dict in prompts:
             prompt_dict_copy = prompt_dict.copy()
-            prompt_dict_copy["krea2_vl_embed"] = te_outputs[prompt_dict.get("prompt", "")]
+            paths = prompt_dict.get("control_image_path", [])
+            if isinstance(paths, str):
+                paths = [paths]
+            paths = tuple(paths)
+            prompt_dict_copy["krea2_vl_embed"] = te_outputs[(prompt_dict.get("prompt", ""), paths)]
             negative_prompt = prompt_dict.get("negative_prompt", None)
             if negative_prompt is not None:
-                prompt_dict_copy["negative_krea2_vl_embed"] = te_outputs[negative_prompt]
+                prompt_dict_copy["negative_krea2_vl_embed"] = te_outputs[(negative_prompt, ())]
             sample_parameters.append(prompt_dict_copy)
 
         clean_memory_on_device(device)
@@ -198,11 +233,28 @@ class Krea2NetworkTrainer(NetworkTrainer):
             untxt, untxtmask = build_branch(sample_parameter["negative_krea2_vl_embed"])
 
         # Seeded gaussian latent noise (generator already seeded by the base sampler).
-        noise = torch.randn(1, model.config.channels, lat_h, lat_w, device=device, dtype=torch.bfloat16, generator=generator)
+        # Keep the ODE state in fp32 like ai-toolkit and cast only model inputs.
+        noise = torch.randn(1, model.config.channels, lat_h, lat_w, device=device, dtype=torch.float32, generator=generator)
 
-        img, pos, mask = krea2_sampling.prepare(noise, txt.shape[1], patch, txtmask)
+        img, base_pos, base_mask = krea2_sampling.prepare(noise, txt.shape[1], patch, txtmask)
+        target_seq_len = img.shape[1]
+        pos, mask = base_pos, base_mask
+        reference_paths = sample_parameter.get("control_image_path", [])
+        if isinstance(reference_paths, str):
+            reference_paths = [reference_paths]
+        reference_images = krea2_sampling.load_reference_images(reference_paths) if reference_paths else []
+        ref_latents = krea2_sampling.encode_reference_images(vae, reference_images, device, torch.bfloat16)
+        reflen = 0
+        ref_tokens = None
+        if ref_latents:
+            model_img, pos, mask, reflen = krea2_sampling.append_reference_latents(img, pos, mask, ref_latents, patch)
+            ref_tokens = model_img[:, target_seq_len:].to(dtype=dit_dtype)
+        unbase_pos = unbase_mask = None
         if do_cfg:
-            _, unpos, unmask = krea2_sampling.prepare(noise, untxt.shape[1], patch, untxtmask)
+            _, unbase_pos, unbase_mask = krea2_sampling.prepare(noise, untxt.shape[1], patch, untxtmask)
+            unpos, unmask = unbase_pos, unbase_mask
+            if ref_latents:
+                _, unpos, unmask, _ = krea2_sampling.append_reference_latents(img, unpos, unmask, ref_latents, patch)
 
         # mu interpolation endpoints (krea2 sample defaults minres=256, maxres=1280).
         x1 = (256 // align) ** 2
@@ -212,15 +264,58 @@ class Krea2NetworkTrainer(NetworkTrainer):
         turbo_mu = 1.15 if args.turbo_dit else None
         ts = krea2_sampling.timesteps(img.shape[1], sample_steps, x1, x2, y1=0.5, y2=1.15, mu=turbo_mu)
 
+        use_kv_cache = bool(args.kv_cache and ref_tokens is not None)
+        ref_cache = None
+        img = img.float()
         for tcurr, tprev in tqdm(zip(ts[:-1], ts[1:]), total=len(ts) - 1, desc="Denoising steps"):
-            t = torch.full((1,), tcurr, dtype=img.dtype, device=device)
-            cond = model(img=img, context=txt, t=t, pos=pos, mask=mask)
+            t = torch.full((1,), tcurr, dtype=dit_dtype, device=device)
+            live_img = img.to(dtype=dit_dtype)
+            if use_kv_cache and ref_cache is not None:
+                cond = model(
+                    img=live_img,
+                    context=txt,
+                    t=t,
+                    pos=base_pos,
+                    mask=base_mask,
+                    ref_kv_cache=ref_cache,
+                )
+            else:
+                model_img = torch.cat((live_img, ref_tokens), dim=1) if ref_tokens is not None else live_img
+                capture = [] if use_kv_cache else None
+                cond = model(
+                    img=model_img,
+                    context=txt,
+                    t=t,
+                    pos=pos,
+                    mask=mask,
+                    reflen=reflen,
+                    isolate_refs=use_kv_cache,
+                    ref_kv_capture=capture,
+                )
+                if capture is not None:
+                    if len(capture) != len(model.blocks):
+                        raise RuntimeError(
+                            f"Krea 2 reference K/V capture produced {len(capture)} entries for "
+                            f"{len(model.blocks)} transformer blocks"
+                        )
+                    ref_cache = [(cached_k.detach(), cached_v.detach()) for cached_k, cached_v in capture]
             if do_cfg:
-                uncond = model(img=img, context=untxt, t=t, pos=unpos, mask=unmask)
+                if use_kv_cache:
+                    uncond = model(
+                        img=live_img,
+                        context=untxt,
+                        t=t,
+                        pos=unbase_pos,
+                        mask=unbase_mask,
+                        ref_kv_cache=ref_cache,
+                    )
+                else:
+                    model_img = torch.cat((live_img, ref_tokens), dim=1) if ref_tokens is not None else live_img
+                    uncond = model(img=model_img, context=untxt, t=t, pos=unpos, mask=unmask, reflen=reflen)
                 v = uncond + cfg * (cond - uncond)
             else:
                 v = cond
-            img = img + (tprev - tcurr) * v
+            img = img + (tprev - tcurr) * v.float()
 
         # Unpatchify token sequence back to a latent (1, C, 1, H, W) for the VAE.
         latent = rearrange(img, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=patch, pw=patch, h=lat_h // patch, w=lat_w // patch)
@@ -457,6 +552,33 @@ class Krea2NetworkTrainer(NetworkTrainer):
         pos = torch.cat((imgpos, txtpos), dim=1)
 
         img_tokens = img_tokens.to(device=device, dtype=network_dtype)
+        reflen = 0
+        if self.is_edit:
+            reference_latents = []
+            control_index = 0
+            while True:
+                key = f"latents_control_{control_index}"
+                if key not in batch:
+                    break
+                control = batch[key]
+                if control.ndim != 5 or control.shape[2] != 1:
+                    raise ValueError(f"Krea 2 Edit expects {key} as (B,C,1,H,W), got {tuple(control.shape)}")
+                reference_latents.append(control.to(device=device, dtype=network_dtype))
+                control_index += 1
+            if not reference_latents:
+                raise ValueError(
+                    "Krea 2 --edit training requires latents_control_0 in every batch. "
+                    "Rebuild both caches with krea2_cache_latents.py --edit and "
+                    "krea2_cache_text_encoder_outputs.py --edit."
+                )
+            img_tokens, pos, mask, reflen = krea2_sampling.append_reference_latents(
+                img_tokens,
+                pos,
+                mask,
+                reference_latents,
+                patch,
+            )
+
         t = (timesteps / 1000.0).to(device=device)
 
         if args.gradient_checkpointing:
@@ -464,7 +586,15 @@ class Krea2NetworkTrainer(NetworkTrainer):
             context.requires_grad_(True)
 
         with accelerator.autocast():
-            model_pred = model(img=img_tokens, context=context, t=t, pos=pos, mask=mask)  # (B, h*w, c*ph*pw)
+            model_pred = model(
+                img=img_tokens,
+                context=context,
+                t=t,
+                pos=pos,
+                mask=mask,
+                reflen=reflen,
+                isolate_refs=bool(self.is_edit and args.kv_cache),
+            )  # output contains target tokens only
 
         # unpatchify to latent space (B, C, 1, H, W)
         model_pred = rearrange(model_pred, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=patch, pw=patch, h=h_, w=w_)
@@ -479,6 +609,17 @@ class Krea2NetworkTrainer(NetworkTrainer):
 
 
 def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--edit",
+        action="store_true",
+        help="Train Krea 2 Edit using image-conditioned Qwen3-VL caches and clean reference latents.",
+    )
+    parser.add_argument(
+        "--kv_cache",
+        action="store_true",
+        help="With --edit, train the isolated-reference attention topology required by ai-toolkit kv_cache mode. "
+        "Training recomputes reference features; sample generation captures and reuses their K/V.",
+    )
     parser.add_argument(
         "--fp8_scaled",
         action="store_true",
