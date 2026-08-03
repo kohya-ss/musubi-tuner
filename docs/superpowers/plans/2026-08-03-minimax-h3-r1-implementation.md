@@ -208,17 +208,17 @@ git commit -m "feat: define MiniMax-H3 cache contracts"
 - Produces: `load_video_vae(path, device, dtype)`, `load_audio_vae(path, device, dtype)`, `encode_video(...)`, `decode_video(...)`, `encode_audio_mode(...)`, and `decode_audio(...)`.
 - Produces: strict checkpoint helpers that accept a safetensors file or HF snapshot directory and load on CPU before transfer.
 
-- [ ] **Step 1: Write failing posterior-boundary tests**
+- [x] **Step 1: Write failing posterior-boundary tests**
 
 Create tiny encoder doubles returning moments. Assert target video sampling is reproducible from `(cache_seed, canonical_item_key)`, visual conditions use seed 42 and FP16 round-trip before normalization, and audio stores posterior mode `[B,32,2,A]` without evaluating or sampling `logs_proj`.
 
-- [ ] **Step 2: Run VAE tests and verify RED**
+- [x] **Step 2: Run VAE tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_vae.py -v`
 
 Expected: import failure because the H3 VAE modules do not exist.
 
-- [ ] **Step 3: Port the released modules with a narrow compatibility layer**
+- [x] **Step 3: Port the released modules with a narrow compatibility layer**
 
 Port the merged ComfyUI implementations at commit `57500fc5bc92566a63f2046824f522cd55c335ca` into native PyTorch modules. Replace Comfy operation factories with ordinary `torch.nn` construction, preserve parameter names needed by the published checkpoints, and keep normalization constants at the encode/decode boundary.
 
@@ -232,11 +232,11 @@ def encode_audio_mode(vae, waveform: torch.Tensor) -> torch.Tensor:
     return mode
 ```
 
-- [ ] **Step 4: Add strict state-dict and geometry tests**
+- [x] **Step 4: Add strict state-dict and geometry tests**
 
 Assert missing keys, unexpected structural keys, wrong channel widths, unsupported dtype, and non-H3 config fields fail before forward. Use a tiny saved shard index to verify CPU streaming and deterministic key normalization.
 
-- [ ] **Step 5: Run VAE and checkpoint tests and commit**
+- [x] **Step 5: Run VAE and checkpoint tests and commit**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_vae.py -v`
 
