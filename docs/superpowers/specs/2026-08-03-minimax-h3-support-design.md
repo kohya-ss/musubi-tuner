@@ -247,7 +247,7 @@ and route `ARCHITECTURE_MINIMAX_H3` to that value before the unsupported-archite
 H3 frame counts cannot use the repository's legacy `4 * n + 1` expression. Add one shared architecture-aware helper in `dataset/architectures.py` and call it from both dataset and trainer code:
 
 ```python
-def round_down_frame_count(frame_count, architecture, vae_frame_stride=4):
+def round_down_frame_count(frame_count, architecture, vae_frame_stride):
     if architecture == ARCHITECTURE_MINIMAX_H3:
         if frame_count < 5:
             raise ValueError("MiniMax-H3 requires at least 5 frames")
@@ -261,7 +261,7 @@ Replace all three direct rounding sites:
 2. `VideoDataset.retrieve_latent_cache_batches`, where `frame_extraction="full"` chooses the cropped length.
 3. `NetworkTrainer.sample_image_inference`, where training-time sample generation normalizes `frame_count`.
 
-For H3, `5`, `22`, `39`, and `56` must remain unchanged. Setting `vae_frame_stride = 17` is explicitly incorrect because the legacy `1 + n * stride` expression would produce `18`, not `22`. Existing architectures retain their current behavior through the helper's fallback branch.
+For H3, `5`, `22`, `39`, and `56` must remain unchanged. Setting `vae_frame_stride = 17` is explicitly incorrect because the legacy `1 + n * stride` expression would produce `18`, not `22`. The stride argument has no default, so every call site must supply its architecture's value; this preserves stride-1 behavior for Krea2 and Qwen Image instead of silently falling back to 4.
 
 ### 8.3 Post-build H3 batch preflight
 
@@ -916,7 +916,7 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Assert `F -> A` cases `5->8`, `22->37`, `39->65`, and `56->93` using only integer arithmetic.
 - Assert waveform samples equal `A * 800`.
 - Assert `F = 17n + 5` and `Fv = 5n + 2` conversions.
-- Assert configured target frames, `frame_extraction="full"`, and training sample generation all preserve `5`, `22`, `39`, and `56`; values below 5 fail and other values round down with `5 + 17 * floor((F-5)/17)`.
+- Assert configured target frames, `frame_extraction="full"`, and training sample generation all preserve `5`, `22`, `39`, and `56`; values below 5 fail and other values round down with `5 + 17 * floor((F-5)/17)`. Assert the helper requires an explicit stride and preserves the existing stride-1 behavior used by Krea2 and Qwen Image.
 - Assert the audio VAE posterior mode `[B, 32, 2, A]` is cached directly as `[32, 2, A]` under a `32x2xA` key, round-trips through the collator, and produces `2 * A` channel-major rows without evaluating/sampling `logs_proj`.
 - Assert target video produces `Fv * (Hv // 2) * (Wv // 2)` rows of width 96 before projection.
 - Assert packed row formula, mixed tags, row indices, and condition ordering for all three tasks.
