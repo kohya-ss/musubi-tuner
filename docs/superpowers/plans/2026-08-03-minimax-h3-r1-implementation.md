@@ -301,26 +301,30 @@ git commit -m "feat: cache MiniMax-H3 audio video latents"
 - Create: `src/musubi_tuner/minimax_h3_cache_text_encoder_outputs.py`
 - Create: `minimax_h3_cache_text_encoder_outputs.py`
 - Create: `tests/test_minimax_h3_text_encoder.py`
+- Modify: `src/musubi_tuner/dataset/image_video_dataset.py`
+- Modify: `tests/test_minimax_h3_dataset.py`
 - Modify: `tests/test_top_level_entrypoints.py`
 
 **Interfaces:**
 - Produces: `build_presentation(record, task)`, `extract_layer_50_pre_norm(output, model)`, `build_token_tags(processed)`, and `encode_h3_presentation(...) -> tuple[Tensor[L,5120], Tensor[L]]`.
 
-- [ ] **Step 1: Write failing presentation and layer-index tests**
+- [x] **Step 1: Write failing presentation and layer-index tests**
 
 Lock non-chat T2VA/FL2VA/Ref2VA strings and timestamp formatting in golden fixtures. Assert `hidden_states[0]` is treated as embeddings and index 50 as the state after exactly 50 layers. For a 50-layer truncated model, assert the last decoder state is captured before final norm.
 
-- [ ] **Step 2: Write failing tag and size-bound tests**
+Also lock crop-specific H3 text-cache paths (`{item_key}_{frame_pos}-{frame_count}_mmh3_te.safetensors`) so FL2VA crops cannot overwrite one another.
+
+- [x] **Step 2: Write failing tag and size-bound tests**
 
 Build a synthetic expanded multimodal token sequence. Assert ordinary tokens/labels are tag 1, every vision span and both flanking vision tokens are tag 0, no tag 2 is emitted, and `L=32769` raises with modality counts and payload estimate.
 
-- [ ] **Step 3: Run text tests and verify RED**
+- [x] **Step 3: Run text tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_text_encoder.py -v`
 
 Expected: missing text encoder module.
 
-- [ ] **Step 4: Implement processor presentation and extraction**
+- [x] **Step 4: Implement processor presentation and extraction**
 
 Load Qwen3-VL BF16 through Transformers, pass `output_hidden_states=True`, and preserve the pre-final-norm convention. Build tags from processor expansion boundaries rather than token text guesses.
 
@@ -338,11 +342,11 @@ def validate_text_rows(hidden_states: torch.Tensor, token_tags: torch.Tensor) ->
         raise ValueError("MiniMax-H3 text presentation exceeds 32768 rows")
 ```
 
-- [ ] **Step 5: Implement cache CLI and root wrapper**
+- [x] **Step 5: Implement cache CLI and root wrapper**
 
 Save `varlen_mmh3_hidden_states_{dtype}` and `varlen_mmh3_token_tags_int64` with tokenizer, processor, pre-norm layer index, presentation, and tag-algorithm fingerprints.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_text_encoder.py tests/test_top_level_entrypoints.py -v`
 

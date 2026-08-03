@@ -650,9 +650,7 @@ class VideoDataset(BaseDataset):
             target_frames = list(set(target_frames))
             target_frames.sort()
 
-            rounded_target_frames = [
-                round_down_frame_count(f, self.architecture, self.vae_frame_stride) for f in target_frames
-            ]
+            rounded_target_frames = [round_down_frame_count(f, self.architecture, self.vae_frame_stride) for f in target_frames]
             rounded_target_frames = list(set(rounded_target_frames))
             rounded_target_frames.sort()
 
@@ -795,6 +793,8 @@ class VideoDataset(BaseDataset):
                             item_key, caption, original_frame_size, batch_key, frame_count=target_frame, content=cropped_video
                         )
                         item_info.latent_cache_path = self.get_latent_cache_path(item_info)
+                        if self.architecture == ARCHITECTURE_MINIMAX_H3:
+                            item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
                         item_info.control_content = cropped_control  # None is allowed
                         item_info.fp_latent_window_size = self.fp_latent_window_size
 
@@ -879,7 +879,13 @@ class VideoDataset(BaseDataset):
             frame_pos, frame_count = int(frame_pos), int(frame_count)
 
             item_key = "_".join(tokens[:-3])
-            text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
+            if self.architecture == ARCHITECTURE_MINIMAX_H3:
+                text_item_key = f"{item_key}_{tokens[-3]}"
+            else:
+                text_item_key = item_key
+            text_encoder_output_cache_file = os.path.join(
+                self.cache_directory, f"{text_item_key}_{self.architecture}_te.safetensors"
+            )
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue

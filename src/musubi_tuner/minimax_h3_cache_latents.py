@@ -578,7 +578,7 @@ def fingerprint_checkpoint(path: str | Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _record_media_paths(record: H3Record) -> set[Path]:
+def record_media_paths(record: H3Record) -> set[Path]:
     paths = {record.video_path, record.target_audio.path}
     for reference in record.references:
         paths.add(reference.path)
@@ -587,7 +587,7 @@ def _record_media_paths(record: H3Record) -> set[Path]:
     return paths
 
 
-def _records_for_dataset(dataset: VideoDataset, task: H3Task) -> list[H3Record]:
+def records_for_dataset(dataset: VideoDataset, task: H3Task) -> list[H3Record]:
     if dataset.control_directory is not None or dataset.has_control:
         raise ValueError("MiniMax-H3 R1 does not use the shared control-video fields")
     if dataset.video_jsonl_file is not None:
@@ -611,7 +611,7 @@ def _records_for_dataset(dataset: VideoDataset, task: H3Task) -> list[H3Record]:
     return records
 
 
-def _record_for_item(item: ItemInfo, records: Sequence[H3Record]) -> tuple[H3Record, int]:
+def record_for_item(item: ItemInfo, records: Sequence[H3Record]) -> tuple[H3Record, int]:
     item_path = Path(item.item_key).resolve()
     for record in records:
         target = record.video_path
@@ -631,7 +631,7 @@ def _record_for_item(item: ItemInfo, records: Sequence[H3Record]) -> tuple[H3Rec
     raise ValueError(f"MiniMax-H3 cache item has no canonical media record: {item.item_key}")
 
 
-def _install_h3_video_decoder(dataset: VideoDataset, decoder: PyAVH3MediaDecoder) -> None:
+def install_h3_video_decoder(dataset: VideoDataset, decoder: PyAVH3MediaDecoder) -> None:
     def get_video_data_from_path(
         datasource,
         video_path,
@@ -678,8 +678,8 @@ def main() -> None:
     decoder = PyAVH3MediaDecoder()
     records = []
     for dataset in datasets:
-        dataset_records = _records_for_dataset(dataset, args.task)
-        _install_h3_video_decoder(dataset, decoder)
+        dataset_records = records_for_dataset(dataset, args.task)
+        install_h3_video_decoder(dataset, decoder)
         records.extend(dataset_records)
 
     if args.debug_mode is not None:
@@ -696,7 +696,7 @@ def main() -> None:
     logger.info("Fingerprinting MiniMax-H3 VAE checkpoints")
     video_vae_fingerprint = fingerprint_checkpoint(args.video_vae)
     audio_vae_fingerprint = fingerprint_checkpoint(args.audio_vae)
-    media_fingerprints = {path: fingerprint_file(path) for record in records for path in _record_media_paths(record)}
+    media_fingerprints = {path: fingerprint_file(path) for record in records for path in record_media_paths(record)}
 
     logger.info("Loading MiniMax-H3 video VAE from %s", args.video_vae)
     video_vae = load_video_vae(args.video_vae, device=device, dtype=torch.float16, disable_mmap=args.disable_mmap)
@@ -708,8 +708,8 @@ def main() -> None:
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
-            record, crop_start = _record_for_item(item, records)
-            record_fingerprints = {path: media_fingerprints[path] for path in _record_media_paths(record)}
+            record, crop_start = record_for_item(item, records)
+            record_fingerprints = {path: media_fingerprints[path] for path in record_media_paths(record)}
             frame_count, height, width = item.content.shape[:3]
             expected_metadata = build_latent_metadata(
                 record=record,

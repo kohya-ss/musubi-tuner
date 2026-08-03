@@ -282,10 +282,10 @@ Reuse the existing filename contract without adding tokens:
 
 ```text
 {item_key}_{frame_pos}-{frame_count}_{width}x{height}_mmh3.safetensors
-{item_key}_mmh3_te.safetensors
+{item_key}_{frame_pos}-{frame_count}_mmh3_te.safetensors
 ```
 
-`VideoDataset.prepare_for_training` continues to recover `item_key`, frame range, resolution, and architecture from these names. R1 does not encode task or reference layout in the filename, and the shared bucket-construction path does not read safetensors headers. The H3-only post-build preflight in Section 8.3 runs after those buckets exist.
+`VideoDataset.prepare_for_training` continues to recover `item_key`, frame range, resolution, and architecture from these names. Its H3 branch pairs each latent cache with the text cache carrying the same frame-range token. This is required for FL2VA because the selected crop's first and last frames are part of the Qwen presentation; a source-level text cache would silently alias different `chunk` or `slide` crops. T2VA and Ref2VA use the same crop-specific naming contract for one unambiguous lookup rule. R1 does not encode task or reference layout in the filename, and the shared bucket-construction path does not read safetensors headers. The H3-only post-build preflight in Section 8.3 runs after those buckets exist.
 
 Task, VAE fingerprints, media fingerprints, temporal alignment, and ordered reference kinds remain safetensors metadata for cache-command reuse checks and diagnostics. Training compatibility is determined by the standard filename plus required tensor roles; R1 does not add header reads to bucket construction.
 

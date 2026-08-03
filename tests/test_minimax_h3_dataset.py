@@ -108,6 +108,32 @@ def test_h3_full_frame_extraction_preserves_valid_frame_count(tmp_path: Path):
     assert bucket == (64, 64, 56)
     assert items[0].frame_count == 56
     assert items[0].content.shape[0] == 56
+    assert Path(items[0].text_encoder_output_cache_path).name == "clip_00000-056_mmh3_te.safetensors"
+
+
+def test_h3_prepare_for_training_pairs_each_crop_with_its_own_text_cache(tmp_path: Path):
+    dataset = VideoDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        target_frames=[5],
+        video_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    latent_cache = tmp_path / "clip_00022-005_0064x0064_mmh3.safetensors"
+    text_cache = tmp_path / "clip_00022-005_mmh3_te.safetensors"
+    latent_cache.touch()
+    text_cache.touch()
+
+    dataset.prepare_for_training()
+
+    assert dataset.num_train_items == 1
+    item = next(iter(dataset.batch_manager.buckets.values()))[0]
+    assert Path(item.text_encoder_output_cache_path) == text_cache
 
 
 def test_h3_training_sample_preserves_valid_frame_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

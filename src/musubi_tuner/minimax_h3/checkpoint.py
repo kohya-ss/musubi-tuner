@@ -78,6 +78,7 @@ def load_safetensors_module(
     device: str | torch.device,
     dtype: torch.dtype | None,
     key_prefixes: tuple[str, ...] = (),
+    key_transform: Callable[[str], str] | None = None,
     disable_mmap: bool = False,
 ) -> ModuleT:
     files = [Path(path).resolve() for path in files]
@@ -101,6 +102,8 @@ def load_safetensors_module(
                 raise ValueError(f"Quantized MiniMax-H3 artifacts are deferred to R2: {path}")
             for raw_key in raw_keys:
                 key = _normalize_checkpoint_key(raw_key, key_prefixes)
+                if key_transform is not None:
+                    key = key_transform(key)
                 if key in seen:
                     raise ValueError(f"Duplicate MiniMax-H3 checkpoint key {key!r} in {path}")
                 seen.add(key)

@@ -172,6 +172,23 @@ def test_checkpoint_loader_streams_sharded_directory_and_loads_strictly(tmp_path
         torch.testing.assert_close(tensor, expected[key])
 
 
+def test_checkpoint_loader_supports_explicit_key_transforms(tmp_path: Path):
+    expected = _TinyCheckpointModule().state_dict()
+    checkpoint = tmp_path / "prefixed.safetensors"
+    save_file({f"source.{key}": tensor for key, tensor in expected.items()}, checkpoint)
+
+    actual = load_safetensors_module(
+        lambda: _TinyCheckpointModule(),
+        [checkpoint],
+        device="cpu",
+        dtype=torch.float32,
+        key_transform=lambda key: key.removeprefix("source."),
+    )
+
+    for key, tensor in actual.state_dict().items():
+        torch.testing.assert_close(tensor, expected[key])
+
+
 @pytest.mark.parametrize(
     "state_dict",
     [
