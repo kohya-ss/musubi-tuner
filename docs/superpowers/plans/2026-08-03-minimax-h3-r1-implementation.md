@@ -475,25 +475,25 @@ git commit -m "feat: add MiniMax-H3 BF16 transformer"
 - Consumes: model, cache, and packing APIs from Tasks 2-7.
 - Produces: `MiniMaxH3NetworkTrainer`, `validate_h3_dataset_batches`, H3 CLI arguments, and LoRA module creation compatible with the common network loader.
 
-- [ ] **Step 1: Write failing preflight tests**
+- [x] **Step 1: Write failing preflight tests**
 
 Build synthetic bucket managers backed by tiny safetensors. Assert every item in a multi-item bucket is compared, not only the current epoch partition. Reject mismatched text length, token-tag contents, task, ordered roles, shapes, packed rows, rotary inputs, and a per-sample timestep pool. Error text must include dataset index, bucket, cache paths, and conflicting fields.
 
-- [ ] **Step 2: Write failing process/loss tests**
+- [x] **Step 2: Write failing process/loss tests**
 
 Use a tiny fake transformer and real tensors. Assert one scalar `u` is replicated across a compatible batch, video/audio noises are independently sampled, model times use shifted `1-sigma`, targets are `latents-noise`, condition augmentation uses fresh per-sample/per-step noise with deterministic condition resets, and loss is unweighted `mean(video_mse)+mean(audio_mse)` through `DiTOutput.extra`.
 
-- [ ] **Step 3: Run trainer tests and verify RED**
+- [x] **Step 3: Run trainer tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_training.py -v`
 
 Expected: missing H3 trainer module.
 
-- [ ] **Step 4: Implement CLI validation and post-build preflight**
+- [x] **Step 4: Implement CLI validation and post-build preflight**
 
 Accept only uniform timestep sampling, `weighting_scheme=none`, and discrete flow shift 1 in the generic scheduler. Add `--h3_shift_video 12.0`, `--h3_shift_audio 3.0`, `--h3_visual_cond_clean 0.999`, and `--h3_audio_cond_clean 1.0`. Override `_build_dataset`, call `super()`, then inspect safetensors headers plus token tags before returning.
 
-- [ ] **Step 5: Implement dual-modality trainer hooks**
+- [x] **Step 5: Implement dual-modality trainer hooks**
 
 ```python
 def compute_loss(self, args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
@@ -507,11 +507,11 @@ def compute_loss(self, args, output, timesteps, noise_scheduler, dit_dtype, netw
 
 Return the video pair through standard `DiTOutput.pred/target` and the audio pair through `extra`. Override `process_batch` so audio noise is never inferred from the video-shaped base noise.
 
-- [ ] **Step 6: Write and implement LoRA target tests**
+- [x] **Step 6: Write and implement LoRA target tests**
 
 Assert `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in each of the 50 main transformer blocks are discoverable with stable names. Exclude AdaLN, time conditioning, input/output projections, refiner blocks, VAEs, and text modules. Verify forward/backward gradients reach LoRA parameters under block swap.
 
-- [ ] **Step 7: Run focused tests and commit**
+- [x] **Step 7: Run focused tests and commit**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_training.py tests/test_minimax_h3_model.py tests/test_top_level_entrypoints.py -v`
 

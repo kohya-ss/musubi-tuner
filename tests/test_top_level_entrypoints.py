@@ -34,3 +34,12 @@ def test_minimax_h3_text_cache_entrypoint_exists():
     assert script.read_text(encoding="utf-8") == (
         'from musubi_tuner.minimax_h3_cache_text_encoder_outputs import main\n\nif __name__ == "__main__":\n    main()\n'
     )
+
+
+def test_minimax_h3_training_entrypoint_exists():
+    script = ROOT / "minimax_h3_train_network.py"
+
+    assert script.exists(), "missing top-level entrypoint: minimax_h3_train_network.py"
+    assert script.read_text(encoding="utf-8") == (
+        'from musubi_tuner.minimax_h3_train_network import main\n\nif __name__ == "__main__":\n    main()\n'
+    )
