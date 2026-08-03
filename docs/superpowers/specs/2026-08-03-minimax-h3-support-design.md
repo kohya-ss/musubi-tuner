@@ -2,7 +2,7 @@
 
 Date: 2026-08-03
 
-Status: Revised R1 proposal for upstream confirmation
+Status: Revised R1 proposal after merged ComfyUI PR 15224 audit
 
 Branch: `codex/minimax-h3-support`
 
@@ -18,18 +18,31 @@ R1 adds native BF16 MiniMax-H3 LoRA training and joint video/audio inference to 
 
 The implementation must fit Musubi's existing cache filename, tensor-key, collator, trainer, LoRA, compilation, and block-offload contracts. In particular, the target video cache must load as `batch["latents"]`, variable-length text tensors must use the `varlen_` prefix, and the H3 trainer must explicitly create target-audio noise inside its `process_batch` override.
 
-R1 does not force dataset `batch_size` to 1, but it adds no new batching system. It does not group by an H3 layout signature, pad heterogeneous media layouts, or add a token-budget sampler. Incompatible batches fail clearly through the existing stack or H3 shape validation.
+R1 does not force dataset `batch_size` to 1, but it adds no new batching system. A multi-sample forward is a pure replication axis: every sample shares one packed layout and one base timestep while carrying different latent/text values. R1 does not group by an H3 layout signature, pad heterogeneous media layouts, or add a token-budget sampler. Incompatible batches fail clearly through the existing stack or H3 shape validation.
 
 ConvRot, prequantized INT8 loading, runtime LoRA over prequantized weights, and pruned AdaLN are deferred to R2. R1 does not depend on unmerged PR 1008.
 
 ## 2. Source Anchors
 
-Model artifacts and numerical behavior:
+Model artifacts and released configuration:
 
 - <https://huggingface.co/MiniMaxAI/MiniMax-H3>
 - <https://huggingface.co/Comfy-Org/MiniMax-H3>
-- <https://github.com/Comfy-Org/ComfyUI/pull/15224>
+
+Merged ComfyUI integration audited for packing and numerical conventions:
+
+- PR: <https://github.com/Comfy-Org/ComfyUI/pull/15224>
+- Merge commit: `57500fc5bc92566a63f2046824f522cd55c335ca`
+- Transformer/packing: <https://github.com/Comfy-Org/ComfyUI/blob/57500fc5bc92566a63f2046824f522cd55c335ca/comfy/ldm/minimax/model.py>
+- Condition payload: <https://github.com/Comfy-Org/ComfyUI/blob/57500fc5bc92566a63f2046824f522cd55c335ca/comfy/model_base.py>
+- Text presentation/tags: <https://github.com/Comfy-Org/ComfyUI/blob/57500fc5bc92566a63f2046824f522cd55c335ca/comfy/text_encoders/minimax.py>
+- Public task/shift nodes: <https://github.com/Comfy-Org/ComfyUI/blob/57500fc5bc92566a63f2046824f522cd55c335ca/comfy_extras/nodes_minimax_h3.py>
+
+The open Diffusers implementation is a secondary cross-check, pinned to inspected head `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`:
+
 - <https://github.com/huggingface/diffusers/pull/14355>
+
+Released config files and tensors are authoritative for architecture and state-dict shape. The pinned merged ComfyUI implementation is authoritative for its own packed-row, token-tag, and adapter behavior. This spec explicitly defines Musubi's native training and dual-scheduler inference semantics; ComfyUI-specific sign/slope adapters are not model semantics and must not be copied. The open Diffusers PR is not normative when it differs.
 
 Repository contracts that take precedence over a model-specific abstraction:
 
@@ -80,6 +93,7 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - A token-budget sampler.
 - A dedicated `batch_size=1/2/3` test matrix.
 - Running all three tasks at `batch_size=2` as an acceptance gate.
+- Per-sample timesteps inside one replicated packed layout.
 - Loading FL2VA and Ref2VA transformer weights in one process.
 - CI with the real 33B transformer or 32B text encoder.
 
@@ -112,7 +126,7 @@ num_attention_heads * attention_head_dim = 56 * 128 = 7168
 
 The native model therefore projects from a 5376-wide residual stream into a 7168-wide head space and back. No implementation may infer `hidden_size = heads * head_dim`.
 
-Other fixed constants:
+Other architecture constants and released defaults:
 
 | Property | Value |
 | --- | ---: |
@@ -124,6 +138,11 @@ Other fixed constants:
 | Video modality tag | 0 |
 | Text modality tag | 1 |
 | Audio modality tag | 2 |
+| Video temporal span cycle | `(5/3) * (1, 4, 4, 4, 4)` |
+| Default video flow shift | 12.0 |
+| Default audio flow shift | 3.0 |
+| Default visual condition clean coefficient | 0.999 |
+| Default audio condition clean coefficient | 1.0 |
 
 ## 6. Artifact Matrix
 
@@ -390,7 +409,7 @@ Exact keys are:
 
 ```text
 varlen_mmh3_hidden_states_{dtype}
-varlen_mmh3_token_tags_{integer_dtype}
+varlen_mmh3_token_tags_int64
 ```
 
 `BucketBatchManager` removes `varlen_` and the dtype suffix and returns:
@@ -408,6 +427,15 @@ Presentations are non-chat:
 
 Exact labels, separators, and timestamps are locked with golden fixtures from the reference behavior.
 
+The cached token tags are not one constant tag for the whole Qwen output. Build them from the expanded multimodal presentation exactly as follows:
+
+- Initialize all `L` positions to text tag `1`.
+- For every expanded vision embedding span, set the vision rows and both flanking vision-start/vision-end token rows to video tag `0`.
+- Keep prompt text, `Picture`/`Video`/timestamp labels, and `Audio` labels at text tag `1`.
+- Qwen does not receive reference-audio latents, so tag `2` never appears in the text cache. The packer assigns tag `2` only to packed audio-latent rows.
+
+The cache writer validates `token_tags.shape == [L]`, dtype `int64`, and values in `{0, 1}`. Text-cache metadata fingerprints the tokenizer, multimodal processor, layer index, presentation format, and token-tag algorithm. A fingerprint mismatch invalidates reuse instead of silently retaining stale tags.
+
 ### 12.1 Size bound
 
 R1 enforces `L <= 32768` after multimodal processor expansion and before the Qwen3-VL forward. The limit is not silently truncated. The cache command reports the sample, total tokens, counts by modality, and an estimated hidden-state payload.
@@ -422,7 +450,7 @@ At the R1 limit this is 335,544,320 bytes, or 320 MiB, before the small token-ta
 
 ### 12.2 Training collation
 
-The shared collator returns variable-length tensors as lists and does not pad them. H3 `call_dit` checks that all samples in a batch have equal `L`, then stacks them. If lengths differ, it raises a clear incompatibility error recommending `batch_size=1` or homogeneous data. R1 does not add padding or an attention mask to rescue such a batch.
+The shared collator returns variable-length tensors as lists and does not pad them. H3 `call_dit` checks that all samples in a batch have equal `L` and identical token-tag vectors, then stacks the hidden states. Equal length alone is insufficient because the one-dimensional AdaLN tag/index plan is shared across the replicated batch axis. A mismatch raises a clear incompatibility error recommending `batch_size=1` or homogeneous presentations. R1 does not add padding or an attention mask to rescue such a batch.
 
 ## 13. Packed Row Contract
 
@@ -485,14 +513,55 @@ The cache and training logs can compute this value without model weights.
 
 ### 13.3 Tags and timesteps
 
-- Video rows use tag `0`.
-- Text rows use tag `1`.
-- Audio rows use tag `2`.
-- FL2VA and Ref2VA visual conditions are noised and held at model timestep `0.999`.
-- Reference audio stays clean at model timestep `1.0`.
-- Generated target rows receive modality-specific model timesteps.
+- Packed video rows use tag `0`; packed audio rows use tag `2`.
+- The text span preserves the cached per-token tags. Ordinary text and labels use `1`, while expanded vision blocks and their flanking vision tokens use `0`.
+- Text rows and generated target-video rows use `model_t_video`.
+- Generated target-audio rows use `model_t_audio`.
+- With visual clean coefficient `a_v`, FL2VA/Ref2VA visual condition rows use `max(model_t_video, a_v)`. The default is `a_v = 0.999`; this is not a constant row timestep when `model_t_video > 0.999`.
+- With audio clean coefficient `a_a`, reference-audio rows use `max(model_t_audio, a_a)`. The default `a_a = 1.0` keeps the default row timestep at `1.0`.
+
+For each packed sequence, sort the distinct model-time values and build one `row_timestep_indices[S]` vector. Each row selects AdaLN modulation with:
+
+```text
+adaln_index[row] = 3 * row_timestep_indices[row] + token_tag[row]
+```
+
+The text span must therefore be split at token-tag runs or indexed row-by-row; treating it as a uniform tag-1 segment is incorrect. `token_tags[S]`, `row_timestep_indices[S]`, and the position grid are structural one-dimensional tensors shared by every item on the replicated batch axis.
 
 The packer returns explicit row indices for target video/audio and never infers row roles from tensor-key sorting.
+
+### 13.4 Exact FP64 rotary clock
+
+The rotary grid is a checkpoint contract, not an arbitrary monotonic position. Construct `position_ids[S, 3]` in FP64 and preserve this exact clock before the model converts it for frequency multiplication.
+
+For latent video frame `k`:
+
+```text
+frame_span(k) = (5 / 3) * (1, 4, 4, 4, 4)[k mod 5]
+video_time(k, origin) = origin + sum(frame_span(j), j=0..k-1)
+```
+
+For a latent frame of height `H`, width `W`, and spatial patch `2x2`, let `q = sqrt(H * W)`. For axis dimension `d` and index `i = 0..d/2-1`:
+
+```text
+axis(d, i) = 32 * ((1 - d / q) / 2 + i * (d / q) / (d / 2))
+```
+
+The frame grid is the row-major meshgrid of `axis(H, i)` and `axis(W, i)`. Row placement is:
+
+- Text row `i`: `(i, 0, 0)` for `i = 0..L-1`.
+- Target video: `video_time(k, cursor)` plus the target frame grid.
+- Target audio: channel-major stereo rows; both channels use `cursor + a` at audio latent index `a`, `h = 0`, and `w` fixed to the first/last target-width grid coordinate for channels 0/1.
+- FL2VA first condition: time `L` on the target frame grid.
+- FL2VA last condition: time `L + sum(frame_span(k), k=0..Fv-1) - 5/3` on the target frame grid. FL conditions do not advance the target cursor; target audio/video still start at `L`.
+
+Ref2VA starts `cursor = L` and advances references in semantic order:
+
+- Image reference: place its frame grid at `cursor`, then add `1`.
+- Standalone audio reference of length `Ac`: use its `Ac` audio times and the target-width endpoints, then add `Ac`.
+- Video reference: place video at the current cursor. If it has soundtrack, place channel-major audio at the same cursor using that reference video's width endpoints. Then add `max(Ac, sum(frame_span(k), k=0..Fc-1))`.
+
+After all references, target audio and target video share the final cursor. Golden tests compare the full FP64 grid, not only shape or monotonicity, including first/last FL anchors and mixed image/video/audio reference cursor advances.
 
 ## 14. Trainer Integration and Dual-Modality Loss
 
@@ -528,52 +597,101 @@ Visual/audio reference tensors are conditions, not supervised targets, and do no
 
 ### 14.3 Supported timestep arguments
 
-R1 accepts only:
+R1 accepts only the generic training convention below and adds four H3-specific values:
 
 ```text
 --timestep_sampling uniform
 --weighting_scheme none
 --discrete_flow_shift 1.0
+--h3_shift_video 12.0
+--h3_shift_audio 3.0
+--h3_visual_cond_noise_aug 0.999
+--h3_audio_cond_noise_aug 1.0
 ```
 
-Any other value is rejected during argument validation. This prevents the base SD3 weighting or a second generic flow shift from being applied silently.
+Any other generic sampling/weighting value is rejected during argument validation. This prevents the base SD3 weighting or a second generic flow shift from being applied silently. H3 shift values must be in `[0.01, 100.0]`; condition clean coefficients must be in `[0.0, 1.0]`. Training metadata and sample logs record all four H3 values.
 
-Because the shared parser defaults `--timestep_sampling` to `sigma`, `minimax_h3_train_network.py` explicitly calls `parser.set_defaults(timestep_sampling="uniform", weighting_scheme="none", discrete_flow_shift=1.0)` before parsing. A normal H3 command therefore gets the supported values without extra flags.
+Because the shared parser defaults `--timestep_sampling` to `sigma`, `minimax_h3_train_network.py` explicitly sets all supported defaults before parsing. A normal H3 command therefore gets the released convention without extra flags.
 
-`--num_timestep_buckets` remains supported. `BucketBatchManager` supplies each batch's pre-generated values through `batch["timesteps"]`; H3 interprets those values as the common unshifted base `u`. Without a pool, H3 samples `u = torch.rand(B)`.
+One packed forward has one scalar unshifted base value `u`, shared by every replicated batch item. Without a timestep pool, H3 samples one scalar, not `B` independent values. `--num_timestep_buckets > 1` remains usable when the effective batch contains one sample. The existing bucket manager emits one unrelated value per sample, so configuration validation rejects its combination with an H3 dataset `batch_size > 1`; values must never be silently discarded or averaged.
 
-`--min_timestep` and `--max_timestep` first restrict `u` on the common `[0, 1]` base interval. H3 then applies its two fixed shifts. The two modalities never draw separate base values.
+`--min_timestep` and `--max_timestep` first restrict `u` on the common `[0, 1]` base interval after the existing `/1000` conversion. H3 then applies its two configurable shifts. The two modalities never draw separate base values.
 
-### 14.4 Noising and model time
+### 14.4 Coordinate conversion and noising
 
-For each sample:
+There are two opposite coordinates. Keep the conversion at the H3 `process_batch` boundary:
 
 ```text
+Musubi base domain:
+  u == t_m in [0, 1] is noise amount
+  unshifted_x = (1 - u) * x0 + u * noise
+
+H3 model domain:
+  model_t in [0, 1] is cleanliness
+  model_t = 1 - sigma
+
 shift(u, s) = s * u / (1 + (s - 1) * u)
-sigma_video = shift(u, 12)
-sigma_audio = shift(u, 3)
+sigma_video = shift(u, h3_shift_video)
+sigma_audio = shift(u, h3_shift_audio)
 
 model_t_video = 1 - sigma_video
 model_t_audio = 1 - sigma_audio
 ```
 
-Noisy inputs use sigma as the noise fraction:
+Broadcast the two scalar sigmas over the batch. Noisy inputs use their modality sigma as the noise fraction:
 
 ```text
 x_video = (1 - sigma_video) * x0_video + sigma_video * noise_video
 x_audio = (1 - sigma_audio) * x0_audio + sigma_audio * noise_audio
 ```
 
-Velocity targets are:
+The model receives `model_t_*`, whose clean endpoint is `1.0`. `batch["timesteps"]` and generic Musubi loss weighting remain in the noise-amount coordinate and are never passed directly into H3 AdaLN.
+
+### 14.5 Native output and target sign
+
+The released H3 output heads predict data-ward velocity:
 
 ```text
-v_video = x0_video - noise_video
-v_audio = x0_audio - noise_audio
+target_video = x0_video - noise_video
+target_audio = x0_audio - noise_audio
 ```
 
-The model receives `model_t_*`, whose clean endpoint is `1.0`. The base loss weighting function is never called with this reversed convention.
+This is the opposite of the `noise - latents` target used by most Musubi architectures and matches the exceptional sign used by Ideogram4. H3 must not reuse a Wan/Hunyuan target template.
 
-### 14.5 Loss object and reduction
+The native `minimax_h3/model.py` forward returns both raw head predictions unchanged. It must not copy either adapter from ComfyUI's return statement:
+
+- ComfyUI negates both outputs to convert `x0 - noise` into its stock sampler's `noise - x0` convention.
+- ComfyUI additionally multiplies audio by `d(sigma_audio) / d(sigma_video)` so one sampler on the video-sigma grid can integrate both streams.
+
+For default shifts `12 -> 3`, that slope ranges from `0.25` near sigma zero to `4.0` near sigma one. It is a ComfyUI single-sampler chain-rule adapter, not a training target or model property. Neither the negative sign nor the audio slope is allowed in native training or Musubi's dual-scheduler inference.
+
+### 14.6 Condition augmentation and RNG
+
+Condition augmentation uses the configured clean coefficients themselves, while AdaLN uses the `max` row timesteps from Section 13.3. These are deliberately distinct when the current target is cleaner than its condition augmentation:
+
+```text
+a_v = h3_visual_cond_noise_aug
+visual_condition_input = a_v * visual_condition + (1 - a_v) * condition_noise_video
+visual_condition_model_t = max(model_t_video, a_v)
+
+a_a = h3_audio_cond_noise_aug
+audio_condition_input = a_a * audio_condition + (1 - a_a) * condition_noise_audio
+audio_condition_model_t = max(model_t_audio, a_a)
+```
+
+At the defaults, visual conditions stay 99.9% clean but their model time follows `model_t_video` above `0.999`; reference audio is fully clean at model time `1.0`.
+
+Condition noise is not VAE posterior sampling and does not reuse the cache's fixed seed 42. The policy is:
+
+- Training draws a fresh condition seed per sample on every `process_batch` call.
+- Within one sample, every visual condition restarts a CPU generator at that same seed, matching ComfyUI's intentional shared noise stream. Equal shapes receive identical noise; unequal shapes share the same prefix.
+- Audio conditions use a separate stream at `condition_seed + 1` and likewise restart it for each audio condition.
+- Inference uses the request seed for visual conditions and request seed plus one for audio conditions. These dedicated generators do not advance the target video/audio noise generator.
+- When a clean coefficient is `1.0`, do not draw unused condition noise.
+
+The training seed is re-sampled per step rather than frozen so LoRA training does not overfit one condition-noise realization. Checkpointed training RNG state must reproduce the sequence after resume.
+
+### 14.7 Loss object and reduction
 
 Define an H3-specific output structure containing:
 
@@ -592,22 +710,26 @@ audio_loss = mean((audio_pred - audio_target) ** 2)
 loss = video_loss_weight * video_loss + audio_loss_weight * audio_loss
 ```
 
-Defaults are `1.0` and `1.0`. It logs `loss/video`, `loss/audio`, and total loss. Condition rows do not enter either mean.
+Defaults are `1.0` and `1.0`. It logs `loss/video`, `loss/audio`, and total loss. Condition rows do not enter either mean. The overridden path never calls `compute_loss_weighting_for_sd3`.
 
 ## 15. Batch Semantics
 
 R1 adds no validation that requires dataset `batch_size == 1`.
 
-It also adds no special batching feature:
+The supported multi-sample case is a pure replication axis. The transformer receives batched values `[B, S, D]`, but one shared structural plan: `position_ids[S, 3]`, `token_tags[S]`, `row_timestep_indices[S]`, and explicit modality row indices. One scalar `u` and therefore one set of distinct AdaLN times applies to the whole forward.
+
+R1 adds no special batching feature:
 
 - Existing `(width, height, frame_count)` buckets remain unchanged.
 - Latent roles use the existing stack behavior.
 - Variable-length text stays a list until H3 `call_dit`.
-- H3 stacks text only when lengths are already equal.
+- H3 stacks text only when lengths and token-tag vectors are already identical.
+- Every sample must have the same task, ordered condition kinds, condition shapes, target shape, and packed row count.
 - H3 verifies every conditioning role's leading dimension equals target-video batch size.
-- Incompatible shapes, missing roles, or unequal text lengths fail with the conflicting role and shapes.
+- H3 uses one base timestep for the whole batch; it does not flatten a per-sample timestep vector and take element zero.
+- Incompatible shapes, missing roles, tag plans, or text lengths fail with the conflicting role and shapes.
 
-This permits naturally compatible batches without promising that arbitrary Ref2VA samples can share one forward. No layout signature, media padding, text padding, attention-mask machinery, per-sample forward loop, or batch-size matrix is part of R1.
+This permits naturally compatible batches without promising that arbitrary Ref2VA samples can share one forward. The existing per-sample timestep-bucket pool is rejected in combination with `batch_size > 1` because it violates the shared-time contract. No layout signature, media padding, text padding, attention-mask machinery, per-sample forward loop, or batch-size matrix is part of R1.
 
 ## 16. LoRA Contract
 
@@ -674,15 +796,26 @@ The compile helper receives `[transformer.blocks]` and disables Linear compilati
 
 ## 18. Inference Flow
 
-1. Validate task, BF16 artifacts, JSONL references, geometry, duration, and output path.
+`minimax_h3_generate_video.py` exposes `--h3_shift_video` and `--h3_shift_audio` with defaults `12.0` and `3.0`, plus the two condition-augmentation values from Section 14.3. Generic `--flow_shift` is not silently reused for one modality.
+
+1. Validate task, BF16 artifacts, JSONL references, geometry, duration, H3 shifts/condition augmentation, and output path.
 2. Run Qwen3-VL conditioning and release it before loading the 33B transformer unless cached features are supplied.
-3. Encode first/last frames or ordered references.
+3. Encode first/last frames or ordered references and apply dedicated request-seeded condition augmentation.
 4. Draw target video noise followed by target audio noise from the request generator.
 5. Build the packed row layout and log its exact row count.
-6. Run paired video shift-12 and audio shift-3 schedules in one transformer forward per step.
-7. Unpack and advance both modalities.
-8. Decode video and audio.
-9. Trim to the planned common duration and mux with PyAV.
+6. Build a common descending base grid `u_i`, then derive `sigma_video_i = shift(u_i, h3_shift_video)` and `sigma_audio_i = shift(u_i, h3_shift_audio)`.
+7. Run one transformer forward per common base interval with raw data-ward predictions and `model_t_* = 1 - sigma_*`.
+8. Advance each modality on its own finite sigma interval:
+
+```text
+x_video_next = x_video + (sigma_video_i - sigma_video_next) * pred_video
+x_audio_next = x_audio + (sigma_audio_i - sigma_audio_next) * pred_audio
+```
+
+9. Decode video and audio.
+10. Trim to the planned common duration and mux with PyAV.
+
+The native dual-scheduler path does not negate the predictions and does not apply `d(sigma_audio) / d(sigma_video)`. ComfyUI instead uses one video-sigma sampler plus a pointwise audio slope. Those updates agree only to first order; at finite step size their trajectories are not bit-exact. R1 acceptance compares packing, timesteps, raw-head parity, scheduler invariants, and output quality, not final ComfyUI tensors or media hashes.
 
 No unconditional sequence or CFG pass is created.
 
@@ -701,11 +834,13 @@ Fail before expensive allocation where possible for:
 - Ref2VA without `video_jsonl_file`.
 - FL2VA/Ref2VA cache used under the wrong task.
 - Missing H3 tensor roles, invalid dtypes/shapes, or cache architecture/format mismatch.
+- Invalid/stale text token tags or presentation fingerprints.
 - Qwen3-VL expanded length over 32768.
-- Unsupported timestep sampling or loss weighting.
+- Unsupported timestep sampling, loss weighting, H3 shift, or condition-augmentation value.
+- Per-sample timestep bucketing combined with H3 `batch_size > 1`.
 - Block swap outside 1 through 48.
 - H2D-only training without gradient checkpointing.
-- Unequal H3 text lengths in a multi-sample batch.
+- Unequal H3 text lengths, token-tag plans, or packed layouts in a multi-sample batch.
 - Conditioning tensor batch dimension different from target video batch size.
 
 OOM-oriented logs include target video/audio shapes, exact `A`, text length, reference counts and shapes, packed row count, dtype, and block-swap configuration. R1 does not rewrite batch size automatically.
@@ -718,6 +853,8 @@ Tests use tiny synthetic model configurations unless marked manual.
 
 - Save a synthetic H3 latent cache through `save_latent_cache_minimax_h3` and load it through `BucketBatchManager`; assert keys are exactly `latents`, `latents_audio`, and task-specific `latents_*` roles.
 - Save H3 text tensors and assert the collator returns lists under `mmh3_hidden_states` and `mmh3_token_tags`.
+- Golden-test mixed text tags: ordinary/label tokens are `1`, each expanded vision span plus both flanking tokens is `0`, and no text-cache row is `2`.
+- Reject text-cache reuse when the presentation/tag fingerprint changes.
 - Assert the standard `mmh3` latent filename and `_mmh3_te.safetensors` filename round-trip through `VideoDataset.prepare_for_training` without header reads.
 - Assert architecture `mmh3` selects a 32-pixel bucket step.
 - Assert JSONL reference order and limits.
@@ -730,23 +867,28 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Assert `F = 17n + 5` and `Fv = 5n + 2` conversions.
 - Assert target audio produces `2 * A` rows in channel-major order.
 - Assert target video produces `Fv * (Hv // 2) * (Wv // 2)` rows of width 96 before projection.
-- Assert packed row formula, tags, row indices, and condition ordering for all three tasks.
+- Assert packed row formula, mixed tags, row indices, and condition ordering for all three tasks.
+- Golden-test the full FP64 rotary grid: `(5/3) * (1,4,4,4,4)` video spans, normalized spatial axes, FL first/last anchors, stereo audio endpoints, and Ref2VA cursor advances.
+- Assert visual condition row time is `max(model_t_video, a_v)`, not constant `a_v`, and text row time follows video.
 
 ### 20.3 Trainer hooks
 
 - Assert `process_batch` uses incoming base-loop noise only for video and creates independent audio noise with the audio shape.
-- Assert a timestep bucket value is interpreted as common `u`, then produces shift-12/shift-3 sigma and `1-sigma` model time.
-- Assert unsupported `timestep_sampling`, `weighting_scheme`, and generic flow shift are rejected.
+- Assert one scalar base `u` is shared across a replicated batch, then produces configurable video/audio sigmas and `1-sigma` model times.
+- Assert the existing per-sample timestep pool is rejected with H3 `batch_size > 1` instead of taking its first value.
+- Assert unsupported `timestep_sampling`, `weighting_scheme`, generic flow shift, H3 shifts, and condition coefficients are rejected.
+- Assert condition inputs use `a*x0 + (1-a)*noise`; training seeds change per step, visual conditions restart one shared stream, and audio uses the `seed+1` stream.
+- Mock raw output heads and assert `process_batch` targets are `latents - noise` with no prediction negation or audio slope scaling.
 - Assert H3 `compute_loss` never calls SD3 weighting and reports separate video/audio means.
-- Assert unequal text lengths and mismatched conditioning batch dimensions fail clearly.
+- Assert unequal text lengths, unequal token-tag plans, and mismatched conditioning batch dimensions fail clearly.
 
 ### 20.4 Model, LoRA, and block swap
 
-- Tiny BF16 forward for T2VA, FL2VA, and Ref2VA packed layouts.
+- Tiny BF16 forward for T2VA, FL2VA, and Ref2VA packed layouts. The T2VA fixture uses one structurally identical `B=2` replicated forward to catch accidental `[0]` slicing; no batch-size matrix or backward matrix is added.
 - Default LoRA target discovery and metadata.
 - Tiny H3 offloader wait/prefetch order.
 - One LoRA forward/backward with gradient checkpointing and block swap.
-- One forward-only multi-step inference with block swap.
+- One forward-only dual-scheduler multi-step inference with block swap, configurable shifts, native velocity sign, and no audio slope.
 - Post-wait block-weight device assertion.
 - Root entrypoint existence/import tests.
 
@@ -762,7 +904,7 @@ No dedicated multi-batch-size matrix or per-task `batch_size=2` run is added.
 - One real 33B BF16 LoRA forward/backward with block swap.
 - One real 33B BF16 forward-only generation with block swap and muxed audio/video.
 
-Record commands, hardware, peak VRAM/RAM, cache sizes, packed rows, and output media properties.
+Record commands, hardware, peak VRAM/RAM, cache sizes, packed rows, shifts, condition augmentation, and output media properties. Comfy generation is a qualitative/artifact compatibility check; final tensors and media hashes are not required to match its finite-step single-scheduler trajectory.
 
 ## 21. R1 Acceptance Criteria
 
@@ -772,15 +914,20 @@ R1 is complete when:
 - Standard cache filenames are discovered without H3-specific parsing.
 - Target video loads as `batch["latents"]`.
 - Target audio and condition/reference roles load under `latents_*` batch keys.
-- Qwen3-VL caches load as `varlen_` lists and enforce the 32768-token limit.
+- Qwen3-VL caches load as `varlen_` lists, preserve mixed text/vision token tags, and enforce the 32768-token limit.
 - Target audio is required, aligned, independently noised, and supervised.
 - The exact integer `F -> A` formula is shared by cache and inference.
 - Packed audio/video row counts match the documented formulas.
+- FP64 rotary clocks, FL anchors, and reference cursor advances match the pinned merged ComfyUI implementation.
+- Condition augmentation, row timesteps, and per-step/shared-stream RNG follow the documented separate contracts.
 - T2VA, FL2VA, and JSONL-only Ref2VA execute through native BF16 packing.
 - H3 rejects base loss weighting and unsupported timestep sampling rather than silently reversing curves.
+- Training uses raw `latents - noise` targets; native model/inference outputs contain neither ComfyUI's negative sign nor its audio slope adapter.
+- Video/audio shifts are configurable and native inference advances two finite sigma schedules from one common base grid.
 - BF16 LoRA training and inference work.
 - BF16 block swap works in LoRA training and inference.
 - No H3-specific `batch_size == 1` assertion exists.
+- One structurally compatible replicated batch executes with a shared layout and base timestep.
 - Incompatible multi-sample layouts fail clearly rather than being padded or silently misbatched.
 - Automated tests pass and real-model R1 evidence is recorded.
 - User documentation states BF16-only R1 scope, JSONL Ref2VA, cache limits, batching limitations, and block-swap commands.
