@@ -130,7 +130,7 @@ git commit -m "feat: register MiniMax-H3 dataset geometry"
 - Consumes: architecture constants and frame helper from Task 1.
 - Produces: `audio_latent_frames(frame_count: int) -> int`, `waveform_samples(audio_frames: int) -> int`, `H3Reference`, `H3Record`, `load_h3_jsonl_records(path)`, and architecture-specific cache writers.
 
-- [ ] **Step 1: Write failing exact-geometry tests**
+- [x] **Step 1: Write failing exact-geometry tests**
 
 ```python
 @pytest.mark.parametrize((frames, audio_frames), [(5, 8), (22, 37), (39, 65), (56, 93)])
@@ -141,13 +141,13 @@ def test_audio_grid_uses_integer_identity(frames, audio_frames):
 
 Add tests that reject malformed JSONL, missing target audio, ambiguous same-stem sidecars, explicit undecodable audio without fallback, reference counts above 9 images/3 videos/3 audio-bearing/12 total, Ref2VA without a visual reference, and reference video duration outside 2-15 seconds.
 
-- [ ] **Step 2: Run cache-contract tests and verify RED**
+- [x] **Step 2: Run cache-contract tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_cache_contract.py -v`
 
 Expected: import failure because `musubi_tuner.minimax_h3.media` does not exist.
 
-- [ ] **Step 3: Implement canonical media records and exact geometry**
+- [x] **Step 3: Implement canonical media records and exact geometry**
 
 ```python
 def audio_latent_frames(frame_count: int) -> int:
@@ -162,11 +162,11 @@ def waveform_samples(audio_frames: int) -> int:
 
 Use dataclasses with canonical absolute paths and ordered references. Resolve target audio as explicit `audio_path`, then one exact same-stem sidecar, then embedded stream; preserve explicit failures. Keep the shared `VideoJsonlDatasource` tuple contract unchanged.
 
-- [ ] **Step 4: Write failing cache-key round-trip tests**
+- [x] **Step 4: Write failing cache-key round-trip tests**
 
 Use temporary safetensors with target video `[24,Fv,Hv,Wv]`, target audio `[32,2,A]`, ordered condition keys, `varlen_mmh3_hidden_states`, and `varlen_mmh3_token_tags`. Assert `BucketBatchManager` produces `batch["latents"]`, stacked `batch["latents_audio"]`, and list-valued text entries.
 
-- [ ] **Step 5: Add H3 cache writers**
+- [x] **Step 5: Add H3 cache writers**
 
 ```python
 def save_latent_cache_minimax_h3(
@@ -187,7 +187,7 @@ def save_text_encoder_output_cache_minimax_h3(
 
 Extend both common writers with an optional final metadata mapping, merge it before the required architecture/item fields, and leave all existing positional calls and shared key parsing unchanged.
 
-- [ ] **Step 6: Run focused tests and commit**
+- [x] **Step 6: Run focused tests and commit**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_cache_contract.py tests/test_minimax_h3_dataset.py -v`
 
