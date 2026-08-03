@@ -143,6 +143,26 @@ def _resolve_target_audio(
     raise ValueError(f"H3 JSONL line {line_number}: Missing target audio for {video_path}")
 
 
+def make_h3_directory_record(
+    video_path: str | Path,
+    caption: str,
+    probe: H3MediaProbe = probe_h3_media,
+) -> H3Record:
+    video_path = Path(video_path).resolve()
+    if not video_path.is_file():
+        raise ValueError(f"MiniMax-H3 target video does not exist: {video_path}")
+    if not isinstance(caption, str):
+        raise ValueError("MiniMax-H3 directory caption must be a string")
+    target_audio = _resolve_target_audio({}, video_path, video_path.parent, 0, probe)
+    return H3Record(
+        video_path=video_path,
+        caption=caption,
+        target_audio=target_audio,
+        references=(),
+        jsonl_line=0,
+    )
+
+
 def _validate_reference_counts(references: list, line_number: int) -> None:
     if len(references) > 12:
         raise ValueError(f"H3 JSONL line {line_number}: Ref2VA allows at most 12 reference items")

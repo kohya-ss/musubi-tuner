@@ -257,17 +257,17 @@ git commit -m "feat: add MiniMax-H3 autoencoders"
 - Consumes: Task 2 media records/cache writers and Task 3 VAE boundaries.
 - Produces: cache tensors and metadata for T2VA, FL2VA, and Ref2VA.
 
-- [ ] **Step 1: Write failing synthetic command tests**
+- [x] **Step 1: Write failing synthetic command tests**
 
 Use tiny fake VAEs and decoded media to assert exact target crop timestamps, `A * 800` stereo samples, target keys, FL first/last keys, ordered numbered reference keys, and metadata fingerprints. Assert Ref2VA fails before either VAE call when limits are invalid.
 
-- [ ] **Step 2: Run command tests and verify RED**
+- [x] **Step 2: Run command tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_cache_contract.py tests/test_top_level_entrypoints.py -v`
 
 Expected: missing H3 entrypoint and command module.
 
-- [ ] **Step 3: Implement cache batching and CLI**
+- [x] **Step 3: Implement cache batching and CLI**
 
 Reuse `BlueprintGenerator`, bucket crop/resize, PyAV decode, and the common cache writer. Add required `--video_vae`, `--audio_vae`, and `--task {t2va,fl2va,ref2va}` arguments plus `--allow_experimental_duration`; keep target audio mandatory.
 
@@ -281,13 +281,13 @@ def build_latent_tensors(record, task, video_vae, audio_vae, cache_seed):
     return tensors
 ```
 
-- [ ] **Step 4: Add the root wrapper and run tests**
+- [x] **Step 4: Add the root wrapper and run tests**
 
 The root wrapper imports `main` from `musubi_tuner.minimax_h3_cache_latents` and executes it under `if __name__ == "__main__"`.
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_cache_contract.py tests/test_top_level_entrypoints.py -v`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add src/musubi_tuner/minimax_h3_cache_latents.py minimax_h3_cache_latents.py tests/test_minimax_h3_cache_contract.py tests/test_top_level_entrypoints.py

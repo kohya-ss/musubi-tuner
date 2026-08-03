@@ -16,3 +16,12 @@ def test_ideogram4_top_level_entrypoints_exist():
         script = ROOT / script_name
         assert script.exists(), f"missing top-level entrypoint: {script_name}"
         assert script.read_text(encoding="utf-8") == (f'from {module_name} import main\n\nif __name__ == "__main__":\n    main()\n')
+
+
+def test_minimax_h3_latent_cache_entrypoint_exists():
+    script = ROOT / "minimax_h3_cache_latents.py"
+
+    assert script.exists(), "missing top-level entrypoint: minimax_h3_cache_latents.py"
+    assert script.read_text(encoding="utf-8") == (
+        'from musubi_tuner.minimax_h3_cache_latents import main\n\nif __name__ == "__main__":\n    main()\n'
+    )

@@ -3,17 +3,29 @@ from pathlib import Path
 import sys
 
 import pytest
+from safetensors.torch import save_file
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.media import (
+    H3AudioSource,
     H3MediaInfo,
+    H3Record,
+    H3Reference,
     audio_latent_frames,
     load_h3_jsonl_records,
+    make_h3_directory_record,
     video_latent_frames,
     waveform_samples,
+)
+from musubi_tuner.minimax_h3_cache_latents import (
+    assemble_audio_chunks,
+    build_latent_tensors,
+    cache_metadata_matches,
+    resample_frame_indices,
+    setup_parser,
 )
 from musubi_tuner.dataset.bucket import BucketBatchManager
 from musubi_tuner.dataset.cache_io import (
@@ -113,6 +125,22 @@ def test_target_audio_resolution_prefers_one_same_stem_sidecar(tmp_path: Path):
 
     assert record.target_audio.path == sidecar
     assert record.target_audio.embedded is False
+
+
+def test_directory_record_uses_the_same_mandatory_audio_resolution(tmp_path: Path):
+    video = _touch(tmp_path / "clip.mp4")
+    sidecar = _touch(tmp_path / "clip.wav")
+
+    record = make_h3_directory_record(
+        video,
+        "caption",
+        lambda path: H3MediaInfo(has_audio=path == sidecar, duration_seconds=5.0),
+    )
+
+    assert record.video_path == video
+    assert record.caption == "caption"
+    assert record.target_audio == H3AudioSource(path=sidecar, embedded=False)
+    assert record.references == ()
 
 
 def test_target_audio_resolution_rejects_ambiguous_sidecars(tmp_path: Path):
@@ -312,3 +340,250 @@ def test_h3_text_writer_rejects_invalid_token_tags(tmp_path: Path, tags: torch.T
 
     with pytest.raises(ValueError, match="token tags"):
         save_text_encoder_output_cache_minimax_h3(item, tensors)
+
+
+class _FakeH3VideoVAE(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("latents_mean", torch.zeros(24))
+        self.register_buffer("latents_std", torch.ones(24))
+        self.calls = []
+
+    def encode_moments(self, pixels: torch.Tensor) -> torch.Tensor:
+        self.calls.append(pixels.detach().cpu())
+        frame_count = pixels.shape[2]
+        latent_frames = 1 if frame_count == 1 else video_latent_frames(frame_count)
+        return torch.zeros(
+            pixels.shape[0],
+            48,
+            latent_frames,
+            pixels.shape[3] // 16,
+            pixels.shape[4] // 16,
+            device=pixels.device,
+        )
+
+
+class _FakeH3AudioVAE(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def encode(self, waveform: torch.Tensor) -> torch.Tensor:
+        self.calls.append(waveform.detach().cpu())
+        latent_frames = (waveform.shape[-1] + 799) // 800
+        return torch.zeros(waveform.shape[0], 32, 2, latent_frames, device=waveform.device)
+
+
+class _FakeH3MediaDecoder:
+    def __init__(self, visuals=None, audio_lengths=None):
+        self.visuals = visuals or {}
+        self.audio_lengths = audio_lengths or {}
+        self.audio_calls = []
+        self.visual_calls = []
+
+    def decode_audio(self, source, *, start_sample, sample_count, require_exact):
+        self.audio_calls.append((source, start_sample, sample_count, require_exact))
+        length = self.audio_lengths.get(source.path, sample_count)
+        return torch.zeros(2, length)
+
+    def decode_reference_visual(self, reference, *, target_frame_count, target_size):
+        self.visual_calls.append((reference, target_frame_count, target_size))
+        return self.visuals[reference.path]
+
+
+def _cache_record(tmp_path: Path, references=()) -> H3Record:
+    video = _touch(tmp_path / "target.mp4")
+    audio = _touch(tmp_path / "target.wav")
+    return H3Record(
+        video_path=video,
+        caption="scene and sound",
+        target_audio=H3AudioSource(path=audio, embedded=False),
+        references=tuple(references),
+        jsonl_line=1,
+    )
+
+
+def test_build_fl2va_latents_uses_exact_audio_window_and_target_crop(tmp_path: Path):
+    record = _cache_record(tmp_path)
+    frames = torch.zeros(5, 64, 64, 3, dtype=torch.uint8)
+    frames[-1] = 255
+    video_vae = _FakeH3VideoVAE()
+    audio_vae = _FakeH3AudioVAE()
+    decoder = _FakeH3MediaDecoder()
+
+    payload = build_latent_tensors(
+        record=record,
+        task="fl2va",
+        target_frames=frames,
+        crop_start_frame=3,
+        video_vae=video_vae,
+        audio_vae=audio_vae,
+        cache_seed=123,
+        media_decoder=decoder,
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={record.video_path: "target-video", record.target_audio.path: "target-audio"},
+        allow_experimental_duration=True,
+    )
+
+    assert set(payload.tensors) == {
+        "latents_2x4x4_float32",
+        "latents_audio_32x2x8_float32",
+        "latents_first_1x4x4_float32",
+        "latents_last_1x4x4_float32",
+    }
+    assert decoder.audio_calls == [(record.target_audio, 4000, 6400, True)]
+    assert [call.shape for call in video_vae.calls] == [
+        (1, 3, 5, 64, 64),
+        (1, 3, 1, 64, 64),
+        (1, 3, 1, 64, 64),
+    ]
+    torch.testing.assert_close(video_vae.calls[1], torch.full_like(video_vae.calls[1], -1.0))
+    torch.testing.assert_close(video_vae.calls[2], torch.full_like(video_vae.calls[2], 1.0))
+    assert payload.metadata["task"] == "fl2va"
+    assert payload.metadata["crop_start_frame"] == "3"
+    assert payload.metadata["audio_start_seconds"] == "1/8"
+    assert payload.metadata["video_vae_fingerprint"] == "video-fingerprint"
+    assert payload.metadata["audio_vae_fingerprint"] == "audio-fingerprint"
+    assert json.loads(payload.metadata["media_fingerprints"]) == {
+        str(record.target_audio.path): "target-audio",
+        str(record.video_path): "target-video",
+    }
+
+
+def test_h3_timestamp_resampling_duplicates_low_fps_frames_to_24fps():
+    indices = resample_frame_indices([0.0, 1 / 12, 2 / 12], source_frame_duration=1 / 12, target_fps=24)
+
+    assert indices == [0, 0, 1, 1, 2, 2]
+
+
+def test_h3_skip_existing_requires_all_cache_identity_metadata(tmp_path: Path):
+    cache_path = tmp_path / "cache.safetensors"
+    save_file(
+        {"latents_2x4x4_float32": torch.zeros(24, 2, 4, 4)},
+        cache_path,
+        metadata={"task": "t2va", "video_vae_fingerprint": "old"},
+    )
+
+    assert cache_metadata_matches(cache_path, {"task": "t2va", "video_vae_fingerprint": "old"})
+    assert not cache_metadata_matches(cache_path, {"task": "t2va", "video_vae_fingerprint": "new"})
+    assert not cache_metadata_matches(cache_path, {"task": "t2va", "audio_vae_fingerprint": "missing"})
+
+
+def test_h3_latent_cache_parser_exposes_only_the_two_explicit_vae_paths():
+    help_text = setup_parser().format_help()
+
+    assert "--video_vae" in help_text
+    assert "--audio_vae" in help_text
+    assert "--vae VAE" not in help_text
+    assert "--vae_dtype" not in help_text
+
+
+def test_h3_audio_chunk_assembly_rejects_discontinuous_timestamps():
+    contiguous = assemble_audio_chunks(
+        [(100, torch.zeros(2, 4)), (104, torch.ones(2, 4))],
+        timestamp_tolerance_samples=2,
+    )
+
+    assert contiguous.shape == (2, 8)
+    with pytest.raises(ValueError, match="discontinuous"):
+        assemble_audio_chunks(
+            [(100, torch.zeros(2, 4)), (107, torch.ones(2, 4))],
+            timestamp_tolerance_samples=2,
+        )
+
+
+def test_build_ref2va_latents_preserves_ordered_numbered_roles(tmp_path: Path):
+    image = _touch(tmp_path / "face.png")
+    reference_video = _touch(tmp_path / "motion.mp4")
+    reference_video_audio = _touch(tmp_path / "motion.wav")
+    voice = _touch(tmp_path / "voice.wav")
+    references = (
+        H3Reference(type="image", path=image),
+        H3Reference(
+            type="video",
+            path=reference_video,
+            audio=H3AudioSource(path=reference_video_audio, embedded=False),
+            duration_seconds=4.0,
+        ),
+        H3Reference(
+            type="audio",
+            path=voice,
+            audio=H3AudioSource(path=voice, embedded=False),
+            duration_seconds=1.0,
+        ),
+    )
+    record = _cache_record(tmp_path, references)
+    decoder = _FakeH3MediaDecoder(
+        visuals={
+            image: torch.zeros(1, 32, 64, 3, dtype=torch.uint8),
+            reference_video: torch.zeros(5, 64, 32, 3, dtype=torch.uint8),
+        },
+        audio_lengths={voice: 1600},
+    )
+    video_vae = _FakeH3VideoVAE()
+    audio_vae = _FakeH3AudioVAE()
+
+    payload = build_latent_tensors(
+        record=record,
+        task="ref2va",
+        target_frames=torch.zeros(5, 64, 64, 3, dtype=torch.uint8),
+        crop_start_frame=0,
+        video_vae=video_vae,
+        audio_vae=audio_vae,
+        cache_seed=7,
+        media_decoder=decoder,
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={
+            path: path.name
+            for path in {record.video_path, record.target_audio.path, image, reference_video, reference_video_audio, voice}
+        },
+        allow_experimental_duration=True,
+    )
+
+    assert set(payload.tensors) == {
+        "latents_2x4x4_float32",
+        "latents_audio_32x2x8_float32",
+        "latents_ref_000_image_1x2x4_float32",
+        "latents_ref_001_video_2x4x2_float32",
+        "latents_ref_001_audio_32x2x8_float32",
+        "latents_ref_002_audio_32x2x2_float32",
+    }
+    assert [call[0].path for call in decoder.audio_calls] == [
+        record.target_audio.path,
+        reference_video_audio,
+        voice,
+    ]
+    assert decoder.audio_calls[1][1:] == (0, 6400, True)
+    assert decoder.audio_calls[2][1:] == (0, 6400, False)
+    assert json.loads(payload.metadata["reference_kinds"]) == ["image", "video+audio", "audio"]
+
+
+def test_build_ref2va_revalidates_limits_before_any_model_work(tmp_path: Path):
+    references = tuple(H3Reference(type="image", path=_touch(tmp_path / f"image_{index}.png")) for index in range(10))
+    record = _cache_record(tmp_path, references)
+    video_vae = _FakeH3VideoVAE()
+    audio_vae = _FakeH3AudioVAE()
+    decoder = _FakeH3MediaDecoder()
+
+    with pytest.raises(ValueError, match="at most 9 image"):
+        build_latent_tensors(
+            record=record,
+            task="ref2va",
+            target_frames=torch.zeros(5, 64, 64, 3, dtype=torch.uint8),
+            crop_start_frame=0,
+            video_vae=video_vae,
+            audio_vae=audio_vae,
+            cache_seed=0,
+            media_decoder=decoder,
+            video_vae_fingerprint="video-fingerprint",
+            audio_vae_fingerprint="audio-fingerprint",
+            media_fingerprints={},
+            allow_experimental_duration=True,
+        )
+
+    assert video_vae.calls == []
+    assert audio_vae.calls == []
+    assert decoder.audio_calls == []
+    assert decoder.visual_calls == []
