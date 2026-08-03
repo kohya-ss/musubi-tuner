@@ -66,7 +66,7 @@ dev = [
   "matplotlib==3.10.0",
   "tensorboard",
   "prompt-toolkit==3.0.51",
-  "ruff>=0.12.10",
+  "ruff>=0.12.10,<0.16",
 ]
 
 [build-system]
