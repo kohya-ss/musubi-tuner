@@ -95,6 +95,7 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - Running all three tasks at `batch_size=2` as an acceptance gate.
 - Per-sample timesteps inside one replicated packed layout.
 - Loading FL2VA and Ref2VA transformer weights in one process.
+- Training-time sample generation through the shared `--sample_prompts` hook; R1 uses the standalone joint-AV generator.
 - CI with the real 33B transformer or 32B text encoder.
 
 ## 5. Released Configuration Contract
@@ -839,7 +840,7 @@ The main block loop is:
 
 R1 does not invent an H3 offloader adapter. `ModelOffloader.prepare_block_devices_before_forward` already moves the block to the accelerator, which places buffers there, and then `weighs_to_device` relocates Linear `.weight` tensors for exchange. H3 only supplies the standard model lifecycle and the post-wait device assertion.
 
-Training-time sample generation switches to forward-only mode and prepares placement, then switches back to training mode and prepares placement again.
+The standalone generator uses forward-only block swap. R1 rejects the shared training-time `--sample_prompts` hook before model allocation because that hook owns only one VAE and one video output, while H3 requires two independently placed VAEs and a muxed AV result.
 
 The compile helper receives `[transformer.blocks]` and disables Linear compilation when block swap is active, matching existing architectures.
 

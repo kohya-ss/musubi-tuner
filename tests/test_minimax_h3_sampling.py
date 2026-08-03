@@ -289,16 +289,68 @@ def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):
             "varlen_mmh3_token_tags_int64": tags,
         },
         str(path),
-        metadata={"task": "t2va"},
+        metadata={
+            "task": "t2va",
+            "frame_count": "124",
+            "presentation_fingerprint": "sha256:presentation",
+            "hidden_state_convention": "index50-after-50-layers-pre-final-norm",
+            "token_tag_algorithm": "expanded-vision-span-with-flanks-v1",
+            "text_width": "5120",
+            "max_text_rows": "32768",
+        },
     )
 
-    actual_hidden, actual_tags = load_cached_text_conditioning(path, task="t2va")
+    actual_hidden, actual_tags = load_cached_text_conditioning(
+        path,
+        task="t2va",
+        frame_count=124,
+        presentation_identity="sha256:presentation",
+    )
 
     assert actual_hidden.shape == (1, 3, 5120)
     assert actual_hidden.dtype == torch.bfloat16
     assert torch.equal(actual_tags, tags)
     with pytest.raises(ValueError, match=r"task.*ref2va.*t2va"):
         load_cached_text_conditioning(path, task="ref2va")
+    with pytest.raises(ValueError, match=r"frame count.*141.*124"):
+        load_cached_text_conditioning(path, task="t2va", frame_count=141)
+    with pytest.raises(ValueError, match="presentation fingerprint"):
+        load_cached_text_conditioning(
+            path,
+            task="t2va",
+            presentation_identity="sha256:different",
+        )
+
+
+def test_generation_text_cache_requires_an_identifiable_presentation(tmp_path):
+    text_cache = tmp_path / "conditioning.safetensors"
+    text_cache.touch()
+
+    with pytest.raises(ValueError, match="T2VA requires --prompt"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                text_cache=str(text_cache),
+                text_encoder=None,
+                prompt=None,
+            )
+        )
+    validate_generation_args(_generation_args(tmp_path, text_cache=str(text_cache), text_encoder=None))
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.touch()
+    last.touch()
+    with pytest.raises(ValueError, match="FL2VA.*text_cache"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                task="fl2va",
+                text_cache=str(text_cache),
+                text_encoder=None,
+                first_frame=str(first),
+                last_frame=str(last),
+            )
+        )
 
 
 def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_resident_vaes(tmp_path, monkeypatch):

@@ -240,6 +240,7 @@ def test_h3_parser_defaults_to_the_only_supported_training_coordinates():
         ({"h3_visual_cond_clean": -0.1}, "h3_visual_cond_clean"),
         ({"h3_audio_cond_clean": 1.1}, "h3_audio_cond_clean"),
         ({"blocks_to_swap": 49}, "blocks_to_swap"),
+        ({"sample_prompts": "prompts.txt"}, "sample_prompts"),
     ],
 )
 def test_h3_trainer_rejects_training_knobs_with_the_wrong_coordinate_contract(override, message):

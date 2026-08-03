@@ -502,6 +502,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise ValueError("MiniMax-H3 R1 accepts only a BF16 transformer base; quantized bases are deferred to R2")
         if getattr(args, "dit_dtype", None) not in {None, "bfloat16", "bf16"}:
             raise ValueError("MiniMax-H3 R1 requires --dit_dtype bfloat16")
+        if getattr(args, "sample_prompts", None):
+            raise ValueError(
+                "MiniMax-H3 R1 does not support --sample_prompts during training; "
+                "use minimax_h3_generate_video.py with a saved LoRA"
+            )
         if (
             getattr(args, "block_swap_h2d_only", False)
             and bool(args.blocks_to_swap)

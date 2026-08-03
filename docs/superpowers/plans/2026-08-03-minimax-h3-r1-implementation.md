@@ -575,13 +575,13 @@ git commit -m "feat: generate MiniMax-H3 video with audio"
 - Consumes: the complete R1 implementation.
 - Produces: user-facing command examples and recorded automated/manual acceptance evidence.
 
-- [ ] **Step 1: Run formatting and lint checks**
+- [x] **Step 1: Run formatting and lint checks**
 
 Run: `.venv\Scripts\python -m ruff format --check src/musubi_tuner/minimax_h3 src/musubi_tuner/minimax_h3_*.py src/musubi_tuner/networks/lora_minimax_h3.py tests/test_minimax_h3_*.py`
 
 Run: `.venv\Scripts\python -m ruff check src/musubi_tuner/minimax_h3 src/musubi_tuner/minimax_h3_*.py src/musubi_tuner/networks/lora_minimax_h3.py tests/test_minimax_h3_*.py`
 
-- [ ] **Step 2: Run the complete automated suite**
+- [x] **Step 2: Run the complete automated suite**
 
 Run: `.venv\Scripts\python -m pytest -v`
 
@@ -591,7 +591,9 @@ Expected: all existing and H3 tests pass without new warnings.
 
 Use `Comfy-Org/MiniMax-H3` BF16 transformer, video VAE, audio VAE, and matching Qwen3-VL artifacts. Validate strict load, one tiny T2VA forward at batch 2, one LoRA forward/backward with block swap, and one short joint AV sample. The acceptance run does not add a batch-size matrix or repeat all three tasks at multiple batch sizes.
 
-- [ ] **Step 4: Document exact commands and limitations**
+Published-header validation on 2026-08-03 found zero missing, unexpected, shape-mismatched, or dtype-mismatched tensors in both BF16 transformers, and zero key/shape mismatches in the video VAE, audio VAE, and BF16 Qwen3-VL-32B text encoder. Full tensor-body forward validation remains open because the approximately 120 GB artifact set is not present locally.
+
+- [x] **Step 4: Document exact commands and limitations**
 
 Add cache, text-cache, train, and generate examples to `README.md`. State JSONL-only Ref2VA, required target audio, 24 fps and `17*n+5`, 32-pixel geometry, 32768 text-row limit, BF16-only R1, and deferred ConvRot R2.
 
