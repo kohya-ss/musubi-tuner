@@ -365,7 +365,7 @@ git commit -m "feat: cache MiniMax-H3 multimodal text states"
 - Produces: `pack_video_rows`, `pack_audio_rows`, `build_h3_layout`, `build_position_grid`, `build_timestep_rows`, and `unpack_targets`.
 - Consumes: cached latent/audio/text tensor contracts from Tasks 2-5.
 
-- [ ] **Step 1: Write failing row-order and count tests**
+- [x] **Step 1: Write failing row-order and count tests**
 
 ```python
 def test_audio_rows_are_channel_major():
@@ -377,25 +377,25 @@ def test_audio_rows_are_channel_major():
 
 Assert video patch width 96, target video row count `Fv*(Hv//2)*(Wv//2)`, condition order, reference cursor order, target slices, and exact packed-row totals for all tasks.
 
-- [ ] **Step 2: Write failing tag/timestep/AdaLN tests**
+- [x] **Step 2: Write failing tag/timestep/AdaLN tests**
 
 Assert text tags are preserved, latent rows use video tag 0/audio tag 2, target and condition timesteps follow the clean-coefficient rules, block AdaLN indexes use `3*timestep_index+tag`, and FinalLayer indexes directly select video/audio timestep indexes without tag offsets.
 
-- [ ] **Step 3: Write failing FP64 position tests**
+- [x] **Step 3: Write failing FP64 position tests**
 
 Construct small T2VA, FL2VA, and Ref2VA fixtures and compare the full position tensor against explicit double-precision formulas, including `(5/3)*(1,4,4,4,4)` temporal cycles, normalized spatial axes, FL anchors, and monotonically advanced reference cursors.
 
-- [ ] **Step 4: Run packing tests and verify RED**
+- [x] **Step 4: Run packing tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_packing.py -v`
 
 Expected: missing packing module.
 
-- [ ] **Step 5: Implement immutable layout descriptors and packing**
+- [x] **Step 5: Implement immutable layout descriptors and packing**
 
 Use dataclasses containing named slices and per-role geometry. Perform all clock calculations in `torch.float64`, then pass FP64 coordinates to rotary frequency construction; do not create a layout signature or padding path.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_packing.py -v`
 
