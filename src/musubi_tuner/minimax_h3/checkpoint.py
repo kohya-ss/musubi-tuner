@@ -61,13 +61,33 @@ def _normalize_checkpoint_key(key: str, prefixes: tuple[str, ...]) -> str:
     return key
 
 
-def _format_key_mismatch(missing: Iterable[str], unexpected: Iterable[str], shape_mismatches: Iterable[str]) -> str:
+def load_safetensors_metadata(files: Iterable[str | Path]) -> dict[str, str]:
+    merged = {}
+    for file in files:
+        path = Path(file).resolve()
+        with MemoryEfficientSafeOpen(str(path)) as handle:
+            metadata = handle.metadata() or {}
+        for key, value in metadata.items():
+            if key in merged and merged[key] != value:
+                raise ValueError(f"Conflicting MiniMax-H3 checkpoint metadata {key!r} in {path}")
+            merged[key] = value
+    return merged
+
+
+def _format_key_mismatch(
+    missing: Iterable[str],
+    unexpected: Iterable[str],
+    shape_mismatches: Iterable[str],
+    dtype_mismatches: Iterable[str],
+) -> str:
     missing = sorted(missing)
     unexpected = sorted(unexpected)
     shape_mismatches = sorted(shape_mismatches)
+    dtype_mismatches = sorted(dtype_mismatches)
     return (
         "MiniMax-H3 checkpoint key mismatch: "
-        f"missing={missing[:20]}, unexpected={unexpected[:20]}, shape_mismatches={shape_mismatches[:20]}"
+        f"missing={missing[:20]}, unexpected={unexpected[:20]}, shape_mismatches={shape_mismatches[:20]}, "
+        f"dtype_mismatches={dtype_mismatches[:20]}"
     )
 
 
@@ -79,6 +99,7 @@ def load_safetensors_module(
     dtype: torch.dtype | None,
     key_prefixes: tuple[str, ...] = (),
     key_transform: Callable[[str], str] | None = None,
+    strict_dtype: bool = False,
     disable_mmap: bool = False,
 ) -> ModuleT:
     files = [Path(path).resolve() for path in files]
@@ -93,6 +114,7 @@ def load_safetensors_module(
     seen = set()
     unexpected = set()
     shape_mismatches = []
+    dtype_mismatches = []
 
     for path in files:
         shard = {}
@@ -114,6 +136,9 @@ def load_safetensors_module(
                 if tensor.shape != expected_state[key].shape:
                     shape_mismatches.append(f"{key}: expected {tuple(expected_state[key].shape)}, got {tuple(tensor.shape)}")
                     continue
+                if strict_dtype and tensor.dtype != expected_state[key].dtype:
+                    dtype_mismatches.append(f"{key}: expected {expected_state[key].dtype}, got {tensor.dtype}")
+                    continue
                 if dtype is not None and tensor.is_floating_point():
                     tensor = tensor.to(dtype=dtype)
                 shard[key] = tensor
@@ -121,8 +146,8 @@ def load_safetensors_module(
             model.load_state_dict(shard, strict=False, assign=True)
 
     missing = expected_keys - seen
-    if missing or unexpected or shape_mismatches:
-        raise ValueError(_format_key_mismatch(missing, unexpected, shape_mismatches))
+    if missing or unexpected or shape_mismatches or dtype_mismatches:
+        raise ValueError(_format_key_mismatch(missing, unexpected, shape_mismatches, dtype_mismatches))
 
     model.to(device=torch.device(device))
     model.eval()

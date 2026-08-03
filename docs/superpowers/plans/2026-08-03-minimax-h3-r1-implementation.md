@@ -415,17 +415,17 @@ git commit -m "feat: pack MiniMax-H3 joint modality rows"
 - Consumes: `H3PackedLayout` and row/timestep/position builders from Task 6.
 - Produces: `MiniMaxH3Config`, `MiniMaxH3Model.forward(...)`, gradient checkpointing methods, and the standard block-swap lifecycle used by `NetworkTrainer`.
 
-- [ ] **Step 1: Write failing tiny-model forward tests**
+- [x] **Step 1: Write failing tiny-model forward tests**
 
 Instantiate a reduced config with widths divisible by its head count while keeping separate text/video/audio projections. Assert output target slices reconstruct video and audio shapes, block AdaLN respects three modalities, FinalLayer respects one modality, and a two-sample compatible T2VA batch forwards without a batch-size guard.
 
-- [ ] **Step 2: Run model tests and verify RED**
+- [x] **Step 2: Run model tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_model.py -v`
 
 Expected: missing model module.
 
-- [ ] **Step 3: Port the merged BF16 transformer**
+- [x] **Step 3: Port the merged BF16 transformer**
 
 Port the architecture from ComfyUI commit `57500fc5bc92566a63f2046824f522cd55c335ca`, preserving checkpoint parameter names and the exact refiner, attention, MLP, AdaLN, rotary, and output-head math. Use repository attention helpers for `torch`, `flash`, `flash3`, `sageattn`, and `xformers` only where their semantics match.
 
@@ -441,19 +441,19 @@ class MiniMaxH3Config:
     text_dim: int = 5120
 ```
 
-- [ ] **Step 4: Write failing block-swap lifecycle tests**
+- [x] **Step 4: Write failing block-swap lifecycle tests**
 
 Patch `create_offloader` with the repository test double and assert `enable_block_swap`, `move_to_device_except_swap_blocks`, inference/training switches, `prepare_block_swap_before_forward`, per-block wait, and submit order. After every wait, assert active block parameters and required buffers are on the execution device.
 
-- [ ] **Step 5: Implement block swap using the existing offloader**
+- [x] **Step 5: Implement block swap using the existing offloader**
 
 Follow the established Wan/Z-Image lifecycle. Do not add an H3 offloader adapter. Keep non-swapped modules and required buffers on the accelerator through `move_to_device_except_swap_blocks`; validate devices immediately after wait.
 
-- [ ] **Step 6: Add strict released-config and state-dict tests**
+- [x] **Step 6: Add strict released-config and state-dict tests**
 
 Assert the published config fields match the R1 contract, transformer input projection width is 96, audio projection width is 32, and structural missing/unexpected keys fail. Reject FP8/INT8/ConvRot metadata in R1 with a message pointing to deferred R2.
 
-- [ ] **Step 7: Run tests and commit**
+- [x] **Step 7: Run tests and commit**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_model.py tests/test_minimax_h3_packing.py -v`
 

@@ -1,0 +1,442 @@
+import json
+from pathlib import Path
+import sys
+
+import pytest
+from safetensors.torch import save_file
+import torch
+import torch.nn as nn
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module
+from musubi_tuner.minimax_h3.model import (
+    AdalnProj,
+    FinalLayer,
+    MiniMaxH3Config,
+    MiniMaxH3Model,
+    parse_h3_transformer_config,
+)
+from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
+
+
+def _tiny_config(*, num_layers: int = 2) -> MiniMaxH3Config:
+    return MiniMaxH3Config(
+        hidden_size=16,
+        num_layers=num_layers,
+        token_refiner_num_layers=1,
+        num_attention_heads=2,
+        attention_head_dim=8,
+        ffn_hidden_size=24,
+        text_dim=12,
+        timestep_input_dim=4,
+        time_embed_hidden_size=16,
+        time_embed_dim=8,
+        rope_inv_freq_len=1,
+    )
+
+
+def _t2_layout(text_length: int = 3):
+    return build_h3_layout(
+        task="t2va",
+        text_length=text_length,
+        target_video=H3VideoGeometry(2, 4, 4),
+        target_audio_frames=8,
+    )
+
+
+def _t2_inputs(batch_size: int = 2, text_length: int = 3):
+    return {
+        "video_latents": torch.randn(batch_size, 24, 2, 4, 4),
+        "audio_latents": torch.randn(batch_size, 32, 2, 8),
+        "text_hidden_states": torch.randn(batch_size, text_length, 12),
+        "text_token_tags": torch.tensor([1, 0, 1][:text_length], dtype=torch.int64),
+        "layout": _t2_layout(text_length),
+        "model_t_video": torch.full((batch_size,), 0.25),
+        "model_t_audio": torch.full((batch_size,), 0.75),
+    }
+
+
+def test_released_config_and_meta_state_dict_match_published_bf16_header():
+    config = MiniMaxH3Config()
+
+    model = MiniMaxH3Model(config, dtype=torch.bfloat16, device=torch.device("meta"))
+    state = model.state_dict()
+
+    assert config.in_channels == 24
+    assert config.audio_in_channels == 32
+    assert config.hidden_size == 5376
+    assert config.num_layers == 50
+    assert config.num_attention_heads == 56
+    assert config.attention_head_dim == 128
+    assert config.text_dim == 5120
+    assert len(state) == 535
+    assert state["video_patch_proj.weight"].shape == (5376, 96)
+    assert state["video_patch_proj.weight"].dtype == torch.float32
+    assert state["audio_patch_proj.weight"].shape == (5376, 32)
+    assert state["condition_proj.weight"].shape == (5376, 5120)
+    assert state["condition_proj.weight"].dtype == torch.bfloat16
+    assert state["blocks.0.attn.qkv_proj.weight"].shape == (21504, 5376)
+    assert state["blocks.0.adaln_proj.linear.weight"].shape == (96768, 2688)
+    assert state["final_layer.adaln_proj.linear.weight"].shape == (10752, 2688)
+    assert state["final_layer.video_out.weight"].shape == (96, 5376)
+    assert state["final_layer.video_out.weight"].dtype == torch.float32
+    assert state["rope.inv_freq"].shape == (16,)
+
+
+def test_published_transformer_metadata_is_parsed_strictly():
+    released = {
+        "hidden_size": 5376,
+        "num_layers": 50,
+        "token_refiner_num_layers": 2,
+        "num_attention_heads": 56,
+        "attention_head_dim": 128,
+        "ffn_hidden_size": 14336,
+        "latents_dim": 24,
+        "audio_latents_dim": 32,
+        "patch_size": [1, 2, 2],
+        "text_dim": 5120,
+        "timestep_input_dim": 256,
+        "time_embed_hidden_size": 5376,
+        "time_embed_dim": 2688,
+        "adaln_out_features": 96768,
+        "final_adaln_out_features": 10752,
+        "rope_inv_freq_len": 16,
+        "norm_eps": 1e-5,
+        "qk_norm_eps": 1e-5,
+        "final_norm_eps": 1e-5,
+        "image_model": "minimax_h3",
+    }
+
+    actual = parse_h3_transformer_config({"config": json.dumps({"transformer": released})})
+
+    assert actual == MiniMaxH3Config()
+    with pytest.raises(ValueError, match=r"hidden_size.*5376.*4096"):
+        parse_h3_transformer_config({"config": json.dumps({"transformer": {**released, "hidden_size": 4096}})})
+    with pytest.raises(ValueError, match="deferred to R2"):
+        parse_h3_transformer_config(
+            {
+                "config": json.dumps({"transformer": released}),
+                "format": "int8_tensorwise",
+                "convrot": "true",
+            }
+        )
+
+
+def test_tiny_model_forwards_a_compatible_two_sample_batch():
+    model = MiniMaxH3Model(_tiny_config(), dtype=torch.float32)
+
+    output = model(**_t2_inputs(batch_size=2))
+
+    assert output.video.shape == (2, 24, 2, 4, 4)
+    assert output.audio.shape == (2, 32, 2, 8)
+
+
+def test_two_sample_forward_matches_two_independent_single_sample_forwards():
+    torch.manual_seed(123)
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32).eval()
+    inputs = _t2_inputs(batch_size=2)
+
+    batched = model(**inputs)
+    singles = []
+    for index in range(2):
+        single_inputs = {
+            **inputs,
+            "video_latents": inputs["video_latents"][index : index + 1],
+            "audio_latents": inputs["audio_latents"][index : index + 1],
+            "text_hidden_states": inputs["text_hidden_states"][index : index + 1],
+            "model_t_video": inputs["model_t_video"][index : index + 1],
+            "model_t_audio": inputs["model_t_audio"][index : index + 1],
+        }
+        singles.append(model(**single_inputs))
+
+    torch.testing.assert_close(batched.video, torch.cat([output.video for output in singles]))
+    torch.testing.assert_close(batched.audio, torch.cat([output.audio for output in singles]))
+
+
+def test_model_accepts_ordered_ref2va_visual_and_audio_conditions():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    image = H3VideoGeometry(1, 2, 4)
+    video = H3VideoGeometry(2, 4, 4)
+    layout = build_h3_layout(
+        task="ref2va",
+        text_length=2,
+        target_video=H3VideoGeometry(2, 4, 4),
+        target_audio_frames=8,
+        references=(
+            H3ReferenceGeometry("image", video=image),
+            H3ReferenceGeometry("video", video=video, audio_frames=8),
+            H3ReferenceGeometry("audio", audio_frames=2),
+        ),
+    )
+
+    output = model(
+        video_latents=torch.randn(1, 24, 2, 4, 4),
+        audio_latents=torch.randn(1, 32, 2, 8),
+        text_hidden_states=torch.randn(1, 2, 12),
+        text_token_tags=torch.tensor([0, 1]),
+        layout=layout,
+        model_t_video=0.25,
+        model_t_audio=0.75,
+        visual_condition_latents=(
+            torch.randn(1, 24, 1, 2, 4),
+            torch.randn(1, 24, 2, 4, 4),
+        ),
+        audio_condition_latents=(
+            torch.randn(1, 32, 2, 8),
+            torch.randn(1, 32, 2, 2),
+        ),
+    )
+
+    assert output.video.shape == (1, 24, 2, 4, 4)
+    assert output.audio.shape == (1, 32, 2, 8)
+
+
+def test_model_rejects_condition_geometry_even_when_the_packed_row_count_matches():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    layout = build_h3_layout(
+        task="ref2va",
+        text_length=1,
+        target_video=H3VideoGeometry(2, 4, 4),
+        target_audio_frames=8,
+        references=(H3ReferenceGeometry("image", video=H3VideoGeometry(1, 2, 8)),),
+    )
+
+    with pytest.raises(ValueError, match=r"ref_000_image geometry.*1x2x8.*1x4x4"):
+        model(
+            video_latents=torch.randn(1, 24, 2, 4, 4),
+            audio_latents=torch.randn(1, 32, 2, 8),
+            text_hidden_states=torch.randn(1, 1, 12),
+            text_token_tags=torch.tensor([1]),
+            layout=layout,
+            model_t_video=0.25,
+            model_t_audio=0.75,
+            visual_condition_latents=(torch.randn(1, 24, 1, 4, 4),),
+        )
+
+
+def test_model_rejects_different_text_tag_plans_across_batch():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    inputs = _t2_inputs(batch_size=2)
+    inputs["text_token_tags"] = torch.tensor([[1, 0, 1], [1, 1, 1]], dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="identical text token tags"):
+        model(**inputs)
+
+
+def test_block_adaln_rows_are_ordered_as_three_modalities_per_timestep():
+    projection = AdalnProj(timestep_dim=1, hidden_size=1, expand=1, modalities=3, dtype=torch.float32)
+    with torch.no_grad():
+        projection.linear.weight.copy_(torch.tensor([[1.0], [2.0], [3.0]]))
+        projection.linear.bias.zero_()
+
+    (rows,) = projection(torch.tensor([[1.0], [10.0]]))
+
+    silu = torch.nn.functional.silu(torch.tensor([1.0, 10.0]))
+    expected = torch.cat((silu[0] * torch.tensor([1.0, 2.0, 3.0]), silu[1] * torch.tensor([1.0, 2.0, 3.0])))
+    torch.testing.assert_close(rows[:, 0], expected)
+
+
+def test_final_layer_uses_direct_time_rows_without_modality_offsets():
+    layer = FinalLayer(
+        hidden_size=2,
+        timestep_dim=1,
+        video_output_dim=1,
+        audio_output_dim=1,
+        dtype=torch.float32,
+    )
+
+    class FixedAdaLN(nn.Module):
+        def forward(self, timestep_embeddings):
+            del timestep_embeddings
+            shift = torch.tensor([[10.0, 0.0], [20.0, 0.0]])
+            scale = torch.zeros_like(shift)
+            return shift, scale
+
+    layer.norm = nn.Identity()
+    layer.adaln_proj = FixedAdaLN()
+    with torch.no_grad():
+        layer.video_out.weight.copy_(torch.tensor([[1.0, 0.0]]))
+        layer.video_out.bias.zero_()
+        layer.audio_out.weight.copy_(torch.tensor([[1.0, 0.0]]))
+        layer.audio_out.bias.zero_()
+
+    video, audio = layer(
+        torch.zeros(1, 4, 2),
+        torch.zeros(2, 1),
+        video_slice=slice(2, 4),
+        audio_slice=slice(0, 2),
+        video_timestep_index=1,
+        audio_timestep_index=0,
+    )
+
+    torch.testing.assert_close(video, torch.full((1, 2, 1), 20.0))
+    torch.testing.assert_close(audio, torch.full((1, 2, 1), 10.0))
+
+
+def test_model_returns_native_positive_outputs_without_comfy_sign_or_audio_slope():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+
+    class FixedFinal(nn.Module):
+        def forward(
+            self,
+            hidden_states,
+            timestep_embeddings,
+            *,
+            video_slice,
+            audio_slice,
+            video_timestep_index,
+            audio_timestep_index,
+        ):
+            del timestep_embeddings, video_timestep_index, audio_timestep_index
+            batch = hidden_states.shape[0]
+            return (
+                torch.full((batch, video_slice.stop - video_slice.start, 96), 3.0),
+                torch.full((batch, audio_slice.stop - audio_slice.start, 32), 4.0),
+            )
+
+    model.final_layer = FixedFinal()
+
+    output = model(**_t2_inputs(batch_size=1))
+
+    torch.testing.assert_close(output.video, torch.full_like(output.video, 3.0))
+    torch.testing.assert_close(output.audio, torch.full_like(output.audio, 4.0))
+
+
+def test_block_swap_runs_wait_device_assertion_forward_and_submit_in_order(monkeypatch):
+    events = []
+
+    class FakeOffloader:
+        def __init__(self, blocks, device):
+            self.blocks = blocks
+            self.device = device
+
+        def prepare_block_devices_before_forward(self, blocks):
+            events.append("prepare")
+            for block in blocks:
+                block.to(self.device)
+
+        def wait_for_block(self, index):
+            events.append(f"wait:{index}")
+
+        def submit_move_blocks_forward(self, blocks, index):
+            assert blocks is self.blocks
+            events.append(f"submit:{index}")
+
+        def set_forward_only(self, value):
+            events.append(f"forward_only:{value}")
+
+    captured = {}
+
+    def fake_create_offloader(block_type, blocks, num_blocks, blocks_to_swap, config):
+        captured.update(
+            block_type=block_type,
+            blocks=blocks,
+            num_blocks=num_blocks,
+            blocks_to_swap=blocks_to_swap,
+            config=config,
+        )
+        return FakeOffloader(blocks, config.device)
+
+    monkeypatch.setattr("musubi_tuner.minimax_h3.model.create_offloader", fake_create_offloader)
+    model = MiniMaxH3Model(_tiny_config(num_layers=4), dtype=torch.float32)
+    model.blocks[0].register_buffer("required_scale", torch.ones(1))
+    for index, block in enumerate(model.blocks):
+        block.register_forward_pre_hook(lambda module, args, index=index: events.append(f"forward:{index}"))
+    config = BlockSwapConfig(device=torch.device("cpu"), supports_backward=True)
+
+    model.enable_block_swap(1, config)
+    model.move_to_device_except_swap_blocks(torch.device("cpu"))
+    model.prepare_block_swap_before_forward()
+    model.switch_block_swap_for_inference()
+    model.switch_block_swap_for_training()
+    events.clear()
+    model(**_t2_inputs(batch_size=1))
+
+    assert captured["block_type"] == "minimax-h3"
+    assert captured["num_blocks"] == 4
+    assert captured["blocks_to_swap"] == 1
+    assert events == [
+        "wait:0",
+        "forward:0",
+        "submit:0",
+        "wait:1",
+        "forward:1",
+        "submit:1",
+        "wait:2",
+        "forward:2",
+        "submit:2",
+        "wait:3",
+        "forward:3",
+        "submit:3",
+    ]
+    assert model.blocks[0].required_scale.device.type == "cpu"
+
+
+def test_gradient_checkpointing_interface_toggles_both_flags():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+
+    model.enable_gradient_checkpointing(activation_cpu_offloading=True)
+    assert model.gradient_checkpointing is True
+    assert model.activation_cpu_offloading is True
+    model.disable_gradient_checkpointing()
+    assert model.gradient_checkpointing is False
+    assert model.activation_cpu_offloading is False
+
+
+def test_gradient_checkpointed_forward_and_backward_recompute_the_same_block():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32).train()
+    model.enable_gradient_checkpointing()
+
+    output = model(**_t2_inputs(batch_size=1))
+    (output.video.square().mean() + output.audio.square().mean()).backward()
+
+    assert model.blocks[0].attn.qkv_proj.weight.grad is not None
+
+
+def test_block_device_assertion_catches_parameters_left_off_execution_device():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    model._execution_device = torch.device("meta")
+
+    with pytest.raises(RuntimeError, match=r"parameter.*cpu.*expected meta after wait"):
+        model._assert_block_device(model.blocks[0], 0)
+
+
+def test_checkpoint_loader_can_require_exact_published_dtypes(tmp_path: Path):
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.empty(2, 2, dtype=torch.float32))
+
+    checkpoint = tmp_path / "wrong-dtype.safetensors"
+    save_file({"weight": torch.zeros(2, 2, dtype=torch.bfloat16)}, checkpoint)
+
+    with pytest.raises(ValueError, match=r"dtype_mismatches.*expected torch.float32.*torch.bfloat16"):
+        load_safetensors_module(
+            Tiny,
+            [checkpoint],
+            device="cpu",
+            dtype=None,
+            strict_dtype=True,
+        )
+
+
+def test_checkpoint_loader_rejects_quantized_weight_pairs_in_r1(tmp_path: Path):
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(2, 2, bias=False)
+
+    checkpoint = tmp_path / "quantized.safetensors"
+    save_file(
+        {
+            "linear.weight": torch.zeros(2, 2, dtype=torch.int8),
+            "linear.weight_scale": torch.ones(1),
+        },
+        checkpoint,
+    )
+
+    with pytest.raises(ValueError, match="deferred to R2"):
+        load_safetensors_module(Tiny, [checkpoint], device="cpu", dtype=None)
