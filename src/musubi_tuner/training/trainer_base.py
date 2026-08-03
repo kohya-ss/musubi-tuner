@@ -39,6 +39,7 @@ from diffusers.optimization import (
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.dataset.architectures import round_down_frame_count
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
@@ -104,7 +105,7 @@ class NetworkTrainer:
         self.blocks_to_swap = None
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
-        self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
+        self.vae_frame_stride = 4  # legacy frame-grid fallback; some architectures set 1 or use a custom formula
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
 
     # TODO 他のスクリプトと共通化する
@@ -909,8 +910,7 @@ class NetworkTrainer:
         width = (width // 8) * 8
         height = (height // 8) * 8
 
-        # 1, 5, 9, 13, ... For HunyuanVideo and Wan2.1
-        frame_count = (frame_count - 1) // self.vae_frame_stride * self.vae_frame_stride + 1
+        frame_count = round_down_frame_count(frame_count, self.architecture, self.vae_frame_stride)
 
         if self.i2v_training:
             image_path = sample_parameter.get("image_path", None)

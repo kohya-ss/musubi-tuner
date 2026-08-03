@@ -57,7 +57,7 @@
 - Produces: `ARCHITECTURE_MINIMAX_H3`, `ARCHITECTURE_MINIMAX_H3_FULL`, and `round_down_frame_count(frame_count: int, architecture: str, vae_frame_stride: int) -> int`.
 - Produces: `VideoDataset.TARGET_FPS_MINIMAX_H3 == 24.0` and `BucketSelector.RESOLUTION_STEPS_MINIMAX_H3 == 32`.
 
-- [ ] **Step 1: Write failing registration and helper tests**
+- [x] **Step 1: Write failing registration and helper tests**
 
 ```python
 def test_h3_architecture_and_bucket_step():
@@ -78,13 +78,13 @@ def test_frame_helper_has_no_default_stride_and_preserves_stride_one():
     assert round_down_frame_count(8, ARCHITECTURE_QWEN_IMAGE, 1) == 8
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_dataset.py -v`
 
 Expected: collection or assertion failure because H3 constants and `round_down_frame_count` do not exist.
 
-- [ ] **Step 3: Implement the shared registration and required-argument helper**
+- [x] **Step 3: Implement the shared registration and required-argument helper**
 
 ```python
 ARCHITECTURE_MINIMAX_H3 = "mmh3"
@@ -101,17 +101,17 @@ def round_down_frame_count(frame_count: int, architecture: str, vae_frame_stride
 
 Import the H3 constant in `bucket.py`, register step 32, add `TARGET_FPS_MINIMAX_H3 = 24.0`, and replace all three inline frame expressions with explicit calls that pass `self.vae_frame_stride`.
 
-- [ ] **Step 4: Add construction and call-site regression tests**
+- [x] **Step 4: Add construction and call-site regression tests**
 
 Patch only external media probing in the test, construct an H3 `VideoDataset`, and assert target FPS 24 plus target frame preservation. Exercise the `frame_extraction="full"` normalization and `NetworkTrainer.sample_image_inference` normalization through small test subclasses so the three call sites cannot drift.
 
-- [ ] **Step 5: Run focused and existing dataset tests**
+- [x] **Step 5: Run focused and existing dataset tests**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_dataset.py tests/test_ideogram4_synthetic.py -v`
 
 Expected: PASS, including stride-one regressions.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add src/musubi_tuner/dataset/architectures.py src/musubi_tuner/dataset/bucket.py src/musubi_tuner/dataset/image_video_dataset.py src/musubi_tuner/training/trainer_base.py tests/test_minimax_h3_dataset.py
