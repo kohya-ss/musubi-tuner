@@ -15,8 +15,9 @@
 - Supported tasks are `t2va`, `fl2va`, and JSONL-only `ref2va`.
 - Target video frames use `F = 17 * n + 5`; target audio latent length uses exact integer arithmetic `A = (10 * F + 3) // 6`.
 - Cache keys must follow the repository's `latents_` and `varlen_` collation contracts exactly.
-- Batch size is not forced to one; structurally incompatible multi-item buckets fail in a post-build preflight before model loading.
-- Training uses independent video/audio shifts, a shared scalar noise amount per replicated batch, raw dataward velocity targets, and unweighted mean MSE.
+- Every H3 dataset uses `batch_size = 1`; gradient accumulation is the R1 effective-batch mechanism.
+- Training uses independent video/audio shifts, one scalar noise amount for the single item, raw dataward velocity targets, and unweighted mean MSE.
+- Ported model code is derived from Apache-2.0 Diffusers PR #14355 at pinned commit `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`; ComfyUI is validation-only.
 - BF16 block swap is required for both training and inference.
 - Every production behavior is introduced through a red-green-refactor test cycle.
 
@@ -38,7 +39,7 @@
 - `src/musubi_tuner/minimax_h3/sampling.py`: paired schedules, joint denoising, decode, and mux helpers.
 - `src/musubi_tuner/minimax_h3_cache_latents.py`: dual-VAE cache command.
 - `src/musubi_tuner/minimax_h3_cache_text_encoder_outputs.py`: multimodal Qwen cache command.
-- `src/musubi_tuner/minimax_h3_train_network.py`: dataset preflight, trainer hooks, CLI, and LoRA target contract.
+- `src/musubi_tuner/minimax_h3_train_network.py`: dataset batch-size gate, trainer hooks, CLI, and LoRA target contract.
 - `src/musubi_tuner/minimax_h3_generate_video.py`: standalone T2VA/FL2VA/Ref2VA generation.
 - Root `minimax_h3_*.py` files: thin module entrypoint wrappers.
 - `src/musubi_tuner/networks/lora_minimax_h3.py`: H3 LoRA include/exclude policy.
@@ -218,9 +219,9 @@ Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_vae.py -v`
 
 Expected: import failure because the H3 VAE modules do not exist.
 
-- [x] **Step 3: Port the released modules with a narrow compatibility layer**
+- [x] **Step 3: Adapt the released modules from Apache-compatible sources**
 
-Port the merged ComfyUI implementations at commit `57500fc5bc92566a63f2046824f522cd55c335ca` into native PyTorch modules. Replace Comfy operation factories with ordinary `torch.nn` construction, preserve parameter names needed by the published checkpoints, and keep normalization constants at the encode/decode boundary.
+Adapt the video and audio autoencoders from Diffusers PR #14355 at commit `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc` and the audio module's documented DAC/BigVGAN/alias-free sources. Preserve parameter names needed by the published checkpoints and keep normalization constants at the encode/decode boundary. ComfyUI may be used only for numerical comparison, not as implementation source.
 
 ```python
 @torch.no_grad()
@@ -417,7 +418,7 @@ git commit -m "feat: pack MiniMax-H3 joint modality rows"
 
 - [x] **Step 1: Write failing tiny-model forward tests**
 
-Instantiate a reduced config with widths divisible by its head count while keeping separate text/video/audio projections. Assert output target slices reconstruct video and audio shapes, block AdaLN respects three modalities, FinalLayer respects one modality, and a two-sample compatible T2VA batch forwards without a batch-size guard.
+Instantiate a reduced config with widths divisible by its head count while keeping separate text/video/audio projections. Assert output target slices reconstruct video and audio shapes, block AdaLN respects three modalities, FinalLayer respects one modality, structural tensors retain their batch axes, and `B != 1` is rejected.
 
 - [x] **Step 2: Run model tests and verify RED**
 
@@ -425,9 +426,9 @@ Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_model.py -v`
 
 Expected: missing model module.
 
-- [x] **Step 3: Port the merged BF16 transformer**
+- [x] **Step 3: Adapt the BF16 transformer from Diffusers**
 
-Port the architecture from ComfyUI commit `57500fc5bc92566a63f2046824f522cd55c335ca`, preserving checkpoint parameter names and the exact refiner, attention, MLP, AdaLN, rotary, and output-head math. Use repository attention helpers for `torch`, `flash`, `flash3`, `sageattn`, and `xformers` only where their semantics match.
+Adapt `transformer_minimax_h3.py` from Diffusers PR #14355 at commit `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`, preserving published checkpoint parameter names and the exact refiner, attention, MLP, AdaLN, rotary, and output-head math. Use repository attention helpers for `torch`, `flash`, `flash3`, `sageattn`, and `xformers` only where their semantics match. ComfyUI remains an independent numerical reference.
 
 ```python
 @dataclass(frozen=True)
@@ -473,15 +474,15 @@ git commit -m "feat: add MiniMax-H3 BF16 transformer"
 
 **Interfaces:**
 - Consumes: model, cache, and packing APIs from Tasks 2-7.
-- Produces: `MiniMaxH3NetworkTrainer`, `validate_h3_dataset_batches`, H3 CLI arguments, and LoRA module creation compatible with the common network loader.
+- Produces: `MiniMaxH3NetworkTrainer`, `validate_h3_dataset_batch_size`, H3 CLI arguments, and LoRA module creation compatible with the common network loader.
 
-- [x] **Step 1: Write failing preflight tests**
+- [x] **Step 1: Write failing batch-size gate tests**
 
-Build synthetic bucket managers backed by tiny safetensors. Assert every item in a multi-item bucket is compared, not only the current epoch partition. Reject mismatched text length, token-tag contents, task, ordered roles, shapes, packed rows, rotary inputs, and a per-sample timestep pool. Error text must include dataset index, bucket, cache paths, and conflicting fields.
+Build synthetic dataset managers without cache files. Accept only `batch_size = 1`; reject any other configured value before model loading with the dataset index and a gradient-accumulation recommendation. Assert the gate performs no cache reads.
 
 - [x] **Step 2: Write failing process/loss tests**
 
-Use a tiny fake transformer and real tensors. Assert one scalar `u` is replicated across a compatible batch, video/audio noises are independently sampled, model times use shifted `1-sigma`, targets are `latents-noise`, condition augmentation uses fresh per-sample/per-step noise with deterministic condition resets, and loss is unweighted `mean(video_mse)+mean(audio_mse)` through `DiTOutput.extra`.
+Use a tiny fake transformer and real tensors at `B=1`. Assert video/audio noises are independently sampled, model times use shifted `1-sigma`, targets are `latents-noise`, condition augmentation uses fresh per-step noise with deterministic condition resets, and loss is unweighted `mean(video_mse)+mean(audio_mse)` through `DiTOutput.extra`. Assert runtime calls reject `B != 1`.
 
 - [x] **Step 3: Run trainer tests and verify RED**
 
@@ -489,9 +490,9 @@ Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_training.py -v`
 
 Expected: missing H3 trainer module.
 
-- [x] **Step 4: Implement CLI validation and post-build preflight**
+- [x] **Step 4: Implement CLI validation and the dataset batch-size gate**
 
-Accept only uniform timestep sampling, `weighting_scheme=none`, and discrete flow shift 1 in the generic scheduler. Add `--h3_shift_video 12.0`, `--h3_shift_audio 3.0`, `--h3_visual_cond_clean 0.999`, and `--h3_audio_cond_clean 1.0`. Override `_build_dataset`, call `super()`, then inspect safetensors headers plus token tags before returning.
+Accept only uniform timestep sampling, `weighting_scheme=none`, and discrete flow shift 1 in the generic scheduler. Add `--h3_shift_video 12.0`, `--h3_shift_audio 3.0`, `--h3_visual_cond_clean 0.999`, and `--h3_audio_cond_clean 1.0`. Override `_build_dataset`, call `super()`, then reject any H3 dataset whose configured batch size is not one without opening safetensors.
 
 - [x] **Step 5: Implement dual-modality trainer hooks**
 
@@ -589,7 +590,7 @@ Expected: all existing and H3 tests pass without new warnings.
 
 - [ ] **Step 3: Run published-artifact smoke validation**
 
-Use `Comfy-Org/MiniMax-H3` BF16 transformer, video VAE, audio VAE, and matching Qwen3-VL artifacts. Validate strict load, one tiny T2VA forward at batch 2, one LoRA forward/backward with block swap, and one short joint AV sample. The acceptance run does not add a batch-size matrix or repeat all three tasks at multiple batch sizes.
+Use `Comfy-Org/MiniMax-H3` BF16 transformer, video VAE, audio VAE, and matching Qwen3-VL artifacts. Validate strict load, one tiny T2VA forward at batch 1, one LoRA forward/backward with block swap, and one short joint AV sample. The acceptance run does not add a batch-size matrix or repeat all three tasks at multiple batch sizes.
 
 Published-header validation on 2026-08-03 found zero missing, unexpected, shape-mismatched, or dtype-mismatched tensors in both BF16 transformers, and zero key/shape mismatches in the video VAE, audio VAE, and BF16 Qwen3-VL-32B text encoder. Full tensor-body forward validation remains open because the approximately 120 GB artifact set is not present locally.
 
@@ -626,9 +627,9 @@ Update PR #1018 with the implemented scope, test commands/results, published-art
 - Modify: `docs/minimax_h3.md`
 - Modify: `docs/superpowers/specs/2026-08-03-minimax-h3-support-design.md`
 
-- [x] **Step 1: Make single-item preflight proportional**
+- [x] **Step 1: Replace structural preflight with the strict R1 gate**
 
-Read only latent-cache task metadata for effective `batch_size=1`. Build full fingerprints only for replicated buckets, replace token-tag tuples with SHA-256 digests, and compare candidates without a dataset-wide fingerprint cache.
+Delete structural fingerprint construction and all multi-item compatibility machinery. Require configured dataset `batch_size = 1` without opening cache files; keep runtime/model defense-in-depth checks and explicit structural batch axes.
 
 - [x] **Step 2: Remove repeated layout work without assuming one global layout**
 
@@ -642,4 +643,8 @@ Register `rope.inv_freq` as an empty checkpoint-owned buffer. Replace gate conca
 
 Give training and sampling tests their own `src` path setup. Record the equal-modality loss policy, retain the intentional T2VA-to-FL2VA base-family mapping, and document the two sources of non-bitwise ComfyUI parity.
 
-- [x] **Step 5: Run complete verification, commit, push, and refresh PR #1018**
+- [x] **Step 5: Audit and record Apache-compatible provenance**
+
+Pin Diffusers PR #14355 at `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`, map each ported module to its source file, and add retained Apache-2.0 headers. Rewrite the video VAE from the Diffusers implementation while preserving published checkpoint names. Treat ComfyUI only as an independent numerical reference. Remove operation-factory aliases and unrelated framework comments.
+
+- [x] **Step 6: Run complete verification, commit, push, and refresh PR #1018**

@@ -153,7 +153,7 @@ def test_joint_sampler_uses_native_dataward_predictions_and_each_sigma_delta():
         transformer,
         layout=_layout(),
         text_hidden_states=torch.zeros(1, 3, 12),
-        text_token_tags=torch.tensor([1, 0, 1]),
+        text_token_tags=torch.tensor([[1, 0, 1]]),
         initial_video=initial_video,
         initial_audio=initial_audio,
         steps=2,

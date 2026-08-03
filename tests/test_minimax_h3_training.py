@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -9,191 +8,35 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from musubi_tuner import minimax_h3_train_network as h3_train_network
-from musubi_tuner.dataset.bucket import BucketBatchManager
-from musubi_tuner.dataset.image_video_dataset import ItemInfo
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3_train_network import (
     MiniMaxH3NetworkTrainer,
     minimax_h3_setup_parser,
-    validate_h3_dataset_batches,
+    validate_h3_dataset_batch_size,
 )
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.training.trainer_base import DiTOutput
 
-BUCKET = (32, 32, 5)
 
-
-def _write_item(
-    root: Path,
-    name: str,
-    *,
-    task: str = "t2va",
-    target_shape: tuple[int, int, int] = (2, 4, 4),
-    token_tags: tuple[int, ...] = (1, 0, 1),
-    references: tuple[tuple[str, tuple[int, ...]], ...] = (),
-) -> ItemInfo:
-    latent_path = root / f"{name}_00000-005_32x32_mmh3.safetensors"
-    text_path = root / f"{name}_00000-005_mmh3_te.safetensors"
-    frames, height, width = target_shape
-    latent_tensors = {
-        f"latents_{frames}x{height}x{width}_bfloat16": torch.zeros(24, frames, height, width, dtype=torch.bfloat16),
-        "latents_audio_32x2x8_bfloat16": torch.zeros(32, 2, 8, dtype=torch.bfloat16),
-    }
-    reference_kinds = []
-    for role, shape in references:
-        if role.endswith("_audio"):
-            latent_tensors[f"latents_{role}_32x2x{shape[-1]}_bfloat16"] = torch.zeros(shape, dtype=torch.bfloat16)
-        else:
-            latent_tensors[f"latents_{role}_{'x'.join(map(str, shape[1:]))}_bfloat16"] = torch.zeros(shape, dtype=torch.bfloat16)
-        if role.startswith("ref_"):
-            index = int(role.split("_")[1])
-            while len(reference_kinds) <= index:
-                reference_kinds.append(None)
-            kind = role.rsplit("_", 1)[1]
-            if {kind, reference_kinds[index]} == {"audio", "video"}:
-                reference_kinds[index] = "video+audio"
-            else:
-                reference_kinds[index] = kind
-    save_file(
-        latent_tensors,
-        str(latent_path),
-        metadata={"task": task, "reference_kinds": json.dumps(reference_kinds, separators=(",", ":"))},
-    )
-    tags = torch.tensor(token_tags, dtype=torch.int64)
-    save_file(
-        {
-            "varlen_mmh3_hidden_states_bfloat16": torch.zeros(len(token_tags), 5120, dtype=torch.bfloat16),
-            "varlen_mmh3_token_tags_int64": tags,
-        },
-        str(text_path),
-        metadata={"task": task},
-    )
-    item = ItemInfo(name, "", (32, 32), BUCKET, frame_count=5, latent_cache_path=str(latent_path))
-    item.text_encoder_output_cache_path = str(text_path)
-    return item
-
-
-def _dataset_group(items, *, batch_size: int = 2, num_timestep_buckets: int | None = None):
-    manager = BucketBatchManager({BUCKET: list(items)}, batch_size, num_timestep_buckets=num_timestep_buckets)
-    return SimpleNamespace(datasets=[SimpleNamespace(batch_manager=manager)])
-
-
-def test_preflight_scans_every_item_in_a_bucket_not_only_the_initial_partition(tmp_path):
-    first = _write_item(tmp_path, "first")
-    second = _write_item(tmp_path, "second")
-    incompatible_third = _write_item(tmp_path, "third", token_tags=(1, 0, 1, 1))
-
-    with pytest.raises(ValueError) as error:
-        validate_h3_dataset_batches(_dataset_group([first, second, incompatible_third]))
-
-    message = str(error.value)
-    assert "dataset 0" in message
-    assert str(BUCKET) in message
-    assert str(first.latent_cache_path) in message
-    assert str(incompatible_third.text_encoder_output_cache_path) in message
-    assert "text_length" in message
-
-
-@pytest.mark.parametrize(
-    ("mutated", "conflicting_field"),
-    [
-        ({"token_tags": (1, 1, 1)}, "token_tags"),
-        ({"target_shape": (2, 4, 6)}, "packed_rows"),
-        ({"target_shape": (2, 2, 8)}, "rotary_inputs"),
-        (
-            {
-                "task": "ref2va",
-                "references": (
-                    ("ref_000_image", (24, 1, 4, 4)),
-                    ("ref_001_audio", (32, 2, 8)),
-                ),
-            },
-            "task",
-        ),
-    ],
-)
-def test_preflight_reports_structural_conflicts(tmp_path, mutated, conflicting_field):
-    baseline = _write_item(tmp_path, "baseline")
-    changed = _write_item(tmp_path, "changed", **mutated)
-
-    with pytest.raises(ValueError, match=conflicting_field):
-        validate_h3_dataset_batches(_dataset_group([baseline, changed]))
-
-
-def test_preflight_accepts_a_structurally_compatible_replicated_bucket(tmp_path):
-    items = [_write_item(tmp_path, name) for name in ("first", "second", "third")]
-
-    validate_h3_dataset_batches(_dataset_group(items))
-
-
-def test_preflight_rejects_a_per_sample_timestep_pool_for_replicated_batches(tmp_path):
-    items = [_write_item(tmp_path, name) for name in ("first", "second")]
-
-    with pytest.raises(ValueError, match=r"dataset 0.*bucket.*num_timestep_buckets"):
-        validate_h3_dataset_batches(_dataset_group(items, num_timestep_buckets=4))
-
-
-def test_preflight_checks_the_authoritative_task_even_for_single_item_buckets(tmp_path):
-    item = _write_item(tmp_path, "single", task="t2va")
-
-    with pytest.raises(ValueError, match=r"dataset 0.*task.*ref2va.*t2va"):
-        validate_h3_dataset_batches(_dataset_group([item], batch_size=1), expected_task="ref2va")
-
-
-def test_preflight_checks_every_items_task_when_dataset_batch_size_is_one(tmp_path):
-    matching = _write_item(tmp_path, "matching", task="t2va")
-    mismatched = _write_item(
-        tmp_path,
-        "mismatched",
-        task="ref2va",
-        references=(("ref_000_image", (24, 1, 4, 4)),),
+def _dataset_group(*batch_sizes: int):
+    return SimpleNamespace(
+        datasets=[SimpleNamespace(batch_manager=SimpleNamespace(batch_size=batch_size)) for batch_size in batch_sizes]
     )
 
-    with pytest.raises(ValueError) as error:
-        validate_h3_dataset_batches(_dataset_group([matching, mismatched], batch_size=1), expected_task="t2va")
 
-    message = str(error.value)
-    assert "dataset 0" in message
-    assert "--task t2va" in message
-    assert "cache task ref2va" in message
-    assert str(mismatched.latent_cache_path) in message
+def test_h3_dataset_accepts_batch_size_one_without_inspecting_cache_items():
+    validate_h3_dataset_batch_size(_dataset_group(1, 1))
 
 
-def test_preflight_skips_full_fingerprints_for_single_item_batches(tmp_path, monkeypatch):
-    items = [_write_item(tmp_path, name, task="t2va") for name in ("first", "second")]
-    opened_paths = []
-    original_safe_open = h3_train_network.safe_open
-
-    def fail_if_called(_item):
-        pytest.fail("batch_size=1 must not construct a structural fingerprint")
-
-    def record_safe_open(path, *args, **kwargs):
-        opened_paths.append(path)
-        return original_safe_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(h3_train_network, "_fingerprint_item", fail_if_called)
-    monkeypatch.setattr(h3_train_network, "safe_open", record_safe_open)
-
-    validate_h3_dataset_batches(_dataset_group(items, batch_size=1), expected_task="t2va")
-
-    assert opened_paths == [item.latent_cache_path for item in items]
-
-
-def test_batch_fingerprint_uses_a_fixed_size_token_tag_digest(tmp_path):
-    item = _write_item(tmp_path, "digest", token_tags=(1, 0, 1, 0, 1))
-
-    fingerprint = h3_train_network._fingerprint_item(item)
-
-    assert isinstance(fingerprint.token_tags_sha256, bytes)
-    assert len(fingerprint.token_tags_sha256) == 32
+def test_h3_dataset_rejects_real_batches_and_points_to_gradient_accumulation():
+    with pytest.raises(ValueError, match=r"dataset 1.*batch_size=2.*gradient accumulation"):
+        validate_h3_dataset_batch_size(_dataset_group(1, 2))
 
 
 class _Accelerator:
@@ -238,7 +81,7 @@ def _trainer_args(**overrides):
     return SimpleNamespace(**values)
 
 
-def _training_batch(batch_size: int = 2, *, text_length: int = 3):
+def _training_batch(batch_size: int = 1, *, text_length: int = 3):
     return {
         "latents_audio": torch.full((batch_size, 32, 2, 8), 4.0),
         "mmh3_hidden_states": [torch.full((text_length, 12), float(index)) for index in range(batch_size)],
@@ -289,12 +132,12 @@ def test_process_batch_uses_one_shared_base_time_and_independent_audio_noise(mon
     trainer.handle_model_specific_args(args)
     transformer = _RecordingTransformer()
     batch = _training_batch()
-    video_latents = torch.full((2, 24, 2, 4, 4), 5.0)
+    video_latents = torch.full((1, 24, 2, 4, 4), 5.0)
     video_noise = torch.full_like(video_latents, -2.0)
     real_randn_like = torch.randn_like
 
     def fixed_audio_noise(tensor, *positional, **kwargs):
-        if tuple(tensor.shape) == (2, 32, 2, 8):
+        if tuple(tensor.shape) == (1, 32, 2, 8):
             return torch.full_like(tensor, 3.0)
         return real_randn_like(tensor, *positional, **kwargs)
 
@@ -373,10 +216,10 @@ def test_condition_noise_restarts_per_role_uses_audio_seed_plus_one_and_changes_
     trainer.handle_model_specific_args(args)
     transformer = _RecordingTransformer()
     batch = _training_batch()
-    batch["latents_ref_000_image"] = torch.zeros(2, 24, 1, 4, 4)
-    batch["latents_ref_001_audio"] = torch.zeros(2, 32, 2, 8)
-    video_latents = torch.zeros(2, 24, 2, 4, 4)
-    seeds = iter((torch.tensor([100, 200]), torch.tensor([300, 400])))
+    batch["latents_ref_000_image"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["latents_ref_001_audio"] = torch.zeros(1, 32, 2, 8)
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    seeds = iter((torch.tensor([100]), torch.tensor([300])))
     monkeypatch.setattr(torch, "randint", lambda *args, **kwargs: next(seeds))
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
     monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
@@ -401,22 +244,18 @@ def test_condition_noise_restarts_per_role_uses_audio_seed_plus_one_and_changes_
     first_visual = first_call["visual_condition_latents"][0]
     first_audio = first_call["audio_condition_latents"][0]
     assert torch.equal(first_visual[0], 0.5 * _cpu_noise((24, 1, 4, 4), 100))
-    assert torch.equal(first_visual[1], 0.5 * _cpu_noise((24, 1, 4, 4), 200))
     assert torch.equal(first_audio[0], 0.5 * _cpu_noise((32, 2, 8), 101))
-    assert torch.equal(first_audio[1], 0.5 * _cpu_noise((32, 2, 8), 201))
     assert not torch.equal(first_visual, second_call["visual_condition_latents"][0])
     assert not torch.equal(first_audio, second_call["audio_condition_latents"][0])
 
 
-def test_runtime_rejects_mismatched_token_tags_and_per_sample_timestep_values():
+def test_runtime_rejects_batch_size_above_one():
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args()
     trainer.handle_model_specific_args(args)
     video_latents = torch.zeros(2, 24, 2, 4, 4)
     batch = _training_batch()
-    batch["mmh3_token_tags"][1] = torch.tensor([1, 1, 1])
-
-    with pytest.raises(ValueError, match="token tags"):
+    with pytest.raises(ValueError, match=r"R1 requires batch_size=1"):
         trainer.process_batch(
             args,
             _Accelerator(),
@@ -432,9 +271,15 @@ def test_runtime_rejects_mismatched_token_tags_and_per_sample_timestep_values():
             0,
         )
 
+
+def test_runtime_rejects_more_than_one_timestep_for_the_single_item():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
     batch = _training_batch()
     batch["timesteps"] = [0.1, 0.2]
-    with pytest.raises(ValueError, match="per-sample timestep"):
+    with pytest.raises(ValueError, match="exactly one timestep"):
         trainer.process_batch(
             args,
             _Accelerator(),
@@ -632,7 +477,7 @@ def test_h3_lora_gets_gradients_with_checkpointing_and_block_swap(monkeypatch):
         video_latents=torch.randn(1, 24, 2, 4, 4),
         audio_latents=torch.randn(1, 32, 2, 8),
         text_hidden_states=torch.randn(1, 3, 12),
-        text_token_tags=torch.tensor([1, 0, 1]),
+        text_token_tags=torch.tensor([[1, 0, 1]]),
         layout=layout,
         model_t_video=torch.tensor(0.25),
         model_t_audio=torch.tensor(0.75),

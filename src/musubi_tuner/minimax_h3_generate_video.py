@@ -536,7 +536,7 @@ def run_generation(args: argparse.Namespace) -> Path:
     transformer.eval().requires_grad_(False)
 
     text_hidden_states = text_hidden_states.to(device=device, dtype=torch.bfloat16)
-    text_token_tags = text_token_tags.to(device)
+    text_token_tags = text_token_tags.unsqueeze(0).to(device)
     with tqdm(total=args.steps, desc="MiniMax-H3", unit="step") as progress:
         sample = sample_joint_av(
             transformer,

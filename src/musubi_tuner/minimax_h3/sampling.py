@@ -1,3 +1,22 @@
+# Copyright 2025 The MiniMax authors and The HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Adapted for Musubi from Hugging Face Diffusers PR #14355 at commit
+# abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc
+# (schedulers/scheduling_minimax_h3.py and modular_pipelines/minimax_h3/denoise.py).
+# ComfyUI is used only as an independent numerical reference.
+
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
@@ -146,8 +165,12 @@ def sample_joint_av(
         raise ValueError("MiniMax-H3 initial audio noise does not match the packed layout")
     if initial_video.shape[0] != initial_audio.shape[0]:
         raise ValueError("MiniMax-H3 initial video and audio batch sizes differ")
+    if initial_video.shape[0] != 1:
+        raise ValueError(f"MiniMax-H3 R1 requires batch_size=1, got {initial_video.shape[0]}")
     if text_hidden_states.shape[:2] != (initial_video.shape[0], layout.text_length):
         raise ValueError("MiniMax-H3 text hidden states do not match the sampling layout")
+    if text_token_tags.shape != (initial_video.shape[0], layout.text_length):
+        raise ValueError("MiniMax-H3 text token tags must preserve the [B,L] axes")
 
     schedule = build_shifted_schedule(
         steps,

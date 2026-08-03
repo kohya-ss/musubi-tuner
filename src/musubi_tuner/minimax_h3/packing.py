@@ -1,3 +1,22 @@
+# Copyright 2026 The MiniMax and HuggingFace Teams. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Adapted for Musubi from Hugging Face Diffusers PR #14355 at commit
+# abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc
+# (modular_pipelines/minimax_h3/packing.py and packing_ref2va.py).
+# ComfyUI is used only as an independent numerical reference.
+
 from __future__ import annotations
 
 import math
@@ -121,7 +140,7 @@ class H3TimestepRows:
     row_timestep_indices: torch.Tensor
     token_tags: torch.Tensor
     block_adaln_indices: torch.Tensor
-    block_segments: tuple[tuple[int, int, int], ...]
+    block_segments: tuple[tuple[tuple[int, int, int], ...], ...]
     video_timestep_index: int
     audio_timestep_index: int
 
@@ -356,15 +375,14 @@ def build_position_grid(layout: H3PackedLayout, *, device: torch.device | str | 
     )
     target_video = layout.target_video_segment
     positions[target_video.row_slice] = _video_grid(layout.target_video, cursor)
+    positions = positions.unsqueeze(0)
     return positions.to(device=device) if device is not None else positions
 
 
-def _shared_model_time(value: float | torch.Tensor, label: str) -> float:
+def _single_model_time(value: float | torch.Tensor, label: str) -> float:
     tensor = torch.as_tensor(value).detach().reshape(-1)
-    if tensor.numel() == 0:
-        raise ValueError(f"MiniMax-H3 {label} is empty")
-    if not torch.all(tensor == tensor[0]):
-        raise ValueError(f"MiniMax-H3 {label} must be shared across the replicated batch")
+    if tensor.numel() != 1:
+        raise ValueError(f"MiniMax-H3 R1 {label} must contain exactly one value")
     scalar = float(tensor[0].item())
     if not math.isfinite(scalar) or not 0.0 <= scalar <= 1.0:
         raise ValueError(f"MiniMax-H3 {label} must be finite and in [0,1], got {scalar}")
@@ -378,6 +396,18 @@ def _validate_clean_coefficient(value: float, label: str) -> float:
     return value
 
 
+def _build_modulation_segments(indices: torch.Tensor) -> tuple[tuple[int, int, int], ...]:
+    change_points = torch.nonzero(indices[1:] != indices[:-1], as_tuple=False).flatten() + 1
+    boundaries = torch.cat((indices.new_tensor([0]), change_points, indices.new_tensor([indices.numel()])))
+    return tuple(
+        tuple(row)
+        for row in torch.stack(
+            (boundaries[:-1], boundaries[1:], indices[boundaries[:-1]]),
+            dim=1,
+        ).tolist()
+    )
+
+
 def build_timestep_rows(
     layout: H3PackedLayout,
     *,
@@ -387,14 +417,14 @@ def build_timestep_rows(
     visual_condition_clean: float = 0.999,
     audio_condition_clean: float = 1.0,
 ) -> H3TimestepRows:
-    video_time = _shared_model_time(model_t_video, "video model time")
-    audio_time = _shared_model_time(model_t_audio, "audio model time")
+    video_time = _single_model_time(model_t_video, "video model time")
+    audio_time = _single_model_time(model_t_audio, "audio model time")
     visual_clean = _validate_clean_coefficient(visual_condition_clean, "visual condition clean coefficient")
     audio_clean = _validate_clean_coefficient(audio_condition_clean, "audio condition clean coefficient")
 
     text_token_tags = torch.as_tensor(text_token_tags)
-    if text_token_tags.dtype != torch.int64 or text_token_tags.shape != (layout.text_length,):
-        raise ValueError(f"MiniMax-H3 text token tags must be int64 [{layout.text_length}]")
+    if text_token_tags.dtype != torch.int64 or text_token_tags.shape != (1, layout.text_length):
+        raise ValueError(f"MiniMax-H3 text token tags must be int64 [1,{layout.text_length}]")
     if not torch.all((text_token_tags == 0) | (text_token_tags == 1)):
         raise ValueError("MiniMax-H3 text token tags may contain only 0 and 1")
     text_token_tags = text_token_tags.detach().cpu()
@@ -412,46 +442,22 @@ def build_timestep_rows(
 
     unique_values = sorted(set(segment_times.values()))
     timestep_index = {value: index for index, value in enumerate(unique_values)}
-    row_timesteps = torch.empty(layout.row_count, dtype=torch.float32)
-    row_timestep_indices = torch.empty(layout.row_count, dtype=torch.int64)
-    token_tags = torch.empty(layout.row_count, dtype=torch.int64)
+    row_timesteps = torch.empty((1, layout.row_count), dtype=torch.float32)
+    row_timestep_indices = torch.empty((1, layout.row_count), dtype=torch.int64)
+    token_tags = torch.empty((1, layout.row_count), dtype=torch.int64)
     for segment in layout.segments:
         value = segment_times[segment.role]
-        row_timesteps[segment.row_slice] = value
-        row_timestep_indices[segment.row_slice] = timestep_index[value]
+        row_timesteps[:, segment.row_slice] = value
+        row_timestep_indices[:, segment.row_slice] = timestep_index[value]
         if segment.kind == "text":
-            token_tags[segment.row_slice] = text_token_tags
+            token_tags[:, segment.row_slice] = text_token_tags
         elif segment.kind in {"visual_condition", "target_video"}:
-            token_tags[segment.row_slice] = 0
+            token_tags[:, segment.row_slice] = 0
         else:
-            token_tags[segment.row_slice] = 2
+            token_tags[:, segment.row_slice] = 2
 
     block_adaln_indices = 3 * row_timestep_indices + token_tags
-    change_points = (
-        torch.nonzero(
-            block_adaln_indices[1:] != block_adaln_indices[:-1],
-            as_tuple=False,
-        ).flatten()
-        + 1
-    )
-    boundaries = torch.cat(
-        (
-            block_adaln_indices.new_tensor([0]),
-            change_points,
-            block_adaln_indices.new_tensor([layout.row_count]),
-        )
-    )
-    block_segments = tuple(
-        tuple(row)
-        for row in torch.stack(
-            (
-                boundaries[:-1],
-                boundaries[1:],
-                block_adaln_indices[boundaries[:-1]],
-            ),
-            dim=1,
-        ).tolist()
-    )
+    block_segments = tuple(_build_modulation_segments(indices) for indices in block_adaln_indices)
 
     return H3TimestepRows(
         unique_timesteps=torch.tensor(unique_values, dtype=torch.float32),

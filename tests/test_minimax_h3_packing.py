@@ -170,23 +170,27 @@ def test_timestep_plan_preserves_text_tags_and_uses_final_layer_time_indices_dir
 
     plan = build_timestep_rows(
         layout,
-        text_token_tags=torch.tensor([1, 0, 1]),
-        model_t_video=torch.tensor([0.25, 0.25]),
-        model_t_audio=torch.tensor([0.75, 0.75]),
+        text_token_tags=torch.tensor([[1, 0, 1]]),
+        model_t_video=torch.tensor([0.25]),
+        model_t_audio=torch.tensor([0.75]),
         visual_condition_clean=0.9,
         audio_condition_clean=1.0,
     )
 
     torch.testing.assert_close(plan.unique_timesteps, torch.tensor([0.25, 0.75, 0.9]))
-    torch.testing.assert_close(plan.token_tags[:3], torch.tensor([1, 0, 1]))
-    torch.testing.assert_close(plan.block_adaln_indices[:3], torch.tensor([1, 0, 1]))
+    assert plan.row_timesteps.shape == (1, layout.row_count)
+    assert plan.row_timestep_indices.shape == (1, layout.row_count)
+    assert plan.token_tags.shape == (1, layout.row_count)
+    assert len(plan.block_segments) == 1
+    torch.testing.assert_close(plan.token_tags[0, :3], torch.tensor([1, 0, 1]))
+    torch.testing.assert_close(plan.block_adaln_indices[0, :3], torch.tensor([1, 0, 1]))
     condition = layout.segment("first")
     torch.testing.assert_close(
-        plan.block_adaln_indices[condition.start : condition.stop],
+        plan.block_adaln_indices[0, condition.start : condition.stop],
         torch.full((condition.row_count,), 6),
     )
     torch.testing.assert_close(
-        plan.block_adaln_indices[layout.target_audio_segment.start : layout.target_audio_segment.stop],
+        plan.block_adaln_indices[0, layout.target_audio_segment.start : layout.target_audio_segment.stop],
         torch.full((layout.target_audio_segment.row_count,), 5),
     )
     assert plan.video_timestep_index == 0
@@ -215,7 +219,8 @@ def test_position_grid_matches_full_fl2va_clock_and_does_not_advance_target_curs
     expected = torch.cat((text, first, last, audio, video))
 
     assert actual.dtype == torch.float64
-    torch.testing.assert_close(actual, expected)
+    assert actual.shape == (1, layout.row_count, 3)
+    torch.testing.assert_close(actual[0], expected)
 
 
 def test_position_grid_uses_the_full_five_frame_temporal_cycle():
@@ -228,7 +233,7 @@ def test_position_grid_uses_the_full_five_frame_temporal_cycle():
     )
 
     positions = build_position_grid(layout)
-    video_times = positions[layout.target_video_segment.row_slice, 0]
+    video_times = positions[0, layout.target_video_segment.row_slice, 0]
     spans = torch.tensor([1, 4, 4, 4, 4, 1, 4], dtype=torch.float64) * (5.0 / 3.0)
     expected = 1.0 + torch.cat((torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)))
 
@@ -267,8 +272,8 @@ def test_position_grid_matches_mixed_reference_cursor_order():
     target_video = _video_grid(TARGET_VIDEO, target_cursor)
     expected = torch.cat((text, image_grid, video_audio, video_grid, standalone_audio, target_audio, target_video))
 
-    torch.testing.assert_close(actual, expected)
-    assert torch.all(actual[layout.target_audio_segment.start : layout.target_audio_segment.stop, 0] >= target_cursor)
+    torch.testing.assert_close(actual[0], expected)
+    assert torch.all(actual[0, layout.target_audio_segment.start : layout.target_audio_segment.stop, 0] >= target_cursor)
 
 
 def test_target_rows_round_trip_back_to_video_and_audio_latents():
@@ -287,7 +292,7 @@ def test_target_rows_round_trip_back_to_video_and_audio_latents():
     torch.testing.assert_close(unpacked_audio, audio)
 
 
-def test_timestep_plan_rejects_per_sample_times_instead_of_using_the_first_item():
+def test_timestep_plan_rejects_more_than_one_time_for_r1():
     layout = build_h3_layout(
         task="t2va",
         text_length=1,
@@ -295,12 +300,12 @@ def test_timestep_plan_rejects_per_sample_times_instead_of_using_the_first_item(
         target_audio_frames=8,
     )
 
-    with pytest.raises(ValueError, match="shared across the replicated batch"):
+    with pytest.raises(ValueError, match="exactly one value"):
         build_timestep_rows(
             layout,
-            text_token_tags=torch.tensor([1]),
+            text_token_tags=torch.tensor([[1]]),
             model_t_video=torch.tensor([0.25, 0.5]),
-            model_t_audio=torch.tensor([0.75, 0.75]),
+            model_t_audio=torch.tensor([0.75]),
         )
 
 

@@ -55,12 +55,13 @@ def _t2_layout(text_length: int = 3):
     )
 
 
-def _t2_inputs(batch_size: int = 2, text_length: int = 3):
+def _t2_inputs(batch_size: int = 1, text_length: int = 3):
+    token_tags = torch.tensor([1, 0, 1][:text_length], dtype=torch.int64)
     return {
         "video_latents": torch.randn(batch_size, 24, 2, 4, 4),
         "audio_latents": torch.randn(batch_size, 32, 2, 8),
         "text_hidden_states": torch.randn(batch_size, text_length, 12),
-        "text_token_tags": torch.tensor([1, 0, 1][:text_length], dtype=torch.int64),
+        "text_token_tags": token_tags.unsqueeze(0).expand(batch_size, -1).clone(),
         "layout": _t2_layout(text_length),
         "model_t_video": torch.full((batch_size,), 0.25),
         "model_t_audio": torch.full((batch_size,), 0.75),
@@ -144,35 +145,11 @@ def test_published_transformer_metadata_is_parsed_strictly():
         )
 
 
-def test_tiny_model_forwards_a_compatible_two_sample_batch():
+def test_tiny_model_rejects_batch_size_above_one_in_r1():
     model = _tiny_model()
 
-    output = model(**_t2_inputs(batch_size=2))
-
-    assert output.video.shape == (2, 24, 2, 4, 4)
-    assert output.audio.shape == (2, 32, 2, 8)
-
-
-def test_two_sample_forward_matches_two_independent_single_sample_forwards():
-    torch.manual_seed(123)
-    model = _tiny_model(num_layers=1, training=False)
-    inputs = _t2_inputs(batch_size=2)
-
-    batched = model(**inputs)
-    singles = []
-    for index in range(2):
-        single_inputs = {
-            **inputs,
-            "video_latents": inputs["video_latents"][index : index + 1],
-            "audio_latents": inputs["audio_latents"][index : index + 1],
-            "text_hidden_states": inputs["text_hidden_states"][index : index + 1],
-            "model_t_video": inputs["model_t_video"][index : index + 1],
-            "model_t_audio": inputs["model_t_audio"][index : index + 1],
-        }
-        singles.append(model(**single_inputs))
-
-    torch.testing.assert_close(batched.video, torch.cat([output.video for output in singles]))
-    torch.testing.assert_close(batched.audio, torch.cat([output.audio for output in singles]))
+    with pytest.raises(ValueError, match=r"R1 requires batch_size=1"):
+        model(**_t2_inputs(batch_size=2))
 
 
 def test_model_reuses_rotary_state_for_the_same_layout(monkeypatch):
@@ -244,7 +221,7 @@ def test_model_accepts_ordered_ref2va_visual_and_audio_conditions():
         video_latents=torch.randn(1, 24, 2, 4, 4),
         audio_latents=torch.randn(1, 32, 2, 8),
         text_hidden_states=torch.randn(1, 2, 12),
-        text_token_tags=torch.tensor([0, 1]),
+        text_token_tags=torch.tensor([[0, 1]]),
         layout=layout,
         model_t_video=0.25,
         model_t_audio=0.75,
@@ -277,7 +254,7 @@ def test_model_rejects_condition_geometry_even_when_the_packed_row_count_matches
             video_latents=torch.randn(1, 24, 2, 4, 4),
             audio_latents=torch.randn(1, 32, 2, 8),
             text_hidden_states=torch.randn(1, 1, 12),
-            text_token_tags=torch.tensor([1]),
+            text_token_tags=torch.tensor([[1]]),
             layout=layout,
             model_t_video=0.25,
             model_t_audio=0.75,
@@ -285,12 +262,12 @@ def test_model_rejects_condition_geometry_even_when_the_packed_row_count_matches
         )
 
 
-def test_model_rejects_different_text_tag_plans_across_batch():
+def test_model_requires_text_token_tags_to_keep_the_batch_axis():
     model = _tiny_model(num_layers=1)
-    inputs = _t2_inputs(batch_size=2)
-    inputs["text_token_tags"] = torch.tensor([[1, 0, 1], [1, 1, 1]], dtype=torch.int64)
+    inputs = _t2_inputs(batch_size=1)
+    inputs["text_token_tags"] = torch.tensor([1, 0, 1], dtype=torch.int64)
 
-    with pytest.raises(ValueError, match="identical text token tags"):
+    with pytest.raises(ValueError, match=r"\[1,3\]"):
         model(**inputs)
 
 
@@ -353,8 +330,8 @@ def test_segment_modulation_preserves_trainable_adaln_gradients():
     update = torch.randn(1, 4, 3, requires_grad=True)
     gate = torch.randn(2, 3, requires_grad=True)
 
-    modulated = h3_model._mod_scale_shift(source + 0.0, shift, scale, segments)
-    gated = h3_model._mod_gate(residual, update, gate, segments)
+    modulated = h3_model._mod_scale_shift(source + 0.0, shift, scale, (segments,))
+    gated = h3_model._mod_gate(residual, update, gate, (segments,))
     (modulated.square().mean() + gated.square().mean()).backward()
 
     for tensor in (source, shift, scale, residual, update, gate):

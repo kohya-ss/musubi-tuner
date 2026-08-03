@@ -1,3 +1,22 @@
+# Copyright 2025 The MiniMax Team and The HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Adapted for Musubi from Hugging Face Diffusers PR #14355 at commit
+# abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc
+# (models/transformers/transformer_minimax_h3.py).
+# ComfyUI is used only as an independent numerical reference.
+
 from __future__ import annotations
 
 import json
@@ -319,11 +338,14 @@ def _mod_scale_shift(
     hidden_states: torch.Tensor,
     shift: torch.Tensor,
     scale: torch.Tensor,
-    segments: tuple[tuple[int, int, int], ...],
+    batch_segments: tuple[tuple[tuple[int, int, int], ...], ...],
 ) -> torch.Tensor:
     # Callers pass a fresh norm output; these disjoint slice updates retain trainable AdaLN gradients.
-    for start, stop, row in segments:
-        hidden_states[:, start:stop].mul_(1.0 + scale[row]).add_(shift[row])
+    if len(batch_segments) != hidden_states.shape[0]:
+        raise ValueError("MiniMax-H3 modulation plans must preserve the batch axis")
+    for batch_index, segments in enumerate(batch_segments):
+        for start, stop, row in segments:
+            hidden_states[batch_index, start:stop].mul_(1.0 + scale[row]).add_(shift[row])
     return hidden_states
 
 
@@ -331,11 +353,14 @@ def _mod_gate(
     residual: torch.Tensor,
     update: torch.Tensor,
     gate: torch.Tensor,
-    segments: tuple[tuple[int, int, int], ...],
+    batch_segments: tuple[tuple[tuple[int, int, int], ...], ...],
 ) -> torch.Tensor:
+    if len(batch_segments) != residual.shape[0]:
+        raise ValueError("MiniMax-H3 gate plans must preserve the batch axis")
     output = residual.clone()
-    for start, stop, row in segments:
-        output[:, start:stop].add_(update[:, start:stop] * gate[row])
+    for batch_index, segments in enumerate(batch_segments):
+        for start, stop, row in segments:
+            output[batch_index, start:stop].add_(update[batch_index, start:stop] * gate[row])
     return output
 
 
@@ -368,7 +393,7 @@ class DiTBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         timestep_embeddings: torch.Tensor,
-        modulation_segments: tuple[tuple[int, int, int], ...],
+        modulation_segments: tuple[tuple[tuple[int, int, int], ...], ...],
         rotation_table: torch.Tensor,
     ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(timestep_embeddings)
@@ -577,18 +602,20 @@ class MiniMaxH3Model(nn.Module):
 
     def _rotation_table(self, position_ids: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         positions = position_ids.to(device=self.rope.inv_freq.device, dtype=torch.float32)
-        per_axis = positions.unsqueeze(-1) * self.rope.inv_freq.reshape(1, 1, -1)
-        temporal, height, width = per_axis.unbind(dim=1)
+        if positions.ndim != 3 or positions.shape[-1] != 3:
+            raise ValueError("MiniMax-H3 position ids must be [B,S,3]")
+        per_axis = positions.unsqueeze(-1) * self.rope.inv_freq.reshape(1, 1, 1, -1)
+        temporal, height, width = per_axis.unbind(dim=2)
         half = torch.cat((temporal, height, width), dim=-1)
         angles = torch.cat((half, half), dim=-1)
         pair_count = angles.shape[-1] // 2
-        angles = angles[:, :pair_count]
+        angles = angles[..., :pair_count]
         cosine, sine = torch.cos(angles), torch.sin(angles)
         return (
             torch.stack((cosine, -sine, sine, cosine), dim=-1)
             .reshape(
-                1,
                 angles.shape[0],
+                angles.shape[1],
                 1,
                 pair_count,
                 2,
@@ -617,17 +644,11 @@ class MiniMaxH3Model(nn.Module):
         return rotation_table
 
     @staticmethod
-    def _shared_text_tags(tags: torch.Tensor, batch_size: int, text_length: int) -> torch.Tensor:
+    def _validate_text_tags(tags: torch.Tensor, batch_size: int, text_length: int) -> torch.Tensor:
         tags = torch.as_tensor(tags)
-        if tags.ndim == 1:
-            if tags.shape != (text_length,):
-                raise ValueError(f"MiniMax-H3 text token tags must have length {text_length}")
-            return tags
         if tags.shape != (batch_size, text_length):
-            raise ValueError(f"MiniMax-H3 batched text token tags must be [{batch_size},{text_length}]")
-        if not torch.all(tags == tags[0:1]):
-            raise ValueError("MiniMax-H3 batch items must have identical text token tags")
-        return tags[0]
+            raise ValueError(f"MiniMax-H3 text token tags must be [{batch_size},{text_length}]")
+        return tags
 
     @staticmethod
     def _validate_condition_rows(
@@ -678,11 +699,13 @@ class MiniMaxH3Model(nn.Module):
         ):
             raise ValueError("MiniMax-H3 target audio tensor does not match the packed layout")
         batch_size = video_latents.shape[0]
+        if batch_size != 1:
+            raise ValueError(f"MiniMax-H3 R1 requires batch_size=1, got {batch_size}; use gradient accumulation")
         if audio_latents.shape[0] != batch_size:
             raise ValueError("MiniMax-H3 target video and audio batch sizes differ")
         if text_hidden_states.shape != (batch_size, layout.text_length, self.config.text_dim):
             raise ValueError(f"MiniMax-H3 text hidden states must be [{batch_size},{layout.text_length},{self.config.text_dim}]")
-        text_token_tags = self._shared_text_tags(text_token_tags, batch_size, layout.text_length)
+        text_token_tags = self._validate_text_tags(text_token_tags, batch_size, layout.text_length)
 
         execution_device = self.video_patch_proj.weight.device
         video_dtype = video_latents.dtype

@@ -24,6 +24,10 @@ T2VA uses the FL2VA transformer without first/last conditions. R1 rejects the IN
 
 The Qwen processor/config defaults to `Qwen/Qwen3-VL-32B-Instruct` and is downloaded by Transformers. Pass `--processor` when using a local copy.
 
+## Implementation Provenance
+
+The transformer, video VAE, packed-sequence logic, text presentation, and dual scheduler are adapted from Apache-2.0 [Diffusers PR #14355](https://github.com/huggingface/diffusers/pull/14355), pinned at commit `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`. Source files retain their upstream copyright and license headers. ComfyUI is used only as an independent numerical and artifact-compatibility reference; its GPL-3.0 implementation is not a source for Musubi code. Model weights remain governed by the MiniMax-H3 Community License linked above.
+
 ## Geometry And Media Contract
 
 - Target video is 24 fps.
@@ -145,7 +149,7 @@ The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.
 
-R1 does not force `batch_size=1`, but it adds no ragged batching or padding system. An effective batch larger than one is accepted only when task, target and condition shapes, ordered roles, text length/tags, and packed layout are identical. The H3 preflight checks every planned bucket before model allocation and reports incompatible fields. Effective single-item buckets perform only a lightweight latent-cache task metadata check; they do not build full layout fingerprints or load token-tag tensors.
+R1 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The gate runs immediately after dataset construction, reads no cache files, and the runtime/model repeat the check for direct API calls. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
 
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 
@@ -204,4 +208,5 @@ The native sampler builds one common base grid, derives independent shifted vide
 - No training-time sample generation.
 - No CFG or negative prompt.
 - No numbered reference-directory convention.
-- No heterogeneous or padded multi-sample packed layouts.
+- Dataset `batch_size` is fixed to 1; use gradient accumulation for larger effective batches.
+- No padded multi-sample packed layouts.

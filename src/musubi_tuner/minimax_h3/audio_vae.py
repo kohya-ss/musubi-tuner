@@ -14,9 +14,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-ops = nn
-
-
 # Snake activations
 
 
@@ -158,9 +155,9 @@ class ResidualUnit(nn.Module):
         pad = ((7 - 1) * dilation) // 2
         self.block = nn.Sequential(
             Snake1d(dim),
-            ops.Conv1d(dim, dim, kernel_size=7, dilation=dilation, padding=pad),
+            nn.Conv1d(dim, dim, kernel_size=7, dilation=dilation, padding=pad),
             Snake1d(dim),
-            ops.Conv1d(dim, dim, kernel_size=1),
+            nn.Conv1d(dim, dim, kernel_size=1),
         )
 
     def forward(self, x):
@@ -179,7 +176,7 @@ class EncoderBlock(nn.Module):
             ResidualUnit(dim // 2, dilation=3),
             ResidualUnit(dim // 2, dilation=9),
             Snake1d(dim // 2),
-            ops.Conv1d(
+            nn.Conv1d(
                 dim // 2,
                 dim,
                 kernel_size=2 * stride,
@@ -195,13 +192,13 @@ class EncoderBlock(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, d_model=64, strides=(2, 4, 4, 5, 5), d_latent=2048):
         super().__init__()
-        block = [ops.Conv1d(1, d_model, kernel_size=7, padding=3)]
+        block = [nn.Conv1d(1, d_model, kernel_size=7, padding=3)]
         for stride in strides:
             d_model *= 2
             block += [EncoderBlock(d_model, stride=stride)]
         block += [
             Snake1d(d_model),
-            ops.Conv1d(d_model, d_latent, kernel_size=3, padding=1),
+            nn.Conv1d(d_model, d_latent, kernel_size=3, padding=1),
         ]
         self.block = nn.Sequential(*block)
 
@@ -215,11 +212,11 @@ class Encoder(nn.Module):
 class GeGluMlp(nn.Module):
     def __init__(self, in_features, hidden_features):
         super().__init__()
-        self.norm = ops.LayerNorm(in_features)
+        self.norm = nn.LayerNorm(in_features)
         self.act = nn.GELU(approximate="tanh")
-        self.w0 = ops.Linear(in_features, hidden_features)
-        self.w1 = ops.Linear(in_features, hidden_features)
-        self.w2 = ops.Linear(hidden_features, in_features)
+        self.w0 = nn.Linear(in_features, hidden_features)
+        self.w1 = nn.Linear(in_features, hidden_features)
+        self.w2 = nn.Linear(hidden_features, in_features)
 
     def forward(self, x):
         x = self.norm(x)
@@ -232,11 +229,11 @@ class CausalAttention(nn.Module):
         self.head_dim = in_dim // num_heads
         self.num_heads = num_heads
         self.out_dim = out_dim
-        self.qkv = ops.Linear(in_dim, in_dim * 3, bias=False)
+        self.qkv = nn.Linear(in_dim, in_dim * 3, bias=False)
         self.q_bias = nn.Parameter(torch.empty(in_dim))
         self.v_bias = nn.Parameter(torch.empty(in_dim))
         self.register_buffer("zero_k_bias", torch.empty(in_dim))
-        self.proj = ops.Linear(out_dim, out_dim)
+        self.proj = nn.Linear(out_dim, out_dim)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -252,12 +249,12 @@ class CausalAttention(nn.Module):
 class AttnProjection(nn.Module):
     def __init__(self, in_dim, out_dim, num_heads, mlp_ratio=2):
         super().__init__()
-        self.norm1 = ops.LayerNorm(in_dim)
+        self.norm1 = nn.LayerNorm(in_dim)
         self.attn = CausalAttention(in_dim, out_dim, num_heads)
-        self.proj = ops.Linear(in_dim, out_dim)
-        self.norm3 = ops.LayerNorm(in_dim)
+        self.proj = nn.Linear(in_dim, out_dim)
+        self.norm3 = nn.LayerNorm(in_dim)
 
-        self.norm2 = ops.LayerNorm(out_dim)
+        self.norm2 = nn.LayerNorm(out_dim)
         hidden_dim = int(out_dim * mlp_ratio)
         self.mlp = GeGluMlp(in_features=out_dim, hidden_features=hidden_dim)
 
@@ -279,13 +276,13 @@ class AMPBlock1(nn.Module):
         super().__init__()
         self.convs1 = nn.ModuleList(
             [
-                ops.Conv1d(channels, channels, kernel_size, stride=1, dilation=d, padding=get_padding(kernel_size, d))
+                nn.Conv1d(channels, channels, kernel_size, stride=1, dilation=d, padding=get_padding(kernel_size, d))
                 for d in dilation
             ]
         )
         self.convs2 = nn.ModuleList(
             [
-                ops.Conv1d(channels, channels, kernel_size, stride=1, dilation=1, padding=get_padding(kernel_size, 1))
+                nn.Conv1d(channels, channels, kernel_size, stride=1, dilation=1, padding=get_padding(kernel_size, 1))
                 for _ in range(len(dilation))
             ]
         )
@@ -322,14 +319,14 @@ class BigVGAN(nn.Module):
         self.num_kernels = len(resblock_kernel_sizes)
         self.num_upsamples = len(upsample_rates)
 
-        self.conv_pre = ops.Conv1d(num_mels, upsample_initial_channel, 7, 1, padding=3)
+        self.conv_pre = nn.Conv1d(num_mels, upsample_initial_channel, 7, 1, padding=3)
 
         self.ups = nn.ModuleList()
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
             self.ups.append(
                 nn.ModuleList(
                     [
-                        ops.ConvTranspose1d(
+                        nn.ConvTranspose1d(
                             upsample_initial_channel // (2**i),
                             upsample_initial_channel // (2 ** (i + 1)),
                             k,
@@ -347,7 +344,7 @@ class BigVGAN(nn.Module):
                 self.resblocks.append(AMPBlock1(ch, k, d))
 
         self.activation_post = Activation1d(activation=SnakeBeta(ch))
-        self.conv_post = ops.Conv1d(ch, 1, 7, 1, padding=3, bias=False)
+        self.conv_post = nn.Conv1d(ch, 1, 7, 1, padding=3, bias=False)
 
     def forward(self, x):
         x = self.conv_pre(x)
@@ -395,18 +392,18 @@ class MiniMaxH3AudioVAE(nn.Module):
             self.hop_length *= r
         self.samples_per_latent = self.hop_length  # 800
         self.latents_per_second = self.sample_rate // self.hop_length  # 40
-        self.output_sample_rate = self.sample_rate  # read by LTXVAudioVAEDecode
+        self.output_sample_rate = self.sample_rate  # exposed for downstream decode and mux helpers
 
         self.encoder = Encoder(encoder_dim, encoder_rates, latent_dim)
 
         self.pre_block = AttnProjection(latent_dim, vae_latent_channels, num_heads=8)
 
-        self.mean_proj = ops.Conv1d(vae_latent_channels, vae_latent_channels, 1)
+        self.mean_proj = nn.Conv1d(vae_latent_channels, vae_latent_channels, 1)
         # logs_proj exists in the checkpoint but is unused at inference
         # (encode returns the posterior mean, no sampling).
-        self.logs_proj = ops.Conv1d(vae_latent_channels, vae_latent_channels, 1)
+        self.logs_proj = nn.Conv1d(vae_latent_channels, vae_latent_channels, 1)
 
-        self.dec_in_proj = ops.Conv1d(vae_latent_channels, latent_dim, 1)
+        self.dec_in_proj = nn.Conv1d(vae_latent_channels, latent_dim, 1)
         self.decoder = BigVGAN(num_mels=latent_dim, upsample_initial_channel=decoder_dim)
 
         self.register_buffer("latents_mean", torch.empty(vae_latent_channels))

@@ -2,7 +2,7 @@
 
 Date: 2026-08-03
 
-Status: Revised R1 proposal after merged ComfyUI and end-to-end dataset audits
+Status: Approved R1 after upstream scope and provenance review
 
 Branch: `codex/minimax-h3-support`
 
@@ -18,7 +18,7 @@ R1 adds native BF16 MiniMax-H3 LoRA training and joint video/audio inference to 
 
 The implementation must fit Musubi's existing cache filename, tensor-key, collator, trainer, LoRA, compilation, and block-offload contracts. In particular, the target video cache must load as `batch["latents"]`, variable-length text tensors must use the `varlen_` prefix, and the H3 trainer must explicitly create target-audio noise inside its `process_batch` override.
 
-R1 does not force dataset `batch_size` to 1, but it adds no new batching system. A multi-sample forward is a pure replication axis: every sample shares one packed layout and one base timestep while carrying different latent/text values. R1 does not group by an H3 layout signature, pad heterogeneous media layouts, or add a token-budget sampler. An H3-only post-build preflight rejects incompatible buckets before accelerator or model allocation.
+R1 requires every H3 dataset to use `batch_size = 1`; gradient accumulation is the effective-batch mechanism. Real packed batching needs text padding, attention masks, and per-sample structural plans, so it belongs in a later PR rather than a replication-only R1 path. Structural tensors still keep an explicit leading batch axis to avoid baking an unbatched model interface into the first release.
 
 ConvRot, prequantized INT8 loading, runtime LoRA over prequantized weights, and pruned AdaLN are deferred to R2. R1 does not depend on unmerged PR 1008.
 
@@ -29,7 +29,17 @@ Model artifacts and released configuration:
 - <https://huggingface.co/MiniMaxAI/MiniMax-H3>
 - <https://huggingface.co/Comfy-Org/MiniMax-H3>
 
-Merged ComfyUI integration audited for packing and numerical conventions:
+Apache-2.0 implementation source, pinned to the reviewed Diffusers PR head `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`:
+
+- PR: <https://github.com/huggingface/diffusers/pull/14355>
+- Transformer: `src/diffusers/models/transformers/transformer_minimax_h3.py`
+- Video VAE: `src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py`
+- Audio VAE: `src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3_audio.py`
+- Packing: `src/diffusers/modular_pipelines/minimax_h3/packing.py` and `packing_ref2va.py`
+- Text presentation: `src/diffusers/modular_pipelines/minimax_h3/encoders.py`
+- Dual scheduler: `src/diffusers/schedulers/scheduling_minimax_h3.py` and `modular_pipelines/minimax_h3/denoise.py`
+
+GPL-3.0 ComfyUI integration used only as an independent numerical and artifact-compatibility reference:
 
 - PR: <https://github.com/Comfy-Org/ComfyUI/pull/15224>
 - Merge commit: `57500fc5bc92566a63f2046824f522cd55c335ca`
@@ -38,11 +48,7 @@ Merged ComfyUI integration audited for packing and numerical conventions:
 - Text presentation/tags: <https://github.com/Comfy-Org/ComfyUI/blob/57500fc5bc92566a63f2046824f522cd55c335ca/comfy/text_encoders/minimax.py>
 - Public task/shift nodes: <https://github.com/Comfy-Org/ComfyUI/blob/57500fc5bc92566a63f2046824f522cd55c335ca/comfy_extras/nodes_minimax_h3.py>
 
-The open Diffusers implementation is a secondary cross-check, pinned to inspected head `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`:
-
-- <https://github.com/huggingface/diffusers/pull/14355>
-
-Released config files and tensors are authoritative for architecture and state-dict shape. The pinned merged ComfyUI implementation is authoritative for its own packed-row, token-tag, and adapter behavior. This spec explicitly defines Musubi's native training and dual-scheduler inference semantics; ComfyUI-specific sign/slope adapters are not model semantics and must not be copied. The open Diffusers PR is not normative when it differs.
+Released config files and tensors are authoritative for architecture and state-dict shape. The pinned Diffusers code is the implementation lineage for the transformer, VAEs, packing, presentation, and scheduler modules. ComfyUI is not a code source: it is used only to verify observable packing and adapter behavior against released artifacts. ComfyUI-specific sign/slope adapters are not model semantics and are not copied.
 
 Repository contracts that take precedence over a model-specific abstraction:
 
@@ -72,7 +78,7 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - Generate video and audio jointly and mux the result.
 - Load official sharded BF16 and Comfy-Org single-file BF16 artifacts.
 - Support block swap for the 50 H3 main blocks in training and inference.
-- Preserve the absence of an H3-specific `batch_size == 1` check.
+- Require dataset `batch_size = 1`; use gradient accumulation for larger effective batches.
 - Reject unsupported training knobs rather than silently applying the wrong timestep or loss convention.
 
 ## 4. R1 Non-Goals
@@ -91,9 +97,10 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - Ragged reference-media batching.
 - Text padding or attention masks added solely to enable heterogeneous training batches.
 - A token-budget sampler.
+- Real multi-sample packed training; it is deferred to a separate PR with padding, masking, and per-sample plans.
 - A dedicated `batch_size=1/2/3` test matrix.
 - Running all three tasks at `batch_size=2` as an acceptance gate.
-- Per-sample timesteps inside one replicated packed layout.
+- Per-sample timesteps inside one packed forward.
 - Loading FL2VA and Ref2VA transformer weights in one process.
 - Training-time sample generation through the shared `--sample_prompts` hook; R1 uses the standalone joint-AV generator.
 - CI with the real 33B transformer or 32B text encoder.
@@ -264,20 +271,11 @@ Replace all three direct rounding sites:
 
 For H3, `5`, `22`, `39`, and `56` must remain unchanged. Setting `vae_frame_stride = 17` is explicitly incorrect because the legacy `1 + n * stride` expression would produce `18`, not `22`. The stride argument has no default, so every call site must supply its architecture's value; this preserves stride-1 behavior for Krea2 and Qwen Image instead of silently falling back to 4.
 
-### 8.3 Post-build H3 batch preflight
+### 8.3 R1 batch-size gate
 
-`minimax_h3_train_network.py` overrides `_build_dataset`, calls the base implementation, and validates the returned dataset group before accelerator creation or model loading. The preflight inspects each H3 `BucketBatchManager` and, for every bucket capable of producing an effective batch larger than one, verifies that all items share:
+`minimax_h3_train_network.py` overrides `_build_dataset`, calls the base implementation, and checks each returned H3 `BucketBatchManager` before accelerator creation or model loading. Every configured dataset must have `batch_size = 1`; any other value raises with the dataset index and directs the user to gradient accumulation.
 
-- text length and the exact token-tag vector;
-- task and ordered condition-role keys;
-- every target/condition tensor shape;
-- packed row count and rotary-layout inputs.
-
-The validator reads safetensors headers/slices plus the small token-tag tensor; it does not load latent payloads or `[L, 5120]` hidden states. Because buckets are reshuffled every epoch, validating only the current batch partition is insufficient: every item in a multi-item bucket must have the same structural fingerprint. This fingerprint is preflight-only and is not added to the cache filename or bucket key.
-
-An effective `batch_size=1` bucket does not need a structural fingerprint. For that case, preflight reads only the authoritative latent-cache `metadata["task"]` with one `safe_open` and no tensor materialization. Full fingerprints are constructed only for buckets that can replicate samples. Their token-tag component is a fixed 32-byte SHA-256 digest rather than an `L`-element Python tuple, and fingerprints are compared one at a time against the bucket baseline rather than retained in an unbounded dataset-wide map.
-
-The same preflight rejects a per-sample timestep pool when any effective H3 batch can exceed one. Runtime `call_dit` checks remain defense in depth, but structural incompatibility must be reported at step zero with dataset index, bucket, cache paths, and the conflicting fields.
+The gate reads no cache files, constructs no layout fingerprints, and does not inspect bucket contents. Task and tensor-role correctness remain ordinary cache/runtime validation concerns. The model and runtime repeat the `B == 1` assertion as defense in depth so direct API calls cannot accidentally enter an unsupported replicated path.
 
 ### 8.4 Cache filenames
 
@@ -288,7 +286,7 @@ Reuse the existing filename contract without adding tokens:
 {item_key}_{frame_pos}-{frame_count}_mmh3_te.safetensors
 ```
 
-`VideoDataset.prepare_for_training` continues to recover `item_key`, frame range, resolution, and architecture from these names. Its H3 branch pairs each latent cache with the text cache carrying the same frame-range token. This is required for FL2VA because the selected crop's first and last frames are part of the Qwen presentation; a source-level text cache would silently alias different `chunk` or `slide` crops. T2VA and Ref2VA use the same crop-specific naming contract for one unambiguous lookup rule. R1 does not encode task or reference layout in the filename, and the shared bucket-construction path does not read safetensors headers. The H3-only post-build preflight in Section 8.3 runs after those buckets exist.
+`VideoDataset.prepare_for_training` continues to recover `item_key`, frame range, resolution, and architecture from these names. Its H3 branch pairs each latent cache with the text cache carrying the same frame-range token. This is required for FL2VA because the selected crop's first and last frames are part of the Qwen presentation; a source-level text cache would silently alias different `chunk` or `slide` crops. T2VA and Ref2VA use the same crop-specific naming contract for one unambiguous lookup rule. R1 does not encode task or reference layout in the filename, and the shared bucket-construction path does not read safetensors headers.
 
 Task, VAE fingerprints, media fingerprints, temporal alignment, and ordered reference kinds remain safetensors metadata for cache-command reuse checks and diagnostics. Training compatibility is determined by the standard filename plus required tensor roles; R1 does not add header reads to bucket construction.
 
@@ -499,7 +497,7 @@ At the R1 limit this is 335,544,320 bytes, or 320 MiB, before the small token-ta
 
 ### 12.2 Training collation
 
-The shared collator returns variable-length tensors as lists and does not pad them. The post-build preflight in Section 8.3 verifies equal `L` and identical token-tag vectors across every multi-item bucket before training starts; equal length alone is insufficient because the one-dimensional AdaLN tag/index plan is shared across the replicated batch axis. H3 `call_dit` repeats the checks as defense in depth, then stacks the hidden states. R1 does not add padding or an attention mask to rescue an incompatible batch.
+The shared collator returns variable-length tensors as one-element lists and does not pad them. H3 stacks that one item into `[1, L, D]` hidden states and `[1, L]` token tags. R1 does not add padding or an attention mask; those are prerequisites for a later real-batching PR.
 
 ## 13. Packed Row Contract
 
@@ -569,13 +567,13 @@ The cache and training logs can compute this value without model weights.
 - With visual clean coefficient `a_v`, FL2VA/Ref2VA visual condition rows use `max(model_t_video, a_v)`. The default is `a_v = 0.999`; this is not a constant row timestep when `model_t_video > 0.999`.
 - With audio clean coefficient `a_a`, reference-audio rows use `max(model_t_audio, a_a)`. The default `a_a = 1.0` keeps the default row timestep at `1.0`.
 
-For each packed sequence, sort the distinct model-time values and build one `row_timestep_indices[S]` vector. Main transformer blocks have three modality slots per distinct time, so each row selects block AdaLN modulation with:
+For each packed sequence, sort the distinct model-time values and build `row_timestep_indices[B, S]`. Main transformer blocks have three modality slots per distinct time, so each row selects block AdaLN modulation with:
 
 ```text
 block_adaln_index[row] = 3 * row_timestep_indices[row] + token_tag[row]
 ```
 
-The text span must therefore be split at token-tag runs or indexed row-by-row; treating it as a uniform tag-1 segment is incorrect. `token_tags[S]`, `row_timestep_indices[S]`, and the position grid are structural one-dimensional tensors shared by every item on the replicated batch axis.
+The text span must therefore be split at token-tag runs or indexed row-by-row; treating it as a uniform tag-1 segment is incorrect. R1 produces `token_tags[1, S]`, `row_timestep_indices[1, S]`, and `row_timesteps[1, S]`. The leading batch axis is explicit even though its only supported size is one.
 
 The FinalLayer is different: its AdaLN projection has one slot per distinct time, not three modality slots. Target video selects `video_timestep_index` directly and target audio selects `audio_timestep_index` directly. FinalLayer must never receive `3 * index + tag`; modality separation there comes from the two output heads, not a tagged AdaLN table. Text and condition rows do not enter either final output head.
 
@@ -583,7 +581,7 @@ The packer returns explicit row indices for target video/audio and never infers 
 
 ### 13.4 Exact FP64 rotary clock
 
-The rotary grid is a checkpoint contract, not an arbitrary monotonic position. Construct `position_ids[S, 3]` in FP64 and preserve this exact clock before the model converts it for frequency multiplication.
+The rotary grid is a checkpoint contract, not an arbitrary monotonic position. Construct `position_ids[1, S, 3]` in FP64 and preserve this exact clock before the model converts it for frequency multiplication.
 
 For latent video frame `k`:
 
@@ -672,7 +670,7 @@ Any other generic sampling/weighting value is rejected during argument validatio
 
 Because the shared parser defaults `--timestep_sampling` to `sigma`, `minimax_h3_train_network.py` explicitly sets all supported defaults before parsing. A normal H3 command therefore gets the released convention without extra flags.
 
-One packed forward has one scalar unshifted base value `u`, shared by every replicated batch item. Without a timestep pool, H3 samples one scalar, not `B` independent values. `--num_timestep_buckets > 1` remains usable when the effective batch contains one sample. The existing bucket manager emits one unrelated value per sample, so the post-build preflight rejects the option when any H3 bucket can produce an effective batch larger than one; values must never be silently discarded or averaged.
+One packed forward has one scalar unshifted base value `u` for its single item. Without a timestep pool, H3 samples one scalar. When the bucket manager supplies a timestep value, the runtime requires exactly one value; values must never be silently discarded or averaged.
 
 `--min_timestep` and `--max_timestep` first restrict `u` on the common `[0, 1]` base interval after the existing `/1000` conversion. H3 then applies its two configurable shifts. The two modalities never draw separate base values.
 
@@ -776,22 +774,9 @@ This is an intentional equal-modality policy, not a row-weighted global mean: ea
 
 ## 15. Batch Semantics
 
-R1 adds no validation that requires dataset `batch_size == 1`.
+R1 supports one real sample per packed forward. Every H3 dataset must configure `batch_size = 1`; gradient accumulation supplies a larger effective batch without requiring unrelated captions or reference layouts to share one attention sequence.
 
-The supported multi-sample case is a pure replication axis. The transformer receives batched values `[B, S, D]`, but one shared structural plan: `position_ids[S, 3]`, `token_tags[S]`, `row_timestep_indices[S]`, and explicit modality row indices. One scalar `u` and therefore one set of distinct AdaLN times applies to the whole forward.
-
-R1 adds no special batching feature:
-
-- Existing `(width, height, frame_count)` buckets remain unchanged.
-- Latent roles use the existing stack behavior.
-- Variable-length text stays a list until H3 `call_dit`.
-- H3 stacks text only when lengths and token-tag vectors are already identical.
-- Every sample must have the same task, ordered condition kinds, condition shapes, target shape, and packed row count.
-- H3 verifies every conditioning role's leading dimension equals target-video batch size.
-- H3 uses one base timestep for the whole batch; it does not flatten a per-sample timestep vector and take element zero.
-- Section 8.3 validates the entire multi-item bucket before model allocation because epoch shuffling can pair any two items; runtime checks repeat the same invariants only as defense in depth.
-
-This permits naturally compatible batches without promising that arbitrary Ref2VA samples can share one forward. Incompatible shapes, missing roles, tag plans, or text lengths fail at step zero with the conflicting cache paths and fields. The existing per-sample timestep-bucket pool is rejected when an effective batch can exceed one because it violates the shared-time contract. No layout-signature bucket, media padding, text padding, attention-mask machinery, per-sample forward loop, or batch-size matrix is part of R1.
+The tensor interfaces retain their batch axes: values use `[1, S, D]`, positions use `[1, S, 3]`, and tags/timestep indices use `[1, S]`. Dataset, runtime, sampler, and model entry points all reject `B != 1`. No structural fingerprint scan, layout-signature bucket, replicated-forward path, media padding, text padding, attention mask, or token-budget sampler is part of R1. Real T2VA/FL2VA batching is deferred to a separate PR; heterogeneous Ref2VA layouts may remain single-item even then.
 
 ## 16. LoRA Contract
 
@@ -901,10 +886,9 @@ Fail before expensive allocation where possible for:
 - Invalid/stale text token tags or presentation fingerprints.
 - Qwen3-VL expanded length over 32768.
 - Unsupported timestep sampling, loss weighting, H3 shift, or condition-clean value.
-- Per-sample timestep bucketing when an effective H3 batch can exceed one.
+- Dataset or runtime `batch_size` other than one.
 - Block swap outside 1 through 48.
 - H2D-only training without gradient checkpointing.
-- Unequal H3 text lengths, token-tag plans, or packed layouts found by the post-build bucket preflight.
 - Conditioning tensor batch dimension different from target video batch size.
 
 OOM-oriented logs include target video/audio shapes, exact `A`, text length, reference counts and shapes, packed row count, dtype, and block-swap configuration. R1 does not rewrite batch size automatically.
@@ -943,18 +927,18 @@ Tests use tiny synthetic model configurations unless marked manual.
 ### 20.3 Trainer hooks
 
 - Assert `process_batch` uses incoming base-loop noise only for video and creates independent audio noise with the audio shape.
-- Assert one scalar base `u` is shared across a replicated batch, then produces configurable video/audio sigmas and `1-sigma` model times.
-- Assert post-build preflight accepts one compatible replicated bucket and rejects a heterogeneous bucket before accelerator/model creation, including mismatched equal-length tag vectors.
-- Assert the existing per-sample timestep pool is rejected when an effective H3 batch exceeds one instead of taking its first value.
+- Assert dataset construction rejects `batch_size != 1` before accelerator/model creation and recommends gradient accumulation without reading cache files.
+- Assert runtime and model entry points reject `B != 1`, and a timestep pool must contain exactly one value.
+- Assert `position_ids`, packed token tags, row timesteps, and row timestep indices preserve an explicit leading batch axis.
 - Assert unsupported `timestep_sampling`, `weighting_scheme`, generic flow shift, H3 shifts, and condition coefficients are rejected.
 - Assert condition inputs use `a*x0 + (1-a)*noise`; training seeds change per step, visual conditions restart one shared stream, and audio uses the `seed+1` stream.
 - Mock raw output heads and assert `process_batch` targets are `latents - noise` with no prediction negation or audio slope scaling.
 - Assert H3 returns the standard `DiTOutput`, stores audio tensors in `extra`, and `compute_loss` never calls SD3 weighting while reporting separate video/audio means.
-- Assert unequal text lengths, unequal token-tag plans, and mismatched conditioning batch dimensions fail clearly.
+- Assert mismatched conditioning batch dimensions fail clearly.
 
 ### 20.4 Model, LoRA, and block swap
 
-- Tiny BF16 forward for T2VA, FL2VA, and Ref2VA packed layouts. The T2VA fixture uses one structurally identical `B=2` replicated forward to catch accidental `[0]` slicing; no batch-size matrix or backward matrix is added.
+- Tiny BF16 forward for T2VA, FL2VA, and Ref2VA packed layouts at `B=1`.
 - Default LoRA target discovery and metadata.
 - Tiny H3 offloader wait/prefetch order.
 - One LoRA forward/backward with gradient checkpointing and block swap.
@@ -989,7 +973,7 @@ R1 is complete when:
 - Target audio is required, aligned, independently noised, and supervised.
 - The exact integer `F -> A` formula is shared by cache and inference.
 - Packed audio/video row counts match the documented formulas.
-- FP64 rotary clocks, FL anchors, and reference cursor advances match the pinned merged ComfyUI implementation.
+- FP64 rotary clocks, FL anchors, and reference cursor advances follow the pinned Apache-2.0 Diffusers implementation and are independently cross-checked against ComfyUI behavior.
 - Main-block and FinalLayer AdaLN indices follow their distinct three-slot and one-slot rules.
 - Condition augmentation, row timesteps, and per-step/shared-stream RNG follow the documented separate contracts.
 - T2VA, FL2VA, and JSONL-only Ref2VA execute through native BF16 packing.
@@ -998,9 +982,9 @@ R1 is complete when:
 - Video/audio shifts are configurable and native inference advances two finite sigma schedules from one common base grid.
 - BF16 LoRA training and inference work.
 - BF16 block swap works in LoRA training and inference.
-- No H3-specific `batch_size == 1` assertion exists.
-- One structurally compatible replicated batch executes with a shared layout and base timestep.
-- Incompatible multi-sample layouts fail in the post-build step-zero preflight rather than after cache work and partial training.
+- Dataset construction, runtime, sampling, and model calls enforce `batch_size == 1`; documentation points larger effective batches to gradient accumulation.
+- Packed positions, tags, and row timestep indices keep explicit batch axes despite the R1 limit.
+- Ported modules carry Apache-2.0 provenance headers pinned to Diffusers PR #14355; ComfyUI remains validation-only and contributes no implementation code.
 - H3 loss transport reuses `DiTOutput.extra` rather than introducing a parallel output type.
 - Automated tests pass and real-model R1 evidence is recorded.
 - User documentation states BF16-only R1 scope, JSONL Ref2VA, cache limits, batching limitations, and block-swap commands.

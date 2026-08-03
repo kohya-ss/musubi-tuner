@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from musubi_tuner.minimax_h3.audio_vae import MiniMaxH3AudioVAE, encode_audio_mode
 from musubi_tuner.minimax_h3.video_vae import (
     CausalConv3d,
+    MiniMaxH3VideoVAE,
     ViT3DDecoder,
     encode_video_condition,
     encode_video_target,
@@ -23,6 +24,18 @@ from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_
 class _ExplodingProjection(nn.Module):
     def forward(self, inputs):
         raise AssertionError("logs_proj must not be evaluated for MiniMax-H3 audio caching")
+
+
+def test_video_vae_keeps_the_published_checkpoint_structure_after_provenance_rewrite():
+    with torch.device("meta"):
+        vae = MiniMaxH3VideoVAE()
+    state = vae.state_dict()
+
+    assert len(state) == 562
+    assert state["encoder.down.1.block.0.nin_shortcut.weight"].shape == (256, 128, 1, 1, 1)
+    assert state["decoder.mask_token"].shape == (1, 1, 2048)
+    assert state["decoder.transformer_blocks.0.attn.to_qkv.weight"].shape == (6144, 2048)
+    assert state["decoder.transformer_blocks.35.ff.w2.weight"].shape == (2048, 8192)
 
 
 def test_audio_vae_encode_uses_mean_projection_without_logs_projection():

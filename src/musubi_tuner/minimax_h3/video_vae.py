@@ -1,4 +1,21 @@
-# MiniMax H3 video VAE: 3D causal CNN encoder + ViT3D decoder.
+# Copyright 2026 The MiniMax and HuggingFace Teams. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Adapted for Musubi from Hugging Face Diffusers PR #14355 at commit
+# abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc. Musubi keeps the published
+# checkpoint names and adds cache-specific posterior sampling wrappers.
+# ComfyUI is used only as an independent numerical reference.
 
 import hashlib
 import math
@@ -7,7 +24,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-ops = nn
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -67,45 +83,46 @@ LATENTS_STD = [
 ]
 
 
-# 3D causal CNN encoder
+class CausalConv3d(nn.Conv3d):
+    """Spatially reflected, temporally causal 3D convolution."""
 
-
-class CausalConv3d(ops.Conv3d):
-    # Reflect spatial padding, causal (zeros, front-only) temporal padding.
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
-        super().__init__(in_channels, out_channels, kernel_size=kernel_size, stride=stride)
+        super().__init__(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=0)
         self.causal_padding = (padding,) * 3 if isinstance(padding, int) else tuple(padding)
 
-    def forward(self, x):
-        if sum(self.causal_padding) == 0:
-            return super().forward(x)
-
-        x = F.pad(
-            x,
-            (self.causal_padding[2], self.causal_padding[2], self.causal_padding[1], self.causal_padding[1], 0, 0),
-            mode="reflect",
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        temporal, height, width = self.causal_padding
+        if height or width:
+            hidden_states = F.pad(hidden_states, (width, width, height, height, 0, 0), mode="reflect")
+        if temporal:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, 0, temporal * 2, 0), mode="constant")
+        return F.conv3d(
+            hidden_states,
+            self.weight,
+            self.bias,
+            stride=self.stride,
+            padding=0,
+            dilation=self.dilation,
+            groups=self.groups,
         )
-        if x.shape[2] == 1:
-            # single frame: the causal front padding is all zeros truncate the temporal taps instead of convolving zero frames
-            weight = self.weight[:, :, -x.shape[2] :, :, :]
-            return F.conv3d(x, weight, self.bias, self.stride, 0, self.dilation, self.groups)
-        x = F.pad(x, (0, 0, 0, 0, self.causal_padding[0] * 2, 0), mode="constant")
-        return super().forward(x)
 
 
-class TemporalIsolatedGroupNorm(ops.GroupNorm):
-    # GroupNorm with statistics computed per frame (time merged into batch).
-    def forward(self, x):
-        if x.dim() == 5:
-            b, c, t, h, w = x.shape
-            x = x.permute(0, 2, 1, 3, 4).contiguous().view(b * t, c, 1, h, w)
-            x = super().forward(x)
-            return x.view(b, t, c, h, w).permute(0, 2, 1, 3, 4).contiguous()
-        return super().forward(x)
+class TemporalIsolatedGroupNorm(nn.GroupNorm):
+    """Compute group-normalization statistics independently for each frame."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.ndim != 5:
+            return super().forward(hidden_states)
+        batch_size, channels, frames, height, width = hidden_states.shape
+        hidden_states = hidden_states.permute(0, 2, 1, 3, 4).contiguous()
+        hidden_states = hidden_states.view(batch_size * frames, channels, 1, height, width)
+        hidden_states = super().forward(hidden_states)
+        hidden_states = hidden_states.view(batch_size, frames, channels, height, width)
+        return hidden_states.permute(0, 2, 1, 3, 4).contiguous()
 
 
-def group_norm_3d(num_channels):
-    return TemporalIsolatedGroupNorm(num_groups=32, num_channels=num_channels, eps=1e-6, affine=True)
+def group_norm_3d(num_channels: int) -> TemporalIsolatedGroupNorm:
+    return TemporalIsolatedGroupNorm(32, num_channels, eps=1e-6, affine=True)
 
 
 class Downsample3D(nn.Module):
@@ -116,141 +133,123 @@ class Downsample3D(nn.Module):
             in_channels,
             out_channels,
             kernel_size=3,
-            padding=(1, 0, 0),
             stride=(time_stride, space_stride, space_stride),
+            padding=(1, 0, 0),
         )
 
-    def forward(self, x):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.space_stride == 2:
-            x = F.pad(x, (0, 1, 0, 1, 0, 0), mode="reflect")
-        return self.conv(x)
+            hidden_states = F.pad(hidden_states, (0, 1, 0, 1, 0, 0), mode="reflect")
+        return self.conv(hidden_states)
 
 
 class ResnetBlock3D(nn.Module):
     def __init__(self, in_channels, out_channels=None):
         super().__init__()
         self.in_channels = in_channels
-        out_channels = in_channels if out_channels is None else out_channels
-        self.out_channels = out_channels
-
+        self.out_channels = in_channels if out_channels is None else out_channels
         self.norm1 = group_norm_3d(in_channels)
-        self.norm2 = group_norm_3d(out_channels)
-        self.conv1 = CausalConv3d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.conv2 = CausalConv3d(out_channels, out_channels, kernel_size=3, padding=1)
-        if in_channels != out_channels:
-            self.nin_shortcut = CausalConv3d(in_channels, out_channels, kernel_size=1)
+        self.conv1 = CausalConv3d(in_channels, self.out_channels, kernel_size=3, padding=1)
+        self.norm2 = group_norm_3d(self.out_channels)
+        self.conv2 = CausalConv3d(self.out_channels, self.out_channels, kernel_size=3, padding=1)
+        self.nin_shortcut = (
+            CausalConv3d(in_channels, self.out_channels, kernel_size=1) if in_channels != self.out_channels else None
+        )
 
-    def forward(self, x):
-        h = self.conv1(F.silu(self.norm1(x), inplace=True))
-        h = self.conv2(F.silu(self.norm2(h), inplace=True))
-        if self.in_channels != self.out_channels:
-            x = self.nin_shortcut(x)
-        return h.add_(x)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.conv1(F.silu(self.norm1(hidden_states)))
+        hidden_states = self.conv2(F.silu(self.norm2(hidden_states)))
+        if self.nin_shortcut is not None:
+            residual = self.nin_shortcut(residual)
+        return residual + hidden_states
 
 
 class EncoderFCN3D(nn.Module):
     def __init__(self, ch, ch_mult, space_down, time_down, num_res_blocks, in_channels, z_channels, double_z=True):
         super().__init__()
-        self.num_levels = len(ch_mult)
-        if isinstance(num_res_blocks, int):
-            num_res_blocks = [num_res_blocks] * self.num_levels
-        self.num_res_blocks = num_res_blocks
+        num_levels = len(ch_mult)
+        layers_per_level = [num_res_blocks] * num_levels if isinstance(num_res_blocks, int) else list(num_res_blocks)
+        block_channels = [ch * multiplier for multiplier in ch_mult]
+        input_channels = [block_channels[0], *block_channels[:-1]]
 
-        block_mid = [ch * ch_mult[i] for i in range(self.num_levels)]
-        block_in = [block_mid[0]] + block_mid[:-1]
-        block_out = block_mid
-
-        self.conv_in = CausalConv3d(in_channels, block_in[0], kernel_size=3, padding=1)
-
+        self.num_levels = num_levels
+        self.num_res_blocks = layers_per_level
+        self.conv_in = CausalConv3d(in_channels, input_channels[0], kernel_size=3, padding=1)
         self.down = nn.ModuleList()
-        for i_level in range(self.num_levels):
+        for level in range(num_levels):
             down = nn.Module()
-            down.block = nn.ModuleList()
-            for i in range(self.num_res_blocks[i_level]):
-                down.block.append(
+            down.block = nn.ModuleList(
+                [
                     ResnetBlock3D(
-                        in_channels=block_in[i_level] if i == 0 else block_mid[i_level],
-                        out_channels=block_mid[i_level],
+                        input_channels[level] if layer == 0 else block_channels[level],
+                        block_channels[level],
                     )
-                )
-            if space_down[i_level] * time_down[i_level] > 1:
+                    for layer in range(layers_per_level[level])
+                ]
+            )
+            if space_down[level] * time_down[level] > 1:
                 down.downsample = Downsample3D(
-                    block_mid[i_level],
-                    block_out[i_level],
-                    time_stride=time_down[i_level],
-                    space_stride=space_down[i_level],
+                    block_channels[level],
+                    block_channels[level],
+                    time_stride=time_down[level],
+                    space_stride=space_down[level],
                 )
             self.down.append(down)
 
-        self.norm_out = group_norm_3d(block_out[-1])
-        self.conv_out = CausalConv3d(
-            block_out[-1],
-            2 * z_channels if double_z else z_channels,
-            kernel_size=3,
-            padding=1,
-        )
+        self.norm_out = group_norm_3d(block_channels[-1])
+        output_channels = 2 * z_channels if double_z else z_channels
+        self.conv_out = CausalConv3d(block_channels[-1], output_channels, kernel_size=3, padding=1)
 
-    def forward(self, x):
-        h = self.conv_in(x)
-        for i_level in range(self.num_levels):
-            for i_block in range(self.num_res_blocks[i_level]):
-                h = self.down[i_level].block[i_block](h)
-            if hasattr(self.down[i_level], "downsample"):
-                h = self.down[i_level].downsample(h)
-        h = F.silu(self.norm_out(h))
-        return self.conv_out(h)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.conv_in(hidden_states)
+        for down in self.down:
+            for block in down.block:
+                hidden_states = block(hidden_states)
+            if hasattr(down, "downsample"):
+                hidden_states = down.downsample(hidden_states)
+        hidden_states = F.silu(self.norm_out(hidden_states))
+        return self.conv_out(hidden_states)
 
 
-# ViT3D decoder
-
-
-def create_token_ids(patch_dims, device, dtype):
-    coords_list = []
-    for dim_size in patch_dims:
-        coords = torch.arange(0.5, dim_size, dtype=dtype, device=device)
-        coords = coords / dim_size
-        coords = 2.0 * coords - 1.0
-        coords_list.append(coords)
-    coords = torch.stack(torch.meshgrid(*coords_list, indexing="ij"), dim=-1)
-    return coords.flatten(0, len(patch_dims) - 1).unsqueeze(0)
+def create_token_ids(patch_dims, device, dtype=torch.float32):
+    grids = [2.0 * (torch.arange(0.5, size, dtype=dtype, device=device) / size) - 1.0 for size in patch_dims]
+    return torch.stack(torch.meshgrid(*grids, indexing="ij"), dim=-1).flatten(0, len(patch_dims) - 1).unsqueeze(0)
 
 
 class RotaryEmbeddingND(nn.Module):
     def __init__(self, dim, rotary_base=100.0, n_dim=3):
         super().__init__()
-        self.n_dim = n_dim
-        self.angle_scale = 2.0 * math.pi
-        inv_freq = 1 / rotary_base ** torch.arange(0, 1, 2 * n_dim / dim, dtype=torch.float32)
+        if dim % (2 * n_dim):
+            raise ValueError(f"Rotary dimension {dim} must be divisible by {2 * n_dim}")
+        inv_freq = 1.0 / rotary_base ** torch.arange(0, 1, 2 * n_dim / dim, dtype=torch.float32)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    def forward(self, img_ids):
-        # [B, S, n_dim] -> [B, S, 1, pairs, 2, 2] rotation table for the kitchen split-half rope
-        angles = self.angle_scale * img_ids[:, :, :, None].float() * self.inv_freq.to(img_ids.device)[None, None, None, :]
-        angles = angles.flatten(2, 3)
-        c, s = torch.cos(angles), torch.sin(angles)
-        table = torch.stack([c, -s, s, c], dim=-1).reshape(*angles.shape[:2], 1, angles.shape[-1], 2, 2)
-        return table.to(img_ids.dtype)
+    def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        angles = 2.0 * math.pi * position_ids[:, :, :, None].float() * self.inv_freq[None, None, None, :]
+        angles = angles.flatten(2, 3).tile(2).unsqueeze(2)
+        return angles.cos(), angles.sin()
 
 
-def _apply_rope_split_half(x, rotation_table):
-    pairs = rotation_table.shape[-3]
-    rotary = torch.stack((x[..., :pairs], x[..., pairs : 2 * pairs]), dim=-1)
-    rotary = torch.matmul(rotation_table, rotary.unsqueeze(-1)).squeeze(-1)
-    rotary = torch.cat((rotary[..., 0], rotary[..., 1]), dim=-1)
-    return torch.cat((rotary, x[..., 2 * pairs :]), dim=-1)
+def _apply_rotary_emb(hidden_states: torch.Tensor, rotary_emb: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    cosine, sine = (value.to(hidden_states.dtype) for value in rotary_emb)
+    rotary_dim = cosine.shape[-1]
+    rotary, passthrough = hidden_states[..., :rotary_dim], hidden_states[..., rotary_dim:]
+    first, second = rotary.chunk(2, dim=-1)
+    rotated = torch.cat((-second, first), dim=-1)
+    return torch.cat((rotary * cosine + rotated * sine, passthrough), dim=-1)
 
 
 class FeedForward(nn.Module):
-    # Gated SiLU FFN.
     def __init__(self, dim, mult=4, bias=True):
         super().__init__()
         inner_dim = dim * mult
-        self.w1 = ops.Linear(dim, inner_dim * 2, bias=bias)
-        self.w2 = ops.Linear(inner_dim, dim, bias=bias)
+        self.w1 = nn.Linear(dim, inner_dim * 2, bias=bias)
+        self.w2 = nn.Linear(inner_dim, dim, bias=bias)
 
-    def forward(self, x):
-        gate, x = self.w1(x).chunk(2, dim=-1)
-        return self.w2(F.silu(gate).mul_(x))
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        gate, value = self.w1(hidden_states).chunk(2, dim=-1)
+        return self.w2(F.silu(gate) * value)
 
 
 class Attention(nn.Module):
@@ -258,51 +257,64 @@ class Attention(nn.Module):
         super().__init__()
         self.dim_head = dim_head
         self.heads = heads
-        inner_dim = dim_head * heads
-        self.norm_q = ops.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
-        self.norm_k = ops.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
-        self.to_qkv = ops.Linear(inner_dim, inner_dim * 3, bias=bias)
-        self.to_out = ops.Linear(inner_dim, inner_dim, bias=bias)
+        inner_dim = heads * dim_head
+        self.norm_q = nn.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
+        self.norm_k = nn.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
+        self.to_qkv = nn.Linear(inner_dim, inner_dim * 3, bias=bias)
+        self.to_out = nn.Linear(inner_dim, inner_dim, bias=bias)
 
-    def forward(self, x, rotary_pos_emb=None):
-        batch_size, seq_len, _ = x.shape
-
-        qkv = self.to_qkv(x)
-        qkv = qkv.view(batch_size, seq_len, -1, 3 * self.dim_head)
-        query, key, value = torch.chunk(qkv, 3, dim=-1)
-
-        query = F.rms_norm(query, (self.dim_head,), self.norm_q.weight, self.norm_q.eps)
-        key = F.rms_norm(key, (self.dim_head,), self.norm_k.weight, self.norm_k.eps)
-
-        if rotary_pos_emb is not None:
-            query = _apply_rope_split_half(query, rotary_pos_emb)
-            key = _apply_rope_split_half(key, rotary_pos_emb)
-
-        out = F.scaled_dot_product_attention(
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        batch_size, sequence_length, _ = hidden_states.shape
+        qkv = self.to_qkv(hidden_states).view(batch_size, sequence_length, self.heads, 3 * self.dim_head)
+        query, key, value = qkv.chunk(3, dim=-1)
+        query = self.norm_q(query.float()).to(query.dtype)
+        key = self.norm_k(key.float()).to(key.dtype)
+        if rotary_emb is not None:
+            query = _apply_rotary_emb(query, rotary_emb)
+            key = _apply_rotary_emb(key, rotary_emb)
+        hidden_states = F.scaled_dot_product_attention(
             query.transpose(1, 2),
             key.transpose(1, 2),
             value.transpose(1, 2),
         )
-        out = out.transpose(1, 2).reshape(batch_size, seq_len, -1).nan_to_num_(0.0)
-        return self.to_out(out)
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, sequence_length, -1)
+        return self.to_out(hidden_states)
 
 
 class TransformerBlock(nn.Module):
     def __init__(self, heads, dim_head, bias=True, eps=1e-5):
         super().__init__()
         dim = heads * dim_head
-        self.norm1 = ops.RMSNorm(dim, elementwise_affine=True, eps=eps)
+        self.norm1 = nn.RMSNorm(dim, elementwise_affine=True, eps=eps)
         self.attn = Attention(heads=heads, dim_head=dim_head, bias=bias, eps=eps)
         self.scale1 = nn.Parameter(torch.empty(dim))
-        self.norm2 = ops.RMSNorm(dim, elementwise_affine=True, eps=eps)
+        self.norm2 = nn.RMSNorm(dim, elementwise_affine=True, eps=eps)
         self.ff = FeedForward(dim=dim, bias=bias)
         self.scale2 = nn.Parameter(torch.empty(dim))
 
-    def forward(self, x, rotary_pos_emb=None):
-        normed = F.rms_norm(x, (x.shape[-1],), self.norm1.weight, self.norm1.eps)
-        x = x.addcmul_(self.attn(normed, rotary_pos_emb), self.scale1)
-        normed = F.rms_norm(x, (x.shape[-1],), self.norm2.weight, self.norm2.eps)
-        return x.addcmul_(self.ff(normed), self.scale2)
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        normalized = F.rms_norm(
+            hidden_states.float(),
+            (hidden_states.shape[-1],),
+            self.norm1.weight.float(),
+            self.norm1.eps,
+        ).to(hidden_states.dtype)
+        hidden_states = hidden_states + self.attn(normalized, rotary_emb) * self.scale1
+        normalized = F.rms_norm(
+            hidden_states.float(),
+            (hidden_states.shape[-1],),
+            self.norm2.weight.float(),
+            self.norm2.eps,
+        ).to(hidden_states.dtype)
+        return hidden_states + self.ff(normalized) * self.scale2
 
 
 class ViT3DDecoder(nn.Module):
@@ -327,65 +339,56 @@ class ViT3DDecoder(nn.Module):
         self.patch_size_t = patch_size_t
         self.out_channels = out_channels
         self.num_register_tokens = num_register_tokens
-
         self.pos_embed = RotaryEmbeddingND(int(dim_head * rope_dim_ratio), rope_theta, n_dim=3)
-        self.x_embedder = ops.Linear(in_channels, dim)
+        self.x_embedder = nn.Linear(in_channels, dim)
         self.register_tokens = nn.Parameter(torch.empty(1, num_register_tokens, dim))
-        # unused at inference; kept so the checkpoint loads without leftover keys
         self.register_buffer("mask_token", torch.empty(1, 1, dim))
-
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(heads=heads, dim_head=dim_head, bias=bias, eps=eps) for _ in range(num_layers)]
         )
+        self.norm_out = nn.LayerNorm(dim, elementwise_affine=True, eps=eps)
+        self.proj_out = nn.Linear(dim, out_channels * patch_size_t * patch_size * patch_size)
 
-        self.norm_out = ops.LayerNorm(dim, elementwise_affine=True, eps=eps)
-        self.proj_out = ops.Linear(dim, out_channels * patch_size_t * patch_size * patch_size)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, channels, frames, height, width = hidden_states.shape
+        hidden_states = hidden_states.permute(0, 2, 3, 4, 1).reshape(batch_size, frames * height * width, channels)
+        hidden_states = self.x_embedder(hidden_states)
+        num_patches = hidden_states.shape[1]
+        hidden_states = torch.cat(
+            (
+                hidden_states,
+                self.register_tokens.expand(batch_size, -1, -1),
+                torch.zeros_like(hidden_states[:, :1]),
+            ),
+            dim=1,
+        )
 
-    def forward(self, x):
-        B, C, latent_T, latent_H, latent_W = x.shape
-
-        h = self.x_embedder(x.flatten(2).transpose(1, 2))  # [B, T*H*W, C]
-
-        num_patches = h.shape[1]
-        num_suffix = 1 + self.num_register_tokens
-
-        h = torch.cat([h, self.register_tokens.expand(B, -1, -1), torch.zeros_like(h[:, 0:1, :])], dim=1)
-
-        img_ids = create_token_ids((latent_T, latent_H, latent_W), x.device, x.dtype).expand(B, -1, -1)
-        suffix_ids = torch.zeros((B, num_suffix, 3), device=x.device, dtype=img_ids.dtype)
-        img_ids = torch.cat([img_ids, suffix_ids], dim=1)
-
-        rotary_pos_emb = self.pos_embed(img_ids)
-
+        position_ids = create_token_ids((frames, height, width), hidden_states.device)
+        position_ids = position_ids.expand(batch_size, -1, -1)
+        suffix_ids = position_ids.new_zeros((batch_size, self.num_register_tokens + 1, 3))
+        rotary_emb = self.pos_embed(torch.cat((position_ids, suffix_ids), dim=1))
         for block in self.transformer_blocks:
-            h = block(h, rotary_pos_emb)
+            hidden_states = block(hidden_states, rotary_emb)
 
-        output = self.proj_out(self.norm_out(h))
-
-        output = output[:, :num_patches, :]
-
-        output = output.view(
-            B,
-            latent_T,
-            latent_H,
-            latent_W,
+        hidden_states = self.proj_out(self.norm_out(hidden_states))[:, :num_patches]
+        hidden_states = hidden_states.view(
+            batch_size,
+            frames,
+            height,
+            width,
             self.out_channels,
             self.patch_size_t,
             self.patch_size,
             self.patch_size,
         )
-        output = output.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
-        output = output.reshape(
-            B,
+        hidden_states = hidden_states.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
+        return hidden_states.reshape(
+            batch_size,
             self.out_channels,
-            latent_T * self.patch_size_t,
-            latent_H * self.patch_size,
-            latent_W * self.patch_size,
+            frames * self.patch_size_t,
+            height * self.patch_size,
+            width * self.patch_size,
         )
-        return output
-
-
-# Full VAE
 
 
 class MiniMaxH3VideoVAE(nn.Module):
@@ -407,19 +410,15 @@ class MiniMaxH3VideoVAE(nn.Module):
         tiling=True,
     ):
         super().__init__()
-        self.vae_ratio = int(math.prod(space_down))
-        self.vae_ratio_t = int(math.prod(time_down))
-
-        # temporal chunking parameters
+        self.vae_ratio = math.prod(space_down)
+        self.vae_ratio_t = math.prod(time_down)
         self.clip_length = clip_length
         self.token_drop = token_drop
         self.frame_pre_padding = (-clip_length) % self.vae_ratio_t
         self.tokens_chunk_size = math.ceil(clip_length / self.vae_ratio_t)
         self.token_overlap = (-token_drop) % self.tokens_chunk_size
         self.frame_overlap = max(self.token_overlap * self.vae_ratio_t - self.frame_pre_padding, 0)
-
-        # spatial tiling parameters
-        self.tiling = tiling
+        self.use_tiling = tiling
         self.tile_size = tile_size
         self.tile_overlap_min = tile_overlap_min
 
@@ -433,329 +432,211 @@ class MiniMaxH3VideoVAE(nn.Module):
             z_channels=z_channels,
             double_z=True,
         )
-        self.quant_conv = ops.Conv3d(z_channels * 2, 2 * embed_dim, 1)
-        self.post_quant_conv = ops.Conv3d(embed_dim, z_channels, 1)
+        self.quant_conv = nn.Conv3d(2 * z_channels, 2 * embed_dim, kernel_size=1)
+        self.post_quant_conv = nn.Conv3d(embed_dim, z_channels, kernel_size=1)
         self.decoder = ViT3DDecoder(
             patch_size=self.vae_ratio,
             patch_size_t=self.vae_ratio_t,
             in_channels=z_channels,
             out_channels=out_ch,
         )
-
         self.register_buffer("latents_mean", torch.tensor(LATENTS_MEAN))
         self.register_buffer("latents_std", torch.tensor(LATENTS_STD))
         self.register_buffer("pixel_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False)
         self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False)
 
-    # single-shot forward
+    def _split_tiles(self, length: int) -> tuple[list[int], list[int], list[int]]:
+        if self.tile_size >= length:
+            return [0], [length], []
+        num_tiles = math.ceil(length / self.tile_size)
+        while self.tile_size * num_tiles - self.tile_overlap_min * (num_tiles - 1) < length:
+            num_tiles += 1
+        overlaps = [self.tile_overlap_min] * (num_tiles - 1)
+        remaining = self.tile_size * num_tiles - sum(overlaps) - length
+        for index in range(remaining // self.vae_ratio):
+            overlaps[index % (num_tiles - 1)] += self.vae_ratio
+        starts = [0]
+        for index in range(num_tiles - 1):
+            starts.append(starts[-1] + self.tile_size - overlaps[index])
+        return starts, [self.tile_size] * num_tiles, overlaps
 
-    def _encode_moments(self, x):
-        return self.quant_conv(self.encoder(x))
+    @staticmethod
+    def _blend(first: torch.Tensor, second: torch.Tensor, extent: int, dim: int) -> torch.Tensor:
+        extent = min(first.shape[dim], second.shape[dim], extent)
+        positions = torch.arange(extent, device=second.device, dtype=second.dtype)
+        shape = [1] * first.ndim
+        shape[dim] = extent
+        first_weight = (1 - positions / extent).view(shape)
+        second_weight = (positions / extent).view(shape)
+        first_slice = [slice(None)] * first.ndim
+        first_slice[dim] = slice(-extent, None)
+        second_slice = [slice(None)] * second.ndim
+        second_slice[dim] = slice(0, extent)
+        blended = first[tuple(first_slice)] * first_weight + second[tuple(second_slice)] * second_weight
+        if extent == second.shape[dim]:
+            return blended
+        rest = [slice(None)] * second.ndim
+        rest[dim] = slice(extent, None)
+        return torch.cat((blended, second[tuple(rest)]), dim=dim)
 
-    def _decode_pixels(self, z):
-        return self.decoder(self.post_quant_conv(z))
+    def _stitch_tiles(
+        self,
+        tiles: list[list[torch.Tensor]],
+        height_overlaps: list[int],
+        width_overlaps: list[int],
+    ) -> torch.Tensor:
+        stitched_rows = []
+        for row_index, row in enumerate(tiles):
+            stitched_row = []
+            for column_index, tile in enumerate(row):
+                if row_index:
+                    tile = self._blend(tiles[row_index - 1][column_index], tile, height_overlaps[row_index - 1], -2)
+                if column_index:
+                    tile = self._blend(row[column_index - 1], tile, width_overlaps[column_index - 1], -1)
+                if row_index < len(tiles) - 1:
+                    tile = tile[..., : -height_overlaps[row_index], :]
+                if column_index < len(row) - 1:
+                    tile = tile[..., :, : -width_overlaps[column_index]]
+                stitched_row.append(tile)
+            stitched_rows.append(torch.cat(stitched_row, dim=-1))
+        return torch.cat(stitched_rows, dim=-2)
 
-    def _adaptive_encode(self, x):
-        if self.tiling:
-            return self.tiled_encode(x)
-        return self._encode_moments(x)
+    def _encode_clip(self, pixels: torch.Tensor) -> torch.Tensor:
+        if not self.use_tiling:
+            return self.quant_conv(self.encoder(pixels))
+        height_starts, height_lengths, height_overlaps = self._split_tiles(pixels.shape[-2])
+        width_starts, width_lengths, width_overlaps = self._split_tiles(pixels.shape[-1])
+        tiles = [
+            [
+                self.quant_conv(
+                    self.encoder(
+                        pixels[
+                            ...,
+                            top : top + tile_height,
+                            left : left + tile_width,
+                        ]
+                    )
+                )
+                for left, tile_width in zip(width_starts, width_lengths)
+            ]
+            for top, tile_height in zip(height_starts, height_lengths)
+        ]
+        latent_height_overlaps = [value // self.vae_ratio for value in height_overlaps]
+        latent_width_overlaps = [value // self.vae_ratio for value in width_overlaps]
+        return self._stitch_tiles(tiles, latent_height_overlaps, latent_width_overlaps)
 
-    def _adaptive_decode(self, z):
-        if self.tiling:
-            return self.tiled_decode(z)
-        return self._decode_pixels(z)
+    def _decode_clip(self, latents: torch.Tensor) -> torch.Tensor:
+        if not self.use_tiling:
+            return self.decoder(self.post_quant_conv(latents))
+        height_starts, height_lengths, height_overlaps = self._split_tiles(latents.shape[-2] * self.vae_ratio)
+        width_starts, width_lengths, width_overlaps = self._split_tiles(latents.shape[-1] * self.vae_ratio)
+        tiles = [
+            [
+                self.decoder(
+                    self.post_quant_conv(
+                        latents[
+                            ...,
+                            top // self.vae_ratio : (top + tile_height) // self.vae_ratio,
+                            left // self.vae_ratio : (left + tile_width) // self.vae_ratio,
+                        ]
+                    )
+                )
+                for left, tile_width in zip(width_starts, width_lengths)
+            ]
+            for top, tile_height in zip(height_starts, height_lengths)
+        ]
+        return self._stitch_tiles(tiles, height_overlaps, width_overlaps)
 
-    # spatial tiling
-
-    def split_tiles(self, input_len):
-        tile_size = self.tile_size
-        if tile_size >= input_len:
-            return [0], [input_len], []
-
-        N = math.ceil(input_len / tile_size)
-        while True:
-            overlaps = [self.tile_overlap_min] * (N - 1)
-            remaining = tile_size * N - sum(overlaps) - input_len
-            if remaining < 0:
-                N += 1
-            else:
-                break
-
-        remaining_units = remaining // self.vae_ratio
-        for i in range(remaining_units):
-            overlaps[i % (N - 1)] += self.vae_ratio
-
-        tile_start_idx = [0]
-        for i in range(N - 1):
-            tile_start_idx.append(tile_start_idx[-1] + tile_size - overlaps[i])
-
-        return tile_start_idx, [tile_size] * N, overlaps
-
-    def blend(self, a, b, blend_extent, dim):
-        blend_extent = min(a.shape[dim], b.shape[dim], blend_extent)
-
-        positions = torch.arange(blend_extent, device=b.device, dtype=b.dtype)
-        weight_a = 1 - positions / blend_extent
-        weight_b = positions / blend_extent
-
-        shape = [1] * a.ndim
-        shape[dim] = blend_extent
-        weight_a = weight_a.view(shape)
-        weight_b = weight_b.view(shape)
-
-        slice_a = [slice(None)] * a.ndim
-        slice_a[dim] = slice(-blend_extent, None)
-        slice_b = [slice(None)] * b.ndim
-        slice_b[dim] = slice(0, blend_extent)
-
-        blended = a[tuple(slice_a)] * weight_a + b[tuple(slice_b)] * weight_b
-
-        if blend_extent < b.shape[dim]:
-            slice_b_rest = [slice(None)] * b.ndim
-            slice_b_rest[dim] = slice(blend_extent, None)
-            return torch.cat([blended, b[tuple(slice_b_rest)]], dim=dim)
-        return blended
-
-    def tiled_encode(self, x):
-        height, width = x.shape[-2], x.shape[-1]
-        y_idx, y_len, y_overlap = self.split_tiles(height)
-        x_idx, x_len, x_overlap = self.split_tiles(width)
-
-        rows = []
-        for i_pos, i_len in zip(y_idx, y_len):
-            row = []
-            for j_pos, j_len in zip(x_idx, x_len):
-                tile = x[..., i_pos : i_pos + i_len, j_pos : j_pos + j_len]
-                row.append(self._encode_moments(tile))
-            rows.append(row)
-
-        latent_y_overlap = [o // self.vae_ratio for o in y_overlap]
-        latent_x_overlap = [o // self.vae_ratio for o in x_overlap]
-
-        result_rows = []
-        for i, row in enumerate(rows):
-            result_row = []
-            for j, tile in enumerate(row):
-                if i > 0:
-                    tile = self.blend(rows[i - 1][j], tile, latent_y_overlap[i - 1], dim=-2)
-                if j > 0:
-                    tile = self.blend(row[j - 1], tile, latent_x_overlap[j - 1], dim=-1)
-                if i < len(rows) - 1:
-                    tile = tile[..., : -latent_y_overlap[i], :]
-                if j < len(row) - 1:
-                    tile = tile[..., :, : -latent_x_overlap[j]]
-                result_row.append(tile)
-            result_rows.append(torch.cat(result_row, dim=-1))
-        return torch.cat(result_rows, dim=-2)
-
-    def tiled_decode(self, z):
-        height, width = z.shape[-2] * self.vae_ratio, z.shape[-1] * self.vae_ratio
-        y_idx, y_len, y_overlap = self.split_tiles(height)
-        x_idx, x_len, x_overlap = self.split_tiles(width)
-
-        # Blended tiles are written straight into a pre-allocated canvas.
-        canvas = None
-        row_tails = []
-        out_y = 0
-        for i, (i_pos, i_len) in enumerate(zip(y_idx, y_len)):
-            zi, zl = i_pos // self.vae_ratio, i_len // self.vae_ratio
-            new_tails = []
-            left_tail = None
-            out_x = 0
-            for j, (j_pos, j_len) in enumerate(zip(x_idx, x_len)):
-                zj, zw = j_pos // self.vae_ratio, j_len // self.vae_ratio
-                tile = self._decode_pixels(z[..., zi : zi + zl, zj : zj + zw])
-                if i < len(y_idx) - 1:
-                    new_tails.append(tile[..., -y_overlap[i] :, :].clone())
-                next_left_tail = tile[..., :, -x_overlap[j] :].clone() if j < len(x_idx) - 1 else None
-                if i > 0:
-                    tile = self.blend(row_tails[j], tile, y_overlap[i - 1], dim=-2)
-                if j > 0:
-                    tile = self.blend(left_tail, tile, x_overlap[j - 1], dim=-1)
-                left_tail = next_left_tail
-                if i < len(y_idx) - 1:
-                    tile = tile[..., : -y_overlap[i], :]
-                if j < len(x_idx) - 1:
-                    tile = tile[..., :, : -x_overlap[j]]
-                if canvas is None:
-                    canvas = torch.empty(*tile.shape[:-2], height, width, dtype=tile.dtype, device=tile.device)
-                canvas[..., out_y : out_y + tile.shape[-2], out_x : out_x + tile.shape[-1]].copy_(tile)
-                out_x += tile.shape[-1]
-            row_tails = new_tails
-            out_y += tile.shape[-2]
-        return canvas
-
-    # temporal chunking
-
-    def encode_temporal(self, x):
-        if x.shape[2] % self.clip_length != 0:
-            pad_size = (-x.shape[2]) % self.clip_length
-            pad_frames = x[:, :, -1:].repeat(1, 1, pad_size, 1, 1)
-            x = torch.cat([x, pad_frames], dim=2)
-
-        num_chunks = x.shape[2] // self.clip_length
-
-        z_list = []
-        for i in range(num_chunks):
-            clip_x = x[:, :, i * self.clip_length : (i + 1) * self.clip_length, :, :]
-            z_list.append(self._adaptive_encode(clip_x))
-
-        z = torch.cat(z_list, dim=2)
-        if self.token_drop > 0:
-            z = z[:, :, : -self.token_drop]
-        return z
-
-    def _decode_temporal_pad_frames(self, z_len, pad_tokens):
-        if pad_tokens <= 0:
-            return 0
-        intra_tail = self.clip_length % self.vae_ratio_t
-        if intra_tail == 0:
-            return pad_tokens * self.vae_ratio_t
-
-        z_len_before_pad = z_len - pad_tokens
-        return sum(
-            (intra_tail if (z_len_before_pad + k) % self.tokens_chunk_size == 0 else self.vae_ratio_t) for k in range(pad_tokens)
+    def _encode_video(self, pixels: torch.Tensor) -> torch.Tensor:
+        frame_count = pixels.shape[2]
+        if frame_count % self.clip_length:
+            padding = pixels[:, :, -1:].repeat(1, 1, (-frame_count) % self.clip_length, 1, 1)
+            pixels = torch.cat((pixels, padding), dim=2)
+        moments = torch.cat(
+            [
+                self._encode_clip(pixels[:, :, start : start + self.clip_length])
+                for start in range(0, pixels.shape[2], self.clip_length)
+            ],
+            dim=2,
         )
+        return moments[:, :, : -self.token_drop] if self.token_drop else moments
 
-    def _decode_temporal_frame_plan(self, z_len, num_chunks, pad_tokens):
-        chunk_dec = self.tokens_chunk_size * self.vae_ratio_t
-        split_count = int(self.token_drop > 0) + 1
-        total_frames = 0
-        final_overlap_frames = 0
-
-        for i in range(num_chunks):
-            t_start_idx = i * self.tokens_chunk_size
-            t_end_idx = t_start_idx + self.tokens_chunk_size + self.token_overlap
-            clip_token_len = max(0, min(t_end_idx, z_len) - min(t_start_idx, z_len))
-            clip_frame_len = clip_token_len * self.vae_ratio_t
-
-            for j in range(split_count):
-                f_start_idx = j * chunk_dec
-                f_end_idx = min(f_start_idx + chunk_dec, clip_frame_len)
-                chunk_frames = max(0, f_end_idx - f_start_idx - self.frame_pre_padding)
-                if j == 0:
-                    total_frames += chunk_frames
-                else:
-                    final_overlap_frames = chunk_frames
-
-        total_frames += final_overlap_frames
-        return total_frames - self._decode_temporal_pad_frames(z_len, pad_tokens)
-
-    def decode_temporal(self, z):
-        chunk_dec = self.tokens_chunk_size * self.vae_ratio_t
-        split_count = int(self.token_drop > 0) + 1
-
-        pseudo_total_tokens = z.shape[2] + self.token_drop
-
-        pad_tokens = 0
-        remainder = pseudo_total_tokens % self.tokens_chunk_size
-        if remainder != 0:
-            pad_tokens = self.tokens_chunk_size - remainder
-            pseudo_total_tokens += pad_tokens
-
-        num_chunks = pseudo_total_tokens // self.tokens_chunk_size - int(self.token_drop > 0)
+    def _decode_video(self, latents: torch.Tensor) -> torch.Tensor:
+        chunk_tokens = self.tokens_chunk_size
+        chunk_frames = chunk_tokens * self.vae_ratio_t
+        padded_token_count = latents.shape[2] + self.token_drop
+        pad_tokens = (-padded_token_count) % chunk_tokens
+        num_chunks = (padded_token_count + pad_tokens) // chunk_tokens - int(self.token_drop > 0)
         if num_chunks < 1:
-            # too few tokens for one chunk (e.g. T_lat == 2): pad one extra chunk
-            pad_tokens += self.tokens_chunk_size
-            num_chunks += 1
+            pad_tokens += chunk_tokens
+            num_chunks = 1
+        if pad_tokens:
+            latents = torch.cat((latents, latents[:, :, -1:].repeat(1, 1, pad_tokens, 1, 1)), dim=2)
 
-        if pad_tokens > 0:
-            pad_z = z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)
-            z = torch.cat([z, pad_z], dim=2)
-
-        output_frames = self._decode_temporal_frame_plan(z.shape[2], num_chunks, pad_tokens)
-
-        dec = None
-        dec_overlap = None
-        write_pos = 0
-
-        def write_part(part):
-            nonlocal dec, write_pos
-            part_frames = part.shape[2]
-            if part_frames <= 0:
-                return
-            if dec is None:
-                out_shape = list(part.shape)
-                out_shape[2] = output_frames
-                dec = torch.empty(out_shape, dtype=part.dtype, device=part.device)
-            copy_frames = min(part_frames, max(0, dec.shape[2] - write_pos))
-            if copy_frames > 0:
-                dec[:, :, write_pos : write_pos + copy_frames, :, :].copy_(part[:, :, :copy_frames, :, :])
-                write_pos += copy_frames
-
-        for i in range(num_chunks):
-            t_start_idx = i * self.tokens_chunk_size
-            t_end_idx = t_start_idx + self.tokens_chunk_size + self.token_overlap
-            clip_z = z[:, :, t_start_idx:t_end_idx, :, :]
-
-            clip_dec = self._adaptive_decode(clip_z)
-
-            for j in range(split_count):
-                f_start_idx = j * chunk_dec
-                f_end_idx = min(f_start_idx + chunk_dec, clip_dec.shape[2])
-                clip_dec_chunk = clip_dec[:, :, f_start_idx:f_end_idx, :, :]
-                clip_dec_chunk = clip_dec_chunk[:, :, self.frame_pre_padding :, :, :]
-
-                if j == 0:
-                    if dec_overlap is not None:
-                        clip_dec_chunk = self.blend(dec_overlap, clip_dec_chunk, self.frame_overlap, dim=-3)
-                        dec_overlap = None
-                    write_part(clip_dec_chunk)
+        decoded = []
+        overlap = None
+        for index in range(num_chunks):
+            start = index * chunk_tokens
+            clip = self._decode_clip(latents[:, :, start : start + chunk_tokens + self.token_overlap])
+            for part_index in range(int(self.token_drop > 0) + 1):
+                frame_start = part_index * chunk_frames
+                part = clip[:, :, frame_start : frame_start + chunk_frames]
+                part = part[:, :, self.frame_pre_padding :]
+                if part_index == 0:
+                    if overlap is not None:
+                        part = self._blend(overlap, part, self.frame_overlap, dim=-3)
+                    decoded.append(part)
                 else:
-                    dec_overlap = clip_dec_chunk.contiguous()
+                    overlap = part
+        if overlap is not None:
+            decoded.append(overlap)
+        pixels = torch.cat(decoded, dim=2)
 
-            if i == num_chunks - 1 and dec_overlap is not None:
-                write_part(dec_overlap)
-                dec_overlap = None
+        if pad_tokens:
+            intra_tail = self.clip_length % self.vae_ratio_t
+            tokens_before_padding = latents.shape[2] - pad_tokens
+            pad_frames = sum(
+                intra_tail if intra_tail and (tokens_before_padding + offset) % chunk_tokens == 0 else self.vae_ratio_t
+                for offset in range(pad_tokens)
+            )
+            pixels = pixels[:, :, :-pad_frames]
+        return pixels
 
-            del clip_dec, clip_z
-
-        return dec
-
-    def encode_moments(self, x):
-        # x: [B, 3, T, H, W] in [-1, 1] -> unnormalized posterior moments.
-        if x.ndim == 4:
-            x = x.unsqueeze(2)
-
-        x = x.add(1.0).mul_(0.5).sub_(self.pixel_mean.to(x)).div_(self.pixel_std.to(x))
-
-        if x.shape[2] == 1:
-            moments = self._adaptive_encode(x)
-            moments = moments[:, :, -1:, :, :]
+    def encode_moments(self, pixels: torch.Tensor) -> torch.Tensor:
+        if pixels.ndim == 4:
+            pixels = pixels.unsqueeze(2)
+        pixels = (pixels + 1.0) * 0.5
+        pixels = (pixels - self.pixel_mean.to(pixels)) / self.pixel_std.to(pixels)
+        if pixels.shape[2] == 1:
+            moments = self._encode_clip(pixels)[:, :, -1:]
         else:
-            moments = self.encode_temporal(x)
+            moments = self._encode_video(pixels)
         return moments.float()
 
-    def encode(self, x):
-        moments = self.encode_moments(x)
-        mean = torch.chunk(moments, 2, dim=1)[0]
+    def encode(self, pixels: torch.Tensor) -> torch.Tensor:
+        mean = self.encode_moments(pixels).chunk(2, dim=1)[0]
+        latent_mean = self.latents_mean.view(1, -1, 1, 1, 1).to(mean)
+        latent_std = self.latents_std.view(1, -1, 1, 1, 1).to(mean)
+        return (mean - latent_mean) / latent_std
 
-        latents_mean = self.latents_mean.view(1, -1, 1, 1, 1).to(mean)
-        latents_std = self.latents_std.view(1, -1, 1, 1, 1).to(mean)
-        return (mean - latents_mean) / latents_std
+    def encode_tiled(self, pixels: torch.Tensor, **kwargs) -> torch.Tensor:
+        del kwargs
+        return self.encode(pixels)
 
-    def encode_tiled(self, x, **kwargs):
-        # tiling is always on internally with the reference's semantic tile sizes, ignore tiling fallbacks
-        return self.encode(x)
+    def decode_tiled(self, latents: torch.Tensor, **kwargs) -> torch.Tensor:
+        del kwargs
+        return self.decode(latents)
 
-    def decode_tiled(self, z, **kwargs):
-        return self.decode(z)
-
-    def decode(self, z):
-        # z: [B, 24, T_lat, H_lat, W_lat] normalized latents -> pixels [B, 3, T, H, W] in [-1, 1]
-        latents_mean = self.latents_mean.view(1, -1, 1, 1, 1).to(z)
-        latents_std = self.latents_std.view(1, -1, 1, 1, 1).to(z)
-        z = z * latents_std + latents_mean
-
-        if z.shape[2] == 1:
-            dec = self._adaptive_decode(z)
-            dec = dec[:, :, -1:, :, :]
+    def decode(self, latents: torch.Tensor) -> torch.Tensor:
+        latent_mean = self.latents_mean.view(1, -1, 1, 1, 1).to(latents)
+        latent_std = self.latents_std.view(1, -1, 1, 1, 1).to(latents)
+        latents = latents * latent_std + latent_mean
+        if latents.shape[2] == 1:
+            pixels = self._decode_clip(latents)[:, :, -1:]
         else:
-            dec = self.decode_temporal(z)
-
-        dec = dec.float()
-        dec.mul_(self.pixel_std.to(dec)).add_(self.pixel_mean.to(dec)).clamp_(0.0, 1.0).mul_(2.0).sub_(1.0)
-        return dec
+            pixels = self._decode_video(latents)
+        pixels = pixels.float() * self.pixel_std.to(pixels) + self.pixel_mean.to(pixels)
+        return pixels.clamp(0.0, 1.0) * 2.0 - 1.0
 
 
 def _video_posterior_sample(vae, pixels: torch.Tensor, generator: torch.Generator, fp16_roundtrip: bool) -> torch.Tensor:
@@ -774,7 +655,7 @@ def _video_posterior_sample(vae, pixels: torch.Tensor, generator: torch.Generato
 
 @torch.no_grad()
 def encode_video_target(vae, pixels: torch.Tensor, cache_seed: int, canonical_item_key: str) -> torch.Tensor:
-    digest = hashlib.sha256(f"{cache_seed}\0{canonical_item_key}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{cache_seed}\0{canonical_item_key}".encode()).digest()
     seed = int.from_bytes(digest[:8], "little") % (2**63)
     generator = torch.Generator(device="cpu").manual_seed(seed)
     return _video_posterior_sample(vae, pixels, generator, fp16_roundtrip=False)
