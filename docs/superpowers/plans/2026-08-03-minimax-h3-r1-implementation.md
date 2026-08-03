@@ -533,29 +533,29 @@ git commit -m "feat: train MiniMax-H3 LoRA with joint AV loss"
 - Consumes: all model, text, VAE, media, and packing APIs.
 - Produces: `build_shifted_schedule`, `sample_joint_av`, and a standalone generation CLI.
 
-- [ ] **Step 1: Write failing scheduler and Euler tests**
+- [x] **Step 1: Write failing scheduler and Euler tests**
 
 Assert video shift 12 and audio shift 3 create distinct paired schedules from the same base discretization. For a fixed prediction, assert each update is exactly `x_next = x + (sigma_i - sigma_next) * pred`; reject negative-prediction and audio-slope transforms.
 
-- [ ] **Step 2: Write failing deterministic condition-noise tests**
+- [x] **Step 2: Write failing deterministic condition-noise tests**
 
 Assert request seed drives target video/audio initialization, every visual condition receives the same reset noise stream, audio conditions use seed plus one, and changing the seed changes all stochastic inputs.
 
-- [ ] **Step 3: Run sampling tests and verify RED**
+- [x] **Step 3: Run sampling tests and verify RED**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_sampling.py -v`
 
 Expected: missing sampling module.
 
-- [ ] **Step 4: Implement joint denoising and decode**
+- [x] **Step 4: Implement joint denoising and decode**
 
-Build text and condition rows once, update target video/audio latents with their own sigma deltas at every paired step, preserve the model's raw dataward velocity, decode both VAEs, synchronize duration, and mux audio with video. Keep muxing as a replaceable subprocess boundary tested with argument assertions.
+Build text and condition rows once, update target video/audio latents with their own sigma deltas at every paired step, preserve the model's raw dataward velocity, decode both VAEs, synchronize duration, and mux audio with video. Keep PyAV muxing behind a replaceable callable boundary tested with argument assertions.
 
-- [ ] **Step 5: Implement the generation CLI and root wrapper**
+- [x] **Step 5: Implement the generation CLI and root wrapper**
 
 Support T2VA, external first/last images for FL2VA, and JSONL ordered references for Ref2VA. Wire LoRA loading, attention choice, block swap, BF16 checkpoint validation, seed, dimensions, frame count, steps, and output path.
 
-- [ ] **Step 6: Run focused tests and commit**
+- [x] **Step 6: Run focused tests and commit**
 
 Run: `.venv\Scripts\python -m pytest tests/test_minimax_h3_sampling.py tests/test_top_level_entrypoints.py -v`
 
