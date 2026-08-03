@@ -1,15 +1,16 @@
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
-from safetensors.torch import save_file
 import torch
-import torch.nn as nn
+from safetensors.torch import save_file
+from torch import nn
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from musubi_tuner.minimax_h3 import model as h3_model
 from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module
 from musubi_tuner.minimax_h3.model import (
     AdalnProj,
@@ -36,6 +37,13 @@ def _tiny_config(*, num_layers: int = 2) -> MiniMaxH3Config:
         time_embed_dim=8,
         rope_inv_freq_len=1,
     )
+
+
+def _tiny_model(*, num_layers: int = 2, training: bool = True) -> MiniMaxH3Model:
+    model = MiniMaxH3Model(_tiny_config(num_layers=num_layers), dtype=torch.float32)
+    with torch.no_grad():
+        model.rope.inv_freq.fill_(1.0)
+    return model.train(training)
 
 
 def _t2_layout(text_length: int = 3):
@@ -86,6 +94,17 @@ def test_released_config_and_meta_state_dict_match_published_bf16_header():
     assert state["rope.inv_freq"].shape == (16,)
 
 
+def test_rope_inv_freq_has_no_synthesized_fallback(monkeypatch):
+    def unexpected_log(_value):
+        pytest.fail("rope.inv_freq must be loaded from the checkpoint, not synthesized")
+
+    monkeypatch.setattr(h3_model.math, "log", unexpected_log)
+
+    model = MiniMaxH3Model(_tiny_config(), dtype=torch.float32)
+
+    assert model.rope.inv_freq.shape == (1,)
+
+
 def test_published_transformer_metadata_is_parsed_strictly():
     released = {
         "hidden_size": 5376,
@@ -126,7 +145,7 @@ def test_published_transformer_metadata_is_parsed_strictly():
 
 
 def test_tiny_model_forwards_a_compatible_two_sample_batch():
-    model = MiniMaxH3Model(_tiny_config(), dtype=torch.float32)
+    model = _tiny_model()
 
     output = model(**_t2_inputs(batch_size=2))
 
@@ -136,7 +155,7 @@ def test_tiny_model_forwards_a_compatible_two_sample_batch():
 
 def test_two_sample_forward_matches_two_independent_single_sample_forwards():
     torch.manual_seed(123)
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32).eval()
+    model = _tiny_model(num_layers=1, training=False)
     inputs = _t2_inputs(batch_size=2)
 
     batched = model(**inputs)
@@ -156,8 +175,57 @@ def test_two_sample_forward_matches_two_independent_single_sample_forwards():
     torch.testing.assert_close(batched.audio, torch.cat([output.audio for output in singles]))
 
 
+def test_model_reuses_rotary_state_for_the_same_layout(monkeypatch):
+    model = _tiny_model(num_layers=1, training=False)
+    inputs = _t2_inputs(batch_size=1)
+    calls = {"positions": 0, "rotation": 0}
+    original_build_position_grid = h3_model.build_position_grid
+    original_rotation_table = model._rotation_table
+
+    def record_positions(*args, **kwargs):
+        calls["positions"] += 1
+        return original_build_position_grid(*args, **kwargs)
+
+    def record_rotation(*args, **kwargs):
+        calls["rotation"] += 1
+        return original_rotation_table(*args, **kwargs)
+
+    monkeypatch.setattr(h3_model, "build_position_grid", record_positions)
+    monkeypatch.setattr(model, "_rotation_table", record_rotation)
+
+    model(**inputs)
+    model(
+        **{
+            **inputs,
+            "model_t_video": torch.tensor([0.4]),
+            "model_t_audio": torch.tensor([0.6]),
+        }
+    )
+
+    assert calls == {"positions": 1, "rotation": 1}
+
+    model.to("cpu")
+    assert not model._rotary_cache
+
+
+def test_rotary_cache_is_bounded_and_cleared_by_checkpoint_load():
+    model = _tiny_model(num_layers=1, training=False)
+    for text_length in (1, 2, 3):
+        model._cached_rotation_table(
+            _t2_layout(text_length),
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+    assert len(model._rotary_cache) == 2
+
+    model.load_state_dict(model.state_dict())
+
+    assert not model._rotary_cache
+
+
 def test_model_accepts_ordered_ref2va_visual_and_audio_conditions():
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    model = _tiny_model(num_layers=1)
     image = H3VideoGeometry(1, 2, 4)
     video = H3VideoGeometry(2, 4, 4)
     layout = build_h3_layout(
@@ -195,7 +263,7 @@ def test_model_accepts_ordered_ref2va_visual_and_audio_conditions():
 
 
 def test_model_rejects_condition_geometry_even_when_the_packed_row_count_matches():
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    model = _tiny_model(num_layers=1)
     layout = build_h3_layout(
         task="ref2va",
         text_length=1,
@@ -218,7 +286,7 @@ def test_model_rejects_condition_geometry_even_when_the_packed_row_count_matches
 
 
 def test_model_rejects_different_text_tag_plans_across_batch():
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    model = _tiny_model(num_layers=1)
     inputs = _t2_inputs(batch_size=2)
     inputs["text_token_tags"] = torch.tensor([[1, 0, 1], [1, 1, 1]], dtype=torch.int64)
 
@@ -276,8 +344,26 @@ def test_final_layer_uses_direct_time_rows_without_modality_offsets():
     torch.testing.assert_close(audio, torch.full((1, 2, 1), 10.0))
 
 
+def test_segment_modulation_preserves_trainable_adaln_gradients():
+    segments = ((0, 2, 0), (2, 4, 1))
+    source = torch.randn(1, 4, 3, requires_grad=True)
+    shift = torch.randn(2, 3, requires_grad=True)
+    scale = torch.randn(2, 3, requires_grad=True)
+    residual = torch.randn(1, 4, 3, requires_grad=True)
+    update = torch.randn(1, 4, 3, requires_grad=True)
+    gate = torch.randn(2, 3, requires_grad=True)
+
+    modulated = h3_model._mod_scale_shift(source + 0.0, shift, scale, segments)
+    gated = h3_model._mod_gate(residual, update, gate, segments)
+    (modulated.square().mean() + gated.square().mean()).backward()
+
+    for tensor in (source, shift, scale, residual, update, gate):
+        assert tensor.grad is not None
+        assert torch.isfinite(tensor.grad).all()
+
+
 def test_model_returns_native_positive_outputs_without_comfy_sign_or_audio_slope():
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    model = _tiny_model(num_layers=1)
 
     class FixedFinal(nn.Module):
         def forward(
@@ -341,7 +427,7 @@ def test_block_swap_runs_wait_device_assertion_forward_and_submit_in_order(monke
         return FakeOffloader(blocks, config.device)
 
     monkeypatch.setattr("musubi_tuner.minimax_h3.model.create_offloader", fake_create_offloader)
-    model = MiniMaxH3Model(_tiny_config(num_layers=4), dtype=torch.float32)
+    model = _tiny_model(num_layers=4)
     model.blocks[0].register_buffer("required_scale", torch.ones(1))
     for index, block in enumerate(model.blocks):
         block.register_forward_pre_hook(lambda module, args, index=index: events.append(f"forward:{index}"))
@@ -376,7 +462,7 @@ def test_block_swap_runs_wait_device_assertion_forward_and_submit_in_order(monke
 
 
 def test_gradient_checkpointing_interface_toggles_both_flags():
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    model = _tiny_model(num_layers=1)
 
     model.enable_gradient_checkpointing(activation_cpu_offloading=True)
     assert model.gradient_checkpointing is True
@@ -387,7 +473,7 @@ def test_gradient_checkpointing_interface_toggles_both_flags():
 
 
 def test_gradient_checkpointed_forward_and_backward_recompute_the_same_block():
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32).train()
+    model = _tiny_model(num_layers=1)
     model.enable_gradient_checkpointing()
 
     output = model(**_t2_inputs(batch_size=1))
@@ -397,7 +483,7 @@ def test_gradient_checkpointed_forward_and_backward_recompute_the_same_block():
 
 
 def test_block_device_assertion_catches_parameters_left_off_execution_device():
-    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32)
+    model = _tiny_model(num_layers=1)
     model._execution_device = torch.device("meta")
 
     with pytest.raises(RuntimeError, match=r"parameter.*cpu.*expected meta after wait"):
@@ -420,6 +506,21 @@ def test_checkpoint_loader_can_require_exact_published_dtypes(tmp_path: Path):
             device="cpu",
             dtype=None,
             strict_dtype=True,
+        )
+
+
+def test_checkpoint_loader_rejects_missing_rope_inv_freq(tmp_path: Path):
+    state = _tiny_model(num_layers=1).state_dict()
+    del state["rope.inv_freq"]
+    checkpoint = tmp_path / "missing-rope.safetensors"
+    save_file(state, checkpoint)
+
+    with pytest.raises(ValueError, match=r"missing=.*rope\.inv_freq"):
+        load_safetensors_module(
+            lambda: MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32),
+            [checkpoint],
+            device="cpu",
+            dtype=None,
         )
 
 

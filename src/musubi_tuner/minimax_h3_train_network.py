@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import logging
+import re
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, fields
-import json
-import logging
 from pathlib import Path
-import re
 from typing import Any
 
+import torch
 from accelerate import Accelerator
 from safetensors import safe_open
-import torch
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3, ARCHITECTURE_MINIMAX_H3_FULL
 from musubi_tuner.minimax_h3.model import load_h3_transformer
@@ -25,7 +26,6 @@ from musubi_tuner.minimax_h3.packing import (
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
 from musubi_tuner.utils import model_utils
-
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class _H3BatchFingerprint:
     ordered_roles: tuple[str, ...]
     tensor_shapes: tuple[tuple[str, tuple[int, ...]], ...]
     text_length: int
-    token_tags: tuple[int, ...]
+    token_tags_sha256: bytes
     packed_rows: int
     rotary_inputs: tuple[Any, ...]
 
@@ -171,18 +171,19 @@ def _read_latent_structure(path: Path):
     return task, H3VideoGeometry(frames, height, width), audio_frames, conditions, references, tensor_shapes
 
 
-def _read_text_structure(path: Path) -> tuple[str, int, tuple[int, ...]]:
+def _read_text_structure(path: Path) -> tuple[str, int, bytes]:
     with safe_open(str(path), framework="pt", device="cpu") as handle:
         metadata = handle.metadata() or {}
-        hidden_keys = [key for key in handle.keys() if _TEXT_HIDDEN_KEY.fullmatch(key)]
+        keys = tuple(handle.keys())
+        hidden_keys = [key for key in keys if _TEXT_HIDDEN_KEY.fullmatch(key)]
         hidden_key, _ = _only_match(
             [(key, _TEXT_HIDDEN_KEY.fullmatch(key)) for key in hidden_keys],
             "text hidden-state tensor",
             path,
         )
-        keys = set(handle.keys())
-        if keys != {hidden_key, _TEXT_TAGS_KEY}:
-            raise ValueError(f"MiniMax-H3 text cache {path} has unsupported keys: {sorted(keys)}")
+        key_set = set(keys)
+        if key_set != {hidden_key, _TEXT_TAGS_KEY}:
+            raise ValueError(f"MiniMax-H3 text cache {path} has unsupported keys: {sorted(key_set)}")
         hidden_shape = _shape(handle, hidden_key)
         if len(hidden_shape) != 2 or hidden_shape[1] != 5120:
             raise ValueError(f"MiniMax-H3 text cache {path} must contain [L,5120] hidden states")
@@ -191,14 +192,23 @@ def _read_text_structure(path: Path) -> tuple[str, int, tuple[int, ...]]:
             raise ValueError(f"MiniMax-H3 text cache {path} must contain int64 [L] token tags")
         if not torch.all((tags == 0) | (tags == 1)):
             raise ValueError(f"MiniMax-H3 text cache {path} token tags may contain only 0 and 1")
-    return metadata.get("task"), hidden_shape[0], tuple(int(tag) for tag in tags.tolist())
+    token_tags_sha256 = hashlib.sha256(tags.contiguous().numpy().tobytes()).digest()
+    return metadata.get("task"), hidden_shape[0], token_tags_sha256
+
+
+def _read_latent_task(path: Path) -> str:
+    with safe_open(str(path), framework="pt", device="cpu") as handle:
+        task = (handle.metadata() or {}).get("task")
+    if task not in {"t2va", "fl2va", "ref2va"}:
+        raise ValueError(f"MiniMax-H3 latent cache {path} has invalid task metadata: {task!r}")
+    return task
 
 
 def _fingerprint_item(item) -> _H3BatchFingerprint:
     latent_path = Path(item.latent_cache_path)
     text_path = Path(item.text_encoder_output_cache_path)
     task, target_video, target_audio_frames, conditions, references, tensor_shapes = _read_latent_structure(latent_path)
-    text_task, text_length, token_tags = _read_text_structure(text_path)
+    text_task, text_length, token_tags_sha256 = _read_text_structure(text_path)
     if text_task != task:
         raise ValueError(f"MiniMax-H3 task metadata differs between {latent_path} and {text_path}: {task!r} != {text_task!r}")
     layout = build_h3_layout(
@@ -228,7 +238,7 @@ def _fingerprint_item(item) -> _H3BatchFingerprint:
         ordered_roles=tuple(segment.role for segment in layout.segments),
         tensor_shapes=tuple(sorted(tensor_shapes.items())),
         text_length=text_length,
-        token_tags=token_tags,
+        token_tags_sha256=token_tags_sha256,
         packed_rows=layout.row_count,
         rotary_inputs=rotary_inputs,
     )
@@ -238,10 +248,26 @@ def _cache_paths(item) -> str:
     return f"latent={item.latent_cache_path}, text={item.text_encoder_output_cache_path}"
 
 
+def _fingerprint_with_context(item, dataset_index: int, bucket) -> _H3BatchFingerprint:
+    try:
+        return _fingerprint_item(item)
+    except Exception as error:
+        raise ValueError(
+            f"Invalid MiniMax-H3 cache in dataset {dataset_index} bucket {bucket}: {_cache_paths(item)}: {error}"
+        ) from error
+
+
+def _validate_expected_task(item, task: str, expected_task: str | None, dataset_index: int, bucket) -> None:
+    if expected_task is None or task == expected_task:
+        return
+    raise ValueError(
+        f"MiniMax-H3 dataset {dataset_index} bucket {bucket} --task {expected_task} conflicts with "
+        f"cache task {task}; {_cache_paths(item)}"
+    )
+
+
 def validate_h3_dataset_batches(dataset_group, *, expected_task: str | None = None) -> None:
     """Reject replicated H3 buckets that cannot share one packed structural plan."""
-    fingerprint_cache = {}
-
     for dataset_index, dataset in enumerate(dataset_group.datasets):
         manager = dataset.batch_manager
         for bucket in manager.bucket_resos:
@@ -249,28 +275,18 @@ def validate_h3_dataset_batches(dataset_group, *, expected_task: str | None = No
             if not items:
                 continue
 
-            def fingerprint(item):
-                cache_key = (item.latent_cache_path, item.text_encoder_output_cache_path)
-                if cache_key not in fingerprint_cache:
+            effective_batch_size = min(manager.batch_size, len(items))
+            if effective_batch_size <= 1:
+                if expected_task is None:
+                    continue
+                for item in items:
                     try:
-                        fingerprint_cache[cache_key] = _fingerprint_item(item)
+                        task = _read_latent_task(Path(item.latent_cache_path))
                     except Exception as error:
                         raise ValueError(
                             f"Invalid MiniMax-H3 cache in dataset {dataset_index} bucket {bucket}: {_cache_paths(item)}: {error}"
                         ) from error
-                return fingerprint_cache[cache_key]
-
-            effective_batch_size = min(manager.batch_size, len(items))
-            if expected_task is not None:
-                for item in items:
-                    item_fingerprint = fingerprint(item)
-                    if item_fingerprint.task == expected_task:
-                        continue
-                    raise ValueError(
-                        f"MiniMax-H3 dataset {dataset_index} bucket {bucket} --task {expected_task} conflicts with "
-                        f"cache task {item_fingerprint.task}; {_cache_paths(item)}"
-                    )
-            if effective_batch_size <= 1:
+                    _validate_expected_task(item, task, expected_task, dataset_index, bucket)
                 continue
             if manager.num_timestep_buckets is not None and manager.num_timestep_buckets > 1:
                 paths = "; ".join(_cache_paths(item) for item in items[:2])
@@ -280,9 +296,11 @@ def validate_h3_dataset_batches(dataset_group, *, expected_task: str | None = No
                 )
 
             baseline_item = items[0]
-            baseline = fingerprint(baseline_item)
+            baseline = _fingerprint_with_context(baseline_item, dataset_index, bucket)
+            _validate_expected_task(baseline_item, baseline.task, expected_task, dataset_index, bucket)
             for item in items[1:]:
-                candidate = fingerprint(item)
+                candidate = _fingerprint_with_context(item, dataset_index, bucket)
+                _validate_expected_task(item, candidate.task, expected_task, dataset_index, bucket)
                 conflicts = [
                     field.name
                     for field in fields(_H3BatchFingerprint)
@@ -527,6 +545,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_shift_audio": args.h3_shift_audio,
             "ss_minimax_h3_visual_cond_clean": args.h3_visual_cond_clean,
             "ss_minimax_h3_audio_cond_clean": args.h3_audio_cond_clean,
+            "ss_minimax_h3_loss_policy": "video_mean_plus_audio_mean",
             "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
             "ss_minimax_h3_latent_cache_version": "1",
             "ss_minimax_h3_text_cache_version": "1",

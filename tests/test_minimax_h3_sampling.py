@@ -1,15 +1,16 @@
+from __future__ import annotations
+
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from safetensors.torch import save_file
 import torch
+from safetensors.torch import save_file
 
-from musubi_tuner.minimax_h3_generate_video import (
-    load_cached_text_conditioning,
-    run_generation,
-    validate_generation_args,
-)
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
@@ -18,6 +19,11 @@ from musubi_tuner.minimax_h3.sampling import (
     initialize_target_latents,
     sample_joint_av,
     write_joint_av,
+)
+from musubi_tuner.minimax_h3_generate_video import (
+    load_cached_text_conditioning,
+    run_generation,
+    validate_generation_args,
 )
 
 

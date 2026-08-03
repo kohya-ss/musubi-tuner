@@ -597,7 +597,7 @@ Published-header validation on 2026-08-03 found zero missing, unexpected, shape-
 
 Add cache, text-cache, train, and generate examples to `README.md`. State JSONL-only Ref2VA, required target audio, 24 fps and `17*n+5`, 32-pixel geometry, 32768 text-row limit, BF16-only R1, and deferred ConvRot R2.
 
-- [ ] **Step 5: Inspect the final diff and commit**
+- [x] **Step 5: Inspect the final diff and commit**
 
 Run: `git diff --check`
 
@@ -608,8 +608,38 @@ git add README.md docs/superpowers src tests minimax_h3_*.py
 git commit -m "docs: document MiniMax-H3 R1 workflows"
 ```
 
-- [ ] **Step 6: Push and update the Draft PR**
+- [x] **Step 6: Push and update the Draft PR**
 
 Run: `git push origin codex/minimax-h3-support`
 
 Update PR #1018 with the implemented scope, test commands/results, published-artifact validation, and the explicit R2 deferrals.
+
+### Task 11: Final Review Hardening
+
+**Files:**
+- Modify: `src/musubi_tuner/minimax_h3_train_network.py`
+- Modify: `src/musubi_tuner/minimax_h3/packing.py`
+- Modify: `src/musubi_tuner/minimax_h3/model.py`
+- Modify: `tests/test_minimax_h3_training.py`
+- Modify: `tests/test_minimax_h3_model.py`
+- Modify: `tests/test_minimax_h3_sampling.py`
+- Modify: `docs/minimax_h3.md`
+- Modify: `docs/superpowers/specs/2026-08-03-minimax-h3-support-design.md`
+
+- [x] **Step 1: Make single-item preflight proportional**
+
+Read only latent-cache task metadata for effective `batch_size=1`. Build full fingerprints only for replicated buckets, replace token-tag tuples with SHA-256 digests, and compare candidates without a dataset-wide fingerprint cache.
+
+- [x] **Step 2: Remove repeated layout work without assuming one global layout**
+
+Vectorize AdaLN run discovery. Cache completed rotation tables in a bounded layout/device/dtype LRU and clear it across module moves or checkpoint loads. Do not cache timestep values that change every step.
+
+- [x] **Step 3: Harden checkpoint and modulation semantics**
+
+Register `rope.inv_freq` as an empty checkpoint-owned buffer. Replace gate concatenation with one preallocated residual clone plus slice updates. Verify trainable AdaLN shift/scale/gate gradients directly; the reported in-place backward failure is not reproducible.
+
+- [x] **Step 4: Make tests independently collectible and metadata explicit**
+
+Give training and sampling tests their own `src` path setup. Record the equal-modality loss policy, retain the intentional T2VA-to-FL2VA base-family mapping, and document the two sources of non-bitwise ComfyUI parity.
+
+- [x] **Step 5: Run complete verification, commit, push, and refresh PR #1018**

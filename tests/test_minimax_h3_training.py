@@ -1,13 +1,20 @@
+from __future__ import annotations
+
 import argparse
-from contextlib import nullcontext
 import json
+import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from safetensors.torch import save_file
 import torch
+from safetensors.torch import save_file
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from musubi_tuner import minimax_h3_train_network as h3_train_network
 from musubi_tuner.dataset.bucket import BucketBatchManager
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
@@ -20,7 +27,6 @@ from musubi_tuner.minimax_h3_train_network import (
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.training.trainer_base import DiTOutput
-
 
 BUCKET = (32, 32, 5)
 
@@ -52,9 +58,7 @@ def _write_item(
             while len(reference_kinds) <= index:
                 reference_kinds.append(None)
             kind = role.rsplit("_", 1)[1]
-            if kind == "audio" and reference_kinds[index] == "video":
-                reference_kinds[index] = "video+audio"
-            elif kind == "video" and reference_kinds[index] == "audio":
+            if {kind, reference_kinds[index]} == {"audio", "video"}:
                 reference_kinds[index] = "video+audio"
             else:
                 reference_kinds[index] = kind
@@ -161,6 +165,35 @@ def test_preflight_checks_every_items_task_when_dataset_batch_size_is_one(tmp_pa
     assert "--task t2va" in message
     assert "cache task ref2va" in message
     assert str(mismatched.latent_cache_path) in message
+
+
+def test_preflight_skips_full_fingerprints_for_single_item_batches(tmp_path, monkeypatch):
+    items = [_write_item(tmp_path, name, task="t2va") for name in ("first", "second")]
+    opened_paths = []
+    original_safe_open = h3_train_network.safe_open
+
+    def fail_if_called(_item):
+        pytest.fail("batch_size=1 must not construct a structural fingerprint")
+
+    def record_safe_open(path, *args, **kwargs):
+        opened_paths.append(path)
+        return original_safe_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(h3_train_network, "_fingerprint_item", fail_if_called)
+    monkeypatch.setattr(h3_train_network, "safe_open", record_safe_open)
+
+    validate_h3_dataset_batches(_dataset_group(items, batch_size=1), expected_task="t2va")
+
+    assert opened_paths == [item.latent_cache_path for item in items]
+
+
+def test_batch_fingerprint_uses_a_fixed_size_token_tag_digest(tmp_path):
+    item = _write_item(tmp_path, "digest", token_tags=(1, 0, 1, 0, 1))
+
+    fingerprint = h3_train_network._fingerprint_item(item)
+
+    assert isinstance(fingerprint.token_tags_sha256, bytes)
+    assert len(fingerprint.token_tags_sha256) == 32
 
 
 class _Accelerator:
@@ -504,10 +537,18 @@ def test_h3_training_metadata_records_task_scheduler_and_target_policy():
         "ss_minimax_h3_shift_audio": 3.0,
         "ss_minimax_h3_visual_cond_clean": 0.999,
         "ss_minimax_h3_audio_cond_clean": 1.0,
+        "ss_minimax_h3_loss_policy": "video_mean_plus_audio_mean",
         "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
         "ss_minimax_h3_latent_cache_version": "1",
         "ss_minimax_h3_text_cache_version": "1",
     }
+
+
+def test_t2va_metadata_distinguishes_task_from_the_fl2va_base_family():
+    metadata = MiniMaxH3NetworkTrainer().extra_metadata(_trainer_args(task="t2va"))
+
+    assert metadata["ss_minimax_h3_task"] == "t2va"
+    assert metadata["ss_minimax_h3_base_family"] == "fl2va"
 
 
 def _tiny_model(num_layers: int = 2):
@@ -524,7 +565,10 @@ def _tiny_model(num_layers: int = 2):
         time_embed_dim=8,
         rope_inv_freq_len=1,
     )
-    return MiniMaxH3Model(config, dtype=torch.float32)
+    model = MiniMaxH3Model(config, dtype=torch.float32)
+    with torch.no_grad():
+        model.rope.inv_freq.fill_(1.0)
+    return model
 
 
 def test_default_h3_lora_policy_targets_only_four_projections_in_main_blocks():

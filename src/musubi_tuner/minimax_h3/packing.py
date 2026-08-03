@@ -1,14 +1,13 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-import math
 from typing import Literal
 
 import torch
 
 from musubi_tuner.minimax_h3.media import H3Task
-
 
 VIDEO_CHANNELS = 24
 AUDIO_CHANNELS = 32
@@ -428,12 +427,31 @@ def build_timestep_rows(
             token_tags[segment.row_slice] = 2
 
     block_adaln_indices = 3 * row_timestep_indices + token_tags
-    block_segments = []
-    run_start = 0
-    for index in range(1, layout.row_count + 1):
-        if index == layout.row_count or block_adaln_indices[index] != block_adaln_indices[run_start]:
-            block_segments.append((run_start, index, int(block_adaln_indices[run_start])))
-            run_start = index
+    change_points = (
+        torch.nonzero(
+            block_adaln_indices[1:] != block_adaln_indices[:-1],
+            as_tuple=False,
+        ).flatten()
+        + 1
+    )
+    boundaries = torch.cat(
+        (
+            block_adaln_indices.new_tensor([0]),
+            change_points,
+            block_adaln_indices.new_tensor([layout.row_count]),
+        )
+    )
+    block_segments = tuple(
+        tuple(row)
+        for row in torch.stack(
+            (
+                boundaries[:-1],
+                boundaries[1:],
+                block_adaln_indices[boundaries[:-1]],
+            ),
+            dim=1,
+        ).tolist()
+    )
 
     return H3TimestepRows(
         unique_timesteps=torch.tensor(unique_values, dtype=torch.float32),
@@ -441,7 +459,7 @@ def build_timestep_rows(
         row_timestep_indices=row_timestep_indices,
         token_tags=token_tags,
         block_adaln_indices=block_adaln_indices,
-        block_segments=tuple(block_segments),
+        block_segments=block_segments,
         video_timestep_index=timestep_index[video_time],
         audio_timestep_index=timestep_index[audio_time],
     )

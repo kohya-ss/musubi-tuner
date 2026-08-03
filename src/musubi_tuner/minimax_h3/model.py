@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 import json
 import math
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from musubi_tuner.minimax_h3.checkpoint import (
     load_safetensors_metadata,
@@ -29,6 +30,8 @@ from musubi_tuner.minimax_h3.packing import (
 from musubi_tuner.modules.attention import AttentionParams, attention
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
+
+_ROTARY_CACHE_SIZE = 2
 
 
 @dataclass(frozen=True)
@@ -133,7 +136,7 @@ def parse_h3_transformer_config(metadata: Mapping[str, str]) -> MiniMaxH3Config:
     except (json.JSONDecodeError, KeyError, TypeError) as error:
         raise ValueError("MiniMax-H3 transformer checkpoint has invalid config metadata") from error
     if not isinstance(transformer, dict):
-        raise ValueError("MiniMax-H3 transformer config must be an object")
+        raise TypeError("MiniMax-H3 transformer config must be an object")
     for field, expected in _PUBLISHED_CONFIG_FIELDS.items():
         if field not in transformer:
             raise ValueError(f"MiniMax-H3 transformer config is missing {field}")
@@ -318,6 +321,7 @@ def _mod_scale_shift(
     scale: torch.Tensor,
     segments: tuple[tuple[int, int, int], ...],
 ) -> torch.Tensor:
+    # Callers pass a fresh norm output; these disjoint slice updates retain trainable AdaLN gradients.
     for start, stop, row in segments:
         hidden_states[:, start:stop].mul_(1.0 + scale[row]).add_(shift[row])
     return hidden_states
@@ -329,10 +333,10 @@ def _mod_gate(
     gate: torch.Tensor,
     segments: tuple[tuple[int, int, int], ...],
 ) -> torch.Tensor:
-    return torch.cat(
-        [residual[:, start:stop] + update[:, start:stop] * gate[row] for start, stop, row in segments],
-        dim=1,
-    )
+    output = residual.clone()
+    for start, stop, row in segments:
+        output[:, start:stop].add_(update[:, start:stop] * gate[row])
+    return output
 
 
 class DiTBlock(nn.Module):
@@ -454,11 +458,7 @@ class MiniMaxH3Model(nn.Module):
             device=device,
         )
         self.rope = nn.Module()
-        inv_freq = torch.exp(
-            -math.log(10000.0)
-            * torch.arange(config.rope_inv_freq_len, dtype=torch.float32, device=device)
-            / config.rope_inv_freq_len
-        )
+        inv_freq = torch.empty(config.rope_inv_freq_len, dtype=torch.float32, device=device)
         self.rope.register_buffer("inv_freq", inv_freq)
         self.token_refiner = TokenRefiner(
             config,
@@ -488,6 +488,17 @@ class MiniMaxH3Model(nn.Module):
         self.blocks_to_swap = 0
         self.offloader = None
         self._execution_device = torch.device(device) if device is not None else None
+        self._rotary_cache: OrderedDict[tuple[H3PackedLayout, torch.device, torch.dtype], torch.Tensor] = OrderedDict()
+
+    def _apply(self, fn, recurse: bool = True):
+        result = super()._apply(fn, recurse=recurse)
+        if hasattr(self, "_rotary_cache"):
+            self._rotary_cache.clear()
+        return result
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        self._rotary_cache.clear()
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     @property
     def device(self) -> torch.device:
@@ -585,6 +596,25 @@ class MiniMaxH3Model(nn.Module):
             )
             .to(dtype)
         )
+
+    def _cached_rotation_table(
+        self,
+        layout: H3PackedLayout,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        key = (layout, torch.device(device), dtype)
+        cached = self._rotary_cache.get(key)
+        if cached is not None:
+            self._rotary_cache.move_to_end(key)
+            return cached
+        position_ids = build_position_grid(layout, device=device)
+        rotation_table = self._rotation_table(position_ids, dtype)
+        self._rotary_cache[key] = rotation_table
+        while len(self._rotary_cache) > _ROTARY_CACHE_SIZE:
+            self._rotary_cache.popitem(last=False)
+        return rotation_table
 
     @staticmethod
     def _shared_text_tags(tags: torch.Tensor, batch_size: int, text_length: int) -> torch.Tensor:
@@ -742,8 +772,11 @@ class MiniMaxH3Model(nn.Module):
             audio_condition_clean=audio_condition_clean,
         )
         timestep_embeddings = self.time_embedder(timestep_rows.unique_timesteps.to(execution_device)).to(self.dtype)
-        position_ids = build_position_grid(layout, device=execution_device)
-        rotation_table = self._rotation_table(position_ids, hidden_states.dtype)
+        rotation_table = self._cached_rotation_table(
+            layout,
+            device=execution_device,
+            dtype=hidden_states.dtype,
+        )
 
         for index, block in enumerate(self.blocks):
             if self.blocks_to_swap:

@@ -141,11 +141,13 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 minimax
   --output_name h3-lora
 ```
 
-The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in the 50 main DiT blocks. The loss is the unweighted sum of video and audio mean MSE. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
+The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in the 50 main DiT blocks. The loss is intentionally `mean(video_mse) + mean(audio_mse)`: the two modality heads contribute equally even though video has many more elements, rather than being combined into one element-weighted mean. This policy is saved as `ss_minimax_h3_loss_policy=video_mean_plus_audio_mean`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.
 
-R1 does not force `batch_size=1`, but it adds no ragged batching or padding system. An effective batch larger than one is accepted only when task, target and condition shapes, ordered roles, text length/tags, and packed layout are identical. The H3 preflight checks every planned bucket before model allocation and reports incompatible fields.
+R1 does not force `batch_size=1`, but it adds no ragged batching or padding system. An effective batch larger than one is accepted only when task, target and condition shapes, ordered roles, text length/tags, and packed layout are identical. The H3 preflight checks every planned bucket before model allocation and reports incompatible fields. Effective single-item buckets perform only a lightweight latent-cache task metadata check; they do not build full layout fingerprints or load token-tag tensors.
+
+Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 
 Training-time `--sample_prompts` is not supported in R1 because the shared hook owns one VAE and a video-only output path. Use the standalone joint AV generator with a saved LoRA.
 
@@ -192,7 +194,7 @@ The Ref2VA generation JSONL intentionally uses the same validated schema as trai
 
 T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. The cache must match the requested task, frame count, and exact presentation fingerprint. T2VA still requires `--prompt` so that identity can be verified; Ref2VA uses the selected record caption unless `--prompt` overrides it. FL2VA generation does not accept a dataset text cache because external first/last images cannot be proven identical to the crop presentation that produced that cache.
 
-The native sampler builds one common base grid, derives independent shifted video and audio sigma grids, and advances each modality with its own finite sigma interval. It does not apply CFG, negate the model heads, or apply ComfyUI's single-sampler audio slope adapter. Video and audio are decoded sequentially, trimmed to a common duration, and muxed with PyAV as H.264 plus AAC.
+The native sampler builds one common base grid, derives independent shifted video and audio sigma grids, and advances each modality with its own finite sigma interval. It does not apply CFG, negate the model heads, or apply ComfyUI's single-sampler audio slope adapter. Musubi also adds condition noise before packing, while ComfyUI adds it after packing; the distributions agree but RNG placement does not. These two intentional differences mean the same seed is not bitwise reproducible against ComfyUI. Video and audio are decoded sequentially, trimmed to a common duration, and muxed with PyAV as H.264 plus AAC.
 
 ## R1 Limitations
 

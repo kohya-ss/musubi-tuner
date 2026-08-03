@@ -275,6 +275,8 @@ For H3, `5`, `22`, `39`, and `56` must remain unchanged. Setting `vae_frame_stri
 
 The validator reads safetensors headers/slices plus the small token-tag tensor; it does not load latent payloads or `[L, 5120]` hidden states. Because buckets are reshuffled every epoch, validating only the current batch partition is insufficient: every item in a multi-item bucket must have the same structural fingerprint. This fingerprint is preflight-only and is not added to the cache filename or bucket key.
 
+An effective `batch_size=1` bucket does not need a structural fingerprint. For that case, preflight reads only the authoritative latent-cache `metadata["task"]` with one `safe_open` and no tensor materialization. Full fingerprints are constructed only for buckets that can replicate samples. Their token-tag component is a fixed 32-byte SHA-256 digest rather than an `L`-element Python tuple, and fingerprints are compared one at a time against the bucket baseline rather than retained in an unbounded dataset-wide map.
+
 The same preflight rejects a per-sample timestep pool when any effective H3 batch can exceed one. Runtime `call_dit` checks remain defense in depth, but structural incompatibility must be reported at step zero with dataset index, bucket, cache paths, and the conflicting fields.
 
 ### 8.4 Cache filenames
@@ -612,6 +614,14 @@ Ref2VA starts `cursor = L` and advances references in semantic order:
 
 After all references, target audio and target video share the final cursor. Golden tests compare the full FP64 grid, not only shape or monotonicity, including first/last FL anchors and mixed image/video/audio reference cursor advances.
 
+### 13.5 Derived-layout reuse
+
+The checkpoint owns `rope.inv_freq`; the model registers an empty persistent FP32 buffer and strict loading must supply it. No analytic fallback frequency is synthesized.
+
+`position_ids` and the resulting rotation table depend only on `(layout, execution device, activation dtype)` after the checkpoint is loaded. The model keeps a bounded two-entry LRU of the completed rotation table, so a cache hit rebuilds neither tensor. Device/dtype moves and state-dict loads clear this cache. The bound prevents a variable-resolution dataset from retaining one large GPU table per bucket.
+
+The dataset does not guarantee one layout for the entire run: epoch shuffling can alternate several valid buckets. Complete timestep rows are also not invariant because `model_t_video` and `model_t_audio` change every training and sampling step. Caching those values would produce almost no hits or grow without bound. Instead, the dynamic AdaLN run boundaries are detected with a tensor comparison and `nonzero`; Python work scales with the number of runs, not `S` scalar tensor reads.
+
 ## 14. Trainer Integration and Dual-Modality Loss
 
 ### 14.1 Fixed base-loop contract
@@ -740,6 +750,8 @@ Condition noise is not VAE posterior sampling and does not reuse the cache's fix
 
 The training seed is re-sampled per step rather than frozen so LoRA training does not overfit one condition-noise realization. Checkpointed training RNG state must reproduce the sequence after resume.
 
+Musubi applies condition noise to latent-shaped tensors before the pack permutation. ComfyUI applies statistically equivalent noise after packing. The distribution is the same, but random numbers land on different packed coordinates, so equal seeds do not imply bitwise-equal conditioned rows.
+
 ### 14.7 Loss object and reduction
 
 Reuse the repository's existing `training.trainer_base.DiTOutput` extension seam rather than defining a parallel result type:
@@ -757,10 +769,10 @@ The overridden `compute_loss` calculates:
 ```text
 video_loss = mean((output.pred - output.target) ** 2)
 audio_loss = mean((output.extra["audio_pred"] - output.extra["audio_target"]) ** 2)
-loss = video_loss_weight * video_loss + audio_loss_weight * audio_loss
+loss = video_loss + audio_loss
 ```
 
-Defaults are `1.0` and `1.0`. It logs `loss/video`, `loss/audio`, and total loss. Condition rows do not enter either mean. The overridden path never calls `compute_loss_weighting_for_sd3`.
+This is an intentional equal-modality policy, not a row-weighted global mean: each head contributes one scalar mean even though video contains many more elements. Consequently an individual audio element has greater influence than an individual video element. R1 chooses this explicitly so the much smaller audio head is not diluted by video row count; it does not expose modality-loss weights. The policy is recorded as `ss_minimax_h3_loss_policy=video_mean_plus_audio_mean`. The trainer logs `loss/video`, `loss/audio`, and total loss. Condition rows do not enter either mean, and the overridden path never calls `compute_loss_weighting_for_sd3`.
 
 ## 15. Batch Semantics
 
@@ -802,6 +814,9 @@ Saved metadata includes:
 - FL2VA/Ref2VA base family
 - target module policy
 - latent/text cache format versions
+- loss policy `video_mean_plus_audio_mean`
+
+`ss_minimax_h3_task` records the requested task. `ss_minimax_h3_base_family` records the released checkpoint family, so T2VA correctly records task `t2va` with base family `fl2va`; there is no separate released T2VA transformer.
 
 Inference uses the existing BF16 streamed/static LoRA merge path. Prequantized runtime branches are R2 scope.
 
@@ -865,7 +880,7 @@ x_audio_next = x_audio + (sigma_audio_i - sigma_audio_next) * pred_audio
 9. Decode video and audio.
 10. Trim to the planned common duration and mux with PyAV.
 
-The native dual-scheduler path does not negate the predictions and does not apply `d(sigma_audio) / d(sigma_video)`. ComfyUI instead uses one video-sigma sampler plus a pointwise audio slope. Those updates agree only to first order; at finite step size their trajectories are not bit-exact. R1 acceptance compares packing, timesteps, raw-head parity, scheduler invariants, and output quality, not final ComfyUI tensors or media hashes.
+The native dual-scheduler path does not negate the predictions and does not apply `d(sigma_audio) / d(sigma_video)`. ComfyUI instead uses one video-sigma sampler plus a pointwise audio slope. Those updates agree only to first order; at finite step size their trajectories are not bit-exact. Together with the condition-noise placement difference in Section 14.6, this means a shared seed is not a promise of bitwise-identical tensors or media. R1 acceptance compares packing, timesteps, raw-head parity, scheduler invariants, and output quality, not final ComfyUI tensors or media hashes.
 
 No unconditional sequence or CFG pass is created.
 
