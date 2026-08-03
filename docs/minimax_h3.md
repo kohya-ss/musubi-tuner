@@ -153,7 +153,40 @@ R1 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumu
 
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 
-Training-time `--sample_prompts` is not supported in R1 because the shared hook owns one VAE and a video-only output path. Use the standalone joint AV generator with a saved LoRA.
+### Training-time joint AV samples
+
+H3 overrides the shared single-VAE/video-only sampling hook. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`.
+
+Add the sampling assets and normal sampling schedule flags to the training command:
+
+```text
+--sample_prompts /data/h3/sample_prompts.json \
+--sample_every_n_epochs 1 \
+--video_vae /models/minimax_h3_video_vae_fp16.safetensors \
+--audio_vae /models/minimax_h3_audio_vae_fp32.safetensors \
+--text_encoder /models/qwen3vl_32b_minimax_h3_bf16.safetensors
+```
+
+The text presentations and condition latents are prepared once before the transformer is loaded. The two decode VAEs then remain on CPU and are moved to the accelerator one at a time for each scheduled sample. The shared trainer still owns sampling cadence, distributed prompt assignment, RNG restoration, and the block-swap inference/training transition.
+
+All entries in one run use the training `--task`. T2VA JSON entries use the common prompt fields:
+
+```json
+[
+  {
+    "prompt": "A singer performs under stage lights.",
+    "width": 768,
+    "height": 1344,
+    "frame_count": 124,
+    "sample_steps": 30,
+    "seed": 42
+  }
+]
+```
+
+FL2VA entries additionally use `first_frame` and `last_frame`; the common `image_path` and `end_image_path` names are accepted as aliases. Ref2VA entries use `reference_jsonl`, optional `reference_index`, and an optional `prompt` override. Ref2VA keeps the same ordered JSONL schema as caching and standalone generation.
+
+Sample geometry must be 32-pixel aligned. Frame counts of at least 5 are rounded down to the nearest `17*n+5` value, matching the shared training-sample convention. Released durations are 5-15 seconds; `--h3_allow_experimental_sample_duration` permits shorter smoke samples. H3 sampling does not accept negative prompts, CFG, or a per-prompt generic flow shift.
 
 ## Generation
 
@@ -205,7 +238,6 @@ The native sampler builds one common base grid, derives independent shifted vide
 - BF16 FL2VA/Ref2VA transformer bases only.
 - BF16 Qwen3-VL text encoder only.
 - No ConvRot INT8, pruned AdaLN, FP8, or NVFP4/AWQ artifact loading.
-- No training-time sample generation.
 - No CFG or negative prompt.
 - No numbered reference-directory convention.
 - Dataset `batch_size` is fixed to 1; use gradient accumulation for larger effective batches.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
-from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
+from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3_train_network import (
     MiniMaxH3NetworkTrainer,
     minimax_h3_setup_parser,
@@ -116,7 +117,6 @@ def test_h3_parser_defaults_to_the_only_supported_training_coordinates():
         ({"h3_visual_cond_clean": -0.1}, "h3_visual_cond_clean"),
         ({"h3_audio_cond_clean": 1.1}, "h3_audio_cond_clean"),
         ({"blocks_to_swap": 49}, "blocks_to_swap"),
-        ({"sample_prompts": "prompts.txt"}, "sample_prompts"),
     ],
 )
 def test_h3_trainer_rejects_training_knobs_with_the_wrong_coordinate_contract(override, message):
@@ -124,6 +124,326 @@ def test_h3_trainer_rejects_training_knobs_with_the_wrong_coordinate_contract(ov
 
     with pytest.raises(ValueError, match=message):
         trainer.handle_model_specific_args(_trainer_args(**override))
+
+
+def test_h3_trainer_allows_training_time_sample_prompts():
+    trainer = MiniMaxH3NetworkTrainer()
+
+    trainer.handle_model_specific_args(_trainer_args(sample_prompts="prompts.json"))
+
+
+def test_h3_parser_exposes_the_dual_vae_and_text_assets_needed_for_training_samples():
+    parser = minimax_h3_setup_parser(argparse.ArgumentParser())
+
+    args = parser.parse_args(
+        [
+            "--task",
+            "t2va",
+            "--video_vae",
+            "video.safetensors",
+            "--audio_vae",
+            "audio.safetensors",
+            "--text_encoder",
+            "qwen.safetensors",
+        ]
+    )
+
+    assert args.video_vae == "video.safetensors"
+    assert args.audio_vae == "audio.safetensors"
+    assert args.text_encoder == "qwen.safetensors"
+    assert args.processor == "Qwen/Qwen3-VL-32B-Instruct"
+    assert args.processor_revision is None
+    assert args.h3_allow_experimental_sample_duration is False
+
+
+def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_both_modalities(tmp_path, monkeypatch):
+    import musubi_tuner.minimax_h3_train_network as train
+
+    events = []
+
+    class Transformer:
+        training = True
+
+        def eval(self):
+            events.append("transformer_eval")
+            self.training = False
+            return self
+
+        def train(self, mode=True):
+            events.append(("transformer_train", mode))
+            self.training = mode
+            return self
+
+        def __call__(self, **kwargs):
+            events.append("sample_live_transformer")
+            return SimpleNamespace(
+                video=torch.zeros_like(kwargs["video_latents"]),
+                audio=torch.zeros_like(kwargs["audio_latents"]),
+            )
+
+    class VideoVAE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("anchor", torch.tensor(0.0, dtype=torch.float16))
+
+        def to(self, *args, **kwargs):
+            events.append("move_video_vae")
+            return super().to(*args, **kwargs)
+
+        def decode(self, latents):
+            events.append("decode_video")
+            assert latents.shape == (1, 24, 2, 4, 4)
+            return torch.zeros(1, 3, 5, 8, 8)
+
+    class AudioVAE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("anchor", torch.tensor(0.0, dtype=torch.float32))
+
+        def to(self, *args, **kwargs):
+            events.append("move_audio_vae")
+            return super().to(*args, **kwargs)
+
+        def decode(self, latents):
+            events.append("decode_audio")
+            assert latents.shape == (1, 32, 2, 8)
+            return torch.zeros(1, 2, 6667)
+
+    captured = {}
+    monkeypatch.setattr(
+        train,
+        "write_joint_av",
+        lambda decoded, output_path: captured.update(decoded=decoded, output_path=Path(output_path)),
+    )
+    trainer = MiniMaxH3NetworkTrainer()
+    trainer._sampling_video_vae = VideoVAE()
+    trainer._sampling_audio_vae = AudioVAE()
+    layout = build_h3_layout(
+        task="t2va",
+        text_length=3,
+        target_video=H3VideoGeometry(2, 4, 4),
+        target_audio_frames=8,
+    )
+    sample_parameter = {
+        "enum": 0,
+        "prompt": "joint sample",
+        "sample_steps": 2,
+        "width": 64,
+        "height": 64,
+        "frame_count": 5,
+        "seed": 123,
+        "h3_layout": layout,
+        "h3_text_hidden_states": torch.zeros(1, 3, 12),
+        "h3_text_token_tags": torch.tensor([[1, 0, 1]], dtype=torch.int64),
+        "h3_visual_conditions": (),
+        "h3_audio_conditions": (),
+    }
+    args = _trainer_args(
+        output_dir=str(tmp_path),
+        output_name="h3",
+    )
+    transformer = Transformer()
+
+    output = trainer.sample_image_inference(
+        _Accelerator(),
+        args,
+        transformer,
+        torch.bfloat16,
+        None,
+        str(tmp_path),
+        sample_parameter,
+        None,
+        12,
+    )
+
+    assert output == captured["output_path"]
+    assert captured["output_path"].suffix == ".mp4"
+    assert captured["decoded"].video.shape == (5, 8, 8, 3)
+    assert captured["decoded"].audio.shape == (2, 6667)
+    assert events.index("sample_live_transformer") < events.index("decode_video") < events.index("decode_audio")
+    assert transformer.training is True
+
+
+def test_prepare_training_samples_encodes_text_once_and_owns_both_vaes_without_using_the_shared_vae(tmp_path, monkeypatch):
+    import musubi_tuner.minimax_h3_train_network as train
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text(
+        json.dumps(
+            [
+                {
+                    "prompt": "joint sample",
+                    "width": 64,
+                    "height": 64,
+                    "frame_count": 23,
+                    "sample_steps": 2,
+                    "seed": 123,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    asset_paths = {}
+    for name in ("video_vae", "audio_vae", "text_encoder"):
+        path = tmp_path / f"{name}.safetensors"
+        path.touch()
+        asset_paths[name] = str(path)
+    args = _trainer_args(
+        sample_prompts=str(prompt_file),
+        processor="processor",
+        processor_revision=None,
+        h3_allow_experimental_sample_duration=True,
+        disable_numpy_memmap=False,
+        **asset_paths,
+    )
+    events = []
+
+    class TextEncoder(torch.nn.Module):
+        pass
+
+    class VideoVAE(torch.nn.Module):
+        vae_ratio = 16
+
+    class AudioVAE(torch.nn.Module):
+        pass
+
+    record = SimpleNamespace(references=())
+    monkeypatch.setattr(train, "PyAVH3MediaDecoder", lambda: object())
+    monkeypatch.setattr(train, "load_h3_processor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        train,
+        "load_h3_text_encoder",
+        lambda *args, **kwargs: events.append("load_text_encoder") or TextEncoder(),
+    )
+    monkeypatch.setattr(
+        train,
+        "load_generation_record_and_visuals",
+        lambda *args, **kwargs: (record, {}, {}),
+    )
+    monkeypatch.setattr(train, "build_presentation", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        train,
+        "encode_h3_presentation",
+        lambda *args, **kwargs: (
+            events.append("encode_text") or torch.zeros(3, 12),
+            torch.tensor([1, 0, 1], dtype=torch.int64),
+        ),
+    )
+    monkeypatch.setattr(
+        train,
+        "load_video_vae",
+        lambda *args, **kwargs: events.append("load_video_vae") or VideoVAE(),
+    )
+    monkeypatch.setattr(
+        train,
+        "load_audio_vae",
+        lambda *args, **kwargs: events.append("load_audio_vae") or AudioVAE(),
+    )
+    monkeypatch.setattr(train, "clean_memory_on_device", lambda *args, **kwargs: None)
+    trainer = MiniMaxH3NetworkTrainer()
+
+    sample_parameters, shared_vae = trainer._prepare_sampling(args, _Accelerator(), torch.bfloat16)
+
+    assert shared_vae is None
+    assert events == ["load_text_encoder", "encode_text", "load_video_vae", "load_audio_vae"]
+    assert isinstance(trainer._sampling_video_vae, VideoVAE)
+    assert isinstance(trainer._sampling_audio_vae, AudioVAE)
+    assert len(sample_parameters) == 1
+    parameter = sample_parameters[0]
+    assert parameter["h3_layout"].task == "t2va"
+    assert parameter["frame_count"] == 22
+    assert parameter["h3_layout"].target_video == H3VideoGeometry(7, 4, 4)
+    assert parameter["h3_layout"].target_audio_frames == 37
+    assert parameter["h3_text_hidden_states"].shape == (1, 3, 12)
+    assert parameter["h3_text_token_tags"].shape == (1, 3)
+    assert parameter["h3_visual_conditions"] == ()
+    assert parameter["h3_audio_conditions"] == ()
+    assert not any(key.startswith("_h3_") for key in parameter)
+
+
+def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions_into_the_layout(tmp_path, monkeypatch):
+    import musubi_tuner.minimax_h3_train_network as train
+
+    reference_jsonl = tmp_path / "references.jsonl"
+    reference_jsonl.touch()
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text(
+        json.dumps(
+            [
+                {
+                    "reference_jsonl": str(reference_jsonl),
+                    "reference_index": 0,
+                    "width": 64,
+                    "height": 64,
+                    "frame_count": 5,
+                    "sample_steps": 2,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    asset_paths = {}
+    for name in ("video_vae", "audio_vae", "text_encoder"):
+        path = tmp_path / f"{name}.safetensors"
+        path.touch()
+        asset_paths[name] = str(path)
+    args = _trainer_args(
+        task="ref2va",
+        sample_prompts=str(prompt_file),
+        processor="processor",
+        processor_revision=None,
+        h3_allow_experimental_sample_duration=True,
+        disable_numpy_memmap=False,
+        **asset_paths,
+    )
+
+    class EmptyModule(torch.nn.Module):
+        pass
+
+    class VideoVAE(EmptyModule):
+        vae_ratio = 16
+
+    reference = SimpleNamespace(type="video", path="reference.mp4", audio=object())
+    record = SimpleNamespace(references=(reference,))
+    visual = torch.zeros(1, 24, 2, 4, 4)
+    audio = torch.zeros(1, 32, 2, 8)
+    monkeypatch.setattr(train, "PyAVH3MediaDecoder", lambda: object())
+    monkeypatch.setattr(train, "load_h3_processor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(train, "load_h3_text_encoder", lambda *args, **kwargs: EmptyModule())
+    monkeypatch.setattr(
+        train,
+        "load_generation_record_and_visuals",
+        lambda *args, **kwargs: (record, {reference.path: torch.zeros(5, 64, 64, 3)}, {}),
+    )
+    monkeypatch.setattr(train, "build_presentation", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        train,
+        "encode_h3_presentation",
+        lambda *args, **kwargs: (torch.zeros(3, 12), torch.tensor([1, 0, 1], dtype=torch.int64)),
+    )
+    monkeypatch.setattr(train, "load_video_vae", lambda *args, **kwargs: VideoVAE())
+    monkeypatch.setattr(train, "load_audio_vae", lambda *args, **kwargs: EmptyModule())
+    monkeypatch.setattr(
+        train,
+        "encode_visual_conditions",
+        lambda *args, **kwargs: ((visual,), (), {0: H3VideoGeometry(2, 4, 4)}),
+    )
+    monkeypatch.setattr(
+        train,
+        "encode_audio_conditions",
+        lambda *args, **kwargs: ((audio,), {0: 8}),
+    )
+    monkeypatch.setattr(train, "clean_memory_on_device", lambda *args, **kwargs: None)
+    trainer = MiniMaxH3NetworkTrainer()
+
+    sample_parameters, shared_vae = trainer._prepare_sampling(args, _Accelerator(), torch.bfloat16)
+
+    assert shared_vae is None
+    parameter = sample_parameters[0]
+    assert parameter["h3_layout"].task == "ref2va"
+    assert parameter["h3_layout"].references == (H3ReferenceGeometry("video", video=H3VideoGeometry(2, 4, 4), audio_frames=8),)
+    assert parameter["h3_visual_conditions"] == (visual,)
+    assert parameter["h3_audio_conditions"] == (audio,)
 
 
 def test_process_batch_uses_one_shared_base_time_and_independent_audio_noise(monkeypatch):

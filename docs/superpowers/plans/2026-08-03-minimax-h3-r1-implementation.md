@@ -648,3 +648,31 @@ Give training and sampling tests their own `src` path setup. Record the equal-mo
 Pin Diffusers PR #14355 at `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`, map each ported module to its source file, and add retained Apache-2.0 headers. Rewrite the video VAE from the Diffusers implementation while preserving published checkpoint names. Treat ComfyUI only as an independent numerical reference. Remove operation-factory aliases and unrelated framework comments.
 
 - [x] **Step 6: Run complete verification, commit, push, and refresh PR #1018**
+
+### Task 12: Restore Training-Time Joint AV Sampling
+
+**Files:**
+- Add: `src/musubi_tuner/minimax_h3/generation_inputs.py`
+- Modify: `src/musubi_tuner/minimax_h3_generate_video.py`
+- Modify: `src/musubi_tuner/minimax_h3_train_network.py`
+- Modify: `tests/test_minimax_h3_training.py`
+- Modify: `docs/minimax_h3.md`
+- Modify: `docs/superpowers/specs/2026-08-03-minimax-h3-support-design.md`
+
+- [x] **Step 1: Reproduce the omitted interface**
+
+Replace the regression that expected `--sample_prompts` to fail with tests requiring H3 sampling assets, a live-transformer joint denoise, sequential video/audio decode, and muxed output.
+
+- [x] **Step 2: Share generation input preparation**
+
+Extract image/reference loading and visual/audio condition encoding from the standalone CLI into an H3 package module so standalone and training-time generation keep one task/layout contract.
+
+- [x] **Step 3: Implement H3-specific trainer hooks**
+
+Override sampling preparation instead of changing the shared single-VAE contract. Encode all text presentations before the transformer is allocated, prepare task-specific condition latents, retain both VAEs on CPU, and return `None` for the shared VAE slot. Override per-prompt inference to use the live transformer/LoRA, produce joint target latents, decode each modality with its own VAE in sequence, restore model placement/mode, and mux the result.
+
+- [x] **Step 4: Document training sample inputs and lifecycle**
+
+Document T2VA, FL2VA, and Ref2VA prompt fields, required sampling artifacts, geometry/duration validation, block-swap reuse, and the absence of CFG.
+
+- [x] **Step 5: Run full verification, commit, push, and refresh PR #1018**

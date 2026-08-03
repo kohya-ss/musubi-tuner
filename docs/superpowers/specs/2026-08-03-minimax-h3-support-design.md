@@ -76,6 +76,7 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - Cache Qwen3-VL-32B layer-50 conditioning in the repository's variable-length format.
 - Train BF16-base LoRA adapters with a dual-modality flow objective.
 - Generate video and audio jointly and mux the result.
+- Generate scheduled joint video/audio samples from the live training transformer and LoRA.
 - Load official sharded BF16 and Comfy-Org single-file BF16 artifacts.
 - Support block swap for the 50 H3 main blocks in training and inference.
 - Require dataset `batch_size = 1`; use gradient accumulation for larger effective batches.
@@ -102,7 +103,6 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - Running all three tasks at `batch_size=2` as an acceptance gate.
 - Per-sample timesteps inside one packed forward.
 - Loading FL2VA and Ref2VA transformer weights in one process.
-- Training-time sample generation through the shared `--sample_prompts` hook; R1 uses the standalone joint-AV generator.
 - CI with the real 33B transformer or 32B text encoder.
 
 ## 5. Released Configuration Contract
@@ -840,7 +840,7 @@ The main block loop is:
 
 R1 does not invent an H3 offloader adapter. `ModelOffloader.prepare_block_devices_before_forward` already moves the block to the accelerator, which places buffers there, and then `weighs_to_device` relocates Linear `.weight` tensors for exchange. H3 only supplies the standard model lifecycle and the post-wait device assertion.
 
-The standalone generator uses forward-only block swap. R1 rejects the shared training-time `--sample_prompts` hook before model allocation because that hook owns only one VAE and one video output, while H3 requires two independently placed VAEs and a muxed AV result.
+The standalone generator uses forward-only block swap. Training-time sampling reuses the shared cadence, distributed prompt assignment, RNG restoration, and block-swap mode transitions, but overrides the single-VAE/video-only preparation and per-prompt inference hooks. H3 prepares Qwen3-VL states and condition latents before loading the transformer, retains the video and audio VAEs on CPU, moves them to the accelerator one at a time after joint denoising, and muxes the decoded result. Sampling uses the live transformer so the currently trained LoRA remains active.
 
 The compile helper receives `[transformer.blocks]` and disables Linear compilation when block swap is active, matching existing architectures.
 
@@ -935,6 +935,8 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Mock raw output heads and assert `process_batch` targets are `latents - noise` with no prediction negation or audio slope scaling.
 - Assert H3 returns the standard `DiTOutput`, stores audio tensors in `extra`, and `compute_loss` never calls SD3 weighting while reporting separate video/audio means.
 - Assert mismatched conditioning batch dimensions fail clearly.
+- Assert training sample preparation loads Qwen3-VL once, builds task-specific layouts, retains both VAEs on CPU, and returns no shared single VAE.
+- Assert scheduled sampling runs the live transformer/LoRA, decodes the two latent outputs sequentially, restores transformer mode, and muxes a joint AV file.
 
 ### 20.4 Model, LoRA, and block swap
 
@@ -981,6 +983,7 @@ R1 is complete when:
 - Training uses raw `latents - noise` targets; native model/inference outputs contain neither ComfyUI's negative sign nor its audio slope adapter.
 - Video/audio shifts are configurable and native inference advances two finite sigma schedules from one common base grid.
 - BF16 LoRA training and inference work.
+- Scheduled `--sample_prompts` generation writes muxed video/audio from the live training LoRA for T2VA, FL2VA, and Ref2VA inputs.
 - BF16 block swap works in LoRA training and inference.
 - Dataset construction, runtime, sampling, and model calls enforce `batch_size == 1`; documentation points larger effective batches to gradient accumulation.
 - Packed positions, tags, and row timestep indices keep explicit batch axes despite the R1 limit.

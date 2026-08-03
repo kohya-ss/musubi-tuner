@@ -1,29 +1,30 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import gc
 import logging
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
 from safetensors import safe_open
 from safetensors.torch import load_file
 import torch
 from tqdm.auto import tqdm
 
-from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode, load_audio_vae
+from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
+from musubi_tuner.minimax_h3.generation_inputs import (
+    VIDEO_VAE_SPATIAL_RATIO,
+    build_reference_geometries,
+    encode_audio_conditions,
+    encode_visual_conditions,
+    load_generation_record_and_visuals,
+)
 from musubi_tuner.minimax_h3.media import (
-    H3AudioSource,
     H3Record,
     audio_latent_frames,
-    load_h3_jsonl_records,
     video_latent_frames,
-    waveform_samples,
 )
 from musubi_tuner.minimax_h3.model import load_h3_transformer
-from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
+from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
     initialize_target_latents,
@@ -33,7 +34,6 @@ from musubi_tuner.minimax_h3.sampling import (
 )
 from musubi_tuner.minimax_h3.text_encoder import (
     DEFAULT_PROCESSOR_ID,
-    H3TextVisual,
     MAX_TEXT_ROWS,
     TEXT_WIDTH,
     build_presentation,
@@ -43,7 +43,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     presentation_fingerprint,
     validate_text_rows,
 )
-from musubi_tuner.minimax_h3.video_vae import encode_video_condition, load_video_vae
+from musubi_tuner.minimax_h3.video_vae import load_video_vae
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder, fingerprint_file
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
@@ -52,7 +52,6 @@ from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 
 logger = logging.getLogger(__name__)
-VIDEO_VAE_SPATIAL_RATIO = 16
 
 
 def _require_path(value: str | None, label: str) -> Path:
@@ -171,72 +170,6 @@ def load_cached_text_conditioning(
     return hidden_states.unsqueeze(0), token_tags
 
 
-def _dummy_record(prompt: str) -> H3Record:
-    placeholder = Path(".")
-    return H3Record(
-        video_path=placeholder,
-        caption=prompt,
-        target_audio=H3AudioSource(placeholder, embedded=False),
-        references=(),
-        jsonl_line=0,
-    )
-
-
-def _load_image_frames(path: str | Path, *, width: int, height: int) -> torch.Tensor:
-    with Image.open(path) as image:
-        image = image.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
-        pixels = torch.from_numpy(np.asarray(image).copy())
-    return pixels.unsqueeze(0)
-
-
-def _prepare_pixels(frames: torch.Tensor) -> torch.Tensor:
-    if frames.ndim != 4 or frames.shape[-1] != 3:
-        raise ValueError(f"MiniMax-H3 condition pixels must be [F,H,W,3], got {tuple(frames.shape)}")
-    if frames.dtype == torch.uint8:
-        frames = frames.float().div(127.5).sub(1.0)
-    else:
-        frames = frames.float().mul(2.0).sub(1.0)
-    return frames.permute(3, 0, 1, 2).unsqueeze(0).contiguous()
-
-
-def _load_record_and_visuals(args, decoder: PyAVH3MediaDecoder):
-    raw_visuals = {}
-    text_visuals = {}
-    if args.task in {"t2va", "fl2va"}:
-        record = _dummy_record(args.prompt or "")
-        if args.task == "fl2va":
-            for role, path in (("first", args.first_frame), ("last", args.last_frame)):
-                frames = _load_image_frames(path, width=args.width, height=args.height)
-                raw_visuals[role] = frames
-                text_visuals[role] = H3TextVisual(frames)
-        return record, raw_visuals, text_visuals
-
-    records = load_h3_jsonl_records(args.reference_jsonl, "ref2va")
-    if args.reference_index >= len(records):
-        raise ValueError(f"MiniMax-H3 --reference_index {args.reference_index} is outside {len(records)} JSONL records")
-    record = records[args.reference_index]
-    if args.prompt is not None:
-        record = replace(record, caption=args.prompt)
-    for reference in record.references:
-        if reference.type not in {"image", "video"}:
-            continue
-        frames = decoder.decode_reference_visual(
-            reference,
-            target_frame_count=args.frame_count,
-            target_size=(args.width, args.height),
-        )
-        raw_visuals[reference.path] = frames
-        if reference.type == "image":
-            text_visuals[reference.path] = H3TextVisual(frames)
-        else:
-            sampled = frames[::12]
-            text_visuals[reference.path] = H3TextVisual(
-                sampled,
-                tuple(index / 2.0 for index in range(sampled.shape[0])),
-            )
-    return record, raw_visuals, text_visuals
-
-
 def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
     presentation = build_presentation(record, args.task, text_visuals)
     if args.text_cache:
@@ -267,80 +200,6 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
     gc.collect()
     clean_memory_on_device(device)
     return hidden_states.to(torch.bfloat16).unsqueeze(0).cpu(), token_tags.cpu()
-
-
-def _module_device_dtype(module, fallback_dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
-    for tensor in (*module.parameters(), *module.buffers()):
-        if tensor.is_floating_point():
-            return tensor.device, tensor.dtype
-    return torch.device("cpu"), fallback_dtype
-
-
-@torch.no_grad()
-def _encode_visual_conditions(args, record, raw_visuals, video_vae):
-    video_device, video_dtype = _module_device_dtype(video_vae, torch.float16)
-    visual_latents = []
-    visual_geometries = []
-    reference_visual_geometries = {}
-
-    def encode_visual(frames):
-        latent = encode_video_condition(video_vae, _prepare_pixels(frames).to(video_device, video_dtype)).cpu()
-        visual_latents.append(latent)
-        return H3VideoGeometry(*latent.shape[2:])
-
-    if args.task == "fl2va":
-        for role in ("first", "last"):
-            visual_geometries.append(encode_visual(raw_visuals[role]))
-    elif args.task == "ref2va":
-        for index, reference in enumerate(record.references):
-            if reference.type in {"image", "video"}:
-                reference_visual_geometries[index] = encode_visual(raw_visuals[reference.path])
-    return tuple(visual_latents), tuple(visual_geometries), reference_visual_geometries
-
-
-@torch.no_grad()
-def _encode_audio_conditions(args, record, raw_visuals, decoder, audio_vae):
-    audio_device, audio_dtype = _module_device_dtype(audio_vae, torch.float32)
-    audio_latents = []
-    reference_audio_frames = {}
-    target_audio_frames = audio_latent_frames(args.frame_count)
-    for index, reference in enumerate(record.references):
-        if reference.audio is None:
-            continue
-        if reference.type == "video":
-            frames = audio_latent_frames(raw_visuals[reference.path].shape[0])
-            require_exact = True
-        else:
-            frames = target_audio_frames
-            require_exact = False
-        waveform = decoder.decode_audio(
-            reference.audio,
-            start_sample=0,
-            sample_count=waveform_samples(frames),
-            require_exact=require_exact,
-        )
-        latent = encode_audio_mode(audio_vae, waveform.unsqueeze(0).to(audio_device, audio_dtype)).cpu()
-        audio_latents.append(latent)
-        reference_audio_frames[index] = latent.shape[-1]
-    return tuple(audio_latents), reference_audio_frames
-
-
-def _build_reference_geometries(record, visual_geometries, audio_frames):
-    references = []
-    for index, reference in enumerate(record.references):
-        if reference.type == "image":
-            references.append(H3ReferenceGeometry("image", video=visual_geometries[index]))
-        elif reference.type == "audio":
-            references.append(H3ReferenceGeometry("audio", audio_frames=audio_frames[index]))
-        else:
-            references.append(
-                H3ReferenceGeometry(
-                    "video",
-                    video=visual_geometries[index],
-                    audio_frames=audio_frames.get(index, 0),
-                )
-            )
-    return tuple(references)
 
 
 def _merge_lora_weights(transformer, args) -> None:
@@ -412,7 +271,7 @@ def run_generation(args: argparse.Namespace) -> Path:
     validate_generation_args(args)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     decoder = PyAVH3MediaDecoder()
-    record, raw_visuals, text_visuals = _load_record_and_visuals(args, decoder)
+    record, raw_visuals, text_visuals = load_generation_record_and_visuals(args, decoder)
     text_hidden_states, text_token_tags = _encode_text(args, record, text_visuals, device)
 
     visual_conditions = ()
@@ -430,7 +289,7 @@ def run_generation(args: argparse.Namespace) -> Path:
             raise ValueError(
                 f"MiniMax-H3 video VAE spatial ratio must be {VIDEO_VAE_SPATIAL_RATIO}, got {condition_video_vae.vae_ratio}"
             )
-        visual_conditions, visual_geometries, reference_visual_geometries = _encode_visual_conditions(
+        visual_conditions, visual_geometries, reference_visual_geometries = encode_visual_conditions(
             args,
             record,
             raw_visuals,
@@ -450,7 +309,7 @@ def run_generation(args: argparse.Namespace) -> Path:
             dtype=torch.float32,
             disable_mmap=args.disable_numpy_memmap,
         )
-        audio_conditions, reference_audio_frames = _encode_audio_conditions(
+        audio_conditions, reference_audio_frames = encode_audio_conditions(
             args,
             record,
             raw_visuals,
@@ -461,7 +320,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         gc.collect()
         clean_memory_on_device(device)
     reference_geometries = (
-        _build_reference_geometries(record, reference_visual_geometries, reference_audio_frames) if args.task == "ref2va" else ()
+        build_reference_geometries(record, reference_visual_geometries, reference_audio_frames) if args.task == "ref2va" else ()
     )
     del raw_visuals, text_visuals
     clean_memory_on_device(device)
@@ -572,7 +431,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         disable_mmap=args.disable_numpy_memmap,
     )
     with torch.no_grad():
-        decoded_video = video_vae.decode(video_latents.to(device)).cpu()
+        decoded_video = video_vae.decode(video_latents.to(device=device, dtype=torch.float16)).cpu()
     del video_vae, video_latents
     gc.collect()
     clean_memory_on_device(device)
@@ -585,7 +444,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         disable_mmap=args.disable_numpy_memmap,
     )
     with torch.no_grad():
-        decoded_audio = audio_vae.decode(audio_latents.to(device)).cpu()
+        decoded_audio = audio_vae.decode(audio_latents.to(device=device, dtype=torch.float32)).cpu()
     del audio_vae, audio_latents
     gc.collect()
     clean_memory_on_device(device)
