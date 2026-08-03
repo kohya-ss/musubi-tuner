@@ -5,15 +5,17 @@ Musubi Tuner has experimental LoRA training and inference support for
 The model implementation is pinned to upstream Mage commit
 `ea7109b3515ddd995c2e1212656dc1bc3a9607b7`.
 
-This integration has passed synthetic contract and tiny-model tests. It has not
-yet passed the real released-weight parity checklist in this repository, so it
-is not a general-availability compatibility claim.
+This integration has passed synthetic contract and tiny-model tests. A
+released-weight workflow run has also been completed on an external GPU system,
+covering cache generation, LoRA training and inference. This is workflow
+validation rather than a bit-exact compatibility claim.
 
 ## Supported Scope
 
 - Mage-Flow T2I and Mage-Flow-Edit with one to three ordered references
 - LoRA training only
-- BF16, scaled FP8, gradient checkpointing, block swap and `torch.compile`
+- BF16, FP16 and FP32 compute, plus scaled FP8, gradient checkpointing, block
+  swap and `torch.compile`
 - PyTorch SDPA by default and optional FlashAttention 2
 - fixed released DiT dimensions and Qwen3-VL-4B conditioning
 - MageVAE image latents with 128 channels and 16x spatial downsampling
@@ -199,6 +201,9 @@ package remains an optional user installation.
 
 T2I Base-oriented defaults are 30 steps and CFG 5:
 
+`--dtype` supports `bfloat16`, `float16` and `float32`. MageVAE decoding uses
+the matching autocast dtype for BF16/FP16 and disables autocast for FP32.
+
 ```bash
 python mage_flow_generate_image.py \
   --dit path/to/mage_flow_dit.safetensors \
@@ -257,7 +262,13 @@ Recommended explicit schedules:
 
 ## Real-Weight Validation
 
-Before treating a component set as compatible, verify:
+On 2026-07-26, a maintainer completed a released-weight workflow run on a
+separate GPU system. The run covered the cache entry points, LoRA training and
+the inference entry point with released components.
+
+That run establishes end-to-end workflow execution. It does not by itself
+record bit-exact tensor comparisons with the pinned upstream implementation.
+For strict numerical parity, verify:
 
 1. each of DiT, MageVAE and Qwen is one readable safetensors file;
 2. strict header and state-dict loading succeeds without ignored keys;
@@ -269,8 +280,8 @@ Before treating a component set as compatible, verify:
 8. SDPA, optional FA2, scaled FP8, checkpointing, block swap and compile are
    checked on the intended GPU.
 
-Until that checklist is run with released files, this support remains
-experimental.
+Support remains labeled experimental until reproducible tensor-level reference
+artifacts and the external run configuration are recorded in this repository.
 
 ## 日本語
 
@@ -278,16 +289,18 @@ Musubi Tuner は Microsoft Mage-Flow と Mage-Flow-Edit の LoRA 学習および
 推論に実験的に対応しています。実装は upstream Mage の
 `ea7109b3515ddd995c2e1212656dc1bc3a9607b7` に固定されています。
 
-合成データによる契約テストと小型モデルテストは通過していますが、公開済み
-実重みを使った数値 parity はまだ完了していません。そのため、現時点では
-一般利用向けの完全互換を保証しません。
+合成データによる契約テストと小型モデルテストに加え、別の GPU 環境で公開済み
+実重みを使った cache 生成、LoRA 学習、推論の workflow 検証も完了しています。
+これは workflow の検証結果であり、bit-exact な完全互換を保証するものでは
+ありません。
 
 ### 対応範囲
 
 - Mage-Flow T2I
 - 参照画像を順序付きで 1～3 枚使う Mage-Flow-Edit
 - LoRA 学習のみ
-- BF16、scaled FP8、gradient checkpointing、block swap、`torch.compile`
+- BF16、FP16、FP32 compute、scaled FP8、gradient checkpointing、block swap、
+  `torch.compile`
 - 既定の PyTorch SDPA と、任意導入の FlashAttention 2
 - 固定された公開 DiT 構成と Qwen3-VL-4B conditioning
 - 128 channel、空間 16 倍圧縮の MageVAE latent
@@ -436,6 +449,9 @@ unscaled の `--fp8_base` は拒否します。scaled FP8 変換は DiT load 中
 
 T2I Base 向けの既定は 30 step、CFG 5 です。
 
+`--dtype` は `bfloat16`、`float16`、`float32` に対応します。MageVAE decode は
+BF16/FP16 では同じ dtype の autocast を使い、FP32 では autocast を無効にします。
+
 ```bash
 python mage_flow_generate_image.py \
   --dit path/to/mage_flow_dit.safetensors \
@@ -471,7 +487,12 @@ size です。最終 size は 16 の倍数へ切り下げます。
 
 ### 実重みでの検証
 
-一般利用向けと判断する前に、次を公開 weight で確認してください。
+2026-07-26 に、maintainer が別の GPU 環境で公開 weight を使い、cache entry
+point、LoRA 学習、推論 entry point を含む workflow 検証を完了しました。
+
+この結果は end-to-end workflow の実行を確認するものです。pinned upstream
+との bit-exact な tensor 比較結果を記録するものではありません。厳密な数値
+parity については、次を確認してください。
 
 1. DiT、MageVAE、Qwen がそれぞれ読み取り可能な単一 safetensors であること
 2. 無視された key なしで header 検証と strict load が成功すること
@@ -483,4 +504,5 @@ size です。最終 size は 16 の倍数へ切り下げます。
 8. 使用予定 GPU で SDPA、任意の FA2、scaled FP8、checkpointing、block swap、
    compile を確認すること
 
-この checklist が公開 weight で完了するまでは experimental support です。
+再現可能な tensor-level reference artifact と外部検証時の構成が repository
+に記録されるまでは experimental support とします。
