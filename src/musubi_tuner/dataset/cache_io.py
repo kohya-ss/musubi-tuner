@@ -519,10 +519,22 @@ def save_latent_cache_minimax_h3(
 
     target_count = 0
     audio_count = 0
+    audio_loss_weight_count = 0
+    audio_loss_weight = None
     normalized = {}
     for key, tensor in tensors.items():
         if not isinstance(tensor, torch.Tensor):
             raise ValueError(f"MiniMax-H3 cache value must be a tensor: {key}")
+        if key == "mmh3_audio_loss_weight_float32":
+            if tensor.shape != torch.Size([]) or tensor.dtype != torch.float32:
+                raise ValueError("MiniMax-H3 audio loss weight must be a scalar float32 tensor")
+            if not torch.isfinite(tensor).item() or tensor.item() not in {0.0, 1.0}:
+                raise ValueError("MiniMax-H3 audio loss weight must be exactly 0.0 or 1.0")
+            audio_loss_weight_count += 1
+            audio_loss_weight = tensor.item()
+            normalized[key] = tensor.detach().cpu().contiguous()
+            continue
+
         match = target_pattern.fullmatch(key)
         if match is not None:
             frames, height, width = (int(match.group(index)) for index in range(1, 4))
@@ -563,6 +575,18 @@ def save_latent_cache_minimax_h3(
         raise ValueError(f"MiniMax-H3 cache requires exactly one target video latent, found {target_count}")
     if audio_count != 1:
         raise ValueError(f"MiniMax-H3 cache requires exactly one target audio latent, found {audio_count}")
+    if audio_loss_weight_count != 1:
+        raise ValueError(f"MiniMax-H3 cache requires exactly one audio loss weight tensor, found {audio_loss_weight_count}")
+    target_audio_policy = (metadata or {}).get("target_audio_policy")
+    valid_audio_policies = {"real-supervised", "missing-unsupervised", "video-only-unsupervised"}
+    if target_audio_policy not in valid_audio_policies:
+        raise ValueError(f"MiniMax-H3 cache requires valid target_audio_policy metadata, got {target_audio_policy!r}")
+    expected_audio_loss_weight = 1.0 if target_audio_policy == "real-supervised" else 0.0
+    if audio_loss_weight != expected_audio_loss_weight:
+        raise ValueError(
+            f"MiniMax-H3 cache has contradictory target_audio_policy={target_audio_policy!r} "
+            f"and audio loss weight={audio_loss_weight}"
+        )
     save_latent_cache_common(item_info, normalized, ARCHITECTURE_MINIMAX_H3_FULL, metadata)
 
 

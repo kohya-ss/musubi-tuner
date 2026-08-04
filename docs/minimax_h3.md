@@ -34,11 +34,11 @@ The transformer, video VAE, packed-sequence logic, text presentation, and dual s
 - Width and height must be positive multiples of 32.
 - Frame count must be `17*n+5`.
 - The released duration range is 5 to 15 seconds. At 24 fps, the valid released frame counts run from 124 through 345 in steps of 17.
-- Every training target requires stereo 32000 Hz audio. It may be embedded in the target video, supplied through `audio_path` in JSONL, or stored as one same-stem sidecar next to a directory-dataset video.
+- Real target audio is optional. When present, it is decoded as stereo 32000 Hz audio from the target video, JSONL `audio_path`, or one same-stem sidecar. When absent, the cache stores an unsupervised Audio-VAE silence placeholder so the released packed layout remains intact.
 - Ref2VA uses ordered JSONL references only. Numbered reference directories are not supported.
 - Expanded Qwen conditioning is limited to 32768 rows. A BF16 cache at the limit is approximately 320 MiB for one sample.
 
-`--allow_experimental_duration` bypasses only the released 5-to-15-second check. It does not bypass frame geometry, reference limits, or audio validation.
+`--allow_experimental_duration` bypasses only the released 5-to-15-second check. It does not bypass frame geometry, reference limits, or validation of an explicitly selected audio source.
 
 ## Dataset Configuration
 
@@ -60,7 +60,7 @@ frame_extraction = "head"
 source_fps = 24.0
 ```
 
-For a directory item such as `clip.mp4`, put the caption in `clip.txt`. Target audio is resolved in this order: the JSONL `audio_path` when JSONL is used, exactly one same-stem audio sidecar such as `clip.wav`, then the video's embedded audio stream.
+For a directory item such as `clip.mp4`, put the caption in `clip.txt`. Target audio is resolved in this order: the JSONL `audio_path` when JSONL is used, exactly one same-stem audio sidecar such as `clip.wav`, then the video's embedded audio stream, then an unsupervised silence placeholder.
 
 Ref2VA requires `video_jsonl_file`:
 
@@ -237,7 +237,7 @@ For Ref2VA, use the Ref2VA BF16 base and an ordered JSONL record:
 --task ref2va --dit /models/minimax_h3_ref2va_bf16.safetensors --reference_jsonl /data/h3/ref2va.jsonl --reference_index 0
 ```
 
-The Ref2VA generation JSONL intentionally uses the same validated schema as training, including target `video_path`, target audio, caption, and references. The target media identifies the record but is not used as a generation target. `--prompt` may override the record caption when encoding fresh text conditioning.
+The Ref2VA generation JSONL intentionally uses the same validated schema as training, including target `video_path`, optional target audio, caption, and references. The target media identifies the record but is not used as a generation target. `--prompt` may override the record caption when encoding fresh text conditioning.
 
 T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. The cache must match the requested task, frame count, and exact presentation fingerprint. T2VA still requires `--prompt` so that identity can be verified; Ref2VA uses the selected record caption unless `--prompt` overrides it. FL2VA generation does not accept a dataset text cache because external first/last images cannot be proven identical to the crop presentation that produced that cache.
 

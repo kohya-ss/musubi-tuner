@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -26,8 +27,11 @@ from musubi_tuner.minimax_h3_cache_latents import (
     build_latent_tensors,
     cache_metadata_matches,
     install_h3_video_decoder,
+    log_target_audio_summary,
+    record_media_paths,
     resample_frame_indices,
     setup_parser,
+    warn_missing_target_audio,
 )
 from musubi_tuner.dataset.bucket import BucketBatchManager
 from musubi_tuner.dataset.cache_io import (
@@ -158,7 +162,7 @@ def test_target_audio_resolution_prefers_one_same_stem_sidecar(tmp_path: Path):
     assert record.target_audio.embedded is False
 
 
-def test_directory_record_uses_the_same_mandatory_audio_resolution(tmp_path: Path):
+def test_directory_record_uses_the_same_audio_resolution(tmp_path: Path):
     video = _touch(tmp_path / "clip.mp4")
     sidecar = _touch(tmp_path / "clip.wav")
 
@@ -208,17 +212,131 @@ def test_explicit_target_audio_decode_failure_does_not_fall_back(tmp_path: Path)
         load_h3_jsonl_records(jsonl, "t2va", probe)
 
 
-def test_target_audio_is_required(tmp_path: Path):
+def test_missing_target_audio_is_an_unsupervised_record(tmp_path: Path):
     video = _touch(tmp_path / "clip.mp4")
     jsonl = tmp_path / "data.jsonl"
     _write_jsonl(jsonl, [{"video_path": "clip.mp4", "caption": "caption"}])
 
-    with pytest.raises(ValueError, match="Missing target audio"):
-        load_h3_jsonl_records(
-            jsonl,
-            "t2va",
-            lambda path: H3MediaInfo(has_audio=False, duration_seconds=5.0),
+    record = load_h3_jsonl_records(
+        jsonl,
+        "t2va",
+        lambda path: H3MediaInfo(has_audio=False, duration_seconds=5.0),
+    )[0]
+
+    assert record.target_audio is None
+    assert record_media_paths(record) == {video}
+
+
+def test_video_only_jsonl_bypasses_all_target_audio_discovery(tmp_path: Path):
+    video = _touch(tmp_path / "clip.mp4")
+    _touch(tmp_path / "clip.wav")
+    _touch(tmp_path / "clip.flac")
+    jsonl = tmp_path / "data.jsonl"
+    _write_jsonl(
+        jsonl,
+        [{"video_path": "clip.mp4", "caption": "caption", "audio_path": "does-not-exist.wav"}],
+    )
+
+    record = load_h3_jsonl_records(
+        jsonl,
+        "t2va",
+        lambda path: pytest.fail(f"video-only target audio must not probe {path}"),
+        video_only=True,
+    )[0]
+
+    assert record.target_audio is None
+    assert record_media_paths(record) == {video}
+
+
+def test_video_only_directory_record_bypasses_sidecars_and_probing(tmp_path: Path):
+    video = _touch(tmp_path / "clip.mp4")
+    _touch(tmp_path / "clip.wav")
+    _touch(tmp_path / "clip.flac")
+
+    record = make_h3_directory_record(
+        video,
+        "caption",
+        lambda path: pytest.fail(f"video-only target audio must not probe {path}"),
+        video_only=True,
+    )
+
+    assert record.target_audio is None
+
+
+def test_video_only_keeps_ref2va_reference_audio_validation(tmp_path: Path):
+    video = _touch(tmp_path / "target.mp4")
+    reference_video = _touch(tmp_path / "reference.mp4")
+    reference_audio = _touch(tmp_path / "reference.wav")
+    jsonl = tmp_path / "data.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "video_path": "target.mp4",
+                "caption": "caption",
+                "audio_path": "ignored-missing.wav",
+                "references": [{"type": "video", "path": "reference.mp4", "audio_path": "reference.wav"}],
+            }
+        ],
+    )
+    probed = []
+
+    def probe(path: Path) -> H3MediaInfo:
+        probed.append(path)
+        return H3MediaInfo(has_audio=path == reference_audio, duration_seconds=5.0)
+
+    record = load_h3_jsonl_records(jsonl, "ref2va", probe, video_only=True)[0]
+
+    assert record.target_audio is None
+    assert probed == [reference_video, reference_audio]
+    assert record.references[0].audio == H3AudioSource(reference_audio, embedded=False)
+    assert record_media_paths(record) == {video, reference_video, reference_audio}
+
+
+def test_missing_audio_warnings_are_capped_and_summary_is_aggregated(caplog, tmp_path: Path):
+    records = [
+        H3Record(
+            video_path=tmp_path / f"clip-{index}.mp4",
+            caption="caption",
+            target_audio=None,
+            references=(),
+            jsonl_line=index + 1,
         )
+        for index in range(12)
+    ]
+    caplog.set_level(logging.INFO)
+
+    warn_missing_target_audio(records, video_only=False, limit=10)
+    log_target_audio_summary(
+        {
+            "real-supervised": 0,
+            "missing-unsupervised": 12,
+            "video-only-unsupervised": 0,
+        }
+    )
+
+    missing_warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(missing_warnings) == 10
+    assert "clip-0.mp4" in missing_warnings[0].getMessage()
+    assert "clip-9.mp4" in missing_warnings[-1].getMessage()
+    assert "real_audio=0 missing_audio=12 video_only=0 supervised_audio_fraction=0.000000" in caplog.text
+
+
+def test_explicit_video_only_emits_no_missing_audio_warning(caplog, tmp_path: Path):
+    records = [H3Record(tmp_path / "clip.mp4", "caption", None, (), 1)]
+    caplog.set_level(logging.INFO)
+
+    warn_missing_target_audio(records, video_only=True)
+    log_target_audio_summary(
+        {
+            "real-supervised": 0,
+            "missing-unsupervised": 0,
+            "video-only-unsupervised": 1,
+        }
+    )
+
+    assert not [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert "real_audio=0 missing_audio=0 video_only=1 supervised_audio_fraction=0.000000" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -326,13 +444,18 @@ def test_h3_cache_keys_round_trip_through_existing_bucket_collator(tmp_path: Pat
     latent_tensors = {
         "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
         "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+        "mmh3_audio_loss_weight_float32": torch.tensor(1.0, dtype=torch.float32),
         "latents_first_1x4x4_float16": torch.ones(24, 1, 4, 4, dtype=torch.float16),
     }
     text_tensors = {
         "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
         "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
     }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "fl2va"})
+    save_latent_cache_minimax_h3(
+        item,
+        latent_tensors,
+        {"task": "fl2va", "target_audio_policy": "real-supervised"},
+    )
     save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "fl2va"})
 
     manager = BucketBatchManager({(64, 64, 5): [item]}, batch_size=1)
@@ -340,6 +463,7 @@ def test_h3_cache_keys_round_trip_through_existing_bucket_collator(tmp_path: Pat
 
     assert batch["latents"].shape == (1, 24, 2, 4, 4)
     assert batch["latents_audio"].shape == (1, 32, 2, 8)
+    torch.testing.assert_close(batch["mmh3_audio_loss_weight"], torch.tensor([1.0]))
     assert batch["latents_first"].shape == (1, 24, 1, 4, 4)
     assert isinstance(batch["mmh3_hidden_states"], list)
     assert batch["mmh3_hidden_states"][0].shape == (3, 5120)
@@ -356,6 +480,48 @@ def test_h3_latent_writer_rejects_transposed_audio_layout(tmp_path: Path):
 
     with pytest.raises(ValueError, match=r"audio latent \[32,2,A\]"):
         save_latent_cache_minimax_h3(item, tensors)
+
+
+def test_h3_latent_writer_requires_binary_float32_audio_loss_scalar(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    base = {
+        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+    }
+
+    with pytest.raises(ValueError, match="audio loss weight"):
+        save_latent_cache_minimax_h3(item, base)
+
+    invalid = (
+        torch.tensor([1.0], dtype=torch.float32),
+        torch.tensor(1.0, dtype=torch.float64),
+        torch.tensor(float("nan"), dtype=torch.float32),
+        torch.tensor(0.5, dtype=torch.float32),
+    )
+    for scalar in invalid:
+        with pytest.raises(ValueError, match="audio loss weight"):
+            save_latent_cache_minimax_h3(
+                item,
+                {**base, "mmh3_audio_loss_weight_float32": scalar},
+            )
+
+
+def test_h3_latent_writer_requires_policy_metadata_consistent_with_scalar(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    tensors = {
+        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+        "mmh3_audio_loss_weight_float32": torch.tensor(1.0, dtype=torch.float32),
+    }
+
+    with pytest.raises(ValueError, match="target_audio_policy"):
+        save_latent_cache_minimax_h3(item, tensors, {"task": "t2va"})
+    with pytest.raises(ValueError, match="contradictory"):
+        save_latent_cache_minimax_h3(
+            item,
+            tensors,
+            {"task": "t2va", "target_audio_policy": "missing-unsupervised"},
+        )
 
 
 @pytest.mark.parametrize(
@@ -460,9 +626,13 @@ def test_build_fl2va_latents_uses_exact_audio_window_and_target_crop(tmp_path: P
     assert set(payload.tensors) == {
         "latents_2x4x4_float32",
         "latents_audio_32x2x8_float32",
+        "mmh3_audio_loss_weight_float32",
         "latents_first_1x4x4_float32",
         "latents_last_1x4x4_float32",
     }
+    assert payload.tensors["mmh3_audio_loss_weight_float32"].shape == torch.Size([])
+    assert payload.tensors["mmh3_audio_loss_weight_float32"].dtype == torch.float32
+    assert payload.tensors["mmh3_audio_loss_weight_float32"].item() == 1.0
     assert decoder.audio_calls == [(record.target_audio, 4000, 6400, True)]
     assert [call.shape for call in video_vae.calls] == [
         (1, 3, 5, 64, 64),
@@ -476,11 +646,52 @@ def test_build_fl2va_latents_uses_exact_audio_window_and_target_crop(tmp_path: P
     assert payload.metadata["audio_start_seconds"] == "1/8"
     assert payload.metadata["video_vae_fingerprint"] == "video-fingerprint"
     assert payload.metadata["audio_vae_fingerprint"] == "audio-fingerprint"
+    assert payload.metadata["target_audio_policy"] == "real-supervised"
     assert payload.metadata["posterior_policy"] == "video_vae=fp32;target=seeded;conditions=seed42-fp16;audio=mode"
     assert json.loads(payload.metadata["media_fingerprints"]) == {
         str(record.target_audio.path): "target-audio",
         str(record.video_path): "target-video",
     }
+
+
+@pytest.mark.parametrize(
+    ("video_only", "expected_policy"),
+    [(False, "missing-unsupervised"), (True, "video-only-unsupervised")],
+)
+def test_missing_or_ignored_target_audio_encodes_unsupervised_silence(
+    tmp_path: Path,
+    video_only: bool,
+    expected_policy: str,
+):
+    real_record = _cache_record(tmp_path)
+    record = real_record if video_only else H3Record(real_record.video_path, real_record.caption, None, (), 1)
+    video_vae = _FakeH3VideoVAE()
+    audio_vae = _FakeH3AudioVAE()
+    decoder = _FakeH3MediaDecoder()
+
+    payload = build_latent_tensors(
+        record=record,
+        task="t2va",
+        target_frames=torch.zeros(5, 64, 64, 3, dtype=torch.uint8),
+        crop_start_frame=0,
+        video_vae=video_vae,
+        audio_vae=audio_vae,
+        cache_seed=0,
+        media_decoder=decoder,
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={record.video_path: "target-video"},
+        allow_experimental_duration=True,
+        video_only=video_only,
+    )
+
+    assert decoder.audio_calls == []
+    assert len(audio_vae.calls) == 1
+    assert audio_vae.calls[0].shape == (1, 2, 6400)
+    assert audio_vae.calls[0].dtype == torch.float32
+    assert torch.count_nonzero(audio_vae.calls[0]) == 0
+    assert payload.tensors["mmh3_audio_loss_weight_float32"].item() == 0.0
+    assert payload.metadata["target_audio_policy"] == expected_policy
 
 
 def test_h3_timestamp_resampling_duplicates_low_fps_frames_to_24fps():
@@ -502,11 +713,45 @@ def test_h3_skip_existing_requires_all_cache_identity_metadata(tmp_path: Path):
     assert not cache_metadata_matches(cache_path, {"task": "t2va", "audio_vae_fingerprint": "missing"})
 
 
+def test_h3_skip_existing_compares_derived_audio_supervision_not_raw_provenance(tmp_path: Path):
+    cache_path = tmp_path / "cache.safetensors"
+    save_file(
+        {
+            "latents_2x4x4_float32": torch.zeros(24, 2, 4, 4),
+            "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+            "mmh3_audio_loss_weight_float32": torch.tensor(0.0),
+        },
+        cache_path,
+        metadata={
+            "task": "t2va",
+            "media_fingerprints": '{"target.mp4":"same-video"}',
+            "target_audio_policy": "missing-unsupervised",
+        },
+    )
+
+    common = {"task": "t2va", "media_fingerprints": '{"target.mp4":"same-video"}'}
+    assert cache_metadata_matches(cache_path, {**common, "target_audio_policy": "video-only-unsupervised"})
+    assert not cache_metadata_matches(cache_path, {**common, "target_audio_policy": "real-supervised"})
+
+
+def test_h3_skip_existing_treats_complete_legacy_policy_absence_as_supervised(tmp_path: Path):
+    cache_path = tmp_path / "legacy.safetensors"
+    save_file(
+        {"latents_2x4x4_float32": torch.zeros(24, 2, 4, 4)},
+        cache_path,
+        metadata={"task": "t2va"},
+    )
+
+    assert cache_metadata_matches(cache_path, {"task": "t2va", "target_audio_policy": "real-supervised"})
+    assert not cache_metadata_matches(cache_path, {"task": "t2va", "target_audio_policy": "missing-unsupervised"})
+
+
 def test_h3_latent_cache_parser_exposes_only_the_two_explicit_vae_paths():
     help_text = setup_parser().format_help()
 
     assert "--video_vae" in help_text
     assert "--audio_vae" in help_text
+    assert "--h3_video_only" in help_text
     assert "--vae VAE" not in help_text
     assert "--vae_dtype" not in help_text
 
@@ -577,6 +822,7 @@ def test_build_ref2va_latents_preserves_ordered_numbered_roles(tmp_path: Path):
     assert set(payload.tensors) == {
         "latents_2x4x4_float32",
         "latents_audio_32x2x8_float32",
+        "mmh3_audio_loss_weight_float32",
         "latents_ref_000_image_1x2x4_float32",
         "latents_ref_001_video_2x4x2_float32",
         "latents_ref_001_audio_32x2x8_float32",

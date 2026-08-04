@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_left
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -59,6 +60,7 @@ AUDIO_TIMESTAMP_TOLERANCE_SAMPLES = 2
 CANVAS_MULTIPLE = 32
 BASE_SHORT_EDGE = 768
 MAX_PIXELS = 768 * 1344
+TARGET_AUDIO_POLICIES = frozenset({"real-supervised", "missing-unsupervised", "video-only-unsupervised"})
 
 
 @dataclass(frozen=True)
@@ -402,6 +404,22 @@ def _media_fingerprint_metadata(fingerprints: Mapping[Path, str]) -> str:
     return json.dumps(dict(sorted(normalized.items())), ensure_ascii=True, separators=(",", ":"))
 
 
+def _target_audio_policy(record: H3Record, *, video_only: bool) -> str:
+    if video_only:
+        return "video-only-unsupervised"
+    if record.target_audio is None:
+        return "missing-unsupervised"
+    return "real-supervised"
+
+
+def _audio_policy_is_supervised(policy: str | None, *, legacy_missing: bool) -> bool | None:
+    if policy is None:
+        return True if legacy_missing else None
+    if policy not in TARGET_AUDIO_POLICIES:
+        return None
+    return policy == "real-supervised"
+
+
 def build_latent_metadata(
     *,
     record: H3Record,
@@ -414,6 +432,7 @@ def build_latent_metadata(
     video_vae_fingerprint: str,
     audio_vae_fingerprint: str,
     media_fingerprints: Mapping[Path, str],
+    video_only: bool = False,
 ) -> dict[str, str]:
     reference_kinds = [
         reference.type + ("+audio" if reference.type == "video" and reference.audio is not None else "")
@@ -431,6 +450,7 @@ def build_latent_metadata(
         "video_vae_fingerprint": video_vae_fingerprint,
         "audio_vae_fingerprint": audio_vae_fingerprint,
         "media_fingerprints": _media_fingerprint_metadata(media_fingerprints),
+        "target_audio_policy": _target_audio_policy(record, video_only=video_only),
     }
 
 
@@ -441,7 +461,16 @@ def cache_metadata_matches(path: str | Path, expected: Mapping[str, str]) -> boo
     except Exception as error:
         logger.warning("Unable to read MiniMax-H3 cache metadata from %s: %s", path, error)
         return False
-    return all(actual.get(key) == value for key, value in expected.items())
+    for key, value in expected.items():
+        if key != "target_audio_policy":
+            if actual.get(key) != value:
+                return False
+            continue
+        expected_supervised = _audio_policy_is_supervised(value, legacy_missing=False)
+        actual_supervised = _audio_policy_is_supervised(actual.get(key), legacy_missing=True)
+        if expected_supervised is None or actual_supervised is None or expected_supervised != actual_supervised:
+            return False
+    return True
 
 
 def build_latent_tensors(
@@ -458,6 +487,7 @@ def build_latent_tensors(
     audio_vae_fingerprint: str,
     media_fingerprints: Mapping[Path, str],
     allow_experimental_duration: bool = False,
+    video_only: bool = False,
 ) -> H3LatentCachePayload:
     _validate_task_record(record, task)
     if crop_start_frame < 0:
@@ -486,12 +516,21 @@ def build_latent_tensors(
 
     target_samples = waveform_samples(expected_audio_frames)
     start_sample = _audio_start_sample(crop_start_frame)
-    target_waveform = media_decoder.decode_audio(
-        record.target_audio,
-        start_sample=start_sample,
-        sample_count=target_samples,
-        require_exact=True,
-    )
+    target_audio_policy = _target_audio_policy(record, video_only=video_only)
+    if target_audio_policy == "real-supervised":
+        target_audio_source = record.target_audio
+        if target_audio_source is None:
+            raise ValueError("MiniMax-H3 real-supervised audio policy requires a target audio source")
+        target_waveform = media_decoder.decode_audio(
+            target_audio_source,
+            start_sample=start_sample,
+            sample_count=target_samples,
+            require_exact=True,
+        )
+        audio_loss_weight = 1.0
+    else:
+        target_waveform = torch.zeros((2, target_samples), dtype=torch.float32)
+        audio_loss_weight = 0.0
     target_audio = _encode_audio(audio_vae, target_waveform)[0]
     if target_audio.shape[2] != expected_audio_frames:
         raise ValueError(f"MiniMax-H3 audio VAE returned {target_audio.shape[2]} frames, expected {expected_audio_frames}")
@@ -499,6 +538,7 @@ def build_latent_tensors(
     tensors = {
         _visual_key("", target_video): target_video,
         _audio_key("", target_audio): target_audio,
+        "mmh3_audio_loss_weight_float32": torch.tensor(audio_loss_weight, dtype=torch.float32),
     }
     if task == "fl2va":
         for role, frame in (("first", target_frames[:1]), ("last", target_frames[-1:])):
@@ -547,6 +587,7 @@ def build_latent_tensors(
         video_vae_fingerprint=video_vae_fingerprint,
         audio_vae_fingerprint=audio_vae_fingerprint,
         media_fingerprints=media_fingerprints,
+        video_only=video_only,
     )
     return H3LatentCachePayload(tensors=tensors, metadata=metadata)
 
@@ -584,7 +625,9 @@ def fingerprint_checkpoint(path: str | Path) -> str:
 
 
 def record_media_paths(record: H3Record) -> set[Path]:
-    paths = {record.video_path, record.target_audio.path}
+    paths = {record.video_path}
+    if record.target_audio is not None:
+        paths.add(record.target_audio.path)
     for reference in record.references:
         paths.add(reference.path)
         if reference.audio is not None:
@@ -592,11 +635,11 @@ def record_media_paths(record: H3Record) -> set[Path]:
     return paths
 
 
-def records_for_dataset(dataset: VideoDataset, task: H3Task) -> list[H3Record]:
+def records_for_dataset(dataset: VideoDataset, task: H3Task, *, video_only: bool = False) -> list[H3Record]:
     if dataset.control_directory is not None or dataset.has_control:
         raise ValueError("MiniMax-H3 R1 does not use the shared control-video fields")
     if dataset.video_jsonl_file is not None:
-        records = load_h3_jsonl_records(dataset.video_jsonl_file, task)
+        records = load_h3_jsonl_records(dataset.video_jsonl_file, task, video_only=video_only)
         if len(records) != len(dataset.datasource.data):
             raise ValueError("MiniMax-H3 JSONL record count changed while building the dataset")
         for data, record in zip(dataset.datasource.data, records):
@@ -609,11 +652,47 @@ def records_for_dataset(dataset: VideoDataset, task: H3Task) -> list[H3Record]:
     canonical_paths = []
     for index in range(len(dataset.datasource)):
         video_path, caption = dataset.datasource.get_caption(index)
-        record = make_h3_directory_record(video_path, caption)
+        record = make_h3_directory_record(video_path, caption, video_only=video_only)
         records.append(record)
         canonical_paths.append(str(record.video_path))
     dataset.datasource.video_paths = canonical_paths
     return records
+
+
+def warn_missing_target_audio(
+    records: Sequence[H3Record],
+    *,
+    video_only: bool,
+    limit: int = 10,
+) -> None:
+    if video_only:
+        return
+    if limit < 0:
+        raise ValueError("MiniMax-H3 missing-audio warning limit must be nonnegative")
+    missing = [record for record in records if record.target_audio is None]
+    for record in missing[:limit]:
+        logger.warning(
+            "MiniMax-H3 target has no audio; caching an unsupervised silence placeholder: %s",
+            record.video_path,
+        )
+
+
+def log_target_audio_summary(policy_counts: Mapping[str, int]) -> None:
+    unknown = set(policy_counts) - TARGET_AUDIO_POLICIES
+    if unknown or any(not isinstance(count, int) or count < 0 for count in policy_counts.values()):
+        raise ValueError(f"Invalid MiniMax-H3 target-audio policy counts: {dict(policy_counts)}")
+    real_audio = policy_counts.get("real-supervised", 0)
+    missing_audio = policy_counts.get("missing-unsupervised", 0)
+    video_only_count = policy_counts.get("video-only-unsupervised", 0)
+    total = real_audio + missing_audio + video_only_count
+    supervised_fraction = real_audio / total if total else 0.0
+    logger.info(
+        "MiniMax-H3 target-audio cache summary: real_audio=%d missing_audio=%d video_only=%d supervised_audio_fraction=%.6f",
+        real_audio,
+        missing_audio,
+        video_only_count,
+        supervised_fraction,
+    )
 
 
 def record_for_item(item: ItemInfo, records: Sequence[H3Record]) -> tuple[H3Record, int]:
@@ -658,6 +737,11 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
     parser.add_argument("--cache_seed", type=int, default=0, help="seed used for reproducible target-video posterior samples")
     parser.add_argument(
+        "--h3_video_only",
+        action="store_true",
+        help="ignore all target audio and cache unsupervised Audio-VAE silence placeholders",
+    )
+    parser.add_argument(
         "--allow_experimental_duration",
         action="store_true",
         help="allow target crops outside the released 5-15 second duration range",
@@ -684,9 +768,10 @@ def main() -> None:
     decoder = PyAVH3MediaDecoder()
     records = []
     for dataset in datasets:
-        dataset_records = records_for_dataset(dataset, args.task)
+        dataset_records = records_for_dataset(dataset, args.task, video_only=args.h3_video_only)
         install_h3_video_decoder(dataset, decoder)
         records.extend(dataset_records)
+    warn_missing_target_audio(records, video_only=args.h3_video_only)
 
     if args.debug_mode is not None:
         cache_latents.show_datasets(
@@ -716,10 +801,12 @@ def main() -> None:
 
     skip_matching_cache = args.skip_existing
     args.skip_existing = False
+    cache_policy_counts: Counter[str] = Counter()
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
             record, crop_start = record_for_item(item, records)
+            cache_policy_counts[_target_audio_policy(record, video_only=args.h3_video_only)] += 1
             record_fingerprints = {path: media_fingerprints[path] for path in record_media_paths(record)}
             frame_count, height, width = item.content.shape[:3]
             expected_metadata = build_latent_metadata(
@@ -733,6 +820,7 @@ def main() -> None:
                 video_vae_fingerprint=video_vae_fingerprint,
                 audio_vae_fingerprint=audio_vae_fingerprint,
                 media_fingerprints=record_fingerprints,
+                video_only=args.h3_video_only,
             )
             if skip_matching_cache and Path(item.latent_cache_path).is_file():
                 if cache_metadata_matches(item.latent_cache_path, expected_metadata):
@@ -752,11 +840,13 @@ def main() -> None:
                 audio_vae_fingerprint=audio_vae_fingerprint,
                 media_fingerprints=record_fingerprints,
                 allow_experimental_duration=args.allow_experimental_duration,
+                video_only=args.h3_video_only,
             )
             logger.info("Saving MiniMax-H3 latent cache for %s to %s", item.item_key, item.latent_cache_path)
             save_latent_cache_minimax_h3(item, payload.tensors, payload.metadata)
 
     cache_latents.encode_datasets(datasets, encode, args)
+    log_target_audio_summary(cache_policy_counts)
 
 
 if __name__ == "__main__":

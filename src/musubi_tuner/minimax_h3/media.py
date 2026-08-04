@@ -39,7 +39,7 @@ class H3Reference:
 class H3Record:
     video_path: Path
     caption: str
-    target_audio: H3AudioSource
+    target_audio: Optional[H3AudioSource]
     references: tuple[H3Reference, ...]
     jsonl_line: int
 
@@ -120,7 +120,12 @@ def _resolve_target_audio(
     base_directory: Path,
     line_number: int,
     probe: H3MediaProbe,
-) -> H3AudioSource:
+    *,
+    video_only: bool = False,
+) -> Optional[H3AudioSource]:
+    if video_only:
+        return None
+
     if data.get("audio_path") is not None:
         path = _resolve_existing_path(data["audio_path"], base_directory, "audio_path", line_number)
         _probe_required_audio(path, probe, "Explicit target audio", line_number)
@@ -140,20 +145,22 @@ def _resolve_target_audio(
         raise ValueError(f"H3 JSONL line {line_number}: Target video failed to decode: {error}") from error
     if video_info.has_audio:
         return H3AudioSource(path=video_path, embedded=True)
-    raise ValueError(f"H3 JSONL line {line_number}: Missing target audio for {video_path}")
+    return None
 
 
 def make_h3_directory_record(
     video_path: str | Path,
     caption: str,
     probe: H3MediaProbe = probe_h3_media,
+    *,
+    video_only: bool = False,
 ) -> H3Record:
     video_path = Path(video_path).resolve()
     if not video_path.is_file():
         raise ValueError(f"MiniMax-H3 target video does not exist: {video_path}")
     if not isinstance(caption, str):
         raise ValueError("MiniMax-H3 directory caption must be a string")
-    target_audio = _resolve_target_audio({}, video_path, video_path.parent, 0, probe)
+    target_audio = _resolve_target_audio({}, video_path, video_path.parent, 0, probe, video_only=video_only)
     return H3Record(
         video_path=video_path,
         caption=caption,
@@ -249,6 +256,8 @@ def load_h3_jsonl_records(
     jsonl_path: str | Path,
     task: H3Task,
     probe: H3MediaProbe = probe_h3_media,
+    *,
+    video_only: bool = False,
 ) -> list[H3Record]:
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
@@ -274,7 +283,14 @@ def load_h3_jsonl_records(
             caption = data.get("caption")
             if not isinstance(caption, str):
                 raise ValueError(f"H3 JSONL line {line_number}: caption must be a string")
-            target_audio = _resolve_target_audio(data, video_path, base_directory, line_number, probe)
+            target_audio = _resolve_target_audio(
+                data,
+                video_path,
+                base_directory,
+                line_number,
+                probe,
+                video_only=video_only,
+            )
 
             raw_references = data.get("references", [])
             if task == "ref2va":

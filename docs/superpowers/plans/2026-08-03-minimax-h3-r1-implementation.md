@@ -16,7 +16,7 @@
 - Target video frames use `F = 17 * n + 5`; target audio latent length uses exact integer arithmetic `A = (10 * F + 3) // 6`.
 - Cache keys must follow the repository's `latents_` and `varlen_` collation contracts exactly.
 - Every H3 dataset uses `batch_size = 1`; gradient accumulation is the R1 effective-batch mechanism.
-- Training uses independent video/audio shifts, one scalar noise amount for the single item, raw dataward velocity targets, and unweighted mean MSE.
+- Training uses independent video/audio shifts, one scalar noise amount for the single item, raw dataward velocity targets, video mean MSE for every sample, and optional audio mean MSE selected by the cache policy scalar.
 - Ported model code is derived from Apache-2.0 Diffusers PR #14355 at pinned commit `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`; ComfyUI is validation-only.
 - BF16 block swap is required for both training and inference.
 - Every production behavior is introduced through a red-green-refactor test cycle.
@@ -140,7 +140,7 @@ def test_audio_grid_uses_integer_identity(frames, audio_frames):
     assert waveform_samples(audio_frames) == audio_frames * 800
 ```
 
-Add tests that reject malformed JSONL, missing target audio, ambiguous same-stem sidecars, explicit undecodable audio without fallback, reference counts above 9 images/3 videos/3 audio-bearing/12 total, Ref2VA without a visual reference, and reference video duration outside 2-15 seconds.
+Add tests that reject malformed JSONL, ambiguous same-stem sidecars, explicit undecodable audio without fallback, reference counts above 9 images/3 videos/3 audio-bearing/12 total, Ref2VA without a visual reference, and reference video duration outside 2-15 seconds. Missing target audio is accepted as an unsupervised record under the final Task 13 contract.
 
 - [x] **Step 2: Run cache-contract tests and verify RED**
 
@@ -161,7 +161,7 @@ def waveform_samples(audio_frames: int) -> int:
     return audio_frames * 800
 ```
 
-Use dataclasses with canonical absolute paths and ordered references. Resolve target audio as explicit `audio_path`, then one exact same-stem sidecar, then embedded stream; preserve explicit failures. Keep the shared `VideoJsonlDatasource` tuple contract unchanged.
+Use dataclasses with canonical absolute paths and ordered references. Resolve target audio as explicit `audio_path`, then one exact same-stem sidecar, then embedded stream, then `None`; preserve failures for explicitly selected sources. Keep the shared `VideoJsonlDatasource` tuple contract unchanged.
 
 - [x] **Step 4: Write failing cache-key round-trip tests**
 
@@ -270,7 +270,7 @@ Expected: missing H3 entrypoint and command module.
 
 - [x] **Step 3: Implement cache batching and CLI**
 
-Reuse `BlueprintGenerator`, bucket crop/resize, PyAV decode, and the common cache writer. Add required `--video_vae`, `--audio_vae`, and `--task {t2va,fl2va,ref2va}` arguments plus `--allow_experimental_duration`; keep target audio mandatory.
+Reuse `BlueprintGenerator`, bucket crop/resize, PyAV decode, and the common cache writer. Add required `--video_vae`, `--audio_vae`, and `--task {t2va,fl2va,ref2va}` arguments plus `--allow_experimental_duration`. Later Task 13 supersedes the original mandatory-target-audio behavior while keeping the Audio VAE mandatory.
 
 ```python
 def build_latent_tensors(record, task, video_vae, audio_vae, cache_seed):
@@ -482,7 +482,7 @@ Build synthetic dataset managers without cache files. Accept only `batch_size = 
 
 - [x] **Step 2: Write failing process/loss tests**
 
-Use a tiny fake transformer and real tensors at `B=1`. Assert video/audio noises are independently sampled, model times use shifted `1-sigma`, targets are `latents-noise`, condition augmentation uses fresh per-step noise with deterministic condition resets, and loss is unweighted `mean(video_mse)+mean(audio_mse)` through `DiTOutput.extra`. Assert runtime calls reject `B != 1`.
+Use a tiny fake transformer and real tensors at `B=1`. Assert video/audio noises are independently sampled, model times use shifted `1-sigma`, targets are `latents-noise`, condition augmentation uses fresh per-step noise with deterministic condition resets, and loss is `mean(video_mse)` plus optional `mean(audio_mse)` selected through `DiTOutput.extra`. Assert runtime calls reject `B != 1`.
 
 - [x] **Step 3: Run trainer tests and verify RED**
 
@@ -499,6 +499,8 @@ Accept only uniform timestep sampling, `weighting_scheme=none`, and discrete flo
 ```python
 def compute_loss(self, args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step):
     video_loss = F.mse_loss(output.pred.to(network_dtype), output.target.to(network_dtype))
+    if output.extra["audio_loss_weight"].item() == 0.0:
+        return video_loss, {"loss/video": video_loss.detach(), "loss/audio": video_loss.detach().new_zeros(())}
     audio_loss = F.mse_loss(
         output.extra["audio_pred"].to(network_dtype),
         output.extra["audio_target"].to(network_dtype),
@@ -596,7 +598,7 @@ Published-header validation on 2026-08-03 found zero missing, unexpected, shape-
 
 - [x] **Step 4: Document exact commands and limitations**
 
-Add cache, text-cache, train, and generate examples to `README.md`. State JSONL-only Ref2VA, required target audio, 24 fps and `17*n+5`, 32-pixel geometry, 32768 text-row limit, BF16-only R1, and deferred ConvRot R2.
+Add cache, text-cache, train, and generate examples to `README.md`. State JSONL-only Ref2VA, target-audio fallback policy, 24 fps and `17*n+5`, 32-pixel geometry, 32768 text-row limit, BF16-only R1, and deferred ConvRot R2.
 
 - [x] **Step 5: Inspect the final diff and commit**
 
@@ -676,3 +678,41 @@ Override sampling preparation instead of changing the shared single-VAE contract
 Document T2VA, FL2VA, and Ref2VA prompt fields, required sampling artifacts, geometry/duration validation, block-swap reuse, and the absence of CFG.
 
 - [x] **Step 5: Run full verification, commit, push, and refresh PR #1018**
+
+### Task 13: Add Per-Sample Video-Only Audio Supervision
+
+**Files:**
+- Modify: `src/musubi_tuner/minimax_h3/media.py`
+- Modify: `src/musubi_tuner/minimax_h3_cache_latents.py`
+- Modify: `src/musubi_tuner/dataset/cache_io.py`
+- Modify: `src/musubi_tuner/minimax_h3_train_network.py`
+- Modify: `tests/test_minimax_h3_cache_contract.py`
+- Modify: `tests/test_minimax_h3_training.py`
+- Modify: `docs/minimax_h3.md`
+- Modify: `docs/superpowers/specs/2026-08-03-minimax-h3-support-design.md`
+
+- [x] **Step 1: Make target audio optional without weakening explicit-source errors**
+
+Accept a missing target audio stream as unknown. In cache-only `--h3_video_only` mode, bypass target-audio fields, sidecars, probing, decoding, and fingerprinting while leaving Ref2VA reference audio unchanged.
+
+- [x] **Step 2: Cache Audio-VAE silence with an unsupervised scalar**
+
+Keep target-audio rows structurally present. Encode duration-matched FP32 stereo silence through the real Audio VAE and write scalar `mmh3_audio_loss_weight_float32`, with `1.0` only for real target audio and `0.0` for missing or intentionally ignored audio. Require consistent three-valued provenance metadata.
+
+- [x] **Step 3: Make equivalent unsupervised caches reusable**
+
+Retain exact provenance for diagnostics, but compare only the supervision class for `--skip_existing`. Treat complete legacy policy/scalar absence as supervised real audio and reject partial or contradictory new states.
+
+- [x] **Step 4: Select the loss branch per sample**
+
+Validate the collated scalar before transformer execution. Continue joint audio/video noising and forward topology for every sample, but do not evaluate audio MSE at all when the scalar is zero. Record the optional-loss policy and supervised fraction in artifact metadata.
+
+- [x] **Step 5: Scan supervision once before model allocation**
+
+Read paths from constructed batch managers, count repeats with one `Counter`, open each unique cache once, and read only metadata plus the four-byte scalar. Log `supervised_audio_fraction` without reciprocal renormalization.
+
+- [x] **Step 6: Bound cache warnings and document shared-weight risk**
+
+Warn for at most the first ten missing-audio records, then report cache-item policy totals. Document that video-only LoRA updates shared single-stream attention/MLP weights and therefore do not preserve base-model audio behavior.
+
+- [x] **Step 7: Run full verification, commit, and push without posting a PR reply**

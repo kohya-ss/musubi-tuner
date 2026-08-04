@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from safetensors.torch import save_file
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,12 +18,13 @@ from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3_train_network import (
     MiniMaxH3NetworkTrainer,
+    inspect_h3_audio_supervision,
     minimax_h3_setup_parser,
     validate_h3_dataset_batch_size,
 )
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
-from musubi_tuner.training.trainer_base import DiTOutput
+from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
 
 
 def _dataset_group(*batch_sizes: int):
@@ -38,6 +40,107 @@ def test_h3_dataset_accepts_batch_size_one_without_inspecting_cache_items():
 def test_h3_dataset_rejects_real_batches_and_points_to_gradient_accumulation():
     with pytest.raises(ValueError, match=r"dataset 1.*batch_size=2.*gradient accumulation"):
         validate_h3_dataset_batch_size(_dataset_group(1, 2))
+
+
+def _policy_cache(path: Path, *, policy: str | None, scalar: torch.Tensor | None) -> Path:
+    tensors = {"latents_2x4x4_float32": torch.zeros(24, 2, 4, 4)}
+    if scalar is not None:
+        tensors["mmh3_audio_loss_weight_float32"] = scalar
+    metadata = {} if policy is None else {"target_audio_policy": policy}
+    save_file(tensors, path, metadata=metadata)
+    return path.resolve()
+
+
+def _audio_policy_dataset_group(entries: list[Path]):
+    items = [SimpleNamespace(latent_cache_path=str(path)) for path in entries]
+    manager = SimpleNamespace(batch_size=1, buckets={(64, 64, 5): items})
+    dataset = SimpleNamespace(batch_manager=manager)
+    return SimpleNamespace(datasets=[dataset])
+
+
+def test_audio_supervision_scan_counts_repeats_and_opens_each_unique_cache_once(monkeypatch, tmp_path: Path):
+    import musubi_tuner.minimax_h3_train_network as train
+
+    supervised = _policy_cache(
+        tmp_path / "supervised.safetensors",
+        policy="real-supervised",
+        scalar=torch.tensor(1.0, dtype=torch.float32),
+    )
+    unsupervised = _policy_cache(
+        tmp_path / "unsupervised.safetensors",
+        policy="missing-unsupervised",
+        scalar=torch.tensor(0.0, dtype=torch.float32),
+    )
+    dataset_group = _audio_policy_dataset_group([supervised, supervised, unsupervised])
+    opened = []
+    real_safe_open = train.safe_open
+
+    def counted_safe_open(path, *args, **kwargs):
+        opened.append(Path(path).resolve())
+        return real_safe_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(train, "safe_open", counted_safe_open)
+
+    fraction = inspect_h3_audio_supervision(dataset_group)
+
+    assert fraction == pytest.approx(2 / 3)
+    assert opened.count(supervised) == 1
+    assert opened.count(unsupervised) == 1
+
+
+def test_audio_supervision_scan_accepts_complete_legacy_absence_as_real_audio(tmp_path: Path):
+    legacy = _policy_cache(tmp_path / "legacy.safetensors", policy=None, scalar=None)
+
+    assert inspect_h3_audio_supervision(_audio_policy_dataset_group([legacy])) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("policy", "scalar", "message"),
+    [
+        (None, torch.tensor(0.0, dtype=torch.float32), "scalar.*policy"),
+        ("missing-unsupervised", None, "policy.*scalar"),
+        ("real-supervised", torch.tensor(0.0, dtype=torch.float32), "contradict"),
+        ("unknown", torch.tensor(1.0, dtype=torch.float32), "policy"),
+        ("missing-unsupervised", torch.tensor([0.0], dtype=torch.float32), "scalar float32"),
+        ("missing-unsupervised", torch.tensor(0.0, dtype=torch.float64), "scalar float32"),
+        ("missing-unsupervised", torch.tensor(float("nan"), dtype=torch.float32), "0.0 or 1.0"),
+        ("missing-unsupervised", torch.tensor(0.5, dtype=torch.float32), "0.0 or 1.0"),
+    ],
+)
+def test_audio_supervision_scan_rejects_partial_invalid_or_contradictory_caches(
+    tmp_path: Path,
+    policy: str | None,
+    scalar: torch.Tensor | None,
+    message: str,
+):
+    path = _policy_cache(tmp_path / "invalid.safetensors", policy=policy, scalar=scalar)
+
+    with pytest.raises(ValueError, match=message):
+        inspect_h3_audio_supervision(_audio_policy_dataset_group([path]))
+
+
+def test_h3_dataset_build_scans_audio_supervision_before_returning(monkeypatch, tmp_path: Path, caplog):
+    path = _policy_cache(
+        tmp_path / "unsupervised.safetensors",
+        policy="video-only-unsupervised",
+        scalar=torch.tensor(0.0, dtype=torch.float32),
+    )
+    dataset_group = _audio_policy_dataset_group([path])
+    sentinel_collator = object()
+    sentinel_epoch = object()
+    monkeypatch.setattr(
+        NetworkTrainer,
+        "_build_dataset",
+        lambda self, args: (dataset_group, sentinel_collator, sentinel_epoch),
+    )
+    caplog.set_level("INFO")
+    trainer = MiniMaxH3NetworkTrainer()
+
+    result = trainer._build_dataset(_trainer_args())
+
+    assert result == (dataset_group, sentinel_collator, sentinel_epoch)
+    assert trainer._supervised_audio_fraction == 0.0
+    assert "supervised_audio_fraction=0.000000" in caplog.text
 
 
 class _Accelerator:
@@ -85,6 +188,7 @@ def _trainer_args(**overrides):
 def _training_batch(batch_size: int = 1, *, text_length: int = 3):
     return {
         "latents_audio": torch.full((batch_size, 32, 2, 8), 4.0),
+        "mmh3_audio_loss_weight": torch.ones(batch_size, dtype=torch.float32),
         "mmh3_hidden_states": [torch.full((text_length, 12), float(index)) for index in range(batch_size)],
         "mmh3_token_tags": [torch.tensor([1, 0, 1][:text_length], dtype=torch.int64) for _ in range(batch_size)],
         "timesteps": None,
@@ -104,6 +208,7 @@ def test_h3_parser_defaults_to_the_only_supported_training_coordinates():
     assert args.h3_visual_cond_clean == 0.999
     assert args.h3_audio_cond_clean == 1.0
     assert args.network_module == "networks.lora_minimax_h3"
+    assert "--h3_video_only" not in parser.format_help()
 
 
 @pytest.mark.parametrize(
@@ -553,6 +658,36 @@ def test_process_batch_preserves_the_released_fp32_audio_cache_dtype(monkeypatch
     assert transformer.calls[0]["audio_latents"].dtype == torch.float32
 
 
+def test_process_batch_uses_zero_cache_weight_for_video_only_loss(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer(audio_prediction=float("nan"))
+    batch = _training_batch()
+    batch["mmh3_audio_loss_weight"] = torch.tensor([0.0], dtype=torch.float32)
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    loss, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    assert torch.isfinite(loss)
+    assert metrics["loss/audio"] == 0.0
+
+
 def _cpu_noise(shape, seed):
     generator = torch.Generator(device="cpu").manual_seed(seed)
     return torch.randn(shape, generator=generator, dtype=torch.float32)
@@ -644,6 +779,44 @@ def test_runtime_rejects_more_than_one_timestep_for_the_single_item():
         )
 
 
+@pytest.mark.parametrize(
+    "weight",
+    [
+        torch.tensor(1.0, dtype=torch.float32),
+        torch.tensor([1.0], dtype=torch.float64),
+        torch.tensor([float("nan")], dtype=torch.float32),
+        torch.tensor([0.5], dtype=torch.float32),
+        torch.tensor([0.0, 1.0], dtype=torch.float32),
+    ],
+)
+def test_runtime_rejects_invalid_audio_loss_weight_before_transformer(weight: torch.Tensor):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+    batch = _training_batch()
+    batch["mmh3_audio_loss_weight"] = weight
+    transformer = _RecordingTransformer()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+
+    with pytest.raises(ValueError, match="audio loss weight"):
+        trainer.process_batch(
+            args,
+            _Accelerator(),
+            transformer,
+            None,
+            batch,
+            video_latents,
+            torch.zeros_like(video_latents),
+            None,
+            torch.bfloat16,
+            torch.float32,
+            None,
+            0,
+        )
+
+    assert transformer.calls == []
+
+
 def test_runtime_rejects_a_batch_from_a_different_authoritative_task():
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(task="ref2va")
@@ -718,8 +891,69 @@ def test_compute_loss_is_plain_video_plus_audio_mean_mse():
     assert metrics == {"loss/video": pytest.approx(10.0), "loss/audio": pytest.approx(2.0)}
 
 
+def test_compute_loss_skips_audio_expression_and_gradient_for_zero_weight():
+    trainer = MiniMaxH3NetworkTrainer()
+    video_pred = torch.tensor([1.0, 5.0], requires_grad=True)
+    audio_pred = torch.tensor([float("nan"), 2.0], requires_grad=True)
+    output = DiTOutput(
+        pred=video_pred,
+        target=torch.tensor([3.0, 1.0]),
+        extra={
+            "audio_pred": audio_pred,
+            "audio_target": torch.tensor([2.0, 2.0]),
+            "audio_loss_weight": torch.tensor([0.0], dtype=torch.float32),
+        },
+    )
+
+    loss, metrics = trainer.compute_loss(
+        _trainer_args(),
+        output,
+        torch.tensor(0.25),
+        object(),
+        torch.bfloat16,
+        torch.float32,
+        7,
+    )
+    loss.backward()
+
+    assert loss.item() == pytest.approx(10.0)
+    assert metrics["loss/video"] == pytest.approx(10.0)
+    assert metrics["loss/audio"] == pytest.approx(0.0)
+    assert video_pred.grad is not None
+    assert audio_pred.grad is None
+
+
+def test_process_batch_uses_legacy_missing_audio_weight_as_supervised(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+    batch = _training_batch()
+    del batch["mmh3_audio_loss_weight"]
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    _, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        _RecordingTransformer(),
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    assert metrics["loss/audio"] > 0
+
+
 def test_h3_training_metadata_records_task_scheduler_and_target_policy():
     trainer = MiniMaxH3NetworkTrainer()
+    trainer._supervised_audio_fraction = 0.25
 
     metadata = trainer.extra_metadata(_trainer_args(task="fl2va"))
 
@@ -730,7 +964,9 @@ def test_h3_training_metadata_records_task_scheduler_and_target_policy():
         "ss_minimax_h3_shift_audio": 3.0,
         "ss_minimax_h3_visual_cond_clean": 0.999,
         "ss_minimax_h3_audio_cond_clean": 1.0,
-        "ss_minimax_h3_loss_policy": "video_mean_plus_audio_mean",
+        "ss_minimax_h3_loss_policy": "video_mean_plus_optional_audio_mean",
+        "ss_minimax_h3_audio_supervision": "per_sample_binary_cache_weight",
+        "ss_minimax_h3_supervised_audio_fraction": 0.25,
         "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
         "ss_minimax_h3_latent_cache_version": "1",
         "ss_minimax_h3_text_cache_version": "1",
