@@ -45,6 +45,12 @@ def test_minimax_h3_training_entrypoint_exists():
     )
 
 
+def test_minimax_h3_training_module_is_directly_executable():
+    module = ROOT / "src" / "musubi_tuner" / "minimax_h3_train_network.py"
+
+    assert module.read_text(encoding="utf-8").endswith('\n\nif __name__ == "__main__":\n    main()\n')
+
+
 def test_minimax_h3_generation_entrypoint_exists():
     script = ROOT / "minimax_h3_generate_video.py"
 

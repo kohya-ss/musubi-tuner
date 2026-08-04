@@ -40,7 +40,12 @@ from musubi_tuner.minimax_h3.media import (
     video_latent_frames,
     waveform_samples,
 )
-from musubi_tuner.minimax_h3.video_vae import encode_video_condition, encode_video_target, load_video_vae
+from musubi_tuner.minimax_h3.video_vae import (
+    VIDEO_VAE_ENCODE_DTYPE,
+    encode_video_condition,
+    encode_video_target,
+    load_video_vae,
+)
 from musubi_tuner.utils.model_utils import dtype_to_str
 
 
@@ -357,12 +362,12 @@ def _prepare_pixels(frames: torch.Tensor | np.ndarray) -> torch.Tensor:
 
 
 def _encode_target_video(video_vae, pixels: torch.Tensor, cache_seed: int, item_key: str) -> torch.Tensor:
-    device, dtype = _model_device_dtype(video_vae, torch.float16)
+    device, dtype = _model_device_dtype(video_vae, VIDEO_VAE_ENCODE_DTYPE)
     return encode_video_target(video_vae, pixels.to(device=device, dtype=dtype), cache_seed, item_key)
 
 
 def _encode_condition_video(video_vae, pixels: torch.Tensor) -> torch.Tensor:
-    device, dtype = _model_device_dtype(video_vae, torch.float16)
+    device, dtype = _model_device_dtype(video_vae, VIDEO_VAE_ENCODE_DTYPE)
     return encode_video_condition(video_vae, pixels.to(device=device, dtype=dtype))
 
 
@@ -421,7 +426,7 @@ def build_latent_metadata(
         "audio_start_seconds": str(Fraction(crop_start_frame, TARGET_FPS)),
         "target_geometry": f"{frame_count}x{height}x{width}",
         "reference_kinds": json.dumps(reference_kinds, ensure_ascii=True, separators=(",", ":")),
-        "posterior_policy": "target=seeded;conditions=seed42-fp16;audio=mode",
+        "posterior_policy": "video_vae=fp32;target=seeded;conditions=seed42-fp16;audio=mode",
         "normalization": "released-minimax-h3-v1",
         "video_vae_fingerprint": video_vae_fingerprint,
         "audio_vae_fingerprint": audio_vae_fingerprint,
@@ -639,7 +644,8 @@ def install_h3_video_decoder(dataset: VideoDataset, decoder: PyAVH3MediaDecoder)
         end_frame=None,
         bucket_selector=None,
     ):
-        del datasource
+        if bucket_selector is None:
+            bucket_selector = datasource.bucket_selector
         return decoder.decode_target_video(video_path, start_frame, end_frame, bucket_selector)
 
     dataset.datasource.get_video_data_from_path = MethodType(get_video_data_from_path, dataset.datasource)
@@ -699,7 +705,12 @@ def main() -> None:
     media_fingerprints = {path: fingerprint_file(path) for record in records for path in record_media_paths(record)}
 
     logger.info("Loading MiniMax-H3 video VAE from %s", args.video_vae)
-    video_vae = load_video_vae(args.video_vae, device=device, dtype=torch.float16, disable_mmap=args.disable_mmap)
+    video_vae = load_video_vae(
+        args.video_vae,
+        device=device,
+        dtype=VIDEO_VAE_ENCODE_DTYPE,
+        disable_mmap=args.disable_mmap,
+    )
     logger.info("Loading MiniMax-H3 audio VAE from %s", args.audio_vae)
     audio_vae = load_audio_vae(args.audio_vae, device=device, dtype=torch.float32, disable_mmap=args.disable_mmap)
 

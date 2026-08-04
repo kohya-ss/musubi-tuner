@@ -332,7 +332,7 @@ def test_prepare_training_samples_encodes_text_once_and_owns_both_vaes_without_u
     monkeypatch.setattr(
         train,
         "load_video_vae",
-        lambda *args, **kwargs: events.append("load_video_vae") or VideoVAE(),
+        lambda *args, **kwargs: events.append(("load_video_vae", kwargs["dtype"])) or VideoVAE(),
     )
     monkeypatch.setattr(
         train,
@@ -345,7 +345,7 @@ def test_prepare_training_samples_encodes_text_once_and_owns_both_vaes_without_u
     sample_parameters, shared_vae = trainer._prepare_sampling(args, _Accelerator(), torch.bfloat16)
 
     assert shared_vae is None
-    assert events == ["load_text_encoder", "encode_text", "load_video_vae", "load_audio_vae"]
+    assert events == ["load_text_encoder", "encode_text", ("load_video_vae", torch.float16), "load_audio_vae"]
     assert isinstance(trainer._sampling_video_vae, VideoVAE)
     assert isinstance(trainer._sampling_audio_vae, AudioVAE)
     assert len(sample_parameters) == 1
@@ -403,6 +403,10 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
     class VideoVAE(EmptyModule):
         vae_ratio = 16
 
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("dtype_probe", torch.zeros(1))
+
     reference = SimpleNamespace(type="video", path="reference.mp4", audio=object())
     record = SimpleNamespace(references=(reference,))
     visual = torch.zeros(1, 24, 2, 4, 4)
@@ -421,7 +425,12 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
         "encode_h3_presentation",
         lambda *args, **kwargs: (torch.zeros(3, 12), torch.tensor([1, 0, 1], dtype=torch.int64)),
     )
-    monkeypatch.setattr(train, "load_video_vae", lambda *args, **kwargs: VideoVAE())
+    video_vae_load_dtypes = []
+    monkeypatch.setattr(
+        train,
+        "load_video_vae",
+        lambda *args, **kwargs: video_vae_load_dtypes.append(kwargs["dtype"]) or VideoVAE(),
+    )
     monkeypatch.setattr(train, "load_audio_vae", lambda *args, **kwargs: EmptyModule())
     monkeypatch.setattr(
         train,
@@ -444,6 +453,8 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
     assert parameter["h3_layout"].references == (H3ReferenceGeometry("video", video=H3VideoGeometry(2, 4, 4), audio_frames=8),)
     assert parameter["h3_visual_conditions"] == (visual,)
     assert parameter["h3_audio_conditions"] == (audio,)
+    assert video_vae_load_dtypes == [torch.float32]
+    assert trainer._sampling_video_vae.dtype_probe.dtype is torch.float16
 
 
 def test_process_batch_uses_one_shared_base_time_and_independent_audio_noise(monkeypatch):

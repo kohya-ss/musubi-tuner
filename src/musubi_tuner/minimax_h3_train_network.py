@@ -52,7 +52,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     load_h3_processor,
     load_h3_text_encoder,
 )
-from musubi_tuner.minimax_h3.video_vae import load_video_vae
+from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
@@ -431,11 +431,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             clean_memory_on_device(device)
 
         logger.info("Loading MiniMax-H3 video VAE for training samples")
-        video_vae_device = device if args.task != "t2va" else torch.device("cpu")
+        has_visual_conditions = args.task != "t2va"
+        video_vae_device = device if has_visual_conditions else torch.device("cpu")
         video_vae = load_video_vae(
             args.video_vae,
             device=video_vae_device,
-            dtype=torch.float16,
+            dtype=VIDEO_VAE_ENCODE_DTYPE if has_visual_conditions else VIDEO_VAE_DECODE_DTYPE,
             disable_mmap=getattr(args, "disable_numpy_memmap", False),
         )
         video_vae.eval().requires_grad_(False)
@@ -470,7 +471,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 parameter["_h3_record"] = record
                 del raw_visuals, text_visuals
         finally:
-            video_vae.to("cpu")
+            video_vae.to(device="cpu", dtype=VIDEO_VAE_DECODE_DTYPE)
             gc.collect()
             clean_memory_on_device(device)
         self._sampling_video_vae = video_vae
@@ -650,7 +651,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
 
             logger.info("Decoding MiniMax-H3 training sample video")
             video_vae.to(device).eval()
-            _, video_dtype = module_device_dtype(video_vae, torch.float16)
+            _, video_dtype = module_device_dtype(video_vae, VIDEO_VAE_DECODE_DTYPE)
             decoded_video = video_vae.decode(video_latents.to(device=device, dtype=video_dtype)).cpu()
             video_vae.to("cpu")
             del video_latents
@@ -958,3 +959,7 @@ def main() -> None:
     args.dit_dtype = "bfloat16" if args.dit_dtype is None else args.dit_dtype
     args.vae_dtype = "bfloat16" if args.vae_dtype is None else args.vae_dtype
     MiniMaxH3NetworkTrainer().train(args)
+
+
+if __name__ == "__main__":
+    main()

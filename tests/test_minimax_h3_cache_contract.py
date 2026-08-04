@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 from safetensors.torch import save_file
@@ -24,6 +25,7 @@ from musubi_tuner.minimax_h3_cache_latents import (
     assemble_audio_chunks,
     build_latent_tensors,
     cache_metadata_matches,
+    install_h3_video_decoder,
     resample_frame_indices,
     setup_parser,
 )
@@ -61,6 +63,35 @@ def _touch(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     return path.resolve()
+
+
+def test_h3_decoder_patch_preserves_the_datasource_bucket_selector_fallback():
+    selector = object()
+    datasource = SimpleNamespace(bucket_selector=selector)
+    dataset = SimpleNamespace(datasource=datasource)
+    seen = {}
+
+    class Decoder:
+        def decode_target_video(self, video_path, start_frame, end_frame, bucket_selector):
+            seen.update(
+                video_path=video_path,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                bucket_selector=bucket_selector,
+            )
+            return "decoded"
+
+    install_h3_video_decoder(dataset, Decoder())
+
+    result = datasource.get_video_data_from_path("clip.mp4", 2, 7)
+
+    assert result == "decoded"
+    assert seen == {
+        "video_path": "clip.mp4",
+        "start_frame": 2,
+        "end_frame": 7,
+        "bucket_selector": selector,
+    }
 
 
 def test_ref2va_jsonl_preserves_reference_order_and_canonicalizes_paths(tmp_path: Path):
@@ -445,6 +476,7 @@ def test_build_fl2va_latents_uses_exact_audio_window_and_target_crop(tmp_path: P
     assert payload.metadata["audio_start_seconds"] == "1/8"
     assert payload.metadata["video_vae_fingerprint"] == "video-fingerprint"
     assert payload.metadata["audio_vae_fingerprint"] == "audio-fingerprint"
+    assert payload.metadata["posterior_policy"] == "video_vae=fp32;target=seeded;conditions=seed42-fp16;audio=mode"
     assert json.loads(payload.metadata["media_fingerprints"]) == {
         str(record.target_audio.path): "target-audio",
         str(record.video_path): "target-video",

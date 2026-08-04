@@ -437,6 +437,7 @@ The audio cache deliberately preserves the released audio VAE layout: feature wi
 - Target audio and all reference audio use the audio posterior mean/mode; the released H3 audio path does not sample `logs_proj`.
 - FL2VA and Ref2VA visual conditions sample with fixed seed 42.
 - Visual condition samples round through FP16 before normalization to match released condition behavior.
+- The video VAE runs target and condition encoding in FP32. The explicit FP16 round-trip applies only to the sampled condition latent, not to VAE weights or encoder compute. Video decoding uses the published FP16 artifact in FP16.
 
 The cache metadata records the posterior policy, source fingerprints, crop timestamps, target geometry, ordered reference kinds, normalization constants, and VAE fingerprints.
 
@@ -444,7 +445,7 @@ The cache metadata records the posterior policy, source fingerprints, crop times
 
 All `latents_` tensors use the existing `torch.stack` path. R1 introduces no custom H3 collator and no new bucket dimension.
 
-Different target audio lengths cannot occur within an existing `(width, height, frame_count)` bucket because `A` is a deterministic function of target `F`. Heterogeneous reference counts or shapes are not repaired. Section 8.3 inspects cache keys/shapes and rejects such a multi-item bucket before training; `torch.stack` and H3 `process_batch` retain runtime assertions only as defense in depth.
+Different target audio lengths cannot occur within an existing `(width, height, frame_count)` bucket because `A` is a deterministic function of target `F`. R1 requires `batch_size = 1`, so heterogeneous references never enter one collated batch. The collator and H3 runtime retain shape assertions as defense in depth for direct API calls.
 
 ## 12. Text Cache Contract
 

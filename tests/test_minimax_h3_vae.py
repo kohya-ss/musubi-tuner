@@ -10,6 +10,7 @@ from safetensors.torch import save_file
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+import musubi_tuner.minimax_h3.video_vae as video_vae
 from musubi_tuner.minimax_h3.audio_vae import MiniMaxH3AudioVAE, encode_audio_mode
 from musubi_tuner.minimax_h3.video_vae import (
     CausalConv3d,
@@ -24,6 +25,11 @@ from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_
 class _ExplodingProjection(nn.Module):
     def forward(self, inputs):
         raise AssertionError("logs_proj must not be evaluated for MiniMax-H3 audio caching")
+
+
+def test_video_vae_dtype_policy_uses_fp32_encoding_and_fp16_decoding():
+    assert getattr(video_vae, "VIDEO_VAE_ENCODE_DTYPE", None) is torch.float32
+    assert getattr(video_vae, "VIDEO_VAE_DECODE_DTYPE", None) is torch.float16
 
 
 def test_video_vae_keeps_the_published_checkpoint_structure_after_provenance_rewrite():

@@ -17,7 +17,7 @@ from musubi_tuner.minimax_h3.media import (
 )
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry
 from musubi_tuner.minimax_h3.text_encoder import H3TextVisual
-from musubi_tuner.minimax_h3.video_vae import encode_video_condition
+from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_ENCODE_DTYPE, encode_video_condition
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 
 
@@ -99,7 +99,7 @@ def module_device_dtype(module, fallback_dtype: torch.dtype) -> tuple[torch.devi
 
 @torch.no_grad()
 def encode_visual_conditions(args, record, raw_visuals, video_vae):
-    video_device, video_dtype = module_device_dtype(video_vae, torch.float16)
+    video_device, video_dtype = module_device_dtype(video_vae, VIDEO_VAE_ENCODE_DTYPE)
     visual_latents = []
     visual_geometries = []
     reference_visual_geometries = {}

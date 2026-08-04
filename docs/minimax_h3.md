@@ -57,7 +57,7 @@ cache_directory = "/data/h3/cache"
 caption_extension = ".txt"
 target_frames = [124]
 frame_extraction = "head"
-source_fps = 24
+source_fps = 24.0
 ```
 
 For a directory item such as `clip.mp4`, put the caption in `clip.txt`. Target audio is resolved in this order: the JSONL `audio_path` when JSONL is used, exactly one same-stem audio sidecar such as `clip.wav`, then the video's embedded audio stream.
@@ -76,7 +76,7 @@ video_jsonl_file = "/data/h3/ref2va.jsonl"
 cache_directory = "/data/h3/cache-ref2va"
 target_frames = [124]
 frame_extraction = "head"
-source_fps = 24
+source_fps = 24.0
 ```
 
 Each JSONL line contains the target plus its ordered references. Relative paths resolve from the JSONL directory.
@@ -108,7 +108,7 @@ python minimax_h3_cache_latents.py \
   --skip_existing
 ```
 
-The video VAE uses a reproducible posterior sample for each target. Visual conditions use the released fixed sampling policy. Target and reference audio use the audio posterior mode directly in `[32,2,A]` layout.
+The video VAE is upcast to FP32 for target and condition encoding so cached training targets do not inherit FP16 encoder outliers. It uses a reproducible posterior sample for each target. Visual conditions use the released fixed sampling policy, including the required FP16 round-trip of the sampled condition latent before normalization. Video decode keeps the released FP16 artifact in FP16. Target and reference audio use the audio posterior mode directly in `[32,2,A]` layout.
 
 ## Cache Text Encoder Outputs
 
@@ -168,6 +168,8 @@ Add the sampling assets and normal sampling schedule flags to the training comma
 ```
 
 The text presentations and condition latents are prepared once before the transformer is loaded. The two decode VAEs then remain on CPU and are moved to the accelerator one at a time for each scheduled sample. The shared trainer still owns sampling cadence, distributed prompt assignment, RNG restoration, and the block-swap inference/training transition.
+
+R1 prepares sample prompts by loading the released Qwen3-VL text encoder on the training accelerator. The BF16 artifact is approximately 48 GB, so `--sample_prompts` currently requires roughly 50 GB of available accelerator memory before the transformer is loaded. Omit scheduled sampling on smaller accelerators; a text-encoder device override or cached sample conditioning is follow-up scope.
 
 All entries in one run use the training `--task`. T2VA JSON entries use the common prompt fields:
 

@@ -43,7 +43,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     presentation_fingerprint,
     validate_text_rows,
 )
-from musubi_tuner.minimax_h3.video_vae import load_video_vae
+from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder, fingerprint_file
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
@@ -282,7 +282,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         condition_video_vae = load_video_vae(
             args.video_vae,
             device=device,
-            dtype=torch.float16,
+            dtype=VIDEO_VAE_ENCODE_DTYPE,
             disable_mmap=args.disable_numpy_memmap,
         )
         if condition_video_vae.vae_ratio != VIDEO_VAE_SPATIAL_RATIO:
@@ -427,11 +427,11 @@ def run_generation(args: argparse.Namespace) -> Path:
     video_vae = load_video_vae(
         args.video_vae,
         device=device,
-        dtype=torch.float16,
+        dtype=VIDEO_VAE_DECODE_DTYPE,
         disable_mmap=args.disable_numpy_memmap,
     )
     with torch.no_grad():
-        decoded_video = video_vae.decode(video_latents.to(device=device, dtype=torch.float16)).cpu()
+        decoded_video = video_vae.decode(video_latents.to(device=device, dtype=VIDEO_VAE_DECODE_DTYPE)).cpu()
     del video_vae, video_latents
     gc.collect()
     clean_memory_on_device(device)

@@ -417,7 +417,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     monkeypatch.setattr(
         generate,
         "load_video_vae",
-        lambda *unused, **kwargs: events.append(("load_video_vae", str(kwargs["device"]))) or VideoVAE(),
+        lambda *unused, **kwargs: events.append(("load_video_vae", str(kwargs["device"]), kwargs["dtype"])) or VideoVAE(),
     )
     monkeypatch.setattr(
         generate,
@@ -441,6 +441,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         "load_audio_vae",
         "decode_audio",
     ]
+    assert next(event for event in events if event[0] == "load_video_vae")[2] is torch.float16
     assert captured["decoded"].video.shape == (5, 4, 4, 3)
     assert captured["decoded"].audio.shape == (2, 6667)
     assert captured["output"] == args.output

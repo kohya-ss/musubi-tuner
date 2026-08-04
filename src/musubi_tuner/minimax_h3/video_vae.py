@@ -27,6 +27,8 @@ import torch.nn.functional as F
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+VIDEO_VAE_ENCODE_DTYPE = torch.float32
+VIDEO_VAE_DECODE_DTYPE = torch.float16
 
 LATENTS_MEAN = [
     0.858090341091156,
@@ -670,7 +672,7 @@ def encode_video_condition(vae, pixels: torch.Tensor) -> torch.Tensor:
 def load_video_vae(
     path,
     device: str | torch.device = "cpu",
-    dtype: torch.dtype = torch.float16,
+    dtype: torch.dtype = VIDEO_VAE_DECODE_DTYPE,
     disable_mmap: bool = False,
 ) -> MiniMaxH3VideoVAE:
     from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_safetensors_files
