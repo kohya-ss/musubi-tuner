@@ -16,3 +16,17 @@ def test_ideogram4_top_level_entrypoints_exist():
         script = ROOT / script_name
         assert script.exists(), f"missing top-level entrypoint: {script_name}"
         assert script.read_text(encoding="utf-8") == (f'from {module_name} import main\n\nif __name__ == "__main__":\n    main()\n')
+
+
+def test_mage_flow_top_level_entrypoints_exist():
+    expected = {
+        "mage_flow_cache_latents.py": "musubi_tuner.mage_flow_cache_latents",
+        "mage_flow_cache_text_encoder_outputs.py": "musubi_tuner.mage_flow_cache_text_encoder_outputs",
+        "mage_flow_generate_image.py": "musubi_tuner.mage_flow_generate_image",
+        "mage_flow_train_network.py": "musubi_tuner.mage_flow_train_network",
+    }
+
+    for script_name, module_name in expected.items():
+        script = ROOT / script_name
+        assert script.exists(), f"missing top-level entrypoint: {script_name}"
+        assert script.read_text(encoding="utf-8") == (f'from {module_name} import main\n\nif __name__ == "__main__":\n    main()\n')

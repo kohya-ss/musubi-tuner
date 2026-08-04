@@ -152,6 +152,7 @@ This approach ensures that you have full control over the instructions given to 
 For detailed information on specific architectures, configurations, and advanced features, please refer to the documentation below.
 
 **Architecture-specific:**
+- [Mage-Flow / Mage-Flow-Edit (experimental)](./docs/mage_flow.md)
 - [HunyuanVideo](./docs/hunyuan_video.md)
 - [Wan2.1/2.2](./docs/wan.md)
 - [Wan2.1/2.2 (Single Frame)](./docs/wan_1f.md)

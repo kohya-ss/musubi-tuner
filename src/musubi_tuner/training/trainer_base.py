@@ -565,6 +565,7 @@ class NetworkTrainer:
 
         if (
             args.timestep_sampling == "uniform"
+            or args.timestep_sampling == "uniform_shift"
             or args.timestep_sampling == "sigmoid"
             or args.timestep_sampling == "shift"
             or args.timestep_sampling == "flux_shift"
@@ -595,12 +596,15 @@ class NetworkTrainer:
                     )
                     return logsnr
 
-                if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
+                if args.timestep_sampling in ("uniform", "uniform_shift", "sigmoid"):
                     # Simple random t-based noise sampling
                     if args.timestep_sampling == "sigmoid":
                         t = torch.sigmoid(args.sigmoid_scale * randn(batch_size, org_timesteps))
                     else:
                         t = rand(batch_size, org_timesteps)
+                        if args.timestep_sampling == "uniform_shift":
+                            shift = args.discrete_flow_shift
+                            t = (t * shift) / (1 + (shift - 1) * t)
 
                 elif args.timestep_sampling == "ideogram4_shift":
                     h, w = latents.shape[-2:]
@@ -1584,8 +1588,10 @@ class NetworkTrainer:
                 net_kwargs[key] = value
 
         if args.dim_from_weights:
-            logger.info(f"Loading network from weights: {args.dim_from_weights}")
-            weights_sd = load_file(args.dim_from_weights)
+            if not args.network_weights:
+                raise ValueError("--dim_from_weights requires --network_weights")
+            logger.info(f"Loading network dimensions from weights: {args.network_weights}")
+            weights_sd = load_file(args.network_weights)
             network, _ = network_module.create_arch_network_from_weights(1, weights_sd, unet=transformer)
         else:
             # We use the name create_arch_network for compatibility with LyCORIS

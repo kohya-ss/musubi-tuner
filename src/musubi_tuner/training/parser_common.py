@@ -445,6 +445,7 @@ def _add_timestep_args(parser: argparse.ArgumentParser) -> None:
         choices=[
             "sigma",
             "uniform",
+            "uniform_shift",
             "sigmoid",
             "shift",
             "flux_shift",
@@ -457,14 +458,15 @@ def _add_timestep_args(parser: argparse.ArgumentParser) -> None:
             "qinglong_qwen",
         ],
         default="sigma",
-        help="Method to sample timesteps: sigma-based, uniform random, sigmoid of random normal, shift of sigmoid and flux shift."
-        " / タイムステップをサンプリングする方法：sigma、random uniform、random normalのsigmoid、sigmoidのシフト、flux shift。",
+        help="Method to sample timesteps: sigma-based, uniform random, shifted uniform, sigmoid of random normal, shift of sigmoid and flux shift."
+        " / タイムステップをサンプリングする方法：sigma、random uniform、shiftしたuniform、random normalのsigmoid、sigmoidのシフト、flux shift。",
     )
     parser.add_argument(
         "--discrete_flow_shift",
         type=float,
         default=1.0,
-        help="Discrete flow shift for the Euler Discrete Scheduler, default is 1.0. / Euler Discrete Schedulerの離散フローシフト、デフォルトは1.0。",
+        help="Discrete flow shift for uniform_shift, shift, and the Euler Discrete Scheduler, default is 1.0."
+        " / uniform_shift、shift、Euler Discrete Schedulerの離散フローシフト、デフォルトは1.0。",
     )
     parser.add_argument(
         "--sigmoid_scale",
