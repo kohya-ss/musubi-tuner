@@ -2,7 +2,7 @@
 
 Date: 2026-08-03
 
-Status: Approved R1 after upstream scope and provenance review
+Status: Approved R1 after upstream scope, provenance, and video-only review
 
 Branch: `codex/minimax-h3-support`
 
@@ -19,6 +19,8 @@ R1 adds native BF16 MiniMax-H3 LoRA training and joint video/audio inference to 
 The implementation must fit Musubi's existing cache filename, tensor-key, collator, trainer, LoRA, compilation, and block-offload contracts. In particular, the target video cache must load as `batch["latents"]`, variable-length text tensors must use the `varlen_` prefix, and the H3 trainer must explicitly create target-audio noise inside its `process_batch` override.
 
 R1 requires every H3 dataset to use `batch_size = 1`; gradient accumulation is the effective-batch mechanism. Real packed batching needs text padding, attention masks, and per-sample structural plans, so it belongs in a later PR rather than a replication-only R1 path. Structural tensors still keep an explicit leading batch axis to avoid baking an unbatched model interface into the first release.
+
+R1 has two run-wide target-audio policies without changing the released packed layout. Default joint AV training uses real target audio when available and otherwise supervises a duration-matched silence latent. `--h3_video_only` ignores real target audio, keeps an Audio-VAE-encoded silence placeholder in the structurally required target-audio rows, and optimizes video MSE only. Ref2VA reference audio remains conditioning in both modes.
 
 ConvRot, prequantized INT8 loading, runtime LoRA over prequantized weights, and pruned AdaLN are deferred to R2. R1 does not depend on unmerged PR 1008.
 
@@ -70,11 +72,11 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 ## 3. R1 Goals
 
 - Register MiniMax-H3 as a first-class Musubi dataset architecture.
-- Cache synchronized target video and required target audio latents.
+- Cache synchronized target video and structurally required target-audio latents, using real audio or duration-matched silence according to the selected mode.
 - Cache FL2VA first/last visual conditions.
 - Cache Ref2VA ordered visual/audio reference latents from JSONL.
 - Cache Qwen3-VL-32B layer-50 conditioning in the repository's variable-length format.
-- Train BF16-base LoRA adapters with a dual-modality flow objective.
+- Train BF16-base LoRA adapters with either the equal-modality joint AV objective or an explicit video-only objective.
 - Generate video and audio jointly and mux the result.
 - Generate scheduled joint video/audio samples from the live training transformer and LoRA.
 - Load official sharded BF16 and Comfy-Org single-file BF16 artifacts.
@@ -104,6 +106,10 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - Per-sample timesteps inside one packed forward.
 - Loading FL2VA and Ref2VA transformer weights in one process.
 - CI with the real 33B transformer or 32B text encoder.
+- I2V training or conversion from Ref2VA/FL2VA records.
+- Removing target-audio rows from the released packed sequence.
+- Mixing joint AV and video-only samples within one training run.
+- A standalone `AudioDataset` or audio-only training.
 
 ## 5. Released Configuration Contract
 
@@ -301,17 +307,26 @@ save_text_encoder_output_cache_minimax_h3(...)
 
 Both call the existing common writers with `ARCHITECTURE_MINIMAX_H3_FULL`. Shared cache parsing and `BucketBatchManager.__getitem__` are not changed for H3.
 
+The latent writer also requires exactly one scalar `mmh3_audio_loss_weight_float32` tensor. It validates shape `[]`, dtype `float32`, and an exact value of `0.0` or `1.0`; missing, incorrectly named, non-finite, or non-binary policy data is an error. The shared collator already removes the dtype suffix and stacks this scalar as `batch["mmh3_audio_loss_weight"]`.
+
 ## 9. Dataset Contract
 
 ### 9.1 Target media
 
-Every sample has a target video, caption, and required target audio. Resolve target audio in this order:
+Every sample has a target video and caption. Target audio is synchronized media owned by that video record, not a separate dataset. `H3Record.target_audio` is optional because a structurally valid target-audio latent can be encoded from silence.
+
+In default joint AV mode, resolve target audio in this order:
 
 1. JSONL `audio_path`.
 2. One exact same-stem sidecar next to the target video.
 3. The target video's embedded audio stream.
+4. No source, represented by `target_audio = None`.
 
-Multiple matching sidecars are an error. An explicit path that fails decode does not fall back. Missing target audio is an error; R1 never substitutes silence or zero latents.
+Case 4 is not an error. Cache construction encodes duration-matched stereo silence and keeps the normal audio loss. A source that the user actually supplied remains strict: a missing or undecodable explicit path, a selected sidecar without audio, multiple matching sidecars, an undecodable embedded stream, or materially short selected audio raises rather than silently falling back.
+
+`--h3_video_only` is a run-wide flag on both latent caching and training. During video-only caching, target-audio discovery is bypassed entirely: do not validate JSONL `audio_path`, scan sidecars, probe embedded target audio for this purpose, decode target audio, or fingerprint a target-audio file. Always store `target_audio = None` and encode the silence placeholder. This rule affects target audio only. Ref2VA reference audio remains resolved, validated, fingerprinted, encoded, and presented as conditioning.
+
+Media identity always includes the target video and reference media. It includes a target-audio path only when `target_audio` is not `None`. Consequently ignored audio changes do not invalidate video-only caches, while selected real audio remains part of joint AV cache identity.
 
 ### 9.2 JSONL
 
@@ -401,6 +416,8 @@ samples_per_channel = A * 800
 
 Longer audio is truncated. Padding is allowed only for a short terminal decoder window within timestamp tolerance; a materially short or discontinuous stream is an error.
 
+When `target_audio is None`, do not call the media decoder. Allocate a stereo FP32 waveform of shape `[2, A * 800]` filled with zeros and pass it through the released Audio VAE posterior-mode path. The resulting latent must still be `[32, 2, A]`; silence must not be represented by an invented all-zero latent. This applies to missing audio in joint AV mode and to every sample in video-only mode. `--audio_vae` therefore remains required in both modes.
+
 ### 10.3 References
 
 - Prepare images independently of the target canvas using the released reference transform.
@@ -419,6 +436,7 @@ Cache tensors use names that `BucketBatchManager.__getitem__` already understand
 | --- | --- | --- |
 | Target video | `latents_{Fv}x{Hv}x{Wv}_{dtype}` | `latents` |
 | Target audio | `latents_audio_32x2x{A}_{dtype}` | `latents_audio` |
+| Audio loss policy | `mmh3_audio_loss_weight_float32` | `mmh3_audio_loss_weight` |
 | FL first condition | `latents_first_{Fc}x{Hc}x{Wc}_{dtype}` | `latents_first` |
 | FL last condition | `latents_last_{Fc}x{Hc}x{Wc}_{dtype}` | `latents_last` |
 | Ref image 000 | `latents_ref_000_image_{Fc}x{Hc}x{Wc}_{dtype}` | `latents_ref_000_image` |
@@ -429,21 +447,26 @@ Numbered reference tensor keys follow the JSONL order. The geometry suffix after
 
 Target video shape is `[24, Fv, Hv, Wv]`. Target audio shape is `[32, 2, A]`. Visual condition/reference shapes are `[24, Fc, Hc, Wc]`; audio reference shapes are `[32, 2, Ac]`.
 
+The audio loss policy is a scalar float32 with an exact value of `1.0` for joint AV samples, including supervised silence, and `0.0` for video-only samples. R1 does not use it to mix policies inside a run; it is a cache/trainer compatibility contract.
+
 The audio cache deliberately preserves the released audio VAE layout: feature width, stereo channel, then time. The encoder boundary stores `[32, 2, A]` directly from released `[B, 32, 2, A]` output; it must not transpose to `[2, 32, A]` while retaining a misleading geometry key.
 
 ### 11.2 Posterior policy
 
 - Target video uses a reproducible posterior sample derived from cache seed plus canonical item key.
 - Target audio and all reference audio use the audio posterior mean/mode; the released H3 audio path does not sample `logs_proj`.
+- Silence placeholders are encoded through that same posterior-mode path and are not assumed to produce zero latents.
 - FL2VA and Ref2VA visual conditions sample with fixed seed 42.
 - Visual condition samples round through FP16 before normalization to match released condition behavior.
 - The video VAE runs target and condition encoding in FP32. The explicit FP16 round-trip applies only to the sampled condition latent, not to VAE weights or encoder compute. Video decoding uses the published FP16 artifact in FP16.
 
-The cache metadata records the posterior policy, source fingerprints, crop timestamps, target geometry, ordered reference kinds, normalization constants, and VAE fingerprints.
+The cache metadata records the posterior policy, source fingerprints, crop timestamps, target geometry, ordered reference kinds, normalization constants, and VAE fingerprints. It additionally records `latent_cache_version=2`, `training_mode=joint_av|video_only`, and one of `target_audio_policy=real-supervised|silence-supervised|silence-unsupervised`. All three fields participate in `--skip_existing` checks.
+
+H3 latent cache format version 2 introduces `mmh3_audio_loss_weight_float32`. Version 1 latent caches must be rebuilt because their supervision policy is unknown. H3 text-encoder caches are unchanged and remain reusable.
 
 ### 11.3 Collation behavior
 
-All `latents_` tensors use the existing `torch.stack` path. R1 introduces no custom H3 collator and no new bucket dimension.
+All `latents_` tensors and the scalar loss-policy tensor use the existing `torch.stack` path. At runtime the scalar has shape `[1]` under R1's batch-size gate. R1 introduces no custom H3 collator and no new bucket dimension.
 
 Different target audio lengths cannot occur within an existing `(width, height, frame_count)` bucket because `A` is a deterministic function of target `F`. R1 requires `batch_size = 1`, so heterogeneous references never enter one collated batch. The collator and H3 runtime retain shape assertions as defense in depth for direct API calls.
 
@@ -621,7 +644,7 @@ The checkpoint owns `rope.inv_freq`; the model registers an empty persistent FP3
 
 The dataset does not guarantee one layout for the entire run: epoch shuffling can alternate several valid buckets. Complete timestep rows are also not invariant because `model_t_video` and `model_t_audio` change every training and sampling step. Caching those values would produce almost no hits or grow without bound. Instead, the dynamic AdaLN run boundaries are detected with a tensor comparison and `nonzero`; Python work scales with the number of runs, not `S` scalar tensor reads.
 
-## 14. Trainer Integration and Dual-Modality Loss
+## 14. Trainer Integration and Mode-Dependent Loss
 
 ### 14.1 Fixed base-loop contract
 
@@ -638,7 +661,7 @@ The H3 cache stores already normalized target-video latents, so the H3 trainer's
 The H3 trainer overrides both:
 
 - `process_batch`: construct dual-modality noise/noisy inputs, pack, call the DiT, and return the standard `DiTOutput` with audio tensors in `extra`.
-- `compute_loss`: compute unweighted video/audio mean MSE and return decomposed metrics.
+- `compute_loss`: apply the validated joint-AV or video-only policy and return decomposed metrics.
 
 It does not call the base `get_noisy_model_input_and_timesteps` or base `compute_loss`.
 
@@ -759,11 +782,15 @@ Reuse the repository's existing `training.trainer_base.DiTOutput` extension seam
 DiTOutput(
     pred=video_pred,
     target=video_target,
-    extra={"audio_pred": audio_pred, "audio_target": audio_target},
+    extra={
+        "audio_pred": audio_pred,
+        "audio_target": audio_target,
+        "audio_loss_weight": audio_loss_weight,
+    },
 )
 ```
 
-The overridden `compute_loss` calculates:
+For joint AV caches, the overridden `compute_loss` calculates:
 
 ```text
 video_loss = mean((output.pred - output.target) ** 2)
@@ -772,6 +799,16 @@ loss = video_loss + audio_loss
 ```
 
 This is an intentional equal-modality policy, not a row-weighted global mean: each head contributes one scalar mean even though video contains many more elements. Consequently an individual audio element has greater influence than an individual video element. R1 chooses this explicitly so the much smaller audio head is not diluted by video row count; it does not expose modality-loss weights. The policy is recorded as `ss_minimax_h3_loss_policy=video_mean_plus_audio_mean`. The trainer logs `loss/video`, `loss/audio`, and total loss. Condition rows do not enter either mean, and the overridden path never calls `compute_loss_weighting_for_sd3`.
+
+For video-only caches, `compute_loss` calculates only `video_loss`. It must not evaluate audio MSE and multiply the result by zero; it skips the audio loss expression, reports `loss/audio = 0`, and records `ss_minimax_h3_loss_policy=video_mean`. This removes the direct supervised gradient from the audio output objective. The shared transformer can still receive video-loss gradients through silence target-audio input rows because H3 uses joint self-attention; video-only does not claim those rows are computationally disconnected.
+
+### 14.8 Mode validation and packed semantics
+
+Both `minimax_h3_cache_latents.py` and `minimax_h3_train_network.py` expose `--h3_video_only`, defaulting to false. The same setting is required for both commands.
+
+Before layout construction or transformer execution, `_runtime_batch_plan` requires `batch["mmh3_audio_loss_weight"]` to be a float32 tensor of shape `[1]` with exact value `0.0` or `1.0`. `process_batch` then requires `0.0` when `--h3_video_only` is set and `1.0` otherwise. Missing version-2 policy data or a CLI/cache mismatch raises an actionable cache-rebuild error before the expensive forward.
+
+Both modes still load and noise the cached target-audio latent, build both timesteps, include target-audio rows in the packed transformer sequence, and produce both output heads. Removing those rows would change position ids, AdaLN routing, and full self-attention behavior from the released model. Video-only changes supervision, not model topology.
 
 ## 15. Batch Semantics
 
@@ -799,8 +836,9 @@ Saved metadata includes:
 - BF16 base artifact fingerprint
 - FL2VA/Ref2VA base family
 - target module policy
-- latent/text cache format versions
-- loss policy `video_mean_plus_audio_mean`
+- latent/text cache format versions, with H3 latent cache version `2`
+- `ss_minimax_h3_video_only=true|false`
+- loss policy `video_mean_plus_audio_mean` or `video_mean`
 
 `ss_minimax_h3_task` records the requested task. `ss_minimax_h3_base_family` records the released checkpoint family, so T2VA correctly records task `t2va` with base family `fl2va`; there is no separate released T2VA transformer.
 
@@ -841,7 +879,9 @@ The main block loop is:
 
 R1 does not invent an H3 offloader adapter. `ModelOffloader.prepare_block_devices_before_forward` already moves the block to the accelerator, which places buffers there, and then `weighs_to_device` relocates Linear `.weight` tensors for exchange. H3 only supplies the standard model lifecycle and the post-wait device assertion.
 
-The standalone generator uses forward-only block swap. Training-time sampling reuses the shared cadence, distributed prompt assignment, RNG restoration, and block-swap mode transitions, but overrides the single-VAE/video-only preparation and per-prompt inference hooks. H3 prepares Qwen3-VL states and condition latents before loading the transformer, retains the video and audio VAEs on CPU, moves them to the accelerator one at a time after joint denoising, and muxes the decoded result. Sampling uses the live transformer so the currently trained LoRA remains active.
+The standalone generator uses forward-only block swap. Training-time sampling reuses the shared cadence, distributed prompt assignment, RNG restoration, and block-swap mode transitions, but overrides the shared single-VAE, video-output-only preparation and per-prompt inference hooks. H3 prepares Qwen3-VL states and condition latents before loading the transformer, retains the video and audio VAEs on CPU, moves them to the accelerator one at a time after joint denoising, and muxes the decoded result. Sampling uses the live transformer so the currently trained LoRA remains active.
+
+Training-time and standalone sampling remain joint video/audio generation even for a video-only LoRA. Audio emitted from a video-only training run is unsupervised diagnostic output and is not evidence of trained audio quality.
 
 The compile helper receives `[transformer.blocks]` and disables Linear compilation when block swap is active, matching existing architectures.
 
@@ -875,8 +915,8 @@ No unconditional sequence or CFG pass is created.
 Fail before expensive allocation where possible for:
 
 - Unsupported R2 artifact formats.
-- Missing target audio.
-- Audio/video decode or timestamp failures.
+- Broken explicitly selected target audio; genuinely absent target audio uses supervised silence in joint AV mode.
+- Audio/video decode or timestamp failures for selected target or reference media.
 - Materially short target audio.
 - Fewer than 5 frames or invalid `17 * n + 5` geometry after architecture-aware normalization.
 - Released-duration violations without override.
@@ -884,6 +924,7 @@ Fail before expensive allocation where possible for:
 - Ref2VA without `video_jsonl_file`.
 - FL2VA/Ref2VA cache used under the wrong task.
 - Missing H3 tensor roles, invalid dtypes/shapes, or cache architecture/format mismatch.
+- Missing/invalid audio-loss policy tensors or a latent-cache mode different from `--h3_video_only`.
 - Invalid/stale text token tags or presentation fingerprints.
 - Qwen3-VL expanded length over 32768.
 - Unsupported timestep sampling, loss weighting, H3 shift, or condition-clean value.
@@ -892,7 +933,7 @@ Fail before expensive allocation where possible for:
 - H2D-only training without gradient checkpointing.
 - Conditioning tensor batch dimension different from target video batch size.
 
-OOM-oriented logs include target video/audio shapes, exact `A`, text length, reference counts and shapes, packed row count, dtype, and block-swap configuration. R1 does not rewrite batch size automatically.
+OOM-oriented logs include target video/audio shapes, exact `A`, target-audio policy, text length, reference counts and shapes, packed row count, dtype, and block-swap configuration. R1 does not rewrite batch size automatically.
 
 ## 20. Test Strategy
 
@@ -900,7 +941,7 @@ Tests use tiny synthetic model configurations unless marked manual.
 
 ### 20.1 Cache and dataset contract
 
-- Save a synthetic H3 latent cache through `save_latent_cache_minimax_h3` and load it through `BucketBatchManager`; assert keys are exactly `latents`, `latents_audio`, and task-specific `latents_*` roles.
+- Save a synthetic H3 latent cache through `save_latent_cache_minimax_h3` and load it through `BucketBatchManager`; assert keys are exactly `latents`, `latents_audio`, `mmh3_audio_loss_weight`, and task-specific `latents_*` roles.
 - Construct `VideoDataset(architecture="mmh3")` and assert it selects 24 fps instead of reaching the unsupported-architecture branch.
 - Save H3 text tensors and assert the collator returns lists under `mmh3_hidden_states` and `mmh3_token_tags`.
 - Assert full-Qwen `hidden_states[50]` and truncated-50 pre-norm last-state paths use the same after-layer-50/no-final-norm convention.
@@ -911,6 +952,10 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Assert `architectures.py` exports both `mmh3` and `minimax_h3` constants and all dataset/bucket imports resolve.
 - Assert JSONL reference order and limits.
 - Assert Ref2VA rejects directory datasets.
+- Assert joint AV resolves explicit, sidecar, and embedded target audio in order, but returns `target_audio = None` when none exists; broken selected sources and ambiguous sidecars still fail.
+- Assert video-only bypasses target-audio probing, decoding, sidecar discovery, and fingerprinting while retaining Ref2VA reference-audio validation and identity.
+- Assert joint AV missing audio encodes a `[2, A * 800]` FP32 zero waveform with loss weight `1.0`, while video-only ignores real audio and encodes the same silence shape with loss weight `0.0`.
+- Reject missing, incorrectly shaped/typed, non-finite, and non-binary audio-loss policy tensors; assert version/mode metadata invalidates stale caches while text caches remain reusable.
 
 ### 20.2 Geometry and packing
 
@@ -935,6 +980,9 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Assert condition inputs use `a*x0 + (1-a)*noise`; training seeds change per step, visual conditions restart one shared stream, and audio uses the `seed+1` stream.
 - Mock raw output heads and assert `process_batch` targets are `latents - noise` with no prediction negation or audio slope scaling.
 - Assert H3 returns the standard `DiTOutput`, stores audio tensors in `extra`, and `compute_loss` never calls SD3 weighting while reporting separate video/audio means.
+- Assert cache/CLI mode mismatches and version-1 caches fail before transformer execution.
+- Assert video-only loss equals video MSE, reports zero audio loss, and has no direct gradient from `audio_pred`; assert joint AV remains `video_mean + audio_mean` with both gradients.
+- Assert video-only forwards retain silence target-audio rows and Ref2VA reference-audio conditions.
 - Assert mismatched conditioning batch dimensions fail clearly.
 - Assert training sample preparation loads Qwen3-VL once, builds task-specific layouts, retains both VAEs on CPU, and returns no shared single VAE.
 - Assert scheduled sampling runs the live transformer/LoRA, decodes the two latent outputs sequentially, restores transformer mode, and muxes a joint AV file.
@@ -973,7 +1021,9 @@ R1 is complete when:
 - Target video loads as `batch["latents"]`.
 - Target audio and condition/reference roles load under `latents_*` batch keys, with released `[32, 2, A]` audio axis order preserved.
 - Qwen3-VL caches load as `varlen_` lists, use the exact after-layer-50 pre-norm state, preserve mixed text/vision token tags, and enforce the 32768-token limit.
-- Target audio is required, aligned, independently noised, and supervised.
+- Joint AV uses aligned real target audio when available and otherwise supervises Audio-VAE-encoded silence; a broken selected source remains an error.
+- Video-only ignores real target audio, retains silence target-audio rows, and optimizes video MSE without an audio MSE term; Ref2VA reference audio remains conditioning.
+- Latent cache version 2 carries an explicit loss-policy scalar, and stale or mode-mismatched caches fail before transformer execution.
 - The exact integer `F -> A` formula is shared by cache and inference.
 - Packed audio/video row counts match the documented formulas.
 - FP64 rotary clocks, FL anchors, and reference cursor advances follow the pinned Apache-2.0 Diffusers implementation and are independently cross-checked against ComfyUI behavior.
@@ -991,7 +1041,7 @@ R1 is complete when:
 - Ported modules carry Apache-2.0 provenance headers pinned to Diffusers PR #14355; ComfyUI remains validation-only and contributes no implementation code.
 - H3 loss transport reuses `DiTOutput.extra` rather than introducing a parallel output type.
 - Automated tests pass and real-model R1 evidence is recorded.
-- User documentation states BF16-only R1 scope, JSONL Ref2VA, cache limits, batching limitations, and block-swap commands.
+- User documentation states BF16-only R1 scope, JSONL Ref2VA, joint-AV silence fallback, video-only cache/training flag parity, cache rebuild requirements, sampling semantics, batching limitations, and block-swap commands.
 
 ## 22. Deferred R2
 
