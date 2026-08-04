@@ -110,6 +110,10 @@ python minimax_h3_cache_latents.py \
 
 The video VAE is upcast to FP32 for target and condition encoding so cached training targets do not inherit FP16 encoder outliers. It uses a reproducible posterior sample for each target. Visual conditions use the released fixed sampling policy, including the required FP16 round-trip of the sampled condition latent before normalization. Video decode keeps the released FP16 artifact in FP16. Target and reference audio use the audio posterior mode directly in `[32,2,A]` layout.
 
+By default, caching uses real target audio when available. If a video has no target audio, caching logs a warning, encodes duration-matched silence as the structurally required audio latent, and marks that sample's audio loss disabled; missing audio is not treated as a silent supervision target. To ignore all target audio intentionally, add `--h3_video_only` to the latent-cache command only. Ref2VA reference audio remains active conditioning.
+
+`--audio_vae` is still required with `--h3_video_only`. H3 always includes target-audio rows, and the released Audio VAE encoding of a zero waveform is not guaranteed to be an all-zero latent. Each cache stores its own small silence latent: at `F=124`, it is about 52 KB versus about 7.16 MB for the BF16 video latent, so no shared-silence or deduplication mechanism is used. Existing real-audio H3 latent caches remain compatible and do not require a blanket rebuild.
+
 ## Cache Text Encoder Outputs
 
 ```bash
@@ -145,11 +149,13 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 minimax
   --output_name h3-lora
 ```
 
-The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in the 50 main DiT blocks. The loss is intentionally `mean(video_mse) + mean(audio_mse)`: the two modality heads contribute equally even though video has many more elements, rather than being combined into one element-weighted mean. This policy is saved as `ss_minimax_h3_loss_policy=video_mean_plus_audio_mean`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
+The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in the 50 main DiT blocks. Every sample contributes `mean(video_mse)`. A sample with real target audio additionally contributes `mean(audio_mse)` at equal per-sample coefficient; a missing-audio or video-only sample contributes no audio MSE. With `batch_size=1` and gradient accumulation, the run-level effective audio coefficient is therefore the supervised-audio sample fraction, not always one. Training does not renormalize by that fraction, because doing so would amplify a small supervised subset.
+
+The trainer logs this value as `supervised_audio_fraction` and saves it as `ss_minimax_h3_supervised_audio_fraction`. It also records `ss_minimax_h3_loss_policy=video_mean_plus_optional_audio_mean` and `ss_minimax_h3_audio_supervision=per_sample_binary_cache_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.
 
-R1 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The gate runs immediately after dataset construction, reads no cache files, and the runtime/model repeat the check for direct API calls. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
+R1 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The batch-size gate runs immediately after dataset construction and reads no cache files; a separate H3 metadata-only pass then reads cache headers, not latent payloads, to compute `supervised_audio_fraction`. The runtime/model repeat the batch-size check for direct API calls. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
 
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 

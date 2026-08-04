@@ -109,6 +109,7 @@ The upstream author is handling its integration. This R1 spec neither merges tha
 - I2V training or conversion from Ref2VA/FL2VA records.
 - Removing target-audio rows from the released packed sequence.
 - A standalone `AudioDataset` or audio-only training.
+- Deduplicating silence latents across cache files.
 
 ## 5. Released Configuration Contract
 
@@ -314,6 +315,8 @@ The latent writer also requires exactly one scalar `mmh3_audio_loss_weight_float
 
 Every sample has a target video and caption. Target audio is synchronized media owned by that video record, not a separate dataset. `H3Record.target_audio` is optional because a structurally valid target-audio latent can be encoded from silence.
 
+The media-layer change is confined to `minimax_h3/media.py`: `_resolve_target_audio(..., video_only=...)` returns `Optional[H3AudioSource]`; `make_h3_directory_record` and `load_h3_jsonl_records` pass the cache policy through their existing resolution calls. In video-only mode, `_resolve_target_audio` returns `None` before inspecting target-audio fields or media. Reference parsing keeps its existing independent audio rules.
+
 In default joint AV mode, resolve target audio in this order:
 
 1. JSONL `audio_path`.
@@ -447,6 +450,8 @@ Numbered reference tensor keys follow the JSONL order. The geometry suffix after
 Target video shape is `[24, Fv, Hv, Wv]`. Target audio shape is `[32, 2, A]`. Visual condition/reference shapes are `[24, Fc, Hc, Wc]`; audio reference shapes are `[32, 2, Ac]`.
 
 The audio loss policy is a scalar float32 with an exact value of `1.0` when a real target-audio source was decoded and `0.0` when target audio was missing or intentionally ignored by `--h3_video_only`. It is behavioral per-sample data, not a checksum for a training CLI flag. A normal dataset may therefore contain both values.
+
+Each cache stores its own silence latent. For the common `F=124`, `A=207` case, a `[32,2,207]` FP32 audio latent is about 52 KB, versus about 7.16 MB for a `[24,37,84,48]` BF16 video latent. The audio placeholder is below one percent of that payload, so R1 does not add shared-blob references, canonical-silence lookup, or any other deduplication mechanism.
 
 The audio cache deliberately preserves the released audio VAE layout: feature width, stereo channel, then time. The encoder boundary stores `[32, 2, A]` directly from released `[B, 32, 2, A]` output; it must not transpose to `[2, 32, A]` while retaining a misleading geometry key.
 
@@ -805,6 +810,10 @@ For samples whose cached audio loss weight is `0.0`, whether from missing audio 
 
 The artifact policy is recorded as `ss_minimax_h3_loss_policy=video_mean_plus_optional_audio_mean`: the binary cache scalar determines whether the optional audio mean is present for each sample.
 
+With `batch_size = 1` and gradient accumulation over `N` micro-steps, video loss appears in all `N` steps while audio loss appears only in supervised steps. Accelerate divides the accumulated gradient by `N`, so the run-level effective audio coefficient is the supervised-audio sample fraction `p`; equal head weighting applies only inside a sample whose audio weight is `1.0`. R1 deliberately does not divide audio loss by `p`, because that would amplify a small supervised subset.
+
+After the batch-size gate, the H3 trainer computes `supervised_audio_fraction` across the effective bucketed training examples. It reads only latent-cache headers, memoizes policy by cache path, treats simultaneous absence of the legacy policy and scalar as supervised, and counts repeated examples according to their actual micro-step frequency. Any present new policy requires the scalar key. Invalid policy metadata or a missing new scalar fails before model allocation; no latent payload is loaded for this statistics pass. The trainer logs the fraction once at startup and saves the same `[0,1]` decimal as `ss_minimax_h3_supervised_audio_fraction`.
+
 ### 14.8 Audio supervision and packed semantics
 
 `minimax_h3_cache_latents.py` exposes `--h3_video_only`, defaulting to false. The training command has no corresponding mode flag: supervision follows each cache record rather than duplicating that fact in CLI state.
@@ -842,6 +851,7 @@ Saved metadata includes:
 - latent/text cache format versions, retaining backward-compatible H3 latent cache version `1`
 - `ss_minimax_h3_audio_supervision=per_sample_binary_cache_weight`
 - loss policy `video_mean_plus_optional_audio_mean`
+- `ss_minimax_h3_supervised_audio_fraction`, the effective fraction of training examples with audio weight `1.0`
 
 `ss_minimax_h3_task` records the requested task. `ss_minimax_h3_base_family` records the released checkpoint family, so T2VA correctly records task `t2va` with base family `fl2va`; there is no separate released T2VA transformer.
 
@@ -938,7 +948,7 @@ Fail before expensive allocation where possible for:
 - H2D-only training without gradient checkpointing.
 - Conditioning tensor batch dimension different from target video batch size.
 
-OOM-oriented logs include target video/audio shapes, exact `A`, target-audio policy, text length, reference counts and shapes, packed row count, dtype, and block-swap configuration. R1 does not rewrite batch size automatically.
+Startup logs include `supervised_audio_fraction`. OOM-oriented logs include target video/audio shapes, exact `A`, target-audio policy, text length, reference counts and shapes, packed row count, dtype, and block-swap configuration. R1 does not rewrite batch size automatically.
 
 ## 20. Test Strategy
 
@@ -958,9 +968,11 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Assert JSONL reference order and limits.
 - Assert Ref2VA rejects directory datasets.
 - Assert joint AV resolves explicit, sidecar, and embedded target audio in order, but returns `target_audio = None` when none exists; broken selected sources and ambiguous sidecars still fail.
+- Assert both directory and JSONL record construction propagate the cache-only video policy into `_resolve_target_audio`, and `H3Record.target_audio` is optional without changing reference-audio parsing.
 - Assert video-only bypasses target-audio probing, decoding, sidecar discovery, and fingerprinting while retaining Ref2VA reference-audio validation and identity.
 - Assert default missing audio encodes a `[2, A * 800]` FP32 zero waveform, emits a warning, and stores loss weight `0.0`; real audio stores `1.0`; video-only ignores real audio and stores the same silence shape with `0.0`.
 - Reject incorrectly shaped/typed, non-finite, and non-binary present audio-loss policy tensors. Assert a legacy missing tensor defaults to `1.0`, an absent legacy metadata policy matches only `real-supervised`, and policy changes invalidate incompatible caches without a blanket rebuild.
+- Assert silence latents remain ordinary per-sample cache tensors and no shared/deduplicated silence artifact or cache reference is created.
 
 ### 20.2 Geometry and packing
 
@@ -988,6 +1000,7 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Assert H3 returns the standard `DiTOutput`, stores audio tensors in `extra`, and `compute_loss` never calls SD3 weighting while reporting separate video/audio means.
 - Assert new `0.0`/`1.0` cache weights and the implicit legacy `1.0` select their loss branch before transformer execution without a training-side video-only flag.
 - Assert both missing-audio and explicit video-only samples use video MSE, report zero audio loss, and have no direct gradient from `audio_pred`; assert real-audio samples remain `video_mean + audio_mean` with both gradients.
+- For a synthetic mixed dataset, assert `supervised_audio_fraction` follows effective repeated micro-step counts, is logged and saved in metadata, and does not renormalize the audio loss or gradients by the reciprocal fraction.
 - Assert video-only forwards retain silence target-audio rows and Ref2VA reference-audio conditions.
 - Assert mismatched conditioning batch dimensions fail clearly.
 - Assert training sample preparation loads Qwen3-VL once, builds task-specific layouts, retains both VAEs on CPU, and returns no shared single VAE.
@@ -1031,6 +1044,8 @@ R1 is complete when:
 - The default policy supervises aligned real target audio when available; missing audio warns, retains an Audio-VAE-encoded silence placeholder, and contributes no audio MSE. A broken selected source remains an error.
 - Cache-time video-only ignores real target audio, retains silence target-audio rows, and contributes no audio MSE; Ref2VA reference audio remains conditioning.
 - New latent caches carry a per-sample loss-policy scalar, legacy real-audio caches remain valid with implicit weight `1.0`, and policy metadata prevents incompatible cache reuse.
+- Per-sample equal weighting is documented separately from run-level weighting; the logged and saved `supervised_audio_fraction` describes the dataset-dependent effective audio coefficient, and training does not renormalize by that fraction.
+- Every cache keeps its own small silence latent; R1 adds no silence-deduplication storage or lookup mechanism.
 - The exact integer `F -> A` formula is shared by cache and inference.
 - Packed audio/video row counts match the documented formulas.
 - FP64 rotary clocks, FL anchors, and reference cursor advances follow the pinned Apache-2.0 Diffusers implementation and are independently cross-checked against ComfyUI behavior.
@@ -1048,7 +1063,7 @@ R1 is complete when:
 - Ported modules carry Apache-2.0 provenance headers pinned to Diffusers PR #14355; ComfyUI remains validation-only and contributes no implementation code.
 - H3 loss transport reuses `DiTOutput.extra` rather than introducing a parallel output type.
 - Automated tests pass and real-model R1 evidence is recorded.
-- User documentation states BF16-only R1 scope, JSONL Ref2VA, unsupervised missing-audio placeholders, the cache-only video-only flag, legacy-cache compatibility, sampling semantics, batching limitations, and block-swap commands.
+- User documentation states BF16-only R1 scope, JSONL Ref2VA, unsupervised missing-audio placeholders, why video-only still requires the Audio VAE, per-sample versus dataset-level loss weighting, `supervised_audio_fraction`, the cache-only video-only flag, legacy-cache compatibility, per-sample silence storage, sampling semantics, batching limitations, and block-swap commands.
 
 ## 22. Deferred R2
 
