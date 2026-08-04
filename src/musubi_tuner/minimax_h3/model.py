@@ -338,14 +338,11 @@ def _mod_scale_shift(
     hidden_states: torch.Tensor,
     shift: torch.Tensor,
     scale: torch.Tensor,
-    batch_segments: tuple[tuple[tuple[int, int, int], ...], ...],
+    segments: tuple[tuple[int, int, int], ...],
 ) -> torch.Tensor:
     # Callers pass a fresh norm output; these disjoint slice updates retain trainable AdaLN gradients.
-    if len(batch_segments) != hidden_states.shape[0]:
-        raise ValueError("MiniMax-H3 modulation plans must preserve the batch axis")
-    for batch_index, segments in enumerate(batch_segments):
-        for start, stop, row in segments:
-            hidden_states[batch_index, start:stop].mul_(1.0 + scale[row]).add_(shift[row])
+    for start, stop, row in segments:
+        hidden_states[:, start:stop].mul_(1.0 + scale[row]).add_(shift[row])
     return hidden_states
 
 
@@ -353,14 +350,11 @@ def _mod_gate(
     residual: torch.Tensor,
     update: torch.Tensor,
     gate: torch.Tensor,
-    batch_segments: tuple[tuple[tuple[int, int, int], ...], ...],
+    segments: tuple[tuple[int, int, int], ...],
 ) -> torch.Tensor:
-    if len(batch_segments) != residual.shape[0]:
-        raise ValueError("MiniMax-H3 gate plans must preserve the batch axis")
     output = residual.clone()
-    for batch_index, segments in enumerate(batch_segments):
-        for start, stop, row in segments:
-            output[batch_index, start:stop].add_(update[batch_index, start:stop] * gate[row])
+    for start, stop, row in segments:
+        output[:, start:stop].add_(update[:, start:stop] * gate[row])
     return output
 
 
@@ -393,7 +387,7 @@ class DiTBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         timestep_embeddings: torch.Tensor,
-        modulation_segments: tuple[tuple[tuple[int, int, int], ...], ...],
+        modulation_segments: tuple[tuple[int, int, int], ...],
         rotation_table: torch.Tensor,
     ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(timestep_embeddings)

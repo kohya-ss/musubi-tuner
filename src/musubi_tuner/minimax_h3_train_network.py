@@ -25,9 +25,10 @@ from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
 from musubi_tuner.minimax_h3.generation_inputs import (
     VIDEO_VAE_SPATIAL_RATIO,
     build_reference_geometries,
+    decode_generation_visuals,
     encode_audio_conditions,
     encode_visual_conditions,
-    load_generation_record_and_visuals,
+    load_generation_record,
     module_device_dtype,
 )
 from musubi_tuner.minimax_h3.media import audio_latent_frames, video_latent_frames
@@ -418,7 +419,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         try:
             for parameter in parameters:
                 request = SimpleNamespace(**parameter)
-                record, raw_visuals, text_visuals = load_generation_record_and_visuals(request, decoder)
+                record = load_generation_record(request)
+                raw_visuals, text_visuals = decode_generation_visuals(request, record, decoder)
                 presentation = build_presentation(record, args.task, text_visuals)
                 hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
                 parameter["h3_text_hidden_states"] = hidden_states.to(torch.bfloat16).unsqueeze(0).cpu()
@@ -452,7 +454,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     parameter["_h3_has_audio_conditions"] = False
                     continue
                 request = SimpleNamespace(**parameter)
-                record, raw_visuals, text_visuals = load_generation_record_and_visuals(request, decoder)
+                record = parameter["_h3_record"]
+                # Re-decode here instead of retaining hundreds of MB of pixels across model teardown.
+                raw_visuals, text_visuals = decode_generation_visuals(request, record, decoder)
                 visual_conditions, visual_geometries, reference_visual_geometries = encode_visual_conditions(
                     request,
                     record,
@@ -495,7 +499,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 audio_conditions, reference_audio_frames = encode_audio_conditions(
                     request,
                     parameter["_h3_record"],
-                    {},
                     decoder,
                     audio_vae,
                     reference_video_frame_counts=parameter["_h3_reference_video_frame_counts"],

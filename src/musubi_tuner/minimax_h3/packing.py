@@ -140,7 +140,7 @@ class H3TimestepRows:
     row_timestep_indices: torch.Tensor
     token_tags: torch.Tensor
     block_adaln_indices: torch.Tensor
-    block_segments: tuple[tuple[tuple[int, int, int], ...], ...]
+    block_segments: tuple[tuple[int, int, int], ...]
     video_timestep_index: int
     audio_timestep_index: int
 
@@ -457,7 +457,7 @@ def build_timestep_rows(
             token_tags[:, segment.row_slice] = 2
 
     block_adaln_indices = 3 * row_timestep_indices + token_tags
-    block_segments = tuple(_build_modulation_segments(indices) for indices in block_adaln_indices)
+    block_segments = _build_modulation_segments(block_adaln_indices[0])
 
     return H3TimestepRows(
         unique_timesteps=torch.tensor(unique_values, dtype=torch.float32),

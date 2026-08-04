@@ -181,7 +181,8 @@ def test_timestep_plan_preserves_text_tags_and_uses_final_layer_time_indices_dir
     assert plan.row_timesteps.shape == (1, layout.row_count)
     assert plan.row_timestep_indices.shape == (1, layout.row_count)
     assert plan.token_tags.shape == (1, layout.row_count)
-    assert len(plan.block_segments) == 1
+    assert plan.block_segments[0] == (0, 1, 1)
+    assert all(len(segment) == 3 and all(isinstance(value, int) for value in segment) for segment in plan.block_segments)
     torch.testing.assert_close(plan.token_tags[0, :3], torch.tensor([1, 0, 1]))
     torch.testing.assert_close(plan.block_adaln_indices[0, :3], torch.tensor([1, 0, 1]))
     condition = layout.segment("first")

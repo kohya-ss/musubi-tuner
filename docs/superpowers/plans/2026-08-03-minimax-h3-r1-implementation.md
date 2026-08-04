@@ -633,11 +633,11 @@ Delete structural fingerprint construction and all multi-item compatibility mach
 
 - [x] **Step 2: Remove repeated layout work without assuming one global layout**
 
-Vectorize AdaLN run discovery. Cache completed rotation tables in a bounded layout/device/dtype LRU and clear it across module moves or checkpoint loads. Do not cache timestep values that change every step.
+Vectorize AdaLN run discovery. Keep the R1 modulation run plan flat for its single supported packed sequence while retaining batch axes on tensors. Cache completed rotation tables in a bounded layout/device/dtype LRU and clear it across module moves or checkpoint loads. Do not cache timestep values that change every step.
 
 - [x] **Step 3: Harden checkpoint and modulation semantics**
 
-Register `rope.inv_freq` as an empty checkpoint-owned buffer. Replace gate concatenation with one preallocated residual clone plus slice updates. Verify trainable AdaLN shift/scale/gate gradients directly; the reported in-place backward failure is not reproducible.
+Register `rope.inv_freq` as an empty checkpoint-owned buffer. Replace gate concatenation with one preallocated residual clone plus slice updates. Verify FP64 in-place scale/shift/gate outputs and gradients, including the RMSNorm weight, against an out-of-place segmented reference; the reported in-place backward failure is not reproducible.
 
 - [x] **Step 4: Make tests independently collectible and metadata explicit**
 
@@ -665,11 +665,11 @@ Replace the regression that expected `--sample_prompts` to fail with tests requi
 
 - [x] **Step 2: Share generation input preparation**
 
-Extract image/reference loading and visual/audio condition encoding from the standalone CLI into an H3 package module so standalone and training-time generation keep one task/layout contract.
+Extract record loading, visual decoding, and visual/audio condition encoding from the standalone CLI into an H3 package module so standalone and training-time generation keep one task/layout contract. Keep record parsing separate from pixel decoding and make audio encoding depend only on stored reference-video frame counts.
 
 - [x] **Step 3: Implement H3-specific trainer hooks**
 
-Override sampling preparation instead of changing the shared single-VAE contract. Encode all text presentations before the transformer is allocated, prepare task-specific condition latents, retain both VAEs on CPU, and return `None` for the shared VAE slot. Override per-prompt inference to use the live transformer/LoRA, produce joint target latents, decode each modality with its own VAE in sequence, restore model placement/mode, and mux the result.
+Override sampling preparation instead of changing the shared single-VAE contract. Load each canonical record once. Encode all text presentations before the transformer is allocated, then deliberately re-decode visual pixels for Video-VAE encoding instead of retaining hundreds of MB per prompt across model teardown. Prepare task-specific condition latents, retain both VAEs on CPU, and return `None` for the shared VAE slot. Override per-prompt inference to use the live transformer/LoRA, produce joint target latents, decode each modality with its own VAE in sequence, restore model placement/mode, and mux the result.
 
 - [x] **Step 4: Document training sample inputs and lifecycle**
 

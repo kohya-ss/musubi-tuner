@@ -321,22 +321,49 @@ def test_final_layer_uses_direct_time_rows_without_modality_offsets():
     torch.testing.assert_close(audio, torch.full((1, 2, 1), 10.0))
 
 
-def test_segment_modulation_preserves_trainable_adaln_gradients():
+def test_segment_modulation_matches_out_of_place_outputs_and_gradients():
     segments = ((0, 2, 0), (2, 4, 1))
-    source = torch.randn(1, 4, 3, requires_grad=True)
-    shift = torch.randn(2, 3, requires_grad=True)
-    scale = torch.randn(2, 3, requires_grad=True)
-    residual = torch.randn(1, 4, 3, requires_grad=True)
-    update = torch.randn(1, 4, 3, requires_grad=True)
-    gate = torch.randn(2, 3, requires_grad=True)
+    generator = torch.Generator().manual_seed(1234)
+    values = (
+        torch.randn(1, 4, 3, dtype=torch.float64, generator=generator),
+        torch.randn(2, 3, dtype=torch.float64, generator=generator),
+        torch.randn(2, 3, dtype=torch.float64, generator=generator),
+        torch.randn(1, 4, 3, dtype=torch.float64, generator=generator),
+        torch.randn(1, 4, 3, dtype=torch.float64, generator=generator),
+        torch.randn(2, 3, dtype=torch.float64, generator=generator),
+    )
+    actual = [value.clone().requires_grad_() for value in values]
+    expected = [value.clone().requires_grad_() for value in values]
+    actual_norm = nn.RMSNorm(3, dtype=torch.float64)
+    expected_norm = nn.RMSNorm(3, dtype=torch.float64)
+    with torch.no_grad():
+        norm_weight = torch.randn(3, dtype=torch.float64, generator=generator)
+        actual_norm.weight.copy_(norm_weight)
+        expected_norm.weight.copy_(norm_weight)
 
-    modulated = h3_model._mod_scale_shift(source + 0.0, shift, scale, (segments,))
-    gated = h3_model._mod_gate(residual, update, gate, (segments,))
-    (modulated.square().mean() + gated.square().mean()).backward()
+    source, shift, scale, residual, update, gate = actual
+    actual_modulated = h3_model._mod_scale_shift(actual_norm(source), shift, scale, segments)
+    actual_gated = h3_model._mod_gate(residual, update, gate, segments)
 
-    for tensor in (source, shift, scale, residual, update, gate):
-        assert tensor.grad is not None
-        assert torch.isfinite(tensor.grad).all()
+    source, shift, scale, residual, update, gate = expected
+    expected_normalized = expected_norm(source)
+    expected_modulated = torch.cat(
+        [expected_normalized[:, start:stop] * (1.0 + scale[row]) + shift[row] for start, stop, row in segments],
+        dim=1,
+    )
+    expected_gated = torch.cat(
+        [residual[:, start:stop] + update[:, start:stop] * gate[row] for start, stop, row in segments],
+        dim=1,
+    )
+
+    torch.testing.assert_close(actual_modulated, expected_modulated, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(actual_gated, expected_gated, rtol=1e-12, atol=1e-12)
+    (actual_modulated.square().mean() + actual_gated.square().mean()).backward()
+    (expected_modulated.square().mean() + expected_gated.square().mean()).backward()
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor.grad, expected_tensor.grad, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(actual_norm.weight.grad, expected_norm.weight.grad, rtol=1e-12, atol=1e-12)
 
 
 def test_model_returns_native_positive_outputs_without_comfy_sign_or_audio_slope():

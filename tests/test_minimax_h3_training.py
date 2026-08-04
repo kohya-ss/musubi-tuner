@@ -317,9 +317,10 @@ def test_prepare_training_samples_encodes_text_once_and_owns_both_vaes_without_u
     )
     monkeypatch.setattr(
         train,
-        "load_generation_record_and_visuals",
-        lambda *args, **kwargs: (record, {}, {}),
+        "load_generation_record",
+        lambda *args, **kwargs: record,
     )
+    monkeypatch.setattr(train, "decode_generation_visuals", lambda *args, **kwargs: ({}, {}))
     monkeypatch.setattr(train, "build_presentation", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         train,
@@ -411,13 +412,23 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
     record = SimpleNamespace(references=(reference,))
     visual = torch.zeros(1, 24, 2, 4, 4)
     audio = torch.zeros(1, 32, 2, 8)
+    record_loads = []
+    visual_decodes = []
+    audio_frame_counts = []
     monkeypatch.setattr(train, "PyAVH3MediaDecoder", lambda: object())
     monkeypatch.setattr(train, "load_h3_processor", lambda *args, **kwargs: object())
     monkeypatch.setattr(train, "load_h3_text_encoder", lambda *args, **kwargs: EmptyModule())
     monkeypatch.setattr(
         train,
-        "load_generation_record_and_visuals",
-        lambda *args, **kwargs: (record, {reference.path: torch.zeros(5, 64, 64, 3)}, {}),
+        "load_generation_record",
+        lambda *args, **kwargs: record_loads.append(record) or record,
+    )
+    monkeypatch.setattr(
+        train,
+        "decode_generation_visuals",
+        lambda request, loaded_record, decoder: (
+            visual_decodes.append(loaded_record) or ({reference.path: torch.zeros(5, 64, 64, 3)}, {})
+        ),
     )
     monkeypatch.setattr(train, "build_presentation", lambda *args, **kwargs: object())
     monkeypatch.setattr(
@@ -437,11 +448,14 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
         "encode_visual_conditions",
         lambda *args, **kwargs: ((visual,), (), {0: H3VideoGeometry(2, 4, 4)}),
     )
-    monkeypatch.setattr(
-        train,
-        "encode_audio_conditions",
-        lambda *args, **kwargs: ((audio,), {0: 8}),
-    )
+
+    def fake_encode_audio_conditions(request, loaded_record, decoder, audio_vae, *, reference_video_frame_counts):
+        del request, decoder, audio_vae
+        assert loaded_record is record
+        audio_frame_counts.append(reference_video_frame_counts)
+        return (audio,), {0: 8}
+
+    monkeypatch.setattr(train, "encode_audio_conditions", fake_encode_audio_conditions)
     monkeypatch.setattr(train, "clean_memory_on_device", lambda *args, **kwargs: None)
     trainer = MiniMaxH3NetworkTrainer()
 
@@ -455,6 +469,9 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
     assert parameter["h3_audio_conditions"] == (audio,)
     assert video_vae_load_dtypes == [torch.float32]
     assert trainer._sampling_video_vae.dtype_probe.dtype is torch.float16
+    assert record_loads == [record]
+    assert visual_decodes == [record, record]
+    assert audio_frame_counts == [{0: 5}]
 
 
 def test_process_batch_uses_one_shared_base_time_and_independent_audio_noise(monkeypatch):

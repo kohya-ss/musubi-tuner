@@ -599,6 +599,8 @@ block_adaln_index[row] = 3 * row_timestep_indices[row] + token_tag[row]
 
 The text span must therefore be split at token-tag runs or indexed row-by-row; treating it as a uniform tag-1 segment is incorrect. R1 produces `token_tags[1, S]`, `row_timestep_indices[1, S]`, and `row_timesteps[1, S]`. The leading batch axis is explicit even though its only supported size is one.
 
+The derived modulation run plan is flat for that one supported packed sequence: `tuple[tuple[start, stop, adaln_row], ...]`. It does not add a second per-batch nesting level. A future real-batching PR needs per-sample text padding and masking and will define its own plan representation; R1 does not build that unused mechanism early.
+
 The FinalLayer is different: its AdaLN projection has one slot per distinct time, not three modality slots. Target video selects `video_timestep_index` directly and target audio selects `audio_timestep_index` directly. FinalLayer must never receive `3 * index + tag`; modality separation there comes from the two output heads, not a tagged AdaLN table. Text and condition rows do not enter either final output head.
 
 The packer returns explicit row indices for target video/audio and never infers row roles from tensor-key sorting.
@@ -881,6 +883,8 @@ R1 does not invent an H3 offloader adapter. `ModelOffloader.prepare_block_device
 
 The standalone generator uses forward-only block swap. Training-time sampling reuses the shared cadence, distributed prompt assignment, RNG restoration, and block-swap mode transitions, but overrides the shared single-VAE, video-output-only preparation and per-prompt inference hooks. H3 prepares Qwen3-VL states and condition latents before loading the transformer, retains the video and audio VAEs on CPU, moves them to the accelerator one at a time after joint denoising, and muxes the decoded result. Sampling uses the live transformer so the currently trained LoRA remains active.
 
+Training-time sample preparation parses each prompt's generation record once. Text presentation and Video-VAE encoding deliberately decode visual references in separate phases rather than retaining potentially hundreds of MB of raw pixels per prompt across text-encoder teardown; the second phase reuses the stored canonical record and documents this memory-for-decode tradeoff. Audio-condition encoding receives only the recorded reference-video frame-count map and never depends on a dead raw-visual argument.
+
 Training-time and standalone sampling remain joint video/audio generation even for a video-only LoRA. Audio emitted from a video-only training run is unsupervised diagnostic output and is not evidence of trained audio quality.
 
 The compile helper receives `[transformer.blocks]` and disables Linear compilation when block swap is active, matching existing architectures.
@@ -969,6 +973,7 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Golden-test the full FP64 rotary grid: `(5/3) * (1,4,4,4,4)` video spans, normalized spatial axes, FL first/last anchors, stereo audio endpoints, and Ref2VA cursor advances.
 - Assert visual condition row time is `max(model_t_video, a_v)`, not constant `a_v`, and text row time follows video.
 - Assert main blocks use `3 * timestep_index + tag`, while FinalLayer selects video/audio timestep indices directly with no tag offset.
+- Assert the flat single-sequence modulation run plan and compare FP64 in-place scale/shift/gate outputs and all input, AdaLN, and RMSNorm-weight gradients against an out-of-place segmented reference.
 
 ### 20.3 Trainer hooks
 
@@ -985,6 +990,7 @@ Tests use tiny synthetic model configurations unless marked manual.
 - Assert video-only forwards retain silence target-audio rows and Ref2VA reference-audio conditions.
 - Assert mismatched conditioning batch dimensions fail clearly.
 - Assert training sample preparation loads Qwen3-VL once, builds task-specific layouts, retains both VAEs on CPU, and returns no shared single VAE.
+- Assert each training sample record is loaded once, visual references are intentionally re-decoded for the Video-VAE phase, and audio conditions consume the stored reference-video frame counts without raw pixels.
 - Assert scheduled sampling runs the live transformer/LoRA, decodes the two latent outputs sequentially, restores transformer mode, and muxes a joint AV file.
 
 ### 20.4 Model, LoRA, and block swap

@@ -14,9 +14,10 @@ from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
 from musubi_tuner.minimax_h3.generation_inputs import (
     VIDEO_VAE_SPATIAL_RATIO,
     build_reference_geometries,
+    decode_generation_visuals,
     encode_audio_conditions,
     encode_visual_conditions,
-    load_generation_record_and_visuals,
+    load_generation_record,
 )
 from musubi_tuner.minimax_h3.media import (
     H3Record,
@@ -271,7 +272,8 @@ def run_generation(args: argparse.Namespace) -> Path:
     validate_generation_args(args)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     decoder = PyAVH3MediaDecoder()
-    record, raw_visuals, text_visuals = load_generation_record_and_visuals(args, decoder)
+    record = load_generation_record(args)
+    raw_visuals, text_visuals = decode_generation_visuals(args, record, decoder)
     text_hidden_states, text_token_tags = _encode_text(args, record, text_visuals, device)
 
     visual_conditions = ()
@@ -312,9 +314,13 @@ def run_generation(args: argparse.Namespace) -> Path:
         audio_conditions, reference_audio_frames = encode_audio_conditions(
             args,
             record,
-            raw_visuals,
             decoder,
             condition_audio_vae,
+            reference_video_frame_counts={
+                index: int(raw_visuals[reference.path].shape[0])
+                for index, reference in enumerate(record.references)
+                if reference.type == "video"
+            },
         )
         del condition_audio_vae
         gc.collect()

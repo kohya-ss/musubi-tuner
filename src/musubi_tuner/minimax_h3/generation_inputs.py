@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 from PIL import Image
@@ -52,17 +53,9 @@ def prepare_pixels(frames: torch.Tensor) -> torch.Tensor:
     return frames.permute(3, 0, 1, 2).unsqueeze(0).contiguous()
 
 
-def load_generation_record_and_visuals(args, decoder: PyAVH3MediaDecoder):
-    raw_visuals = {}
-    text_visuals = {}
+def load_generation_record(args) -> H3Record:
     if args.task in {"t2va", "fl2va"}:
-        record = dummy_record(args.prompt or "")
-        if args.task == "fl2va":
-            for role, path in (("first", args.first_frame), ("last", args.last_frame)):
-                frames = load_image_frames(path, width=args.width, height=args.height)
-                raw_visuals[role] = frames
-                text_visuals[role] = H3TextVisual(frames)
-        return record, raw_visuals, text_visuals
+        return dummy_record(args.prompt or "")
 
     records = load_h3_jsonl_records(args.reference_jsonl, "ref2va")
     if args.reference_index >= len(records):
@@ -70,6 +63,21 @@ def load_generation_record_and_visuals(args, decoder: PyAVH3MediaDecoder):
     record = records[args.reference_index]
     if args.prompt is not None:
         record = replace(record, caption=args.prompt)
+    return record
+
+
+def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecoder):
+    raw_visuals = {}
+    text_visuals = {}
+    if args.task == "t2va":
+        return raw_visuals, text_visuals
+    if args.task == "fl2va":
+        for role, path in (("first", args.first_frame), ("last", args.last_frame)):
+            frames = load_image_frames(path, width=args.width, height=args.height)
+            raw_visuals[role] = frames
+            text_visuals[role] = H3TextVisual(frames)
+        return raw_visuals, text_visuals
+
     for reference in record.references:
         if reference.type not in {"image", "video"}:
             continue
@@ -87,7 +95,7 @@ def load_generation_record_and_visuals(args, decoder: PyAVH3MediaDecoder):
                 sampled,
                 tuple(index / 2.0 for index in range(sampled.shape[0])),
             )
-    return record, raw_visuals, text_visuals
+    return raw_visuals, text_visuals
 
 
 def module_device_dtype(module, fallback_dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
@@ -123,11 +131,10 @@ def encode_visual_conditions(args, record, raw_visuals, video_vae):
 def encode_audio_conditions(
     args,
     record,
-    raw_visuals,
     decoder,
     audio_vae,
     *,
-    reference_video_frame_counts: dict[int, int] | None = None,
+    reference_video_frame_counts: Mapping[int, int],
 ):
     audio_device, audio_dtype = module_device_dtype(audio_vae, torch.float32)
     audio_latents = []
@@ -137,11 +144,9 @@ def encode_audio_conditions(
         if reference.audio is None:
             continue
         if reference.type == "video":
-            frame_count = (
-                raw_visuals[reference.path].shape[0]
-                if reference_video_frame_counts is None
-                else reference_video_frame_counts[index]
-            )
+            if index not in reference_video_frame_counts:
+                raise ValueError(f"MiniMax-H3 reference video {index:03d} is missing its decoded frame count")
+            frame_count = reference_video_frame_counts[index]
             frames = audio_latent_frames(frame_count)
             require_exact = True
         else:
