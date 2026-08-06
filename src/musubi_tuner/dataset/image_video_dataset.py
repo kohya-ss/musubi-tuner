@@ -34,8 +34,10 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_HUNYUAN_VIDEO,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ARCHITECTURE_KANDINSKY5,
+    ARCHITECTURE_MINIMAX_H3,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
+    round_down_frame_count,
 )
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
@@ -581,6 +583,7 @@ class VideoDataset(BaseDataset):
     TARGET_FPS_FRAMEPACK = 30.0
     TARGET_FPS_FLUX_KONTEXT = 1.0  # VideoDataset is not used for Flux Kontext, but this is a placeholder
     TARGET_FPS_HUNYUAN_VIDEO_1_5 = 24.0
+    TARGET_FPS_MINIMAX_H3 = 24.0
 
     def __init__(
         self,
@@ -625,7 +628,7 @@ class VideoDataset(BaseDataset):
         self.source_fps = source_fps
         self.fp_latent_window_size = fp_latent_window_size
 
-        self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4
+        self.vae_frame_stride = 4  # legacy frame-grid fallback; architecture-specific helpers may override the formula
         if self.architecture == ARCHITECTURE_HUNYUAN_VIDEO:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_WAN:
@@ -638,6 +641,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
+        elif self.architecture == ARCHITECTURE_MINIMAX_H3:
+            self.target_fps = VideoDataset.TARGET_FPS_MINIMAX_H3
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
@@ -645,8 +650,7 @@ class VideoDataset(BaseDataset):
             target_frames = list(set(target_frames))
             target_frames.sort()
 
-            # round each value to N*4+1
-            rounded_target_frames = [(f - 1) // self.vae_frame_stride * self.vae_frame_stride + 1 for f in target_frames]
+            rounded_target_frames = [round_down_frame_count(f, self.architecture, self.vae_frame_stride) for f in target_frames]
             rounded_target_frames = list(set(rounded_target_frames))
             rounded_target_frames.sort()
 
@@ -765,7 +769,7 @@ class VideoDataset(BaseDataset):
                     elif self.frame_extraction == "full":
                         # select all frames
                         target_frame = min(frame_count, self.max_frames)
-                        target_frame = (target_frame - 1) // self.vae_frame_stride * self.vae_frame_stride + 1  # round to N*4+1
+                        target_frame = round_down_frame_count(target_frame, self.architecture, self.vae_frame_stride)
                         crop_pos_and_frames.append((0, target_frame))
                     else:
                         raise ValueError(f"frame_extraction {self.frame_extraction} is not supported")
@@ -789,6 +793,8 @@ class VideoDataset(BaseDataset):
                             item_key, caption, original_frame_size, batch_key, frame_count=target_frame, content=cropped_video
                         )
                         item_info.latent_cache_path = self.get_latent_cache_path(item_info)
+                        if self.architecture == ARCHITECTURE_MINIMAX_H3:
+                            item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
                         item_info.control_content = cropped_control  # None is allowed
                         item_info.fp_latent_window_size = self.fp_latent_window_size
 
@@ -873,7 +879,13 @@ class VideoDataset(BaseDataset):
             frame_pos, frame_count = int(frame_pos), int(frame_count)
 
             item_key = "_".join(tokens[:-3])
-            text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
+            if self.architecture == ARCHITECTURE_MINIMAX_H3:
+                text_item_key = f"{item_key}_{tokens[-3]}"
+            else:
+                text_item_key = item_key
+            text_encoder_output_cache_file = os.path.join(
+                self.cache_directory, f"{text_item_key}_{self.architecture}_te.safetensors"
+            )
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue

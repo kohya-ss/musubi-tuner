@@ -31,3 +31,13 @@ ARCHITECTURE_IDEOGRAM4 = "i4"
 ARCHITECTURE_IDEOGRAM4_FULL = "ideogram4"
 ARCHITECTURE_KREA2 = "kr2"
 ARCHITECTURE_KREA2_FULL = "krea2"
+ARCHITECTURE_MINIMAX_H3 = "mmh3"
+ARCHITECTURE_MINIMAX_H3_FULL = "minimax_h3"
+
+
+def round_down_frame_count(frame_count: int, architecture: str, vae_frame_stride: int) -> int:
+    if architecture == ARCHITECTURE_MINIMAX_H3:
+        if frame_count < 5:
+            raise ValueError("MiniMax-H3 requires at least 5 frames")
+        return 5 + ((frame_count - 5) // 17) * 17
+    return 1 + ((frame_count - 1) // vae_frame_stride) * vae_frame_stride

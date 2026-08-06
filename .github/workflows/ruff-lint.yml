@@ -34,12 +34,14 @@ jobs:
       - name: "Run Ruff check"
         uses: astral-sh/ruff-action@v3
         with:
+          version: ">=0.12.10,<0.16"
           args: >
             check --fix
 
       - name: "Run Ruff format check"
         uses: astral-sh/ruff-action@v3
         with:
+          version: ">=0.12.10,<0.16"
           args: >
             format --check
           # will exit with a non-zero code if there are formatting changes
