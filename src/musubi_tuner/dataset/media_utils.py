@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 import glob
 from importlib.util import find_spec
+import math
 import os
 from typing import Optional, Union, TYPE_CHECKING
 
@@ -137,6 +139,88 @@ def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: t
     return image
 
 
+def resample_frame_indices(
+    timestamps: list[float],
+    *,
+    source_frame_duration: float,
+    target_fps: float,
+) -> list[int]:
+    """Maps decoded frame timestamps to nearest-frame indices on a fixed target-fps grid.
+
+    Used by fps_resample_mode="timestamps" to normalize videos of any (possibly variable)
+    frame rate to exactly target_fps, so that audio/video alignment is deterministic.
+    """
+    if not timestamps:
+        return []
+    if source_frame_duration <= 0 or target_fps <= 0:
+        raise ValueError("Video frame durations and target FPS must be positive")
+    if any(right < left for left, right in zip(timestamps, timestamps[1:])):
+        raise ValueError("Video timestamps must be nondecreasing")
+
+    origin = timestamps[0]
+    normalized = [timestamp - origin for timestamp in timestamps]
+    duration = normalized[-1] + source_frame_duration
+    target_count = max(1, math.ceil(duration * target_fps - 1e-9))
+    indices = []
+    for target_index in range(target_count):
+        target_time = target_index / target_fps
+        right = bisect_left(normalized, target_time)
+        if right == 0:
+            source_index = 0
+        elif right == len(normalized):
+            source_index = len(normalized) - 1
+        else:
+            left = right - 1
+            left_distance = target_time - normalized[left]
+            right_distance = normalized[right] - target_time
+            source_index = left if left_distance <= right_distance + 1e-12 else right
+        indices.append(source_index)
+    return indices
+
+
+def _load_video_timestamp_resampled(
+    video_path: str,
+    target_fps: float,
+    start_frame: Optional[int],
+    end_frame: Optional[int],
+    bucket_selector: Optional[BucketSelector],
+    bucket_reso: Optional[tuple[int, int]],
+) -> list[np.ndarray]:
+    if not os.path.isfile(video_path):
+        raise ValueError(f"fps_resample_mode='timestamps' requires a video file, not a directory: {video_path}")
+
+    with av.open(video_path) as container:
+        if not container.streams.video:
+            raise ValueError(f"Video source has no video stream: {video_path}")
+        stream = container.streams.video[0]
+        average_rate = float(stream.average_rate) if stream.average_rate is not None else target_fps
+        source_frame_duration = 1.0 / average_rate if average_rate > 0 else 1.0 / target_fps
+        frames = []
+        timestamps = []
+        for index, frame in enumerate(container.decode(stream)):
+            if frame.pts is not None and frame.time_base is not None:
+                timestamp = float(frame.pts * frame.time_base)
+            else:
+                timestamp = index * source_frame_duration
+            frames.append(frame.to_ndarray(format="rgb24"))
+            timestamps.append(timestamp)
+    if not frames:
+        raise ValueError(f"Video source decoded no frames: {video_path}")
+
+    indices = resample_frame_indices(timestamps, source_frame_duration=source_frame_duration, target_fps=target_fps)
+    indices = indices[slice(start_frame, end_frame)]
+
+    video = []
+    for index in indices:
+        frame = frames[index]
+        if bucket_selector is not None and bucket_reso is None:
+            bucket_reso = bucket_selector.get_bucket_resolution((frame.shape[1], frame.shape[0]))
+        if bucket_reso is not None:
+            frame = resize_image_to_bucket(frame, bucket_reso)
+        video.append(frame)
+    return video
+
+
 def load_video(
     video_path: str,
     start_frame: Optional[int] = None,
@@ -145,10 +229,22 @@ def load_video(
     bucket_reso: Optional[tuple[int, int]] = None,
     source_fps: Optional[float] = None,
     target_fps: Optional[float] = None,
+    fps_resample_mode: Optional[str] = None,
 ) -> list[np.ndarray]:
     """
     bucket_reso: if given, resize the video to the bucket resolution, (width, height)
+    fps_resample_mode: None (legacy source_fps/target_fps frame dropping) or "timestamps"
+        (PTS-based nearest-frame resampling to target_fps regardless of source fps)
     """
+    if fps_resample_mode is not None:
+        if fps_resample_mode != "timestamps":
+            raise ValueError(f"Unsupported fps_resample_mode: {fps_resample_mode}")
+        if target_fps is None:
+            raise ValueError("fps_resample_mode='timestamps' requires target_fps")
+        if source_fps is not None:
+            raise ValueError("fps_resample_mode='timestamps' does not use source_fps")
+        return _load_video_timestamp_resampled(video_path, target_fps, start_frame, end_frame, bucket_selector, bucket_reso)
+
     if source_fps is None or target_fps is None:
         if os.path.isfile(video_path):
             container = av.open(video_path)

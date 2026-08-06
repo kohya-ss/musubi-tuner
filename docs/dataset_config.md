@@ -240,11 +240,15 @@ JSONL file format for metadata:
 
 `video_path` can be a directory containing multiple images.
 
+For audio-capable architectures, each record may also have an optional `audio_path` field pointing to the audio file for the video. If `audio_path` is omitted, the audio source is resolved automatically: a same-stem audio sidecar file (e.g. `video1.wav` next to `video1.mp4`; `.aac`/`.flac`/`.m4a`/`.mp3`/`.ogg`/`.opus`/`.wav`) is used if present (multiple candidates are an error), otherwise the audio track embedded in the video container is used. If none is found, the item is cached as audio-less (a silence placeholder with `audio_present=0`, excluded from audio supervision during training). Architectures without audio support ignore `audio_path`.
+
 <details>
 <summary>日本語</summary>
 metadata jsonl ファイルを使用する場合、caption_extension は必要ありません。また、cache_directory は必須です。
 
 `video_path`は、複数の画像を含むディレクトリのパスでも構いません。
+
+audio 対応アーキテクチャでは、各レコードに任意の `audio_path` フィールドを指定できます。省略した場合は、同名の音声サイドカーファイル（例: `video1.mp4` と同じ場所の `video1.wav`。複数候補がある場合はエラー）、次に動画コンテナ内の音声トラックの順で自動解決されます。どちらも無い場合は音声なしとしてキャッシュされ（無音プレースホルダ、`audio_present=0`）、学習時の audio 教師からは除外されます。audio 非対応のアーキテクチャでは `audio_path` は無視されます。
 
 他の注意事項は今までのデータセットと同様です。
 </details>
