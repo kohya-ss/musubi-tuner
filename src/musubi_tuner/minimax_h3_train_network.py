@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import gc
 import logging
 import re
@@ -15,7 +14,6 @@ from typing import Any
 
 import torch
 from accelerate import Accelerator
-from safetensors import safe_open
 from tqdm.auto import tqdm
 
 from musubi_tuner.dataset.architectures import (
@@ -33,7 +31,7 @@ from musubi_tuner.minimax_h3.generation_inputs import (
     load_generation_record,
     module_device_dtype,
 )
-from musubi_tuner.minimax_h3.media import audio_latent_frames, video_latent_frames
+from musubi_tuner.minimax_h3.media import H3_AUDIO_SPEC, audio_latent_frames, video_latent_frames
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
     H3PackedLayout,
@@ -56,7 +54,13 @@ from musubi_tuner.minimax_h3.text_encoder import (
     load_h3_text_encoder,
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
-from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder, TARGET_AUDIO_POLICIES
+from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
+from musubi_tuner.training.audio_loss import (
+    add_audio_train_args,
+    effective_audio_loss_weights,
+    log_audio_supervision_summary,
+    scan_audio_supervised_fraction,
+)
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
@@ -170,62 +174,11 @@ def validate_h3_dataset_batch_size(dataset_group) -> None:
             )
 
 
-def _read_h3_audio_supervision(path: Path) -> float:
-    with safe_open(str(path), framework="pt", device="cpu") as handle:
-        metadata = handle.metadata() or {}
-        tensor_keys = set(handle.keys())
-        policy = metadata.get("target_audio_policy")
-        has_scalar = "mmh3_audio_loss_weight_float32" in tensor_keys
-
-        if policy is None and not has_scalar:
-            return 1.0
-        if policy is None:
-            raise ValueError(f"MiniMax-H3 cache {path} has an audio loss scalar without target_audio_policy metadata")
-        if not has_scalar:
-            raise ValueError(f"MiniMax-H3 cache {path} has target_audio_policy metadata without an audio loss scalar")
-        if policy not in TARGET_AUDIO_POLICIES:
-            raise ValueError(f"MiniMax-H3 cache {path} has invalid target_audio_policy {policy!r}")
-
-        scalar = handle.get_tensor("mmh3_audio_loss_weight_float32")
-        if scalar.shape != torch.Size([]) or scalar.dtype != torch.float32:
-            raise ValueError(f"MiniMax-H3 cache {path} audio loss weight must be a scalar float32 tensor")
-        value = scalar.item()
-        if not torch.isfinite(scalar).item() or value not in {0.0, 1.0}:
-            raise ValueError(f"MiniMax-H3 cache {path} audio loss weight must be exactly 0.0 or 1.0")
-        expected = 1.0 if policy == "real-supervised" else 0.0
-        if value != expected:
-            raise ValueError(
-                f"MiniMax-H3 cache {path} has contradictory target_audio_policy={policy!r} and audio loss weight={value}"
-            )
-        return value
-
-
-def inspect_h3_audio_supervision(dataset_group) -> float:
-    cache_counts: Counter[Path] = Counter()
-    for dataset in dataset_group.datasets:
-        for bucket in dataset.batch_manager.buckets.values():
-            for item in bucket:
-                cache_path = getattr(item, "latent_cache_path", None)
-                if not cache_path:
-                    raise ValueError("MiniMax-H3 training item is missing latent_cache_path")
-                cache_counts[Path(cache_path).resolve()] += 1
-    if not cache_counts:
-        raise ValueError("MiniMax-H3 audio supervision scan found no latent cache files")
-
-    supervised = 0
-    total = sum(cache_counts.values())
-    for path, repeats in cache_counts.items():
-        supervised += repeats * int(_read_h3_audio_supervision(path))
-    return supervised / total
-
-
-def _validate_audio_loss_weight(value: Any) -> torch.Tensor:
-    if value is None:
-        return torch.tensor([1.0], dtype=torch.float32)
-    if not isinstance(value, torch.Tensor) or value.shape != (1,) or value.dtype != torch.float32:
-        raise ValueError("MiniMax-H3 audio loss weight must be a float32 tensor with shape [1]")
-    if not torch.isfinite(value).all().item() or value.item() not in {0.0, 1.0}:
-        raise ValueError("MiniMax-H3 audio loss weight must be exactly 0.0 or 1.0")
+def _validate_audio_present(value: Any, batch_size: int) -> torch.Tensor:
+    if not isinstance(value, torch.Tensor) or value.shape != (batch_size,) or value.dtype != torch.float32:
+        raise ValueError("MiniMax-H3 batch requires a float32 audio_present tensor with shape [B]; re-run latent caching")
+    if not torch.isfinite(value).all().item() or not ((value == 0.0) | (value == 1.0)).all().item():
+        raise ValueError("MiniMax-H3 audio_present must be exactly 0.0 or 1.0 per sample")
     return value
 
 
@@ -236,7 +189,7 @@ class _H3RuntimeBatch:
     text_token_tags: torch.Tensor
     visual_conditions: tuple[torch.Tensor, ...]
     audio_conditions: tuple[torch.Tensor, ...]
-    audio_loss_weight: torch.Tensor
+    audio_present: torch.Tensor
 
 
 def _stack_single_text_rows(value, label: str) -> torch.Tensor:
@@ -261,7 +214,7 @@ def _runtime_batch_plan(batch: dict[str, Any], video_latents: torch.Tensor) -> _
         raise ValueError(f"MiniMax-H3 target audio latents must be [B,32,2,A], got {shape}")
     if audio_latents.shape[0] != batch_size:
         raise ValueError("MiniMax-H3 target video and audio batch sizes differ")
-    audio_loss_weight = _validate_audio_loss_weight(batch.get("mmh3_audio_loss_weight"))
+    audio_present = _validate_audio_present(batch.get("audio_present"), batch_size)
 
     hidden_states = _stack_single_text_rows(batch.get("mmh3_hidden_states"), "text hidden states")
     token_tags = _stack_single_text_rows(batch.get("mmh3_token_tags"), "text token tags")
@@ -349,7 +302,7 @@ def _runtime_batch_plan(batch: dict[str, Any], video_latents: torch.Tensor) -> _
         text_token_tags=token_tags,
         visual_conditions=tuple(visual_conditions),
         audio_conditions=tuple(audio_conditions),
-        audio_loss_weight=audio_loss_weight,
+        audio_present=audio_present,
     )
 
 
@@ -398,6 +351,8 @@ def _augment_conditions(
 
 
 class MiniMaxH3NetworkTrainer(NetworkTrainer):
+    audio_spec = H3_AUDIO_SPEC
+
     @property
     def architecture(self) -> str:
         return ARCHITECTURE_MINIMAX_H3
@@ -428,6 +383,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             value = float(getattr(args, name))
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"--{name} must be in [0.0,1.0], got {value}")
+        if args.audio_loss_weight < 0:
+            raise ValueError(f"--audio_loss_weight must be nonnegative, got {args.audio_loss_weight}")
         if args.blocks_to_swap is not None and args.blocks_to_swap > 48:
             raise ValueError("--blocks_to_swap for MiniMax-H3 must be <= 48")
         if getattr(args, "fp8_base", False) or getattr(args, "fp8_scaled", False):
@@ -444,8 +401,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
     def _build_dataset(self, args):
         dataset_group, collator, current_epoch = super()._build_dataset(args)
         validate_h3_dataset_batch_size(dataset_group)
-        self._supervised_audio_fraction = inspect_h3_audio_supervision(dataset_group)
-        logger.info("MiniMax-H3 supervised_audio_fraction=%.6f", self._supervised_audio_fraction)
+        self._supervised_audio_fraction = scan_audio_supervised_fraction(dataset_group)
+        log_audio_supervision_summary(self._supervised_audio_fraction, args)
         return dataset_group, collator, current_epoch
 
     def _prepare_sampling(self, args, accelerator, vae_dtype):
@@ -773,11 +730,13 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_shift_audio": args.h3_shift_audio,
             "ss_minimax_h3_visual_cond_clean": args.h3_visual_cond_clean,
             "ss_minimax_h3_audio_cond_clean": args.h3_audio_cond_clean,
-            "ss_minimax_h3_loss_policy": "video_mean_plus_optional_audio_mean",
-            "ss_minimax_h3_audio_supervision": "per_sample_binary_cache_weight",
+            "ss_minimax_h3_loss_policy": "video_mean_plus_weighted_audio_mean",
+            "ss_minimax_h3_audio_supervision": "presence_gated_training_weight",
             "ss_minimax_h3_supervised_audio_fraction": getattr(self, "_supervised_audio_fraction", 1.0),
+            "ss_minimax_h3_audio_loss_weight": args.audio_loss_weight,
+            "ss_minimax_h3_video_only": args.video_only,
             "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
-            "ss_minimax_h3_latent_cache_version": "1",
+            "ss_minimax_h3_latent_cache_version": "2",
             "ss_minimax_h3_text_cache_version": "1",
         }
 
@@ -836,6 +795,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         model_t_audio = kwargs.pop("model_t_audio")
         visual_conditions = kwargs.pop("visual_conditions")
         audio_conditions = kwargs.pop("audio_conditions")
+        audio_loss_weight = kwargs.pop("audio_loss_weight")
         if kwargs:
             raise TypeError(f"Unexpected MiniMax-H3 call_dit arguments: {sorted(kwargs)}")
 
@@ -867,7 +827,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             extra={
                 "audio_pred": prediction.audio,
                 "audio_target": audio_latents - audio_noise,
-                "audio_loss_weight": runtime.audio_loss_weight,
+                "audio_loss_weight": audio_loss_weight,
             },
         )
 
@@ -941,6 +901,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             model_t_audio=model_t_audio,
             visual_conditions=visual_conditions,
             audio_conditions=audio_conditions,
+            audio_loss_weight=effective_audio_loss_weights(runtime.audio_present, args),
         )
         return self.compute_loss(args, output, base, noise_scheduler, dit_dtype, network_dtype, global_step)
 
@@ -960,8 +921,16 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             output.target.to(network_dtype),
             reduction="mean",
         )
-        audio_loss_weight = _validate_audio_loss_weight(output.extra.get("audio_loss_weight"))
-        if audio_loss_weight.item() == 0.0:
+        audio_loss_weight = output.extra.get("audio_loss_weight")
+        if (
+            not isinstance(audio_loss_weight, torch.Tensor)
+            or audio_loss_weight.shape != (1,)
+            or not torch.isfinite(audio_loss_weight).all().item()
+            or audio_loss_weight.item() < 0.0
+        ):
+            raise ValueError("MiniMax-H3 audio loss weight must be a finite nonnegative float32 tensor with shape [1]")
+        weight = audio_loss_weight.item()
+        if weight == 0.0:
             audio_loss = video_loss.detach().new_zeros(())
         else:
             audio_loss = torch.nn.functional.mse_loss(
@@ -969,7 +938,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 output.extra["audio_target"].to(network_dtype),
                 reduction="mean",
             )
-        return video_loss + audio_loss, {
+        return video_loss + weight * audio_loss, {
             "loss/video": video_loss.detach(),
             "loss/audio": audio_loss.detach(),
         }
@@ -983,6 +952,7 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         network_module="networks.lora_minimax_h3",
     )
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), default=None, help="MiniMax-H3 training task")
+    add_audio_train_args(parser)
     parser.add_argument("--h3_shift_video", type=float, default=12.0, help="MiniMax-H3 target-video flow shift")
     parser.add_argument("--h3_shift_audio", type=float, default=3.0, help="MiniMax-H3 target-audio flow shift")
     parser.add_argument(

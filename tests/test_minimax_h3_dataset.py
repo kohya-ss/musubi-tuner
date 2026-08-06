@@ -1,5 +1,6 @@
 import inspect
 from pathlib import Path
+import pickle
 import sys
 from types import SimpleNamespace
 
@@ -29,11 +30,11 @@ def test_h3_architecture_and_bucket_step():
     assert BucketSelector.ARCHITECTURE_STEPS_MAP[ARCHITECTURE_MINIMAX_H3] == 32
 
 
-def test_h3_documented_dataset_fps_values_are_toml_floats():
+def test_h3_documentation_does_not_ask_users_to_set_source_fps():
     documentation = (ROOT / "docs" / "minimax_h3.md").read_text(encoding="utf-8")
 
-    assert documentation.count("source_fps = 24.0") == 2
-    assert "source_fps = 24\n" not in documentation
+    assert "source_fps = " not in documentation
+    assert "`source_fps` is not needed" in documentation
 
 
 @pytest.mark.parametrize(
@@ -57,6 +58,30 @@ def test_frame_helper_requires_stride_and_preserves_stride_one():
 
     assert round_down_frame_count(8, ARCHITECTURE_KREA2, 1) == 8
     assert round_down_frame_count(8, ARCHITECTURE_QWEN_IMAGE, 1) == 8
+
+
+def test_h3_audio_dataset_survives_dataloader_worker_pickling(tmp_path: Path):
+    # spawned DataLoader workers (Windows/macOS) pickle the dataset, including the AudioSpec
+    from musubi_tuner.minimax_h3.media import H3_AUDIO_SPEC
+
+    restored_spec = pickle.loads(pickle.dumps(H3_AUDIO_SPEC))
+    assert restored_spec.samples_per_crop(22) == H3_AUDIO_SPEC.samples_per_crop(22) == 29600
+
+    dataset = VideoDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        target_frames=[5],
+        video_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+        audio_spec=H3_AUDIO_SPEC,
+    )
+    restored_dataset = pickle.loads(pickle.dumps(dataset))
+    assert restored_dataset.audio_spec.samples_per_crop(5) == 6400
 
 
 def test_h3_video_dataset_uses_24_fps_and_preserves_valid_target_frames(tmp_path: Path):

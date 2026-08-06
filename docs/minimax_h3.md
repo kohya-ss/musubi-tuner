@@ -57,10 +57,11 @@ cache_directory = "/data/h3/cache"
 caption_extension = ".txt"
 target_frames = [124]
 frame_extraction = "head"
-source_fps = 24.0
 ```
 
-For a directory item such as `clip.mp4`, put the caption in `clip.txt`. Target audio is resolved in this order: the JSONL `audio_path` when JSONL is used, exactly one same-stem audio sidecar such as `clip.wav`, then the video's embedded audio stream, then an unsupervised silence placeholder.
+H3 always normalizes source videos to 24 fps using frame timestamps, so `source_fps` is not needed and is ignored if set.
+
+For a directory item such as `clip.mp4`, put the caption in `clip.txt`. Target audio is resolved in this order: the JSONL `audio_path` when JSONL is used, exactly one same-stem audio sidecar such as `clip.wav`, then the video's embedded audio stream, then an unsupervised silence placeholder. Audio sources are resolved and validated when the dataset is constructed, so a broken explicit `audio_path` fails before any caching work starts.
 
 Ref2VA requires `video_jsonl_file`:
 
@@ -76,7 +77,6 @@ video_jsonl_file = "/data/h3/ref2va.jsonl"
 cache_directory = "/data/h3/cache-ref2va"
 target_frames = [124]
 frame_extraction = "head"
-source_fps = 24.0
 ```
 
 Each JSONL line contains the target plus its ordered references. Relative paths resolve from the JSONL directory.
@@ -110,9 +110,13 @@ python minimax_h3_cache_latents.py \
 
 The video VAE is upcast to FP32 for target and condition encoding so cached training targets do not inherit FP16 encoder outliers. It uses a reproducible posterior sample for each target. Visual conditions use the released fixed sampling policy, including the required FP16 round-trip of the sampled condition latent before normalization. Video decode keeps the released FP16 artifact in FP16. Target and reference audio use the audio posterior mode directly in `[32,2,A]` layout.
 
-By default, caching uses real target audio when available. If a video has no target audio, caching encodes duration-matched silence as the structurally required audio latent and marks that sample's audio loss disabled; missing audio is not treated as a silent supervision target. To avoid flooding large silent datasets, the cache command warns with paths for only the first 10 missing-audio records and then prints one completion summary with policy counts and the supervised fraction. To ignore all target audio intentionally, add `--h3_video_only` to the latent-cache command only. Ref2VA reference audio remains active conditioning.
+Caching always uses real target audio when available. If a video has no target audio, caching encodes duration-matched silence as the structurally required audio latent and records `audio_present=0`; missing audio is never treated as a silent supervision target, and such samples are automatically excluded from audio supervision during training. To avoid flooding large silent datasets, dataset construction warns with paths for only the first 10 missing-audio records, and the cache command prints one completion summary with the supervised fraction.
 
-`--audio_vae` is still required with `--h3_video_only`. H3 always includes target-audio rows, and the released Audio VAE encoding of a zero waveform is not guaranteed to be an all-zero latent. Each cache stores its own small silence latent: at `F=124`, it is about 52 KB versus about 7.16 MB for the BF16 video latent, so no shared-silence or deduplication mechanism is used. Existing real-audio H3 latent caches remain compatible and do not require a blanket rebuild.
+The cache stores only this fact about the data. Whether and how strongly audio is supervised is decided at training time with `--video_only` and `--audio_loss_weight` (see LoRA Training below); there is no cache-time video-only mode.
+
+`--audio_vae` is always required. H3 always includes target-audio rows, and the released Audio VAE encoding of a zero waveform is not guaranteed to be an all-zero latent. Each cache stores its own small silence latent: at `F=124`, it is about 52 KB versus about 7.16 MB for the BF16 video latent, so no shared-silence or deduplication mechanism is used.
+
+Latent caches created before the `audio_present` contract (releases with `target_audio_policy` metadata) are not compatible; re-run latent caching. Text encoder caches are unaffected.
 
 ## Cache Text Encoder Outputs
 
@@ -149,15 +153,20 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 minimax
   --output_name h3-lora
 ```
 
-The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in the 50 main DiT blocks. Every sample contributes `mean(video_mse)`. A sample with real target audio additionally contributes `mean(audio_mse)` at equal per-sample coefficient; a missing-audio or video-only sample contributes no audio MSE. With `batch_size=1` and gradient accumulation, the expected run-level audio coefficient is therefore the supervised-audio sample fraction, not always one. This fraction is not a uniform per-step scale: at low values, most optimizer steps receive no audio gradient and occasional steps receive the full audio term. Training does not renormalize by the fraction, because doing so would amplify a small supervised subset.
+The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in the 50 main DiT blocks. Every sample contributes `mean(video_mse)`. A sample cached with real target audio additionally contributes `audio_loss_weight * mean(audio_mse)`; a sample cached from missing audio (`audio_present=0`) never contributes audio MSE. With `batch_size=1` and gradient accumulation, the expected run-level audio coefficient is therefore `audio_loss_weight` times the supervised-audio sample fraction. This fraction is not a uniform per-step scale: at low values, most optimizer steps receive no audio gradient and occasional steps receive the full audio term. Training does not renormalize by the fraction, because doing so would amplify a small supervised subset.
 
-The trainer logs this value as `supervised_audio_fraction` and saves it as `ss_minimax_h3_supervised_audio_fraction`. It also records `ss_minimax_h3_loss_policy=video_mean_plus_optional_audio_mean` and `ss_minimax_h3_audio_supervision=per_sample_binary_cache_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
+Two training arguments control audio supervision:
 
-Zero audio loss does not preserve the base model's audio behavior. H3 is single-stream, and these LoRA targets modify the same attention and MLP weights used by video and audio tokens. A video-only or low-`supervised_audio_fraction` LoRA can therefore produce audio worse than the base model; the risk generally increases with adapter capacity/strength and training exposure, although degradation is not guaranteed to be monotonic. Treat audio from a fully video-only LoRA as unconstrained output.
+- `--video_only` disables audio supervision entirely (audio loss weight 0 for all samples). The model still attends to the real audio latents as context, which matches the inference-time distribution where audio tokens are always generated audio, never silence.
+- `--audio_loss_weight` (default 1.0) scales the audio loss term for supervised samples, e.g. to rebalance a small audio loss against the video loss.
+
+The trainer logs the supervised fraction as `supervised_audio_fraction` and saves it as `ss_minimax_h3_supervised_audio_fraction`, along with `ss_minimax_h3_audio_loss_weight` and `ss_minimax_h3_video_only`. It also records `ss_minimax_h3_loss_policy=video_mean_plus_weighted_audio_mean` and `ss_minimax_h3_audio_supervision=presence_gated_training_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
+
+Zero audio loss does not preserve the base model's audio behavior. H3 is single-stream, and these LoRA targets modify the same attention and MLP weights used by video and audio tokens. A `--video_only` or low-`supervised_audio_fraction` LoRA can therefore produce audio worse than the base model; the risk generally increases with adapter capacity/strength and training exposure, although degradation is not guaranteed to be monotonic. Treat audio from a fully video-only LoRA as unconstrained output.
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.
 
-R1 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The batch-size gate runs immediately after dataset construction and reads no cache files. Fraction validation then uses the cache paths already stored in the constructed batch managers, counts repeats from those entries, and opens each unique cache once; it does not run a second glob or load video/audio latent payloads. The runtime/model repeat the batch-size check for direct API calls. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
+R1 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The batch-size gate runs immediately after dataset construction and reads no cache files. The supervised-fraction scan then uses the cache paths already stored in the constructed batch managers, counts repeats from those entries, and opens each unique cache once to read its `audio_present` entry; it does not run a second glob or load video/audio latent payloads. The runtime/model repeat the batch-size check for direct API calls. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
 
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 
