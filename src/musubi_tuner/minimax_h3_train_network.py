@@ -388,7 +388,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if args.blocks_to_swap is not None and args.blocks_to_swap > 48:
             raise ValueError("--blocks_to_swap for MiniMax-H3 must be <= 48")
         if getattr(args, "fp8_base", False) or getattr(args, "fp8_scaled", False):
-            raise ValueError("MiniMax-H3 R1 accepts only a BF16 transformer base; quantized bases are deferred to R2")
+            raise ValueError("MiniMax-H3 does not support fp8 transformer bases; use --convrot_int8 for a quantized base")
+        if args.convrot_int8_bwd == "int8" and not args.convrot_int8:
+            raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
         if getattr(args, "dit_dtype", None) not in {None, "bfloat16", "bf16"}:
             raise ValueError("MiniMax-H3 R1 requires --dit_dtype bfloat16")
         if (
@@ -736,6 +738,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_audio_loss_weight": args.audio_loss_weight,
             "ss_minimax_h3_video_only": args.video_only,
             "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
+            "ss_minimax_h3_convrot_int8": args.convrot_int8,
             "ss_minimax_h3_latent_cache_version": "2",
             "ss_minimax_h3_text_cache_version": "1",
         }
@@ -750,9 +753,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: torch.dtype | None,
     ):
-        del accelerator
         if dit_weight_dtype not in {None, torch.bfloat16}:
-            raise ValueError("MiniMax-H3 R1 transformer weights must stay BF16")
+            raise ValueError("MiniMax-H3 transformer weights must stay BF16")
         return load_h3_transformer(
             dit_path,
             device=loading_device,
@@ -760,14 +762,21 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             attn_mode=attn_mode,
             split_attn=split_attn,
             disable_mmap=getattr(args, "disable_numpy_memmap", False),
+            convrot_int8=args.convrot_int8,
+            convrot_int8_bwd=args.convrot_int8_bwd,
+            # quantization runs on the accelerator device even when the weights load to CPU
+            # for block swap (cf. the Krea 2 calc-device fix in #1008)
+            quant_device=accelerator.device,
         )
 
     def compile_transformer(self, args, transformer):
+        # ConvRot int8 Linears are excluded from compile: the custom autograd.Function +
+        # autotuned Triton kernels are not dynamo-traceable (cf. krea2_train_network).
         return model_utils.compile_transformer(
             args,
             transformer,
             [transformer.blocks],
-            disable_linear=bool(self.blocks_to_swap),
+            disable_linear=bool(self.blocks_to_swap) or args.convrot_int8,
         )
 
     def scale_shift_latents(self, latents):
@@ -998,6 +1007,22 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         help="allow training samples outside the released 5-15 second duration range",
     )
     parser.add_argument("--dit_dtype", type=str, default=None, help="MiniMax-H3 DiT dtype; R1 requires bfloat16")
+    parser.add_argument(
+        "--convrot_int8",
+        action="store_true",
+        help="use ConvRot INT8 for the DiT base weights. Quantizes the per-block Linears (attn/mlp/adaln_proj) at "
+        "load time with Hadamard rotation + int8, or loads ComfyUI pre-quantized ConvRot INT8 checkpoints directly; "
+        "forward runs fused Triton int8 GEMM (requires triton / triton-windows; falls back to slower "
+        "dequantized bf16 matmul without it).",
+    )
+    parser.add_argument(
+        "--convrot_int8_bwd",
+        type=str,
+        default="bf16",
+        choices=["bf16", "int8"],
+        help="backward mode for --convrot_int8. bf16 (default): transient dequantized matmul, most accurate. "
+        "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton).",
+    )
     return parser
 
 
