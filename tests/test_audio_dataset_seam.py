@@ -269,19 +269,32 @@ def test_jsonl_datasource_resolves_explicit_audio_path(tmp_path: Path):
     assert datasource.audio_sources == [AudioSource(path=wav_path.resolve(), embedded=False)]
 
 
-def test_jsonl_datasource_resolves_relative_paths_against_jsonl_directory(tmp_path: Path):
-    _write_video(tmp_path / "clip.mp4", frames=4)
-    _write_wav(tmp_path / "narration.wav", _sine_stereo(SAMPLE_RATE // 4))
+def test_jsonl_datasource_resolves_relative_paths_cwd_first_then_jsonl_directory(tmp_path: Path, monkeypatch):
+    jsonl_dir = tmp_path / "ds"
+    working_dir = tmp_path / "cwd"
+    jsonl_dir.mkdir()
+    working_dir.mkdir()
+    monkeypatch.chdir(working_dir)
 
-    jsonl_path = tmp_path / "data.jsonl"
+    _write_video(jsonl_dir / "clip.mp4", frames=4)
+    _write_wav(jsonl_dir / "narration.wav", _sine_stereo(SAMPLE_RATE // 4))
+
+    jsonl_path = jsonl_dir / "data.jsonl"
     record = {"video_path": "clip.mp4", "caption": "caption", "audio_path": "narration.wav"}
     jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
+    # absent from the working directory, paths fall back to the JSONL's own directory
     datasource = VideoJsonlDatasource(str(jsonl_path))
-    assert datasource.data[0]["video_path"] == str(tmp_path / "clip.mp4")
-    assert datasource.data[0]["audio_path"] == str(tmp_path / "narration.wav")
+    assert datasource.data[0]["video_path"] == str(jsonl_dir / "clip.mp4")
+    assert datasource.data[0]["audio_path"] == str(jsonl_dir / "narration.wav")
 
-    # nonexistent relative paths are kept as-is (working-directory relative)
+    # a working-directory match wins over the JSONL-directory match
+    _write_video(working_dir / "clip.mp4", frames=4)
+    datasource = VideoJsonlDatasource(str(jsonl_path))
+    assert datasource.data[0]["video_path"] == str(working_dir / "clip.mp4")
+    assert datasource.data[0]["audio_path"] == str(jsonl_dir / "narration.wav")
+
+    # nonexistent relative paths are kept as-is
     jsonl_path.write_text(json.dumps({"video_path": "missing.mp4", "caption": "c"}) + "\n", encoding="utf-8")
     datasource = VideoJsonlDatasource(str(jsonl_path))
     assert datasource.data[0]["video_path"] == "missing.mp4"

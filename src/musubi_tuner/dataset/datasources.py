@@ -683,17 +683,26 @@ class VideoJsonlDatasource(VideoDatasource):
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} videos")
 
-        # resolve relative paths against the JSONL's own directory when the target exists
-        # there; otherwise keep the original (working-directory relative) path
+        # resolve relative paths against the working directory first (the historical behavior),
+        # then against the JSONL's own directory. Whichever location matches is rewritten to an
+        # absolute path so downstream consumers (e.g. MiniMax-H3 record building) never
+        # re-resolve the value against a different base.
         base_directory = os.path.dirname(os.path.abspath(self.video_jsonl_file))
         for data in self.data:
             for key in VideoJsonlDatasource.PATH_KEYS:
                 value = data.get(key)
                 if not isinstance(value, str) or not value or os.path.isabs(value):
                     continue
-                candidate = os.path.join(base_directory, value)
-                if os.path.exists(candidate):
-                    data[key] = candidate
+                jsonl_candidate = os.path.join(base_directory, value)
+                if os.path.exists(value):
+                    data[key] = os.path.abspath(value)
+                    if os.path.exists(jsonl_candidate) and not os.path.samefile(value, jsonl_candidate):
+                        logger.warning(
+                            f"{key} {value!r} exists both relative to the working directory and to the JSONL directory; "
+                            f"using the working-directory match {data[key]}"
+                        )
+                elif os.path.exists(jsonl_candidate):
+                    data[key] = jsonl_candidate
 
         # Check if there are control paths in the JSONL
         self.has_control = any("control_path" in item for item in self.data)
