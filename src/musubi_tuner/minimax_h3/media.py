@@ -64,11 +64,16 @@ def waveform_samples(audio_frames: int) -> int:
     return audio_frames * 800
 
 
+def h3_samples_per_crop(frame_count: int) -> int:
+    # module-level (not a lambda) so the spec stays picklable for spawned DataLoader workers
+    return waveform_samples(audio_latent_frames(frame_count))
+
+
 # passed to the shared dataset layer so that it decodes and windows target audio for us
 H3_AUDIO_SPEC = AudioSpec(
     sample_rate=AUDIO_SAMPLE_RATE,
     channels=2,
-    samples_per_crop=lambda frame_count: waveform_samples(audio_latent_frames(frame_count)),
+    samples_per_crop=h3_samples_per_crop,
     codec_pad_tolerance=AUDIO_TERMINAL_TOLERANCE_SAMPLES,
 )
 
