@@ -314,4 +314,6 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 
 `frame_pack`ディレクトリ以下のコードは、[frame_pack](https://github.com/lllyasviel/FramePack)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
 
+`modules/convrot_int8_kernels.py`のコードは、[comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen)（dxqb/OneTrainerおよびComfyUI-Flux2-INT8由来）のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
+
 他のコードはApache License 2.0に従います。一部Diffusersのコードをコピー、改変して使用しています。
