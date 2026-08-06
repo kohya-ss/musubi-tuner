@@ -29,11 +29,11 @@ def test_h3_architecture_and_bucket_step():
     assert BucketSelector.ARCHITECTURE_STEPS_MAP[ARCHITECTURE_MINIMAX_H3] == 32
 
 
-def test_h3_documented_dataset_fps_values_are_toml_floats():
+def test_h3_documentation_does_not_ask_users_to_set_source_fps():
     documentation = (ROOT / "docs" / "minimax_h3.md").read_text(encoding="utf-8")
 
-    assert documentation.count("source_fps = 24.0") == 2
-    assert "source_fps = 24\n" not in documentation
+    assert "source_fps = " not in documentation
+    assert "`source_fps` is not needed" in documentation
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,6 @@ import torch
 
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode
 from musubi_tuner.minimax_h3.media import (
-    H3AudioSource,
     H3Record,
     audio_latent_frames,
     load_h3_jsonl_records,
@@ -26,11 +25,9 @@ VIDEO_VAE_SPATIAL_RATIO = 16
 
 
 def dummy_record(prompt: str) -> H3Record:
-    placeholder = Path(".")
     return H3Record(
-        video_path=placeholder,
+        video_path=Path("."),
         caption=prompt,
-        target_audio=H3AudioSource(placeholder, embedded=False),
         references=(),
         jsonl_line=0,
     )

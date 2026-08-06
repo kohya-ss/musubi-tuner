@@ -24,14 +24,15 @@ from musubi_tuner.minimax_h3.text_encoder import (
     presentation_fingerprint,
     processor_fingerprint,
 )
+from musubi_tuner.minimax_h3.media import h3_records_from_datasource
 from musubi_tuner.minimax_h3_cache_latents import (
     PyAVH3MediaDecoder,
     cache_metadata_matches,
+    dataset_cache_dir_key,
     fingerprint_checkpoint,
     fingerprint_file,
-    install_h3_video_decoder,
-    record_for_item,
-    records_for_dataset,
+    item_record_inputs,
+    validate_h3_dataset,
 )
 from musubi_tuner.utils.model_utils import dtype_to_str
 
@@ -152,14 +153,15 @@ def main() -> None:
         raise ValueError("MiniMax-H3 text caching accepts only video datasets")
 
     decoder = PyAVH3MediaDecoder()
-    records = []
+    records_by_dir = {}
     for dataset in datasets:
-        dataset_records = records_for_dataset(dataset, args.task)
-        install_h3_video_decoder(dataset, decoder)
-        records.extend(dataset_records)
+        validate_h3_dataset(dataset)
+        records_by_dir[dataset_cache_dir_key(dataset.cache_directory)] = h3_records_from_datasource(dataset.datasource, args.task)
 
     all_cache_files, all_cache_paths = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
-    text_paths = {path for record in records for path in _text_media_paths(record, args.task)}
+    text_paths = {
+        path for records in records_by_dir.values() for record in records for path in _text_media_paths(record, args.task)
+    }
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
     logger.info("Loading MiniMax-H3 Qwen3-VL processor from %s", args.processor)
@@ -182,7 +184,9 @@ def main() -> None:
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
-            record, crop_start = record_for_item(item, records)
+            records = records_by_dir[dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))]
+            datasource_index, crop_start = item_record_inputs(item)
+            record = records[datasource_index]
             visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
             presentation = build_presentation(record, args.task, visuals)
             record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}

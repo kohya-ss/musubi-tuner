@@ -7,24 +7,24 @@ from typing import Callable, Literal, Optional
 
 import av
 
+from musubi_tuner.dataset.audio_utils import AudioSource as H3AudioSource
+from musubi_tuner.dataset.audio_utils import AudioSpec
+from musubi_tuner.dataset.datasources import VideoDatasource, VideoJsonlDatasource
+
 
 H3Task = Literal["t2va", "fl2va", "ref2va"]
 H3ReferenceType = Literal["image", "video", "audio"]
 H3MediaProbe = Callable[[Path], "H3MediaInfo"]
 
-AUDIO_SIDECAR_EXTENSIONS = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"})
+TARGET_FPS = 24
+AUDIO_SAMPLE_RATE = 32000
+AUDIO_TERMINAL_TOLERANCE_SAMPLES = 800
 
 
 @dataclass(frozen=True)
 class H3MediaInfo:
     has_audio: bool
     duration_seconds: Optional[float]
-
-
-@dataclass(frozen=True)
-class H3AudioSource:
-    path: Path
-    embedded: bool
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,6 @@ class H3Reference:
 class H3Record:
     video_path: Path
     caption: str
-    target_audio: Optional[H3AudioSource]
     references: tuple[H3Reference, ...]
     jsonl_line: int
 
@@ -63,6 +62,15 @@ def waveform_samples(audio_frames: int) -> int:
     if audio_frames <= 0:
         raise ValueError(f"Audio latent frame count must be positive, got {audio_frames}")
     return audio_frames * 800
+
+
+# passed to the shared dataset layer so that it decodes and windows target audio for us
+H3_AUDIO_SPEC = AudioSpec(
+    sample_rate=AUDIO_SAMPLE_RATE,
+    channels=2,
+    samples_per_crop=lambda frame_count: waveform_samples(audio_latent_frames(frame_count)),
+    codec_pad_tolerance=AUDIO_TERMINAL_TOLERANCE_SAMPLES,
+)
 
 
 def probe_h3_media(path: Path) -> H3MediaInfo:
@@ -101,73 +109,6 @@ def _probe_required_audio(path: Path, probe: H3MediaProbe, label: str, line_numb
     if not info.has_audio:
         raise ValueError(f"H3 JSONL line {line_number}: {label} contains no audio stream: {path}")
     return info
-
-
-def _same_stem_audio_sidecars(video_path: Path) -> list[Path]:
-    return sorted(
-        (
-            candidate.resolve()
-            for candidate in video_path.parent.iterdir()
-            if candidate.is_file() and candidate.stem == video_path.stem and candidate.suffix.lower() in AUDIO_SIDECAR_EXTENSIONS
-        ),
-        key=lambda path: path.name.lower(),
-    )
-
-
-def _resolve_target_audio(
-    data: dict,
-    video_path: Path,
-    base_directory: Path,
-    line_number: int,
-    probe: H3MediaProbe,
-    *,
-    video_only: bool = False,
-) -> Optional[H3AudioSource]:
-    if video_only:
-        return None
-
-    if data.get("audio_path") is not None:
-        path = _resolve_existing_path(data["audio_path"], base_directory, "audio_path", line_number)
-        _probe_required_audio(path, probe, "Explicit target audio", line_number)
-        return H3AudioSource(path=path, embedded=False)
-
-    sidecars = _same_stem_audio_sidecars(video_path)
-    if len(sidecars) > 1:
-        formatted = ", ".join(str(path) for path in sidecars)
-        raise ValueError(f"H3 JSONL line {line_number}: Multiple same-stem audio sidecars found: {formatted}")
-    if sidecars:
-        _probe_required_audio(sidecars[0], probe, "Target audio sidecar", line_number)
-        return H3AudioSource(path=sidecars[0], embedded=False)
-
-    try:
-        video_info = probe(video_path)
-    except Exception as error:
-        raise ValueError(f"H3 JSONL line {line_number}: Target video failed to decode: {error}") from error
-    if video_info.has_audio:
-        return H3AudioSource(path=video_path, embedded=True)
-    return None
-
-
-def make_h3_directory_record(
-    video_path: str | Path,
-    caption: str,
-    probe: H3MediaProbe = probe_h3_media,
-    *,
-    video_only: bool = False,
-) -> H3Record:
-    video_path = Path(video_path).resolve()
-    if not video_path.is_file():
-        raise ValueError(f"MiniMax-H3 target video does not exist: {video_path}")
-    if not isinstance(caption, str):
-        raise ValueError("MiniMax-H3 directory caption must be a string")
-    target_audio = _resolve_target_audio({}, video_path, video_path.parent, 0, probe, video_only=video_only)
-    return H3Record(
-        video_path=video_path,
-        caption=caption,
-        target_audio=target_audio,
-        references=(),
-        jsonl_line=0,
-    )
 
 
 def _validate_reference_counts(references: list, line_number: int) -> None:
@@ -252,12 +193,36 @@ def _parse_references(
     return tuple(references)
 
 
+def _record_from_jsonl_data(
+    data: object,
+    base_directory: Path,
+    line_number: int,
+    task: H3Task,
+    probe: H3MediaProbe,
+) -> H3Record:
+    if not isinstance(data, dict):
+        raise ValueError(f"H3 JSONL line {line_number}: each record must be an object")
+
+    video_path = _resolve_existing_path(data.get("video_path"), base_directory, "video_path", line_number)
+    caption = data.get("caption")
+    if not isinstance(caption, str):
+        raise ValueError(f"H3 JSONL line {line_number}: caption must be a string")
+
+    raw_references = data.get("references", [])
+    if task == "ref2va":
+        references = _parse_references(raw_references, base_directory, line_number, probe)
+    else:
+        if raw_references:
+            raise ValueError(f"H3 JSONL line {line_number}: references require task ref2va")
+        references = ()
+
+    return H3Record(video_path=video_path, caption=caption, references=references, jsonl_line=line_number)
+
+
 def load_h3_jsonl_records(
     jsonl_path: str | Path,
     task: H3Task,
     probe: H3MediaProbe = probe_h3_media,
-    *,
-    video_only: bool = False,
 ) -> list[H3Record]:
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
@@ -276,40 +241,45 @@ def load_h3_jsonl_records(
                 data = json.loads(line)
             except json.JSONDecodeError as error:
                 raise ValueError(f"H3 JSONL line {line_number}: invalid JSON: {error.msg}") from error
-            if not isinstance(data, dict):
-                raise ValueError(f"H3 JSONL line {line_number}: each record must be an object")
-
-            video_path = _resolve_existing_path(data.get("video_path"), base_directory, "video_path", line_number)
-            caption = data.get("caption")
-            if not isinstance(caption, str):
-                raise ValueError(f"H3 JSONL line {line_number}: caption must be a string")
-            target_audio = _resolve_target_audio(
-                data,
-                video_path,
-                base_directory,
-                line_number,
-                probe,
-                video_only=video_only,
-            )
-
-            raw_references = data.get("references", [])
-            if task == "ref2va":
-                references = _parse_references(raw_references, base_directory, line_number, probe)
-            else:
-                if raw_references:
-                    raise ValueError(f"H3 JSONL line {line_number}: references require task ref2va")
-                references = ()
-
-            records.append(
-                H3Record(
-                    video_path=video_path,
-                    caption=caption,
-                    target_audio=target_audio,
-                    references=references,
-                    jsonl_line=line_number,
-                )
-            )
+            records.append(_record_from_jsonl_data(data, base_directory, line_number, task, probe))
 
     if not records:
         raise ValueError(f"MiniMax-H3 JSONL contains no records: {jsonl_path}")
+    return records
+
+
+def h3_records_from_datasource(
+    datasource: VideoDatasource,
+    task: H3Task,
+    probe: H3MediaProbe = probe_h3_media,
+) -> list[H3Record]:
+    """Builds H3 records from the datasource's already-parsed data (no JSONL re-read).
+
+    Records align with datasource indices, so cache items reference them through
+    ItemInfo.datasource_index.
+    """
+    if task not in {"t2va", "fl2va", "ref2va"}:
+        raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
+
+    if isinstance(datasource, VideoJsonlDatasource):
+        base_directory = Path(datasource.video_jsonl_file).resolve().parent
+        records = [
+            _record_from_jsonl_data(data, base_directory, index + 1, task, probe) for index, data in enumerate(datasource.data)
+        ]
+        if not records:
+            raise ValueError(f"MiniMax-H3 JSONL contains no records: {datasource.video_jsonl_file}")
+        return records
+
+    if task == "ref2va":
+        raise ValueError("MiniMax-H3 Ref2VA requires video_jsonl_file")
+
+    records = []
+    for index in range(len(datasource)):
+        video_path, caption = datasource.get_caption(index)
+        video_path = Path(video_path).resolve()
+        if not video_path.is_file():
+            raise ValueError(f"MiniMax-H3 target video does not exist: {video_path}")
+        if not isinstance(caption, str):
+            raise ValueError("MiniMax-H3 directory caption must be a string")
+        records.append(H3Record(video_path=video_path, caption=caption, references=(), jsonl_line=0))
     return records

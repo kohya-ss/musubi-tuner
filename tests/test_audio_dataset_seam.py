@@ -33,7 +33,6 @@ from musubi_tuner.dataset.cache_io import (
 from musubi_tuner.dataset.datasources import VideoJsonlDatasource
 from musubi_tuner.dataset.image_video_dataset import VideoDataset
 from musubi_tuner.dataset.media_utils import load_video, resample_frame_indices
-from musubi_tuner.minimax_h3_cache_latents import resample_frame_indices as h3_resample_frame_indices
 from musubi_tuner.training.audio_loss import (
     add_audio_train_args,
     effective_audio_loss_weights,
@@ -225,12 +224,20 @@ def test_decode_audio_roundtrips_wav(tmp_path: Path):
     assert torch.allclose(waveform, torch.from_numpy(samples), atol=1e-3)
 
 
-def test_resample_frame_indices_matches_h3_implementation():
-    for fps, frames in ((30, 21), (24, 48), (60, 30), (12, 7)):
-        timestamps = [index / fps for index in range(frames)]
-        common = resample_frame_indices(timestamps, source_frame_duration=1.0 / fps, target_fps=24)
-        h3 = h3_resample_frame_indices(timestamps, source_frame_duration=1.0 / fps, target_fps=24)
-        assert common == h3
+def test_resample_frame_indices_nearest_frame_selection():
+    # 30 fps source resampled to 24 fps: nearest-source-frame per target tick
+    timestamps = [index / 30 for index in range(21)]
+    indices = resample_frame_indices(timestamps, source_frame_duration=1.0 / 30, target_fps=24)
+    assert len(indices) == 17  # 0.7 seconds at 24 fps
+    assert indices[0] == 0
+    assert indices == sorted(indices)
+    assert max(indices) <= 20
+
+    # 12 fps source upsampled to 24 fps repeats frames
+    timestamps = [index / 12 for index in range(7)]
+    indices = resample_frame_indices(timestamps, source_frame_duration=1.0 / 12, target_fps=24)
+    assert len(indices) == 14
+    assert indices == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
 
 
 def test_load_video_timestamps_mode_resamples_to_target_fps(tmp_path: Path):
