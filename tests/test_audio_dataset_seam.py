@@ -79,10 +79,10 @@ def _write_video(path: Path, *, fps: int = 24, frames: int = 48, size: int = 64)
 
 
 def _write_video_with_embedded_audio(path: Path, *, fps: int = 24, frames: int = 24, size: int = 64) -> None:
+    # audio is interleaved in per-frame chunks like real muxers produce; in containers with a
+    # coarse timestamp grid (Matroska: 1 ms) this quantizes chunk timestamps, which decode_audio
+    # must tolerate when reassembling the stream
     samples = (_sine_stereo(SAMPLE_RATE) * 32767.0).astype(np.int16)
-    interleaved = np.empty((1, samples.shape[1] * 2), dtype=np.int16)
-    interleaved[0, 0::2] = samples[0]
-    interleaved[0, 1::2] = samples[1]
     with av.open(str(path), mode="w") as container:
         video_stream = container.add_stream("mpeg4", rate=fps)
         video_stream.width = size
@@ -90,18 +90,32 @@ def _write_video_with_embedded_audio(path: Path, *, fps: int = 24, frames: int =
         video_stream.pix_fmt = "yuv420p"
         audio_stream = container.add_stream("pcm_s16le", rate=SAMPLE_RATE)
         audio_stream.layout = "stereo"
+
+        def mux_audio_chunk(start: int, count: int) -> None:
+            chunk = samples[:, start : start + count]
+            if chunk.shape[1] == 0:
+                return
+            interleaved = np.empty((1, chunk.shape[1] * 2), dtype=np.int16)
+            interleaved[0, 0::2] = chunk[0]
+            interleaved[0, 1::2] = chunk[1]
+            audio_frame = av.AudioFrame.from_ndarray(interleaved, format="s16", layout="stereo")
+            audio_frame.sample_rate = SAMPLE_RATE
+            audio_frame.pts = start
+            for packet in audio_stream.encode(audio_frame):
+                container.mux(packet)
+
+        samples_per_frame = SAMPLE_RATE // fps
+        audio_pos = 0
         for index in range(frames):
             image = np.full((size, size, 3), (index * 8) % 256, dtype=np.uint8)
             frame = av.VideoFrame.from_ndarray(image, format="rgb24")
             for packet in video_stream.encode(frame):
                 container.mux(packet)
+            mux_audio_chunk(audio_pos, samples_per_frame)
+            audio_pos += samples_per_frame
         for packet in video_stream.encode():
             container.mux(packet)
-        audio_frame = av.AudioFrame.from_ndarray(interleaved, format="s16", layout="stereo")
-        audio_frame.sample_rate = SAMPLE_RATE
-        audio_frame.pts = 0
-        for packet in audio_stream.encode(audio_frame):
-            container.mux(packet)
+        mux_audio_chunk(audio_pos, samples.shape[1] - audio_pos)
         for packet in audio_stream.encode():
             container.mux(packet)
 
@@ -187,6 +201,18 @@ def test_resolve_audio_source_explicit_and_embedded(tmp_path: Path):
     assert probe_audio(embedded_path)
     source = resolve_audio_source(embedded_path)
     assert source == AudioSource(path=embedded_path.resolve(), embedded=True)
+
+
+def test_decode_audio_tolerates_coarse_container_timestamps(tmp_path: Path):
+    # Matroska quantizes chunk timestamps to 1 ms (up to 16 samples of jitter at 32 kHz);
+    # reassembly must not report a discontinuous stream for interleaved chunked audio
+    path = tmp_path / "embedded.mkv"
+    _write_video_with_embedded_audio(path)
+
+    waveform = decode_audio(AudioSource(path=path, embedded=True), sample_rate=SAMPLE_RATE, channels=2)
+
+    assert waveform.shape[0] == 2
+    assert abs(waveform.shape[1] - SAMPLE_RATE) <= SAMPLE_RATE // 1000  # within one timestamp tick
 
 
 def test_decode_audio_roundtrips_wav(tmp_path: Path):

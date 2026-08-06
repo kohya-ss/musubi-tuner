@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -166,6 +167,13 @@ def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> tor
         if not container.streams.audio:
             raise ValueError(f"Audio source has no audio stream: {source.path}")
         stream = container.streams.audio[0]
+        # containers with a coarse timestamp grid (e.g. Matroska's 1 ms time base) quantize
+        # chunk timestamps; two consecutive chunks can be quantized in opposite directions,
+        # so allow up to one full tick of jitter when assembling chunks
+        timestamp_tolerance = DEFAULT_TIMESTAMP_TOLERANCE_SAMPLES
+        if stream.time_base is not None:
+            tick_samples = float(stream.time_base) * sample_rate
+            timestamp_tolerance = max(timestamp_tolerance, math.ceil(tick_samples) + 1)
         resampler = av.AudioResampler(format="fltp", layout=layout, rate=sample_rate)
         for frame in container.decode(stream):
             for resampled in resampler.resample(frame):
@@ -181,7 +189,7 @@ def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> tor
 
     if not chunks:
         raise ValueError(f"Audio source decoded no samples: {source.path}")
-    return assemble_audio_chunks(chunks, channels=channels).contiguous()
+    return assemble_audio_chunks(chunks, channels=channels, timestamp_tolerance_samples=timestamp_tolerance).contiguous()
 
 
 def slice_audio_window(
