@@ -38,6 +38,30 @@ logger = logging.getLogger(__name__)
 # and `<content_type>_<dtype|mask>` for other tensors
 
 
+# Common audio conventions (audio-capable architectures):
+# - the target audio latent is stored as `latents_audio_<shape>_<dtype>` (shape layout is
+#   architecture-specific) in the same latent cache file
+# - AUDIO_PRESENT_KEY holds a scalar 0/1 float32 tensor recording whether the item had real
+#   audio (0: silence placeholder was encoded). This is a fact about the data; supervision
+#   policy (loss weights, video-only training) is decided at training time.
+AUDIO_PRESENT_KEY = "audio_present_float32"
+
+
+def append_audio_present_entry(sd: dict[str, torch.Tensor], audio_present: bool):
+    sd[AUDIO_PRESENT_KEY] = torch.tensor(1.0 if audio_present else 0.0, dtype=torch.float32)
+
+
+def validate_audio_present_entry(sd: dict[str, torch.Tensor]) -> float:
+    """Validates the audio_present entry of a latent cache dict and returns its value."""
+    tensor = sd.get(AUDIO_PRESENT_KEY)
+    if not isinstance(tensor, torch.Tensor) or tensor.shape != torch.Size([]) or tensor.dtype != torch.float32:
+        raise ValueError(f"Audio latent cache requires a scalar float32 {AUDIO_PRESENT_KEY} tensor")
+    value = tensor.item()
+    if value not in (0.0, 1.0):
+        raise ValueError(f"{AUDIO_PRESENT_KEY} must be exactly 0.0 or 1.0, got {value}")
+    return value
+
+
 def save_latent_cache(item_info: ItemInfo, latent: torch.Tensor):
     """HunyuanVideo architecture. HunyuanVideo doesn't support I2V and control latents"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
