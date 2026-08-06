@@ -15,8 +15,7 @@ from musubi_tuner.dataset.image_video_dataset import ItemInfo, VideoDataset
 from musubi_tuner.minimax_h3.text_encoder import (
     DEFAULT_PROCESSOR_ID,
     H3TextVisual,
-    MAX_TEXT_ROWS,
-    TEXT_WIDTH,
+    TEXT_CACHE_FORMAT,
     build_presentation,
     encode_h3_presentation,
     load_h3_processor,
@@ -94,24 +93,22 @@ def _text_cache_metadata(
     *,
     task: str,
     crop_start: int,
-    frame_count: int,
     processor_identity: str,
     text_encoder_identity: str,
     presentation_identity: str,
     cache_dtype: str,
 ) -> dict[str, str]:
+    # cache_dtype and crop_start_frame stay so --skip_existing rebuilds when --text_cache_dtype or the
+    # FL2VA crop window changes; frame_count is folded into the presentation fingerprint and the
+    # behavior tags into TEXT_CACHE_FORMAT.
     return {
         "task": task,
         "crop_start_frame": str(crop_start),
-        "frame_count": str(frame_count),
+        "cache_format": TEXT_CACHE_FORMAT,
         "text_encoder_fingerprint": text_encoder_identity,
         "processor_fingerprint": processor_identity,
         "presentation_fingerprint": presentation_identity,
         "cache_dtype": cache_dtype,
-        "hidden_state_convention": "index50-after-50-layers-pre-final-norm",
-        "token_tag_algorithm": "expanded-vision-span-with-flanks-v1",
-        "text_width": str(TEXT_WIDTH),
-        "max_text_rows": str(MAX_TEXT_ROWS),
     }
 
 
@@ -167,7 +164,6 @@ def main() -> None:
     logger.info("Loading MiniMax-H3 Qwen3-VL processor from %s", args.processor)
     processor = load_h3_processor(args.processor, revision=args.processor_revision)
     processor_identity = processor_fingerprint(processor)
-    logger.info("Fingerprinting MiniMax-H3 text encoder checkpoint")
     text_encoder_identity = fingerprint_checkpoint(args.text_encoder)
     logger.info("Loading MiniMax-H3 text encoder from %s", args.text_encoder)
     text_encoder = load_h3_text_encoder(
@@ -190,11 +186,14 @@ def main() -> None:
             visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
             presentation = build_presentation(record, args.task, visuals)
             record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
-            presentation_identity = presentation_fingerprint(presentation, record_media_fingerprints)
+            presentation_identity = presentation_fingerprint(
+                presentation,
+                record_media_fingerprints,
+                frame_count=item.frame_count,
+            )
             metadata = _text_cache_metadata(
                 task=args.task,
                 crop_start=crop_start,
-                frame_count=item.frame_count,
                 processor_identity=processor_identity,
                 text_encoder_identity=text_encoder_identity,
                 presentation_identity=presentation_identity,

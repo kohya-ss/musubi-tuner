@@ -116,7 +116,9 @@ The cache stores only this fact about the data. Whether and how strongly audio i
 
 `--audio_vae` is always required. H3 always includes target-audio rows, and the released Audio VAE encoding of a zero waveform is not guaranteed to be an all-zero latent. Each cache stores its own small silence latent: at `F=124`, it is about 52 KB versus about 7.16 MB for the BF16 video latent, so no shared-silence or deduplication mechanism is used.
 
-Latent caches created before the `audio_present` contract (releases with `target_audio_policy` metadata) are not compatible; re-run latent caching. Text encoder caches are unaffected.
+`--skip_existing` compares the stored cache metadata (task, cache seed, crop start, cache format version, and fingerprints of the media files and VAE checkpoints) and rebuilds any cache that no longer matches. Fingerprints are lightweight file identities (size + mtime), not content hashes: re-copying or re-downloading a file changes its identity and triggers a one-time re-cache.
+
+Latent caches created before the `audio_present` contract (releases with `target_audio_policy` metadata) are not compatible; re-run latent caching. Caches written with the earlier metadata format remain trainable but are treated as stale by `--skip_existing` and rebuilt once.
 
 ## Cache Text Encoder Outputs
 
@@ -248,7 +250,7 @@ For Ref2VA, use the Ref2VA BF16 base and an ordered JSONL record:
 
 The Ref2VA generation JSONL intentionally uses the same validated schema as training, including target `video_path`, optional target audio, caption, and references. The target media identifies the record but is not used as a generation target. `--prompt` may override the record caption when encoding fresh text conditioning.
 
-T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. The cache must match the requested task, frame count, and exact presentation fingerprint. T2VA still requires `--prompt` so that identity can be verified; Ref2VA uses the selected record caption unless `--prompt` overrides it. FL2VA generation does not accept a dataset text cache because external first/last images cannot be proven identical to the crop presentation that produced that cache.
+T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. The cache must match the requested task, cache format version, and exact presentation fingerprint (which covers the prompt, frame count, and size+mtime identities of the reference media, so the cache must be used on the machine holding the original files). T2VA still requires `--prompt` so that identity can be verified; Ref2VA uses the selected record caption unless `--prompt` overrides it. FL2VA generation does not accept a dataset text cache because external first/last images cannot be proven identical to the crop presentation that produced that cache.
 
 The native sampler builds one common base grid, derives independent shifted video and audio sigma grids, and advances each modality with its own finite sigma interval. It does not apply CFG, negate the model heads, or apply ComfyUI's single-sampler audio slope adapter. Musubi also adds condition noise before packing, while ComfyUI adds it after packing; the distributions agree but RNG placement does not. These two intentional differences mean the same seed is not bitwise reproducible against ComfyUI. Video and audio are decoded sequentially, trimmed to a common duration, and muxed with PyAV as H.264 plus AAC.
 

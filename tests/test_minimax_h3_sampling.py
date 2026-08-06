@@ -285,31 +285,27 @@ def test_generation_validation_enforces_task_inputs_and_block_swap_range(tmp_pat
         validate_generation_args(_generation_args(tmp_path, blocks_to_swap=49))
 
 
-def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):
+def test_cached_text_conditioning_validates_task_format_and_fingerprint(tmp_path):
     path = tmp_path / "conditioning.safetensors"
     hidden = torch.zeros(3, 5120, dtype=torch.bfloat16)
     tags = torch.tensor([1, 0, 1], dtype=torch.int64)
+    tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": hidden,
+        "varlen_mmh3_token_tags_int64": tags,
+    }
     save_file(
-        {
-            "varlen_mmh3_hidden_states_bfloat16": hidden,
-            "varlen_mmh3_token_tags_int64": tags,
-        },
+        tensors,
         str(path),
         metadata={
             "task": "t2va",
-            "frame_count": "124",
+            "cache_format": "minimax-h3-text-v2",
             "presentation_fingerprint": "sha256:presentation",
-            "hidden_state_convention": "index50-after-50-layers-pre-final-norm",
-            "token_tag_algorithm": "expanded-vision-span-with-flanks-v1",
-            "text_width": "5120",
-            "max_text_rows": "32768",
         },
     )
 
     actual_hidden, actual_tags = load_cached_text_conditioning(
         path,
         task="t2va",
-        frame_count=124,
         presentation_identity="sha256:presentation",
     )
 
@@ -318,14 +314,21 @@ def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):
     assert torch.equal(actual_tags, tags)
     with pytest.raises(ValueError, match=r"task.*ref2va.*t2va"):
         load_cached_text_conditioning(path, task="ref2va")
-    with pytest.raises(ValueError, match=r"frame count.*141.*124"):
-        load_cached_text_conditioning(path, task="t2va", frame_count=141)
     with pytest.raises(ValueError, match="presentation fingerprint"):
         load_cached_text_conditioning(
             path,
             task="t2va",
             presentation_identity="sha256:different",
         )
+
+    stale = tmp_path / "stale.safetensors"
+    save_file(
+        tensors,
+        str(stale),
+        metadata={"task": "t2va", "presentation_fingerprint": "sha256:presentation"},
+    )
+    with pytest.raises(ValueError, match="text cache format"):
+        load_cached_text_conditioning(stale, task="t2va", presentation_identity="sha256:presentation")
 
 
 def test_generation_text_cache_requires_an_identifiable_presentation(tmp_path):

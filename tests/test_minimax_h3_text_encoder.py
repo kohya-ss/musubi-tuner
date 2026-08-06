@@ -167,7 +167,6 @@ def test_text_cache_metadata_distinguishes_requested_storage_dtype():
     common = {
         "task": "t2va",
         "crop_start": 0,
-        "frame_count": 22,
         "processor_identity": "processor",
         "text_encoder_identity": "encoder",
         "presentation_identity": "presentation",
@@ -178,4 +177,14 @@ def test_text_cache_metadata_distinguishes_requested_storage_dtype():
 
     assert bf16["cache_dtype"] == "bf16"
     assert float32["cache_dtype"] == "float32"
+    assert bf16["cache_format"] == "minimax-h3-text-v2"
     assert bf16 != float32
+    assert set(bf16) == {
+        "task",
+        "crop_start_frame",
+        "cache_format",
+        "text_encoder_fingerprint",
+        "processor_fingerprint",
+        "presentation_fingerprint",
+        "cache_dtype",
+    }

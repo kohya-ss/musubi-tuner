@@ -253,37 +253,28 @@ def _media_fingerprint_metadata(fingerprints: Mapping[Path, str]) -> str:
     return json.dumps(dict(sorted(normalized.items())), ensure_ascii=True, separators=(",", ":"))
 
 
+# Bump whenever the cached tensor semantics change (posterior policy, normalization constants, key
+# layout, or the fingerprint formats) so --skip_existing rebuilds stale caches.
+LATENT_CACHE_FORMAT = "minimax-h3-latent-v2"
+
+
 def build_latent_metadata(
     *,
-    record: H3Record,
     task: H3Task,
     crop_start_frame: int,
-    frame_count: int,
-    height: int,
-    width: int,
     cache_seed: int,
-    audio_present: bool,
     video_vae_fingerprint: str,
     audio_vae_fingerprint: str,
     media_fingerprints: Mapping[Path, str],
 ) -> dict[str, str]:
-    reference_kinds = [
-        reference.type + ("+audio" if reference.type == "video" and reference.audio is not None else "")
-        for reference in record.references
-    ]
     return {
         "task": task,
         "cache_seed": str(cache_seed),
         "crop_start_frame": str(crop_start_frame),
-        "audio_start_seconds": str(Fraction(crop_start_frame, TARGET_FPS)),
-        "target_geometry": f"{frame_count}x{height}x{width}",
-        "reference_kinds": json.dumps(reference_kinds, ensure_ascii=True, separators=(",", ":")),
-        "posterior_policy": "video_vae=fp32;target=seeded;conditions=seed42-fp16;audio=mode",
-        "normalization": "released-minimax-h3-v1",
+        "cache_format": LATENT_CACHE_FORMAT,
         "video_vae_fingerprint": video_vae_fingerprint,
         "audio_vae_fingerprint": audio_vae_fingerprint,
         "media_fingerprints": _media_fingerprint_metadata(media_fingerprints),
-        "audio_present": "1" if audio_present else "0",
     }
 
 
@@ -394,14 +385,9 @@ def build_latent_tensors(
                 tensors[_audio_key(f"{role_prefix}_audio", audio_latent)] = audio_latent
 
     metadata = build_latent_metadata(
-        record=record,
         task=task,
         crop_start_frame=crop_start_frame,
-        frame_count=frame_count,
-        height=height,
-        width=width,
         cache_seed=cache_seed,
-        audio_present=audio_present,
         video_vae_fingerprint=video_vae_fingerprint,
         audio_vae_fingerprint=audio_vae_fingerprint,
         media_fingerprints=media_fingerprints,
@@ -409,23 +395,10 @@ def build_latent_tensors(
     return H3LatentCachePayload(tensors=tensors, metadata=metadata)
 
 
-_fingerprint_cache: dict[tuple[Path, int, int], str] = {}
-
-
 def fingerprint_file(path: str | Path) -> str:
-    path = Path(path).resolve()
-    stat = path.stat()
-    cache_key = (path, stat.st_size, stat.st_mtime_ns)
-    cached = _fingerprint_cache.get(cache_key)
-    if cached is not None:
-        return cached
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    fingerprint = f"sha256:{digest.hexdigest()}"
-    _fingerprint_cache[cache_key] = fingerprint
-    return fingerprint
+    """Lightweight file identity (size + mtime) for cache-staleness checks; deliberately not a content hash."""
+    stat = Path(path).resolve().stat()
+    return f"stat:{stat.st_size}:{stat.st_mtime_ns}"
 
 
 def fingerprint_checkpoint(path: str | Path) -> str:
@@ -532,7 +505,6 @@ def main() -> None:
         )
         return
 
-    logger.info("Fingerprinting MiniMax-H3 VAE checkpoints")
     video_vae_fingerprint = fingerprint_checkpoint(args.video_vae)
     audio_vae_fingerprint = fingerprint_checkpoint(args.audio_vae)
     media_fingerprints: dict[Path, str] = {}
@@ -572,16 +544,10 @@ def main() -> None:
             record_fingerprints = {path: media_fingerprints[path] for path in record_media_paths(record)}
             if audio_source is not None:
                 record_fingerprints[audio_source.path] = media_fingerprints[audio_source.path]
-            frame_count, height, width = item.content.shape[:3]
             expected_metadata = build_latent_metadata(
-                record=record,
                 task=args.task,
                 crop_start_frame=crop_start,
-                frame_count=frame_count,
-                height=height,
-                width=width,
                 cache_seed=args.cache_seed,
-                audio_present=item.audio_present,
                 video_vae_fingerprint=video_vae_fingerprint,
                 audio_vae_fingerprint=audio_vae_fingerprint,
                 media_fingerprints=record_fingerprints,
