@@ -665,6 +665,8 @@ class VideoDirectoryDatasource(VideoDatasource):
 
 
 class VideoJsonlDatasource(VideoDatasource):
+    PATH_KEYS = ("video_path", "control_path", "audio_path")
+
     def __init__(self, video_jsonl_file: str):
         super().__init__()
         self.video_jsonl_file = video_jsonl_file
@@ -675,9 +677,23 @@ class VideoJsonlDatasource(VideoDatasource):
         self.data = []
         with open(self.video_jsonl_file, "r", encoding="utf-8") as f:
             for line in f:
+                if not line.strip():
+                    continue
                 data = json.loads(line)
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} videos")
+
+        # resolve relative paths against the JSONL's own directory when the target exists
+        # there; otherwise keep the original (working-directory relative) path
+        base_directory = os.path.dirname(os.path.abspath(self.video_jsonl_file))
+        for data in self.data:
+            for key in VideoJsonlDatasource.PATH_KEYS:
+                value = data.get(key)
+                if not isinstance(value, str) or not value or os.path.isabs(value):
+                    continue
+                candidate = os.path.join(base_directory, value)
+                if os.path.exists(candidate):
+                    data[key] = candidate
 
         # Check if there are control paths in the JSONL
         self.has_control = any("control_path" in item for item in self.data)

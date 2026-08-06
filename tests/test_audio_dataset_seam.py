@@ -236,6 +236,24 @@ def test_jsonl_datasource_resolves_explicit_audio_path(tmp_path: Path):
     assert datasource.audio_sources == [AudioSource(path=wav_path.resolve(), embedded=False)]
 
 
+def test_jsonl_datasource_resolves_relative_paths_against_jsonl_directory(tmp_path: Path):
+    _write_video(tmp_path / "clip.mp4", frames=4)
+    _write_wav(tmp_path / "narration.wav", _sine_stereo(SAMPLE_RATE // 4))
+
+    jsonl_path = tmp_path / "data.jsonl"
+    record = {"video_path": "clip.mp4", "caption": "caption", "audio_path": "narration.wav"}
+    jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    datasource = VideoJsonlDatasource(str(jsonl_path))
+    assert datasource.data[0]["video_path"] == str(tmp_path / "clip.mp4")
+    assert datasource.data[0]["audio_path"] == str(tmp_path / "narration.wav")
+
+    # nonexistent relative paths are kept as-is (working-directory relative)
+    jsonl_path.write_text(json.dumps({"video_path": "missing.mp4", "caption": "c"}) + "\n", encoding="utf-8")
+    datasource = VideoJsonlDatasource(str(jsonl_path))
+    assert datasource.data[0]["video_path"] == "missing.mp4"
+
+
 def _make_video_dataset(directory: Path, audio_spec: AudioSpec) -> VideoDataset:
     return VideoDataset(
         resolution=(64, 64),
