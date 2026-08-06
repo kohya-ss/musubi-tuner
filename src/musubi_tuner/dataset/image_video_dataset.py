@@ -871,14 +871,13 @@ class VideoDataset(BaseDataset):
                 result = op()
 
                 waveform = None
-                datasource_index = None
                 if len(result) == 3:  # for backward compatibility TODO remove this in the future
                     video_key, video, caption = result
                     control = None
                 elif len(result) == 4:
                     video_key, video, caption, control = result
                 else:  # audio-enabled datasource
-                    video_key, video, caption, control, waveform, datasource_index = result
+                    video_key, video, caption, control, waveform = result
 
                 video: list[np.ndarray]
                 frame_size = (video[0].shape[1], video[0].shape[0])
@@ -891,7 +890,7 @@ class VideoDataset(BaseDataset):
                 if control is not None:
                     control = [resize_image_to_bucket(frame, bucket_reso) for frame in control]
 
-                return frame_size, video_key, video, caption, control, waveform, datasource_index
+                return frame_size, video_key, video, caption, control, waveform, getattr(op, "datasource_index", None)
 
             future = executor.submit(fetch_and_resize, operator)
             futures.append(future)

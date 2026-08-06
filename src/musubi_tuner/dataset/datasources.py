@@ -535,11 +535,17 @@ class VideoDatasource(ContentDatasource):
             def fetch():
                 video_path, video, caption, control = self.get_video_data(index)
                 waveform = self.get_audio_waveform(index)
-                return video_path, video, caption, control, waveform, index
+                return video_path, video, caption, control, waveform
 
-            return fetch
+        else:
 
-        return lambda: self.get_video_data(index)
+            def fetch():
+                return self.get_video_data(index)
+
+        # the datasource record index travels as a fetcher attribute so that ItemInfo can
+        # reference the originating record without re-deriving it from item keys
+        fetch.datasource_index = index
+        return fetch
 
     def __iter__(self):
         raise NotImplementedError
