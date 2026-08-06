@@ -263,9 +263,9 @@ def test_quantizer_patch_and_meta_load_state_dict_roundtrip(tmp_path):
     # patched forward matches the dequantized reference (eager CPU path)
     x = torch.randn(4, K, dtype=torch.bfloat16)
     y = fresh.blocks[0]["attn"](x)
-    w_deq = kernels.dequantize_int8_convrot_weight(
-        qsd["blocks.0.attn.weight"], qsd["blocks.0.attn.scale_weight"], GS
-    ).to(torch.bfloat16)
+    w_deq = kernels.dequantize_int8_convrot_weight(qsd["blocks.0.attn.weight"], qsd["blocks.0.attn.scale_weight"], GS).to(
+        torch.bfloat16
+    )
     assert _relerr(y, F.linear(x, w_deq)) < 2e-2  # bf16 rounding only
 
     # unpatched layers still behave as plain Linears

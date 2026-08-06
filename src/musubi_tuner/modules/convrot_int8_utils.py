@@ -80,9 +80,9 @@ class ConvRotInt8Quantizer:
         self.groupsize = groupsize
 
     def is_target_key(self, key: str) -> bool:
-        is_target = (
-            self.target_layer_keys is None or any(pattern in key for pattern in self.target_layer_keys)
-        ) and key.endswith(".weight")
+        is_target = (self.target_layer_keys is None or any(pattern in key for pattern in self.target_layer_keys)) and key.endswith(
+            ".weight"
+        )
         is_excluded = self.exclude_layer_keys is not None and any(pattern in key for pattern in self.exclude_layer_keys)
         return is_target and not is_excluded
 
@@ -217,9 +217,7 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
 
 
 def convrot_int8_linear_forward_patch(self: nn.Linear, x):
-    return ConvRotInt8LinearFn.apply(
-        x, self.weight, self.scale_weight, self.bias, self._convrot_groupsize, self._convrot_bwd_mode
-    )
+    return ConvRotInt8LinearFn.apply(x, self.weight, self.scale_weight, self.bias, self._convrot_groupsize, self._convrot_bwd_mode)
 
 
 def apply_convrot_int8_monkey_patch(model, optimized_state_dict, bwd_mode: str = "bf16", groupsize: int = CONVROT_GROUPSIZE):
