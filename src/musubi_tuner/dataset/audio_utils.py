@@ -38,6 +38,10 @@ class AudioSpec:
     `generate_dataset_group_by_blueprint`; the shared dataset layer stays
     architecture-agnostic. `samples_per_crop` maps a video crop's frame count to the
     number of waveform samples the architecture's audio latent grid requires.
+
+    `samples_per_crop` must be a picklable module-level function (not a lambda or
+    closure): datasets carry the spec into DataLoader workers, which are spawned
+    processes on Windows/macOS and pickle their arguments.
     """
 
     sample_rate: int
