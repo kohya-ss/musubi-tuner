@@ -591,14 +591,7 @@ def save_latent_cache_minimax_h3(
         raise ValueError(f"MiniMax-H3 cache requires exactly one target video latent, found {target_count}")
     if audio_count != 1:
         raise ValueError(f"MiniMax-H3 cache requires exactly one target audio latent, found {audio_count}")
-    audio_present = validate_audio_present_entry(normalized)
-    metadata_present = (metadata or {}).get("audio_present")
-    if metadata_present not in {"0", "1"}:
-        raise ValueError(f'MiniMax-H3 cache requires audio_present metadata of "0" or "1", got {metadata_present!r}')
-    if float(metadata_present) != audio_present:
-        raise ValueError(
-            f"MiniMax-H3 cache has contradictory audio_present metadata={metadata_present!r} and tensor value={audio_present}"
-        )
+    validate_audio_present_entry(normalized)
     save_latent_cache_common(item_info, normalized, ARCHITECTURE_MINIMAX_H3_FULL, metadata)
 
 

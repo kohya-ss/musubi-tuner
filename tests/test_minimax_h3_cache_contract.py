@@ -285,11 +285,7 @@ def test_h3_cache_keys_round_trip_through_existing_bucket_collator(tmp_path: Pat
         "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
         "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
     }
-    save_latent_cache_minimax_h3(
-        item,
-        latent_tensors,
-        {"task": "fl2va", "audio_present": "1"},
-    )
+    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "fl2va"})
     save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "fl2va"})
 
     manager = BucketBatchManager({(64, 64, 5): [item]}, batch_size=1)
@@ -324,7 +320,7 @@ def test_h3_latent_writer_requires_binary_float32_audio_present_scalar(tmp_path:
     }
 
     with pytest.raises(ValueError, match=AUDIO_PRESENT_KEY):
-        save_latent_cache_minimax_h3(item, base, {"task": "t2va", "audio_present": "1"})
+        save_latent_cache_minimax_h3(item, base, {"task": "t2va"})
 
     invalid = (
         torch.tensor([1.0], dtype=torch.float32),
@@ -337,22 +333,8 @@ def test_h3_latent_writer_requires_binary_float32_audio_present_scalar(tmp_path:
             save_latent_cache_minimax_h3(
                 item,
                 {**base, AUDIO_PRESENT_KEY: scalar},
-                {"task": "t2va", "audio_present": "1"},
+                {"task": "t2va"},
             )
-
-
-def test_h3_latent_writer_requires_presence_metadata_consistent_with_tensor(tmp_path: Path):
-    item = _h3_item(tmp_path)
-    tensors = {
-        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
-        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
-        AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32),
-    }
-
-    with pytest.raises(ValueError, match="audio_present metadata"):
-        save_latent_cache_minimax_h3(item, tensors, {"task": "t2va"})
-    with pytest.raises(ValueError, match="contradictory"):
-        save_latent_cache_minimax_h3(item, tensors, {"task": "t2va", "audio_present": "0"})
 
 
 @pytest.mark.parametrize(
@@ -476,13 +458,21 @@ def test_build_fl2va_latents_encodes_the_provided_audio_window(tmp_path: Path):
     torch.testing.assert_close(video_vae.calls[1], torch.full_like(video_vae.calls[1], -1.0))
     torch.testing.assert_close(video_vae.calls[2], torch.full_like(video_vae.calls[2], 1.0))
     assert payload.metadata["task"] == "fl2va"
+    assert payload.metadata["cache_seed"] == "123"
     assert payload.metadata["crop_start_frame"] == "3"
-    assert payload.metadata["audio_start_seconds"] == "1/8"
+    assert payload.metadata["cache_format"] == "minimax-h3-latent-v2"
     assert payload.metadata["video_vae_fingerprint"] == "video-fingerprint"
     assert payload.metadata["audio_vae_fingerprint"] == "audio-fingerprint"
-    assert payload.metadata["audio_present"] == "1"
-    assert payload.metadata["posterior_policy"] == "video_vae=fp32;target=seeded;conditions=seed42-fp16;audio=mode"
     assert json.loads(payload.metadata["media_fingerprints"]) == {str(record.video_path): "target-video"}
+    assert set(payload.metadata) == {
+        "task",
+        "cache_seed",
+        "crop_start_frame",
+        "cache_format",
+        "video_vae_fingerprint",
+        "audio_vae_fingerprint",
+        "media_fingerprints",
+    }
 
 
 def test_missing_target_audio_encodes_silence_with_presence_zero(tmp_path: Path):
@@ -513,7 +503,6 @@ def test_missing_target_audio_encodes_silence_with_presence_zero(tmp_path: Path)
     assert audio_vae.calls[0].shape == (1, 2, 6400)
     assert torch.count_nonzero(audio_vae.calls[0]) == 0
     assert payload.tensors[AUDIO_PRESENT_KEY].item() == 0.0
-    assert payload.metadata["audio_present"] == "0"
 
 
 def test_silence_placeholder_must_be_all_zeros(tmp_path: Path):
@@ -565,14 +554,14 @@ def test_h3_skip_existing_requires_all_cache_identity_metadata(tmp_path: Path):
     save_file(
         {"latents_2x4x4_float32": torch.zeros(24, 2, 4, 4)},
         cache_path,
-        metadata={"task": "t2va", "video_vae_fingerprint": "old", "audio_present": "0"},
+        metadata={"task": "t2va", "video_vae_fingerprint": "old", "cache_seed": "0"},
     )
 
     assert cache_metadata_matches(cache_path, {"task": "t2va", "video_vae_fingerprint": "old"})
     assert not cache_metadata_matches(cache_path, {"task": "t2va", "video_vae_fingerprint": "new"})
     assert not cache_metadata_matches(cache_path, {"task": "t2va", "audio_vae_fingerprint": "missing"})
-    assert cache_metadata_matches(cache_path, {"audio_present": "0"})
-    assert not cache_metadata_matches(cache_path, {"audio_present": "1"})
+    assert cache_metadata_matches(cache_path, {"cache_seed": "0"})
+    assert not cache_metadata_matches(cache_path, {"cache_seed": "1"})
 
 
 def test_h3_latent_cache_parser_exposes_only_the_two_explicit_vae_paths():
@@ -645,7 +634,9 @@ def test_build_ref2va_latents_preserves_ordered_numbered_roles(tmp_path: Path):
     assert [call[0].path for call in decoder.audio_calls] == [reference_video_audio, voice]
     assert decoder.audio_calls[0][1:] == (0, 6400, True)
     assert decoder.audio_calls[1][1:] == (0, 6400, False)
-    assert json.loads(payload.metadata["reference_kinds"]) == ["image", "video+audio", "audio"]
+    assert json.loads(payload.metadata["media_fingerprints"]) == {
+        str(path): path.name for path in {record.video_path, image, reference_video, reference_video_audio, voice}
+    }
 
 
 def test_build_ref2va_revalidates_limits_before_any_model_work(tmp_path: Path):
