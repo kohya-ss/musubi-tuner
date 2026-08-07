@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
+from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
+from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, ConvRotInt8LayerSpec, prepare_convrot_int8_model
 from musubi_tuner.dataset.cache_io import AUDIO_PRESENT_KEY
 from musubi_tuner.minimax_h3_train_network import (
     MiniMaxH3NetworkTrainer,
@@ -162,6 +164,8 @@ def _trainer_args(**overrides):
         "task": "t2va",
         "video_only": False,
         "audio_loss_weight": 1.0,
+        "convrot_int8_bwd": "bf16",
+        "base_weights": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -192,7 +196,17 @@ def test_h3_parser_defaults_to_the_only_supported_training_coordinates():
     assert args.network_module == "networks.lora_minimax_h3"
     assert args.video_only is False
     assert args.audio_loss_weight == 1.0
+    assert args.convrot_int8_bwd == "bf16"
+    assert not any(action.dest == "convrot_int8" for action in parser._actions)
     assert "--h3_video_only" not in parser.format_help()
+
+
+def test_h3_parser_accepts_int8_convrot_backward_mode():
+    parser = minimax_h3_setup_parser(argparse.ArgumentParser())
+
+    args = parser.parse_args(["--task", "t2va", "--convrot_int8_bwd", "int8"])
+
+    assert args.convrot_int8_bwd == "int8"
 
 
 @pytest.mark.parametrize(
@@ -219,6 +233,46 @@ def test_h3_trainer_allows_training_time_sample_prompts():
     trainer = MiniMaxH3NetworkTrainer()
 
     trainer.handle_model_specific_args(_trainer_args(sample_prompts="prompts.json"))
+
+
+def test_h3_trainer_validates_backward_mode_and_destructive_merges_after_detection():
+    trainer = MiniMaxH3NetworkTrainer()
+    bf16 = SimpleNamespace(is_convrot_int8=False)
+    int8 = SimpleNamespace(is_convrot_int8=True)
+
+    with pytest.raises(ValueError, match="convrot_int8_bwd.*INT8"):
+        trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), None, bf16)
+    with pytest.raises(ValueError, match="base_weights.*INT8"):
+        trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"]), None, int8)
+    trainer.on_transformer_loaded(_trainer_args(), None, int8)
+
+
+def test_h3_trainer_passes_backward_mode_to_loader_and_excludes_int8_linears_from_compile(monkeypatch):
+    import musubi_tuner.minimax_h3_train_network as train
+
+    captured = {}
+    transformer = SimpleNamespace(blocks=[], is_convrot_int8=True)
+    monkeypatch.setattr(
+        train,
+        "load_h3_transformer",
+        lambda *args, **kwargs: captured.update(load=kwargs) or transformer,
+    )
+    monkeypatch.setattr(
+        train.model_utils,
+        "compile_transformer",
+        lambda *args, **kwargs: captured.update(compile=kwargs) or transformer,
+    )
+    trainer = MiniMaxH3NetworkTrainer()
+    trainer.blocks_to_swap = 0
+    args = _trainer_args(convrot_int8_bwd="int8", disable_numpy_memmap=False)
+
+    loaded = trainer.load_transformer(None, args, "dit.safetensors", "torch", False, "cpu", torch.bfloat16)
+    compiled = trainer.compile_transformer(args, transformer)
+
+    assert loaded is transformer
+    assert compiled is transformer
+    assert captured["load"]["convrot_int8_bwd"] == "int8"
+    assert captured["compile"]["disable_linear"] is True
 
 
 def test_h3_parser_exposes_the_dual_vae_and_text_assets_needed_for_training_samples():
@@ -1101,3 +1155,58 @@ def test_h3_lora_gets_gradients_with_checkpointing_and_block_swap(monkeypatch):
 
     gradients = [parameter.grad for parameter in network.parameters()]
     assert any(gradient is not None and torch.count_nonzero(gradient) for gradient in gradients)
+
+
+def test_h3_lora_gets_gradients_over_frozen_int8_convrot_base_with_checkpointing():
+    model = _tiny_model(num_layers=1)
+    target_paths = (
+        "blocks.0.attn.qkv_proj",
+        "blocks.0.attn.out_proj",
+        "blocks.0.mlp.fc1",
+        "blocks.0.mlp.fc2",
+    )
+    quantized = {}
+    layers = {}
+    for module_path in target_paths:
+        module = model.get_submodule(module_path)
+        quantized[module_path] = quantize_int8_convrot_weight(module.weight.detach(), 4)
+        layers[module_path] = ConvRotInt8LayerSpec(
+            module_path,
+            f"{module_path}.weight",
+            f"{module_path}.scale_weight",
+            4,
+        )
+    prepare_convrot_int8_model(model, ConvRotInt8Artifact(layers, frozenset()))
+    with torch.no_grad():
+        for module_path, (weight, scale) in quantized.items():
+            module = model.get_submodule(module_path)
+            module.weight.copy_(weight)
+            module.scale_weight.copy_(scale)
+
+    model.requires_grad_(False)
+    model.enable_gradient_checkpointing()
+    model.train()
+    network = lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, model)
+    network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+    network.prepare_optimizer_params(unet_lr=1e-4)
+    layout = build_h3_layout(
+        task="t2va",
+        text_length=3,
+        target_video=H3VideoGeometry(2, 4, 4),
+        target_audio_frames=8,
+    )
+
+    output = model(
+        video_latents=torch.randn(1, 24, 2, 4, 4),
+        audio_latents=torch.randn(1, 32, 2, 8),
+        text_hidden_states=torch.randn(1, 3, 12),
+        text_token_tags=torch.tensor([[1, 0, 1]]),
+        layout=layout,
+        model_t_video=torch.tensor(0.25),
+        model_t_audio=torch.tensor(0.75),
+    )
+    (output.video.square().mean() + output.audio.square().mean()).backward()
+
+    gradients = [parameter.grad for parameter in network.parameters()]
+    assert any(gradient is not None and torch.count_nonzero(gradient) for gradient in gradients)
+    assert all(model.get_submodule(path).weight.grad is None for path in target_paths)

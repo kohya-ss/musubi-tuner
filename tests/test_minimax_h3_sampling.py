@@ -21,6 +21,7 @@ from musubi_tuner.minimax_h3.sampling import (
     write_joint_av,
 )
 from musubi_tuner.minimax_h3_generate_video import (
+    _configure_lora_weights,
     load_cached_text_conditioning,
     run_generation,
     validate_generation_args,
@@ -264,6 +265,26 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_generation_keeps_bf16_merge_but_attaches_lora_to_int8(monkeypatch):
+    import musubi_tuner.minimax_h3_generate_video as generate
+
+    calls = []
+    args = SimpleNamespace(lora_weight=["adapter.safetensors"])
+    attached = [object()]
+    monkeypatch.setattr(generate, "_merge_lora_weights", lambda transformer, args: calls.append(("merge", transformer)))
+    monkeypatch.setattr(
+        generate,
+        "_apply_lora_weights",
+        lambda transformer, args, device: calls.append(("attach", transformer, device)) or attached,
+    )
+    bf16 = SimpleNamespace(is_convrot_int8=False)
+    int8 = SimpleNamespace(is_convrot_int8=True)
+
+    assert _configure_lora_weights(bf16, args, torch.device("cpu")) == []
+    assert _configure_lora_weights(int8, args, torch.device("cpu")) is attached
+    assert calls == [("merge", bf16), ("attach", int8, torch.device("cpu"))]
 
 
 @pytest.mark.parametrize("field", ("width", "height"))

@@ -388,15 +388,30 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if args.blocks_to_swap is not None and args.blocks_to_swap > 48:
             raise ValueError("--blocks_to_swap for MiniMax-H3 must be <= 48")
         if getattr(args, "fp8_base", False) or getattr(args, "fp8_scaled", False):
-            raise ValueError("MiniMax-H3 R1 accepts only a BF16 transformer base; quantized bases are deferred to R2")
+            raise ValueError("MiniMax-H3 does not support runtime FP8 base conversion")
         if getattr(args, "dit_dtype", None) not in {None, "bfloat16", "bf16"}:
-            raise ValueError("MiniMax-H3 R1 requires --dit_dtype bfloat16")
+            raise ValueError("MiniMax-H3 requires --dit_dtype bfloat16 for floating-point compute")
+        if getattr(args, "convrot_int8_bwd", "bf16") not in {"bf16", "int8"}:
+            raise ValueError("MiniMax-H3 --convrot_int8_bwd must be bf16 or int8")
         if (
             getattr(args, "block_swap_h2d_only", False)
             and bool(args.blocks_to_swap)
             and not getattr(args, "gradient_checkpointing", False)
         ):
             raise ValueError("MiniMax-H3 --block_swap_h2d_only training requires --gradient_checkpointing")
+
+    def on_transformer_loaded(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+    ) -> None:
+        del accelerator
+        is_convrot_int8 = bool(getattr(transformer, "is_convrot_int8", False))
+        if getattr(args, "convrot_int8_bwd", "bf16") == "int8" and not is_convrot_int8:
+            raise ValueError("MiniMax-H3 --convrot_int8_bwd int8 requires an automatically detected INT8 ConvRot transformer")
+        if is_convrot_int8 and getattr(args, "base_weights", None):
+            raise ValueError("MiniMax-H3 --base_weights cannot be destructively merged into an INT8 ConvRot transformer")
 
     def _build_dataset(self, args):
         dataset_group, collator, current_epoch = super()._build_dataset(args)
@@ -752,13 +767,14 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
     ):
         del accelerator
         if dit_weight_dtype not in {None, torch.bfloat16}:
-            raise ValueError("MiniMax-H3 R1 transformer weights must stay BF16")
+            raise ValueError("MiniMax-H3 floating-point compute weights must stay BF16")
         return load_h3_transformer(
             dit_path,
             device=loading_device,
             dtype=torch.bfloat16,
             attn_mode=attn_mode,
             split_attn=split_attn,
+            convrot_int8_bwd=getattr(args, "convrot_int8_bwd", "bf16"),
             disable_mmap=getattr(args, "disable_numpy_memmap", False),
         )
 
@@ -767,7 +783,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             args,
             transformer,
             [transformer.blocks],
-            disable_linear=bool(self.blocks_to_swap),
+            disable_linear=bool(self.blocks_to_swap) or bool(getattr(transformer, "is_convrot_int8", False)),
         )
 
     def scale_shift_latents(self, latents):
@@ -968,6 +984,12 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         help="clean coefficient used to augment MiniMax-H3 audio conditions",
     )
     parser.add_argument(
+        "--convrot_int8_bwd",
+        choices=("bf16", "int8"),
+        default="bf16",
+        help="ConvRot INT8 base backward path: transient BF16 dequantization or fused INT8",
+    )
+    parser.add_argument(
         "--video_vae",
         type=str,
         default=None,
@@ -997,7 +1019,7 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         action="store_true",
         help="allow training samples outside the released 5-15 second duration range",
     )
-    parser.add_argument("--dit_dtype", type=str, default=None, help="MiniMax-H3 DiT dtype; R1 requires bfloat16")
+    parser.add_argument("--dit_dtype", type=str, default=None, help="MiniMax-H3 floating-point compute dtype; requires bfloat16")
     return parser
 
 

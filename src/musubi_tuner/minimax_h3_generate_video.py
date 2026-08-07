@@ -215,13 +215,49 @@ def _merge_lora_weights(transformer, args) -> None:
         network.merge_to(None, transformer, state, dtype=torch.bfloat16, device="cpu")
 
 
+def _apply_lora_weights(transformer, args, device: torch.device) -> list[torch.nn.Module]:
+    weights = args.lora_weight or []
+    multipliers = args.lora_multiplier or []
+    includes = args.include_patterns or []
+    excludes = args.exclude_patterns or []
+    networks = []
+    for index, path in enumerate(weights):
+        multiplier = multipliers[index] if index < len(multipliers) else 1.0
+        include = includes[index] if index < len(includes) else None
+        exclude = excludes[index] if index < len(excludes) else None
+        logger.info("Attaching MiniMax-H3 LoRA %s with multiplier %s", path, multiplier)
+        state = filter_lora_state_dict(load_file(path), include, exclude)
+        network = lora_minimax_h3.create_arch_network_from_weights(
+            multiplier,
+            state,
+            unet=transformer,
+            for_inference=True,
+        )
+        if not network.unet_loras:
+            raise ValueError(f"MiniMax-H3 LoRA {path} contains no compatible target modules")
+        network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
+        network.load_state_dict(state, strict=True)
+        network.eval().requires_grad_(False).to(device)
+        networks.append(network)
+    return networks
+
+
+def _configure_lora_weights(transformer, args, device: torch.device) -> list[torch.nn.Module]:
+    if not args.lora_weight:
+        return []
+    if getattr(transformer, "is_convrot_int8", False):
+        return _apply_lora_weights(transformer, args, device)
+    _merge_lora_weights(transformer, args)
+    return []
+
+
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
-    parser.add_argument("--dit", required=True, help="MiniMax-H3 BF16 transformer safetensors path or directory")
+    parser.add_argument("--dit", required=True, help="MiniMax-H3 transformer safetensors path or directory")
     parser.add_argument("--video_vae", required=True, help="MiniMax-H3 video VAE safetensors path or directory")
     parser.add_argument("--audio_vae", required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
-    parser.add_argument("--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL BF16 safetensors path")
+    parser.add_argument("--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path")
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache")
     parser.add_argument("--processor", default=DEFAULT_PROCESSOR_ID, help="Qwen3-VL processor repo or directory")
     parser.add_argument("--processor_revision", default=None)
@@ -365,7 +401,7 @@ def run_generation(args: argparse.Namespace) -> Path:
     )
 
     load_on_cpu = bool(args.blocks_to_swap or args.lora_weight)
-    logger.info("Loading MiniMax-H3 BF16 transformer")
+    logger.info("Loading MiniMax-H3 transformer")
     transformer = load_h3_transformer(
         args.dit,
         device="cpu" if load_on_cpu else device,
@@ -374,8 +410,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         split_attn=args.split_attn,
         disable_mmap=args.disable_numpy_memmap,
     )
-    if args.lora_weight:
-        _merge_lora_weights(transformer, args)
+    attached_lora_networks = _configure_lora_weights(transformer, args, device)
     if args.blocks_to_swap:
         swap_config = BlockSwapConfig(
             device=device,
@@ -411,7 +446,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         )
     if transformer.offloader is not None:
         transformer.offloader.set_forward_only(True)
-    del transformer, text_hidden_states, text_token_tags, visual_conditions, audio_conditions
+    del transformer, attached_lora_networks, text_hidden_states, text_token_tags, visual_conditions, audio_conditions
     gc.collect()
     clean_memory_on_device(device)
 
