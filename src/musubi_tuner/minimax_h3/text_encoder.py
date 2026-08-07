@@ -30,7 +30,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_safetensors_files
+from musubi_tuner.minimax_h3.checkpoint import (
+    inspect_safetensors_convrot_int8,
+    load_safetensors_module,
+    resolve_safetensors_files,
+)
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
 
 
@@ -272,12 +276,20 @@ def load_h3_text_encoder(
         del model.language_model.norm
         return model
 
+    files = resolve_safetensors_files(checkpoint_path)
+    convrot_artifact = inspect_safetensors_convrot_int8(
+        files,
+        key_transform=normalize_h3_text_encoder_key,
+        disable_mmap=disable_mmap,
+    )
     return load_safetensors_module(
         factory,
-        resolve_safetensors_files(checkpoint_path),
+        files,
         device=device,
         dtype=dtype,
         key_transform=normalize_h3_text_encoder_key,
+        strict_dtype=False,
+        convrot_artifact=convrot_artifact,
         disable_mmap=disable_mmap,
     )
 
