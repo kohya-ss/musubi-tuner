@@ -13,6 +13,7 @@ from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
 from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, ConvRotInt8LayerSpec, prepare_convrot_int8_model
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 
 
 def _stub(monkeypatch, name, **attributes):
@@ -216,10 +217,10 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     assert calls == [("merge", bf16), ("attach", int8, torch.device("cpu"))]
 
 
-def _tiny_model():
+def _tiny_model(*, num_layers: int = 1):
     config = MiniMaxH3Config(
         hidden_size=16,
-        num_layers=1,
+        num_layers=num_layers,
         token_refiner_num_layers=1,
         num_attention_heads=2,
         attention_head_dim=8,
@@ -234,11 +235,10 @@ def _tiny_model():
 
 
 def _prepare_int8_targets(model):
-    target_paths = (
-        "blocks.0.attn.qkv_proj",
-        "blocks.0.attn.out_proj",
-        "blocks.0.mlp.fc1",
-        "blocks.0.mlp.fc2",
+    target_paths = tuple(
+        f"blocks.{index}.{suffix}"
+        for index in range(len(model.blocks))
+        for suffix in ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2")
     )
     layers = {}
     quantized = {}
@@ -322,3 +322,51 @@ def test_lora_gradient_reaches_adapter_over_checkpointed_int8_base(monkeypatch):
 
     assert any(parameter.grad is not None and torch.count_nonzero(parameter.grad) for parameter in network.parameters())
     assert all(model.get_submodule(path).weight.grad is None for path in target_paths)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for real block swap")
+def test_cuda_block_swap_keeps_convrot_scales_resident_during_lora_backward(monkeypatch):
+    generate = _load_generation_module(monkeypatch)
+    device = torch.device("cuda")
+    model = _tiny_model(num_layers=3)
+    target_paths = _prepare_int8_targets(model)
+    model.requires_grad_(False)
+    model.enable_gradient_checkpointing()
+    model.train()
+    network = generate.lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, model)
+    network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+    network.prepare_optimizer_params(unet_lr=1e-4)
+    network.to(device)
+
+    model.enable_block_swap(
+        1,
+        BlockSwapConfig(device=device, supports_backward=True, use_pinned_memory=False),
+    )
+    model.move_to_device_except_swap_blocks(device)
+    model.switch_block_swap_for_training()
+    layout = build_h3_layout(
+        task="t2va",
+        text_length=3,
+        target_video=H3VideoGeometry(2, 4, 4),
+        target_audio_frames=8,
+    )
+
+    output = model(
+        video_latents=torch.randn(1, 24, 2, 4, 4, device=device),
+        audio_latents=torch.randn(1, 32, 2, 8, device=device),
+        text_hidden_states=torch.randn(1, 3, 12, device=device),
+        text_token_tags=torch.tensor([[1, 0, 1]], device=device),
+        layout=layout,
+        model_t_video=torch.tensor([0.25], device=device),
+        model_t_audio=torch.tensor([0.75], device=device),
+    )
+    (output.video.square().mean() + output.audio.square().mean()).backward()
+    torch.cuda.synchronize(device)
+
+    assert any(parameter.grad is not None and torch.count_nonzero(parameter.grad) for parameter in network.parameters())
+    for path in target_paths:
+        module = model.get_submodule(path)
+        assert module.weight.dtype is torch.int8
+        assert module.weight.grad is None
+        assert module.scale_weight.dtype is torch.float32
+        assert module.scale_weight.device.type == "cuda"
