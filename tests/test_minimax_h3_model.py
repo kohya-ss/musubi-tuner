@@ -528,7 +528,7 @@ def test_checkpoint_loader_rejects_missing_rope_inv_freq(tmp_path: Path):
         )
 
 
-def test_checkpoint_loader_rejects_quantized_weight_pairs_in_r1(tmp_path: Path):
+def test_checkpoint_loader_rejects_uninspected_quantized_weight_pairs(tmp_path: Path):
     class Tiny(nn.Module):
         def __init__(self):
             super().__init__()
@@ -543,5 +543,5 @@ def test_checkpoint_loader_rejects_quantized_weight_pairs_in_r1(tmp_path: Path):
         checkpoint,
     )
 
-    with pytest.raises(ValueError, match="deferred to R2"):
+    with pytest.raises(ValueError, match="require artifact inspection"):
         load_safetensors_module(Tiny, [checkpoint], device="cpu", dtype=None)

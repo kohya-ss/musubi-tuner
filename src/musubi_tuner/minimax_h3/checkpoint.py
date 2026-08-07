@@ -9,6 +9,12 @@ from accelerate import init_empty_weights
 import torch
 import torch.nn as nn
 
+from musubi_tuner.modules.convrot_int8_utils import (
+    ConvRotInt8Artifact,
+    canonicalize_convrot_int8_key,
+    inspect_convrot_int8_artifact,
+    prepare_convrot_int8_model,
+)
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 
@@ -61,6 +67,31 @@ def _normalize_checkpoint_key(key: str, prefixes: tuple[str, ...]) -> str:
     return key
 
 
+def _normalize_loaded_key(
+    key: str,
+    key_prefixes: tuple[str, ...],
+    key_transform: Callable[[str], str] | None,
+) -> str:
+    key = _normalize_checkpoint_key(key, key_prefixes)
+    if key_transform is not None:
+        key = key_transform(key)
+    return canonicalize_convrot_int8_key(key)
+
+
+def inspect_safetensors_convrot_int8(
+    files: Iterable[str | Path],
+    *,
+    key_prefixes: tuple[str, ...] = (),
+    key_transform: Callable[[str], str] | None = None,
+    disable_mmap: bool = False,
+) -> ConvRotInt8Artifact | None:
+    return inspect_convrot_int8_artifact(
+        files,
+        key_normalizer=lambda key: _normalize_loaded_key(key, key_prefixes, key_transform),
+        disable_numpy_memmap=disable_mmap,
+    )
+
+
 def load_safetensors_metadata(files: Iterable[str | Path]) -> dict[str, str]:
     merged = {}
     for file in files:
@@ -100,6 +131,8 @@ def load_safetensors_module(
     key_prefixes: tuple[str, ...] = (),
     key_transform: Callable[[str], str] | None = None,
     strict_dtype: bool = False,
+    convrot_artifact: ConvRotInt8Artifact | None = None,
+    convrot_bwd_mode: str = "bf16",
     disable_mmap: bool = False,
 ) -> ModuleT:
     files = [Path(path).resolve() for path in files]
@@ -108,10 +141,14 @@ def load_safetensors_module(
 
     with init_empty_weights():
         model = factory()
+        if convrot_artifact is not None:
+            prepare_convrot_int8_model(model, convrot_artifact, bwd_mode=convrot_bwd_mode)
 
     expected_state = model.state_dict()
     expected_keys = set(expected_state)
-    seen = set()
+    seen_normalized_keys = set()
+    loaded_model_keys = set()
+    consumed_control_keys = set()
     unexpected = set()
     shape_mismatches = []
     dtype_mismatches = []
@@ -120,32 +157,76 @@ def load_safetensors_module(
         shard = {}
         with MemoryEfficientSafeOpen(str(path), disable_numpy_memmap=disable_mmap) as handle:
             raw_keys = handle.keys()
-            if any(key.endswith((".weight_scale", ".comfy_quant")) for key in raw_keys):
-                raise ValueError(f"Quantized MiniMax-H3 artifacts are deferred to R2: {path}")
             for raw_key in raw_keys:
-                key = _normalize_checkpoint_key(raw_key, key_prefixes)
-                if key_transform is not None:
-                    key = key_transform(key)
-                if key in seen:
+                if convrot_artifact is None and raw_key.endswith((".weight_scale", ".comfy_quant")):
+                    raise ValueError(f"ConvRot INT8 tensors require artifact inspection before loading: {path}:{raw_key}")
+
+                key = _normalize_loaded_key(raw_key, key_prefixes, key_transform)
+                if key in seen_normalized_keys:
                     raise ValueError(f"Duplicate MiniMax-H3 checkpoint key {key!r} in {path}")
-                seen.add(key)
+                seen_normalized_keys.add(key)
+
+                if key.endswith(".comfy_quant"):
+                    if convrot_artifact is None or key not in convrot_artifact.control_keys:
+                        unexpected.add(key)
+                    else:
+                        consumed_control_keys.add(key)
+                    continue
                 if key not in expected_keys:
                     unexpected.add(key)
                     continue
+
                 tensor = handle.get_tensor(raw_key, device=torch.device("cpu"), dtype=None)
                 if tensor.shape != expected_state[key].shape:
                     shape_mismatches.append(f"{key}: expected {tuple(expected_state[key].shape)}, got {tuple(tensor.shape)}")
                     continue
-                if strict_dtype and tensor.dtype != expected_state[key].dtype:
-                    dtype_mismatches.append(f"{key}: expected {expected_state[key].dtype}, got {tensor.dtype}")
-                    continue
-                if dtype is not None and tensor.is_floating_point():
-                    tensor = tensor.to(dtype=dtype)
+
+                if convrot_artifact is not None:
+                    if key in convrot_artifact.weight_keys:
+                        if tensor.dtype is not torch.int8:
+                            dtype_mismatches.append(f"{key}: expected torch.int8, got {tensor.dtype}")
+                            continue
+                    elif key in convrot_artifact.scale_keys:
+                        if tensor.dtype is not torch.float32:
+                            dtype_mismatches.append(f"{key}: expected torch.float32, got {tensor.dtype}")
+                            continue
+                    elif tensor.is_floating_point():
+                        target_dtype = dtype if dtype is not None else expected_state[key].dtype
+                        if target_dtype in {torch.float16, torch.bfloat16}:
+                            if tensor.dtype not in {torch.float16, torch.bfloat16}:
+                                dtype_mismatches.append(
+                                    f"{key}: expected source torch.float16 or torch.bfloat16 for {target_dtype} compute, got {tensor.dtype}"
+                                )
+                                continue
+                        elif target_dtype is torch.float32:
+                            if tensor.dtype is not torch.float32:
+                                dtype_mismatches.append(f"{key}: expected fixed torch.float32, got {tensor.dtype}")
+                                continue
+                        elif tensor.dtype is not target_dtype:
+                            dtype_mismatches.append(f"{key}: expected {target_dtype}, got {tensor.dtype}")
+                            continue
+                        if tensor.dtype is not target_dtype:
+                            tensor = tensor.to(dtype=target_dtype)
+                    elif tensor.dtype != expected_state[key].dtype:
+                        dtype_mismatches.append(f"{key}: expected {expected_state[key].dtype}, got {tensor.dtype}")
+                        continue
+                else:
+                    if strict_dtype and tensor.dtype != expected_state[key].dtype:
+                        dtype_mismatches.append(f"{key}: expected {expected_state[key].dtype}, got {tensor.dtype}")
+                        continue
+                    if dtype is not None and tensor.is_floating_point():
+                        tensor = tensor.to(dtype=dtype)
+
                 shard[key] = tensor
+                loaded_model_keys.add(key)
         if shard:
             model.load_state_dict(shard, strict=False, assign=True)
 
-    missing = expected_keys - seen
+    missing = expected_keys - loaded_model_keys
+    if convrot_artifact is not None:
+        missing_controls = convrot_artifact.control_keys - consumed_control_keys
+        if missing_controls:
+            raise ValueError(f"MiniMax-H3 ConvRot control tensors were not consumed: {sorted(missing_controls)[:20]}")
     if missing or unexpected or shape_mismatches or dtype_mismatches:
         raise ValueError(_format_key_mismatch(missing, unexpected, shape_mismatches, dtype_mismatches))
 

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
+from musubi_tuner.minimax_h3.checkpoint import inspect_safetensors_convrot_int8, load_safetensors_module
 from musubi_tuner.modules.convrot_int8_utils import (
     ConvRotInt8Artifact,
     ConvRotInt8LayerSpec,
@@ -213,3 +214,137 @@ def test_prepare_model_rejects_linear_subclasses():
 
     with pytest.raises(TypeError, match="exact nn.Linear"):
         prepare_convrot_int8_model(model, _artifact(("a", 4)))
+
+
+class _SelectiveModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.quant = nn.Linear(4, 2, bias=False, dtype=torch.bfloat16)
+        self.compute = nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+        self.register_buffer("fixed", torch.empty(3, dtype=torch.float32))
+
+
+def _selective_state(*, compute_dtype=torch.float16, fixed_dtype=torch.float32):
+    scale = torch.tensor([[1.000123], [0.999321]], dtype=torch.float32)
+    state = {
+        **_triple("quant", groupsize=4, in_features=4, out_features=2),
+        "compute.weight": torch.ones(4, 4, dtype=compute_dtype),
+        "fixed": torch.arange(3, dtype=fixed_dtype),
+    }
+    state["quant.weight_scale"] = scale
+    return state, scale
+
+
+def test_artifact_loader_preserves_fp32_scale_and_converts_compute_islands(tmp_path):
+    state, scale = _selective_state()
+    path = _save(tmp_path / "selective.safetensors", state)
+    artifact = inspect_safetensors_convrot_int8([path])
+
+    loaded = load_safetensors_module(
+        _SelectiveModel,
+        [path],
+        device="cpu",
+        dtype=None,
+        strict_dtype=True,
+        convrot_artifact=artifact,
+    )
+
+    assert loaded.is_convrot_int8
+    assert loaded.quant.weight.dtype is torch.int8
+    assert loaded.compute.weight.dtype is torch.bfloat16
+    assert loaded.fixed.dtype is torch.float32
+    assert torch.equal(loaded.quant.scale_weight, scale)
+
+
+def test_inspection_and_streaming_share_prefix_and_key_transforms(tmp_path):
+    state, scale = _selective_state()
+    prefixed = {f"root.source.{key}": value for key, value in state.items()}
+    path = _save(tmp_path / "transformed.safetensors", prefixed)
+    transform = lambda key: key.removeprefix("source.")
+    artifact = inspect_safetensors_convrot_int8(
+        [path],
+        key_prefixes=("root.",),
+        key_transform=transform,
+    )
+
+    loaded = load_safetensors_module(
+        _SelectiveModel,
+        [path],
+        device="cpu",
+        dtype=None,
+        key_prefixes=("root.",),
+        key_transform=transform,
+        convrot_artifact=artifact,
+    )
+
+    assert torch.equal(loaded.quant.scale_weight, scale)
+
+
+def test_inspector_rejects_duplicate_normalized_controls_across_shards(tmp_path):
+    first = _save(tmp_path / "first.safetensors", _triple("root.quant", in_features=4, out_features=2))
+    second = _save(tmp_path / "second.safetensors", _triple("quant", in_features=4, out_features=2))
+
+    with pytest.raises(ValueError, match=r"Duplicate normalized.*quant\.comfy_quant|Duplicate normalized"):
+        inspect_safetensors_convrot_int8(
+            [first, second],
+            key_prefixes=("root.",),
+        )
+
+
+def test_artifact_loader_uses_loaded_keys_for_missing_accounting(tmp_path):
+    state, _ = _selective_state()
+    state["quant.weight"] = torch.zeros(3, 4, dtype=torch.int8)
+    state["quant.weight_scale"] = torch.ones(3, 1, dtype=torch.float32)
+    path = _save(tmp_path / "shape-mismatch.safetensors", state)
+    artifact = inspect_safetensors_convrot_int8([path])
+
+    with pytest.raises(ValueError, match=r"missing=.*quant\.weight.*shape_mismatches=.*quant\.weight"):
+        load_safetensors_module(
+            _SelectiveModel,
+            [path],
+            device="cpu",
+            dtype=None,
+            convrot_artifact=artifact,
+        )
+
+
+def test_artifact_loader_rejects_f16_source_for_fixed_fp32_island(tmp_path):
+    state, _ = _selective_state(fixed_dtype=torch.float16)
+    path = _save(tmp_path / "bad-fixed.safetensors", state)
+    artifact = inspect_safetensors_convrot_int8([path])
+
+    with pytest.raises(ValueError, match=r"dtype_mismatches=.*fixed.*torch.float32.*torch.float16"):
+        load_safetensors_module(
+            _SelectiveModel,
+            [path],
+            device="cpu",
+            dtype=None,
+            convrot_artifact=artifact,
+        )
+
+
+def test_artifact_loader_rejects_fp32_source_for_bf16_compute_parameter(tmp_path):
+    state, _ = _selective_state(compute_dtype=torch.float32)
+    path = _save(tmp_path / "bad-compute.safetensors", state)
+    artifact = inspect_safetensors_convrot_int8([path])
+
+    with pytest.raises(ValueError, match=r"dtype_mismatches=.*compute\.weight.*float16 or torch.bfloat16"):
+        load_safetensors_module(
+            _SelectiveModel,
+            [path],
+            device="cpu",
+            dtype=None,
+            convrot_artifact=artifact,
+        )
+
+
+def test_nonartifact_strict_dtype_still_requires_exact_source_dtype(tmp_path):
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.empty(2, 2, dtype=torch.float32))
+
+    path = _save(tmp_path / "ordinary-wrong-dtype.safetensors", {"weight": torch.zeros(2, 2, dtype=torch.bfloat16)})
+
+    with pytest.raises(ValueError, match=r"expected torch.float32, got torch.bfloat16"):
+        load_safetensors_module(Tiny, [path], device="cpu", dtype=None, strict_dtype=True)
