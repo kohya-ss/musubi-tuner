@@ -26,7 +26,12 @@ from musubi_tuner.minimax_h3.text_encoder import (
     normalize_h3_text_encoder_key,
     validate_text_rows,
 )
-from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _fit_size_to_max_pixels, _read_rgb_image, _text_cache_metadata, setup_parser
+from musubi_tuner.minimax_h3_cache_text_encoder_outputs import (
+    _fit_size_to_max_pixels,
+    _read_rgb_image,
+    _text_cache_metadata,
+    setup_parser,
+)
 
 
 class _TinyQuantModel(torch.nn.Module):
@@ -44,7 +49,6 @@ def _record(tmp_path: Path, references=()) -> H3Record:
     return H3Record(
         video_path=tmp_path / "target.mp4",
         caption="A bright scene with clear sound.",
-        target_audio=H3AudioSource(tmp_path / "target.wav", embedded=False),
         references=tuple(references),
         jsonl_line=1,
     )
@@ -285,7 +289,6 @@ def test_text_cache_metadata_distinguishes_requested_storage_dtype():
     common = {
         "task": "t2va",
         "crop_start": 0,
-        "frame_count": 22,
         "processor_identity": "processor",
         "text_encoder_identity": "encoder",
         "presentation_identity": "presentation",
@@ -296,7 +299,17 @@ def test_text_cache_metadata_distinguishes_requested_storage_dtype():
 
     assert bf16["cache_dtype"] == "bf16"
     assert float32["cache_dtype"] == "float32"
+    assert bf16["cache_format"] == "minimax-h3-text-v2"
     assert bf16 != float32
+    assert set(bf16) == {
+        "task",
+        "crop_start_frame",
+        "cache_format",
+        "text_encoder_fingerprint",
+        "processor_fingerprint",
+        "presentation_fingerprint",
+        "cache_dtype",
+    }
 
 
 def test_h3_text_visual_max_pixels_rounds_large_images_to_32_multiple(tmp_path: Path):

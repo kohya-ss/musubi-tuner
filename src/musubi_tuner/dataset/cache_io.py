@@ -38,6 +38,30 @@ logger = logging.getLogger(__name__)
 # and `<content_type>_<dtype|mask>` for other tensors
 
 
+# Common audio conventions (audio-capable architectures):
+# - the target audio latent is stored as `latents_audio_<shape>_<dtype>` (shape layout is
+#   architecture-specific) in the same latent cache file
+# - AUDIO_PRESENT_KEY holds a scalar 0/1 float32 tensor recording whether the item had real
+#   audio (0: silence placeholder was encoded). This is a fact about the data; supervision
+#   policy (loss weights, video-only training) is decided at training time.
+AUDIO_PRESENT_KEY = "audio_present_float32"
+
+
+def append_audio_present_entry(sd: dict[str, torch.Tensor], audio_present: bool):
+    sd[AUDIO_PRESENT_KEY] = torch.tensor(1.0 if audio_present else 0.0, dtype=torch.float32)
+
+
+def validate_audio_present_entry(sd: dict[str, torch.Tensor]) -> float:
+    """Validates the audio_present entry of a latent cache dict and returns its value."""
+    tensor = sd.get(AUDIO_PRESENT_KEY)
+    if not isinstance(tensor, torch.Tensor) or tensor.shape != torch.Size([]) or tensor.dtype != torch.float32:
+        raise ValueError(f"Audio latent cache requires a scalar float32 {AUDIO_PRESENT_KEY} tensor")
+    value = tensor.item()
+    if value not in (0.0, 1.0):
+        raise ValueError(f"{AUDIO_PRESENT_KEY} must be exactly 0.0 or 1.0, got {value}")
+    return value
+
+
 def save_latent_cache(item_info: ItemInfo, latent: torch.Tensor):
     """HunyuanVideo architecture. HunyuanVideo doesn't support I2V and control latents"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
@@ -519,19 +543,11 @@ def save_latent_cache_minimax_h3(
 
     target_count = 0
     audio_count = 0
-    audio_loss_weight_count = 0
-    audio_loss_weight = None
     normalized = {}
     for key, tensor in tensors.items():
         if not isinstance(tensor, torch.Tensor):
             raise ValueError(f"MiniMax-H3 cache value must be a tensor: {key}")
-        if key == "mmh3_audio_loss_weight_float32":
-            if tensor.shape != torch.Size([]) or tensor.dtype != torch.float32:
-                raise ValueError("MiniMax-H3 audio loss weight must be a scalar float32 tensor")
-            if not torch.isfinite(tensor).item() or tensor.item() not in {0.0, 1.0}:
-                raise ValueError("MiniMax-H3 audio loss weight must be exactly 0.0 or 1.0")
-            audio_loss_weight_count += 1
-            audio_loss_weight = tensor.item()
+        if key == AUDIO_PRESENT_KEY:
             normalized[key] = tensor.detach().cpu().contiguous()
             continue
 
@@ -575,18 +591,7 @@ def save_latent_cache_minimax_h3(
         raise ValueError(f"MiniMax-H3 cache requires exactly one target video latent, found {target_count}")
     if audio_count != 1:
         raise ValueError(f"MiniMax-H3 cache requires exactly one target audio latent, found {audio_count}")
-    if audio_loss_weight_count != 1:
-        raise ValueError(f"MiniMax-H3 cache requires exactly one audio loss weight tensor, found {audio_loss_weight_count}")
-    target_audio_policy = (metadata or {}).get("target_audio_policy")
-    valid_audio_policies = {"real-supervised", "missing-unsupervised", "video-only-unsupervised"}
-    if target_audio_policy not in valid_audio_policies:
-        raise ValueError(f"MiniMax-H3 cache requires valid target_audio_policy metadata, got {target_audio_policy!r}")
-    expected_audio_loss_weight = 1.0 if target_audio_policy == "real-supervised" else 0.0
-    if audio_loss_weight != expected_audio_loss_weight:
-        raise ValueError(
-            f"MiniMax-H3 cache has contradictory target_audio_policy={target_audio_policy!r} "
-            f"and audio loss weight={audio_loss_weight}"
-        )
+    validate_audio_present_entry(normalized)
     save_latent_cache_common(item_info, normalized, ARCHITECTURE_MINIMAX_H3_FULL, metadata)
 
 

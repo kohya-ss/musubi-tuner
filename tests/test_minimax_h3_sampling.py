@@ -353,27 +353,23 @@ def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):
     path = tmp_path / "conditioning.safetensors"
     hidden = torch.zeros(3, 5120, dtype=torch.bfloat16)
     tags = torch.tensor([1, 0, 1], dtype=torch.int64)
+    tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": hidden,
+        "varlen_mmh3_token_tags_int64": tags,
+    }
     save_file(
-        {
-            "varlen_mmh3_hidden_states_bfloat16": hidden,
-            "varlen_mmh3_token_tags_int64": tags,
-        },
+        tensors,
         str(path),
         metadata={
             "task": "t2va",
-            "frame_count": "124",
+            "cache_format": "minimax-h3-text-v2",
             "presentation_fingerprint": "sha256:presentation",
-            "hidden_state_convention": "index50-after-50-layers-pre-final-norm",
-            "token_tag_algorithm": "expanded-vision-span-with-flanks-v1",
-            "text_width": "5120",
-            "max_text_rows": "32768",
         },
     )
 
     actual_hidden, actual_tags = load_cached_text_conditioning(
         path,
         task="t2va",
-        frame_count=124,
         presentation_identity="sha256:presentation",
     )
 
@@ -382,14 +378,21 @@ def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):
     assert torch.equal(actual_tags, tags)
     with pytest.raises(ValueError, match=r"task.*ref2va.*t2va"):
         load_cached_text_conditioning(path, task="ref2va")
-    with pytest.raises(ValueError, match=r"frame count.*141.*124"):
-        load_cached_text_conditioning(path, task="t2va", frame_count=141)
     with pytest.raises(ValueError, match="presentation fingerprint"):
         load_cached_text_conditioning(
             path,
             task="t2va",
             presentation_identity="sha256:different",
         )
+
+    stale = tmp_path / "stale.safetensors"
+    save_file(
+        tensors,
+        str(stale),
+        metadata={"task": "t2va", "presentation_fingerprint": "sha256:presentation"},
+    )
+    with pytest.raises(ValueError, match="text cache format"):
+        load_cached_text_conditioning(stale, task="t2va", presentation_identity="sha256:presentation")
 
 
 def test_generation_text_cache_requires_an_identifiable_presentation(tmp_path):
@@ -569,7 +572,11 @@ def test_generation_orchestrates_image_output_without_audio_decode(tmp_path, mon
     monkeypatch.setattr(
         generate,
         "encode_visual_conditions",
-        lambda *unused: ((torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4)), (H3VideoGeometry(1, 4, 4), H3VideoGeometry(1, 4, 4)), {}),
+        lambda *unused: (
+            (torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4)),
+            (H3VideoGeometry(1, 4, 4), H3VideoGeometry(1, 4, 4)),
+            {},
+        ),
     )
     monkeypatch.setattr(
         generate,
@@ -582,7 +589,9 @@ def test_generation_orchestrates_image_output_without_audio_decode(tmp_path, mon
         "load_video_vae",
         lambda *unused, **kwargs: events.append(("load_video_vae", str(kwargs["device"]), kwargs["dtype"])) or VideoVAE(),
     )
-    monkeypatch.setattr(generate, "load_audio_vae", lambda *unused, **kwargs: pytest.fail("audio VAE should not decode image output"))
+    monkeypatch.setattr(
+        generate, "load_audio_vae", lambda *unused, **kwargs: pytest.fail("audio VAE should not decode image output")
+    )
     captured = {}
     monkeypatch.setattr(
         generate,

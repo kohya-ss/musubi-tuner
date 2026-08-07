@@ -18,8 +18,7 @@ from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo, Vid
 from musubi_tuner.minimax_h3.text_encoder import (
     DEFAULT_PROCESSOR_ID,
     H3TextVisual,
-    MAX_TEXT_ROWS,
-    TEXT_WIDTH,
+    TEXT_CACHE_FORMAT,
     build_presentation,
     encode_h3_presentation,
     load_h3_processor,
@@ -27,19 +26,21 @@ from musubi_tuner.minimax_h3.text_encoder import (
     presentation_fingerprint,
     processor_fingerprint,
 )
+from musubi_tuner.minimax_h3.media import h3_records_from_datasource
 from musubi_tuner.minimax_h3_cache_latents import (
     PyAVH3MediaDecoder,
+    _validate_h3_image_mode,
     cache_metadata_matches,
     configure_h3_image_item,
+    dataset_cache_dir_key,
     fingerprint_checkpoint,
     fingerprint_file,
     h3_image_frame_count_for_item,
+    image_record_for_item,
     image_condition_set,
-    install_h3_video_decoder,
-    record_for_item,
-    records_for_dataset,
+    item_record_inputs,
     target_frames_from_image,
-    _validate_h3_image_mode,
+    validate_h3_dataset,
 )
 from musubi_tuner.utils.model_utils import dtype_to_str
 
@@ -166,24 +167,22 @@ def _text_cache_metadata(
     *,
     task: str,
     crop_start: int,
-    frame_count: int,
     processor_identity: str,
     text_encoder_identity: str,
     presentation_identity: str,
     cache_dtype: str,
 ) -> dict[str, str]:
+    # cache_dtype and crop_start_frame stay so --skip_existing rebuilds when --text_cache_dtype or the
+    # FL2VA crop window changes; frame_count is folded into the presentation fingerprint and the
+    # behavior tags into TEXT_CACHE_FORMAT.
     return {
         "task": task,
         "crop_start_frame": str(crop_start),
-        "frame_count": str(frame_count),
+        "cache_format": TEXT_CACHE_FORMAT,
         "text_encoder_fingerprint": text_encoder_identity,
         "processor_fingerprint": processor_identity,
         "presentation_fingerprint": presentation_identity,
         "cache_dtype": cache_dtype,
-        "hidden_state_convention": "index50-after-50-layers-pre-final-norm",
-        "token_tag_algorithm": "expanded-vision-span-with-flanks-v1",
-        "text_width": str(TEXT_WIDTH),
-        "max_text_rows": str(MAX_TEXT_ROWS),
     }
 
 
@@ -253,21 +252,21 @@ def main() -> None:
         raise ValueError("MiniMax-H3 text caching accepts image datasets only with --h3_image_mode")
 
     decoder = PyAVH3MediaDecoder()
-    records = []
+    records_by_dir = {}
     for dataset in datasets:
-        dataset_records = records_for_dataset(dataset, args.task, video_only=args.h3_image_mode != "none")
         if isinstance(dataset, VideoDataset):
-            install_h3_video_decoder(dataset, decoder)
-        records.extend(dataset_records)
+            validate_h3_dataset(dataset)
+        records_by_dir[dataset_cache_dir_key(dataset.cache_directory)] = h3_records_from_datasource(dataset.datasource, args.task)
 
     all_cache_files, all_cache_paths = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
-    text_paths = {path for record in records for path in _text_media_paths(record, args.task)}
+    text_paths = {
+        path for records in records_by_dir.values() for record in records for path in _text_media_paths(record, args.task)
+    }
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
     logger.info("Loading MiniMax-H3 Qwen3-VL processor from %s", args.processor)
     processor = load_h3_processor(args.processor, revision=args.processor_revision)
     processor_identity = processor_fingerprint(processor)
-    logger.info("Fingerprinting MiniMax-H3 text encoder checkpoint")
     text_encoder_identity = fingerprint_checkpoint(args.text_encoder)
     logger.info("Loading MiniMax-H3 text encoder from %s", args.text_encoder)
     text_encoder = load_h3_text_encoder(
@@ -289,21 +288,29 @@ def main() -> None:
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
+            records = records_by_dir[dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))]
             if args.h3_image_mode != "none":
+                record = image_record_for_item(item, records)
+                crop_start = 0
                 image_frame_count = h3_image_frame_count_for_item(item, args.h3_image_frame_count)
                 _load_h3_image_item_pixels(item, image_info_by_path, text_visual_max_pixels=text_visual_max_pixels)
                 configure_h3_image_item(item, image_frame_count)
                 item.h3_image_mode = args.h3_image_mode
                 item.content = target_frames_from_image(item, image_frame_count)
-            record, crop_start = record_for_item(item, records)
+            else:
+                datasource_index, crop_start = item_record_inputs(item)
+                record = records[datasource_index]
             visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
             presentation = build_presentation(record, args.task, visuals)
             record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
-            presentation_identity = presentation_fingerprint(presentation, record_media_fingerprints)
+            presentation_identity = presentation_fingerprint(
+                presentation,
+                record_media_fingerprints,
+                frame_count=item.frame_count,
+            )
             metadata = _text_cache_metadata(
                 task=args.task,
                 crop_start=crop_start,
-                frame_count=item.frame_count,
                 processor_identity=processor_identity,
                 text_encoder_identity=text_encoder_identity,
                 presentation_identity=presentation_identity,

@@ -382,14 +382,28 @@ def processor_fingerprint(processor) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def presentation_fingerprint(presentation: H3Presentation, media_fingerprints: Mapping[Path, str]) -> str:
+# Bump whenever the cached hidden-state semantics change (hidden-state convention, token-tag
+# algorithm, text layout constants, or the fingerprint formats) so stale caches are rebuilt/rejected.
+TEXT_CACHE_FORMAT = "minimax-h3-text-v2"
+
+
+def presentation_fingerprint(
+    presentation: H3Presentation,
+    media_fingerprints: Mapping[Path, str],
+    *,
+    frame_count: int,
+) -> str:
+    # frame_count is part of the identity because Ref2VA reference videos are resampled to the
+    # target frame count before presentation. The target crop start is deliberately excluded: it
+    # only affects FL2VA visuals, and is guarded by explicit cache metadata instead.
     payload = {
         "text": presentation.text,
         "processor_text": presentation.processor_text,
         "image_shapes": [list(image.shape) for image in presentation.images],
         "video_shapes": [list(video.shape) for video in presentation.videos],
         "media": dict(sorted((str(Path(path).resolve()), value) for path, value in media_fingerprints.items())),
-        "format": "minimax-h3-non-chat-v1",
+        "frame_count": frame_count,
+        "format": "minimax-h3-non-chat-v2",
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"

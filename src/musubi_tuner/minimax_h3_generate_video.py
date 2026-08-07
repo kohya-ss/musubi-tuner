@@ -36,8 +36,7 @@ from musubi_tuner.minimax_h3.sampling import (
 )
 from musubi_tuner.minimax_h3.text_encoder import (
     DEFAULT_PROCESSOR_ID,
-    MAX_TEXT_ROWS,
-    TEXT_WIDTH,
+    TEXT_CACHE_FORMAT,
     build_presentation,
     encode_h3_presentation,
     load_h3_processor,
@@ -203,7 +202,6 @@ def load_cached_text_conditioning(
     path: str | Path,
     *,
     task: str,
-    frame_count: int | None = None,
     presentation_identity: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     path = Path(path)
@@ -212,20 +210,9 @@ def load_cached_text_conditioning(
         cached_task = metadata.get("task")
         if cached_task != task:
             raise ValueError(f"MiniMax-H3 requested task {task} conflicts with text-cache task {cached_task}")
-        cached_frame_count = metadata.get("frame_count")
-        if frame_count is not None and cached_frame_count != str(frame_count):
-            raise ValueError(
-                f"MiniMax-H3 requested frame count {frame_count} conflicts with text-cache frame count {cached_frame_count}"
-            )
-        expected_metadata = {
-            "hidden_state_convention": "index50-after-50-layers-pre-final-norm",
-            "token_tag_algorithm": "expanded-vision-span-with-flanks-v1",
-            "text_width": str(TEXT_WIDTH),
-            "max_text_rows": str(MAX_TEXT_ROWS),
-        }
-        for key, expected in expected_metadata.items():
-            if metadata.get(key) != expected:
-                raise ValueError(f"MiniMax-H3 text cache metadata {key} must be {expected!r}, got {metadata.get(key)!r}")
+        cached_format = metadata.get("cache_format")
+        if cached_format != TEXT_CACHE_FORMAT:
+            raise ValueError(f"MiniMax-H3 text cache format must be {TEXT_CACHE_FORMAT!r}, got {cached_format!r}")
         cached_presentation = metadata.get("presentation_fingerprint")
         if not cached_presentation:
             raise ValueError("MiniMax-H3 text cache is missing its presentation fingerprint")
@@ -251,11 +238,14 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
             for reference in record.references
             if reference.type in {"image", "video"}
         }
-        presentation_identity = presentation_fingerprint(presentation, media_fingerprints)
+        presentation_identity = presentation_fingerprint(
+            presentation,
+            media_fingerprints,
+            frame_count=args.frame_count,
+        )
         return load_cached_text_conditioning(
             args.text_cache,
             task=args.task,
-            frame_count=args.frame_count,
             presentation_identity=presentation_identity,
         )
     logger.info("Loading MiniMax-H3 Qwen3-VL text encoder")

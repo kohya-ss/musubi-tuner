@@ -101,6 +101,11 @@ class DiTOutput:
 
 
 class NetworkTrainer:
+    # audio-capable architectures override this class attribute with their AudioSpec so that
+    # dataset construction enables audio (class attribute because _build_dataset runs before
+    # handle_model_specific_args)
+    audio_spec = None
+
     def __init__(self):
         self.blocks_to_swap = None
         self.timestep_range_pool = []
@@ -1462,7 +1467,11 @@ class NetworkTrainer:
         user_config = config_utils.load_user_config(args.dataset_config)
         blueprint = blueprint_generator.generate(user_config, args, architecture=self.architecture)
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
-            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
+            blueprint.dataset_group,
+            training=True,
+            num_timestep_buckets=self.num_timestep_buckets,
+            shared_epoch=current_epoch,
+            audio_spec=self.audio_spec,
         )
 
         if train_dataset_group.num_train_items == 0:

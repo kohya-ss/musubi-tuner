@@ -39,6 +39,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_WAN,
     round_down_frame_count,
 )
+from musubi_tuner.dataset.audio_utils import AudioSpec, audio_window_start, slice_audio_window
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
 
@@ -65,6 +66,16 @@ class ItemInfo:
 
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
+
+        # crop provenance (video datasets): start frame of the crop in target-fps space and
+        # the index of the originating datasource record
+        self.frame_pos: Optional[int] = None
+        self.datasource_index: Optional[int] = None
+
+        # audio (audio-capable architectures): waveform window [channels, samples] aligned to
+        # the crop, and whether it came from real audio (False: silence placeholder)
+        self.audio_content: Optional[torch.Tensor] = None
+        self.audio_present: Optional[bool] = None
 
         # FramePack architecture specific
         self.fp_latent_window_size: Optional[int] = None
@@ -625,6 +636,7 @@ class VideoDataset(BaseDataset):
         fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        audio_spec: Optional["AudioSpec"] = None,
     ):
         super(VideoDataset, self).__init__(
             resolution,
@@ -648,6 +660,7 @@ class VideoDataset(BaseDataset):
         self.fp_latent_window_size = fp_latent_window_size
 
         self.vae_frame_stride = 4  # legacy frame-grid fallback; architecture-specific helpers may override the formula
+        self.strict_target_fps = False  # timestamp-based fps normalization (required for AV alignment)
         if self.architecture == ARCHITECTURE_HUNYUAN_VIDEO:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_WAN:
@@ -662,8 +675,22 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
         elif self.architecture == ARCHITECTURE_MINIMAX_H3:
             self.target_fps = VideoDataset.TARGET_FPS_MINIMAX_H3
+            self.strict_target_fps = True
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
+
+        self.audio_spec = audio_spec
+        self.audio_fps: Optional[int] = None
+        if audio_spec is not None:
+            audio_fps = int(round(self.target_fps))
+            if abs(self.target_fps - audio_fps) > 1e-9:
+                raise ValueError(f"Audio-capable datasets require an integer target fps, got {self.target_fps}")
+            self.audio_fps = audio_fps
+        if self.strict_target_fps and source_fps is not None:
+            logger.warning(
+                f"source_fps={source_fps} is ignored: architecture {self.architecture} always resamples to "
+                f"{self.target_fps} fps using frame timestamps"
+            )
 
         if target_frames is not None:
             target_frames = list(set(target_frames))
@@ -685,6 +712,11 @@ class VideoDataset(BaseDataset):
             self.datasource = VideoDirectoryDatasource(video_directory, caption_extension, control_directory)
         elif video_jsonl_file is not None:
             self.datasource = VideoJsonlDatasource(video_jsonl_file)
+
+        if self.strict_target_fps:
+            self.datasource.set_strict_target_fps(self.target_fps)
+        if self.audio_spec is not None:
+            self.datasource.set_audio_spec(self.audio_spec)
 
         if self.frame_extraction == "uniform" and self.frame_sample == 1:
             self.frame_extraction = "head"
@@ -742,7 +774,7 @@ class VideoDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_frame_size, video_key, video, caption, control = future.result()
+                    original_frame_size, video_key, video, caption, control, waveform, datasource_index = future.result()
 
                     frame_count = len(video)
                     video = np.stack(video, axis=0)
@@ -816,6 +848,24 @@ class VideoDataset(BaseDataset):
                             item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
                         item_info.control_content = cropped_control  # None is allowed
                         item_info.fp_latent_window_size = self.fp_latent_window_size
+                        item_info.frame_pos = int(crop_pos)
+                        item_info.datasource_index = datasource_index
+
+                        if self.audio_spec is not None:
+                            sample_count = self.audio_spec.samples_per_crop(target_frame)
+                            if waveform is None:
+                                item_info.audio_content = torch.zeros(self.audio_spec.channels, sample_count, dtype=torch.float32)
+                                item_info.audio_present = False
+                            else:
+                                start_sample = audio_window_start(crop_pos, self.audio_fps, self.audio_spec.sample_rate)
+                                item_info.audio_content = slice_audio_window(
+                                    waveform,
+                                    start_sample=start_sample,
+                                    sample_count=sample_count,
+                                    pad_tolerance=self.audio_spec.codec_pad_tolerance,
+                                    context=video_key,
+                                )
+                                item_info.audio_present = True
 
                         batch = batches.get(batch_key, [])
                         batch.append(item_info)
@@ -836,14 +886,17 @@ class VideoDataset(BaseDataset):
 
         for operator in self.datasource:
 
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, list[np.ndarray], str, Optional[list[np.ndarray]]]:
+            def fetch_and_resize(op: callable) -> tuple:
                 result = op()
 
+                waveform = None
                 if len(result) == 3:  # for backward compatibility TODO remove this in the future
                     video_key, video, caption = result
                     control = None
-                else:
+                elif len(result) == 4:
                     video_key, video, caption, control = result
+                else:  # audio-enabled datasource
+                    video_key, video, caption, control, waveform = result
 
                 video: list[np.ndarray]
                 frame_size = (video[0].shape[1], video[0].shape[0])
@@ -856,7 +909,7 @@ class VideoDataset(BaseDataset):
                 if control is not None:
                     control = [resize_image_to_bucket(frame, bucket_reso) for frame in control]
 
-                return frame_size, video_key, video, caption, control
+                return frame_size, video_key, video, caption, control, waveform, getattr(op, "datasource_index", None)
 
             future = executor.submit(fetch_and_resize, operator)
             futures.append(future)
