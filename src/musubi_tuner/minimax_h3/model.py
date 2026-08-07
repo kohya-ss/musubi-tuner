@@ -72,6 +72,7 @@ class MiniMaxH3Config:
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5
+    adaln_curve_grid: int | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -100,6 +101,11 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 timestep input width must be even")
         if self.rope_inv_freq_len * 6 > self.attention_head_dim:
             raise ValueError("MiniMax-H3 rotary width exceeds the attention head width")
+        if self.adaln_curve_grid is not None:
+            if self.adaln_curve_grid != 1025:
+                raise ValueError("MiniMax-H3 pruned AdaLN requires exactly 1025 curve rows")
+            if self.time_embed_dim != 8:
+                raise ValueError("MiniMax-H3 pruned AdaLN requires time_embed_dim=8")
 
     @property
     def attention_inner_dim(self) -> int:
@@ -116,6 +122,10 @@ class MiniMaxH3Config:
     @property
     def final_adaln_out_features(self) -> int:
         return 2 * self.hidden_size
+
+    @property
+    def is_pruned(self) -> bool:
+        return self.adaln_curve_grid is not None
 
 
 _PUBLISHED_CONFIG_FIELDS = {
@@ -198,12 +208,14 @@ class AdalnProj(nn.Module):
         modalities: int,
         *,
         dtype: torch.dtype,
+        apply_silu: bool = True,
         device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
         self.expand = expand
         self.modalities = modalities
         self.hidden_size = hidden_size
+        self.apply_silu = apply_silu
         self.linear = nn.Linear(
             timestep_dim,
             expand * hidden_size * modalities,
@@ -212,7 +224,9 @@ class AdalnProj(nn.Module):
         )
 
     def forward(self, timestep_embeddings: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        projected = self.linear(F.silu(timestep_embeddings))
+        if self.apply_silu:
+            timestep_embeddings = F.silu(timestep_embeddings)
+        projected = self.linear(timestep_embeddings)
         projected = projected.reshape(projected.shape[0] * self.modalities, self.expand * self.hidden_size)
         return projected.chunk(self.expand, dim=-1)
 
@@ -380,6 +394,7 @@ class DiTBlock(nn.Module):
             expand=6,
             modalities=3,
             dtype=dtype,
+            apply_silu=not config.is_pruned,
             device=device,
         )
 
@@ -412,6 +427,7 @@ class FinalLayer(nn.Module):
         *,
         norm_eps: float = 1e-5,
         dtype: torch.dtype,
+        apply_silu: bool = True,
         device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
@@ -422,6 +438,7 @@ class FinalLayer(nn.Module):
             expand=2,
             modalities=1,
             dtype=dtype,
+            apply_silu=apply_silu,
             device=device,
         )
         self.video_out = nn.Linear(hidden_size, video_output_dim, dtype=torch.float32, device=device)
@@ -470,12 +487,19 @@ class MiniMaxH3Model(nn.Module):
         self.video_patch_proj = nn.Linear(config.video_patch_dim, config.hidden_size, dtype=torch.float32, device=device)
         self.audio_patch_proj = nn.Linear(config.audio_in_channels, config.hidden_size, dtype=torch.float32, device=device)
         self.condition_proj = nn.Linear(config.text_dim, config.hidden_size, dtype=dtype, device=device)
-        self.time_embedder = TimeEmbedder(
-            config.timestep_input_dim,
-            config.time_embed_hidden_size,
-            config.time_embed_dim,
-            device=device,
-        )
+        if config.is_pruned:
+            self.time_embedder = None
+            self.register_buffer(
+                "adaln_t_table",
+                torch.empty(config.adaln_curve_grid, config.time_embed_dim, dtype=torch.float32, device=device),
+            )
+        else:
+            self.time_embedder = TimeEmbedder(
+                config.timestep_input_dim,
+                config.time_embed_hidden_size,
+                config.time_embed_dim,
+                device=device,
+            )
         self.rope = nn.Module()
         inv_freq = torch.empty(config.rope_inv_freq_len, dtype=torch.float32, device=device)
         self.rope.register_buffer("inv_freq", inv_freq)
@@ -499,6 +523,7 @@ class MiniMaxH3Model(nn.Module):
             config.audio_in_channels,
             norm_eps=config.final_norm_eps,
             dtype=dtype,
+            apply_silu=not config.is_pruned,
             device=device,
         )
 
@@ -526,6 +551,24 @@ class MiniMaxH3Model(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return self.condition_proj.weight.dtype
+
+    def _timestep_embeddings(
+        self,
+        unique_timesteps: torch.Tensor,
+        execution_device: torch.device,
+    ) -> torch.Tensor:
+        if unique_timesteps.ndim != 1:
+            raise ValueError("MiniMax-H3 unique timesteps must be a one-dimensional tensor")
+        if not self.config.is_pruned:
+            return self.time_embedder(unique_timesteps.to(execution_device)).to(self.dtype)
+
+        table = self.adaln_t_table
+        timesteps_fp32 = unique_timesteps.to(device=table.device, dtype=torch.float32)
+        position = timesteps_fp32.clamp(0.0, 1.0) * (table.shape[0] - 1)
+        lower = position.floor().long().clamp(max=table.shape[0] - 2)
+        fraction = position - lower.to(position.dtype)
+        embedding_fp32 = torch.lerp(table.float()[lower], table.float()[lower + 1], fraction[:, None])
+        return embedding_fp32.to(self.dtype)
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False) -> None:
         self.gradient_checkpointing = True
@@ -788,7 +831,7 @@ class MiniMaxH3Model(nn.Module):
             visual_condition_clean=visual_condition_clean,
             audio_condition_clean=audio_condition_clean,
         )
-        timestep_embeddings = self.time_embedder(timestep_rows.unique_timesteps.to(execution_device)).to(self.dtype)
+        timestep_embeddings = self._timestep_embeddings(timestep_rows.unique_timesteps, execution_device)
         rotation_table = self._cached_rotation_table(
             layout,
             device=execution_device,

@@ -23,7 +23,7 @@ from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 
 
-def _tiny_config(*, num_layers: int = 2) -> MiniMaxH3Config:
+def _tiny_config(*, num_layers: int = 2, pruned: bool = False) -> MiniMaxH3Config:
     return MiniMaxH3Config(
         hidden_size=16,
         num_layers=num_layers,
@@ -36,6 +36,7 @@ def _tiny_config(*, num_layers: int = 2) -> MiniMaxH3Config:
         time_embed_hidden_size=16,
         time_embed_dim=8,
         rope_inv_freq_len=1,
+        adaln_curve_grid=1025 if pruned else None,
     )
 
 
@@ -93,6 +94,80 @@ def test_released_config_and_meta_state_dict_match_published_bf16_header():
     assert state["final_layer.video_out.weight"].shape == (96, 5376)
     assert state["final_layer.video_out.weight"].dtype == torch.float32
     assert state["rope.inv_freq"].shape == (16,)
+
+
+def test_pruned_config_builds_curve_table_without_time_embedder_state():
+    config = _tiny_config(num_layers=1, pruned=True)
+    model = MiniMaxH3Model(config, dtype=torch.bfloat16, device=torch.device("meta"))
+    state = model.state_dict()
+
+    assert config.is_pruned
+    assert state["adaln_t_table"].shape == (1025, 8)
+    assert state["adaln_t_table"].dtype is torch.float32
+    assert not any(key.startswith("time_embedder.") for key in state)
+    assert state["blocks.0.adaln_proj.linear.weight"].shape[-1] == 8
+    assert state["final_layer.adaln_proj.linear.weight"].shape[-1] == 8
+    assert not model.blocks[0].adaln_proj.apply_silu
+    assert not model.final_layer.adaln_proj.apply_silu
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"adaln_curve_grid": 1024, "time_embed_dim": 8},
+        {"adaln_curve_grid": 1025, "time_embed_dim": 16},
+    ],
+)
+def test_pruned_config_rejects_unknown_curve_shapes(overrides):
+    with pytest.raises(ValueError, match="pruned AdaLN"):
+        MiniMaxH3Config(**overrides)
+
+
+def test_pruned_timestep_curve_interpolates_fp32_then_casts_to_compute_dtype():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1, pruned=True), dtype=torch.bfloat16)
+    table = torch.arange(1025, dtype=torch.float32)[:, None].repeat(1, 8)
+    with torch.no_grad():
+        model.adaln_t_table.copy_(table)
+
+    timesteps = torch.tensor([0.0, 0.30017, 1.0], dtype=torch.float32)
+    actual = model._timestep_embeddings(timesteps, torch.device("cpu"))
+    position = timesteps * 1024
+    expected = position[:, None].repeat(1, 8).to(torch.bfloat16)
+
+    assert actual.dtype is torch.bfloat16
+    torch.testing.assert_close(actual, expected)
+    assert not torch.equal(actual[1].float(), table[position[1].round().long()])
+
+
+def test_pruned_timestep_curve_handles_bf16_as_represented_and_rejects_scalars():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1, pruned=True), dtype=torch.float32)
+    table = torch.arange(1025, dtype=torch.float32)[:, None].repeat(1, 8)
+    with torch.no_grad():
+        model.adaln_t_table.copy_(table)
+    timesteps = torch.tensor([0.13, 0.30017, 0.7773, 0.999], dtype=torch.bfloat16)
+
+    actual = model._timestep_embeddings(timesteps, torch.device("cpu"))
+    expected = (timesteps.float() * 1024)[:, None].repeat(1, 8)
+
+    torch.testing.assert_close(actual, expected)
+    with pytest.raises(ValueError, match="one-dimensional"):
+        model._timestep_embeddings(torch.tensor(0.5), torch.device("cpu"))
+
+
+def test_pruned_forward_casts_curve_output_before_bf16_adaln_without_autocast():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1, pruned=True), dtype=torch.bfloat16).eval()
+    with torch.no_grad():
+        model.adaln_t_table.zero_()
+    seen_dtypes = []
+    hook = model.blocks[0].adaln_proj.linear.register_forward_pre_hook(
+        lambda _module, inputs: seen_dtypes.append(inputs[0].dtype)
+    )
+
+    with torch.no_grad():
+        model(**_t2_inputs())
+    hook.remove()
+
+    assert seen_dtypes == [torch.bfloat16]
 
 
 def test_rope_inv_freq_has_no_synthesized_fallback(monkeypatch):
@@ -282,6 +357,25 @@ def test_block_adaln_rows_are_ordered_as_three_modalities_per_timestep():
     silu = torch.nn.functional.silu(torch.tensor([1.0, 10.0]))
     expected = torch.cat((silu[0] * torch.tensor([1.0, 2.0, 3.0]), silu[1] * torch.tensor([1.0, 2.0, 3.0])))
     torch.testing.assert_close(rows[:, 0], expected)
+
+
+def test_pruned_adaln_projects_curve_coordinates_without_silu():
+    projection = AdalnProj(
+        timestep_dim=2,
+        hidden_size=1,
+        expand=2,
+        modalities=1,
+        dtype=torch.float32,
+        apply_silu=False,
+    )
+    with torch.no_grad():
+        projection.linear.weight.copy_(torch.eye(2))
+        projection.linear.bias.zero_()
+
+    first, second = projection(torch.tensor([[-1.0, 2.0]]))
+
+    torch.testing.assert_close(first, torch.tensor([[-1.0]]))
+    torch.testing.assert_close(second, torch.tensor([[2.0]]))
 
 
 def test_final_layer_uses_direct_time_rows_without_modality_offsets():
