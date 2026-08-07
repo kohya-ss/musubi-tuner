@@ -31,6 +31,7 @@ import numpy as np
 import torch
 
 from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_safetensors_files
+from musubi_tuner.minimax_h3.comfy_quant_loader import checkpoint_has_comfy_quant, load_quantized_text_encoder
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
 
 
@@ -272,9 +273,19 @@ def load_h3_text_encoder(
         del model.language_model.norm
         return model
 
+    files = resolve_safetensors_files(checkpoint_path)
+    if checkpoint_has_comfy_quant(files):
+        return load_quantized_text_encoder(
+            factory,
+            files,
+            device=device,
+            dtype=dtype,
+            key_transform=normalize_h3_text_encoder_key,
+        )
+
     return load_safetensors_module(
         factory,
-        resolve_safetensors_files(checkpoint_path),
+        files,
         device=device,
         dtype=dtype,
         key_transform=normalize_h3_text_encoder_key,

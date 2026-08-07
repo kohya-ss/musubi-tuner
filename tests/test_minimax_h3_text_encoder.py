@@ -3,12 +3,19 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
+from safetensors.torch import save_file
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.media import H3AudioSource, H3Record, H3Reference
+from musubi_tuner.minimax_h3.comfy_quant_loader import (
+    _apply_convrot_inverse,
+    checkpoint_has_comfy_quant,
+    load_quantized_text_encoder,
+)
 from musubi_tuner.minimax_h3.text_encoder import (
     IMAGE_PLACEHOLDER,
     VIDEO_PLACEHOLDER,
@@ -19,7 +26,18 @@ from musubi_tuner.minimax_h3.text_encoder import (
     normalize_h3_text_encoder_key,
     validate_text_rows,
 )
-from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _text_cache_metadata
+from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _fit_size_to_max_pixels, _read_rgb_image, _text_cache_metadata, setup_parser
+
+
+class _TinyQuantModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.language_model = torch.nn.Module()
+        self.language_model.embed_tokens = torch.nn.Embedding(4, 3)
+        self.language_model.proj = torch.nn.Linear(3, 2, bias=True)
+
+    def forward(self, input_ids):
+        return self.language_model.proj(self.language_model.embed_tokens(input_ids))
 
 
 def _record(tmp_path: Path, references=()) -> H3Record:
@@ -164,6 +182,105 @@ def test_released_text_checkpoint_key_mapping_keeps_visual_tower_separate():
     assert normalize_h3_text_encoder_key("visual.patch_embed.proj.weight") == "visual.patch_embed.proj.weight"
 
 
+def test_comfy_quant_loader_reads_int8_tensorwise_checkpoint(tmp_path: Path):
+    checkpoint = tmp_path / "tiny_quant.safetensors"
+    quant_marker = torch.tensor(list(b'{"format":"int8_tensorwise"}'), dtype=torch.uint8)
+    embed_q = torch.tensor(
+        [
+            [1, -2, 3],
+            [4, 5, -6],
+            [7, -8, 9],
+            [-10, 11, 12],
+        ],
+        dtype=torch.int8,
+    )
+    embed_scale = torch.tensor([[0.5], [0.25], [0.125], [0.0625]], dtype=torch.float32)
+    linear_q = torch.tensor([[2, -4, 6], [-8, 10, 12]], dtype=torch.int8)
+    linear_scale = torch.tensor([[0.25], [0.125]], dtype=torch.float32)
+    bias = torch.tensor([0.5, -1.0], dtype=torch.float32)
+    save_file(
+        {
+            "model.embed_tokens.comfy_quant": quant_marker,
+            "model.embed_tokens.weight": embed_q,
+            "model.embed_tokens.weight_scale": embed_scale,
+            "model.proj.comfy_quant": quant_marker.clone(),
+            "model.proj.weight": linear_q,
+            "model.proj.weight_scale": linear_scale,
+            "model.proj.bias": bias,
+        },
+        checkpoint,
+    )
+
+    assert checkpoint_has_comfy_quant([checkpoint])
+
+    model = load_quantized_text_encoder(
+        _TinyQuantModel,
+        [checkpoint],
+        device="cpu",
+        dtype=torch.float32,
+        key_transform=normalize_h3_text_encoder_key,
+    )
+
+    input_ids = torch.tensor([[0, 3]], dtype=torch.long)
+    actual = model(input_ids)
+    expected_embed = embed_q.float() * embed_scale
+    expected_weight = linear_q.float() * linear_scale
+    expected = torch.nn.functional.linear(expected_embed[input_ids], expected_weight, bias)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_comfy_quant_loader_unrotates_int8_convrot_checkpoint(tmp_path: Path):
+    checkpoint = tmp_path / "tiny_convrot.safetensors"
+    layer_conf = torch.tensor(list(b'{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":4}'), dtype=torch.uint8)
+    embed_rot_q = torch.tensor(
+        [
+            [1, 2, 3, 4],
+            [-2, 1, -4, 3],
+            [1, -3, 5, -7],
+            [4, -3, 2, -1],
+        ],
+        dtype=torch.int8,
+    )
+    weight_rot_q = torch.tensor([[1, -2, 3, -4], [-3, 5, -7, 9]], dtype=torch.int8)
+    save_file(
+        {
+            "model.embed_tokens.comfy_quant": layer_conf,
+            "model.embed_tokens.weight": embed_rot_q,
+            "model.embed_tokens.weight_scale": torch.ones((4, 1), dtype=torch.float32),
+            "model.proj.comfy_quant": layer_conf.clone(),
+            "model.proj.weight": weight_rot_q,
+            "model.proj.weight_scale": torch.ones((2, 1), dtype=torch.float32),
+            "model.proj.bias": torch.zeros(2),
+        },
+        checkpoint,
+    )
+
+    class TinyConvRotModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = torch.nn.Module()
+            self.language_model.embed_tokens = torch.nn.Embedding(4, 4)
+            self.language_model.proj = torch.nn.Linear(4, 2, bias=True)
+
+        def forward(self, input_ids):
+            return self.language_model.proj(self.language_model.embed_tokens(input_ids))
+
+    model = load_quantized_text_encoder(
+        TinyConvRotModel,
+        [checkpoint],
+        device="cpu",
+        dtype=torch.float32,
+        key_transform=normalize_h3_text_encoder_key,
+    )
+
+    input_ids = torch.tensor([[0, 1]], dtype=torch.long)
+    actual = model(input_ids)
+    embed = _apply_convrot_inverse(embed_rot_q.float(), 4)
+    weight = _apply_convrot_inverse(weight_rot_q.float(), 4)
+    expected = torch.nn.functional.linear(embed[input_ids], weight)
+    torch.testing.assert_close(actual, expected)
+
+
 def test_text_cache_metadata_distinguishes_requested_storage_dtype():
     common = {
         "task": "t2va",
@@ -180,3 +297,34 @@ def test_text_cache_metadata_distinguishes_requested_storage_dtype():
     assert bf16["cache_dtype"] == "bf16"
     assert float32["cache_dtype"] == "float32"
     assert bf16 != float32
+
+
+def test_h3_text_visual_max_pixels_rounds_large_images_to_32_multiple(tmp_path: Path):
+    image_path = tmp_path / "large.png"
+    Image.new("RGB", (3000, 2000), (128, 64, 32)).save(image_path)
+
+    resized = _read_rgb_image(image_path, max_pixels=1024 * 1024)
+
+    assert resized.shape[1] % 32 == 0
+    assert resized.shape[0] % 32 == 0
+    assert resized.shape[1] * resized.shape[0] <= 1024 * 1024
+    assert resized.shape[:2] == (832, 1248)
+
+
+def test_h3_text_visual_max_pixels_can_be_disabled():
+    assert _fit_size_to_max_pixels(3000, 2000, 0) == (3000, 2000)
+
+
+def test_h3_text_encoder_cache_parser_defaults_to_one_megapixel_visual_cap():
+    args = setup_parser().parse_args(
+        [
+            "--dataset_config",
+            "dataset.toml",
+            "--task",
+            "fl2va",
+            "--text_encoder",
+            "encoder.safetensors",
+        ]
+    )
+
+    assert args.h3_text_visual_max_pixels == 1024 * 1024

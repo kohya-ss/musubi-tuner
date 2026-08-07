@@ -4,7 +4,7 @@
 
 Musubi Tuner supports MiniMax-H3 text-to-video-with-audio (T2VA), first/last-frame-to-video-with-audio (FL2VA), and reference-to-video-with-audio (Ref2VA) LoRA training and standalone generation.
 
-R1 follows the released MiniMax-H3 packing, Qwen3-VL conditioning, dual video/audio flow schedules, and two VAE layouts. It supports the published BF16 FL2VA and Ref2VA transformers. Quantized ConvRot, pruned AdaLN, and quantized text-encoder artifacts are deferred to R2.
+The MiniMax-H3 path follows the released packing, Qwen3-VL conditioning, dual video/audio flow schedules, and two VAE layouts. It supports the published BF16 FL2VA and Ref2VA transformers, plus experimental Comfy-Org quantized artifacts for local LoRA training.
 
 Read and accept the [MiniMax-H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) before downloading or using the weights.
 
@@ -12,7 +12,7 @@ Read and accept the [MiniMax-H3 Community License](https://huggingface.co/MiniMa
 
 Download the following files from [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
 
-| Component | R1 file |
+| Component | File |
 | --- | --- |
 | FL2VA and T2VA transformer | `diffusion_models/minimax_h3_fl2va_bf16.safetensors` |
 | Ref2VA transformer | `diffusion_models/minimax_h3_ref2va_bf16.safetensors` |
@@ -20,9 +20,19 @@ Download the following files from [Comfy-Org/MiniMax-H3](https://huggingface.co/
 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` |
 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` |
 
-T2VA uses the FL2VA transformer without first/last conditions. R1 rejects the INT8 ConvRot, pruned, FP8, and NVFP4/AWQ files rather than silently interpreting them as BF16.
+T2VA uses the FL2VA transformer without first/last conditions.
 
-The Qwen processor/config defaults to `Qwen/Qwen3-VL-32B-Instruct` and is downloaded by Transformers. Pass `--processor` when using a local copy.
+Experimental quantized checkpoints are also accepted when they use the Comfy-style quant metadata supported by Musubi:
+
+| Component | Experimental file |
+| --- | --- |
+| FL2VA and T2VA transformer | `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
+| Qwen3-VL-32B text encoder | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` |
+| Qwen3-VL-32B text encoder | `text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors` |
+
+The quantized transformer is dequantized/materialized to ordinary PyTorch modules during model loading so LoRA training does not dequantize every layer on every forward pass. The quantized text encoder is supported for text-cache creation. Keep these artifacts isolated from upstream Musubi licensing assumptions; the quant loader code is separated in `src/musubi_tuner/minimax_h3/comfy_quant_loader.py` with its own license header.
+
+The Qwen processor/config defaults to `Qwen/Qwen3-VL-32B-Instruct` and is downloaded by Transformers. Pass `--processor` when using a local copy. The text encoder cache format is the same for BF16 and supported quantized text encoders, so training consumes the generated cache normally.
 
 ## Implementation Provenance
 
@@ -61,6 +71,155 @@ source_fps = 24.0
 ```
 
 For a directory item such as `clip.mp4`, put the caption in `clip.txt`. Target audio is resolved in this order: the JSONL `audio_path` when JSONL is used, exactly one same-stem audio sidecar such as `clip.wav`, then the video's embedded audio stream, then an unsupervised silence placeholder.
+
+### FL2VA Image Training Modes
+
+MiniMax-H3 can also cache still-image training samples on the FL2VA base. These modes are intended for image-edit-like LoRA training, following the same H3-compatible frame grid used by short MiniMax-H3 single-frame workflows.
+
+Use `image_directory` for the output/target image and `control_directory` for the input condition image(s). Captions live next to the target images. Audio is always encoded as an unsupervised silence placeholder, so these LoRAs are video/image-supervised only.
+
+```toml
+[general]
+resolution = [768, 1344]
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = false
+
+[[datasets]]
+image_directory = "/data/h3-image/targets"
+control_directory = "/data/h3-image/inputs"
+cache_directory = "/data/h3-image/cache"
+caption_extension = ".txt"
+h3_image_frame_count = 5
+```
+
+File names are not fixed. For a target such as `pose front.png`, put the caption at `pose front.txt` and the controls at `pose front_0.png`, `pose front_1.png`. The same rule works for any basename; only the shared basename and numeric control suffix matter.
+
+Input image sizes may be mixed. With `enable_bucket = true`, target and control images are resized into a matching H3 bucket automatically, and H3 buckets are aligned to 32-pixel steps. `resolution` is the maximum bucket area, not a required exact source size.
+
+Text encoder caching also caps large H3 image-mode visuals before they are passed to Qwen3-VL. The default `--h3_text_visual_max_pixels 1048576` keeps the aspect ratio, rounds width/height down to 32-pixel multiples, and affects only the text encoder's temporary visual input; original files and latent-cache images are not rewritten. Use a smaller value such as `786432` for faster text caching, or `0` to disable this cap. Changing this value changes the text-cache metadata, so stale caches are rebuilt even with `--skip_existing`.
+
+The two supported still-image conditioning modes are:
+
+| Mode | Control files per sample | Target files per sample | Meaning |
+| --- | ---: | ---: | --- |
+| `first` | 1 | 1 or more | One input image is used as both FL2VA first and last conditions. |
+| `first_last` | 2 | 1 or more | First and end condition images are supplied separately. |
+
+For one-input/one-output training, place one matching control image for each target and cache with `--h3_image_mode first`. The same input latent is written as both FL2VA first and last conditions:
+
+```bash
+python minimax_h3_cache_latents.py \
+  --dataset_config /data/h3-image/dataset.toml \
+  --task fl2va \
+  --h3_image_mode first \
+  --h3_image_frame_count 5 \
+  --video_vae /models/minimax_h3_video_vae_fp16.safetensors \
+  --audio_vae /models/minimax_h3_audio_vae_fp32.safetensors \
+  --skip_existing
+```
+
+For two-input/one-output training, place two matching control images for each target and cache with `--h3_image_mode first_last`. They become the FL2VA first and last conditions:
+
+```bash
+python minimax_h3_cache_latents.py \
+  --dataset_config /data/h3-image/dataset.toml \
+  --task fl2va \
+  --h3_image_mode first_last \
+  --h3_image_frame_count 5 \
+  --video_vae /models/minimax_h3_video_vae_fp16.safetensors \
+  --audio_vae /models/minimax_h3_audio_vae_fp32.safetensors \
+  --skip_existing
+```
+
+Then cache text encoder outputs with the same image mode and frame count. The text encoder may be the BF16 file or a supported quantized Comfy-Org text encoder:
+
+```bash
+python minimax_h3_cache_text_encoder_outputs.py \
+  --dataset_config /data/h3-image/dataset.toml \
+  --task fl2va \
+  --h3_image_mode first \
+  --h3_image_frame_count 5 \
+  --text_encoder /models/qwen3vl_32b_minimax_h3_bf16.safetensors \
+  --h3_text_visual_max_pixels 1048576 \
+  --text_cache_dtype bf16 \
+  --skip_existing
+```
+
+`h3_image_frame_count` may be set in each image dataset block, so different image datasets can use different H3-compatible temporal lengths. The value must satisfy `frame_count = 17 * k + 5` with integer `k >= 0`; the minimum is `5`, and the next valid value is `22`. For still-image LoRA training, keep `5` unless you explicitly want the target image repeated across a longer H3-compatible frame grid. The CLI option `--h3_image_frame_count` overrides the TOML value for all image datasets. If source, condition images, or frame count change, rebuild caches without `--skip_existing`.
+
+To train against multiple output frames from the same input condition(s), enable the existing image-dataset `multiple_target` option. Two filename layouts are supported:
+
+- Unsuffixed base frame: `pose.png`, `pose_1.png`, `pose_2.png`, ...
+- Zero-indexed base frame: `pose_0.png`, `pose_1.png`, `pose_2.png`, ...
+
+The zero-indexed layout is useful when every output frame should have an explicit frame index. In that layout, keep captions and one-image controls unsuffixed: `pose.txt` and `control/pose.png` are matched to `image/pose_0.png`.
+
+```toml
+[[datasets]]
+image_directory = "/data/h3-image/targets"
+control_directory = "/data/h3-image/inputs"
+cache_directory = "/data/h3-image/cache"
+caption_extension = ".txt"
+h3_image_frame_count = 5
+multiple_target = true
+```
+
+Example for a 5-frame target sequence with an unsuffixed base frame:
+
+```text
+targets/pose.png
+targets/pose_1.png
+targets/pose_2.png
+targets/pose_3.png
+targets/pose_4.png
+targets/pose.txt
+```
+
+Example for a 5-frame target sequence with a zero-indexed base frame:
+
+```text
+targets/pose_0.png
+targets/pose_1.png
+targets/pose_2.png
+targets/pose_3.png
+targets/pose_4.png
+targets/pose.txt
+```
+
+For `first`, use one control image:
+
+```text
+inputs/pose.png
+```
+
+For `first_last`, use two control images:
+
+```text
+inputs/pose_0.png
+inputs/pose_1.png
+```
+
+For `h3_image_frame_count = 22`, provide up to 22 target frames using the same suffix order. If fewer target frames are present, the last target frame is repeated to fill the requested H3 frame count; if more are present, extras are ignored. Changing `multiple_target` or target frame files changes the latent content, so rebuild both latent and text caches without `--skip_existing`.
+
+Windows example for one-input image training:
+
+```bat
+python minimax_h3_cache_latents.py ^
+  --dataset_config "E:\AI\dataset\h3_image.toml" ^
+  --task fl2va ^
+  --h3_image_mode first ^
+  --video_vae "C:\ComfyUI\models\vae\minimax_h3_video_vae_fp16.safetensors" ^
+  --audio_vae "C:\ComfyUI\models\vae\minimax_h3_audio_vae_fp32.safetensors"
+
+python minimax_h3_cache_text_encoder_outputs.py ^
+  --dataset_config "E:\AI\dataset\h3_image.toml" ^
+  --task fl2va ^
+  --h3_image_mode first ^
+  --text_encoder "C:\ComfyUI\models\text_encoders\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" ^
+  --h3_text_visual_max_pixels 1048576 ^
+  --text_cache_dtype bf16
+```
 
 Ref2VA requires `video_jsonl_file`:
 
@@ -149,6 +308,33 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 minimax
   --output_name h3-lora
 ```
 
+On Windows with the Comfy-Org quantized FL2VA transformer, the command is the same except for paths and the attention backend:
+
+```bat
+accelerate launch ^
+--num_cpu_threads_per_process 1 ^
+--mixed_precision bf16 ^
+minimax_h3_train_network.py ^
+--dataset_config "E:\AI\dataset\h3_image.toml" ^
+--task fl2va ^
+--dit "C:\ComfyUI\models\diffusion_models\minimax_h3_fl2va_pruned_int8_convrot.safetensors" ^
+--network_module networks.lora_minimax_h3 ^
+--network_dim 16 ^
+--network_alpha 16 ^
+--mixed_precision bf16 ^
+--gradient_checkpointing ^
+--blocks_to_swap 48 ^
+--xformers ^
+--optimizer_type adamw8bit ^
+--learning_rate 1e-4 ^
+--max_train_epochs 20 ^
+--save_every_n_epochs 1 ^
+--output_dir "E:\AI\dataset\output" ^
+--output_name h3-lora
+```
+
+One of `--sdpa`, `--xformers`, `--flash-attn`, `--flash3`, or `--sage-attn` must be selected. For training, `--sdpa` is the safest baseline. `--xformers` can reduce memory or improve speed when a working xFormers build is available. On Blackwell/RTX 50-series Windows systems, xFormers may require a local build and a backend that accepts compute capability 12.0; if xFormers reports a dtype mismatch, update to a version of this branch that aligns Q/K/V dtypes before dispatch.
+
 The default LoRA targets only `attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, and `mlp.fc2` in the 50 main DiT blocks. Every sample contributes `mean(video_mse)`. A sample with real target audio additionally contributes `mean(audio_mse)` at equal per-sample coefficient; a missing-audio or video-only sample contributes no audio MSE. With `batch_size=1` and gradient accumulation, the expected run-level audio coefficient is therefore the supervised-audio sample fraction, not always one. This fraction is not a uniform per-step scale: at low values, most optimizer steps receive no audio gradient and occasional steps receive the full audio term. Training does not renormalize by the fraction, because doing so would amplify a small supervised subset.
 
 The trainer logs this value as `supervised_audio_fraction` and saves it as `ss_minimax_h3_supervised_audio_fraction`. It also records `ss_minimax_h3_loss_policy=video_mean_plus_optional_audio_mean` and `ss_minimax_h3_audio_supervision=per_sample_binary_cache_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
@@ -231,6 +417,35 @@ For FL2VA, keep the FL2VA base and replace the task inputs:
 --task fl2va --prompt "..." --first_frame first.png --last_frame last.png
 ```
 
+For still-image inference with an image-trained FL2VA LoRA, use the same image mode used for caching/training. `first` takes one input image and internally uses it as both FL2VA conditions; `first_last` takes separate first and last condition images. PNG/JPEG/WebP outputs decode only video and save one selected frame, so the generated audio latent is discarded.
+
+```bash
+python minimax_h3_generate_video.py \
+  --task fl2va \
+  --h3_image_mode first \
+  --dit /models/minimax_h3_fl2va_bf16.safetensors \
+  --video_vae /models/minimax_h3_video_vae_fp16.safetensors \
+  --audio_vae /models/minimax_h3_audio_vae_fp32.safetensors \
+  --text_encoder /models/qwen3vl_32b_minimax_h3_bf16.safetensors \
+  --lora_weight /data/h3-image/output/h3-image-lora.safetensors \
+  --prompt "..." \
+  --first_frame input.png \
+  --width 768 \
+  --height 1344 \
+  --steps 30 \
+  --seed 42 \
+  --blocks_to_swap 48 \
+  --output output.png
+```
+
+For two-condition still-image inference:
+
+```text
+--h3_image_mode first_last --first_frame first.png --last_frame end.png --output output.png
+```
+
+`--frame_count` defaults to `5` in image mode. Increase it only if the LoRA was trained with a longer H3-compatible image frame count. `--h3_select_frame` selects which decoded frame is saved for image outputs and defaults to `0`.
+
 For Ref2VA, use the Ref2VA BF16 base and an ordered JSONL record:
 
 ```text
@@ -243,12 +458,13 @@ T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. T
 
 The native sampler builds one common base grid, derives independent shifted video and audio sigma grids, and advances each modality with its own finite sigma interval. It does not apply CFG, negate the model heads, or apply ComfyUI's single-sampler audio slope adapter. Musubi also adds condition noise before packing, while ComfyUI adds it after packing; the distributions agree but RNG placement does not. These two intentional differences mean the same seed is not bitwise reproducible against ComfyUI. Video and audio are decoded sequentially, trimmed to a common duration, and muxed with PyAV as H.264 plus AAC.
 
-## R1 Limitations
+## Limitations
 
-- BF16 FL2VA/Ref2VA transformer bases only.
-- BF16 Qwen3-VL text encoder only.
-- No ConvRot INT8, pruned AdaLN, FP8, or NVFP4/AWQ artifact loading.
+- BF16 FL2VA/Ref2VA transformer bases are the reference path. The Comfy-Org FL2VA INT8 ConvRot/pruned transformer is supported experimentally for LoRA training.
+- BF16 Qwen3-VL text encoder is the reference path. Comfy-Org NVFP4/AWQ and INT8 ConvRot text encoders are supported experimentally for text-cache creation.
+- Other FP8/quantized formats outside the supported Comfy metadata are not supported.
 - No CFG or negative prompt.
 - No numbered reference-directory convention.
 - Dataset `batch_size` is fixed to 1; use gradient accumulation for larger effective batches.
 - No padded multi-sample packed layouts.
+- Image training uses dummy/unsupervised target audio. It can affect audio behavior because MiniMax-H3 is a joint video/audio transformer; image-only LoRAs should be treated as unconstrained for audio output.

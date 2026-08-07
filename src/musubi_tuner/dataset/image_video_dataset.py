@@ -231,6 +231,9 @@ class BaseDataset(torch.utils.data.Dataset):
                 for future in completed_futures:
                     item_key, caption = future.result()
                     item_info = ItemInfo(item_key, caption, (0, 0), (0, 0))
+                    h3_image_frame_count = getattr(self, "h3_image_frame_count", None)
+                    if h3_image_frame_count is not None:
+                        item_info.h3_image_frame_count = h3_image_frame_count
                     item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
                     data.append(item_info)
 
@@ -281,6 +284,7 @@ class ImageDataset(BaseDataset):
         control_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
         multiple_target: bool = False,
+        h3_image_frame_count: Optional[int] = None,
         fp_latent_window_size: Optional[int] = 9,
         fp_1f_clean_indices: Optional[list[int]] = None,
         fp_1f_target_index: Optional[int] = None,
@@ -305,6 +309,7 @@ class ImageDataset(BaseDataset):
         self.image_jsonl_file = image_jsonl_file
         self.control_directory = control_directory
         self.multiple_target = multiple_target
+        self.h3_image_frame_count = h3_image_frame_count
         self.fp_latent_window_size = fp_latent_window_size
         self.fp_1f_clean_indices = fp_1f_clean_indices
         self.fp_1f_target_index = fp_1f_target_index
@@ -330,6 +335,8 @@ class ImageDataset(BaseDataset):
             control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_HIDREAM_O1:
             control_count_per_image = None  # can be multiple control/reference images
+        elif self.architecture == ARCHITECTURE_MINIMAX_H3:
+            control_count_per_image = None  # first-frame or first/last-frame image conditioning
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
@@ -388,6 +395,8 @@ class ImageDataset(BaseDataset):
                     item_info = ItemInfo(
                         item_key, caption, original_size, bucket_reso, content=image if len(images) == 1 else images
                     )
+                    if self.h3_image_frame_count is not None:
+                        item_info.h3_image_frame_count = self.h3_image_frame_count
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
 
                     # for VLM, which require image in addition to text, like Qwen-Image-Edit
@@ -519,13 +528,23 @@ class ImageDataset(BaseDataset):
             image_width, image_height = map(int, image_size.split("x"))
             image_size = (image_width, image_height)
 
-            item_key = "_".join(tokens[:-2])
-            text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
+            if self.architecture == ARCHITECTURE_MINIMAX_H3:
+                frame_pos, frame_count = tokens[-3].split("-")[:2]
+                frame_count = int(frame_count)
+                item_key = "_".join(tokens[:-3])
+                text_item_key = f"{item_key}_{tokens[-3]}"
+            else:
+                frame_count = None
+                item_key = "_".join(tokens[:-2])
+                text_item_key = item_key
+            text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{text_item_key}_{self.architecture}_te.safetensors")
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue
 
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
+            if self.architecture == ARCHITECTURE_MINIMAX_H3:
+                bucket_reso = (*bucket_reso, frame_count)
 
             if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
                 # we need to split the bucket with latent window size and optional 1f clean indices, zero post
@@ -548,7 +567,7 @@ class ImageDataset(BaseDataset):
                 control_shapes = [remove_dtype_suffix(key) for key in control_keys]
                 bucket_reso = tuple(list(bucket_reso) + control_shapes)
 
-            item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
+            item_info = ItemInfo(item_key, "", image_size, bucket_reso, frame_count=frame_count, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
 
             bucket = bucketed_item_info.get(bucket_reso, [])

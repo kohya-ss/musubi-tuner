@@ -48,6 +48,7 @@ class ImageDatasetParams(BaseDatasetParams):
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
     multiple_target: Optional[bool] = False
+    h3_image_frame_count: Optional[int] = None
 
     # FramePack dependent parameters
     fp_latent_window_size: Optional[int] = 9
@@ -123,6 +124,7 @@ class ConfigSanitizer:
         "cache_directory": str,
         "control_directory": str,
         "multiple_target": bool,
+        "h3_image_frame_count": int,
         "fp_latent_window_size": int,
         "fp_1f_clean_indices": [int],
         "fp_1f_target_index": int,
@@ -318,6 +320,7 @@ def generate_dataset_group_by_blueprint(
         image_jsonl_file: "{dataset.image_jsonl_file}"
         control_directory: "{dataset.control_directory}"
         multiple_target: {dataset.multiple_target}
+        h3_image_frame_count: {dataset.h3_image_frame_count}
         fp_latent_window_size: {dataset.fp_latent_window_size}
         fp_1f_clean_indices: {dataset.fp_1f_clean_indices}
         fp_1f_target_index: {dataset.fp_1f_target_index}

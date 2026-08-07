@@ -23,17 +23,23 @@ import json
 import math
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from safetensors import safe_open
 
 from musubi_tuner.minimax_h3.checkpoint import (
     load_safetensors_metadata,
     load_safetensors_module,
     resolve_safetensors_files,
+)
+from musubi_tuner.minimax_h3.comfy_quant_loader import (
+    checkpoint_has_comfy_quant,
+    interpolate_adaln_curve,
+    load_quantized_module,
 )
 from musubi_tuner.minimax_h3.packing import (
     AUDIO_CHANNELS,
@@ -72,6 +78,7 @@ class MiniMaxH3Config:
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5
+    adaln_curve_grid: int | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -100,6 +107,8 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 timestep input width must be even")
         if self.rope_inv_freq_len * 6 > self.attention_head_dim:
             raise ValueError("MiniMax-H3 rotary width exceeds the attention head width")
+        if self.adaln_curve_grid is not None and self.adaln_curve_grid < 2:
+            raise ValueError("MiniMax-H3 AdaLN curve grid must have at least two rows")
 
     @property
     def attention_inner_dim(self) -> int:
@@ -142,12 +151,14 @@ _PUBLISHED_CONFIG_FIELDS = {
 }
 
 
-def parse_h3_transformer_config(metadata: Mapping[str, str]) -> MiniMaxH3Config:
+def parse_h3_transformer_config(metadata: Mapping[str, str], *, allow_quantized_without_metadata: bool = False) -> MiniMaxH3Config:
     artifact_markers = " ".join(f"{key}={value}" for key, value in metadata.items() if key != "config").lower()
     if any(marker in artifact_markers for marker in ("convrot", "int8", "fp8", "quantized")):
         raise ValueError("Quantized or ConvRot MiniMax-H3 artifacts are deferred to R2")
     raw_config = metadata.get("config")
     if raw_config is None:
+        if allow_quantized_without_metadata:
+            return MiniMaxH3Config()
         raise ValueError("MiniMax-H3 transformer checkpoint is missing config metadata")
     try:
         root = json.loads(raw_config)
@@ -165,6 +176,22 @@ def parse_h3_transformer_config(metadata: Mapping[str, str]) -> MiniMaxH3Config:
     if transformer.get("adaln_curve_grid") is not None:
         raise ValueError("Pruned MiniMax-H3 AdaLN artifacts are deferred to R2")
     return MiniMaxH3Config()
+
+
+def _detect_adaln_curve(files: Sequence[str | Path]) -> tuple[int, int] | None:
+    found = None
+    for path in files:
+        with safe_open(str(path), framework="pt", device="cpu") as handle:
+            if "adaln_t_table" not in handle.keys():
+                continue
+            shape = handle.get_slice("adaln_t_table").get_shape()
+            if len(shape) != 2:
+                raise ValueError(f"MiniMax-H3 adaln_t_table must be [N,K], got {tuple(shape)}")
+            curve = (int(shape[0]), int(shape[1]))
+            if found is not None and found != curve:
+                raise ValueError("MiniMax-H3 checkpoint has conflicting adaln_t_table shapes")
+            found = curve
+    return found
 
 
 class TimeEmbedder(nn.Module):
@@ -198,12 +225,14 @@ class AdalnProj(nn.Module):
         modalities: int,
         *,
         dtype: torch.dtype,
+        apply_silu: bool = True,
         device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
         self.expand = expand
         self.modalities = modalities
         self.hidden_size = hidden_size
+        self.apply_silu = apply_silu
         self.linear = nn.Linear(
             timestep_dim,
             expand * hidden_size * modalities,
@@ -212,7 +241,9 @@ class AdalnProj(nn.Module):
         )
 
     def forward(self, timestep_embeddings: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        projected = self.linear(F.silu(timestep_embeddings))
+        if self.apply_silu:
+            timestep_embeddings = F.silu(timestep_embeddings)
+        projected = self.linear(timestep_embeddings)
         projected = projected.reshape(projected.shape[0] * self.modalities, self.expand * self.hidden_size)
         return projected.chunk(self.expand, dim=-1)
 
@@ -380,6 +411,7 @@ class DiTBlock(nn.Module):
             expand=6,
             modalities=3,
             dtype=dtype,
+            apply_silu=config.adaln_curve_grid is None,
             device=device,
         )
 
@@ -412,6 +444,7 @@ class FinalLayer(nn.Module):
         *,
         norm_eps: float = 1e-5,
         dtype: torch.dtype,
+        apply_silu: bool = True,
         device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
@@ -422,6 +455,7 @@ class FinalLayer(nn.Module):
             expand=2,
             modalities=1,
             dtype=dtype,
+            apply_silu=apply_silu,
             device=device,
         )
         self.video_out = nn.Linear(hidden_size, video_output_dim, dtype=torch.float32, device=device)
@@ -470,12 +504,18 @@ class MiniMaxH3Model(nn.Module):
         self.video_patch_proj = nn.Linear(config.video_patch_dim, config.hidden_size, dtype=torch.float32, device=device)
         self.audio_patch_proj = nn.Linear(config.audio_in_channels, config.hidden_size, dtype=torch.float32, device=device)
         self.condition_proj = nn.Linear(config.text_dim, config.hidden_size, dtype=dtype, device=device)
-        self.time_embedder = TimeEmbedder(
-            config.timestep_input_dim,
-            config.time_embed_hidden_size,
-            config.time_embed_dim,
-            device=device,
-        )
+        if config.adaln_curve_grid is None:
+            self.time_embedder = TimeEmbedder(
+                config.timestep_input_dim,
+                config.time_embed_hidden_size,
+                config.time_embed_dim,
+                device=device,
+            )
+        else:
+            self.register_buffer(
+                "adaln_t_table",
+                torch.empty(config.adaln_curve_grid, config.time_embed_dim, dtype=torch.float32, device=device),
+            )
         self.rope = nn.Module()
         inv_freq = torch.empty(config.rope_inv_freq_len, dtype=torch.float32, device=device)
         self.rope.register_buffer("inv_freq", inv_freq)
@@ -499,6 +539,7 @@ class MiniMaxH3Model(nn.Module):
             config.audio_in_channels,
             norm_eps=config.final_norm_eps,
             dtype=dtype,
+            apply_silu=config.adaln_curve_grid is None,
             device=device,
         )
 
@@ -508,6 +549,11 @@ class MiniMaxH3Model(nn.Module):
         self.offloader = None
         self._execution_device = torch.device(device) if device is not None else None
         self._rotary_cache: OrderedDict[tuple[H3PackedLayout, torch.device, torch.dtype], torch.Tensor] = OrderedDict()
+
+    def _timestep_embeddings(self, timesteps: torch.Tensor) -> torch.Tensor:
+        if hasattr(self, "adaln_t_table"):
+            return interpolate_adaln_curve(self.adaln_t_table.to(device=timesteps.device), timesteps)
+        return self.time_embedder(timesteps)
 
     def _apply(self, fn, recurse: bool = True):
         result = super()._apply(fn, recurse=recurse)
@@ -788,7 +834,7 @@ class MiniMaxH3Model(nn.Module):
             visual_condition_clean=visual_condition_clean,
             audio_condition_clean=audio_condition_clean,
         )
-        timestep_embeddings = self.time_embedder(timestep_rows.unique_timesteps.to(execution_device)).to(self.dtype)
+        timestep_embeddings = self._timestep_embeddings(timestep_rows.unique_timesteps.to(execution_device)).to(self.dtype)
         rotation_table = self._cached_rotation_table(
             layout,
             device=execution_device,
@@ -845,7 +891,20 @@ def load_h3_transformer(
     if dtype != torch.bfloat16:
         raise ValueError("MiniMax-H3 R1 accepts only BF16 transformer checkpoints")
     files = resolve_safetensors_files(checkpoint_path)
-    config = parse_h3_transformer_config(load_safetensors_metadata(files))
+    has_comfy_quant = checkpoint_has_comfy_quant(files)
+    config = parse_h3_transformer_config(load_safetensors_metadata(files), allow_quantized_without_metadata=has_comfy_quant)
+    adaln_curve = _detect_adaln_curve(files)
+    if adaln_curve is not None:
+        config = replace(config, adaln_curve_grid=adaln_curve[0], time_embed_dim=adaln_curve[1])
+    if has_comfy_quant:
+        return load_quantized_module(
+            lambda: MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=dtype),
+            files,
+            device=device,
+            dtype=dtype,
+            key_transform=lambda key: key,
+            materialize_quantized=True,
+        )
     return load_safetensors_module(
         lambda: MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=dtype),
         files,

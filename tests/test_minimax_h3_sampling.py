@@ -23,6 +23,7 @@ from musubi_tuner.minimax_h3.sampling import (
 from musubi_tuner.minimax_h3_generate_video import (
     load_cached_text_conditioning,
     run_generation,
+    save_selected_frame,
     validate_generation_args,
 )
 
@@ -259,6 +260,8 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "h3_shift_audio": 3.0,
         "h3_visual_cond_clean": 0.999,
         "h3_audio_cond_clean": 1.0,
+        "h3_image_mode": "none",
+        "h3_select_frame": 0,
         "lora_weight": None,
         "lora_multiplier": None,
     }
@@ -283,6 +286,67 @@ def test_generation_validation_enforces_task_inputs_and_block_swap_range(tmp_pat
         validate_generation_args(_generation_args(tmp_path, task="ref2va"))
     with pytest.raises(ValueError, match="blocks_to_swap"):
         validate_generation_args(_generation_args(tmp_path, blocks_to_swap=49))
+
+
+def test_generation_validation_normalizes_first_image_mode(tmp_path):
+    first = tmp_path / "first.png"
+    first.touch()
+    args = _generation_args(
+        tmp_path,
+        task="fl2va",
+        first_frame=str(first),
+        frame_count=None,
+        output=str(tmp_path / "result.png"),
+        h3_image_mode="first",
+    )
+
+    validate_generation_args(args)
+
+    assert args.frame_count == 5
+    assert args.last_frame == str(first)
+    assert args.allow_experimental_duration is True
+
+
+def test_generation_validation_enforces_image_mode_contract(tmp_path):
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.touch()
+    last.touch()
+
+    with pytest.raises(ValueError, match="does not accept --last_frame"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                task="fl2va",
+                first_frame=str(first),
+                last_frame=str(last),
+                output=str(tmp_path / "result.png"),
+                h3_image_mode="first",
+            )
+        )
+    with pytest.raises(ValueError, match="last_frame"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                task="fl2va",
+                first_frame=str(first),
+                last_frame=None,
+                output=str(tmp_path / "result.png"),
+                h3_image_mode="first_last",
+            )
+        )
+    with pytest.raises(ValueError, match=r"\.mp4"):
+        validate_generation_args(_generation_args(tmp_path, output=str(tmp_path / "result.png")))
+
+
+def test_save_selected_frame_clamps_and_writes_image(tmp_path):
+    video = torch.zeros(2, 4, 4, 3, dtype=torch.uint8)
+    video[1, :, :, 0] = 255
+    output = tmp_path / "frame.png"
+
+    save_selected_frame(video, output, 99)
+
+    assert output.exists()
 
 
 def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):
@@ -445,3 +509,91 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     assert captured["decoded"].video.shape == (5, 4, 4, 3)
     assert captured["decoded"].audio.shape == (2, 6667)
     assert captured["output"] == args.output
+
+
+def test_generation_orchestrates_image_output_without_audio_decode(tmp_path, monkeypatch):
+    import musubi_tuner.minimax_h3_generate_video as generate
+
+    first = tmp_path / "first.png"
+    first.touch()
+    args = _generation_args(
+        tmp_path,
+        task="fl2va",
+        first_frame=str(first),
+        frame_count=None,
+        output=str(tmp_path / "result.png"),
+        h3_image_mode="first",
+        device="cpu",
+        attn_mode="torch",
+        split_attn=False,
+        use_pinned_memory_for_block_swap=False,
+        include_patterns=None,
+        exclude_patterns=None,
+        disable_numpy_memmap=False,
+        processor_revision=None,
+    )
+    events = []
+
+    class Transformer:
+        offloader = None
+
+        def to(self, device):
+            events.append(("transformer", str(device)))
+            return self
+
+        def eval(self):
+            return self
+
+        def requires_grad_(self, value):
+            assert value is False
+            return self
+
+        def __call__(self, **kwargs):
+            return SimpleNamespace(
+                video=torch.zeros_like(kwargs["video_latents"]),
+                audio=torch.zeros_like(kwargs["audio_latents"]),
+            )
+
+    class VideoVAE:
+        vae_ratio = 16
+
+        def decode(self, latents):
+            events.append(("decode_video", tuple(latents.shape)))
+            return torch.zeros(1, 3, 5, 4, 4)
+
+    monkeypatch.setattr(
+        generate,
+        "decode_generation_visuals",
+        lambda *unused: ({"first": torch.zeros(1, 64, 64, 3), "last": torch.zeros(1, 64, 64, 3)}, {}),
+    )
+    monkeypatch.setattr(
+        generate,
+        "encode_visual_conditions",
+        lambda *unused: ((torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4)), (H3VideoGeometry(1, 4, 4), H3VideoGeometry(1, 4, 4)), {}),
+    )
+    monkeypatch.setattr(
+        generate,
+        "_encode_text",
+        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(3, dtype=torch.int64)),
+    )
+    monkeypatch.setattr(generate, "load_h3_transformer", lambda *unused, **kwargs: Transformer())
+    monkeypatch.setattr(
+        generate,
+        "load_video_vae",
+        lambda *unused, **kwargs: events.append(("load_video_vae", str(kwargs["device"]), kwargs["dtype"])) or VideoVAE(),
+    )
+    monkeypatch.setattr(generate, "load_audio_vae", lambda *unused, **kwargs: pytest.fail("audio VAE should not decode image output"))
+    captured = {}
+    monkeypatch.setattr(
+        generate,
+        "save_selected_frame",
+        lambda decoded_video, output, frame: captured.update(video=decoded_video, output=output, frame=frame),
+    )
+
+    output = run_generation(args)
+
+    assert output == Path(args.output)
+    assert [event[0] for event in events] == ["load_video_vae", "transformer", "load_video_vae", "decode_video"]
+    assert captured["video"].shape == (5, 4, 4, 3)
+    assert captured["output"] == args.output
+    assert captured["frame"] == 0
