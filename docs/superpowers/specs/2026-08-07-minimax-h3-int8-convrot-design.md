@@ -130,6 +130,8 @@ final_layer.adaln_proj.linear.bias    F16 [10752]
 
 These files omit the standard `time_embedder.*` tensors and may omit config metadata. The loader therefore derives pruned mode from `adaln_t_table`, then validates all other released dimensions from tensor shapes. It does not infer arbitrary H3 variants.
 
+The released F16 AdaLN tensors are storage inputs, not a request to change MiniMax-H3's BF16 compute contract. The selective loader converts them to the model's requested BF16 destination dtype. It preserves `adaln_t_table`, patch/output projections, rotary state, and ConvRot scales as FP32.
+
 ### 5.4 Qwen3-VL text encoder
 
 The text encoder contains 350 quantized language-model Linears across the retained 50 layers:
@@ -179,7 +181,7 @@ Loading follows this order:
 5. Prepare all declared INT8 Linear modules before computing the expected state dict.
 6. Stream weight and scale tensors shard by shard with `assign=True`; scales and control tensors are excluded from the general floating-point cast policy.
 7. Mark validated `.comfy_quant` keys as consumed control data without registering them as model buffers.
-8. Apply the existing missing, unexpected, shape, and dtype checks to every model tensor.
+8. Apply missing, unexpected, and shape checks to every model tensor, the caller's existing strict-dtype policy where requested, and mandatory source-dtype checks to every declared quantized triple.
 9. Move the populated model to its requested loading device and set evaluation mode.
 
 The loader keeps three distinct accounting sets:
@@ -188,13 +190,17 @@ The loader keeps three distinct accounting sets:
 - `loaded_model_keys` drives missing-model-key checks.
 - `consumed_control_keys` records only control keys declared by the inspected artifact.
 
-This prevents a control key from becoming an unexpected model key without losing duplicate detection. Strict dtype checking understands the inspected INT8 layers and checks source dtype for fixed-precision islands. `load_h3_text_encoder` enables strict dtype checking. Its FP32 scales must match an FP32 destination buffer and remain bit-for-bit unchanged; `dtype=torch.bfloat16` applies only to eligible floating model tensors, not `scale_weight`.
+This prevents a control key from becoming an unexpected model key without losing duplicate detection. Quantized artifact validation is key-specific: declared weights must be INT8, external scales FP32, and controls U8 regardless of the caller's general `strict_dtype` setting. An FP32 scale must match its FP32 destination buffer and remain bit-for-bit unchanged; the requested model `dtype` applies only to eligible floating model tensors, not `scale_weight`.
+
+`load_h3_text_encoder` deliberately keeps global `strict_dtype=False`. Its direct `Qwen3VLModel(config)` factory creates FP32 meta parameters, while released ordinary floating islands are BF16 and are intentionally loaded at the requested compute dtype. Enabling the current global strict comparison would reject those valid tensors before conversion. Scale safety therefore comes from the mandatory per-key ConvRot dtype rule and cast exclusion, not from global strictness.
+
+The pruned transformer also requires selective conversion rather than blanket strictness: its released AdaLN parameters are F16, its normal compute parameters are BF16, and its table, patch/output projections, rotary state, and ConvRot scales are FP32. The inspected ConvRot path validates exact I8/F32/U8 triples, converts eligible F16/BF16 compute parameters to the destination BF16 dtype, and preserves declared FP32 islands. The existing strict path for an unquantized full BF16 transformer remains unchanged.
 
 ## 8. Pruned AdaLN Runtime
 
 `MiniMaxH3Config` gains an optional `adaln_curve_grid`. Standard models keep `time_embed_dim=2688` and construct `TimeEmbedder`. Pruned models use `time_embed_dim=8`, register `adaln_t_table`, omit `TimeEmbedder`, and construct 8-input AdaLN projections.
 
-For each unique timestep `t` in `[0, 1]`, the pruned path computes:
+For each unique timestep `t` in `[0, 1]`, the pruned path receives a one-dimensional `[num_unique]` tensor and computes:
 
 ```python
 t_fp32 = t.to(device=table.device, dtype=torch.float32)
@@ -209,13 +215,15 @@ timestep_embedding = torch.lerp(
 )
 ```
 
-The whole coordinate calculation and interpolation stay FP32 even when the caller supplies BF16 timesteps. Computing `t * 1024` in BF16 rounds many interior positions to integers and silently degrades interpolation to table lookup. Standard AdaLN continues to apply SiLU inside `AdalnProj`. Pruned AdaLN consumes the interpolated curve coordinate directly and skips that SiLU. Both endpoints and non-grid interior positions are part of the numerical contract.
+The production path preserves `unique_timesteps` as FP32 from packing through this interpolation. The explicit promotion is defensive and prevents additional precision loss during multiplication and `lerp`, but it cannot recover information already lost if a caller supplies BF16. For many BF16 values, multiplying the represented value by 1024 lands exactly on a table index, so nearest-neighbor-like behavior is expected rather than treated as FP32-equivalent interpolation. Standard AdaLN continues to apply SiLU inside `AdalnProj`. Pruned AdaLN consumes the interpolated curve coordinate directly and skips that SiLU. Both endpoints and FP32 non-grid interior positions are part of the numerical contract.
 
 ## 9. Runtime Integration
 
 ### 9.1 Transformer training
 
 `load_h3_transformer` automatically detects and prepares ConvRot files. The trainer no longer rejects a non-BF16 source artifact when it has a valid inspected ConvRot contract. Floating-point activations and the LoRA branch remain BF16.
+
+For a pruned artifact, F16 AdaLN source storage is converted once to BF16 during loading. FP32 table, patch/output projection, rotary, and scale tensors bypass that conversion. This avoids both mixed F16/BF16 Linear execution and accidental narrowing of fixed-precision state.
 
 Add `--convrot_int8_bwd {bf16,int8}` with default `bf16`:
 
@@ -238,7 +246,7 @@ Training-time scheduled samples already execute through the attached training ne
 
 ### 9.4 Text encoder
 
-`load_h3_text_encoder` applies the artifact adapter after the existing Qwen config truncation and layer-50 final-norm removal. INT8 is accepted only for valid ConvRot triples, `strict_dtype=True` is required, and every `scale_weight` remains FP32 even though ordinary eligible model tensors load at BF16. The encoder remains frozen and evaluation-only, so no text-encoder backward mode is exposed.
+`load_h3_text_encoder` applies the artifact adapter after the existing Qwen config truncation and layer-50 final-norm removal. INT8 is accepted only for valid ConvRot triples. Global `strict_dtype` stays disabled because the direct Transformers factory has FP32 meta tensors; the adapter instead enforces INT8/F32/U8 source dtypes for every declared triple. Every `scale_weight` bypasses the general cast and remains FP32 while ordinary eligible model tensors load at the requested dtype, BF16 by default. The encoder remains frozen and evaluation-only, so no text-encoder backward mode is exposed.
 
 Text cache and direct prompt encoding share this loader. No cache format changes are needed because cached hidden states remain BF16.
 
@@ -296,7 +304,10 @@ Use tiny model configs and synthetic safetensors files to cover:
 - Automatic full INT8 detection without a CLI format flag.
 - Automatic pruned INT8 detection without config metadata.
 - Standard and curve AdaLN construction.
-- Curve interpolation at both endpoints and non-grid interior positions when input timesteps are FP32 and BF16; both must match the FP32 reference and differ from nearest-neighbor lookup.
+- Pruned F16 AdaLN source parameters load as BF16 compute parameters while the curve table and other declared FP32 islands remain FP32.
+- FP32 curve interpolation at both endpoints and non-grid interior positions; interior results must match the interpolation reference and differ from nearest-neighbor lookup.
+- Timestep packing produces a one-dimensional FP32 tensor, and the pruned path receives it without dtype narrowing.
+- Defensive BF16 input does not raise and matches a reference computed from the already-rounded `t_bf16.float()` values; it is not required to differ from nearest-neighbor lookup.
 - Per-layer group size propagation, including a group-64 AdaLN layer.
 - Forward and LoRA backward through a patched main block.
 - Scale buffers remaining on the execution device while block weights swap.
@@ -309,8 +320,10 @@ Use tiny model configs and synthetic safetensors files to cover:
 Patch the Transformers factory with a tiny Qwen-shaped module and verify:
 
 - `model.*` keys normalize to `language_model.*` for all sibling tensors.
-- Mixed quantized and floating layers load strictly.
+- Mixed quantized and floating layers load under the selective dtype policy: quantized triples are exact while ordinary floating islands convert to the requested compute dtype.
+- The existing BF16 text encoder loads through the FP32-meta factory with global strict dtype checking disabled.
 - FP32 scale values survive `dtype=torch.bfloat16` loading unchanged.
+- A non-FP32 ConvRot scale is rejected before assignment even though global strict dtype checking is disabled.
 - The patched Linears execute during layer-50 extraction.
 - Text cache and direct encoding entry points accept the artifact automatically.
 
@@ -346,6 +359,8 @@ Remove the R1 statements that all quantized and pruned artifacts are deferred.
 - All five released INT8 ConvRot files in scope classify from content without filename checks: full and pruned FL2VA/Ref2VA transformers plus the Qwen3-VL text encoder.
 - Full transformers patch 250 declared Linear layers with their per-layer group sizes.
 - Pruned transformers patch 200 declared Linear layers and use `[1025, 8]` curve interpolation.
+- Production pruned timesteps remain one-dimensional FP32 values through interpolation.
+- Pruned F16 AdaLN storage converts to BF16 while all declared FP32 transformer islands remain FP32.
 - The text encoder patches 350 declared language-model Linears.
 - BF16 transformer and text-encoder tests remain unchanged in behavior.
 - LoRA gradients reach trainable adapter parameters over an INT8 base.
