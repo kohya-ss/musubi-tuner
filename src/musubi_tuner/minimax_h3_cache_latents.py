@@ -416,6 +416,18 @@ def configure_h3_image_item(item: ItemInfo, frame_count: int) -> None:
         item.item_key = str(path.with_name(f"{path.stem}_00000-{frame_count:03d}{path.suffix}"))
 
 
+def _resample_image_target_frames(frames: list[torch.Tensor], frame_count: int) -> list[torch.Tensor]:
+    if len(frames) == frame_count:
+        return frames
+    if len(frames) == 1:
+        return [frames[0]] * frame_count
+    if frame_count == 1:
+        return [frames[0]]
+    max_source_index = len(frames) - 1
+    max_target_index = frame_count - 1
+    return [frames[round(index * max_source_index / max_target_index)] for index in range(frame_count)]
+
+
 def target_frames_from_image(item: ItemInfo, frame_count: int) -> torch.Tensor:
     frame_count = align_h3_frame_count(frame_count)
     content = item.content
@@ -433,18 +445,18 @@ def target_frames_from_image(item: ItemInfo, frame_count: int) -> torch.Tensor:
                 )
         if len(frames) < frame_count:
             logger.warning(
-                "MiniMax-H3 image target has %d frame(s), padding to %d by repeating the last frame",
+                "MiniMax-H3 image target has %d frame(s), resampling to requested frame count %d",
                 len(frames),
                 frame_count,
             )
-            frames.extend([frames[-1]] * (frame_count - len(frames)))
+            frames = _resample_image_target_frames(frames, frame_count)
         elif len(frames) > frame_count:
             logger.warning(
-                "MiniMax-H3 image target has %d frame(s), trimming to requested frame count %d",
+                "MiniMax-H3 image target has %d frame(s), resampling to requested frame count %d",
                 len(frames),
                 frame_count,
             )
-            frames = frames[:frame_count]
+            frames = _resample_image_target_frames(frames, frame_count)
         return torch.stack(frames, dim=0)
 
     target = torch.as_tensor(content)

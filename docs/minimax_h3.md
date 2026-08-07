@@ -200,7 +200,7 @@ inputs/pose_0.png
 inputs/pose_1.png
 ```
 
-For `h3_image_frame_count = 22`, provide up to 22 target frames using the same suffix order. If fewer target frames are present, the last target frame is repeated to fill the requested H3 frame count; if more are present, extras are ignored. Changing `multiple_target` or target frame files changes the latent content, so rebuild both latent and text caches without `--skip_existing`.
+For `h3_image_frame_count = 22`, provide up to 22 target frames using the same suffix order. If the number of target frames differs from the requested H3 frame count, the provided frames are resampled across the requested timeline with nearest-neighbor frame selection. For example, five keyed target images can be expanded to 22 H3 frames while preserving the first and last frames. Changing `multiple_target`, target frame files, or `h3_image_frame_count` changes the latent content, so rebuild both latent and text caches without `--skip_existing`.
 
 Windows example for one-input image training:
 

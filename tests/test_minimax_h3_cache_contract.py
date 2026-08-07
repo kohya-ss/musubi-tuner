@@ -805,7 +805,7 @@ def test_h3_image_multiple_targets_become_target_frame_sequence(tmp_path: Path):
     assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 32, 64, 96, 128]
 
 
-def test_h3_image_multiple_targets_pad_to_requested_frame_count(tmp_path: Path):
+def test_h3_image_multiple_targets_resample_to_requested_frame_count(tmp_path: Path):
     item = ItemInfo(
         item_key=str(tmp_path / "target.png"),
         caption="caption",
@@ -821,7 +821,49 @@ def test_h3_image_multiple_targets_pad_to_requested_frame_count(tmp_path: Path):
     target_frames = target_frames_from_image(item, 5)
 
     assert target_frames.shape == (5, 64, 64, 3)
-    assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 64, 128, 128, 128]
+    assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 0, 64, 128, 128]
+
+
+def test_h3_image_multiple_targets_upsample_five_frames_to_twenty_two(tmp_path: Path):
+    item = ItemInfo(
+        item_key=str(tmp_path / "target.png"),
+        caption="caption",
+        original_size=(64, 64),
+        bucket_size=(64, 64),
+        content=[
+            torch.full((64, 64, 3), value, dtype=torch.uint8).numpy()
+            for value in (0, 32, 64, 96, 128)
+        ],
+        latent_cache_path=str(tmp_path / "target_0064x0064_mmh3.safetensors"),
+    )
+
+    target_frames = target_frames_from_image(item, 22)
+
+    assert target_frames.shape == (22, 64, 64, 3)
+    assert [int(target_frames[index, 0, 0, 0]) for index in range(22)] == [
+        0,
+        0,
+        0,
+        32,
+        32,
+        32,
+        32,
+        32,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        96,
+        96,
+        96,
+        96,
+        96,
+        128,
+        128,
+        128,
+    ]
 
 
 def test_h3_image_dataset_multiple_target_records_frame_sequence(tmp_path: Path):
