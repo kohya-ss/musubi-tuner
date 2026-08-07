@@ -181,7 +181,7 @@ Loading follows this order:
 5. Prepare all declared INT8 Linear modules before computing the expected state dict.
 6. Stream weight and scale tensors shard by shard with `assign=True`; scales and control tensors are excluded from the general floating-point cast policy.
 7. Mark validated `.comfy_quant` keys as consumed control data without registering them as model buffers.
-8. Apply missing, unexpected, and shape checks to every model tensor, the caller's existing strict-dtype policy where requested, and mandatory source-dtype checks to every declared quantized triple.
+8. Apply missing, unexpected, and shape checks to every model tensor, then select the path-specific dtype policy: an unquantized full transformer keeps the existing exact strict comparison; an ordinary text encoder keeps the existing requested-dtype conversion without global strictness; an inspected ConvRot file uses the artifact-aware policy and never enters the old exact-dtype comparison.
 9. Move the populated model to its requested loading device and set evaluation mode.
 
 The loader keeps three distinct accounting sets:
@@ -190,7 +190,7 @@ The loader keeps three distinct accounting sets:
 - `loaded_model_keys` drives missing-model-key checks.
 - `consumed_control_keys` records only control keys declared by the inspected artifact.
 
-This prevents a control key from becoming an unexpected model key without losing duplicate detection. Quantized artifact validation is key-specific: declared weights must be INT8, external scales FP32, and controls U8 regardless of the caller's general `strict_dtype` setting. An FP32 scale must match its FP32 destination buffer and remain bit-for-bit unchanged; the requested model `dtype` applies only to eligible floating model tensors, not `scale_weight`.
+This prevents a control key from becoming an unexpected model key without losing duplicate detection. Once a ConvRot artifact is detected, the loader does not run those tensors through the existing global exact-dtype comparison, even if the caller historically requested `strict_dtype=True`. The artifact-aware policy replaces it: declared weights must be INT8, external scales FP32, and controls U8; declared FP32 islands must remain FP32; eligible F16 or BF16 compute parameters are converted to the destination compute dtype. An FP32 scale must match its FP32 destination buffer and remain bit-for-bit unchanged; the requested model `dtype` applies only to eligible floating model tensors, not `scale_weight`.
 
 `load_h3_text_encoder` deliberately keeps global `strict_dtype=False`. Its direct `Qwen3VLModel(config)` factory creates FP32 meta parameters, while released ordinary floating islands are BF16 and are intentionally loaded at the requested compute dtype. Enabling the current global strict comparison would reject those valid tensors before conversion. Scale safety therefore comes from the mandatory per-key ConvRot dtype rule and cast exclusion, not from global strictness.
 
@@ -208,14 +208,15 @@ table_fp32 = table.to(dtype=torch.float32)
 position = t_fp32.clamp(0.0, 1.0) * (table_fp32.shape[0] - 1)
 lower = position.floor().long().clamp(max=table_fp32.shape[0] - 2)
 fraction = position - lower.to(position.dtype)
-timestep_embedding = torch.lerp(
+timestep_embedding_fp32 = torch.lerp(
     table_fp32[lower],
     table_fp32[lower + 1],
     fraction.unsqueeze(1),
 )
+timestep_embedding = timestep_embedding_fp32.to(dtype=self.dtype)
 ```
 
-The production path preserves `unique_timesteps` as FP32 from packing through this interpolation. The explicit promotion is defensive and prevents additional precision loss during multiplication and `lerp`, but it cannot recover information already lost if a caller supplies BF16. For many BF16 values, multiplying the represented value by 1024 lands exactly on a table index, so nearest-neighbor-like behavior is expected rather than treated as FP32-equivalent interpolation. Standard AdaLN continues to apply SiLU inside `AdalnProj`. Pruned AdaLN consumes the interpolated curve coordinate directly and skips that SiLU. Both endpoints and FP32 non-grid interior positions are part of the numerical contract.
+The production path preserves `unique_timesteps` as FP32 through interpolation, then casts the completed embedding to `self.dtype` immediately before the BF16 `AdalnProj`. This cast is part of the model contract and must not rely on autocast, because standalone generation calls the transformer without an autocast context. The explicit input promotion is defensive and prevents additional precision loss during multiplication and `lerp`, but it cannot recover information already lost if a caller supplies BF16. For many BF16 values, multiplying the represented value by 1024 lands exactly on a table index, so nearest-neighbor-like behavior is expected rather than treated as FP32-equivalent interpolation. Standard AdaLN continues to apply SiLU inside `AdalnProj`. Pruned AdaLN consumes the interpolated curve coordinate directly and skips that SiLU. Both endpoints and FP32 non-grid interior positions are part of the numerical contract.
 
 ## 9. Runtime Integration
 
@@ -305,9 +306,11 @@ Use tiny model configs and synthetic safetensors files to cover:
 - Automatic pruned INT8 detection without config metadata.
 - Standard and curve AdaLN construction.
 - Pruned F16 AdaLN source parameters load as BF16 compute parameters while the curve table and other declared FP32 islands remain FP32.
+- ConvRot loading bypasses the old global exact-dtype comparator while still rejecting an invalid triple or fixed FP32 island; the unquantized full BF16 path retains exact strict checking.
 - FP32 curve interpolation at both endpoints and non-grid interior positions; interior results must match the interpolation reference and differ from nearest-neighbor lookup.
 - Timestep packing produces a one-dimensional FP32 tensor, and the pruned path receives it without dtype narrowing.
 - Defensive BF16 input does not raise and matches a reference computed from the already-rounded `t_bf16.float()` values; it is not required to differ from nearest-neighbor lookup.
+- A BF16 pruned model executes the curve-to-AdaLN path outside autocast, and the AdaLN Linear receives a BF16 embedding.
 - Per-layer group size propagation, including a group-64 AdaLN layer.
 - Forward and LoRA backward through a patched main block.
 - Scale buffers remaining on the execution device while block weights swap.
@@ -361,6 +364,7 @@ Remove the R1 statements that all quantized and pruned artifacts are deferred.
 - Pruned transformers patch 200 declared Linear layers and use `[1025, 8]` curve interpolation.
 - Production pruned timesteps remain one-dimensional FP32 values through interpolation.
 - Pruned F16 AdaLN storage converts to BF16 while all declared FP32 transformer islands remain FP32.
+- The completed FP32 curve embedding is cast to the model dtype before AdaLN, so standalone generation does not depend on autocast.
 - The text encoder patches 350 declared language-model Linears.
 - BF16 transformer and text-encoder tests remain unchanged in behavior.
 - LoRA gradients reach trainable adapter parameters over an INT8 base.
