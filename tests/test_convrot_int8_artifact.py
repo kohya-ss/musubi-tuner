@@ -216,6 +216,21 @@ def test_prepare_model_rejects_linear_subclasses():
         prepare_convrot_int8_model(model, _artifact(("a", 4)))
 
 
+def test_int8_backward_on_cpu_raises_a_clear_cuda_error(monkeypatch):
+    from musubi_tuner.modules import convrot_int8_utils
+
+    monkeypatch.setattr(convrot_int8_utils, "HAS_TRITON", True)
+    model = _TinyModel()
+    prepare_convrot_int8_model(model, _artifact(("a", 4)), bwd_mode="int8")
+    with torch.no_grad():
+        model.a.weight.zero_()
+        model.a.scale_weight.fill_(1.0)
+    inputs = torch.randn(2, 16, requires_grad=True)
+
+    with pytest.raises(RuntimeError, match=r"int8.*CUDA"):
+        model.a(inputs).sum().backward()
+
+
 class _SelectiveModel(nn.Module):
     def __init__(self):
         super().__init__()

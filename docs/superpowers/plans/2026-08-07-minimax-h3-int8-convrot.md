@@ -481,7 +481,7 @@ git commit -m "feat: load MiniMax-H3 ConvRot text encoder"
 
 - [ ] **Step 1: Write failing trainer argument and compile tests**
 
-Assert the parser defaults `convrot_int8_bwd` to `bf16`, accepts `int8`, and does not add `--convrot_int8`. Test `on_transformer_loaded` rejects `convrot_int8_bwd=int8` for a BF16 transformer and rejects `base_weights` for an INT8 transformer. Record `model_utils.compile_transformer` arguments and require `disable_linear=True` whenever `transformer.is_convrot_int8`, independent of block swap.
+Assert the parser defaults `convrot_int8_bwd` to `bf16`, accepts `int8`, and does not add `--convrot_int8`. Test `on_transformer_loaded` rejects `convrot_int8_bwd=int8` for a BF16 transformer or non-CUDA training device and rejects `base_weights` for an INT8 transformer. Record `model_utils.compile_transformer` arguments and require `disable_linear=True` whenever `transformer.is_convrot_int8`, independent of block swap.
 
 - [ ] **Step 2: Run the trainer tests and verify missing option/hook failures**
 

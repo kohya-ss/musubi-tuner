@@ -154,6 +154,13 @@ _PUBLISHED_CONFIG_FIELDS = {
     "image_model": "minimax_h3",
 }
 
+_CONVROT_BLOCK_GROUPS = {
+    "attn.qkv_proj": 256,
+    "attn.out_proj": 256,
+    "mlp.fc1": 256,
+    "mlp.fc2": 256,
+}
+
 
 def parse_h3_transformer_config(metadata: Mapping[str, str]) -> MiniMaxH3Config:
     raw_config = metadata.get("config")
@@ -212,6 +219,36 @@ def _published_pruned_h3_config() -> MiniMaxH3Config:
     return MiniMaxH3Config(time_embed_dim=8, adaln_curve_grid=1025)
 
 
+def _validate_h3_convrot_topology(config: MiniMaxH3Config, artifact: ConvRotInt8Artifact) -> None:
+    expected_groups = {}
+    for index in range(config.num_layers):
+        for suffix, groupsize in _CONVROT_BLOCK_GROUPS.items():
+            expected_groups[f"blocks.{index}.{suffix}"] = groupsize
+        if not config.is_pruned:
+            expected_groups[f"blocks.{index}.adaln_proj.linear"] = 64
+
+    expected = set(expected_groups)
+    actual = set(artifact.layers)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing or unexpected:
+        raise ValueError(f"MiniMax-H3 ConvRot topology mismatch: missing={missing[:20]}, unexpected={unexpected[:20]}")
+
+    published_dimensions = (
+        config.hidden_size == 5376
+        and config.num_layers == 50
+        and config.ffn_hidden_size == 14336
+        and config.time_embed_dim in {8, 2688}
+    )
+    if published_dimensions:
+        for module_path, expected_groupsize in expected_groups.items():
+            actual_groupsize = artifact.layers[module_path].groupsize
+            if actual_groupsize != expected_groupsize:
+                raise ValueError(
+                    f"MiniMax-H3 ConvRot group size mismatch: {module_path} expected {expected_groupsize}, got {actual_groupsize}"
+                )
+
+
 def _require_pruned_adaln_header(
     headers: Mapping[str, _H3TensorHeader],
     key: str,
@@ -232,7 +269,10 @@ def _classify_h3_transformer(
     table = headers.get("adaln_t_table")
     has_time_embedder = any(key.startswith("time_embedder.") for key in headers)
     if table is None:
-        return parse_h3_transformer_config(load_safetensors_metadata(files))
+        config = parse_h3_transformer_config(load_safetensors_metadata(files))
+        if convrot_artifact is not None:
+            _validate_h3_convrot_topology(config, convrot_artifact)
+        return config
     if has_time_embedder:
         raise ValueError("MiniMax-H3 checkpoint has mixed adaln_t_table and time_embedder structures")
     if table.dtype != "F32":
@@ -261,6 +301,7 @@ def _classify_h3_transformer(
         "final_layer.adaln_proj.linear.bias",
         (config.final_adaln_out_features,),
     )
+    _validate_h3_convrot_topology(config, convrot_artifact)
     return config
 
 
@@ -637,7 +678,7 @@ class MiniMaxH3Model(nn.Module):
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.condition_proj.weight.dtype
+        return self.blocks[0].norm1.weight.dtype
 
     def _timestep_embeddings(
         self,

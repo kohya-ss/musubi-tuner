@@ -366,6 +366,8 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             # grad_x = g @ W = g @ (W_rot R) = rotate(g @ W_rot), R = block-diag Hadamard
             if ctx.bwd_mode == "int8":
+                if not g2d.is_cuda:
+                    raise RuntimeError("ConvRot INT8 backward mode 'int8' requires CUDA tensors")
                 # fold per-channel weight scale into g, then reuse the fused Triton GEMM
                 # (row-wise quant of g + int8 GEMM + dequant epilogue in one pipeline).
                 # transient int8 transpose of wq: [K, N], ~1 byte/param, freed after mm

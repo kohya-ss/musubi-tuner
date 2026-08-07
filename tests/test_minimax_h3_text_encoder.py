@@ -245,9 +245,7 @@ class _FakeQwen3VLModel(nn.Module):
         super().__init__()
         self.language_model = nn.Module()
         self.language_model.embed_tokens = nn.Embedding(8, 256)
-        self.language_model.layers = nn.ModuleList(
-            [_FakeLanguageLayer() for _ in range(config.text_config.num_hidden_layers)]
-        )
+        self.language_model.layers = nn.ModuleList([_FakeLanguageLayer() for _ in range(config.text_config.num_hidden_layers)])
         self.language_model.norm = nn.LayerNorm(256)
         self.visual = nn.Linear(256, 4, bias=False)
 
@@ -343,6 +341,24 @@ def test_load_h3_text_encoder_rejects_non_fp32_convrot_scale(tmp_path, monkeypat
     save_file(state, checkpoint)
 
     with pytest.raises(ValueError, match=r"scale.*FP32|scale.*F32"):
+        load_h3_text_encoder(
+            checkpoint,
+            processor_path="fake",
+            device="cpu",
+            dtype=torch.bfloat16,
+        )
+
+
+def test_load_h3_text_encoder_rejects_nonpublished_convrot_layer(tmp_path, monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    state, _scale = _fake_text_state(quantized=True)
+    state["visual.weight"] = torch.zeros(4, 256, dtype=torch.int8)
+    state["visual.weight_scale"] = torch.ones(4, 1, dtype=torch.float32)
+    state["visual.comfy_quant"] = _text_convrot_payload()
+    checkpoint = tmp_path / "qwen3vl-extra-convrot.safetensors"
+    save_file(state, checkpoint)
+
+    with pytest.raises(ValueError, match=r"text encoder ConvRot.*topology.*visual"):
         load_h3_text_encoder(
             checkpoint,
             processor_path="fake",

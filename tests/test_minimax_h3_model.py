@@ -21,6 +21,7 @@ from musubi_tuner.minimax_h3.model import (
 )
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
+from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, ConvRotInt8LayerSpec
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 
 
@@ -160,15 +161,23 @@ def test_pruned_forward_casts_curve_output_before_bf16_adaln_without_autocast():
     with torch.no_grad():
         model.adaln_t_table.zero_()
     seen_dtypes = []
-    hook = model.blocks[0].adaln_proj.linear.register_forward_pre_hook(
-        lambda _module, inputs: seen_dtypes.append(inputs[0].dtype)
-    )
+    hook = model.blocks[0].adaln_proj.linear.register_forward_pre_hook(lambda _module, inputs: seen_dtypes.append(inputs[0].dtype))
 
     with torch.no_grad():
         model(**_t2_inputs())
     hook.remove()
 
     assert seen_dtypes == [torch.bfloat16]
+
+
+def test_model_compute_dtype_uses_an_unquantized_norm_sentinel():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.bfloat16)
+    model.condition_proj.weight = nn.Parameter(
+        torch.empty(model.condition_proj.weight.shape, dtype=torch.int8),
+        requires_grad=False,
+    )
+
+    assert model.dtype is torch.bfloat16
 
 
 def test_rope_inv_freq_has_no_synthesized_fallback(monkeypatch):
@@ -669,10 +678,22 @@ def _synthetic_convrot_h3_state(*, pruned: bool, layers: dict[str, int]):
     return config, state
 
 
+def _tiny_transformer_convrot_layers(*, pruned: bool) -> dict[str, int]:
+    layers = {
+        "blocks.0.attn.qkv_proj": 16,
+        "blocks.0.attn.out_proj": 16,
+        "blocks.0.mlp.fc1": 16,
+        "blocks.0.mlp.fc2": 4,
+    }
+    if not pruned:
+        layers["blocks.0.adaln_proj.linear"] = 4
+    return layers
+
+
 def test_load_h3_transformer_auto_detects_full_convrot_and_per_layer_groups(tmp_path: Path, monkeypatch):
     config, state = _synthetic_convrot_h3_state(
         pruned=False,
-        layers={"blocks.0.attn.qkv_proj": 16, "blocks.0.adaln_proj.linear": 4},
+        layers=_tiny_transformer_convrot_layers(pruned=False),
     )
     checkpoint = tmp_path / "full-int8-convrot.safetensors"
     save_file(state, checkpoint, metadata={"config": "{}", "note": "contains unrelated INT8 and quantized text"})
@@ -681,7 +702,7 @@ def test_load_h3_transformer_auto_detects_full_convrot_and_per_layer_groups(tmp_
     loaded = h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16)
 
     assert loaded.is_convrot_int8
-    assert loaded.convrot_int8_layer_count == 2
+    assert loaded.convrot_int8_layer_count == 5
     assert loaded.blocks[0].attn.qkv_proj.weight.dtype is torch.int8
     assert loaded.blocks[0].attn.qkv_proj.scale_weight.dtype is torch.float32
     assert "attn.qkv_proj.scale_weight" in dict(loaded.blocks[0].named_buffers())
@@ -698,7 +719,7 @@ def test_load_h3_transformer_auto_detects_full_convrot_and_per_layer_groups(tmp_
 def test_load_h3_transformer_auto_detects_pruned_and_converts_f16_adaln(tmp_path: Path, monkeypatch):
     config, state = _synthetic_convrot_h3_state(
         pruned=True,
-        layers={"blocks.0.attn.qkv_proj": 16},
+        layers=_tiny_transformer_convrot_layers(pruned=True),
     )
     checkpoint = tmp_path / "pruned-int8-convrot.safetensors"
     save_file(state, checkpoint)
@@ -708,7 +729,7 @@ def test_load_h3_transformer_auto_detects_pruned_and_converts_f16_adaln(tmp_path
 
     assert loaded.config.is_pruned
     assert loaded.is_convrot_int8
-    assert loaded.convrot_int8_layer_count == 1
+    assert loaded.convrot_int8_layer_count == 4
     assert loaded.adaln_t_table.dtype is torch.float32
     assert loaded.video_patch_proj.weight.dtype is torch.float32
     assert loaded.final_layer.video_out.weight.dtype is torch.float32
@@ -716,6 +737,63 @@ def test_load_h3_transformer_auto_detects_pruned_and_converts_f16_adaln(tmp_path
     assert loaded.blocks[0].adaln_proj.linear.weight.dtype is torch.bfloat16
     assert state["blocks.0.adaln_proj.linear.weight"].dtype is torch.float16
     assert loaded.blocks[0].attn.qkv_proj.scale_weight.dtype is torch.float32
+
+
+def test_full_classifier_rejects_nonpublished_convrot_layer(tmp_path: Path, monkeypatch):
+    layers = _tiny_transformer_convrot_layers(pruned=False)
+    layers["condition_proj"] = 4
+    config, state = _synthetic_convrot_h3_state(pruned=False, layers=layers)
+    checkpoint = tmp_path / "extra-convrot-layer.safetensors"
+    save_file(state, checkpoint, metadata={"config": "{}"})
+    artifact = inspect_safetensors_convrot_int8([checkpoint])
+    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata: config)
+
+    with pytest.raises(ValueError, match=r"ConvRot.*topology.*condition_proj"):
+        h3_model._classify_h3_transformer([checkpoint], artifact)
+
+
+def test_full_classifier_rejects_missing_published_convrot_layer(tmp_path: Path, monkeypatch):
+    layers = _tiny_transformer_convrot_layers(pruned=False)
+    del layers["blocks.0.mlp.fc2"]
+    config, state = _synthetic_convrot_h3_state(pruned=False, layers=layers)
+    checkpoint = tmp_path / "missing-convrot-layer.safetensors"
+    save_file(state, checkpoint, metadata={"config": "{}"})
+    artifact = inspect_safetensors_convrot_int8([checkpoint])
+    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata: config)
+
+    with pytest.raises(ValueError, match=r"ConvRot.*topology.*blocks.0.mlp.fc2"):
+        h3_model._classify_h3_transformer([checkpoint], artifact)
+
+
+def test_published_convrot_topology_requires_released_group_sizes():
+    config = MiniMaxH3Config()
+    layers = {}
+    for index in range(config.num_layers):
+        for suffix in ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2"):
+            module_path = f"blocks.{index}.{suffix}"
+            layers[module_path] = ConvRotInt8LayerSpec(
+                module_path,
+                f"{module_path}.weight",
+                f"{module_path}.scale_weight",
+                256,
+            )
+        module_path = f"blocks.{index}.adaln_proj.linear"
+        layers[module_path] = ConvRotInt8LayerSpec(
+            module_path,
+            f"{module_path}.weight",
+            f"{module_path}.scale_weight",
+            64,
+        )
+    broken = layers["blocks.0.attn.qkv_proj"]
+    layers[broken.module_path] = ConvRotInt8LayerSpec(
+        broken.module_path,
+        broken.weight_key,
+        broken.scale_key,
+        64,
+    )
+
+    with pytest.raises(ValueError, match=r"group size.*blocks.0.attn.qkv_proj.*256.*64"):
+        h3_model._validate_h3_convrot_topology(config, ConvRotInt8Artifact(layers, frozenset()))
 
 
 @pytest.mark.parametrize(

@@ -244,6 +244,12 @@ def test_h3_trainer_validates_backward_mode_and_destructive_merges_after_detecti
         trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), None, bf16)
     with pytest.raises(ValueError, match="base_weights.*INT8"):
         trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"]), None, int8)
+    with pytest.raises(ValueError, match=r"int8.*CUDA"):
+        trainer.on_transformer_loaded(
+            _trainer_args(convrot_int8_bwd="int8"),
+            SimpleNamespace(device=torch.device("cpu")),
+            int8,
+        )
     trainer.on_transformer_loaded(_trainer_args(), None, int8)
 
 

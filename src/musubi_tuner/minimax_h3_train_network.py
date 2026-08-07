@@ -406,10 +406,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         accelerator: Accelerator,
         transformer,
     ) -> None:
-        del accelerator
         is_convrot_int8 = bool(getattr(transformer, "is_convrot_int8", False))
-        if getattr(args, "convrot_int8_bwd", "bf16") == "int8" and not is_convrot_int8:
+        convrot_bwd_mode = getattr(args, "convrot_int8_bwd", "bf16")
+        if convrot_bwd_mode == "int8" and not is_convrot_int8:
             raise ValueError("MiniMax-H3 --convrot_int8_bwd int8 requires an automatically detected INT8 ConvRot transformer")
+        if convrot_bwd_mode == "int8" and torch.device(accelerator.device).type != "cuda":
+            raise ValueError("MiniMax-H3 --convrot_int8_bwd int8 requires a CUDA training device")
         if is_convrot_int8 and getattr(args, "base_weights", None):
             raise ValueError("MiniMax-H3 --base_weights cannot be destructively merged into an INT8 ConvRot transformer")
 

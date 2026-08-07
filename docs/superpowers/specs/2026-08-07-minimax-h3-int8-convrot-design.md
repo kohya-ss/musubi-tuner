@@ -116,6 +116,8 @@ The full FL2VA and Ref2VA artifacts contain 250 quantized layers:
 
 The token refiner, patch projections, output heads, norms, and time embedder remain floating point. Full files carry the released transformer config metadata and use the standard 2688-wide time embedding.
 
+The loader treats these 250 paths and group sizes as an exact topology fingerprint. Missing main-block targets and additional quantized modules are rejected before model construction.
+
 ### 5.3 Pruned transformers
 
 The pruned artifacts contain 200 quantized layers: the four attention/MLP Linears in each main block. AdaLN is not quantized. Its representation is:
@@ -130,6 +132,8 @@ final_layer.adaln_proj.linear.bias    F16 [10752]
 
 These files omit the standard `time_embedder.*` tensors and may omit config metadata. The loader therefore derives pruned mode from `adaln_t_table`, then validates all other released dimensions from tensor shapes. It does not infer arbitrary H3 variants.
 
+The 200 attention/MLP paths, each with group size 256, are also exact. Partial artifacts and quantized AdaLN or projection additions are rejected.
+
 The released F16 AdaLN tensors are storage inputs, not a request to change MiniMax-H3's BF16 compute contract. The selective loader converts them to the model's requested BF16 destination dtype. It preserves `adaln_t_table`, patch/output projections, rotary state, and ConvRot scales as FP32.
 
 ### 5.4 Qwen3-VL text encoder
@@ -140,6 +144,8 @@ The text encoder contains 350 quantized language-model Linears across the retain
 - `mlp.gate_proj`, `up_proj`, and `down_proj`
 
 The current artifact declares group size 256 for these layers. Embeddings, norms, rotary tensors, and visual components remain floating point. The existing `model.*` to `language_model.*` key transform applies to weight, scale, and control keys before module matching.
+
+The loader requires exactly these 350 paths. Missing language-model targets or additional quantized embedding, norm, rotary, or visual modules are rejected.
 
 ## 6. Shared ConvRot Artifact Adapter
 
@@ -229,7 +235,7 @@ For a pruned artifact, F16 AdaLN source storage is converted once to BF16 during
 Add `--convrot_int8_bwd {bf16,int8}` with default `bf16`:
 
 - `bf16` transiently dequantizes the rotated base weight for `grad_x`.
-- `int8` uses the fused INT8 backward path and requires Triton.
+- `int8` uses the fused INT8 backward path and requires Triton on a CUDA training device.
 
 The option does not enable quantization. Supplying `int8` for a non-ConvRot transformer is rejected. Existing `--base_weights` merges are rejected for an INT8 base; normal LoRA creation, `--network_weights`, gradient checkpointing, and block swap remain supported.
 
@@ -271,10 +277,11 @@ Raise `ValueError` before execution for:
 - Weight and scale dtype or shape mismatches.
 - A group size that is not a power of four, is unsupported by the shared kernel, or does not divide the input width.
 - A declared module that does not exist or is not exactly `nn.Linear`.
+- A full, pruned, or text-encoder ConvRot topology or released group size mismatch.
 - Duplicate raw or normalized keys.
 - Mixed full and pruned AdaLN structures.
 - A pruned table other than `[1025, 8]` or inconsistent AdaLN input widths.
-- `--convrot_int8_bwd int8` without an INT8 transformer or without Triton.
+- `--convrot_int8_bwd int8` without an INT8 transformer, Triton, or a CUDA training device.
 - Destructive base-weight merges requested for an INT8 transformer.
 
 Messages include the checkpoint path and normalized layer name. Unsupported quantized formats do not silently dequantize.

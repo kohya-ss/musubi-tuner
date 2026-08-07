@@ -137,6 +137,12 @@ def test_training_detection_guards_merges_and_compile_policy(monkeypatch):
         trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), None, bf16)
     with pytest.raises(ValueError, match="base_weights.*INT8"):
         trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"]), None, int8)
+    with pytest.raises(ValueError, match=r"int8.*CUDA"):
+        trainer.on_transformer_loaded(
+            _trainer_args(convrot_int8_bwd="int8"),
+            SimpleNamespace(device=torch.device("cpu")),
+            int8,
+        )
 
     captured = {}
     monkeypatch.setattr(
@@ -314,8 +320,5 @@ def test_lora_gradient_reaches_adapter_over_checkpointed_int8_base(monkeypatch):
     )
     (output.video.square().mean() + output.audio.square().mean()).backward()
 
-    assert any(
-        parameter.grad is not None and torch.count_nonzero(parameter.grad)
-        for parameter in network.parameters()
-    )
+    assert any(parameter.grad is not None and torch.count_nonzero(parameter.grad) for parameter in network.parameters())
     assert all(model.get_submodule(path).weight.grad is None for path in target_paths)
