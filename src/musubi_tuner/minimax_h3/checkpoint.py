@@ -16,9 +16,7 @@ def resolve_safetensors_files(path: str | Path) -> list[Path]:
     """
     path = Path(path)
     if not path.is_file() or path.suffix != ".safetensors":
-        raise ValueError(
-            f"MiniMax-H3 checkpoints must be a .safetensors file (pass the first shard for split checkpoints): {path}"
-        )
+        raise ValueError(f"MiniMax-H3 checkpoints must be a .safetensors file (pass the first shard for split checkpoints): {path}")
     split_filenames = get_split_weight_filenames(str(path))
     if split_filenames is not None:
         return [Path(filename) for filename in split_filenames]
