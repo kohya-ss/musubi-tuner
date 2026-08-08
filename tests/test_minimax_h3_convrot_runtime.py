@@ -113,6 +113,7 @@ def _load_training_module(monkeypatch):
 
 def _trainer_args(**overrides):
     values = {
+        "convrot_int8": False,
         "convrot_int8_bwd": "bf16",
         "base_weights": None,
         "disable_numpy_memmap": False,
@@ -121,16 +122,17 @@ def _trainer_args(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_training_parser_exposes_only_the_convrot_backward_policy(monkeypatch):
+def test_training_parser_exposes_the_convrot_flags(monkeypatch):
     train = _load_training_module(monkeypatch)
     parser = train.minimax_h3_setup_parser(argparse.ArgumentParser())
 
     defaults = parser.parse_args(["--task", "t2va"])
-    int8 = parser.parse_args(["--task", "t2va", "--convrot_int8_bwd", "int8"])
+    int8 = parser.parse_args(["--task", "t2va", "--convrot_int8", "--convrot_int8_bwd", "int8"])
 
+    assert defaults.convrot_int8 is False
     assert defaults.convrot_int8_bwd == "bf16"
+    assert int8.convrot_int8 is True
     assert int8.convrot_int8_bwd == "int8"
-    assert not any(action.dest == "convrot_int8" for action in parser._actions)
 
 
 def test_training_detection_guards_merges_and_compile_policy(monkeypatch):
@@ -138,17 +140,15 @@ def test_training_detection_guards_merges_and_compile_policy(monkeypatch):
     trainer = train.MiniMaxH3NetworkTrainer()
     bf16 = SimpleNamespace(is_convrot_int8=False, blocks=[])
     int8 = SimpleNamespace(is_convrot_int8=True, blocks=[])
+    accelerator = SimpleNamespace(device=torch.device("cpu"))
 
+    # int8 backward needs an INT8 base (flag or auto-detected pre-quantized checkpoint)
     with pytest.raises(ValueError, match="convrot_int8_bwd.*INT8"):
-        trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), None, bf16)
+        trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), accelerator, bf16)
     with pytest.raises(ValueError, match="base_weights.*INT8"):
-        trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"]), None, int8)
+        trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"]), accelerator, int8)
     with pytest.raises(ValueError, match=r"int8.*CUDA"):
-        trainer.on_transformer_loaded(
-            _trainer_args(convrot_int8_bwd="int8"),
-            SimpleNamespace(device=torch.device("cpu")),
-            int8,
-        )
+        trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), accelerator, int8)
 
     captured = {}
     monkeypatch.setattr(
@@ -164,7 +164,8 @@ def test_training_detection_guards_merges_and_compile_policy(monkeypatch):
     trainer.blocks_to_swap = 0
     args = _trainer_args(convrot_int8_bwd="int8")
 
-    assert trainer.load_transformer(None, args, "dit.safetensors", "torch", False, "cpu", torch.bfloat16) is int8
+    assert trainer.load_transformer(accelerator, args, "dit.safetensors", "torch", False, "cpu", torch.bfloat16) is int8
+    assert trainer._convrot_int8_active is True
     assert trainer.compile_transformer(args, int8) is int8
     assert captured["load"]["convrot_int8_bwd"] == "int8"
     assert captured["compile"]["disable_linear"] is True
@@ -219,13 +220,22 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
         lambda transformer, args, device: calls.append(("attach", transformer, device)) or attached,
         raising=False,
     )
-    args = SimpleNamespace(lora_weight=["adapter.safetensors"])
+    device = torch.device("cpu")
     bf16 = SimpleNamespace(is_convrot_int8=False)
     int8 = SimpleNamespace(is_convrot_int8=True)
 
-    assert generate._configure_lora_weights(bf16, args, torch.device("cpu")) == []
-    assert generate._configure_lora_weights(int8, args, torch.device("cpu")) is attached
-    assert calls == [("merge", bf16), ("attach", int8, torch.device("cpu"))]
+    # plain BF16 base: one-time destructive CPU merge
+    args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=False)
+    assert generate._configure_lora_weights(bf16, args, device, prequantized=False) == []
+    # pre-quantized INT8 base (auto-detected): runtime additive branches
+    assert generate._configure_lora_weights(int8, args, device, prequantized=True) is attached
+    # BF16 base + --convrot_int8: merged during the streaming load, nothing to do here
+    dynamic_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=True)
+    assert generate._configure_lora_weights(int8, dynamic_args, device, prequantized=False) == []
+    # no LoRA: nothing happens on any route
+    no_lora = SimpleNamespace(lora_weight=None, convrot_int8=False)
+    assert generate._configure_lora_weights(bf16, no_lora, device, prequantized=False) == []
+    assert calls == [("merge", bf16), ("attach", int8, device)]
 
 
 def _tiny_model(*, num_layers: int = 1):

@@ -263,26 +263,6 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
     return SimpleNamespace(**values)
 
 
-def test_generation_keeps_bf16_merge_but_attaches_lora_to_int8(monkeypatch):
-    import musubi_tuner.minimax_h3_generate_video as generate
-
-    calls = []
-    args = SimpleNamespace(lora_weight=["adapter.safetensors"])
-    attached = [object()]
-    monkeypatch.setattr(generate, "_merge_lora_weights", lambda transformer, args: calls.append(("merge", transformer)))
-    monkeypatch.setattr(
-        generate,
-        "_apply_lora_weights",
-        lambda transformer, args, device: calls.append(("attach", transformer, device)) or attached,
-    )
-    bf16 = SimpleNamespace(is_convrot_int8=False)
-    int8 = SimpleNamespace(is_convrot_int8=True)
-
-    assert generate._configure_lora_weights(bf16, args, torch.device("cpu")) == []
-    assert generate._configure_lora_weights(int8, args, torch.device("cpu")) is attached
-    assert calls == [("merge", bf16), ("attach", int8, torch.device("cpu"))]
-
-
 @pytest.mark.parametrize("field", ("width", "height"))
 def test_generation_validation_rejects_non_32_aligned_axes(tmp_path, field):
     with pytest.raises(ValueError, match="divisible by 32"):
@@ -396,6 +376,10 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         disable_numpy_memmap=False,
         processor_revision=None,
     )
+    # the pre-quantization probe reads the DiT file headers; the stub DiT here is not
+    # a real safetensors file, so report an ordinary (non-pre-quantized) checkpoint
+    monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
+    monkeypatch.setattr(generate, "inspect_safetensors_convrot_int8", lambda files, **kwargs: None)
     events = []
 
     class Transformer:

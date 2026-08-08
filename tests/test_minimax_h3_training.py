@@ -164,6 +164,7 @@ def _trainer_args(**overrides):
         "task": "t2va",
         "video_only": False,
         "audio_loss_weight": 1.0,
+        "convrot_int8": False,
         "convrot_int8_bwd": "bf16",
         "base_weights": None,
     }
@@ -196,8 +197,8 @@ def test_h3_parser_defaults_to_the_only_supported_training_coordinates():
     assert args.network_module == "networks.lora_minimax_h3"
     assert args.video_only is False
     assert args.audio_loss_weight == 1.0
+    assert args.convrot_int8 is False
     assert args.convrot_int8_bwd == "bf16"
-    assert not any(action.dest == "convrot_int8" for action in parser._actions)
     assert "--h3_video_only" not in parser.format_help()
 
 
@@ -271,11 +272,13 @@ def test_h3_trainer_passes_backward_mode_to_loader_and_excludes_int8_linears_fro
     trainer = train.MiniMaxH3NetworkTrainer()
     trainer.blocks_to_swap = 0
     args = _trainer_args(convrot_int8_bwd="int8", disable_numpy_memmap=False)
+    accelerator = SimpleNamespace(device=torch.device("cpu"))
 
-    loaded = trainer.load_transformer(None, args, "dit.safetensors", "torch", False, "cpu", torch.bfloat16)
+    loaded = trainer.load_transformer(accelerator, args, "dit.safetensors", "torch", False, "cpu", torch.bfloat16)
     compiled = trainer.compile_transformer(args, transformer)
 
     assert loaded is transformer
+    assert trainer._convrot_int8_active is True
     assert compiled is transformer
     assert captured["load"]["convrot_int8_bwd"] == "int8"
     assert captured["compile"]["disable_linear"] is True
@@ -1059,6 +1062,7 @@ def test_h3_training_metadata_records_task_scheduler_and_target_policy():
         "ss_minimax_h3_audio_loss_weight": 1.0,
         "ss_minimax_h3_video_only": False,
         "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
+        "ss_minimax_h3_convrot_int8": False,
         "ss_minimax_h3_latent_cache_version": "2",
         "ss_minimax_h3_text_cache_version": "1",
     }

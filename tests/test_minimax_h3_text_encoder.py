@@ -349,16 +349,39 @@ def test_load_h3_text_encoder_rejects_non_fp32_convrot_scale(tmp_path, monkeypat
         )
 
 
-def test_load_h3_text_encoder_rejects_nonpublished_convrot_layer(tmp_path, monkeypatch):
+def test_load_h3_text_encoder_accepts_nonpublished_convrot_layers_permissively(tmp_path, monkeypatch):
+    # the pre-quantized file dictates which layers are INT8; a quantized layer outside the
+    # published 350-layer scope loads and patches as long as the module exists
     _install_fake_transformers(monkeypatch)
     state, _scale = _fake_text_state(quantized=True)
+    del state["visual.weight"]
     state["visual.weight"] = torch.zeros(4, 256, dtype=torch.int8)
     state["visual.weight_scale"] = torch.ones(4, 1, dtype=torch.float32)
     state["visual.comfy_quant"] = _text_convrot_payload()
     checkpoint = tmp_path / "qwen3vl-extra-convrot.safetensors"
     save_file(state, checkpoint)
 
-    with pytest.raises(ValueError, match=r"text encoder ConvRot.*topology.*visual"):
+    loaded = load_h3_text_encoder(
+        checkpoint,
+        processor_path="fake",
+        device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    assert loaded.visual.weight.dtype is torch.int8
+    assert loaded.convrot_int8_layer_count == 351
+
+
+def test_load_h3_text_encoder_rejects_convrot_layer_missing_from_the_model(tmp_path, monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    state, _scale = _fake_text_state(quantized=True)
+    state["missing_tower.weight"] = torch.zeros(4, 256, dtype=torch.int8)
+    state["missing_tower.weight_scale"] = torch.ones(4, 1, dtype=torch.float32)
+    state["missing_tower.comfy_quant"] = _text_convrot_payload()
+    checkpoint = tmp_path / "qwen3vl-missing-convrot.safetensors"
+    save_file(state, checkpoint)
+
+    with pytest.raises(ValueError, match=r"missing module missing_tower"):
         load_h3_text_encoder(
             checkpoint,
             processor_path="fake",

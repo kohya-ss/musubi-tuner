@@ -21,7 +21,6 @@ from musubi_tuner.minimax_h3.model import (
 )
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
-from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, ConvRotInt8LayerSpec
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 
 
@@ -228,14 +227,19 @@ def test_published_transformer_metadata_is_parsed_strictly():
     assert actual == MiniMaxH3Config()
     with pytest.raises(ValueError, match=r"hidden_size.*5376.*4096"):
         parse_h3_transformer_config({"config": json.dumps({"transformer": {**released, "hidden_size": 4096}})})
-    marked = parse_h3_transformer_config(
-        {
-            "config": json.dumps({"transformer": released}),
-            "format": "int8_tensorwise",
-            "convrot": "true",
-        }
-    )
-    assert marked == MiniMaxH3Config()
+    quantized_metadata = {
+        "config": json.dumps({"transformer": released}),
+        "format": "int8_tensorwise",
+        "convrot": "true",
+    }
+    with pytest.raises(ValueError, match="--convrot_int8"):
+        parse_h3_transformer_config(quantized_metadata)
+    assert parse_h3_transformer_config(quantized_metadata, allow_convrot_int8=True) == MiniMaxH3Config()
+    with pytest.raises(ValueError, match="not supported"):
+        parse_h3_transformer_config(
+            {"config": json.dumps({"transformer": released}), "format": "nvfp4"},
+            allow_convrot_int8=True,
+        )
 
 
 def test_tiny_model_rejects_batch_size_above_one_in_r1():
@@ -722,7 +726,7 @@ def test_load_h3_transformer_auto_detects_full_convrot_and_per_layer_groups(tmp_
     )
     checkpoint = tmp_path / "full-int8-convrot.safetensors"
     save_file(state, checkpoint, metadata={"config": "{}", "note": "contains unrelated INT8 and quantized text"})
-    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata: config)
+    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata, **_kwargs: config)
 
     loaded = h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16)
 
@@ -764,61 +768,22 @@ def test_load_h3_transformer_auto_detects_pruned_and_converts_f16_adaln(tmp_path
     assert loaded.blocks[0].attn.qkv_proj.scale_weight.dtype is torch.float32
 
 
-def test_full_classifier_rejects_nonpublished_convrot_layer(tmp_path: Path, monkeypatch):
+def test_full_loader_accepts_nonpublished_convrot_layers_permissively(tmp_path: Path, monkeypatch):
+    # the pre-quantized file dictates which layers are INT8; layers outside the published
+    # ComfyUI scope load and patch as well instead of being rejected on exact topology
     layers = _tiny_transformer_convrot_layers(pruned=False)
     layers["condition_proj"] = 4
     config, state = _synthetic_convrot_h3_state(pruned=False, layers=layers)
     checkpoint = tmp_path / "extra-convrot-layer.safetensors"
     save_file(state, checkpoint, metadata={"config": "{}"})
-    artifact = inspect_safetensors_convrot_int8([checkpoint])
-    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata: config)
+    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata, **_kwargs: config)
 
-    with pytest.raises(ValueError, match=r"ConvRot.*topology.*condition_proj"):
-        h3_model._classify_h3_transformer([checkpoint], artifact)
+    loaded = h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16)
 
-
-def test_full_classifier_rejects_missing_published_convrot_layer(tmp_path: Path, monkeypatch):
-    layers = _tiny_transformer_convrot_layers(pruned=False)
-    del layers["blocks.0.mlp.fc2"]
-    config, state = _synthetic_convrot_h3_state(pruned=False, layers=layers)
-    checkpoint = tmp_path / "missing-convrot-layer.safetensors"
-    save_file(state, checkpoint, metadata={"config": "{}"})
-    artifact = inspect_safetensors_convrot_int8([checkpoint])
-    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata: config)
-
-    with pytest.raises(ValueError, match=r"ConvRot.*topology.*blocks.0.mlp.fc2"):
-        h3_model._classify_h3_transformer([checkpoint], artifact)
-
-
-def test_published_convrot_topology_requires_released_group_sizes():
-    config = MiniMaxH3Config()
-    layers = {}
-    for index in range(config.num_layers):
-        for suffix in ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2"):
-            module_path = f"blocks.{index}.{suffix}"
-            layers[module_path] = ConvRotInt8LayerSpec(
-                module_path,
-                f"{module_path}.weight",
-                f"{module_path}.scale_weight",
-                256,
-            )
-        module_path = f"blocks.{index}.adaln_proj.linear"
-        layers[module_path] = ConvRotInt8LayerSpec(
-            module_path,
-            f"{module_path}.weight",
-            f"{module_path}.scale_weight",
-            64,
-        )
-    broken = layers["blocks.0.attn.qkv_proj"]
-    layers[broken.module_path] = ConvRotInt8LayerSpec(
-        broken.module_path,
-        broken.weight_key,
-        broken.scale_key,
-        64,
-    )
-
-    with pytest.raises(ValueError, match=r"group size.*blocks.0.attn.qkv_proj.*256.*64"):
-        h3_model._validate_h3_convrot_topology(config, ConvRotInt8Artifact(layers, frozenset()))
+    assert loaded.convrot_int8_layer_count == 6
+    assert loaded.condition_proj.weight.dtype is torch.int8
+    assert loaded.condition_proj._convrot_groupsize == 4
+    assert loaded.dtype is torch.bfloat16
 
 
 @pytest.mark.parametrize(
@@ -840,7 +805,7 @@ def test_pruned_classifier_rejects_invalid_curve_table_before_construction(tmp_p
     artifact = inspect_safetensors_convrot_int8([checkpoint])
 
     with pytest.raises(ValueError, match=match):
-        h3_model._classify_h3_transformer([checkpoint], artifact)
+        h3_model.classify_h3_transformer([checkpoint], artifact)
 
 
 def test_pruned_classifier_rejects_mixed_curve_and_time_embedder_structures(tmp_path: Path):
@@ -854,7 +819,7 @@ def test_pruned_classifier_rejects_mixed_curve_and_time_embedder_structures(tmp_
     artifact = inspect_safetensors_convrot_int8([checkpoint])
 
     with pytest.raises(ValueError, match="both.*adaln_t_table.*time_embedder|mixed"):
-        h3_model._classify_h3_transformer([checkpoint], artifact)
+        h3_model.classify_h3_transformer([checkpoint], artifact)
 
 
 def test_pruned_classifier_rejects_non_eight_wide_adaln(tmp_path: Path, monkeypatch):
@@ -873,7 +838,7 @@ def test_pruned_classifier_rejects_non_eight_wide_adaln(tmp_path: Path, monkeypa
     monkeypatch.setattr(h3_model, "_published_pruned_h3_config", lambda: config)
 
     with pytest.raises(ValueError, match=r"adaln_proj.*expected shape.*8"):
-        h3_model._classify_h3_transformer([checkpoint], artifact)
+        h3_model.classify_h3_transformer([checkpoint], artifact)
 
 
 def test_pruned_classifier_requires_convrot_artifact(tmp_path: Path):
@@ -883,4 +848,4 @@ def test_pruned_classifier_requires_convrot_artifact(tmp_path: Path):
     save_file(state, checkpoint)
 
     with pytest.raises(ValueError, match="pruned.*ConvRot"):
-        h3_model._classify_h3_transformer([checkpoint], None)
+        h3_model.classify_h3_transformer([checkpoint], None)
