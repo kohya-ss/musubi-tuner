@@ -452,6 +452,11 @@ def log_audio_presence_summary(presence_counts: Mapping[bool, int]) -> None:
         missing_audio,
         fraction,
     )
+    if total and real_audio == 0:
+        logger.warning(
+            "No cached item has real audio: training with these caches keeps the audio loss at 0; "
+            "if this is intended, pass --video_only to the trainer explicitly"
+        )
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -486,8 +491,15 @@ def main() -> None:
 
     records_by_dir: dict[str, list[H3Record]] = {}
     audio_sources_by_dir: dict[str, list] = {}
-    for dataset in datasets:
+    for dataset_index, dataset in enumerate(datasets):
         validate_h3_dataset(dataset)
+        if int(dataset.batch_size) != 1:
+            logger.warning(
+                "MiniMax-H3 dataset %d has batch_size=%d in the dataset config; training requires batch_size=1 "
+                "(use gradient accumulation for a larger effective batch) and will stop on the first training batch",
+                dataset_index,
+                int(dataset.batch_size),
+            )
         key = dataset_cache_dir_key(dataset.cache_directory)
         records_by_dir[key] = h3_records_from_datasource(dataset.datasource, args.task)
         audio_sources_by_dir[key] = dataset.datasource.audio_sources

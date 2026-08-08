@@ -55,12 +55,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
-from musubi_tuner.training.audio_loss import (
-    add_audio_train_args,
-    effective_audio_loss_weights,
-    log_audio_supervision_summary,
-    scan_audio_supervised_fraction,
-)
+from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
@@ -161,17 +156,6 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
         seed=None if seed is None else int(seed),
     )
     return sample
-
-
-def validate_h3_dataset_batch_size(dataset_group) -> None:
-    """Keep R1 on one real sample per step; gradient accumulation provides batching."""
-    for dataset_index, dataset in enumerate(dataset_group.datasets):
-        batch_size = int(dataset.batch_manager.batch_size)
-        if batch_size != 1:
-            raise ValueError(
-                f"MiniMax-H3 R1 dataset {dataset_index} requires batch_size=1, got batch_size={batch_size}; "
-                "use gradient accumulation for a larger effective batch"
-            )
 
 
 def _validate_audio_present(value: Any, batch_size: int) -> torch.Tensor:
@@ -350,8 +334,23 @@ def _augment_conditions(
     return tuple(augmented)
 
 
+@dataclass(frozen=True)
+class H3SamplingResources:
+    """Training-time sampling payload: H3 decodes samples with two separate VAEs."""
+
+    video_vae: torch.nn.Module
+    audio_vae: torch.nn.Module
+
+
 class MiniMaxH3NetworkTrainer(NetworkTrainer):
     audio_spec = H3_AUDIO_SPEC
+
+    def __init__(self):
+        super().__init__()
+        # per-rank audio-supervision accounting, fed by process_batch; drives the
+        # first-epoch warning and the observed fraction saved in metadata
+        self._audio_items_seen = 0
+        self._audio_supervised_seen = 0
 
     @property
     def architecture(self) -> str:
@@ -418,29 +417,20 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if is_convrot_int8 and getattr(args, "base_weights", None):
             raise ValueError("MiniMax-H3 --base_weights cannot be merged into a ConvRot INT8 transformer base")
 
-    def _build_dataset(self, args):
-        dataset_group, collator, current_epoch = super()._build_dataset(args)
-        validate_h3_dataset_batch_size(dataset_group)
-        self._supervised_audio_fraction = scan_audio_supervised_fraction(dataset_group)
-        log_audio_supervision_summary(self._supervised_audio_fraction, args)
-        return dataset_group, collator, current_epoch
+    def process_sample_prompts(self, args, accelerator, sample_prompts):
+        # only the default prepare_sampling needs this seam; guard against future
+        # base-side callers silently getting the base NotImplementedError instead
+        raise NotImplementedError(
+            "MiniMax-H3 prepares sample prompts inside prepare_sampling, which returns joint AV sampling resources"
+        )
 
-    def _prepare_sampling(self, args, accelerator, vae_dtype):
-        del vae_dtype
-        self._sampling_video_vae = None
-        self._sampling_audio_vae = None
+    def prepare_sampling(self, args, accelerator, vae_dtype):
+        del vae_dtype  # the H3 video/audio VAE dtypes are fixed per stage
         if not args.sample_prompts:
             return None, None
         for label in ("video_vae", "audio_vae", "text_encoder"):
             _require_sampling_path(getattr(args, label, None), label)
-        return self.process_sample_prompts(args, accelerator, args.sample_prompts), None
-
-    def process_sample_prompts(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        sample_prompts: str,
-    ):
+        sample_prompts = args.sample_prompts
         logger.info("Preparing MiniMax-H3 joint AV training samples from %s", sample_prompts)
         parameters = [_normalize_h3_sample_parameter(args, item) for item in load_prompts(sample_prompts)]
         if not parameters:
@@ -521,7 +511,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             video_vae.to(device="cpu", dtype=VIDEO_VAE_DECODE_DTYPE)
             gc.collect()
             clean_memory_on_device(device)
-        self._sampling_video_vae = video_vae
 
         logger.info("Loading MiniMax-H3 audio VAE for training samples")
         has_audio_conditions = any(parameter["_h3_has_audio_conditions"] for parameter in parameters)
@@ -552,7 +541,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             audio_vae.to("cpu")
             gc.collect()
             clean_memory_on_device(device)
-        self._sampling_audio_vae = audio_vae
 
         for parameter in parameters:
             references = (
@@ -595,7 +583,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 "_h3_has_audio_conditions",
             ):
                 parameter.pop(key)
-        return parameters
+        return parameters, H3SamplingResources(video_vae=video_vae, audio_vae=audio_vae)
 
     def sample_image_inference(
         self,
@@ -603,17 +591,17 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         args,
         transformer,
         dit_dtype,
-        vae,
+        sample_resources,
         save_dir,
         sample_parameter,
         epoch,
         steps,
     ):
-        del dit_dtype, vae
-        video_vae = getattr(self, "_sampling_video_vae", None)
-        audio_vae = getattr(self, "_sampling_audio_vae", None)
-        if video_vae is None or audio_vae is None:
+        del dit_dtype
+        if not isinstance(sample_resources, H3SamplingResources):
             raise RuntimeError("MiniMax-H3 training sample VAEs were not prepared")
+        video_vae = sample_resources.video_vae
+        audio_vae = sample_resources.audio_vae
         layout = sample_parameter["h3_layout"]
         sample_steps = sample_parameter["sample_steps"]
         frame_count = sample_parameter["frame_count"]
@@ -742,8 +730,19 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             gc.collect()
             clean_memory_on_device(device)
 
+    def on_epoch_end(self, args: argparse.Namespace, accelerator: Accelerator, network, transformer, epoch: int) -> None:
+        del network, transformer
+        if epoch != 1 or args.video_only or args.audio_loss_weight <= 0:
+            return
+        # per-rank observation: under DDP each process only sees its own shard
+        if accelerator.is_main_process and self._audio_items_seen > 0 and self._audio_supervised_seen == 0:
+            logger.warning(
+                "No training item with real audio was seen during the first epoch, so the audio loss is always 0; "
+                "if this is intended, consider passing --video_only explicitly"
+            )
+
     def extra_metadata(self, args: argparse.Namespace) -> dict:
-        return {
+        metadata = {
             "ss_minimax_h3_task": args.task,
             "ss_minimax_h3_base_family": "ref2va" if args.task == "ref2va" else "fl2va",
             "ss_minimax_h3_shift_video": args.h3_shift_video,
@@ -752,7 +751,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_audio_cond_clean": args.h3_audio_cond_clean,
             "ss_minimax_h3_loss_policy": "video_mean_plus_weighted_audio_mean",
             "ss_minimax_h3_audio_supervision": "presence_gated_training_weight",
-            "ss_minimax_h3_supervised_audio_fraction": getattr(self, "_supervised_audio_fraction", 1.0),
             "ss_minimax_h3_audio_loss_weight": args.audio_loss_weight,
             "ss_minimax_h3_video_only": args.video_only,
             "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
@@ -760,6 +758,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_latent_cache_version": "2",
             "ss_minimax_h3_text_cache_version": "1",
         }
+        if self._audio_items_seen > 0:
+            # fraction observed on this rank so far (exact once a full epoch has run)
+            metadata["ss_minimax_h3_supervised_audio_fraction"] = round(self._audio_supervised_seen / self._audio_items_seen, 6)
+        return metadata
 
     def load_transformer(
         self,
@@ -874,11 +876,14 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         noise_scheduler,
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
-        vae,
+        sample_resources,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del network, vae
+        del network, sample_resources
+        # _runtime_batch_plan rejects batches larger than one item (batch_size=1 rule)
         runtime = _runtime_batch_plan(batch, latents)
+        self._audio_items_seen += int(runtime.audio_present.numel())
+        self._audio_supervised_seen += int(runtime.audio_present.sum().item())
         if runtime.layout.task != args.task:
             raise ValueError(f"MiniMax-H3 --task {args.task} cannot train a {runtime.layout.task.upper()} cache batch")
         device = latents.device

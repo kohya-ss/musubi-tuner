@@ -167,19 +167,19 @@ Two training arguments control audio supervision:
 - `--video_only` disables audio supervision entirely (audio loss weight 0 for all samples). The model still attends to the real audio latents as context, which matches the inference-time distribution where audio tokens are always generated audio, never silence.
 - `--audio_loss_weight` (default 1.0) scales the audio loss term for supervised samples, e.g. to rebalance a small audio loss against the video loss.
 
-The trainer logs the supervised fraction as `supervised_audio_fraction` and saves it as `ss_minimax_h3_supervised_audio_fraction`, along with `ss_minimax_h3_audio_loss_weight` and `ss_minimax_h3_video_only`. It also records `ss_minimax_h3_loss_policy=video_mean_plus_weighted_audio_mean` and `ss_minimax_h3_audio_supervision=presence_gated_training_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
+The latent caching script logs the supervised fraction as `supervised_audio_fraction` in its end-of-run summary, and warns when no cached item has real audio. The trainer records the fraction it actually observed during training as `ss_minimax_h3_supervised_audio_fraction` (exact once a full epoch has run), along with `ss_minimax_h3_audio_loss_weight` and `ss_minimax_h3_video_only`, and warns at the end of the first epoch if audio supervision is enabled but no sample with real audio was seen. It also records `ss_minimax_h3_loss_policy=video_mean_plus_weighted_audio_mean` and `ss_minimax_h3_audio_supervision=presence_gated_training_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
 
 Zero audio loss does not preserve the base model's audio behavior. H3 is single-stream, and these LoRA targets modify the same attention and MLP weights used by video and audio tokens. A `--video_only` or low-`supervised_audio_fraction` LoRA can therefore produce audio worse than the base model; the risk generally increases with adapter capacity/strength and training exposure, although degradation is not guaranteed to be monotonic. Treat audio from a fully video-only LoRA as unconstrained output.
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.
 
-MiniMax-H3 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The batch-size gate runs immediately after dataset construction and reads no cache files. The supervised-fraction scan then uses the cache paths already stored in the constructed batch managers, counts repeats from those entries, and opens each unique cache once to read its `audio_present` entry; it does not run a second glob or load video/audio latent payloads. The runtime/model repeat the batch-size check for direct API calls. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
+MiniMax-H3 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The latent caching script warns when a dataset config sets any other value, and the trainer rejects the first batch whose size is not 1. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
 
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 
 ### Training-time joint AV samples
 
-H3 overrides the shared single-VAE/video-only sampling hook. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`.
+H3 overrides the shared `prepare_sampling` hook (whose default covers single-VAE architectures) and returns both VAEs as its sampling resources. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`.
 
 Add the sampling assets and normal sampling schedule flags to the training command:
 
