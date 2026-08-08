@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
-from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, ConvRotInt8LayerSpec, prepare_convrot_int8_model
+from musubi_tuner.modules.convrot_int8_utils import apply_convrot_int8_monkey_patch
 from musubi_tuner.dataset.cache_io import AUDIO_PRESENT_KEY
 from musubi_tuner.minimax_h3_train_network import (
     MiniMaxH3NetworkTrainer,
@@ -1175,25 +1175,15 @@ def test_h3_lora_gets_gradients_over_frozen_int8_convrot_base_with_checkpointing
         "blocks.0.mlp.fc1",
         "blocks.0.mlp.fc2",
     )
-    quantized = {}
-    layers = {}
+    state_dict = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
     for module_path in target_paths:
-        module = model.get_submodule(module_path)
-        quantized[module_path] = quantize_int8_convrot_weight(module.weight.detach(), 4)
-        layers[module_path] = ConvRotInt8LayerSpec(
-            module_path,
-            f"{module_path}.weight",
-            f"{module_path}.scale_weight",
-            4,
-        )
-    prepare_convrot_int8_model(model, ConvRotInt8Artifact(layers, frozenset()))
-    with torch.no_grad():
-        for module_path, (weight, scale) in quantized.items():
-            module = model.get_submodule(module_path)
-            module.weight.copy_(weight)
-            module.scale_weight.copy_(scale)
-
+        weight = state_dict.pop(f"{module_path}.weight")
+        quantized_weight, scale = quantize_int8_convrot_weight(weight, 4)
+        state_dict[f"{module_path}.weight"] = quantized_weight
+        state_dict[f"{module_path}.scale_weight"] = scale
+    apply_convrot_int8_monkey_patch(model, state_dict, groupsize_map={path: 4 for path in target_paths})
     model.requires_grad_(False)
+    model.load_state_dict(state_dict, strict=True, assign=True)
     model.enable_gradient_checkpointing()
     model.train()
     network = lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, model)

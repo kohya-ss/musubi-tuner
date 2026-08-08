@@ -24,7 +24,8 @@ from musubi_tuner.minimax_h3.media import (
     audio_latent_frames,
     video_latent_frames,
 )
-from musubi_tuner.minimax_h3.checkpoint import inspect_safetensors_convrot_int8, resolve_safetensors_files
+from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
+from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
@@ -445,9 +446,7 @@ def run_generation(args: argparse.Namespace) -> Path:
     # - Pre-quantized INT8 base (auto-detected): attach LoRAs as runtime additive branches;
     #   the INT8 tensors cannot be merged into.
     # - Plain BF16 base: one-time destructive CPU merge after loading (fastest inference).
-    prequantized = (
-        inspect_safetensors_convrot_int8(resolve_safetensors_files(args.dit), disable_mmap=args.disable_numpy_memmap) is not None
-    )
+    prequantized = has_comfy_quant_tensors(resolve_safetensors_files(args.dit), disable_numpy_memmap=args.disable_numpy_memmap)
     convrot_int8 = args.convrot_int8 or prequantized
     merge_at_load = bool(args.lora_weight) and args.convrot_int8 and not prequantized
     load_on_cpu = bool(args.blocks_to_swap or (args.lora_weight and not convrot_int8))

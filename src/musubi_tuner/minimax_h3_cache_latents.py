@@ -402,12 +402,10 @@ def fingerprint_file(path: str | Path) -> str:
 
 
 def fingerprint_checkpoint(path: str | Path) -> str:
-    path = Path(path).resolve()
-    files = resolve_safetensors_files(path)
+    files = resolve_safetensors_files(Path(path).resolve())
     digest = hashlib.sha256()
     for file in files:
-        relative_name = file.name if path.is_file() else file.relative_to(path).as_posix()
-        digest.update(relative_name.encode("utf-8"))
+        digest.update(file.name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(fingerprint_file(file).encode("ascii"))
         digest.update(b"\0")

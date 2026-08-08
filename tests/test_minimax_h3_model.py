@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3 import model as h3_model
-from musubi_tuner.minimax_h3.checkpoint import inspect_safetensors_convrot_int8, load_safetensors_module
 from musubi_tuner.minimax_h3.model import (
     AdalnProj,
     FinalLayer,
@@ -610,57 +609,62 @@ def test_block_device_assertion_catches_parameters_left_off_execution_device():
         model._assert_block_device(model.blocks[0], 0)
 
 
-def test_checkpoint_loader_can_require_exact_published_dtypes(tmp_path: Path):
-    class Tiny(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(torch.empty(2, 2, dtype=torch.float32))
+def _tiny_bf16_state(num_layers: int = 1) -> dict[str, torch.Tensor]:
+    model = MiniMaxH3Model(_tiny_config(num_layers=num_layers), dtype=torch.bfloat16)
+    return {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
 
+
+def test_bf16_loader_requires_exact_published_dtypes(tmp_path: Path):
+    state = _tiny_bf16_state()
+    state["final_layer.video_out.weight"] = state["final_layer.video_out.weight"].to(torch.bfloat16)
     checkpoint = tmp_path / "wrong-dtype.safetensors"
-    save_file({"weight": torch.zeros(2, 2, dtype=torch.bfloat16)}, checkpoint)
+    save_file(state, checkpoint)
 
-    with pytest.raises(ValueError, match=r"dtype_mismatches.*expected torch.float32.*torch.bfloat16"):
-        load_safetensors_module(
-            Tiny,
+    with pytest.raises(ValueError, match=r"dtype mismatch.*video_out.*expected torch.float32, got torch.bfloat16"):
+        h3_model._load_h3_transformer_bf16(
             [checkpoint],
+            _tiny_config(num_layers=1),
             device="cpu",
-            dtype=None,
-            strict_dtype=True,
+            attn_mode="torch",
+            split_attn=False,
+            disable_mmap=False,
         )
 
 
-def test_checkpoint_loader_rejects_missing_rope_inv_freq(tmp_path: Path):
-    state = _tiny_model(num_layers=1).state_dict()
+def test_bf16_loader_rejects_missing_rope_inv_freq(tmp_path: Path):
+    state = _tiny_bf16_state()
     del state["rope.inv_freq"]
     checkpoint = tmp_path / "missing-rope.safetensors"
     save_file(state, checkpoint)
 
-    with pytest.raises(ValueError, match=r"missing=.*rope\.inv_freq"):
-        load_safetensors_module(
-            lambda: MiniMaxH3Model(_tiny_config(num_layers=1), dtype=torch.float32),
+    with pytest.raises(RuntimeError, match=r"rope\.inv_freq"):
+        h3_model._load_h3_transformer_bf16(
             [checkpoint],
+            _tiny_config(num_layers=1),
             device="cpu",
-            dtype=None,
+            attn_mode="torch",
+            split_attn=False,
+            disable_mmap=False,
         )
 
 
-def test_checkpoint_loader_rejects_uninspected_quantized_weight_pairs(tmp_path: Path):
-    class Tiny(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear = nn.Linear(2, 2, bias=False)
-
+def test_bf16_loader_rejects_stray_quantization_tensors(tmp_path: Path):
+    # an int8 weight without its `.comfy_quant` spec never routes to the ConvRot loader
+    state = _tiny_bf16_state()
+    state["blocks.0.attn.qkv_proj.weight"] = torch.zeros_like(state["blocks.0.attn.qkv_proj.weight"], dtype=torch.int8)
+    state["blocks.0.attn.qkv_proj.weight_scale"] = torch.ones(48, 1, dtype=torch.float32)
     checkpoint = tmp_path / "quantized.safetensors"
-    save_file(
-        {
-            "linear.weight": torch.zeros(2, 2, dtype=torch.int8),
-            "linear.weight_scale": torch.ones(1),
-        },
-        checkpoint,
-    )
+    save_file(state, checkpoint)
 
-    with pytest.raises(ValueError, match="require artifact inspection"):
-        load_safetensors_module(Tiny, [checkpoint], device="cpu", dtype=None)
+    with pytest.raises(ValueError, match=r"dtype mismatch.*qkv_proj"):
+        h3_model._load_h3_transformer_bf16(
+            [checkpoint],
+            _tiny_config(num_layers=1),
+            device="cpu",
+            attn_mode="torch",
+            split_attn=False,
+            disable_mmap=False,
+        )
 
 
 def _convrot_payload(groupsize: int) -> torch.Tensor:
@@ -802,10 +806,9 @@ def test_pruned_classifier_rejects_invalid_curve_table_before_construction(tmp_p
     state["adaln_t_table"] = table
     checkpoint = tmp_path / "bad-table.safetensors"
     save_file(state, checkpoint)
-    artifact = inspect_safetensors_convrot_int8([checkpoint])
 
     with pytest.raises(ValueError, match=match):
-        h3_model.classify_h3_transformer([checkpoint], artifact)
+        h3_model.classify_h3_transformer([checkpoint])
 
 
 def test_pruned_classifier_rejects_mixed_curve_and_time_embedder_structures(tmp_path: Path):
@@ -816,10 +819,9 @@ def test_pruned_classifier_rejects_mixed_curve_and_time_embedder_structures(tmp_
     state["time_embedder.proj_in.weight"] = torch.empty(16, 4, dtype=torch.float32)
     checkpoint = tmp_path / "mixed-adaln.safetensors"
     save_file(state, checkpoint)
-    artifact = inspect_safetensors_convrot_int8([checkpoint])
 
     with pytest.raises(ValueError, match="both.*adaln_t_table.*time_embedder|mixed"):
-        h3_model.classify_h3_transformer([checkpoint], artifact)
+        h3_model.classify_h3_transformer([checkpoint])
 
 
 def test_pruned_classifier_rejects_non_eight_wide_adaln(tmp_path: Path, monkeypatch):
@@ -834,11 +836,10 @@ def test_pruned_classifier_rejects_non_eight_wide_adaln(tmp_path: Path, monkeypa
     )
     checkpoint = tmp_path / "bad-adaln-width.safetensors"
     save_file(state, checkpoint)
-    artifact = inspect_safetensors_convrot_int8([checkpoint])
     monkeypatch.setattr(h3_model, "_published_pruned_h3_config", lambda: config)
 
     with pytest.raises(ValueError, match=r"adaln_proj.*expected shape.*8"):
-        h3_model.classify_h3_transformer([checkpoint], artifact)
+        h3_model.classify_h3_transformer([checkpoint])
 
 
 def test_pruned_classifier_requires_convrot_artifact(tmp_path: Path):
@@ -848,4 +849,4 @@ def test_pruned_classifier_requires_convrot_artifact(tmp_path: Path):
     save_file(state, checkpoint)
 
     with pytest.raises(ValueError, match="pruned.*ConvRot"):
-        h3_model.classify_h3_transformer([checkpoint], None)
+        h3_model.classify_h3_transformer([checkpoint])

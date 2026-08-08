@@ -1,5 +1,4 @@
 from pathlib import Path
-import json
 import sys
 
 import pytest
@@ -19,7 +18,7 @@ from musubi_tuner.minimax_h3.video_vae import (
     encode_video_condition,
     encode_video_target,
 )
-from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_safetensors_files
+from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files, strip_key_prefixes
 
 
 class _ExplodingProjection(nn.Module):
@@ -155,75 +154,36 @@ def test_tiny_vit3d_decoder_runs_without_comfy_runtime():
     assert torch.isfinite(output).all()
 
 
-class _TinyCheckpointModule(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.first = nn.Linear(2, 3)
-        self.second = nn.Linear(3, 1)
+def test_resolve_safetensors_files_expands_first_shard_and_accepts_single_files(tmp_path: Path):
+    first = tmp_path / "model-00001-of-00002.safetensors"
+    second = tmp_path / "model-00002-of-00002.safetensors"
+    save_file({"a": torch.zeros(1)}, first)
+    save_file({"b": torch.zeros(1)}, second)
 
-
-def test_checkpoint_loader_streams_sharded_directory_and_loads_strictly(tmp_path: Path):
-    expected = _TinyCheckpointModule().state_dict()
-    for index, tensor in enumerate(expected.values(), start=1):
-        tensor.fill_(index)
-    first_keys = ["first.weight", "first.bias"]
-    second_keys = ["second.weight", "second.bias"]
-    save_file({key: expected[key] for key in first_keys}, tmp_path / "model-00001-of-00002.safetensors")
-    save_file({key: expected[key] for key in second_keys}, tmp_path / "model-00002-of-00002.safetensors")
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "metadata": {"total_size": sum(tensor.numel() * tensor.element_size() for tensor in expected.values())},
-                "weight_map": {
-                    **{key: "model-00001-of-00002.safetensors" for key in first_keys},
-                    **{key: "model-00002-of-00002.safetensors" for key in second_keys},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    files = resolve_safetensors_files(tmp_path)
-    actual = load_safetensors_module(lambda: _TinyCheckpointModule(), files, device="cpu", dtype=torch.float32)
+    files = resolve_safetensors_files(first)
 
     assert [path.name for path in files] == ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
-    for key, tensor in actual.state_dict().items():
-        torch.testing.assert_close(tensor, expected[key])
+
+    single = tmp_path / "single.safetensors"
+    save_file({"a": torch.zeros(1)}, single)
+    assert resolve_safetensors_files(single) == [single]
 
 
-def test_checkpoint_loader_supports_explicit_key_transforms(tmp_path: Path):
-    expected = _TinyCheckpointModule().state_dict()
-    checkpoint = tmp_path / "prefixed.safetensors"
-    save_file({f"source.{key}": tensor for key, tensor in expected.items()}, checkpoint)
+def test_resolve_safetensors_files_rejects_directories_and_missing_shards(tmp_path: Path):
+    with pytest.raises(ValueError, match="safetensors file"):
+        resolve_safetensors_files(tmp_path)
 
-    actual = load_safetensors_module(
-        lambda: _TinyCheckpointModule(),
-        [checkpoint],
-        device="cpu",
-        dtype=torch.float32,
-        key_transform=lambda key: key.removeprefix("source."),
-    )
-
-    for key, tensor in actual.state_dict().items():
-        torch.testing.assert_close(tensor, expected[key])
+    first = tmp_path / "model-00001-of-00002.safetensors"
+    save_file({"a": torch.zeros(1)}, first)
+    with pytest.raises(FileNotFoundError):
+        resolve_safetensors_files(first)
 
 
-@pytest.mark.parametrize(
-    "state_dict",
-    [
-        {"first.weight": torch.zeros(3, 2)},
-        {
-            "first.weight": torch.zeros(3, 2),
-            "first.bias": torch.zeros(3),
-            "second.weight": torch.zeros(1, 3),
-            "second.bias": torch.zeros(1),
-            "unexpected": torch.zeros(1),
-        },
-    ],
-)
-def test_checkpoint_loader_rejects_missing_or_unexpected_keys(tmp_path: Path, state_dict: dict[str, torch.Tensor]):
-    checkpoint = tmp_path / "model.safetensors"
-    save_file(state_dict, checkpoint)
+def test_strip_key_prefixes_uses_first_match_and_detects_collisions():
+    tensor = torch.zeros(1)
+    stripped = strip_key_prefixes({"vae.encoder.weight": tensor, "decoder.weight": tensor}, ("first_stage_model.", "vae."))
 
-    with pytest.raises(ValueError, match="checkpoint key mismatch"):
-        load_safetensors_module(lambda: _TinyCheckpointModule(), [checkpoint], device="cpu", dtype=torch.float32)
+    assert set(stripped) == {"encoder.weight", "decoder.weight"}
+
+    with pytest.raises(ValueError, match="collide"):
+        strip_key_prefixes({"vae.encoder.weight": tensor, "encoder.weight": tensor}, ("vae.",))

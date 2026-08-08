@@ -12,7 +12,7 @@ from safetensors.torch import save_file
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
-from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, ConvRotInt8LayerSpec, prepare_convrot_int8_model
+from musubi_tuner.modules.convrot_int8_utils import apply_convrot_int8_monkey_patch
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 
 
@@ -261,23 +261,15 @@ def _prepare_int8_targets(model):
         for index in range(len(model.blocks))
         for suffix in ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2")
     )
-    layers = {}
-    quantized = {}
+    state_dict = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
     for module_path in target_paths:
-        module = model.get_submodule(module_path)
-        quantized[module_path] = quantize_int8_convrot_weight(module.weight.detach(), 4)
-        layers[module_path] = ConvRotInt8LayerSpec(
-            module_path,
-            f"{module_path}.weight",
-            f"{module_path}.scale_weight",
-            4,
-        )
-    prepare_convrot_int8_model(model, ConvRotInt8Artifact(layers, frozenset()))
-    with torch.no_grad():
-        for module_path, (weight, scale) in quantized.items():
-            module = model.get_submodule(module_path)
-            module.weight.copy_(weight)
-            module.scale_weight.copy_(scale)
+        weight = state_dict.pop(f"{module_path}.weight")
+        quantized_weight, scale = quantize_int8_convrot_weight(weight, 4)
+        state_dict[f"{module_path}.weight"] = quantized_weight
+        state_dict[f"{module_path}.scale_weight"] = scale
+    apply_convrot_int8_monkey_patch(model, state_dict, groupsize_map={path: 4 for path in target_paths})
+    model.requires_grad_(False)
+    model.load_state_dict(state_dict, strict=True, assign=True)
     return target_paths
 
 

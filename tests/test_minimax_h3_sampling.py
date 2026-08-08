@@ -379,7 +379,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     # the pre-quantization probe reads the DiT file headers; the stub DiT here is not
     # a real safetensors file, so report an ordinary (non-pre-quantized) checkpoint
     monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
-    monkeypatch.setattr(generate, "inspect_safetensors_convrot_int8", lambda files, **kwargs: None)
+    monkeypatch.setattr(generate, "has_comfy_quant_tensors", lambda files, **kwargs: False)
     events = []
 
     class Transformer:
