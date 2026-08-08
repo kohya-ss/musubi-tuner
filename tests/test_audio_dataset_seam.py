@@ -8,7 +8,6 @@ import wave
 import av
 import numpy as np
 import pytest
-from safetensors.torch import save_file
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +35,6 @@ from musubi_tuner.dataset.media_utils import load_video, resample_frame_indices
 from musubi_tuner.training.audio_loss import (
     add_audio_train_args,
     effective_audio_loss_weights,
-    scan_audio_supervised_fraction,
 )
 
 
@@ -384,34 +382,6 @@ def test_effective_audio_loss_weights_combines_policy_and_presence():
     args = SimpleNamespace(video_only=False, audio_loss_weight=1.0)
     with pytest.raises(ValueError, match="exactly 0.0 or 1.0"):
         effective_audio_loss_weights(torch.tensor([0.5]), args)
-
-
-def _fake_dataset_group(bucket_items):
-    batch_manager = SimpleNamespace(buckets={"bucket": bucket_items})
-    return SimpleNamespace(datasets=[SimpleNamespace(batch_manager=batch_manager)])
-
-
-def test_scan_audio_supervised_fraction_weights_repeats(tmp_path: Path):
-    supervised_path = tmp_path / "supervised.safetensors"
-    unsupervised_path = tmp_path / "unsupervised.safetensors"
-    save_file({AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32)}, str(supervised_path))
-    save_file({AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32)}, str(unsupervised_path))
-
-    items = [
-        SimpleNamespace(latent_cache_path=str(supervised_path)),
-        SimpleNamespace(latent_cache_path=str(unsupervised_path)),
-        SimpleNamespace(latent_cache_path=str(unsupervised_path)),
-    ]
-    assert scan_audio_supervised_fraction(_fake_dataset_group(items)) == pytest.approx(1.0 / 3.0)
-
-
-def test_scan_audio_supervised_fraction_rejects_missing_entry(tmp_path: Path):
-    legacy_path = tmp_path / "legacy.safetensors"
-    save_file({"latents_1x1x1_float32": torch.zeros(1, 1, 1, dtype=torch.float32)}, str(legacy_path))
-
-    items = [SimpleNamespace(latent_cache_path=str(legacy_path))]
-    with pytest.raises(ValueError, match="re-run latent caching"):
-        scan_audio_supervised_fraction(_fake_dataset_group(items))
 
 
 def test_audio_present_cache_entry_roundtrip():

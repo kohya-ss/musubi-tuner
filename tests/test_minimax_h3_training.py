@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from safetensors.torch import save_file
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,111 +17,81 @@ from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
 from musubi_tuner.modules.convrot_int8_utils import apply_convrot_int8_monkey_patch
-from musubi_tuner.dataset.cache_io import AUDIO_PRESENT_KEY
 from musubi_tuner.minimax_h3_train_network import (
+    H3SamplingResources,
     MiniMaxH3NetworkTrainer,
     minimax_h3_setup_parser,
-    validate_h3_dataset_batch_size,
 )
-from musubi_tuner.training.audio_loss import scan_audio_supervised_fraction
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
-from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
+from musubi_tuner.training.trainer_base import DiTOutput
 
 
-def _dataset_group(*batch_sizes: int):
-    return SimpleNamespace(
-        datasets=[SimpleNamespace(batch_manager=SimpleNamespace(batch_size=batch_size)) for batch_size in batch_sizes]
-    )
+def test_process_batch_accumulates_observed_audio_supervision(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+
+    for present in (1.0, 0.0):
+        batch = _training_batch()
+        batch["audio_present"] = torch.tensor([present], dtype=torch.float32)
+        trainer.process_batch(
+            args,
+            _Accelerator(),
+            _RecordingTransformer(),
+            None,
+            batch,
+            video_latents,
+            torch.zeros_like(video_latents),
+            None,
+            torch.bfloat16,
+            torch.float32,
+            None,
+            0,
+        )
+
+    assert trainer._audio_items_seen == 2
+    assert trainer._audio_supervised_seen == 1
+    assert trainer.extra_metadata(args)["ss_minimax_h3_supervised_audio_fraction"] == 0.5
 
 
-def test_h3_dataset_accepts_batch_size_one_without_inspecting_cache_items():
-    validate_h3_dataset_batch_size(_dataset_group(1, 1))
+def test_h3_rejects_the_single_vae_prompt_seam_with_a_pointer_to_prepare_sampling():
+    with pytest.raises(NotImplementedError, match="prepare_sampling"):
+        MiniMaxH3NetworkTrainer().process_sample_prompts(_trainer_args(), _Accelerator(), "prompts.json")
 
 
-def test_h3_dataset_rejects_real_batches_and_points_to_gradient_accumulation():
-    with pytest.raises(ValueError, match=r"dataset 1.*batch_size=2.*gradient accumulation"):
-        validate_h3_dataset_batch_size(_dataset_group(1, 2))
+def test_h3_warns_after_the_first_epoch_when_no_real_audio_was_seen(caplog):
+    trainer = MiniMaxH3NetworkTrainer()
+    trainer._audio_items_seen = 3
+    trainer._audio_supervised_seen = 0
+    caplog.set_level("WARNING")
 
+    trainer.on_epoch_end(_trainer_args(), SimpleNamespace(is_main_process=True), None, None, 1)
 
-def _presence_cache(path: Path, *, present: torch.Tensor | None) -> Path:
-    tensors = {"latents_2x4x4_float32": torch.zeros(24, 2, 4, 4)}
-    if present is not None:
-        tensors[AUDIO_PRESENT_KEY] = present
-    save_file(tensors, path)
-    return path.resolve()
-
-
-def _audio_presence_dataset_group(entries: list[Path]):
-    items = [SimpleNamespace(latent_cache_path=str(path)) for path in entries]
-    manager = SimpleNamespace(batch_size=1, buckets={(64, 64, 5): items})
-    dataset = SimpleNamespace(batch_manager=manager)
-    return SimpleNamespace(datasets=[dataset])
-
-
-def test_audio_supervision_scan_counts_repeats_and_opens_each_unique_cache_once(monkeypatch, tmp_path: Path):
-    from musubi_tuner.training import audio_loss
-
-    supervised = _presence_cache(tmp_path / "supervised.safetensors", present=torch.tensor(1.0, dtype=torch.float32))
-    unsupervised = _presence_cache(tmp_path / "unsupervised.safetensors", present=torch.tensor(0.0, dtype=torch.float32))
-    dataset_group = _audio_presence_dataset_group([supervised, supervised, unsupervised])
-    opened = []
-    real_safe_open = audio_loss.safe_open
-
-    def counted_safe_open(path, *args, **kwargs):
-        opened.append(Path(path).resolve())
-        return real_safe_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(audio_loss, "safe_open", counted_safe_open)
-
-    fraction = scan_audio_supervised_fraction(dataset_group)
-
-    assert fraction == pytest.approx(2 / 3)
-    assert opened.count(supervised) == 1
-    assert opened.count(unsupervised) == 1
-
-
-def test_audio_supervision_scan_rejects_pre_audio_present_caches(tmp_path: Path):
-    legacy = _presence_cache(tmp_path / "legacy.safetensors", present=None)
-
-    with pytest.raises(ValueError, match="re-run latent caching"):
-        scan_audio_supervised_fraction(_audio_presence_dataset_group([legacy]))
+    assert "audio loss is always 0" in caplog.text
 
 
 @pytest.mark.parametrize(
-    "present",
+    "overrides, items_seen, supervised_seen, epoch",
     [
-        torch.tensor([0.0], dtype=torch.float32),
-        torch.tensor(0.0, dtype=torch.float64),
-        torch.tensor(float("nan"), dtype=torch.float32),
-        torch.tensor(0.5, dtype=torch.float32),
+        ({}, 3, 1, 1),  # real audio was seen
+        ({}, 3, 0, 2),  # later epochs stay silent
+        ({"video_only": True}, 3, 0, 1),
+        ({"audio_loss_weight": 0.0}, 3, 0, 1),
+        ({}, 0, 0, 1),  # nothing seen (no step ran on this rank)
     ],
 )
-def test_audio_supervision_scan_rejects_invalid_presence_entries(tmp_path: Path, present: torch.Tensor):
-    path = _presence_cache(tmp_path / "invalid.safetensors", present=present)
-
-    with pytest.raises(ValueError, match="audio_present"):
-        scan_audio_supervised_fraction(_audio_presence_dataset_group([path]))
-
-
-def test_h3_dataset_build_scans_audio_supervision_before_returning(monkeypatch, tmp_path: Path, caplog):
-    path = _presence_cache(tmp_path / "unsupervised.safetensors", present=torch.tensor(0.0, dtype=torch.float32))
-    dataset_group = _audio_presence_dataset_group([path])
-    sentinel_collator = object()
-    sentinel_epoch = object()
-    monkeypatch.setattr(
-        NetworkTrainer,
-        "_build_dataset",
-        lambda self, args: (dataset_group, sentinel_collator, sentinel_epoch),
-    )
-    caplog.set_level("INFO")
+def test_h3_epoch_end_stays_silent_unless_audio_supervision_was_expected(caplog, overrides, items_seen, supervised_seen, epoch):
     trainer = MiniMaxH3NetworkTrainer()
+    trainer._audio_items_seen = items_seen
+    trainer._audio_supervised_seen = supervised_seen
+    caplog.set_level("WARNING")
 
-    result = trainer._build_dataset(_trainer_args())
+    trainer.on_epoch_end(_trainer_args(**overrides), SimpleNamespace(is_main_process=True), None, None, epoch)
 
-    assert result == (dataset_group, sentinel_collator, sentinel_epoch)
-    assert trainer._supervised_audio_fraction == 0.0
-    assert "supervised_audio_fraction=0.000000" in caplog.text
+    assert caplog.text == ""
 
 
 class _Accelerator:
@@ -368,8 +337,7 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
         lambda decoded, output_path: captured.update(decoded=decoded, output_path=Path(output_path)),
     )
     trainer = train.MiniMaxH3NetworkTrainer()
-    trainer._sampling_video_vae = VideoVAE()
-    trainer._sampling_audio_vae = AudioVAE()
+    sample_resources = train.H3SamplingResources(video_vae=VideoVAE(), audio_vae=AudioVAE())
     layout = build_h3_layout(
         task="t2va",
         text_length=3,
@@ -401,7 +369,7 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
         args,
         transformer,
         torch.bfloat16,
-        None,
+        sample_resources,
         str(tmp_path),
         sample_parameter,
         None,
@@ -416,7 +384,7 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
     assert transformer.training is True
 
 
-def test_prepare_training_samples_encodes_text_once_and_owns_both_vaes_without_using_the_shared_vae(tmp_path, monkeypatch):
+def test_prepare_training_samples_encodes_text_once_and_returns_both_vaes_as_sampling_resources(tmp_path, monkeypatch):
     import musubi_tuner.minimax_h3_train_network as train
 
     prompt_file = tmp_path / "prompts.json"
@@ -495,12 +463,12 @@ def test_prepare_training_samples_encodes_text_once_and_owns_both_vaes_without_u
     monkeypatch.setattr(train, "clean_memory_on_device", lambda *args, **kwargs: None)
     trainer = train.MiniMaxH3NetworkTrainer()
 
-    sample_parameters, shared_vae = trainer._prepare_sampling(args, _Accelerator(), torch.bfloat16)
+    sample_parameters, sample_resources = trainer.prepare_sampling(args, _Accelerator(), torch.bfloat16)
 
-    assert shared_vae is None
+    assert isinstance(sample_resources, H3SamplingResources)
     assert events == ["load_text_encoder", "encode_text", ("load_video_vae", torch.float16), "load_audio_vae"]
-    assert isinstance(trainer._sampling_video_vae, VideoVAE)
-    assert isinstance(trainer._sampling_audio_vae, AudioVAE)
+    assert isinstance(sample_resources.video_vae, VideoVAE)
+    assert isinstance(sample_resources.audio_vae, AudioVAE)
     assert len(sample_parameters) == 1
     parameter = sample_parameters[0]
     assert parameter["h3_layout"].task == "t2va"
@@ -611,16 +579,15 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
     monkeypatch.setattr(train, "clean_memory_on_device", lambda *args, **kwargs: None)
     trainer = train.MiniMaxH3NetworkTrainer()
 
-    sample_parameters, shared_vae = trainer._prepare_sampling(args, _Accelerator(), torch.bfloat16)
+    sample_parameters, sample_resources = trainer.prepare_sampling(args, _Accelerator(), torch.bfloat16)
 
-    assert shared_vae is None
     parameter = sample_parameters[0]
     assert parameter["h3_layout"].task == "ref2va"
     assert parameter["h3_layout"].references == (H3ReferenceGeometry("video", video=H3VideoGeometry(2, 4, 4), audio_frames=8),)
     assert parameter["h3_visual_conditions"] == (visual,)
     assert parameter["h3_audio_conditions"] == (audio,)
     assert video_vae_load_dtypes == [torch.float32]
-    assert trainer._sampling_video_vae.dtype_probe.dtype is torch.float16
+    assert sample_resources.video_vae.dtype_probe.dtype is torch.float16
     assert record_loads == [record]
     assert visual_decodes == [record, record]
     assert audio_frame_counts == [{0: 5}]
@@ -1045,7 +1012,8 @@ def test_process_batch_rejects_caches_without_audio_present():
 
 def test_h3_training_metadata_records_task_scheduler_and_target_policy():
     trainer = MiniMaxH3NetworkTrainer()
-    trainer._supervised_audio_fraction = 0.25
+    trainer._audio_items_seen = 4
+    trainer._audio_supervised_seen = 1
 
     metadata = trainer.extra_metadata(_trainer_args(task="fl2va"))
 
@@ -1073,6 +1041,12 @@ def test_t2va_metadata_distinguishes_task_from_the_fl2va_base_family():
 
     assert metadata["ss_minimax_h3_task"] == "t2va"
     assert metadata["ss_minimax_h3_base_family"] == "fl2va"
+
+
+def test_h3_metadata_omits_the_audio_fraction_until_a_batch_has_been_observed():
+    metadata = MiniMaxH3NetworkTrainer().extra_metadata(_trainer_args())
+
+    assert "ss_minimax_h3_supervised_audio_fraction" not in metadata
 
 
 def _tiny_model(num_layers: int = 2):
