@@ -839,7 +839,9 @@ class NetworkTrainer:
                 line += "#" * int(w / max_weighting * CONSOLE_WIDTH)
                 print(line)
 
-    def sample_images(self, accelerator: Accelerator, args, epoch, steps, sample_resources, transformer, sample_parameters, dit_dtype):
+    def sample_images(
+        self, accelerator: Accelerator, args, epoch, steps, sample_resources, transformer, sample_parameters, dit_dtype
+    ):
         """architecture independent sample images"""
         if not should_sample_images(args, steps, epoch):
             return
