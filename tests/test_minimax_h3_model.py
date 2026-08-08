@@ -156,6 +156,14 @@ def test_pruned_timestep_curve_handles_bf16_as_represented_and_rejects_scalars()
         model._timestep_embeddings(torch.tensor(0.5), torch.device("cpu"))
 
 
+def test_pruned_timestep_curve_honors_the_execution_device_contract():
+    model = MiniMaxH3Model(_tiny_config(num_layers=1, pruned=True), dtype=torch.float32)
+
+    actual = model._timestep_embeddings(torch.tensor([0.25]), torch.device("meta"))
+
+    assert actual.device.type == "meta"
+
+
 def test_pruned_forward_casts_curve_output_before_bf16_adaln_without_autocast():
     model = MiniMaxH3Model(_tiny_config(num_layers=1, pruned=True), dtype=torch.bfloat16).eval()
     with torch.no_grad():
@@ -659,8 +667,25 @@ def _convrot_payload(groupsize: int) -> torch.Tensor:
     return torch.tensor(list(raw), dtype=torch.uint8)
 
 
+def _convrot_test_config(*, pruned: bool) -> MiniMaxH3Config:
+    return MiniMaxH3Config(
+        hidden_size=256,
+        num_layers=1,
+        token_refiner_num_layers=1,
+        num_attention_heads=2,
+        attention_head_dim=128,
+        ffn_hidden_size=256,
+        text_dim=256,
+        timestep_input_dim=64,
+        time_embed_hidden_size=256,
+        time_embed_dim=8 if pruned else 64,
+        rope_inv_freq_len=16,
+        adaln_curve_grid=1025 if pruned else None,
+    )
+
+
 def _synthetic_convrot_h3_state(*, pruned: bool, layers: dict[str, int]):
-    config = _tiny_config(num_layers=1, pruned=pruned)
+    config = _convrot_test_config(pruned=pruned)
     model = MiniMaxH3Model(config, dtype=torch.bfloat16)
     state = {key: tensor.detach().cpu().clone() for key, tensor in model.state_dict().items()}
     if pruned:
@@ -680,13 +705,13 @@ def _synthetic_convrot_h3_state(*, pruned: bool, layers: dict[str, int]):
 
 def _tiny_transformer_convrot_layers(*, pruned: bool) -> dict[str, int]:
     layers = {
-        "blocks.0.attn.qkv_proj": 16,
-        "blocks.0.attn.out_proj": 16,
-        "blocks.0.mlp.fc1": 16,
-        "blocks.0.mlp.fc2": 4,
+        "blocks.0.attn.qkv_proj": 256,
+        "blocks.0.attn.out_proj": 256,
+        "blocks.0.mlp.fc1": 256,
+        "blocks.0.mlp.fc2": 256,
     }
     if not pruned:
-        layers["blocks.0.adaln_proj.linear"] = 4
+        layers["blocks.0.adaln_proj.linear"] = 64
     return layers
 
 
@@ -706,8 +731,8 @@ def test_load_h3_transformer_auto_detects_full_convrot_and_per_layer_groups(tmp_
     assert loaded.blocks[0].attn.qkv_proj.weight.dtype is torch.int8
     assert loaded.blocks[0].attn.qkv_proj.scale_weight.dtype is torch.float32
     assert "attn.qkv_proj.scale_weight" in dict(loaded.blocks[0].named_buffers())
-    assert loaded.blocks[0].attn.qkv_proj._convrot_groupsize == 16
-    assert loaded.blocks[0].adaln_proj.linear._convrot_groupsize == 4
+    assert loaded.blocks[0].attn.qkv_proj._convrot_groupsize == 256
+    assert loaded.blocks[0].adaln_proj.linear._convrot_groupsize == 64
     assert torch.equal(
         loaded.blocks[0].attn.qkv_proj.scale_weight,
         state["blocks.0.attn.qkv_proj.weight_scale"],

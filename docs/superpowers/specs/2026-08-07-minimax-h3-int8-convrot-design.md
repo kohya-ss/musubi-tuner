@@ -219,10 +219,10 @@ timestep_embedding_fp32 = torch.lerp(
     table_fp32[lower + 1],
     fraction.unsqueeze(1),
 )
-timestep_embedding = timestep_embedding_fp32.to(dtype=self.dtype)
+timestep_embedding = timestep_embedding_fp32.to(device=execution_device, dtype=self.dtype)
 ```
 
-The production path preserves `unique_timesteps` as FP32 through interpolation, then casts the completed embedding to `self.dtype` immediately before the BF16 `AdalnProj`. This cast is part of the model contract and must not rely on autocast, because standalone generation calls the transformer without an autocast context. The explicit input promotion is defensive and prevents additional precision loss during multiplication and `lerp`, but it cannot recover information already lost if a caller supplies BF16. For many BF16 values, multiplying the represented value by 1024 lands exactly on a table index, so nearest-neighbor-like behavior is expected rather than treated as FP32-equivalent interpolation. Standard AdaLN continues to apply SiLU inside `AdalnProj`. Pruned AdaLN consumes the interpolated curve coordinate directly and skips that SiLU. Both endpoints and FP32 non-grid interior positions are part of the numerical contract.
+The production path preserves `unique_timesteps` as FP32 through interpolation, then moves the completed embedding to `execution_device` and casts it to `self.dtype` immediately before the BF16 `AdalnProj`. This transfer and cast are part of the model contract and must not rely on table placement or autocast, because standalone generation calls the transformer without an autocast context. The explicit input promotion is defensive and prevents additional precision loss during multiplication and `lerp`, but it cannot recover information already lost if a caller supplies BF16. For many BF16 values, multiplying the represented value by 1024 lands exactly on a table index, so nearest-neighbor-like behavior is expected rather than treated as FP32-equivalent interpolation. Standard AdaLN continues to apply SiLU inside `AdalnProj`. Pruned AdaLN consumes the interpolated curve coordinate directly and skips that SiLU. Both endpoints and FP32 non-grid interior positions are part of the numerical contract.
 
 ## 9. Runtime Integration
 
@@ -349,6 +349,22 @@ pytest
 ```
 
 Before completion, fetch only the official safetensors headers and control payload ranges to compare key counts, dtypes, shapes, group sizes, and full/pruned classification against this contract. A full numerical smoke test is reported only if the actual multi-gigabyte artifacts are present locally.
+
+### 11.5 Official header audit record
+
+On 2026-08-08, HTTP byte-range requests read the first eight bytes, complete safetensors JSON header, and every declared `.comfy_quant` payload from all five released files. No model-weight payload was downloaded.
+
+| Artifact | File bytes / header bytes | Tensor dtypes | ConvRot groups | Non-quantized floating tensors |
+| --- | ---: | --- | --- | --- |
+| FL2VA full | 34,038,892,334 / 108,232 | BF16 272, F32 263, I8 250, U8 250 | 200 x 256, 50 x 64 | BF16 272, F32 13 |
+| Ref2VA full | 34,038,894,550 / 110,448 | BF16 272, F32 263, I8 250, U8 250 | 200 x 256, 50 x 64 | BF16 272, F32 13 |
+| FL2VA pruned | 20,970,379,616 / 95,416 | BF16 220, F16 102, F32 210, I8 200, U8 200 | 200 x 256 | BF16 220, F16 102, F32 10 |
+| Ref2VA pruned | 20,970,379,616 / 95,416 | BF16 220, F16 102, F32 210, I8 200, U8 200 | 200 x 256 | BF16 220, F16 102, F32 10 |
+| Qwen3-VL text encoder | 27,141,342,152 / 181,104 | BF16 552, F32 350, I8 350, U8 350 | 350 x 256 | BF16 552 |
+
+Every transformer and text-encoder module path matched the exact topology in sections 5.2 through 5.4. Every triple had I8 weight, F32 `[out_features, 1]` scale, U8 control, and a group size dividing its input width. Both pruned files contained `adaln_t_table` as F32 `[1025, 8]`.
+
+The full-transformer non-quantized F32 set is exactly the video/audio patch projections, video/audio output heads, `rope.inv_freq`, and four `time_embedder` parameters. The pruned set replaces the time embedder with `adaln_t_table`. The text encoder has no non-scale F32 tensor: all 350 F32 entries are ConvRot scales, while all 552 floating islands are BF16. This confirms that the text loader's F16/BF16 source policy accepts the released artifact without silently narrowing an ordinary F32 island.
 
 ## 12. Documentation
 

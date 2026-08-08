@@ -268,7 +268,7 @@ def test_h3_trainer_passes_backward_mode_to_loader_and_excludes_int8_linears_fro
         "compile_transformer",
         lambda *args, **kwargs: captured.update(compile=kwargs) or transformer,
     )
-    trainer = MiniMaxH3NetworkTrainer()
+    trainer = train.MiniMaxH3NetworkTrainer()
     trainer.blocks_to_swap = 0
     args = _trainer_args(convrot_int8_bwd="int8", disable_numpy_memmap=False)
 
@@ -364,7 +364,7 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
         "write_joint_av",
         lambda decoded, output_path: captured.update(decoded=decoded, output_path=Path(output_path)),
     )
-    trainer = MiniMaxH3NetworkTrainer()
+    trainer = train.MiniMaxH3NetworkTrainer()
     trainer._sampling_video_vae = VideoVAE()
     trainer._sampling_audio_vae = AudioVAE()
     layout = build_h3_layout(
@@ -490,7 +490,7 @@ def test_prepare_training_samples_encodes_text_once_and_owns_both_vaes_without_u
         lambda *args, **kwargs: events.append("load_audio_vae") or AudioVAE(),
     )
     monkeypatch.setattr(train, "clean_memory_on_device", lambda *args, **kwargs: None)
-    trainer = MiniMaxH3NetworkTrainer()
+    trainer = train.MiniMaxH3NetworkTrainer()
 
     sample_parameters, shared_vae = trainer._prepare_sampling(args, _Accelerator(), torch.bfloat16)
 
@@ -606,7 +606,7 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
 
     monkeypatch.setattr(train, "encode_audio_conditions", fake_encode_audio_conditions)
     monkeypatch.setattr(train, "clean_memory_on_device", lambda *args, **kwargs: None)
-    trainer = MiniMaxH3NetworkTrainer()
+    trainer = train.MiniMaxH3NetworkTrainer()
 
     sample_parameters, shared_vae = trainer._prepare_sampling(args, _Accelerator(), torch.bfloat16)
 

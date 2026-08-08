@@ -234,19 +234,12 @@ def _validate_h3_convrot_topology(config: MiniMaxH3Config, artifact: ConvRotInt8
     if missing or unexpected:
         raise ValueError(f"MiniMax-H3 ConvRot topology mismatch: missing={missing[:20]}, unexpected={unexpected[:20]}")
 
-    published_dimensions = (
-        config.hidden_size == 5376
-        and config.num_layers == 50
-        and config.ffn_hidden_size == 14336
-        and config.time_embed_dim in {8, 2688}
-    )
-    if published_dimensions:
-        for module_path, expected_groupsize in expected_groups.items():
-            actual_groupsize = artifact.layers[module_path].groupsize
-            if actual_groupsize != expected_groupsize:
-                raise ValueError(
-                    f"MiniMax-H3 ConvRot group size mismatch: {module_path} expected {expected_groupsize}, got {actual_groupsize}"
-                )
+    for module_path, expected_groupsize in expected_groups.items():
+        actual_groupsize = artifact.layers[module_path].groupsize
+        if actual_groupsize != expected_groupsize:
+            raise ValueError(
+                f"MiniMax-H3 ConvRot group size mismatch: {module_path} expected {expected_groupsize}, got {actual_groupsize}"
+            )
 
 
 def _require_pruned_adaln_header(
@@ -696,7 +689,7 @@ class MiniMaxH3Model(nn.Module):
         lower = position.floor().long().clamp(max=table.shape[0] - 2)
         fraction = position - lower.to(position.dtype)
         embedding_fp32 = torch.lerp(table.float()[lower], table.float()[lower + 1], fraction[:, None])
-        return embedding_fp32.to(self.dtype)
+        return embedding_fp32.to(device=execution_device, dtype=self.dtype)
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False) -> None:
         self.gradient_checkpointing = True

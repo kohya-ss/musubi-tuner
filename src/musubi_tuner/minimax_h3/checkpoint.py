@@ -158,16 +158,15 @@ def load_safetensors_module(
         with MemoryEfficientSafeOpen(str(path), disable_numpy_memmap=disable_mmap) as handle:
             raw_keys = handle.keys()
             for raw_key in raw_keys:
-                if convrot_artifact is None and raw_key.endswith((".weight_scale", ".comfy_quant")):
-                    raise ValueError(f"ConvRot INT8 tensors require artifact inspection before loading: {path}:{raw_key}")
-
                 key = _normalize_loaded_key(raw_key, key_prefixes, key_transform)
+                if convrot_artifact is None and key.endswith((".scale_weight", ".comfy_quant")):
+                    raise ValueError(f"ConvRot INT8 tensors require artifact inspection before loading: {path}:{raw_key}")
                 if key in seen_normalized_keys:
                     raise ValueError(f"Duplicate MiniMax-H3 checkpoint key {key!r} in {path}")
                 seen_normalized_keys.add(key)
 
                 if key.endswith(".comfy_quant"):
-                    if convrot_artifact is None or key not in convrot_artifact.control_keys:
+                    if key not in convrot_artifact.control_keys:
                         unexpected.add(key)
                     else:
                         consumed_control_keys.add(key)

@@ -1,5 +1,5 @@
 import argparse
-import importlib
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -25,8 +25,7 @@ def _stub(monkeypatch, name, **attributes):
 
 
 def _load_training_module(monkeypatch):
-    target = "musubi_tuner.minimax_h3_train_network"
-    monkeypatch.delitem(sys.modules, target, raising=False)
+    target = "_isolated_minimax_h3_train_network"
     noop = lambda *args, **kwargs: None
     _stub(monkeypatch, "musubi_tuner.minimax_h3.audio_vae", load_audio_vae=noop)
     _stub(
@@ -101,7 +100,13 @@ def _load_training_module(monkeypatch):
     _stub(monkeypatch, "musubi_tuner.training.trainer_base", DiTOutput=SimpleNamespace, NetworkTrainer=NetworkTrainer)
     _stub(monkeypatch, "musubi_tuner.utils.device_utils", clean_memory_on_device=noop, synchronize_device=noop)
     model_utils = _stub(monkeypatch, "musubi_tuner.utils.model_utils", compile_transformer=noop)
-    module = importlib.import_module(target)
+    spec = importlib.util.spec_from_file_location(
+        target,
+        Path(__file__).resolve().parents[1] / "src" / "musubi_tuner" / "minimax_h3_train_network.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, target, module)
+    spec.loader.exec_module(module)
     module.model_utils = model_utils
     return module
 
@@ -166,8 +171,7 @@ def test_training_detection_guards_merges_and_compile_policy(monkeypatch):
 
 
 def _load_generation_module(monkeypatch):
-    target = "musubi_tuner.minimax_h3_generate_video"
-    monkeypatch.delitem(sys.modules, target, raising=False)
+    target = "_isolated_minimax_h3_generate_video"
     noop = lambda *args, **kwargs: None
     _stub(monkeypatch, "transformers", CLIPTextModel=torch.nn.Module)
     _stub(monkeypatch, "musubi_tuner.minimax_h3.audio_vae", load_audio_vae=noop)
@@ -194,7 +198,14 @@ def _load_generation_module(monkeypatch):
         PyAVH3MediaDecoder=object,
         fingerprint_file=noop,
     )
-    return importlib.import_module(target)
+    spec = importlib.util.spec_from_file_location(
+        target,
+        Path(__file__).resolve().parents[1] / "src" / "musubi_tuner" / "minimax_h3_generate_video.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, target, module)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
@@ -325,7 +336,8 @@ def test_lora_gradient_reaches_adapter_over_checkpointed_int8_base(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for real block swap")
-def test_cuda_block_swap_keeps_convrot_scales_resident_during_lora_backward(monkeypatch):
+@pytest.mark.parametrize("use_pinned_memory", [False, True])
+def test_cuda_block_swap_keeps_convrot_scales_resident_during_lora_backward(monkeypatch, use_pinned_memory):
     generate = _load_generation_module(monkeypatch)
     device = torch.device("cuda")
     model = _tiny_model(num_layers=3)
@@ -340,7 +352,7 @@ def test_cuda_block_swap_keeps_convrot_scales_resident_during_lora_backward(monk
 
     model.enable_block_swap(
         1,
-        BlockSwapConfig(device=device, supports_backward=True, use_pinned_memory=False),
+        BlockSwapConfig(device=device, supports_backward=True, use_pinned_memory=use_pinned_memory),
     )
     model.move_to_device_except_swap_blocks(device)
     model.switch_block_swap_for_training()
