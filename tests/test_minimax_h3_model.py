@@ -135,13 +135,18 @@ def test_published_transformer_metadata_is_parsed_strictly():
     assert actual == MiniMaxH3Config()
     with pytest.raises(ValueError, match=r"hidden_size.*5376.*4096"):
         parse_h3_transformer_config({"config": json.dumps({"transformer": {**released, "hidden_size": 4096}})})
-    with pytest.raises(ValueError, match="deferred to R2"):
+    quantized_metadata = {
+        "config": json.dumps({"transformer": released}),
+        "format": "int8_tensorwise",
+        "convrot": "true",
+    }
+    with pytest.raises(ValueError, match="--convrot_int8"):
+        parse_h3_transformer_config(quantized_metadata)
+    assert parse_h3_transformer_config(quantized_metadata, allow_convrot_int8=True) == MiniMaxH3Config()
+    with pytest.raises(ValueError, match="not supported"):
         parse_h3_transformer_config(
-            {
-                "config": json.dumps({"transformer": released}),
-                "format": "int8_tensorwise",
-                "convrot": "true",
-            }
+            {"config": json.dumps({"transformer": released}), "format": "nvfp4"},
+            allow_convrot_int8=True,
         )
 
 
@@ -528,7 +533,7 @@ def test_checkpoint_loader_rejects_missing_rope_inv_freq(tmp_path: Path):
         )
 
 
-def test_checkpoint_loader_rejects_quantized_weight_pairs_in_r1(tmp_path: Path):
+def test_checkpoint_loader_rejects_quantized_weight_pairs_without_convrot_flag(tmp_path: Path):
     class Tiny(nn.Module):
         def __init__(self):
             super().__init__()
@@ -543,5 +548,5 @@ def test_checkpoint_loader_rejects_quantized_weight_pairs_in_r1(tmp_path: Path):
         checkpoint,
     )
 
-    with pytest.raises(ValueError, match="deferred to R2"):
+    with pytest.raises(ValueError, match="--convrot_int8"):
         load_safetensors_module(Tiny, [checkpoint], device="cpu", dtype=None)

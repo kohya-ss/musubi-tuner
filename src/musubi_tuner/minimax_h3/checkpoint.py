@@ -121,7 +121,10 @@ def load_safetensors_module(
         with MemoryEfficientSafeOpen(str(path), disable_numpy_memmap=disable_mmap) as handle:
             raw_keys = handle.keys()
             if any(key.endswith((".weight_scale", ".comfy_quant")) for key in raw_keys):
-                raise ValueError(f"Quantized MiniMax-H3 artifacts are deferred to R2: {path}")
+                raise ValueError(
+                    f"Pre-quantized MiniMax-H3 checkpoint: {path}. Pass --convrot_int8 to load ConvRot INT8"
+                    " transformer weights; other quantized formats (fp8/NVFP4) are not supported."
+                )
             for raw_key in raw_keys:
                 key = _normalize_checkpoint_key(raw_key, key_prefixes)
                 if key_transform is not None:
