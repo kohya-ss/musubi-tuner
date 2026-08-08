@@ -155,11 +155,16 @@ def quantize_int8_rowwise(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def quantize_int8_convrot_weight(weight: torch.Tensor, group_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Offline ConvRot weight rotation followed by row-wise INT8 quantization.
 
+    The rotation is computed in float32 regardless of the weight dtype: rotating in
+    bf16 loses enough precision to shift ~9% of the int8 codes by ±1-2, while fp32
+    rotation reproduces ComfyUI's published pre-quantized checkpoints bit-exactly
+    (verified against the MiniMax-H3 INT8 ConvRot distribution).
+
     Returns:
         Tuple of (rotated quantized weight int8 [N, K], scale float32 [N, 1]).
     """
-    h = _build_hadamard(group_size, device=weight.device, dtype=weight.dtype)
-    weight_rot = _rotate_weight(weight, h, group_size)
+    h = _build_hadamard(group_size, device=weight.device, dtype=torch.float32)
+    weight_rot = _rotate_weight(weight.to(torch.float32), h, group_size)
     return quantize_int8_rowwise(weight_rot)
 
 

@@ -203,6 +203,7 @@ Because the default already targets everything, both `exclude_patterns` and `inc
 - Requires **triton** for the fused kernels (`pip install triton-windows` on Windows, matching your torch version). Without triton, training still works via a dequantized bf16 fallback: VRAM savings remain but there is no speedup.
 - `--convrot_int8_bwd int8` (opt-in) also routes the backward grad_x through the fused int8 GEMM: faster, at the cost of slightly quantized gradients. The default `bf16` dequantizes transiently and is the most accurate.
 - Same scope as fp8: the 28 main blocks only; the quantized layers are still LoRA-trainable (the LoRA branch receives the unrotated input and its gradients are unaffected by the base quantization).
+- ComfyUI pre-quantized ConvRot INT8 checkpoints (`weight` int8 + `weight_scale` + `comfy_quant` tensors) load directly with `--convrot_int8`; the layers the file quantized are used as-is. Load-time LoRA merge requires bf16 base weights (merging into int8 is rejected).
 - Composes with `--blocks_to_swap` and `--gradient_checkpointing`. With `--compile`, the quantized Linears are excluded from compilation automatically. Not supported together with `--turbo_dit` yet. Multi-GPU training is untested.
 
 Reference speed (rough 20-step measurement; LoRA training, 1024x1024, batch size 1, `--flash_attn`, gradient checkpointing):
@@ -224,6 +225,7 @@ Loss curves match the fp8/bf16 baselines closely (both backward modes). `--convr
 - 融合カーネルには **triton** が必要です（Windowsではtorchのバージョンに対応する`pip install triton-windows`）。tritonがなくても逆量子化bf16フォールバックで学習は可能です（VRAM削減は維持、速度向上はなし）。
 - `--convrot_int8_bwd int8`（opt-in）を指定すると、backwardのgrad_xも融合int8 GEMMを通ります。高速ですが勾配がわずかに量子化されます。デフォルトの`bf16`は一時的に逆量子化する方式で、最も高精度です。
 - 適用範囲はfp8と同じく28個のメインブロックのみです。量子化された層もLoRA学習可能です（LoRA枝には回転前の入力が渡され、その勾配はbase量子化の影響を受けません）。
+- ComfyUI配布の事前量子化済みConvRot INT8チェックポイント（`weight` int8＋`weight_scale`＋`comfy_quant`）も`--convrot_int8`でそのまま読み込めます（ファイル側で量子化された層をそのまま使用）。ロード時LoRAマージにはbf16のbase重みが必要です（int8へのマージはエラーになります）。
 - `--blocks_to_swap`、`--gradient_checkpointing`と併用できます。`--compile`使用時は量子化されたLinearは自動的にコンパイル対象から除外されます。`--turbo_dit`との併用は現時点では未対応です。マルチGPU学習は未検証です。
 
 参考速度（20ステップの粗い計測。LoRA学習、1024x1024、batch size 1、`--flash_attn`、gradient checkpointing使用）:

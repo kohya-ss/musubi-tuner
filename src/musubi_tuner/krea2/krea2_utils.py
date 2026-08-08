@@ -102,6 +102,9 @@ def load_krea2_dit(
         # quantizes the per-block Linears (scaled fp8 or ConvRot int8). Targets/excludes only
         # apply when quantizing; without quantization the weights are merged and cast to
         # ``dtype`` as-is.
+        quantizer = (
+            ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS) if convrot_int8 else None
+        )
         sd = load_safetensors_with_lora_and_fp8(
             model_files=dit_path,
             lora_weights_list=lora_weights,
@@ -112,16 +115,12 @@ def load_krea2_dit(
             dit_weight_dtype=None if quantized else dtype,
             target_keys=KREA2_FP8_OPTIMIZATION_TARGET_KEYS if fp8_scaled else None,
             exclude_keys=KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS if fp8_scaled else None,
-            quantizer=(
-                ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS)
-                if convrot_int8
-                else None
-            ),
+            quantizer=quantizer,
         )
         if fp8_scaled:
             apply_fp8_monkey_patch(dit, sd, use_scaled_mm=False)
         elif convrot_int8:
-            apply_convrot_int8_monkey_patch(dit, sd, bwd_mode=convrot_int8_bwd)
+            apply_convrot_int8_monkey_patch(dit, sd, bwd_mode=convrot_int8_bwd, groupsize_map=quantizer.module_groupsizes)
             # int8 tensors cannot be wrapped as Parameters with requires_grad=True (only
             # floating dtypes can require grad), and load_state_dict(assign=True) re-wraps
             # incoming tensors with the meta params' requires_grad (default True). The base
