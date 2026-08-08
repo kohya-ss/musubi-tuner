@@ -18,6 +18,9 @@ of Linear-named modules, and compile exclusion also keys on the class name.
 import json
 import math
 import os
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Union
 
 import torch
@@ -117,6 +120,123 @@ def parse_comfy_quant_spec(key: str, tensor: torch.Tensor) -> dict:
     if not isinstance(groupsize, int) or not _is_power_of_4(groupsize):
         raise ValueError(f"Invalid convrot_groupsize for {key}: {groupsize!r} (must be a power of 4, e.g. 64 or 256)")
     return spec
+
+
+def canonicalize_convrot_int8_key(key: str) -> str:
+    """Map the ComfyUI ``.weight_scale`` suffix to the Musubi ``.scale_weight`` layout."""
+    if key.endswith(COMFY_WEIGHT_SCALE_SUFFIX):
+        return key[: -len(COMFY_WEIGHT_SCALE_SUFFIX)] + ".scale_weight"
+    return key
+
+
+@dataclass(frozen=True)
+class ConvRotInt8LayerSpec:
+    module_path: str
+    weight_key: str
+    scale_key: str
+    groupsize: int
+
+
+@dataclass(frozen=True)
+class ConvRotInt8Artifact:
+    """Pre-quantized ConvRot INT8 layers declared by a checkpoint, from headers only.
+
+    ``layers`` maps module paths (normalized keys) to their specs; ``control_keys`` is
+    the set of normalized ``.comfy_quant`` keys so loaders can consume them without
+    treating them as model tensors.
+    """
+
+    layers: Dict[str, ConvRotInt8LayerSpec] = field(default_factory=dict)
+    control_keys: frozenset = frozenset()
+
+    @property
+    def weight_keys(self) -> frozenset:
+        return frozenset(layer.weight_key for layer in self.layers.values())
+
+    @property
+    def scale_keys(self) -> frozenset:
+        return frozenset(layer.scale_key for layer in self.layers.values())
+
+    @property
+    def module_groupsizes(self) -> Dict[str, int]:
+        return {path: layer.groupsize for path, layer in self.layers.items()}
+
+
+def inspect_convrot_int8_artifact(
+    files: Iterable[Union[str, Path]],
+    *,
+    key_normalizer: Optional[Callable[[str], str]] = None,
+    disable_numpy_memmap: bool = False,
+) -> Optional[ConvRotInt8Artifact]:
+    """Detect and validate ComfyUI ConvRot INT8 triples without reading model weights.
+
+    Scans safetensors headers (plus the tiny ``.comfy_quant`` spec tensors) and returns
+    the declared layer map, or None for an ordinary (non-pre-quantized) checkpoint.
+    Malformed or partial triples raise instead of being reinterpreted. ``key_normalizer``
+    receives raw file keys and must apply the same transform the model loader uses;
+    ``.weight_scale`` is canonicalized to ``.scale_weight`` afterwards either way.
+    """
+    entries: Dict[str, tuple] = {}  # normalized key -> (path, raw_key, dtype str, shape tuple)
+    control_specs: Dict[str, dict] = {}
+    artifact_modules: set = set()
+
+    for file in files:
+        checkpoint_path = str(file)
+        with MemoryEfficientSafeOpen(checkpoint_path, disable_numpy_memmap=disable_numpy_memmap) as handle:
+            for raw_key in handle.keys():
+                transformed = key_normalizer(raw_key) if key_normalizer is not None else raw_key
+                key = canonicalize_convrot_int8_key(transformed)
+                header = handle.header[raw_key]
+                if key in entries:
+                    previous_path, previous_raw, _, _ = entries[key]
+                    raise ValueError(
+                        f"Duplicate normalized safetensors key {key}: {previous_path}:{previous_raw}"
+                        f" and {checkpoint_path}:{raw_key}"
+                    )
+                entries[key] = (checkpoint_path, raw_key, header["dtype"], tuple(header["shape"]))
+
+                if key.endswith(COMFY_QUANT_SUFFIX):
+                    module_path = key[: -len(COMFY_QUANT_SUFFIX)]
+                    artifact_modules.add(module_path)
+                    control_specs[key] = parse_comfy_quant_spec(key, handle.get_tensor(raw_key))
+                elif transformed.endswith(COMFY_WEIGHT_SCALE_SUFFIX):
+                    artifact_modules.add(key[: -len(".scale_weight")])
+                elif key.endswith(".weight") and header["dtype"] == "I8":
+                    artifact_modules.add(key[: -len(".weight")])
+
+    if not artifact_modules:
+        return None
+
+    layers: Dict[str, ConvRotInt8LayerSpec] = {}
+    for module_path in sorted(artifact_modules):
+        weight_key = f"{module_path}.weight"
+        scale_key = f"{module_path}.scale_weight"
+        control_key = f"{module_path}{COMFY_QUANT_SUFFIX}"
+        missing = [key for key in (weight_key, scale_key, control_key) if key not in entries]
+        if missing:
+            raise ValueError(f"Invalid ConvRot INT8 artifact, layer {module_path}: missing sibling tensors {missing}")
+
+        _, _, weight_dtype, weight_shape = entries[weight_key]
+        _, _, scale_dtype, scale_shape = entries[scale_key]
+        if weight_dtype != "I8":
+            raise ValueError(f"Invalid ConvRot INT8 artifact, layer {module_path}: weight must be I8, got {weight_dtype}")
+        if len(weight_shape) != 2:
+            raise ValueError(f"Invalid ConvRot INT8 artifact, layer {module_path}: weight must be 2D, got {weight_shape}")
+        if scale_dtype != "F32":
+            raise ValueError(f"Invalid ConvRot INT8 artifact, layer {module_path}: scale must be F32, got {scale_dtype}")
+        if scale_shape != (weight_shape[0], 1):
+            raise ValueError(
+                f"Invalid ConvRot INT8 artifact, layer {module_path}: scale shape must be {(weight_shape[0], 1)}, got {scale_shape}"
+            )
+        groupsize = control_specs[control_key]["convrot_groupsize"]
+        if weight_shape[1] % groupsize != 0:
+            raise ValueError(
+                f"Invalid ConvRot INT8 artifact, layer {module_path}: convrot_groupsize {groupsize} does not divide"
+                f" input width {weight_shape[1]}"
+            )
+        layers[module_path] = ConvRotInt8LayerSpec(module_path, weight_key, scale_key, groupsize)
+
+    return ConvRotInt8Artifact(layers, frozenset(control_specs))
 
 
 class ConvRotInt8Quantizer:
@@ -322,6 +442,8 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             # grad_x = g @ W = g @ (W_rot R) = rotate(g @ W_rot), R = block-diag Hadamard
             if ctx.bwd_mode == "int8":
+                if not g2d.is_cuda:
+                    raise RuntimeError("ConvRot INT8 backward mode 'int8' requires CUDA tensors")
                 # fold per-channel weight scale into g, then reuse the fused Triton GEMM
                 # (row-wise quant of g + int8 GEMM + dequant epilogue in one pipeline).
                 # transient int8 transpose of wq: [K, N], ~1 byte/param, freed after mm
@@ -341,6 +463,62 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
 
 def convrot_int8_linear_forward_patch(self: nn.Linear, x):
     return ConvRotInt8LinearFn.apply(x, self.weight, self.scale_weight, self.bias, self._convrot_groupsize, self._convrot_bwd_mode)
+
+
+def _validate_convrot_bwd_mode(bwd_mode: str) -> None:
+    if bwd_mode not in ("bf16", "int8"):
+        raise ValueError(f"Unsupported ConvRot INT8 backward mode: {bwd_mode}")
+    if bwd_mode == "int8" and not HAS_TRITON:
+        raise ValueError("ConvRot INT8 backward mode 'int8' requires triton. Install triton (triton-windows on Windows).")
+    if not HAS_TRITON:
+        logger.warning(
+            "triton is not available: ConvRot INT8 falls back to transient dequantization in forward."
+            " Weight VRAM is still reduced, but there is no speedup. Install triton (triton-windows on Windows)"
+            " for the fused INT8 kernels."
+        )
+
+
+def _patch_convrot_int8_linear(module: nn.Linear, groupsize: int, bwd_mode: str) -> None:
+    module._convrot_groupsize = groupsize
+    module._convrot_bwd_mode = bwd_mode
+    module.forward = convrot_int8_linear_forward_patch.__get__(module, type(module))
+
+
+def prepare_convrot_int8_model(model: nn.Module, artifact: ConvRotInt8Artifact, *, bwd_mode: str = "bf16") -> nn.Module:
+    """Prepare a (typically meta-built) model for a streamed pre-quantized assign load.
+
+    For every layer the artifact declares, the ``nn.Linear``'s ``.weight`` is replaced
+    with an INT8 parameter, a ``.scale_weight`` fp32 buffer is registered, and the
+    forward is patched — so a subsequent ``load_state_dict(assign=True)`` can stream
+    the pre-quantized tensors directly into place.
+    """
+    _validate_convrot_bwd_mode(bwd_mode)
+
+    for module_path, layer in artifact.layers.items():
+        try:
+            module = model.get_submodule(module_path)
+        except AttributeError as error:
+            raise ValueError(f"ConvRot INT8 artifact declares missing module {module_path}") from error
+        if type(module) is not nn.Linear:
+            raise TypeError(f"ConvRot INT8 module {module_path} must be an exact nn.Linear, got {type(module).__name__}")
+        if module.in_features % layer.groupsize != 0:
+            raise ValueError(
+                f"ConvRot INT8 module {module_path}: group size {layer.groupsize} does not divide input width {module.in_features}"
+            )
+        module.weight = nn.Parameter(
+            torch.empty(module.weight.shape, device=module.weight.device, dtype=torch.int8),
+            requires_grad=False,
+        )
+        module.register_buffer(
+            "scale_weight",
+            torch.empty((module.out_features, 1), device=module.weight.device, dtype=torch.float32),
+        )
+        _patch_convrot_int8_linear(module, layer.groupsize, bwd_mode)
+
+    model.is_convrot_int8 = True
+    model.convrot_int8_layer_count = len(artifact.layers)
+    logger.info(f"Number of ConvRot INT8 monkey-patched Linear layers: {len(artifact.layers)}")
+    return model
 
 
 def apply_convrot_int8_monkey_patch(
@@ -366,16 +544,7 @@ def apply_convrot_int8_monkey_patch(
     Returns:
         nn.Module: The patched model (same instance, modified in-place)
     """
-    if bwd_mode not in ("bf16", "int8"):
-        raise ValueError(f"Unsupported ConvRot INT8 backward mode: {bwd_mode}")
-    if bwd_mode == "int8" and not HAS_TRITON:
-        raise ValueError("ConvRot INT8 backward mode 'int8' requires triton. Install triton (triton-windows on Windows).")
-    if not HAS_TRITON:
-        logger.warning(
-            "triton is not available: ConvRot INT8 falls back to transient dequantization in forward."
-            " Weight VRAM is still reduced, but there is no speedup. Install triton (triton-windows on Windows)"
-            " for the fused INT8 kernels."
-        )
+    _validate_convrot_bwd_mode(bwd_mode)
 
     scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
 
@@ -391,15 +560,12 @@ def apply_convrot_int8_monkey_patch(
         if isinstance(module, nn.Linear) and name in patched_module_paths:
             # register the scale_weight as a buffer to load the state_dict
             module.register_buffer("scale_weight", torch.ones(scale_shape_info[name], dtype=torch.float32))
-            module._convrot_groupsize = groupsize_map.get(name, groupsize) if groupsize_map is not None else groupsize
-            module._convrot_bwd_mode = bwd_mode
-
-            def new_forward(self, x):
-                return convrot_int8_linear_forward_patch(self, x)
-
-            module.forward = new_forward.__get__(module, type(module))
+            module_groupsize = groupsize_map.get(name, groupsize) if groupsize_map is not None else groupsize
+            _patch_convrot_int8_linear(module, module_groupsize, bwd_mode)
 
             patched_count += 1
 
+    model.is_convrot_int8 = True
+    model.convrot_int8_layer_count = patched_count
     logger.info(f"Number of ConvRot INT8 monkey-patched Linear layers: {patched_count}")
     return model

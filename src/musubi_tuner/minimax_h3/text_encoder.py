@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,7 +37,8 @@ from musubi_tuner.minimax_h3.checkpoint import (
     resolve_safetensors_files,
 )
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
-from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact
+
+logger = logging.getLogger(__name__)
 
 
 TEXT_WIDTH = 5120
@@ -249,23 +251,6 @@ def normalize_h3_text_encoder_key(key: str) -> str:
     return key
 
 
-def _validate_h3_text_encoder_convrot_topology(artifact: ConvRotInt8Artifact) -> None:
-    expected = set()
-    for index in range(LAYER_50_HIDDEN_STATE_INDEX):
-        expected.update(f"language_model.layers.{index}.self_attn.{name}" for name in ("q_proj", "k_proj", "v_proj", "o_proj"))
-        expected.update(f"language_model.layers.{index}.mlp.{name}" for name in ("gate_proj", "up_proj", "down_proj"))
-
-    actual = set(artifact.layers)
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    if missing or unexpected:
-        raise ValueError(f"MiniMax-H3 text encoder ConvRot topology mismatch: missing={missing[:20]}, unexpected={unexpected[:20]}")
-    for module_path in sorted(expected):
-        groupsize = artifact.layers[module_path].groupsize
-        if groupsize != 256:
-            raise ValueError(f"MiniMax-H3 text encoder ConvRot group size mismatch: {module_path} expected 256, got {groupsize}")
-
-
 def load_h3_processor(path: str = DEFAULT_PROCESSOR_ID, *, revision: str | None = None):
     from transformers import AutoProcessor
 
@@ -295,13 +280,15 @@ def load_h3_text_encoder(
         return model
 
     files = resolve_safetensors_files(checkpoint_path)
+    # ConvRot INT8 text encoder artifacts are detected from their tensor structure; the
+    # per-layer validation happens in the inspection and the strict assign load below.
     convrot_artifact = inspect_safetensors_convrot_int8(
         files,
         key_transform=normalize_h3_text_encoder_key,
         disable_mmap=disable_mmap,
     )
     if convrot_artifact is not None:
-        _validate_h3_text_encoder_convrot_topology(convrot_artifact)
+        logger.info(f"MiniMax-H3 text encoder: {len(convrot_artifact.layers)} ConvRot INT8 layers detected")
     return load_safetensors_module(
         factory,
         files,
