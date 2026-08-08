@@ -20,11 +20,7 @@ from musubi_tuner.minimax_h3.sampling import (
     sample_joint_av,
     write_joint_av,
 )
-from musubi_tuner.minimax_h3_generate_video import (
-    load_cached_text_conditioning,
-    run_generation,
-    validate_generation_args,
-)
+from musubi_tuner.minimax_h3_generate_video import load_cached_text_conditioning, validate_generation_args
 
 
 def _layout():
@@ -380,6 +376,10 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         disable_numpy_memmap=False,
         processor_revision=None,
     )
+    # the pre-quantization probe reads the DiT file headers; the stub DiT here is not
+    # a real safetensors file, so report an ordinary (non-pre-quantized) checkpoint
+    monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
+    monkeypatch.setattr(generate, "inspect_safetensors_convrot_int8", lambda files, **kwargs: None)
     events = []
 
     class Transformer:
@@ -435,7 +435,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         lambda decoded, output: captured.update(decoded=decoded, output=output),
     )
 
-    output = run_generation(args)
+    output = generate.run_generation(args)
 
     assert output == Path(args.output)
     assert [event[0] for event in events] == [

@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from musubi_tuner.minimax_h3.checkpoint import (
+    inspect_safetensors_convrot_int8,
     load_safetensors_metadata,
     load_safetensors_module,
     resolve_safetensors_files,
@@ -47,8 +48,10 @@ from musubi_tuner.minimax_h3.packing import (
     unpack_targets,
 )
 from musubi_tuner.modules.attention import AttentionParams, attention
+from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, canonicalize_convrot_int8_key
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 _ROTARY_CACHE_SIZE = 2
 
@@ -72,6 +75,9 @@ class MiniMaxH3Config:
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5
+    # pruned-AdaLN artifacts: the sinusoidal time embedder is replaced by a published
+    # FP32 [adaln_curve_grid, time_embed_dim] lookup table interpolated over t in [0, 1]
+    adaln_curve_grid: int | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -100,6 +106,15 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 timestep input width must be even")
         if self.rope_inv_freq_len * 6 > self.attention_head_dim:
             raise ValueError("MiniMax-H3 rotary width exceeds the attention head width")
+        if self.adaln_curve_grid is not None:
+            if self.adaln_curve_grid != 1025:
+                raise ValueError("MiniMax-H3 pruned AdaLN requires exactly 1025 curve rows")
+            if self.time_embed_dim != 8:
+                raise ValueError("MiniMax-H3 pruned AdaLN requires time_embed_dim=8")
+
+    @property
+    def is_pruned(self) -> bool:
+        return self.adaln_curve_grid is not None
 
     @property
     def attention_inner_dim(self) -> int:
@@ -147,8 +162,9 @@ def parse_h3_transformer_config(metadata: Mapping[str, str], *, allow_convrot_in
     blocked_markers = ("fp8", "nvfp4") if allow_convrot_int8 else ("convrot", "int8", "fp8", "nvfp4", "quantized")
     if any(marker in artifact_markers for marker in blocked_markers):
         raise ValueError(
-            "Unsupported quantized MiniMax-H3 checkpoint. Pass --convrot_int8 for ConvRot INT8 checkpoints;"
-            " other quantized formats (fp8/NVFP4) are not supported."
+            "Unsupported quantized MiniMax-H3 checkpoint. ConvRot INT8 checkpoints are detected from their"
+            " tensor structure (or pass --convrot_int8 to quantize a BF16 checkpoint); other quantized"
+            " formats (fp8/NVFP4) are not supported."
         )
     raw_config = metadata.get("config")
     if raw_config is None:
@@ -167,8 +183,77 @@ def parse_h3_transformer_config(metadata: Mapping[str, str], *, allow_convrot_in
         if actual != expected:
             raise ValueError(f"MiniMax-H3 transformer config {field} expected {expected}, got {actual}")
     if transformer.get("adaln_curve_grid") is not None:
-        raise ValueError("Pruned MiniMax-H3 AdaLN artifacts are deferred to R2")
+        raise ValueError("Pruned MiniMax-H3 AdaLN must be classified from its tensor structure")
     return MiniMaxH3Config()
+
+
+def _read_h3_tensor_headers(files: Sequence[str | Path]) -> dict[str, tuple]:
+    """Read tensor headers (dtype string, shape tuple) across shards, keyed by canonical name."""
+    headers: dict[str, tuple] = {}
+    for file in files:
+        checkpoint_path = str(Path(file).resolve())
+        with MemoryEfficientSafeOpen(checkpoint_path) as handle:
+            for raw_key in handle.keys():
+                key = canonicalize_convrot_int8_key(raw_key)
+                if key in headers:
+                    raise ValueError(f"Duplicate MiniMax-H3 tensor header {key!r} in {checkpoint_path}")
+                raw_header = handle.header[raw_key]
+                headers[key] = (raw_header["dtype"], tuple(raw_header["shape"]))
+    return headers
+
+
+def _published_pruned_h3_config() -> MiniMaxH3Config:
+    return MiniMaxH3Config(time_embed_dim=8, adaln_curve_grid=1025)
+
+
+def _require_pruned_adaln_header(headers: Mapping[str, tuple], key: str, expected_shape: tuple) -> None:
+    header = headers.get(key)
+    if header is None:
+        raise ValueError(f"Pruned MiniMax-H3 checkpoint is missing {key}")
+    if header[1] != expected_shape:
+        raise ValueError(f"Pruned MiniMax-H3 {key} expected shape {expected_shape}, got {header[1]}")
+
+
+def classify_h3_transformer(
+    files: Sequence[str | Path],
+    convrot_artifact: ConvRotInt8Artifact | None,
+    *,
+    allow_convrot_int8: bool = False,
+) -> MiniMaxH3Config:
+    """Classify a transformer checkpoint as the published full or pruned-AdaLN structure.
+
+    Pruned artifacts are recognized structurally: the ``adaln_t_table`` FP32 [1025, 8]
+    curve table replaces the sinusoidal time embedder, and every AdaLN projection takes
+    the 8-wide interpolated embedding directly (no SiLU). Full checkpoints keep the
+    published-config metadata validation.
+    """
+    headers = _read_h3_tensor_headers(files)
+    table = headers.get("adaln_t_table")
+    if table is None:
+        return parse_h3_transformer_config(load_safetensors_metadata(files), allow_convrot_int8=allow_convrot_int8)
+    if any(key.startswith("time_embedder.") for key in headers):
+        raise ValueError("MiniMax-H3 checkpoint has mixed adaln_t_table and time_embedder structures")
+    table_dtype, table_shape = table
+    if table_dtype != "F32":
+        raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must be F32, got {table_dtype}")
+    if table_shape != (1025, 8):
+        raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must have shape [1025, 8], got {table_shape}")
+    if convrot_artifact is None:
+        raise ValueError(
+            "Pruned MiniMax-H3 checkpoints are only published as ConvRot INT8 artifacts;"
+            " this file has the pruned AdaLN table but no valid ConvRot INT8 layers"
+        )
+
+    config = _published_pruned_h3_config()
+    for index in range(config.num_layers):
+        prefix = f"blocks.{index}.adaln_proj.linear"
+        _require_pruned_adaln_header(headers, f"{prefix}.weight", (config.block_adaln_out_features, config.time_embed_dim))
+        _require_pruned_adaln_header(headers, f"{prefix}.bias", (config.block_adaln_out_features,))
+    _require_pruned_adaln_header(
+        headers, "final_layer.adaln_proj.linear.weight", (config.final_adaln_out_features, config.time_embed_dim)
+    )
+    _require_pruned_adaln_header(headers, "final_layer.adaln_proj.linear.bias", (config.final_adaln_out_features,))
+    return config
 
 
 class TimeEmbedder(nn.Module):
@@ -202,12 +287,16 @@ class AdalnProj(nn.Module):
         modalities: int,
         *,
         dtype: torch.dtype,
+        apply_silu: bool = True,
         device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
         self.expand = expand
         self.modalities = modalities
         self.hidden_size = hidden_size
+        # pruned-AdaLN checkpoints bake the activation into the curve table, so the
+        # 8-wide interpolated embedding feeds the projection directly
+        self.apply_silu = apply_silu
         self.linear = nn.Linear(
             timestep_dim,
             expand * hidden_size * modalities,
@@ -216,7 +305,9 @@ class AdalnProj(nn.Module):
         )
 
     def forward(self, timestep_embeddings: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        projected = self.linear(F.silu(timestep_embeddings))
+        if self.apply_silu:
+            timestep_embeddings = F.silu(timestep_embeddings)
+        projected = self.linear(timestep_embeddings)
         projected = projected.reshape(projected.shape[0] * self.modalities, self.expand * self.hidden_size)
         return projected.chunk(self.expand, dim=-1)
 
@@ -384,6 +475,7 @@ class DiTBlock(nn.Module):
             expand=6,
             modalities=3,
             dtype=dtype,
+            apply_silu=not config.is_pruned,
             device=device,
         )
 
@@ -416,6 +508,7 @@ class FinalLayer(nn.Module):
         *,
         norm_eps: float = 1e-5,
         dtype: torch.dtype,
+        apply_silu: bool = True,
         device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
@@ -426,6 +519,7 @@ class FinalLayer(nn.Module):
             expand=2,
             modalities=1,
             dtype=dtype,
+            apply_silu=apply_silu,
             device=device,
         )
         self.video_out = nn.Linear(hidden_size, video_output_dim, dtype=torch.float32, device=device)
@@ -474,12 +568,19 @@ class MiniMaxH3Model(nn.Module):
         self.video_patch_proj = nn.Linear(config.video_patch_dim, config.hidden_size, dtype=torch.float32, device=device)
         self.audio_patch_proj = nn.Linear(config.audio_in_channels, config.hidden_size, dtype=torch.float32, device=device)
         self.condition_proj = nn.Linear(config.text_dim, config.hidden_size, dtype=dtype, device=device)
-        self.time_embedder = TimeEmbedder(
-            config.timestep_input_dim,
-            config.time_embed_hidden_size,
-            config.time_embed_dim,
-            device=device,
-        )
+        if config.is_pruned:
+            self.time_embedder = None
+            self.register_buffer(
+                "adaln_t_table",
+                torch.empty(config.adaln_curve_grid, config.time_embed_dim, dtype=torch.float32, device=device),
+            )
+        else:
+            self.time_embedder = TimeEmbedder(
+                config.timestep_input_dim,
+                config.time_embed_hidden_size,
+                config.time_embed_dim,
+                device=device,
+            )
         self.rope = nn.Module()
         inv_freq = torch.empty(config.rope_inv_freq_len, dtype=torch.float32, device=device)
         self.rope.register_buffer("inv_freq", inv_freq)
@@ -503,6 +604,7 @@ class MiniMaxH3Model(nn.Module):
             config.audio_in_channels,
             norm_eps=config.final_norm_eps,
             dtype=dtype,
+            apply_silu=not config.is_pruned,
             device=device,
         )
 
@@ -529,7 +631,25 @@ class MiniMaxH3Model(nn.Module):
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.condition_proj.weight.dtype
+        # norms are never quantized, so this sentinel stays the compute dtype even when a
+        # checkpoint quantizes more Linears than the published ConvRot INT8 scope
+        return self.blocks[0].norm1.weight.dtype
+
+    def _timestep_embeddings(self, unique_timesteps: torch.Tensor, execution_device: torch.device) -> torch.Tensor:
+        if unique_timesteps.ndim != 1:
+            raise ValueError("MiniMax-H3 unique timesteps must be a one-dimensional tensor")
+        if not self.config.is_pruned:
+            return self.time_embedder(unique_timesteps.to(execution_device)).to(self.dtype)
+
+        # pruned AdaLN: FP32 linear interpolation over the published [1025, 8] curve
+        # table; the model time t = 1 - sigma lives in [0, 1] and maps onto the grid
+        table = self.adaln_t_table
+        timesteps_fp32 = unique_timesteps.to(device=table.device, dtype=torch.float32)
+        position = timesteps_fp32.clamp(0.0, 1.0) * (table.shape[0] - 1)
+        lower = position.floor().long().clamp(max=table.shape[0] - 2)
+        fraction = position - lower.to(position.dtype)
+        embedding_fp32 = torch.lerp(table[lower], table[lower + 1], fraction[:, None])
+        return embedding_fp32.to(device=execution_device, dtype=self.dtype)
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False) -> None:
         self.gradient_checkpointing = True
@@ -792,7 +912,7 @@ class MiniMaxH3Model(nn.Module):
             visual_condition_clean=visual_condition_clean,
             audio_condition_clean=audio_condition_clean,
         )
-        timestep_embeddings = self.time_embedder(timestep_rows.unique_timesteps.to(execution_device)).to(self.dtype)
+        timestep_embeddings = self._timestep_embeddings(timestep_rows.unique_timesteps, execution_device)
         rotation_table = self._cached_rotation_table(
             layout,
             device=execution_device,
@@ -894,8 +1014,12 @@ def _load_h3_transformer_convrot_int8(
     # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps incoming
     # tensors with the meta params' requires_grad (default True); the base is frozen anyway.
     model.requires_grad_(False)
-    if device.type != "cpu":
-        for key in sd.keys():
+    for key in sd.keys():
+        # the H3 DiT stores only BF16 compute weights and FP32 fixed-precision islands;
+        # F16 tensors (e.g. pruned-artifact AdaLN projections) convert to the compute dtype
+        if sd[key].dtype == torch.float16:
+            sd[key] = sd[key].to(torch.bfloat16)
+        if device.type != "cpu":
             sd[key] = sd[key].to(device)
     # strict load keeps the R1 key verification: missing/unexpected keys raise
     model.load_state_dict(sd, strict=True, assign=True)
@@ -920,8 +1044,12 @@ def load_h3_transformer(
     if dtype != torch.bfloat16:
         raise ValueError("MiniMax-H3 accepts only BF16 transformer checkpoints")
     files = resolve_safetensors_files(checkpoint_path)
-    config = parse_h3_transformer_config(load_safetensors_metadata(files), allow_convrot_int8=convrot_int8)
-    if convrot_int8:
+    # Pre-quantized ConvRot INT8 artifacts (full or pruned) are detected from their
+    # tensor structure; --convrot_int8 additionally quantizes BF16 checkpoints on the fly.
+    convrot_artifact = inspect_safetensors_convrot_int8(files, disable_mmap=disable_mmap)
+    use_convrot_int8 = convrot_int8 or convrot_artifact is not None
+    config = classify_h3_transformer(files, convrot_artifact, allow_convrot_int8=use_convrot_int8)
+    if use_convrot_int8:
         device = torch.device(device)
         return _load_h3_transformer_convrot_int8(
             files,

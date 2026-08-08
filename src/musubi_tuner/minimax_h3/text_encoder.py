@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,8 +31,14 @@ from typing import Any
 import numpy as np
 import torch
 
-from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_safetensors_files
+from musubi_tuner.minimax_h3.checkpoint import (
+    inspect_safetensors_convrot_int8,
+    load_safetensors_module,
+    resolve_safetensors_files,
+)
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
+
+logger = logging.getLogger(__name__)
 
 
 TEXT_WIDTH = 5120
@@ -272,12 +279,24 @@ def load_h3_text_encoder(
         del model.language_model.norm
         return model
 
+    files = resolve_safetensors_files(checkpoint_path)
+    # ConvRot INT8 text encoder artifacts are detected from their tensor structure; the
+    # per-layer validation happens in the inspection and the strict assign load below.
+    convrot_artifact = inspect_safetensors_convrot_int8(
+        files,
+        key_transform=normalize_h3_text_encoder_key,
+        disable_mmap=disable_mmap,
+    )
+    if convrot_artifact is not None:
+        logger.info(f"MiniMax-H3 text encoder: {len(convrot_artifact.layers)} ConvRot INT8 layers detected")
     return load_safetensors_module(
         factory,
-        resolve_safetensors_files(checkpoint_path),
+        files,
         device=device,
         dtype=dtype,
         key_transform=normalize_h3_text_encoder_key,
+        strict_dtype=False,
+        convrot_artifact=convrot_artifact,
         disable_mmap=disable_mmap,
     )
 

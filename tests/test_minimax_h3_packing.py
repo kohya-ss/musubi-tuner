@@ -178,6 +178,8 @@ def test_timestep_plan_preserves_text_tags_and_uses_final_layer_time_indices_dir
     )
 
     torch.testing.assert_close(plan.unique_timesteps, torch.tensor([0.25, 0.75, 0.9]))
+    assert plan.unique_timesteps.ndim == 1
+    assert plan.unique_timesteps.dtype is torch.float32
     assert plan.row_timesteps.shape == (1, layout.row_count)
     assert plan.row_timestep_indices.shape == (1, layout.row_count)
     assert plan.token_tags.shape == (1, layout.row_count)
