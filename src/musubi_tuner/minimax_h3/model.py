@@ -31,9 +31,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from musubi_tuner.minimax_h3.checkpoint import (
-    inspect_safetensors_convrot_int8,
     load_safetensors_metadata,
-    load_safetensors_module,
     resolve_safetensors_files,
 )
 from musubi_tuner.minimax_h3.packing import (
@@ -48,7 +46,7 @@ from musubi_tuner.minimax_h3.packing import (
     unpack_targets,
 )
 from musubi_tuner.modules.attention import AttentionParams, attention
-from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Artifact, canonicalize_convrot_int8_key
+from musubi_tuner.modules.convrot_int8_utils import COMFY_QUANT_SUFFIX, canonicalize_convrot_int8_key, has_comfy_quant_tensors
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
@@ -216,7 +214,6 @@ def _require_pruned_adaln_header(headers: Mapping[str, tuple], key: str, expecte
 
 def classify_h3_transformer(
     files: Sequence[str | Path],
-    convrot_artifact: ConvRotInt8Artifact | None,
     *,
     allow_convrot_int8: bool = False,
 ) -> MiniMaxH3Config:
@@ -238,10 +235,10 @@ def classify_h3_transformer(
         raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must be F32, got {table_dtype}")
     if table_shape != (1025, 8):
         raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must have shape [1025, 8], got {table_shape}")
-    if convrot_artifact is None:
+    if not any(key.endswith(COMFY_QUANT_SUFFIX) for key in headers):
         raise ValueError(
             "Pruned MiniMax-H3 checkpoints are only published as ConvRot INT8 artifacts;"
-            " this file has the pruned AdaLN table but no valid ConvRot INT8 layers"
+            " this file has the pruned AdaLN table but no ConvRot INT8 layers"
         )
 
     config = _published_pruned_h3_config()
@@ -1027,6 +1024,45 @@ def _load_h3_transformer_convrot_int8(
     return model
 
 
+def _load_h3_transformer_bf16(
+    files: Sequence[str | Path],
+    config: MiniMaxH3Config,
+    *,
+    device: torch.device | str,
+    attn_mode: str,
+    split_attn: bool,
+    disable_mmap: bool,
+) -> MiniMaxH3Model:
+    from accelerate import init_empty_weights
+
+    from musubi_tuner.utils.safetensors_utils import load_safetensors
+
+    with init_empty_weights():
+        model = MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=torch.bfloat16)
+
+    # load straight to the target device: on CUDA the per-tensor memmap path avoids a
+    # resident full-model CPU copy (pages stay file-backed) and the .to(device) below
+    # becomes a no-op; under block swap the caller passes "cpu" and nothing changes
+    device = torch.device(device)
+    sd: dict[str, torch.Tensor] = {}
+    for file in files:
+        sd.update(load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap))
+    # the model definition is the dtype source of truth: BF16 compute weights plus FP32
+    # fixed-precision islands must arrive exactly as published, without silent conversion
+    expected_state = model.state_dict()
+    dtype_mismatches = sorted(
+        f"{key}: expected {expected_state[key].dtype}, got {tensor.dtype}"
+        for key, tensor in sd.items()
+        if key in expected_state and tensor.dtype != expected_state[key].dtype
+    )
+    if dtype_mismatches:
+        raise ValueError(f"MiniMax-H3 checkpoint dtype mismatch: {dtype_mismatches[:20]}")
+    model.load_state_dict(sd, strict=True, assign=True)
+    model.to(device)
+    model.eval()
+    return model
+
+
 def load_h3_transformer(
     checkpoint_path: str | Path,
     *,
@@ -1046,13 +1082,13 @@ def load_h3_transformer(
     files = resolve_safetensors_files(checkpoint_path)
     # Pre-quantized ConvRot INT8 artifacts (full or pruned) are detected from their
     # tensor structure; --convrot_int8 additionally quantizes BF16 checkpoints on the fly.
-    convrot_artifact = inspect_safetensors_convrot_int8(files, disable_mmap=disable_mmap)
-    use_convrot_int8 = convrot_int8 or convrot_artifact is not None
-    config = classify_h3_transformer(files, convrot_artifact, allow_convrot_int8=use_convrot_int8)
+    prequantized = has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap)
+    use_convrot_int8 = convrot_int8 or prequantized
+    config = classify_h3_transformer(files, allow_convrot_int8=use_convrot_int8)
     if use_convrot_int8:
         device = torch.device(device)
         return _load_h3_transformer_convrot_int8(
-            files,
+            [Path(checkpoint_path)],  # unexpanded: the streaming loader expands split shards itself
             config,
             device=device,
             quant_device=device if quant_device is None else torch.device(quant_device),
@@ -1065,11 +1101,11 @@ def load_h3_transformer(
         )
     if lora_weights:
         raise ValueError("MiniMax-H3 load-time LoRA merge is only wired for the ConvRot INT8 path")
-    return load_safetensors_module(
-        lambda: MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=dtype),
+    return _load_h3_transformer_bf16(
         files,
+        config,
         device=device,
-        dtype=None,
-        strict_dtype=True,
+        attn_mode=attn_mode,
+        split_attn=split_attn,
         disable_mmap=disable_mmap,
     )

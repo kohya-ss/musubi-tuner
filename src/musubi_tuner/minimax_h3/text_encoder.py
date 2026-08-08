@@ -31,11 +31,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from musubi_tuner.minimax_h3.checkpoint import (
-    inspect_safetensors_convrot_int8,
-    load_safetensors_module,
-    resolve_safetensors_files,
-)
+from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
 
 logger = logging.getLogger(__name__)
@@ -274,31 +270,56 @@ def load_h3_text_encoder(
     config.text_config.num_hidden_layers = LAYER_50_HIDDEN_STATE_INDEX
     config.text_config.use_cache = False
 
-    def factory():
+    from accelerate import init_empty_weights
+
+    from musubi_tuner.modules.convrot_int8_utils import (
+        ConvRotInt8Quantizer,
+        apply_convrot_int8_monkey_patch,
+        has_comfy_quant_tensors,
+    )
+    from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+    from musubi_tuner.utils.safetensors_utils import load_safetensors
+
+    with init_empty_weights():
         model = Qwen3VLModel(config)
         del model.language_model.norm
-        return model
 
+    # loading straight to the target device avoids a resident full-model CPU copy
+    device = torch.device(device)
     files = resolve_safetensors_files(checkpoint_path)
-    # ConvRot INT8 text encoder artifacts are detected from their tensor structure; the
-    # per-layer validation happens in the inspection and the strict assign load below.
-    convrot_artifact = inspect_safetensors_convrot_int8(
-        files,
-        key_transform=normalize_h3_text_encoder_key,
-        disable_mmap=disable_mmap,
-    )
-    if convrot_artifact is not None:
-        logger.info(f"MiniMax-H3 text encoder: {len(convrot_artifact.layers)} ConvRot INT8 layers detected")
-    return load_safetensors_module(
-        factory,
-        files,
-        device=device,
-        dtype=dtype,
-        key_transform=normalize_h3_text_encoder_key,
-        strict_dtype=False,
-        convrot_artifact=convrot_artifact,
-        disable_mmap=disable_mmap,
-    )
+    if has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap):
+        # pre-quantized ConvRot INT8 artifact: the same streaming loader as the transformer;
+        # an empty target list disables dynamic quantization, the file dictates the layers
+        quantizer = ConvRotInt8Quantizer(target_layer_keys=[])
+        sd = load_safetensors_with_lora_and_fp8(
+            model_files=[str(checkpoint_path)],  # unexpanded: the loader expands split shards itself
+            lora_weights_list=None,
+            lora_multipliers=None,
+            fp8_optimization=False,
+            calc_device=device,
+            move_to_device=True,
+            disable_numpy_memmap=disable_mmap,
+            quantizer=quantizer,
+        )
+        sd = {normalize_h3_text_encoder_key(key): value for key, value in sd.items()}
+        groupsize_map = {normalize_h3_text_encoder_key(key): value for key, value in quantizer.module_groupsizes.items()}
+        apply_convrot_int8_monkey_patch(model, sd, groupsize_map=groupsize_map)
+        # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps incoming
+        # tensors with the meta params' requires_grad; the text encoder is frozen anyway
+        model.requires_grad_(False)
+    else:
+        sd = {}
+        for file in files:
+            shard = load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
+            sd.update({normalize_h3_text_encoder_key(key): value for key, value in shard.items()})
+
+    for key in sd.keys():
+        if sd[key].is_floating_point() and not key.endswith(".scale_weight"):
+            sd[key] = sd[key].to(dtype)
+    model.load_state_dict(sd, strict=True, assign=True)
+    model.to(device)
+    model.eval()
+    return model
 
 
 class _Layer50Captured(Exception):
