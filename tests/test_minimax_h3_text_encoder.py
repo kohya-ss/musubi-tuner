@@ -265,6 +265,11 @@ def _text_convrot_payload() -> torch.Tensor:
     return torch.tensor(list(raw), dtype=torch.uint8)
 
 
+def _text_tensorwise_payload() -> torch.Tensor:
+    raw = json.dumps({"format": "int8_tensorwise"}, separators=(",", ":")).encode("utf-8")
+    return torch.tensor(list(raw), dtype=torch.uint8)
+
+
 def _fake_text_state(*, quantized: bool):
     config = _FakeQwen3VLConfig.from_pretrained("fake")
     config.text_config.num_hidden_layers = 50
@@ -313,6 +318,54 @@ def test_load_h3_text_encoder_auto_detects_all_350_convrot_linears(tmp_path, mon
     assert torch.equal(q_proj.scale_weight, original_scale)
     assert loaded.language_model.embed_tokens.weight.dtype is torch.bfloat16
     assert loaded.visual.weight.dtype is torch.bfloat16
+
+
+def test_load_h3_text_encoder_supports_tensorwise_int8_linears(tmp_path, monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    state, _scale = _fake_text_state(quantized=True)
+    ordinary_marker = _text_tensorwise_payload()
+    for key in list(state):
+        if key.endswith(".comfy_quant"):
+            state[key] = ordinary_marker.clone()
+    checkpoint = tmp_path / "qwen3vl-int8-tensorwise.safetensors"
+    save_file(state, checkpoint)
+
+    loaded = load_h3_text_encoder(
+        checkpoint,
+        processor_path="fake",
+        device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    q_proj = loaded.language_model.layers[0].self_attn.q_proj
+    assert loaded.checkpoint_quantization == "int8_tensorwise"
+    assert q_proj.weight.dtype is torch.int8
+    assert q_proj._h3_quant_format == "int8_tensorwise"
+    assert q_proj.weight_scale.dtype is torch.uint8
+
+
+def test_load_h3_text_encoder_supports_tensorwise_embedding_with_convrot_linears(tmp_path, monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    state, _scale = _fake_text_state(quantized=True)
+    state["model.embed_tokens.weight"] = torch.zeros(8, 256, dtype=torch.int8)
+    state["model.embed_tokens.weight_scale"] = torch.ones(8, dtype=torch.float32)
+    state["model.embed_tokens.comfy_quant"] = _text_tensorwise_payload()
+    checkpoint = tmp_path / "qwen3vl-mixed-int8-convrot.safetensors"
+    save_file(state, checkpoint)
+
+    loaded = load_h3_text_encoder(
+        checkpoint,
+        processor_path="fake",
+        device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    embedding = loaded.language_model.embed_tokens
+    q_proj = loaded.language_model.layers[0].self_attn.q_proj
+    assert loaded.checkpoint_quantization == "int8_convrot,int8_tensorwise"
+    assert embedding.__class__.__name__ == "H3Int8Embedding"
+    assert q_proj._h3_quant_format == "int8_convrot"
+    assert q_proj.weight.dtype is torch.int8
 
 
 def test_load_h3_text_encoder_keeps_existing_bf16_conversion_for_ordinary_files(tmp_path, monkeypatch):

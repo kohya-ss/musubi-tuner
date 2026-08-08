@@ -25,7 +25,7 @@ Download the following files from [Comfy-Org/MiniMax-H3](https://huggingface.co/
 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` |
 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` |
 
-T2VA uses an FL2VA transformer without first/last conditions. Pre-quantized ConvRot INT8 files (full or pruned, transformer or text encoder) are detected automatically from their tensor structure — no extra flag is needed. FP8, NVFP4/AWQ, and malformed or partial ConvRot files are rejected rather than silently interpreted as BF16. See [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights) for details.
+T2VA uses an FL2VA transformer without first/last conditions. Pre-quantized ConvRot INT8 files (full or pruned, transformer or text encoder) are detected automatically from their tensor structure — no extra flag is needed. Mixed tensorwise INT8 and NVFP4/AWQ ComfyUI artifacts use a dedicated fallback loader; FP8 and malformed or partial quantized files are rejected rather than silently interpreted as BF16. See [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights) for details.
 
 The Qwen processor/config defaults to `Qwen/Qwen3-VL-32B-Instruct` and is downloaded by Transformers. Pass `--processor` when using a local copy.
 
@@ -283,8 +283,8 @@ The native sampler builds one common base grid, derives independent shifted vide
 ## Limitations
 
 - Released BF16 full and ConvRot INT8 full/pruned FL2VA/Ref2VA transformer bases only; pruned BF16 files are not published and not supported.
-- BF16 or ConvRot INT8 Qwen3-VL text encoder only.
-- No FP8 or NVFP4/AWQ artifact loading.
+- BF16, ConvRot INT8, tensorwise INT8, or NVFP4/AWQ Qwen3-VL text encoder.
+- No FP8 artifact loading.
 - No CFG or negative prompt.
 - No numbered reference-directory convention.
 - Dataset `batch_size` is fixed to 1; use gradient accumulation for larger effective batches.

@@ -45,6 +45,12 @@ from musubi_tuner.minimax_h3.packing import (
     pack_video_rows,
     unpack_targets,
 )
+from musubi_tuner.minimax_h3.quantization import (
+    inspect_comfy_quantized_layers,
+    inspect_safetensors_tensors,
+    load_comfy_quantized_model,
+    uses_generic_comfy_loader,
+)
 from musubi_tuner.modules.attention import AttentionParams, attention
 from musubi_tuner.modules.convrot_int8_utils import COMFY_QUANT_SUFFIX, canonicalize_convrot_int8_key, has_comfy_quant_tensors
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
@@ -1080,6 +1086,33 @@ def load_h3_transformer(
     if dtype != torch.bfloat16:
         raise ValueError("MiniMax-H3 accepts only BF16 transformer checkpoints")
     files = resolve_safetensors_files(checkpoint_path)
+    # Keep the official BF16/ConvRot loader authoritative. Only artifacts with
+    # non-ConvRot tensorwise INT8 or NVFP4/AWQ layers use the generic fallback.
+    tensor_specs = inspect_safetensors_tensors(files, disable_mmap=disable_mmap)
+    quantized_layers = inspect_comfy_quantized_layers(files, tensor_specs, disable_mmap=disable_mmap)
+    if uses_generic_comfy_loader(quantized_layers):
+        metadata = load_safetensors_metadata(files)
+        table_spec = tensor_specs.get("adaln_t_table")
+        if table_spec is not None:
+            if tuple(table_spec.shape) != (1025, 8) or table_spec.dtype is not torch.float32:
+                raise ValueError("MiniMax-H3 pruned adaln_t_table must be F32 (1025, 8)")
+            config = _published_pruned_h3_config()
+        else:
+            config = parse_h3_transformer_config(
+                {"config": metadata["config"]} if "config" in metadata else metadata,
+                allow_convrot_int8=True,
+            )
+        model = load_comfy_quantized_model(
+            lambda: MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=dtype),
+            files,
+            quantized_layers,
+            device=device,
+            output_dtype=dtype,
+            disable_mmap=disable_mmap,
+        )
+        model.checkpoint_pruned = table_spec is not None
+        return model
+
     # Pre-quantized ConvRot INT8 artifacts (full or pruned) are detected from their
     # tensor structure; --convrot_int8 additionally quantizes BF16 checkpoints on the fly.
     prequantized = has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap)

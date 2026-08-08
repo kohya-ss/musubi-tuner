@@ -334,12 +334,22 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
             x = x.to(cast_dtype)
             if bias is not None:
                 bias = bias.to(cast_dtype)
+        has_rotation = groupsize > 1
         if HAS_TRITON and x.is_cuda:
-            out = int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, True, groupsize)
+            out = int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, has_rotation, groupsize)
         else:
-            # eager fallback: rotation + transient dequantized matmul, no activation quantization
-            h = _build_hadamard(groupsize, device=x.device, dtype=x.dtype)
-            x_rot = _rotate_activation(x, h, groupsize)
+            if has_rotation:
+                h = _build_hadamard(groupsize, device=x.device, dtype=x.dtype)
+                x_rot = _rotate_activation(x, h, groupsize)
+            else:
+                x_rot = x
+            if bwd_mode.startswith("h3_") and x.requires_grad:
+                # Released H3 artifacts use W8A8 arithmetic. Match that path in
+                # the CPU/non-Triton fallback and use the custom backward as STE.
+                x_2d = x_rot.reshape(-1, x_rot.shape[-1])
+                activation_scale = (x_2d.abs().amax(dim=-1, keepdim=True).float() / 127.0).clamp_min(1e-30)
+                activation_q = (x_2d.float() / activation_scale).round().clamp(-127, 127)
+                x_rot = (activation_q * activation_scale).to(x.dtype).reshape_as(x_rot)
             w_rot = wq.to(x.dtype) * w_scale.reshape(-1, 1).to(x.dtype)
             out = F.linear(x_rot, w_rot, bias)
         # wq/w_scale are live buffers, so saving them adds no activation memory; x is not
@@ -373,8 +383,10 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
                 # transient bf16 dequant of the rotated weight (stays in rotated basis)
                 w_rot = wq.to(grad_out.dtype) * w_scale.reshape(-1, 1).to(grad_out.dtype)
                 gx_rot = g2d @ w_rot  # [M, K]
-            h = _build_hadamard(gs, device=gx_rot.device, dtype=gx_rot.dtype)
-            grad_x = _rotate_activation(gx_rot, h, gs).reshape(*grad_out.shape[:-1], wq.shape[1])
+            if gs > 1:
+                h = _build_hadamard(gs, device=gx_rot.device, dtype=gx_rot.dtype)
+                gx_rot = _rotate_activation(gx_rot, h, gs)
+            grad_x = gx_rot.reshape(*grad_out.shape[:-1], wq.shape[1])
 
         grad_bias = g2d.sum(dim=0) if ctx.bias_needs_grad else None
         return grad_x, None, None, grad_bias, None, None

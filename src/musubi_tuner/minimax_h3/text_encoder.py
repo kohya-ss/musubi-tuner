@@ -33,6 +33,13 @@ import torch
 
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
+from musubi_tuner.minimax_h3.quantization import (
+    inspect_comfy_quantized_layers,
+    inspect_safetensors_tensors,
+    load_comfy_quantized_model,
+    quantization_summary,
+    uses_generic_comfy_loader,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,13 +287,46 @@ def load_h3_text_encoder(
     from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
     from musubi_tuner.utils.safetensors_utils import load_safetensors
 
+    files = resolve_safetensors_files(checkpoint_path)
+    tensor_specs = inspect_safetensors_tensors(
+        files,
+        key_transform=normalize_h3_text_encoder_key,
+        disable_mmap=disable_mmap,
+    )
+    quantized_layers = inspect_comfy_quantized_layers(
+        files,
+        tensor_specs,
+        key_transform=normalize_h3_text_encoder_key,
+        disable_mmap=disable_mmap,
+    )
+    if uses_generic_comfy_loader(quantized_layers):
+        logger.info(
+            "MiniMax-H3 text encoder: using mixed ComfyUI quantized loader for %s",
+            quantization_summary(quantized_layers),
+        )
+
+        def factory():
+            model = Qwen3VLModel(config)
+            del model.language_model.norm
+            return model
+
+        return load_comfy_quantized_model(
+            factory,
+            files,
+            quantized_layers,
+            device=device,
+            output_dtype=dtype,
+            key_transform=normalize_h3_text_encoder_key,
+            cast_unquantized_to_output_dtype=True,
+            disable_mmap=disable_mmap,
+        )
+
     with init_empty_weights():
         model = Qwen3VLModel(config)
         del model.language_model.norm
 
     # loading straight to the target device avoids a resident full-model CPU copy
     device = torch.device(device)
-    files = resolve_safetensors_files(checkpoint_path)
     if has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap):
         # pre-quantized ConvRot INT8 artifact: the same streaming loader as the transformer;
         # an empty target list disables dynamic quantization, the file dictates the layers
