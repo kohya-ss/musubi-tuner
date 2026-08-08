@@ -151,10 +151,20 @@ _PUBLISHED_CONFIG_FIELDS = {
 }
 
 
-def parse_h3_transformer_config(metadata: Mapping[str, str], *, allow_quantized_without_metadata: bool = False) -> MiniMaxH3Config:
+def parse_h3_transformer_config(
+    metadata: Mapping[str, str],
+    *,
+    allow_convrot_int8: bool = False,
+    allow_quantized_without_metadata: bool = False,
+) -> MiniMaxH3Config:
     artifact_markers = " ".join(f"{key}={value}" for key, value in metadata.items() if key != "config").lower()
-    if any(marker in artifact_markers for marker in ("convrot", "int8", "fp8", "quantized")):
-        raise ValueError("Quantized or ConvRot MiniMax-H3 artifacts are deferred to R2")
+    allow_supported_quantized = allow_convrot_int8 or allow_quantized_without_metadata
+    blocked_markers = ("fp8", "nvfp4") if allow_supported_quantized else ("convrot", "int8", "fp8", "nvfp4", "quantized")
+    if any(marker in artifact_markers for marker in blocked_markers):
+        raise ValueError(
+            "Unsupported quantized MiniMax-H3 checkpoint. Pass --convrot_int8 for ConvRot INT8 checkpoints;"
+            " other quantized formats (fp8/NVFP4) are not supported."
+        )
     raw_config = metadata.get("config")
     if raw_config is None:
         if allow_quantized_without_metadata:
@@ -173,7 +183,7 @@ def parse_h3_transformer_config(metadata: Mapping[str, str], *, allow_quantized_
         actual = transformer[field]
         if actual != expected:
             raise ValueError(f"MiniMax-H3 transformer config {field} expected {expected}, got {actual}")
-    if transformer.get("adaln_curve_grid") is not None:
+    if transformer.get("adaln_curve_grid") is not None and not allow_quantized_without_metadata:
         raise ValueError("Pruned MiniMax-H3 AdaLN artifacts are deferred to R2")
     return MiniMaxH3Config()
 
@@ -879,6 +889,72 @@ class MiniMaxH3Model(nn.Module):
         return MiniMaxH3Output(video=video.to(video_dtype), audio=audio.to(audio_dtype))
 
 
+# ConvRot INT8 scope mirrors the ComfyUI distribution: the five per-block Linears
+# (attn qkv/out, mlp fc1/fc2, adaln_proj). token_refiner blocks and the final layer
+# stay BF16. adaln_proj's in_features (2688) is not a multiple of 256, so the group
+# size falls back to 64 there — the same choice ComfyUI publishes in `comfy_quant`.
+H3_CONVROT_INT8_TARGET_KEYS = ["attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2", "adaln_proj.linear"]
+H3_CONVROT_INT8_EXCLUDE_KEYS = ["token_refiner.", "final_layer."]
+H3_CONVROT_INT8_ALLOWED_GROUPSIZES = (256, 64)
+
+
+def _load_h3_transformer_convrot_int8(
+    files: list[Path],
+    config: MiniMaxH3Config,
+    *,
+    device: torch.device,
+    quant_device: torch.device,
+    bwd_mode: str,
+    attn_mode: str,
+    split_attn: bool,
+    disable_mmap: bool,
+    lora_weights: list[dict] | None = None,
+    lora_multipliers: list[float] | None = None,
+) -> MiniMaxH3Model:
+    """Load the transformer with ConvRot INT8 base weights.
+
+    BF16 checkpoints are quantized on the fly on ``quant_device`` (LoRA weights, if any,
+    are merged into the BF16 weights first); ComfyUI pre-quantized checkpoints are
+    converted to the Musubi layout during the same streaming pass. ``device`` is where
+    the weights end up ("cpu" under block swap).
+    """
+    from accelerate import init_empty_weights
+
+    from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
+    from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+
+    with init_empty_weights():
+        model = MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=torch.bfloat16)
+
+    quantizer = ConvRotInt8Quantizer(
+        H3_CONVROT_INT8_TARGET_KEYS,
+        H3_CONVROT_INT8_EXCLUDE_KEYS,
+        allowed_groupsizes=H3_CONVROT_INT8_ALLOWED_GROUPSIZES,
+    )
+    sd = load_safetensors_with_lora_and_fp8(
+        model_files=[str(path) for path in files],
+        lora_weights_list=lora_weights,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=False,
+        calc_device=quant_device,
+        move_to_device=(device == quant_device),
+        dit_weight_dtype=None,
+        disable_numpy_memmap=disable_mmap,
+        quantizer=quantizer,
+    )
+    apply_convrot_int8_monkey_patch(model, sd, bwd_mode=bwd_mode, groupsize_map=quantizer.module_groupsizes)
+    # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps incoming
+    # tensors with the meta params' requires_grad (default True); the base is frozen anyway.
+    model.requires_grad_(False)
+    if device.type != "cpu":
+        for key in sd.keys():
+            sd[key] = sd[key].to(device)
+    # strict load keeps the R1 key verification: missing/unexpected keys raise
+    model.load_state_dict(sd, strict=True, assign=True)
+    model.eval()
+    return model
+
+
 def load_h3_transformer(
     checkpoint_path: str | Path,
     *,
@@ -887,15 +963,38 @@ def load_h3_transformer(
     attn_mode: str = "torch",
     split_attn: bool = False,
     disable_mmap: bool = False,
+    convrot_int8: bool = False,
+    convrot_int8_bwd: str = "bf16",
+    quant_device: torch.device | str | None = None,
+    lora_weights: list[dict] | None = None,
+    lora_multipliers: list[float] | None = None,
 ) -> MiniMaxH3Model:
     if dtype != torch.bfloat16:
-        raise ValueError("MiniMax-H3 R1 accepts only BF16 transformer checkpoints")
+        raise ValueError("MiniMax-H3 accepts only BF16 transformer checkpoints")
     files = resolve_safetensors_files(checkpoint_path)
     has_comfy_quant = checkpoint_has_comfy_quant(files)
-    config = parse_h3_transformer_config(load_safetensors_metadata(files), allow_quantized_without_metadata=has_comfy_quant)
+    config = parse_h3_transformer_config(
+        load_safetensors_metadata(files),
+        allow_convrot_int8=convrot_int8,
+        allow_quantized_without_metadata=has_comfy_quant,
+    )
     adaln_curve = _detect_adaln_curve(files)
     if adaln_curve is not None:
         config = replace(config, adaln_curve_grid=adaln_curve[0], time_embed_dim=adaln_curve[1])
+    if convrot_int8:
+        device = torch.device(device)
+        return _load_h3_transformer_convrot_int8(
+            files,
+            config,
+            device=device,
+            quant_device=device if quant_device is None else torch.device(quant_device),
+            bwd_mode=convrot_int8_bwd,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
+            disable_mmap=disable_mmap,
+            lora_weights=lora_weights,
+            lora_multipliers=lora_multipliers,
+        )
     if has_comfy_quant:
         return load_quantized_module(
             lambda: MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=dtype),
@@ -905,6 +1004,8 @@ def load_h3_transformer(
             key_transform=lambda key: key,
             materialize_quantized=True,
         )
+    if lora_weights:
+        raise ValueError("MiniMax-H3 load-time LoRA merge is only wired for the ConvRot INT8 path")
     return load_safetensors_module(
         lambda: MiniMaxH3Model(config, attn_mode=attn_mode, split_attn=split_attn, dtype=dtype),
         files,

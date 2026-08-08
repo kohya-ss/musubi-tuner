@@ -10,7 +10,6 @@ CPU tests exercise the eager fallback (exact math up to rounding); CUDA tests
 exercise the fused Triton kernels when available.
 """
 
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -59,9 +58,10 @@ def test_quantize_weight_convrot_skips_indivisible_and_non_2d():
     assert quantize_weight_convrot("x.weight", torch.randn(300)) is None  # not 2D
     result = quantize_weight_convrot("x.weight", torch.randn(8, K))
     assert result is not None
-    wq, ws = result
+    wq, ws, gs = result
     assert wq.dtype == torch.int8 and wq.shape == (8, K)
     assert ws.dtype == torch.float32 and ws.shape == (8, 1)
+    assert gs == GS
 
 
 def test_quantize_dequant_roundtrip_error_is_small():

@@ -162,6 +162,8 @@ def _trainer_args(**overrides):
         "task": "t2va",
         "video_only": False,
         "audio_loss_weight": 1.0,
+        "convrot_int8": False,
+        "convrot_int8_bwd": "bf16",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -999,6 +1001,7 @@ def test_h3_training_metadata_records_task_scheduler_and_target_policy():
         "ss_minimax_h3_audio_loss_weight": 1.0,
         "ss_minimax_h3_video_only": False,
         "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
+        "ss_minimax_h3_convrot_int8": False,
         "ss_minimax_h3_latent_cache_version": "2",
         "ss_minimax_h3_text_cache_version": "1",
     }

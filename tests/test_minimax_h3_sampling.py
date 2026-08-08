@@ -264,6 +264,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "h3_select_frame": 0,
         "lora_weight": None,
         "lora_multiplier": None,
+        "convrot_int8": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

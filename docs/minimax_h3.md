@@ -395,6 +395,19 @@ FL2VA entries additionally use `first_frame` and `last_frame`; the common `image
 
 Sample geometry must be 32-pixel aligned. Frame counts of at least 5 are rounded down to the nearest `17*n+5` value, matching the shared training-sample convention. Released durations are 5-15 seconds; `--h3_allow_experimental_sample_duration` permits shorter smoke samples. H3 sampling does not accept negative prompts, CFG, or a per-prompt generic flow shift.
 
+## ConvRot INT8 Quantized Base Weights
+
+`--convrot_int8` quantizes the frozen DiT base weights to int8 with ConvRot ([arXiv:2512.03673](https://arxiv.org/abs/2512.03673)), the same scheme as Krea 2 (see `docs/krea2.md` for the mechanism and backward modes). It is supported for both LoRA training and generation, and accepts either base artifact:
+
+- **BF16 checkpoints** are quantized on the fly at load time.
+- **ComfyUI pre-quantized ConvRot INT8 checkpoints** (`weight` int8 + `weight_scale` + `comfy_quant` tensors) are converted to the Musubi layout during the same streaming load. Both routes produce bit-identical models: Musubi's dynamic quantization reproduces the published ComfyUI INT8 ConvRot distribution exactly, layer by layer.
+
+The quantization scope mirrors the ComfyUI distribution: the five Linears in each of the 50 main DiT blocks (`attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, `mlp.fc2`, and `adaln_proj.linear`). `adaln_proj` uses ConvRot group size 64 (its input width 2688 is not a multiple of 256); the rest use 256. The token refiner, final layer, embedders, and heads stay BF16/FP32. The base checkpoint shrinks from ~66 GB (BF16) to ~34 GB of weights.
+
+Training flags match Krea 2: `--convrot_int8` plus optional `--convrot_int8_bwd {bf16,int8}` (default `bf16`). The LoRA trains in BF16 on top of the int8 base as usual, and block swap (including `--block_swap_h2d_only`) combines with quantization — quantization runs on the accelerator while the weights load to CPU. `--fp8_base`/`--fp8_scaled` remain unsupported for H3. Triton (`triton-windows` on Windows) is required for the fused int8 kernels; without it the forward falls back to a slower transient dequantization (the memory saving remains). `torch.compile` excludes the patched Linears automatically.
+
+For generation, add `--convrot_int8` to `minimax_h3_generate_video.py`. With `--lora_weight`, the LoRA is merged into the BF16 weights during the streaming load and the merged result is then quantized, so LoRA generation requires the BF16 base checkpoint; merging into a pre-quantized int8 checkpoint is rejected with an explicit error.
+
 ## Generation
 
 T2VA generation with the FL2VA BF16 base:
@@ -471,7 +484,7 @@ The native sampler builds one common base grid, derives independent shifted vide
 
 ## Limitations
 
-- BF16 FL2VA/Ref2VA transformer bases are the reference path. The Comfy-Org FL2VA INT8 ConvRot/pruned transformer is supported experimentally for LoRA training.
+- BF16 or ConvRot INT8 FL2VA/Ref2VA transformer bases are supported. The Comfy-Org FL2VA INT8 ConvRot/pruned transformer remains experimental for LoRA training.
 - BF16 Qwen3-VL text encoder is the reference path. Comfy-Org NVFP4/AWQ and INT8 ConvRot text encoders are supported experimentally for text-cache creation.
 - Other FP8/quantized formats outside the supported Comfy metadata are not supported.
 - No CFG or negative prompt.
