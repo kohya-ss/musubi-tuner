@@ -2,7 +2,7 @@
 
 Date: 2026-08-09
 
-Status: Revised draft after third external review
+Status: Revised draft after current-environment scope clarification
 
 Branch: `codex/issue-1019-explorative-modeling`
 
@@ -70,10 +70,15 @@ Method sources:
 - Official image integration: `model/img/dit_cc.py`
 - Official video integration: `model/vid/dit_wm.py`
 - Official flow objective: `model/flow/flow_matching.py`
-- Minimum-supported PyTorch 2.5.1 autocast context implementation:
-  <https://github.com/pytorch/pytorch/blob/v2.5.1/torch/amp/autocast_mode.py#L329-L337>
-- Minimum-supported PyTorch 2.5.1 `fork_rng` implementation:
-  <https://github.com/pytorch/pytorch/blob/v2.5.1/torch/random.py>
+
+Current validation runtime, recorded on 2026-08-09:
+
+- Python 3.10.11.
+- PyTorch `2.13.0+cu130` with `torch.version.cuda == "13.0"`.
+- NVIDIA GeForce RTX 4090, compute capability 8.9.
+
+R1 validates this environment and the repository's existing tests. It does not
+create or claim compatibility for a separate runtime.
 
 Musubi repository contracts:
 
@@ -414,8 +419,6 @@ Add:
 src/musubi_tuner/training/explorative.py
 tests/test_explorative_modeling.py
 docs/explorative_modeling.md
-.github/workflows/test-explorative-modeling.yml
-scripts/run_xm_min_torch_test.py
 ```
 
 `training/explorative.py` owns pure, model-independent mechanics:
@@ -481,14 +484,9 @@ Extend `tests/test_minimax_h3_training.py` for H3 component and final-gradient
 coverage in addition to the model-independent cases in
 `tests/test_explorative_modeling.py`.
 
-The new workflow runs the focused tests on every relevant pull request and push
-under Python 3.10 with the PyTorch 2.5.1 CPU wheel, and asserts the runtime
-release tuple and CPU backend before pytest starts. The script provides one
-repeatable target that creates an isolated uv environment, installs the exact
-requested torch build, prints and asserts `torch.__version__`, checks the
-requested device, and runs the focused autocast test. Section 16.4 separately
-defines the CUDA minimum-version gate because GitHub-hosted CPU runners cannot
-validate CUDA autocast behavior.
+No new minimum-version CI workflow or environment-bootstrap script is added.
+The focused tests run in the current validation runtime recorded in Section 2
+and print its Python, torch, CUDA, and device versions in captured test evidence.
 
 No model package, root entry point, dataset, cache, network, optimizer, or
 checkpoint module changes.
@@ -821,25 +819,24 @@ candidate casts do not survive into the later winner context. R1 must not call
 the global `torch.clear_autocast_cache()` without a supported-version reproducer
 that demonstrates missing gradients or a detached cached cast.
 
-An automated mixed-precision regression runs a no-grad candidate forward
-followed by the gradient-enabled winner forward and asserts finite, nonzero
-trainable-parameter gradients. The dedicated workflow runs it on every relevant
-push and pull request under Python 3.10 and the 2.5.1 wheel from PyTorch's CPU
-index. The job prints `torch.__version__` and fails unless its normalized
-release is exactly `2.5.1` and `torch.version.cuda is None`. This is a real
-minimum-version regression gate, not an optional developer check. If it exposes
-a version-specific PyTorch bug, the design must be amended with the failing
-version and minimal reproducer before adding a workaround.
+A focused mixed-precision regression runs a no-grad candidate forward followed
+by the gradient-enabled winner forward and asserts finite, nonzero
+trainable-parameter gradients. It runs with the current CUDA environment from
+Section 2 and records Python, torch, CUDA, and device versions in the captured
+output. Inspection of the installed PyTorch 2.13.0 implementation confirms that
+the outermost autocast exit clears its cache and that `fork_rng` always includes
+the CPU RNG state.
 
-CPU CI cannot establish CUDA autocast behavior. Before merge, and again after a
-rebase that changes the candidate path, run
-`scripts/run_xm_min_torch_test.py --torch 2.5.1+cu124 --device cuda`. The target
-creates an isolated Python 3.10 uv environment, installs from PyTorch's cu124
-index, prints and asserts `torch.__version__`, verifies CUDA is available, and
-runs only the focused autocast regression. Attach its captured command/output
-to the PR. This CUDA result is a merge gate until the repository has a GPU CI
-runner; if one is added, the same target becomes an automated job rather than a
-second test definition.
+A pre-implementation smoke test in that environment already completed one
+no-grad CUDA autocast forward followed by a gradient-enabled forward without a
+manual cache clear and produced finite, nonzero parameter gradients. The final
+integration test must repeat the assertion through the actual best-of-K path;
+the smoke test alone is not feature acceptance.
+
+R1 does not create a second environment, add a minimum-version CI job, or claim
+coverage for PyTorch/CUDA combinations that were not run. If the current-runtime
+test exposes a failure, amend the design with its minimal reproducer before
+adding a workaround.
 
 ### 16.5 Compilation
 
@@ -950,10 +947,8 @@ required.
 - Under an available autocast dtype, assert no-grad exploration followed by the
   winner recomputation yields finite, nonzero trainable-parameter gradients
   without an explicit cache-clear call.
-- Run that regression automatically with the 2.5.1 CPU wheel, asserting the
-  normalized release and CPU backend; repeat it through the reproducible target
-  on CUDA under exact
-  `torch==2.5.1+cu124`, with asserted versions in both outputs.
+- Run that regression under the current PyTorch `2.13.0+cu130` CUDA environment
+  and capture the Python, torch, CUDA, and device versions with the result.
 - Assert clean latents, timesteps, and conditions are identical across
   candidates, while each derived flow/noise target matches its candidate noise.
 - Assert candidate noise differs and uses the expected dtype/device/shape.
@@ -1060,9 +1055,8 @@ R1 is complete when:
   graph used by backward.
 - No best-of-K code mutates the global autocast cache, and mixed-precision winner
   recomputation produces valid trainable-parameter gradients.
-- The minimum-version autocast regression is automated on exact CPU
-  `torch==2.5.1` and also passes through the reproducible CUDA target with
-  recorded `torch==2.5.1+cu124` evidence.
+- The autocast regression passes in the recorded current CUDA environment;
+  untested PyTorch/CUDA combinations are outside the compatibility claim.
 - Sequential search stores no K-sized latent or activation tensor.
 - Base and Ideogram 4 scalar losses are derived from their canonical per-sample
   objective primitives.
