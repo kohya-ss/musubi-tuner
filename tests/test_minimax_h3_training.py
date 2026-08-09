@@ -912,6 +912,166 @@ def test_h3_best_of_k_rejects_nonfinite_video_candidate(monkeypatch):
         _run_h3_best_of_k(monkeypatch, _NaNH3Trainer())
 
 
+class _ProductionPathAccelerator:
+    def __init__(self, device):
+        self.device = torch.device(device)
+
+    def autocast(self):
+        if self.device.type == "cuda":
+            return torch.autocast("cuda", dtype=torch.float16)
+        return nullcontext()
+
+
+class _TinyJointH3Transformer(torch.nn.Module):
+    def __init__(self, device):
+        super().__init__()
+        self.video_projection = torch.nn.Linear(1, 1, bias=False, device=device, dtype=torch.float32)
+        self.audio_projection = torch.nn.Linear(1, 1, bias=False, device=device, dtype=torch.float32)
+        with torch.no_grad():
+            self.video_projection.weight.fill_(1.0)
+            self.audio_projection.weight.fill_(1.0)
+        self.records = []
+
+    def forward(self, **kwargs):
+        cpu_mask = torch.rand((), device="cpu")
+        device = kwargs["video_latents"].device
+        device_mask = torch.rand((), device=device) if device.type == "cuda" else torch.rand((), device="cpu")
+        video_prediction = self.video_projection(kwargs["video_latents"].reshape(-1, 1)).reshape_as(kwargs["video_latents"])
+        audio_prediction = self.audio_projection(kwargs["audio_latents"].reshape(-1, 1)).reshape_as(kwargs["audio_latents"])
+        self.records.append(
+            {
+                "grad_enabled": torch.is_grad_enabled(),
+                "autocast_enabled": torch.is_autocast_enabled(device.type),
+                "video_input": kwargs["video_latents"].detach().clone(),
+                "video_prediction": video_prediction.detach().clone(),
+                "audio_input": kwargs["audio_latents"].detach().clone(),
+                "audio_prediction": audio_prediction.detach().clone(),
+                "model_t_video": kwargs["model_t_video"].detach().clone(),
+                "model_t_audio": kwargs["model_t_audio"].detach().clone(),
+                "visual_conditions": tuple(value.detach().clone() for value in kwargs["visual_condition_latents"]),
+                "audio_conditions": tuple(value.detach().clone() for value in kwargs["audio_condition_latents"]),
+                "cpu_mask": cpu_mask.detach().clone(),
+                "device_mask": device_mask.detach().cpu().clone(),
+            }
+        )
+        return SimpleNamespace(video=video_prediction, audio=audio_prediction)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")),
+    ],
+)
+def test_h3_best_of_k_real_production_path_dispatches_pairs_targets_and_keeps_joint_gradients(monkeypatch, device):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        task="ref2va",
+        h3_visual_cond_clean=0.5,
+        h3_audio_cond_clean=0.5,
+        h3_video_best_of_k=2,
+        xm_best_of_k=1,
+    )
+    trainer._validate_and_init_best_of_k(args)
+    assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (2, True)
+
+    transformer = _TinyJointH3Transformer(device)
+    batch = _training_batch()
+    batch["timesteps"] = [0.25]
+    batch["latents_ref_000_image"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["latents_ref_001_audio"] = torch.zeros(1, 32, 2, 8)
+    video_latents = torch.full((1, 24, 2, 4, 4), 2.0, device=device)
+    candidate_zero = torch.zeros_like(video_latents)
+    candidate_one = torch.ones_like(video_latents)
+    fixed_audio_noise = torch.full((1, 32, 2, 8), 0.5, device=device)
+    audio_noise_draws = 0
+    real_randn_like = torch.randn_like
+
+    def draw_fixed_audio_noise(reference, *positional, **kwargs):
+        nonlocal audio_noise_draws
+        if tuple(reference.shape) == tuple(fixed_audio_noise.shape):
+            audio_noise_draws += 1
+            return fixed_audio_noise.to(dtype=reference.dtype, device=reference.device)
+        return real_randn_like(reference, *positional, **kwargs)
+
+    monkeypatch.setattr(torch, "randn_like", draw_fixed_audio_noise)
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: candidate_one)
+
+    loss, metrics = trainer._process_batch_for_training(
+        args,
+        _ProductionPathAccelerator(device),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        candidate_zero,
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+    records = transformer.records
+
+    assert type(trainer) is MiniMaxH3NetworkTrainer
+    assert [record["grad_enabled"] for record in records] == [False, False, True]
+    assert [record["autocast_enabled"] for record in records] == [device == "cuda"] * 3
+    assert transformer.video_projection.weight.dtype == torch.float32
+    assert transformer.audio_projection.weight.dtype == torch.float32
+    if device == "cuda":
+        assert all(record["video_prediction"].dtype == torch.float16 for record in records)
+        assert all(record["audio_prediction"].dtype == torch.float16 for record in records)
+
+    expected_noises = (candidate_zero, candidate_one)
+    candidate_video_losses = []
+    for record, expected_noise in zip(records[:2], expected_noises):
+        sigma_video = 1.0 - record["model_t_video"]
+        recovered_noise = (record["video_input"] - (1.0 - sigma_video) * video_latents) / sigma_video
+        torch.testing.assert_close(recovered_noise, expected_noise)
+        expected_target = video_latents - expected_noise
+        candidate_video_losses.append(torch.nn.functional.mse_loss(record["video_prediction"].float(), expected_target.float()))
+
+    assert candidate_video_losses[1] < candidate_video_losses[0]
+    torch.testing.assert_close(records[-1]["video_input"], records[1]["video_input"])
+    assert metrics["h3_video_best_of_k/candidate_loss_mean"] == pytest.approx(
+        torch.stack(candidate_video_losses).mean().item(), rel=1e-5, abs=1e-6
+    )
+    assert metrics["h3_video_best_of_k/selection_gain"] == pytest.approx(
+        (candidate_video_losses[0] - candidate_video_losses[1]).item(), rel=1e-5, abs=1e-6
+    )
+
+    assert audio_noise_draws == 1
+    audio_latents = batch["latents_audio"].to(device)
+    for record in records:
+        sigma_audio = 1.0 - record["model_t_audio"]
+        recovered_audio_noise = (record["audio_input"] - (1.0 - sigma_audio) * audio_latents) / sigma_audio
+        torch.testing.assert_close(recovered_audio_noise, fixed_audio_noise)
+    for key in ("audio_input", "model_t_video", "model_t_audio", "visual_conditions", "audio_conditions"):
+        first = records[0][key]
+        for record in records[1:]:
+            if isinstance(first, tuple):
+                assert all(torch.equal(left, right) for left, right in zip(record[key], first))
+            else:
+                assert torch.equal(record[key], first)
+    assert all(torch.equal(record["cpu_mask"], records[0]["cpu_mask"]) for record in records[1:])
+    assert all(torch.equal(record["device_mask"], records[0]["device_mask"]) for record in records[1:])
+
+    final_video_target = video_latents - candidate_one
+    final_audio_target = audio_latents - fixed_audio_noise
+    expected_video_loss = torch.nn.functional.mse_loss(records[-1]["video_prediction"].float(), final_video_target.float())
+    expected_audio_loss = torch.nn.functional.mse_loss(records[-1]["audio_prediction"].float(), final_audio_target.float())
+    assert metrics["loss/video"].item() == pytest.approx(expected_video_loss.item(), rel=1e-5, abs=1e-6)
+    assert metrics["loss/audio"].item() == pytest.approx(expected_audio_loss.item(), rel=1e-5, abs=1e-6)
+    assert loss.item() == pytest.approx((expected_video_loss + expected_audio_loss).item(), rel=1e-5, abs=1e-6)
+
+    loss.backward()
+    for parameter in (transformer.video_projection.weight, transformer.audio_projection.weight):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert parameter.grad.abs().sum().item() > 0.0
+
+
 def test_process_batch_preserves_the_released_fp32_audio_cache_dtype(monkeypatch):
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args()
