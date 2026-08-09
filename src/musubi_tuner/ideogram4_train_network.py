@@ -333,11 +333,23 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
     ) -> torch.Tensor:
         """Return the unweighted Ideogram 4 velocity MSE for each batch sample."""
         del args, timesteps, noise_scheduler, dit_dtype, global_step
+        if output.pred.ndim < 1 or output.target.ndim < 1:
+            raise ValueError("per-sample loss requires a leading batch axis")
+        batch_size = output.pred.shape[0]
+        if output.target.shape[0] != batch_size:
+            raise ValueError("prediction and target batch sizes differ")
+        if output.pred.shape != output.target.shape:
+            raise ValueError("prediction and target shapes must match")
+        if output.pred.device != output.target.device:
+            raise ValueError("prediction and target devices must match")
+        if batch_size == 0:
+            raise ValueError("per-sample loss requires a non-empty batch")
+        if output.pred.numel() // batch_size == 0:
+            raise ValueError("per-sample loss requires at least one element per batch sample")
+
         pred = output.pred.to(network_dtype)
         target = output.target.to(network_dtype)
-        if pred.ndim < 1 or target.ndim < 1 or pred.shape[0] != target.shape[0]:
-            raise ValueError("Ideogram 4 per-sample loss requires matching leading batch axes")
-        return torch.nn.functional.mse_loss(pred, target, reduction="none").reshape(pred.shape[0], -1).mean(dim=1)
+        return torch.nn.functional.mse_loss(pred, target, reduction="none").reshape(batch_size, -1).mean(dim=1)
 
     def compute_loss(
         self,

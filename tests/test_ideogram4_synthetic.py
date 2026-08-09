@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+import pytest
 from safetensors.torch import safe_open
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -669,9 +670,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertEqual(args.lora_multiplier, [0.8, 1.0])
 
     def test_scale_shift_latents_normalizes_and_compute_loss_reports_metrics(self):
-        # process_batch is now the shared base trainer's; Ideogram 4 only overrides the
-        # scale_shift_latents (latent normalization) and compute_loss (mean MSE + diagnostics)
-        # hooks, so verify those directly instead of the old monolithic process_batch.
+        # process_batch is now the shared base trainer's; Ideogram 4 only overrides
+        # latent normalization plus its per-sample loss and diagnostic scalar wrapper.
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
         original_sampling = sys.modules.get("musubi_tuner.training.sampling_prompts")
         original_trainer = sys.modules.get("musubi_tuner.training.trainer_base")
@@ -716,10 +716,13 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
             # The canonical selection primitive is unweighted MSE in velocity space;
             # diagnostics still accompany the scalar wrapper.
-            target = torch.linspace(-1.0, 1.0, 4 * 2 * 2, dtype=torch.float32).reshape(1, 4, 2, 2)
-            output = DiTOutput(pred=target.clone(), target=target.clone())
+            new_parameter = torch.nn.Parameter(torch.tensor(0.3))
+            old_parameter = torch.nn.Parameter(new_parameter.detach().clone())
+            inputs = torch.tensor([1.0, 3.0, 2.0, 4.0], dtype=torch.float32).reshape(2, 1, 1, 2)
+            target = torch.tensor([-1.0, 0.5, 1.5, -0.5], dtype=torch.float32).reshape(2, 1, 1, 2)
+            output = DiTOutput(pred=new_parameter * inputs, target=target)
             args = SimpleNamespace(log_loss_stats=True)
-            timesteps = torch.full((1,), 251.0)
+            timesteps = torch.tensor([251.0, 753.0])
             per_sample = trainer.compute_per_sample_loss(
                 args,
                 output,
@@ -738,6 +741,9 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 torch.float32,
                 0,
             )
+            old_loss = torch.nn.functional.mse_loss(old_parameter * inputs, target, reduction="mean")
+            new_gradient = torch.autograd.grad(loss, new_parameter)[0]
+            old_gradient = torch.autograd.grad(old_loss, old_parameter)[0]
         finally:
             if original_module is not None:
                 sys.modules["musubi_tuner.ideogram4_train_network"] = original_module
@@ -756,9 +762,11 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             else:
                 sys.modules.pop("musubi_tuner.training.trainer_base", None)
 
-        self.assertEqual(float(loss.item()), 0.0)
         self.assertEqual(per_sample.shape, (output.pred.shape[0],))
         self.assertTrue(torch.allclose(loss, per_sample.mean(), rtol=1e-5, atol=1e-8))
+        self.assertTrue(torch.allclose(loss, old_loss, rtol=1e-5, atol=1e-8))
+        self.assertTrue(torch.allclose(new_gradient, old_gradient, rtol=1e-5, atol=1e-8))
+        self.assertGreater(float(loss.item()), 0.0)
         self.assertEqual(
             set(metrics),
             {
@@ -774,8 +782,9 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         )
         self.assertGreater(metrics["loss/zero_pred"], 0.0)
         self.assertGreater(metrics["loss/flipped_pred"], 0.0)
-        self.assertAlmostEqual(metrics["loss/pred_target_cosine"], 1.0, places=6)
-        self.assertAlmostEqual(metrics["timestep/mean"], 251.0, places=6)
+        self.assertAlmostEqual(metrics["timestep/mean"], 502.0, places=6)
+        self.assertAlmostEqual(metrics["timestep/min"], 251.0, places=6)
+        self.assertAlmostEqual(metrics["timestep/max"], 753.0, places=6)
 
     def test_call_dit_uses_model_time_and_clean_minus_noise_target(self):
         original_image_video = sys.modules.get("musubi_tuner.dataset.image_video_dataset")
@@ -940,6 +949,30 @@ class Ideogram4QwenMaskTests(unittest.TestCase):
         self.assertIs(calls["cache_position"], cache_position)
         self.assertIsNone(calls["past_key_values"])
         self.assertIs(calls["position_ids"], position_ids)
+
+
+@pytest.mark.parametrize(
+    ("pred", "target", "message"),
+    [
+        (torch.zeros(2, 3, 1), torch.zeros(2, 1, 4), "prediction and target shapes must match"),
+        (torch.zeros(0, 3), torch.zeros(0, 3), "per-sample loss requires a non-empty batch"),
+        (torch.zeros(2, 0), torch.zeros(2, 0), "per-sample loss requires at least one element per batch sample"),
+    ],
+)
+def test_ideogram4_per_sample_loss_rejects_malformed_objectives(pred, target, message):
+    from musubi_tuner.ideogram4_train_network import Ideogram4NetworkTrainer
+    from musubi_tuner.training.trainer_base import DiTOutput
+
+    with pytest.raises(ValueError, match=message):
+        Ideogram4NetworkTrainer().compute_per_sample_loss(
+            SimpleNamespace(),
+            DiTOutput(pred=pred, target=target),
+            torch.ones(pred.shape[0]),
+            None,
+            torch.float32,
+            torch.float32,
+            0,
+        )
 
 
 if __name__ == "__main__":

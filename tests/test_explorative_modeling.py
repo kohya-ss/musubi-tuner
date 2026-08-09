@@ -614,13 +614,15 @@ def test_standard_xm_startup_log_is_explicit_and_k_one_is_silent(caplog):
     assert "LoRA fine-tuning" in caplog.text
 
 
-def test_base_per_sample_loss_applies_weight_before_nonbatch_reduction(monkeypatch):
+@pytest.mark.parametrize("shape", [(2, 1, 1, 2), (2, 1, 1, 1, 2)])
+def test_base_per_sample_loss_applies_weight_before_nonbatch_reduction(monkeypatch, shape):
     trainer = NetworkTrainer()
     output = DiTOutput(
-        pred=torch.tensor([[[[1.0, 3.0]]], [[[2.0, 4.0]]]]),
-        target=torch.zeros(2, 1, 1, 2),
+        pred=torch.tensor([1.0, 3.0, 2.0, 4.0]).reshape(shape),
+        target=torch.zeros(shape),
     )
-    weighting = torch.tensor([2.0, 0.5]).reshape(2, 1, 1, 1)
+    # This is the production helper's rank-5 contract, including for 4D images.
+    weighting = torch.tensor([2.0, 0.5]).reshape(2, 1, 1, 1, 1)
     monkeypatch.setattr(trainer_base_module, "compute_loss_weighting_for_sd3", lambda *a, **k: weighting)
     args = SimpleNamespace(weighting_scheme="cosmap")
 
@@ -652,14 +654,37 @@ def test_base_per_sample_loss_rejects_mismatched_batch_axis():
         )
 
 
+@pytest.mark.parametrize(
+    ("pred", "target", "message"),
+    [
+        (torch.zeros(2, 3, 1), torch.zeros(2, 1, 4), "prediction and target shapes must match"),
+        (torch.zeros(0, 3), torch.zeros(0, 3), "per-sample loss requires a non-empty batch"),
+        (torch.zeros(2, 0), torch.zeros(2, 0), "per-sample loss requires at least one element per batch sample"),
+    ],
+)
+def test_base_per_sample_loss_rejects_malformed_objectives(pred, target, message):
+    trainer = NetworkTrainer()
+
+    with pytest.raises(ValueError, match=message):
+        trainer.compute_per_sample_loss(
+            SimpleNamespace(weighting_scheme="none"),
+            DiTOutput(pred=pred, target=target),
+            torch.ones(pred.shape[0]),
+            None,
+            torch.float32,
+            torch.float32,
+            0,
+        )
+
+
 def test_base_scalar_loss_and_gradient_match_direct_baseline_reduction(monkeypatch):
     trainer = NetworkTrainer()
-    weighting = torch.tensor([0.75, 1.25]).reshape(2, 1, 1, 1)
+    weighting = torch.tensor([0.75, 1.25]).reshape(2, 1, 1, 1, 1)
     monkeypatch.setattr(trainer_base_module, "compute_loss_weighting_for_sd3", lambda *args, **kwargs: weighting)
     new_parameter = torch.nn.Parameter(torch.tensor(0.3))
     old_parameter = torch.nn.Parameter(new_parameter.detach().clone())
-    inputs = torch.tensor([1.0, 2.0]).reshape(2, 1, 1, 1)
-    target = torch.tensor([-1.0, 0.5]).reshape(2, 1, 1, 1)
+    inputs = torch.tensor([1.0, 2.0]).reshape(2, 1, 1, 1, 1)
+    target = torch.tensor([-1.0, 0.5]).reshape(2, 1, 1, 1, 1)
     timesteps = torch.tensor([100.0, 900.0])
     args = SimpleNamespace(weighting_scheme="cosmap")
 

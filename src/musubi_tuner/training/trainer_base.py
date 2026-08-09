@@ -1290,11 +1290,29 @@ class NetworkTrainer:
         batch_size = output.pred.shape[0]
         if output.target.shape[0] != batch_size:
             raise ValueError("prediction and target batch sizes differ")
+        if output.pred.shape != output.target.shape:
+            raise ValueError("prediction and target shapes must match")
+        if output.pred.device != output.target.device:
+            raise ValueError("prediction and target devices must match")
+        if batch_size == 0:
+            raise ValueError("per-sample loss requires a non-empty batch")
+        if output.pred.numel() // batch_size == 0:
+            raise ValueError("per-sample loss requires at least one element per batch sample")
 
         weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
         elementwise = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
-            elementwise = elementwise * weighting
+            if weighting.device != elementwise.device:
+                raise ValueError("loss weighting and predictions must be on the same device")
+            if weighting.numel() != batch_size:
+                raise ValueError("loss weighting must contain exactly one value per batch sample")
+            if weighting.ndim < 1 or weighting.shape[0] != batch_size:
+                raise ValueError("loss weighting must be owned by the leading batch axis")
+            weighting = weighting.reshape(batch_size, *([1] * (elementwise.ndim - 1)))
+            weighted_elementwise = elementwise * weighting
+            if weighted_elementwise.shape != elementwise.shape:
+                raise ValueError("loss weighting must not expand the elementwise loss shape")
+            elementwise = weighted_elementwise
 
         per_sample = elementwise.reshape(batch_size, -1).mean(dim=1)
         if per_sample.shape != (batch_size,):
