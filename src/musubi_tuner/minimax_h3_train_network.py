@@ -295,27 +295,18 @@ def _shift_noise_amount(base: torch.Tensor, shift: float) -> torch.Tensor:
     return shift * base / (1.0 + (shift - 1.0) * base)
 
 
-def _augment_conditions(
-    tensors: tuple[torch.Tensor, ...],
-    clean: float,
-    seeds: torch.Tensor,
-    *,
-    seed_offset: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, ...]:
-    moved = tuple(tensor.to(device) for tensor in tensors)
+def _augment_conditions(tensors: tuple[torch.Tensor, ...], clean: float) -> tuple[torch.Tensor, ...]:
+    """Blend independent Gaussian noise into condition latents: clean*x + (1-clean)*eps.
+
+    Training draws fresh noise from the global RNG, like the target noise; only the
+    sampling path (minimax_h3.sampling) needs seed-reproducible condition noise.
+    """
     if clean == 1.0:
-        return moved
+        return tensors
     augmented = []
-    for tensor in moved:
-        samples = []
-        for sample, seed in zip(tensor, seeds):
-            generator = torch.Generator(device="cpu").manual_seed(int(seed.item()) + seed_offset)
-            noise = torch.randn(tuple(sample.shape), generator=generator, dtype=torch.float32, device="cpu").to(
-                device=sample.device, dtype=sample.dtype
-            )
-            samples.append(clean * sample + (1.0 - clean) * noise)
-        augmented.append(torch.stack(samples))
+    for tensor in tensors:
+        noise = torch.randn(tuple(tensor.shape), dtype=torch.float32, device=tensor.device).to(tensor.dtype)
+        augmented.append(clean * tensor + (1.0 - clean) * noise)
     return tuple(augmented)
 
 
@@ -893,27 +884,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         noisy_video = (1.0 - sigma_video) * latents + sigma_video * noise
         noisy_audio = (1.0 - sigma_audio) * audio_latents + sigma_audio * audio_noise
 
-        needs_condition_noise = (bool(runtime.visual_conditions) and args.h3_visual_cond_clean != 1.0) or (
-            bool(runtime.audio_conditions) and args.h3_audio_cond_clean != 1.0
-        )
-        condition_seeds = (
-            torch.randint(0, 2**63 - 2, (latents.shape[0],), dtype=torch.int64, device="cpu")
-            if needs_condition_noise
-            else torch.empty(0, dtype=torch.int64)
-        )
         visual_conditions = _augment_conditions(
-            runtime.visual_conditions,
-            args.h3_visual_cond_clean,
-            condition_seeds,
-            seed_offset=0,
-            device=device,
+            tuple(tensor.to(device) for tensor in runtime.visual_conditions), args.h3_visual_cond_clean
         )
         audio_conditions = _augment_conditions(
-            runtime.audio_conditions,
-            args.h3_audio_cond_clean,
-            condition_seeds,
-            seed_offset=1,
-            device=device,
+            tuple(tensor.to(device) for tensor in runtime.audio_conditions), args.h3_audio_cond_clean
         )
         output = self.call_dit(
             args,
