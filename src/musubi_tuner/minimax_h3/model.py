@@ -350,6 +350,8 @@ class Attention(nn.Module):
         if rotation_table is not None:
             query = _apply_rope_split_half(query, rotation_table)
             key = _apply_rope_split_half(key, rotation_table)
+        query = query.to(value)
+        key = key.to(value)
 
         if self.attn_mode == "flash3":
             try:
