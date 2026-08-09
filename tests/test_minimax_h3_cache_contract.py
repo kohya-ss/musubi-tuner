@@ -171,6 +171,69 @@ def test_ref2va_reference_audio_resolution_and_media_paths(tmp_path: Path):
     assert record_media_paths(record) == {video, reference_video, reference_audio}
 
 
+def test_ref2va_null_audio_path_makes_video_reference_visual_only(tmp_path: Path):
+    video = _touch(tmp_path / "target.mp4")
+    motion = _touch(tmp_path / "motion.mp4")
+    voices = [_touch(tmp_path / f"voice_{index}.wav") for index in range(3)]
+    jsonl = tmp_path / "data.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "video_path": "target.mp4",
+                "caption": "caption",
+                "references": [
+                    # the motion video has an embedded audio track, but null opts out; without
+                    # the opt-out this record would exceed the 3 audio-bearing reference limit
+                    {"type": "video", "path": "motion.mp4", "audio_path": None},
+                    *({"type": "audio", "path": f"voice_{index}.wav"} for index in range(3)),
+                ],
+            }
+        ],
+    )
+
+    record = load_h3_jsonl_records(
+        jsonl,
+        "ref2va",
+        lambda path: H3MediaInfo(has_audio=True, duration_seconds=5.0),
+    )[0]
+
+    assert record.references[0].type == "video"
+    assert record.references[0].audio is None
+    assert record_media_paths(record) == {video, motion, *voices}
+
+
+@pytest.mark.parametrize(
+    ("reference", "message"),
+    [
+        ({"type": "image", "path": "face.png", "audio_path": None}, "image cannot have audio_path"),
+        ({"type": "audio", "path": "voice.wav", "audio_path": None}, "audio uses path, not audio_path"),
+    ],
+)
+def test_ref2va_null_audio_path_is_rejected_on_non_video_references(tmp_path: Path, reference: dict, message: str):
+    _touch(tmp_path / "target.mp4")
+    _touch(tmp_path / "face.png")
+    _touch(tmp_path / reference["path"])
+    jsonl = tmp_path / "data.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "video_path": "target.mp4",
+                "caption": "caption",
+                "references": [{"type": "image", "path": "face.png"}, reference],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_h3_jsonl_records(
+            jsonl,
+            "ref2va",
+            lambda path: H3MediaInfo(has_audio=True, duration_seconds=5.0),
+        )
+
+
 def test_audio_presence_summary_is_aggregated(caplog):
     caplog.set_level(logging.INFO)
 
