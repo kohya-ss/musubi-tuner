@@ -3,7 +3,7 @@ import glob
 import os
 import random
 import time
-from typing import Any, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+from typing import Any, NamedTuple, Optional, Sequence, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from multiprocessing.sharedctypes import Synchronized
@@ -60,6 +60,7 @@ class ItemInfo:
         self.original_size = original_size
         self.bucket_size = bucket_size
         self.frame_count = frame_count
+        self.h3_image_frame_count: Optional[int] = None
         self.content = content
         self.latent_cache_path = latent_cache_path
         self.text_encoder_output_cache_path: Optional[str] = None
@@ -116,6 +117,44 @@ from musubi_tuner.dataset.datasources import (  # noqa: F401
 # - VideoDatasource, VideoDirectoryDatasource, VideoJsonlDatasource
 
 
+class _LatentCacheFilename(NamedTuple):
+    item_key: str
+    image_size: tuple[int, int]
+    frame_token: Optional[str]
+    frame_pos: Optional[int]
+    frame_count: Optional[int]
+
+
+def _parse_latent_cache_filename(
+    cache_file: str, architecture: str, *, require_frame_token: bool
+) -> Optional[_LatentCacheFilename]:
+    filename = os.path.basename(cache_file)
+    suffix = f"_{architecture}.safetensors"
+    if not filename.endswith(suffix):
+        return None
+
+    stem = filename[: -len(suffix)]
+    item_and_frame, separator, size_token = stem.rpartition("_")
+    width, size_separator, height = size_token.partition("x")
+    if not separator or not size_separator or not width.isdigit() or not height.isdigit():
+        return None
+
+    frame_token = None
+    frame_pos = None
+    frame_count = None
+    item_key = item_and_frame
+    if require_frame_token:
+        item_key, separator, frame_token = item_and_frame.rpartition("_")
+        frame_parts = frame_token.split("-")
+        if not separator or not item_key or len(frame_parts) not in (2, 3) or any(not part.isdigit() for part in frame_parts):
+            return None
+        frame_pos, frame_count = map(int, frame_parts[:2])
+
+    if not item_key:
+        return None
+    return _LatentCacheFilename(item_key, (int(width), int(height)), frame_token, frame_pos, frame_count)
+
+
 class BaseDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -138,6 +177,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.cache_directory = cache_directory
         self.debug_dataset = debug_dataset
         self.architecture = architecture
+        self.h3_image_frame_count: Optional[int] = None
         self.seed = None
         self.current_epoch = 0
         self.shared_epoch = None
@@ -242,9 +282,8 @@ class BaseDataset(torch.utils.data.Dataset):
                 for future in completed_futures:
                     item_key, caption = future.result()
                     item_info = ItemInfo(item_key, caption, (0, 0), (0, 0))
-                    h3_image_frame_count = getattr(self, "h3_image_frame_count", None)
-                    if h3_image_frame_count is not None:
-                        item_info.h3_image_frame_count = h3_image_frame_count
+                    if self.h3_image_frame_count is not None:
+                        item_info.h3_image_frame_count = self.h3_image_frame_count
                     item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
                     data.append(item_info)
 
@@ -533,21 +572,22 @@ class ImageDataset(BaseDataset):
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
         for cache_file in latent_cache_files:
-            tokens = os.path.basename(cache_file).split("_")
+            cache_info = _parse_latent_cache_filename(
+                cache_file,
+                self.architecture,
+                require_frame_token=self.architecture == ARCHITECTURE_MINIMAX_H3,
+            )
+            if cache_info is None:
+                logger.warning("Skipping malformed latent cache filename: %s", cache_file)
+                continue
 
-            image_size = tokens[-2]  # 0000x0000
-            image_width, image_height = map(int, image_size.split("x"))
-            image_size = (image_width, image_height)
-
+            item_key = cache_info.item_key
+            image_size = cache_info.image_size
+            frame_count = cache_info.frame_count
+            text_item_key = item_key
             if self.architecture == ARCHITECTURE_MINIMAX_H3:
-                frame_pos, frame_count = tokens[-3].split("-")[:2]
-                frame_count = int(frame_count)
-                item_key = "_".join(tokens[:-3])
-                text_item_key = f"{item_key}_{tokens[-3]}"
-            else:
-                frame_count = None
-                item_key = "_".join(tokens[:-2])
-                text_item_key = item_key
+                assert cache_info.frame_token is not None and frame_count is not None
+                text_item_key = f"{item_key}_{cache_info.frame_token}"
             text_encoder_output_cache_file = os.path.join(
                 self.cache_directory, f"{text_item_key}_{self.architecture}_te.safetensors"
             )
@@ -943,18 +983,17 @@ class VideoDataset(BaseDataset):
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
         for cache_file in latent_cache_files:
-            tokens = os.path.basename(cache_file).split("_")
+            cache_info = _parse_latent_cache_filename(cache_file, self.architecture, require_frame_token=True)
+            if cache_info is None:
+                logger.warning("Skipping malformed latent cache filename: %s", cache_file)
+                continue
 
-            image_size = tokens[-2]  # 0000x0000
-            image_width, image_height = map(int, image_size.split("x"))
-            image_size = (image_width, image_height)
-
-            frame_pos, frame_count = tokens[-3].split("-")[:2]  # "00000-000", or optional section index "00000-000-00"
-            frame_pos, frame_count = int(frame_pos), int(frame_count)
-
-            item_key = "_".join(tokens[:-3])
+            item_key = cache_info.item_key
+            image_size = cache_info.image_size
+            frame_count = cache_info.frame_count
+            assert cache_info.frame_token is not None and frame_count is not None
             if self.architecture == ARCHITECTURE_MINIMAX_H3:
-                text_item_key = f"{item_key}_{tokens[-3]}"
+                text_item_key = f"{item_key}_{cache_info.frame_token}"
             else:
                 text_item_key = item_key
             text_encoder_output_cache_file = os.path.join(

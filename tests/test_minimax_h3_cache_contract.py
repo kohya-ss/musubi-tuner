@@ -44,7 +44,7 @@ from musubi_tuner.dataset.cache_io import (
     save_latent_cache_minimax_h3,
     save_text_encoder_output_cache_minimax_h3,
 )
-from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo
+from musubi_tuner.dataset.image_video_dataset import BaseDataset, ImageDataset, ItemInfo
 from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _image_dataset_info_map, _target_image_paths_for_item
 
 
@@ -74,6 +74,14 @@ def _touch(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     return path.resolve()
+
+
+def test_h3_frame_count_fields_are_declared_with_none_defaults():
+    item = ItemInfo("sample.png", "caption", (64, 64))
+    dataset = BaseDataset()
+
+    assert item.h3_image_frame_count is None
+    assert dataset.h3_image_frame_count is None
 
 
 def test_h3_image_records_match_arbitrary_names_and_bucket_input_sizes(tmp_path: Path):
@@ -474,6 +482,33 @@ def test_h3_image_cache_names_are_discovered_by_image_dataset_training(tmp_path:
     assert batch["latents"].shape == (1, 24, 2, 4, 4)
     assert batch["latents_first"].shape == (1, 24, 1, 4, 4)
     assert batch["latents_last"].shape == (1, 24, 1, 4, 4)
+
+
+def test_h3_image_training_ignores_legacy_cache_names_without_frame_tokens(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    target_dir = tmp_path / "targets"
+    cache_dir = tmp_path / "cache"
+    target_dir.mkdir()
+    cache_dir.mkdir()
+    Image.new("RGB", (64, 64)).save(target_dir / "target.png")
+    (target_dir / "target.txt").write_text("caption", encoding="utf-8")
+    (cache_dir / "target_0064x0064_mmh3.safetensors").touch()
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(target_dir),
+        cache_directory=str(cache_dir),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        dataset.prepare_for_training()
+
+    assert dataset.num_train_items == 0
+    assert "Skipping malformed latent cache filename" in caplog.text
 
 
 def test_h3_latent_writer_rejects_transposed_audio_layout(tmp_path: Path):
@@ -883,6 +918,38 @@ def test_control_matching_ignores_same_prefix_nonnumeric_assets(tmp_path: Path):
 
     assert [Path(path).name for path in targets] == ["pose.png", "pose_1.png"]
     assert [Path(path).name for path in controls] == ["pose.png", "pose_1.png"]
+
+
+def test_multiple_target_rejects_gapped_numeric_suffixes(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    image_dir.mkdir()
+    for name in ("pose.png", "pose_1.png", "pose_3.png"):
+        Image.new("RGB", (64, 64)).save(image_dir / name)
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="contiguous numeric suffixes"):
+        ImageDirectoryDatasource(
+            str(image_dir),
+            caption_extension=".txt",
+            multiple_target=True,
+        )
+
+
+def test_multiple_target_preserves_legacy_zero_started_secondary_images(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    image_dir.mkdir()
+    for name in ("pose.png", "pose_0.png", "pose_1.png"):
+        Image.new("RGB", (64, 64)).save(image_dir / name)
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+
+    datasource = ImageDirectoryDatasource(
+        str(image_dir),
+        caption_extension=".txt",
+        multiple_target=True,
+    )
+    targets, _controls = datasource.get_media_paths(str(image_dir / "pose.png"))
+
+    assert [Path(path).name for path in targets] == ["pose.png", "pose_0.png", "pose_1.png"]
 
 
 def test_jsonl_image_mode_maps_all_targets_and_controls(tmp_path: Path):

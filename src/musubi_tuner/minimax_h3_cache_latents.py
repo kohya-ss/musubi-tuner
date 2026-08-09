@@ -231,7 +231,7 @@ def align_h3_frame_count(frame_count: int) -> int:
 
 
 def h3_image_frame_count_for_item(item: ItemInfo, cli_frame_count: int | None) -> int:
-    requested = cli_frame_count if cli_frame_count is not None else getattr(item, "h3_image_frame_count", None)
+    requested = cli_frame_count if cli_frame_count is not None else item.h3_image_frame_count
     if requested is None:
         requested = 5
     aligned = align_h3_frame_count(requested)

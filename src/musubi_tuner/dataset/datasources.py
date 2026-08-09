@@ -99,12 +99,15 @@ class ImageDirectoryDatasource(ImageDatasource):
         if self.multiple_target and self.caption_extension:
             all_image_paths = glob_images(self.image_directory)
             image_paths = set(self.image_paths)
+            captioned_image_stems = {os.path.splitext(path)[0] for path in image_paths}
             for image_path in all_image_paths:
                 image_path_no_ext = os.path.splitext(image_path)[0]
                 suffix = image_path_no_ext.rsplit("_", 1)[-1]
                 if suffix != "0" or image_path in image_paths:
                     continue
                 base_no_ext = image_path_no_ext[: -(len(suffix) + 1)]
+                if base_no_ext in captioned_image_stems:
+                    continue
                 caption_path = base_no_ext + self.caption_extension
                 if os.path.exists(caption_path):
                     self.image_paths.append(image_path)
@@ -142,6 +145,13 @@ class ImageDirectoryDatasource(ImageDatasource):
                     if indexed_paths:
                         # sort by the digits (`_0000`) suffix
                         indexed_paths.sort()
+                        indexes = [index for index, _path in indexed_paths]
+                        expected_indexes = list(range(indexes[0], indexes[0] + len(indexes)))
+                        if indexes[0] not in (0, 1) or indexes != expected_indexes:
+                            raise ValueError(
+                                f"Multiple-target images for {image_path} must use contiguous numeric suffixes "
+                                f"starting at 0 or 1, got {indexes}"
+                            )
                         potential_paths = [path for _index, path in indexed_paths]
                         self.target_paths[image_path] = potential_paths
 
