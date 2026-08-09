@@ -15,12 +15,18 @@ from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
     build_shifted_schedule,
+    create_sampling_generator,
     decode_joint_av,
     initialize_target_latents,
     sample_joint_av,
     write_joint_av,
 )
-from musubi_tuner.minimax_h3_generate_video import load_cached_text_conditioning, validate_generation_args
+from musubi_tuner.minimax_h3_generate_video import (
+    load_cached_text_conditioning,
+    run_generation,
+    save_selected_frame,
+    validate_generation_args,
+)
 
 
 def _layout():
@@ -52,10 +58,11 @@ def test_shifted_schedule_rejects_out_of_contract_shifts(shift):
 
 
 def test_target_initialization_draws_video_then_audio_from_one_request_generator():
+    generator = create_sampling_generator(123)
     video, audio = initialize_target_latents(
         video_shape=(1, 24, 2, 4, 4),
         audio_shape=(1, 32, 2, 8),
-        seed=123,
+        generator=generator,
         device=torch.device("cpu"),
         video_dtype=torch.float16,
         audio_dtype=torch.float32,
@@ -68,29 +75,33 @@ def test_target_initialization_draws_video_then_audio_from_one_request_generator
     assert torch.equal(audio, expected_audio)
 
 
-def test_condition_augmentation_resets_visual_stream_and_uses_seed_plus_one_for_audio():
+def test_condition_augmentation_consumes_one_shared_generator_in_condition_order():
     visuals = (torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4))
     audios = (torch.zeros(1, 32, 2, 8),)
 
+    generator = create_sampling_generator(456)
     augmented_visuals, augmented_audios = augment_condition_latents(
         visuals,
         audios,
-        seed=456,
+        generator=generator,
         visual_clean=0.5,
         audio_clean=0.5,
         device=torch.device("cpu"),
     )
 
-    expected_visual = 0.5 * _cpu_noise((1, 24, 1, 4, 4), torch.Generator(device="cpu").manual_seed(456))
-    expected_audio = 0.5 * _cpu_noise((1, 32, 2, 8), torch.Generator(device="cpu").manual_seed(457))
-    assert torch.equal(augmented_visuals[0], expected_visual)
-    assert torch.equal(augmented_visuals[1], expected_visual)
+    expected_generator = create_sampling_generator(456)
+    expected_visual_0 = 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected_generator)
+    expected_visual_1 = 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected_generator)
+    expected_audio = 0.5 * _cpu_noise((1, 32, 2, 8), expected_generator)
+    assert torch.equal(augmented_visuals[0], expected_visual_0)
+    assert torch.equal(augmented_visuals[1], expected_visual_1)
     assert torch.equal(augmented_audios[0], expected_audio)
 
+    changed_generator = create_sampling_generator(457)
     changed_visuals, changed_audios = augment_condition_latents(
         visuals,
         audios,
-        seed=457,
+        generator=changed_generator,
         visual_clean=0.5,
         audio_clean=0.5,
         device=torch.device("cpu"),
@@ -99,19 +110,21 @@ def test_condition_augmentation_resets_visual_stream_and_uses_seed_plus_one_for_
     assert not torch.equal(changed_audios[0], augmented_audios[0])
 
 
-def test_condition_augmentation_does_not_change_target_noise_sequence():
+def test_condition_augmentation_advances_the_shared_noise_sequence():
+    expected_generator = create_sampling_generator(789)
     expected = initialize_target_latents(
         video_shape=(1, 24, 2, 4, 4),
         audio_shape=(1, 32, 2, 8),
-        seed=789,
+        generator=expected_generator,
         device=torch.device("cpu"),
         video_dtype=torch.float32,
         audio_dtype=torch.float32,
     )
+    advanced_generator = create_sampling_generator(789)
     augment_condition_latents(
         (torch.zeros(1, 24, 1, 4, 4),),
         (torch.zeros(1, 32, 2, 8),),
-        seed=789,
+        generator=advanced_generator,
         visual_clean=0.5,
         audio_clean=0.5,
         device=torch.device("cpu"),
@@ -119,14 +132,14 @@ def test_condition_augmentation_does_not_change_target_noise_sequence():
     actual = initialize_target_latents(
         video_shape=(1, 24, 2, 4, 4),
         audio_shape=(1, 32, 2, 8),
-        seed=789,
+        generator=advanced_generator,
         device=torch.device("cpu"),
         video_dtype=torch.float32,
         audio_dtype=torch.float32,
     )
 
-    assert torch.equal(actual[0], expected[0])
-    assert torch.equal(actual[1], expected[1])
+    assert not torch.equal(actual[0], expected[0])
+    assert not torch.equal(actual[1], expected[1])
 
 
 def test_joint_sampler_uses_native_dataward_predictions_and_each_sigma_delta():
@@ -255,6 +268,8 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "h3_shift_audio": 3.0,
         "h3_visual_cond_clean": 0.999,
         "h3_audio_cond_clean": 1.0,
+        "h3_image_mode": "none",
+        "h3_select_frame": 0,
         "lora_weight": None,
         "lora_multiplier": None,
         "convrot_int8": False,
@@ -282,7 +297,68 @@ def test_generation_validation_enforces_task_inputs_and_block_swap_range(tmp_pat
         validate_generation_args(_generation_args(tmp_path, blocks_to_swap=49))
 
 
-def test_cached_text_conditioning_validates_task_format_and_fingerprint(tmp_path):
+def test_generation_validation_normalizes_first_image_mode(tmp_path):
+    first = tmp_path / "first.png"
+    first.touch()
+    args = _generation_args(
+        tmp_path,
+        task="fl2va",
+        first_frame=str(first),
+        frame_count=None,
+        output=str(tmp_path / "result.png"),
+        h3_image_mode="first",
+    )
+
+    validate_generation_args(args)
+
+    assert args.frame_count == 5
+    assert args.last_frame == str(first)
+    assert args.allow_experimental_duration is True
+
+
+def test_generation_validation_enforces_image_mode_contract(tmp_path):
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.touch()
+    last.touch()
+
+    with pytest.raises(ValueError, match="does not accept --last_frame"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                task="fl2va",
+                first_frame=str(first),
+                last_frame=str(last),
+                output=str(tmp_path / "result.png"),
+                h3_image_mode="first",
+            )
+        )
+    with pytest.raises(ValueError, match="last_frame"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                task="fl2va",
+                first_frame=str(first),
+                last_frame=None,
+                output=str(tmp_path / "result.png"),
+                h3_image_mode="first_last",
+            )
+        )
+    with pytest.raises(ValueError, match=r"\.mp4"):
+        validate_generation_args(_generation_args(tmp_path, output=str(tmp_path / "result.png")))
+
+
+def test_save_selected_frame_clamps_and_writes_image(tmp_path):
+    video = torch.zeros(2, 4, 4, 3, dtype=torch.uint8)
+    video[1, :, :, 0] = 255
+    output = tmp_path / "frame.png"
+
+    save_selected_frame(video, output, 99)
+
+    assert output.exists()
+
+
+def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):
     path = tmp_path / "conditioning.safetensors"
     hidden = torch.zeros(3, 5120, dtype=torch.bfloat16)
     tags = torch.tensor([1, 0, 1], dtype=torch.int64)
@@ -449,3 +525,99 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     assert captured["decoded"].video.shape == (5, 4, 4, 3)
     assert captured["decoded"].audio.shape == (2, 6667)
     assert captured["output"] == args.output
+
+
+def test_generation_orchestrates_image_output_without_audio_decode(tmp_path, monkeypatch):
+    import musubi_tuner.minimax_h3_generate_video as generate
+
+    first = tmp_path / "first.png"
+    first.touch()
+    args = _generation_args(
+        tmp_path,
+        task="fl2va",
+        first_frame=str(first),
+        frame_count=None,
+        output=str(tmp_path / "result.png"),
+        h3_image_mode="first",
+        device="cpu",
+        attn_mode="torch",
+        split_attn=False,
+        use_pinned_memory_for_block_swap=False,
+        include_patterns=None,
+        exclude_patterns=None,
+        disable_numpy_memmap=False,
+        processor_revision=None,
+    )
+    monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
+    monkeypatch.setattr(generate, "has_comfy_quant_tensors", lambda files, **kwargs: False)
+    events = []
+
+    class Transformer:
+        offloader = None
+
+        def to(self, device):
+            events.append(("transformer", str(device)))
+            return self
+
+        def eval(self):
+            return self
+
+        def requires_grad_(self, value):
+            assert value is False
+            return self
+
+        def __call__(self, **kwargs):
+            return SimpleNamespace(
+                video=torch.zeros_like(kwargs["video_latents"]),
+                audio=torch.zeros_like(kwargs["audio_latents"]),
+            )
+
+    class VideoVAE:
+        vae_ratio = 16
+
+        def decode(self, latents):
+            events.append(("decode_video", tuple(latents.shape)))
+            return torch.zeros(1, 3, 5, 4, 4)
+
+    monkeypatch.setattr(
+        generate,
+        "decode_generation_visuals",
+        lambda *unused: ({"first": torch.zeros(1, 64, 64, 3), "last": torch.zeros(1, 64, 64, 3)}, {}),
+    )
+    monkeypatch.setattr(
+        generate,
+        "encode_visual_conditions",
+        lambda *unused: (
+            (torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4)),
+            (H3VideoGeometry(1, 4, 4), H3VideoGeometry(1, 4, 4)),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        generate,
+        "_encode_text",
+        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(3, dtype=torch.int64)),
+    )
+    monkeypatch.setattr(generate, "load_h3_transformer", lambda *unused, **kwargs: Transformer())
+    monkeypatch.setattr(
+        generate,
+        "load_video_vae",
+        lambda *unused, **kwargs: events.append(("load_video_vae", str(kwargs["device"]), kwargs["dtype"])) or VideoVAE(),
+    )
+    monkeypatch.setattr(
+        generate, "load_audio_vae", lambda *unused, **kwargs: pytest.fail("audio VAE should not decode image output")
+    )
+    captured = {}
+    monkeypatch.setattr(
+        generate,
+        "save_selected_frame",
+        lambda decoded_video, output, frame: captured.update(video=decoded_video, output=output, frame=frame),
+    )
+
+    output = run_generation(args)
+
+    assert output == Path(args.output)
+    assert [event[0] for event in events] == ["load_video_vae", "transformer", "load_video_vae", "decode_video"]
+    assert captured["video"].shape == (5, 4, 4, 3)
+    assert captured["output"] == args.output
+    assert captured["frame"] == 0

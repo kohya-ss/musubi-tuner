@@ -5,6 +5,7 @@ import gc
 import logging
 from pathlib import Path
 
+from PIL import Image
 from safetensors import safe_open
 from safetensors.torch import load_file
 import torch
@@ -56,6 +57,10 @@ from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 logger = logging.getLogger(__name__)
 
+H3_IMAGE_MODES = frozenset({"none", "first", "first_last"})
+IMAGE_OUTPUT_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+VIDEO_OUTPUT_SUFFIXES = frozenset({".mp4", ".mkv", ".mov"})
+
 
 def _require_path(value: str | None, label: str) -> Path:
     if not value:
@@ -66,7 +71,68 @@ def _require_path(value: str | None, label: str) -> Path:
     return path
 
 
+def _is_image_generation(args: argparse.Namespace) -> bool:
+    return getattr(args, "h3_image_mode", "none") != "none"
+
+
+def _is_image_output(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in IMAGE_OUTPUT_SUFFIXES
+
+
+def _normalize_image_generation_args(args: argparse.Namespace) -> None:
+    mode = getattr(args, "h3_image_mode", "none")
+    if mode not in H3_IMAGE_MODES:
+        raise ValueError("MiniMax-H3 --h3_image_mode must be none, first, or first_last")
+    if mode == "none":
+        if getattr(args, "frame_count", None) is None:
+            args.frame_count = 124
+        return
+
+    if args.task != "fl2va":
+        raise ValueError("MiniMax-H3 image generation requires --task fl2va")
+    if getattr(args, "frame_count", None) is None:
+        args.frame_count = 5
+    args.allow_experimental_duration = True
+    if mode == "first":
+        _require_path(args.first_frame, "first_frame")
+        if args.last_frame is not None and args.last_frame != args.first_frame:
+            raise ValueError("MiniMax-H3 --h3_image_mode first does not accept --last_frame")
+        args.last_frame = args.first_frame
+    else:
+        _require_path(args.first_frame, "first_frame")
+        _require_path(args.last_frame, "last_frame")
+
+
+def save_selected_frame(decoded_video: torch.Tensor, output: str | Path, frame_index: int) -> None:
+    if decoded_video.ndim != 4 or decoded_video.shape[-1] != 3:
+        raise ValueError(f"MiniMax-H3 decoded video must be [F,H,W,3], got {tuple(decoded_video.shape)}")
+    if decoded_video.shape[0] == 0:
+        raise ValueError("MiniMax-H3 decoded video has no frames to save")
+    index = min(max(int(frame_index), 0), int(decoded_video.shape[0]) - 1)
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    frame = decoded_video[index].detach().cpu().to(torch.uint8).numpy()
+    Image.fromarray(frame).save(output_path)
+
+
+def decoded_video_to_rgb_frames(decoded_video: torch.Tensor, *, frame_count: int) -> torch.Tensor:
+    if frame_count <= 0:
+        raise ValueError("MiniMax-H3 decode frame count must be positive")
+    if decoded_video.ndim != 5 or decoded_video.shape[0] != 1 or decoded_video.shape[1] != 3:
+        raise ValueError(f"MiniMax-H3 video VAE must decode [1,3,F,H,W], got {tuple(decoded_video.shape)}")
+    common_video_frames = min(frame_count, decoded_video.shape[2])
+    if common_video_frames <= 0:
+        raise ValueError("MiniMax-H3 decoded video duration is empty")
+    decoded_video = decoded_video[0, :, :common_video_frames].detach().cpu()
+    video_chunks = []
+    for chunk in decoded_video.split(16, dim=1):
+        chunk = chunk.float().clamp(-1.0, 1.0)
+        video_chunks.append(((chunk + 1.0) * 127.5).round().to(torch.uint8).permute(1, 2, 3, 0))
+    return torch.cat(video_chunks).contiguous()
+
+
 def validate_generation_args(args: argparse.Namespace) -> None:
+    _normalize_image_generation_args(args)
     if args.task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError("MiniMax-H3 --task must be t2va, fl2va, or ref2va")
     for label in ("dit", "video_vae", "audio_vae"):
@@ -98,7 +164,13 @@ def validate_generation_args(args: argparse.Namespace) -> None:
         value = float(getattr(args, label))
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"MiniMax-H3 --{label} must be in [0.0,1.0], got {value}")
-    if Path(args.output).suffix.lower() not in {".mp4", ".mkv", ".mov"}:
+    output_suffix = Path(args.output).suffix.lower()
+    if _is_image_generation(args):
+        if output_suffix not in VIDEO_OUTPUT_SUFFIXES | IMAGE_OUTPUT_SUFFIXES:
+            raise ValueError("MiniMax-H3 image generation --output must use .png, .jpg, .jpeg, .webp, .mp4, .mkv, or .mov")
+        if args.h3_select_frame < 0:
+            raise ValueError("MiniMax-H3 --h3_select_frame must be nonnegative")
+    elif output_suffix not in VIDEO_OUTPUT_SUFFIXES:
         raise ValueError("MiniMax-H3 --output must use .mp4, .mkv, or .mov")
 
     if args.task == "t2va":
@@ -332,7 +404,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference_index", type=int, default=0)
     parser.add_argument("--width", type=int, default=768)
     parser.add_argument("--height", type=int, default=1344)
-    parser.add_argument("--frame_count", type=int, default=124)
+    parser.add_argument("--frame_count", type=int, default=None)
     parser.add_argument("--allow_experimental_duration", action="store_true")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0)
@@ -350,6 +422,13 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--h3_shift_audio", type=float, default=3.0)
     parser.add_argument("--h3_visual_cond_clean", type=float, default=0.999)
     parser.add_argument("--h3_audio_cond_clean", type=float, default=1.0)
+    parser.add_argument(
+        "--h3_image_mode",
+        choices=tuple(sorted(H3_IMAGE_MODES)),
+        default="none",
+        help="generate FL2VA still images with one first-frame condition or first/last conditions",
+    )
+    parser.add_argument("--h3_select_frame", type=int, default=0, help="decoded frame index to save for image outputs")
     parser.add_argument("--lora_weight", nargs="*", default=None)
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None)
     parser.add_argument("--include_patterns", nargs="*", default=None)
@@ -544,6 +623,13 @@ def run_generation(args: argparse.Namespace) -> Path:
     del video_vae, video_latents
     gc.collect()
     clean_memory_on_device(device)
+
+    if _is_image_generation(args) and _is_image_output(args.output):
+        del audio_latents
+        decoded_frames = decoded_video_to_rgb_frames(decoded_video, frame_count=args.frame_count)
+        save_selected_frame(decoded_frames, args.output, args.h3_select_frame)
+        logger.info("Saved MiniMax-H3 image output: %s", args.output)
+        return Path(args.output)
 
     logger.info("Decoding MiniMax-H3 audio")
     audio_vae = load_audio_vae(

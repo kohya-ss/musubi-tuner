@@ -96,10 +96,9 @@ def process_text_encoder_batches(
             batches = dataset.retrieve_latent_cache_batches(num_workers)  # return captions and images/videos
 
         for batch in tqdm(batches):
-            # update cache files (it's ok if we update it multiple times)
             if requires_content:
                 batch = batch[1]  # batch is (key, items), so use items
-            all_cache_paths.update([os.path.normpath(item.text_encoder_output_cache_path) for item in batch])
+            source_batch = batch
 
             # skip existing cache files
             if skip_existing:
@@ -108,12 +107,15 @@ def process_text_encoder_batches(
                 ]
                 # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
                 if len(filtered_batch) == 0:
+                    all_cache_paths.update(os.path.normpath(item.text_encoder_output_cache_path) for item in source_batch)
                     continue
                 batch = filtered_batch
 
             bs = batch_size if batch_size is not None else len(batch)
             for i in range(0, len(batch), bs):
                 encode(batch[i : i + bs])
+            # Encoders may rewrite cache names after resolving model-specific geometry.
+            all_cache_paths.update(os.path.normpath(item.text_encoder_output_cache_path) for item in source_batch)
 
 
 def post_process_cache_files(

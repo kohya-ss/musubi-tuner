@@ -127,6 +127,7 @@ def _trainer_args(**overrides):
         "h3_audio_cond_clean": 1.0,
         "min_timestep": None,
         "max_timestep": None,
+        "preserve_distribution_shape": False,
         "blocks_to_swap": 0,
         "sample_prompts": None,
         "gradient_checkpointing": False,
@@ -733,12 +734,7 @@ def test_process_batch_video_only_disables_audio_loss_even_with_real_audio(monke
     assert torch.count_nonzero(transformer.calls[0]["audio_latents"]) > 0
 
 
-def _cpu_noise(shape, seed):
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    return torch.randn(shape, generator=generator, dtype=torch.float32)
-
-
-def test_condition_noise_restarts_per_role_uses_audio_seed_plus_one_and_changes_per_step(monkeypatch):
+def test_condition_noise_uses_fresh_draws_per_role_and_step(monkeypatch):
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(task="ref2va", h3_visual_cond_clean=0.5, h3_audio_cond_clean=0.5)
     trainer.handle_model_specific_args(args)
@@ -747,9 +743,13 @@ def test_condition_noise_restarts_per_role_uses_audio_seed_plus_one_and_changes_
     batch["latents_ref_000_image"] = torch.zeros(1, 24, 1, 4, 4)
     batch["latents_ref_001_audio"] = torch.zeros(1, 32, 2, 8)
     video_latents = torch.zeros(1, 24, 2, 4, 4)
-    seeds = iter((torch.tensor([100]), torch.tensor([300])))
-    monkeypatch.setattr(torch, "randint", lambda *args, **kwargs: next(seeds))
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    condition_noise_values = iter((1.0, 2.0, 3.0, 4.0))
+    monkeypatch.setattr(
+        torch,
+        "randn",
+        lambda shape, **kwargs: torch.full(shape, next(condition_noise_values), **kwargs),
+    )
     monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
 
     for step in range(2):
@@ -771,10 +771,10 @@ def test_condition_noise_restarts_per_role_uses_audio_seed_plus_one_and_changes_
     first_call, second_call = transformer.calls
     first_visual = first_call["visual_condition_latents"][0]
     first_audio = first_call["audio_condition_latents"][0]
-    assert torch.equal(first_visual[0], 0.5 * _cpu_noise((24, 1, 4, 4), 100))
-    assert torch.equal(first_audio[0], 0.5 * _cpu_noise((32, 2, 8), 101))
-    assert not torch.equal(first_visual, second_call["visual_condition_latents"][0])
-    assert not torch.equal(first_audio, second_call["audio_condition_latents"][0])
+    assert torch.equal(first_visual, torch.full_like(first_visual, 0.5))
+    assert torch.equal(first_audio, torch.full_like(first_audio, 1.0))
+    assert torch.equal(second_call["visual_condition_latents"][0], torch.full_like(first_visual, 1.5))
+    assert torch.equal(second_call["audio_condition_latents"][0], torch.full_like(first_audio, 2.0))
 
 
 def test_runtime_rejects_batch_size_above_one():

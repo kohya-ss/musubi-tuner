@@ -5,6 +5,7 @@ import types
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 import torch
 import torch.nn as nn
 from safetensors.torch import save_file
@@ -25,9 +26,17 @@ from musubi_tuner.minimax_h3.text_encoder import (
 )
 
 try:
-    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _text_cache_metadata
+    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import (
+        _fit_size_to_max_pixels,
+        _read_rgb_image,
+        _text_cache_metadata,
+        setup_parser,
+    )
 except ImportError as error:
+    _fit_size_to_max_pixels = None
+    _read_rgb_image = None
     _text_cache_metadata = None
+    setup_parser = None
     _text_cache_import_error = str(error)
 else:
     _text_cache_import_error = None
@@ -177,6 +186,43 @@ def test_text_cache_metadata_distinguishes_requested_storage_dtype():
         "presentation_fingerprint",
         "cache_dtype",
     }
+
+
+def test_h3_text_visual_max_pixels_rounds_large_images_to_32_multiple(tmp_path: Path):
+    if _read_rgb_image is None:
+        pytest.skip(f"local optional dependency mismatch: {_text_cache_import_error}")
+    image_path = tmp_path / "large.png"
+    Image.new("RGB", (3000, 2000), (128, 64, 32)).save(image_path)
+
+    resized = _read_rgb_image(image_path, max_pixels=1024 * 1024)
+
+    assert resized.shape[1] % 32 == 0
+    assert resized.shape[0] % 32 == 0
+    assert resized.shape[1] * resized.shape[0] <= 1024 * 1024
+    assert resized.shape[:2] == (832, 1248)
+
+
+def test_h3_text_visual_max_pixels_can_be_disabled():
+    if _fit_size_to_max_pixels is None:
+        pytest.skip(f"local optional dependency mismatch: {_text_cache_import_error}")
+    assert _fit_size_to_max_pixels(3000, 2000, 0) == (3000, 2000)
+
+
+def test_h3_text_encoder_cache_parser_defaults_to_one_megapixel_visual_cap():
+    if setup_parser is None:
+        pytest.skip(f"local optional dependency mismatch: {_text_cache_import_error}")
+    args = setup_parser().parse_args(
+        [
+            "--dataset_config",
+            "dataset.toml",
+            "--task",
+            "fl2va",
+            "--text_encoder",
+            "encoder.safetensors",
+        ]
+    )
+
+    assert args.h3_text_visual_max_pixels == 1024 * 1024
 
 
 class _FakeQwen3VLConfig:

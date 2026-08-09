@@ -57,6 +57,10 @@ class ImageDatasource(ContentDatasource):
         """
         raise NotImplementedError
 
+    def get_media_paths(self, image_path: str) -> tuple[list[str], list[str]]:
+        """Return target and control paths contributing to one image sample."""
+        raise NotImplementedError
+
 
 class ImageDirectoryDatasource(ImageDatasource):
     def __init__(
@@ -78,6 +82,28 @@ class ImageDirectoryDatasource(ImageDatasource):
         # glob images
         logger.info(f"glob images in {self.image_directory}")
         self.image_paths = glob_images(self.image_directory, caption_extension=self.caption_extension)
+        self.caption_paths = {
+            image_path: os.path.splitext(image_path)[0] + self.caption_extension
+            for image_path in self.image_paths
+            if self.caption_extension
+        }
+        self.caption_alias_paths: set[str] = set()
+        if self.multiple_target and self.caption_extension:
+            all_image_paths = glob_images(self.image_directory)
+            image_paths = set(self.image_paths)
+            for image_path in all_image_paths:
+                image_path_no_ext = os.path.splitext(image_path)[0]
+                suffix = image_path_no_ext.rsplit("_", 1)[-1]
+                if suffix != "0" or image_path in image_paths:
+                    continue
+                base_no_ext = image_path_no_ext[: -(len(suffix) + 1)]
+                caption_path = base_no_ext + self.caption_extension
+                if os.path.exists(caption_path):
+                    self.image_paths.append(image_path)
+                    self.caption_paths[image_path] = caption_path
+                    self.caption_alias_paths.add(image_path)
+                    image_paths.add(image_path)
+            self.image_paths.sort()
         logger.info(f"found {len(self.image_paths)} images")
 
         # check if multiple-target images exist
@@ -94,9 +120,12 @@ class ImageDirectoryDatasource(ImageDatasource):
                 logger.info("checking for multiple-target images")
                 for image_path in sorted_image_paths:
                     image_path_no_ext = os.path.splitext(image_path)[0]
+                    match_prefix = image_path_no_ext
+                    if image_path in self.caption_alias_paths:
+                        match_prefix = os.path.splitext(self.caption_paths[image_path])[0]
 
                     # find matching multiple-target images
-                    potential_paths = [p for p in multiple_target_candidates if p.startswith(image_path_no_ext + "_")]
+                    potential_paths = [p for p in multiple_target_candidates if p.startswith(match_prefix + "_")]
 
                     if potential_paths:
                         # sort by the digits (`_0000`) suffix
@@ -150,13 +179,16 @@ class ImageDirectoryDatasource(ImageDatasource):
             for image_path in image_paths_sorted:
                 image_basename = os.path.basename(image_path)
                 image_basename_no_ext = os.path.splitext(image_basename)[0]
+                control_match_basename = image_basename_no_ext
+                if image_path in self.caption_alias_paths:
+                    control_match_basename = os.path.splitext(os.path.basename(self.caption_paths[image_path]))[0]
 
                 # find matching control images
                 potential_paths = [
                     p
                     for p in all_control_image_paths
-                    if os.path.basename(p).startswith(image_basename_no_ext + ".")
-                    or os.path.basename(p).startswith(image_basename_no_ext + "_")
+                    if os.path.basename(p).startswith(control_match_basename + ".")
+                    or os.path.basename(p).startswith(control_match_basename + "_")
                 ]
 
                 # remove to avoid duplicate matching
@@ -167,7 +199,7 @@ class ImageDirectoryDatasource(ImageDatasource):
                     def sort_key(path):
                         basename = os.path.basename(path)
                         basename_no_ext = os.path.splitext(basename)[0]
-                        if image_basename_no_ext == basename_no_ext:  # prefer the one without suffix
+                        if control_match_basename == basename_no_ext:  # prefer the one without suffix
                             return 0
                         digits_suffix = basename_no_ext.rsplit("_", 1)[-1]
                         if not digits_suffix.isdigit():
@@ -240,9 +272,25 @@ class ImageDirectoryDatasource(ImageDatasource):
 
         return image_path, images, caption, controls
 
+    def get_media_paths(self, image_path: str) -> tuple[list[str], list[str]]:
+        normalized = os.path.normcase(os.path.abspath(image_path))
+        source_path = next(
+            (path for path in self.image_paths if os.path.normcase(os.path.abspath(path)) == normalized),
+            None,
+        )
+        if source_path is None:
+            raise KeyError(f"Image path is not present in the datasource: {image_path}")
+        targets = [source_path, *self.target_paths.get(source_path, [])]
+        controls = self.control_paths.get(source_path, []) if self.has_control else []
+        return targets, list(controls)
+
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
-        caption_path = os.path.splitext(image_path)[0] + self.caption_extension if self.caption_extension else ""
+        caption_path = (
+            self.caption_paths.get(image_path, os.path.splitext(image_path)[0] + self.caption_extension)
+            if self.caption_extension
+            else ""
+        )
         with open(caption_path, "r", encoding="utf-8") as f:
             caption = f.read().strip()
         return image_path, caption
@@ -370,6 +418,26 @@ class ImageJsonlDatasource(ImageDatasource):
                 controls.append(control)
 
         return image_path, images, caption, controls
+
+    def get_media_paths(self, image_path: str) -> tuple[list[str], list[str]]:
+        normalized = os.path.normcase(os.path.abspath(image_path))
+        for data in self.data:
+            primary = data.get("image_path", data.get("image_path_0"))
+            if primary is None or os.path.normcase(os.path.abspath(primary)) != normalized:
+                continue
+            targets = [primary]
+            if self.multiple_target:
+                index = 1
+                while (path := data.get(f"image_path_{index}")) is not None:
+                    targets.append(path)
+                    index += 1
+            controls = []
+            index = 0
+            while (path := data.get(f"control_path_{index}")) is not None:
+                controls.append(path)
+                index += 1
+            return targets, controls
+        raise KeyError(f"Image path is not present in the datasource: {image_path}")
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]

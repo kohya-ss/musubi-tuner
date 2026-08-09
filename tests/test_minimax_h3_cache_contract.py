@@ -2,14 +2,18 @@ import json
 import logging
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 from safetensors.torch import save_file
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+import musubi_tuner.cache_latents as shared_cache_latents
+import musubi_tuner.cache_text_encoder_outputs as shared_text_cache
 from musubi_tuner.minimax_h3.media import (
     H3AudioSource,
     H3MediaInfo,
@@ -24,17 +28,23 @@ from musubi_tuner.minimax_h3.media import (
 from musubi_tuner.minimax_h3_cache_latents import (
     build_latent_tensors,
     cache_metadata_matches,
+    configure_h3_image_item,
+    h3_image_frame_count_for_item,
+    image_condition_set,
     log_audio_presence_summary,
     record_media_paths,
     setup_parser,
+    target_frames_from_image,
 )
 from musubi_tuner.dataset.bucket import BucketBatchManager
+from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
 from musubi_tuner.dataset.cache_io import (
     AUDIO_PRESENT_KEY,
     save_latent_cache_minimax_h3,
     save_text_encoder_output_cache_minimax_h3,
 )
-from musubi_tuner.dataset.image_video_dataset import ItemInfo
+from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo
+from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _image_dataset_info_map, _target_image_paths_for_item
 
 
 @pytest.mark.parametrize(
@@ -63,6 +73,52 @@ def _touch(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     return path.resolve()
+
+
+def test_h3_image_records_match_arbitrary_names_and_bucket_input_sizes(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    samples = {
+        "body pose.final": (64, 96),
+        "wide-input sample": (160, 96),
+    }
+    for stem, size in samples.items():
+        Image.new("RGB", size).save(image_dir / f"{stem}.png")
+        (image_dir / f"{stem}.txt").write_text(f"caption for {stem}", encoding="utf-8")
+        Image.new("RGB", size).save(control_dir / f"{stem}_0.png")
+        Image.new("RGB", size).save(control_dir / f"{stem}_1.png")
+    dataset = ImageDataset(
+        resolution=(128, 128),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        h3_image_frame_count=22,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    records = h3_records_from_datasource(dataset.datasource, "fl2va")
+    batches = list(dataset.retrieve_latent_cache_batches(num_workers=1))
+    items = [item for _bucket, batch in batches for item in batch]
+
+    assert {record.video_path.name for record in records} == {f"{stem}.png" for stem in samples}
+    assert len(items) == 2
+    for item in items:
+        assert Path(item.item_key).stem in samples
+        assert item.h3_image_frame_count == 22
+        assert h3_image_frame_count_for_item(item, None) == 22
+        assert h3_image_frame_count_for_item(item, 5) == 5
+        assert item.control_content is not None
+        assert len(item.control_content) == 2
+        height, width = item.content.shape[:2]
+        assert width % 32 == 0
+        assert height % 32 == 0
+        assert width * height <= 128 * 128
 
 
 def test_ref2va_jsonl_preserves_reference_order_and_canonicalizes_paths(tmp_path: Path):
@@ -364,6 +420,61 @@ def test_h3_cache_keys_round_trip_through_existing_bucket_collator(tmp_path: Pat
     torch.testing.assert_close(batch["mmh3_token_tags"][0], torch.tensor([1, 0, 1], dtype=torch.int64))
 
 
+def test_h3_image_cache_names_are_discovered_by_image_dataset_training(tmp_path: Path):
+    target_dir = tmp_path / "targets"
+    control_dir = tmp_path / "controls"
+    target = _touch(target_dir / "target.png")
+    _touch(control_dir / "target.png")
+    (target_dir / "target.txt").write_text("caption", encoding="utf-8")
+    item = ItemInfo(
+        item_key=str(target),
+        caption="caption",
+        original_size=(64, 64),
+        bucket_size=(64, 64),
+        latent_cache_path=str(tmp_path / "cache" / "target_0064x0064_mmh3.safetensors"),
+    )
+    configure_h3_image_item(item, 5)
+    save_latent_cache_minimax_h3(
+        item,
+        {
+            "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+            "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+            AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
+            "latents_first_1x4x4_float16": torch.zeros(24, 1, 4, 4, dtype=torch.float16),
+            "latents_last_1x4x4_float16": torch.zeros(24, 1, 4, 4, dtype=torch.float16),
+        },
+        {"task": "fl2va", "image_training_mode": "first"},
+    )
+    save_text_encoder_output_cache_minimax_h3(
+        item,
+        {
+            "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+            "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+        },
+        {"task": "fl2va", "image_training_mode": "first"},
+    )
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(target_dir),
+        control_directory=str(control_dir),
+        cache_directory=str(tmp_path / "cache"),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    dataset.prepare_for_training()
+
+    assert dataset.num_train_items == 1
+    batch = dataset.batch_manager[0]
+    assert batch["latents"].shape == (1, 24, 2, 4, 4)
+    assert batch["latents_first"].shape == (1, 24, 1, 4, 4)
+    assert batch["latents_last"].shape == (1, 24, 1, 4, 4)
+
+
 def test_h3_latent_writer_rejects_transposed_audio_layout(tmp_path: Path):
     item = _h3_item(tmp_path)
     tensors = {
@@ -536,6 +647,345 @@ def test_build_fl2va_latents_encodes_the_provided_audio_window(tmp_path: Path):
         "audio_vae_fingerprint",
         "media_fingerprints",
     }
+
+
+def test_h3_image_first_mode_repeats_target_and_reuses_one_control_as_both_conditions(tmp_path: Path):
+    item = ItemInfo(
+        item_key=str(tmp_path / "target.png"),
+        caption="caption",
+        original_size=(64, 64),
+        bucket_size=(64, 64),
+        content=torch.full((64, 64, 3), 128, dtype=torch.uint8).numpy(),
+        latent_cache_path=str(tmp_path / "target_0064x0064_mmh3.safetensors"),
+    )
+    item.control_content = [torch.zeros(64, 64, 3, dtype=torch.uint8).numpy()]
+
+    configure_h3_image_item(item, 5)
+    conditions = image_condition_set(item, "first")
+    target_frames = target_frames_from_image(item, 5)
+
+    assert Path(item.item_key).name == "target_00000-005.png"
+    assert Path(item.latent_cache_path).name == "target_00000-005_0064x0064_mmh3.safetensors"
+    assert Path(item.text_encoder_output_cache_path).name == "target_00000-005_mmh3_te.safetensors"
+    assert item.bucket_size == (64, 64, 5)
+    assert target_frames.shape == (5, 64, 64, 3)
+    torch.testing.assert_close(target_frames[0], target_frames[-1])
+    torch.testing.assert_close(conditions.first, conditions.last)
+
+
+def test_h3_image_multiple_targets_become_target_frame_sequence(tmp_path: Path):
+    item = ItemInfo(
+        item_key=str(tmp_path / "target.png"),
+        caption="caption",
+        original_size=(64, 64),
+        bucket_size=(64, 64),
+        content=[torch.full((64, 64, 3), value, dtype=torch.uint8).numpy() for value in (0, 32, 64, 96, 128)],
+        latent_cache_path=str(tmp_path / "target_0064x0064_mmh3.safetensors"),
+    )
+
+    target_frames = target_frames_from_image(item, 5)
+
+    assert target_frames.shape == (5, 64, 64, 3)
+    assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 32, 64, 96, 128]
+
+
+def test_h3_image_multiple_targets_resample_to_requested_frame_count(tmp_path: Path):
+    item = ItemInfo(
+        item_key=str(tmp_path / "target.png"),
+        caption="caption",
+        original_size=(64, 64),
+        bucket_size=(64, 64),
+        content=[torch.full((64, 64, 3), value, dtype=torch.uint8).numpy() for value in (0, 64, 128)],
+        latent_cache_path=str(tmp_path / "target_0064x0064_mmh3.safetensors"),
+    )
+
+    target_frames = target_frames_from_image(item, 5)
+
+    assert target_frames.shape == (5, 64, 64, 3)
+    assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 0, 64, 128, 128]
+
+
+def test_h3_image_multiple_targets_upsample_five_frames_to_twenty_two(tmp_path: Path):
+    item = ItemInfo(
+        item_key=str(tmp_path / "target.png"),
+        caption="caption",
+        original_size=(64, 64),
+        bucket_size=(64, 64),
+        content=[torch.full((64, 64, 3), value, dtype=torch.uint8).numpy() for value in (0, 32, 64, 96, 128)],
+        latent_cache_path=str(tmp_path / "target_0064x0064_mmh3.safetensors"),
+    )
+
+    target_frames = target_frames_from_image(item, 22)
+
+    assert target_frames.shape == (22, 64, 64, 3)
+    assert [int(target_frames[index, 0, 0, 0]) for index in range(22)] == [
+        0,
+        0,
+        0,
+        32,
+        32,
+        32,
+        32,
+        32,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        96,
+        96,
+        96,
+        96,
+        96,
+        128,
+        128,
+        128,
+    ]
+
+
+def test_h3_image_dataset_multiple_target_records_frame_sequence(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    for index, value in enumerate((0, 32, 64, 96, 128)):
+        name = "pose.png" if index == 0 else f"pose_{index}.png"
+        Image.new("RGB", (64, 64), (value, value, value)).save(image_dir / name)
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(control_dir / "pose.png")
+
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        multiple_target=True,
+        h3_image_frame_count=5,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    batches = list(dataset.retrieve_latent_cache_batches(num_workers=1))
+    item = batches[0][1][0]
+
+    assert isinstance(item.content, list)
+    assert len(item.content) == 5
+    target_frames = target_frames_from_image(item, 5)
+    assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 32, 64, 96, 128]
+
+
+def test_h3_image_dataset_multiple_target_accepts_zero_indexed_base_frame(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    for index, value in enumerate((0, 32, 64, 96, 128)):
+        Image.new("RGB", (64, 64), (value, value, value)).save(image_dir / f"pose_{index}.png")
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(control_dir / "pose.png")
+
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        multiple_target=True,
+        h3_image_frame_count=5,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    batches = list(dataset.retrieve_latent_cache_batches(num_workers=1))
+    item = batches[0][1][0]
+
+    assert Path(item.item_key).name == "pose_0.png"
+    assert item.caption == "caption"
+    assert isinstance(item.content, list)
+    assert len(item.content) == 5
+    assert item.control_content is not None
+    assert len(item.control_content) == 1
+    target_frames = target_frames_from_image(item, 5)
+    assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 32, 64, 96, 128]
+
+
+def test_multiple_target_zero_suffix_with_own_caption_is_not_rebased(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(image_dir / "pose_0.png")
+    Image.new("RGB", (64, 64), (32, 32, 32)).save(image_dir / "pose_0_1.png")
+    Image.new("RGB", (64, 64), (255, 255, 255)).save(image_dir / "pose_1.png")
+    (image_dir / "pose_0.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(control_dir / "pose_0.png")
+
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        multiple_target=True,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    item = list(dataset.retrieve_latent_cache_batches(num_workers=1))[0][1][0]
+
+    assert Path(item.item_key).name == "pose_0.png"
+    assert len(item.content) == 2
+    assert [int(frame[0, 0, 0]) for frame in item.content] == [0, 32]
+
+
+def test_jsonl_image_mode_maps_all_targets_and_controls(tmp_path: Path):
+    target_0 = tmp_path / "target_0.png"
+    target_1 = tmp_path / "target_1.png"
+    control = tmp_path / "control.png"
+    for path in (target_0, target_1, control):
+        Image.new("RGB", (64, 64)).save(path)
+    jsonl = tmp_path / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "image_path_0": str(target_0),
+                "image_path_1": str(target_1),
+                "control_path_0": str(control),
+                "caption": "caption",
+            }
+        ],
+    )
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=None,
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_jsonl_file=str(jsonl),
+        multiple_target=True,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    image_info = _image_dataset_info_map([dataset])
+    targets = _target_image_paths_for_item(target_0.resolve(), dataset)
+    source_targets, source_controls = dataset.datasource.get_media_paths(str(target_0))
+
+    assert image_info[target_0.resolve()][0] == [control.resolve()]
+    assert targets == [target_0.resolve(), target_1.resolve()]
+    assert [Path(path).resolve() for path in source_targets] == targets
+    assert [Path(path).resolve() for path in source_controls] == [control.resolve()]
+
+
+def test_cache_cleanup_tracks_paths_after_encoder_renames_items(tmp_path: Path):
+    old_cache = tmp_path / "sample_0064x0064_minimax_h3.safetensors"
+    new_cache = tmp_path / "sample_00000-005_0064x0064_minimax_h3.safetensors"
+    old_cache.touch()
+    item = ItemInfo(
+        str(tmp_path / "sample.png"),
+        "caption",
+        (64, 64),
+        (64, 64),
+        content=[torch.zeros(64, 64, 3)],
+        latent_cache_path=str(old_cache),
+    )
+
+    class _Dataset:
+        def retrieve_latent_cache_batches(self, _num_workers):
+            yield (64, 64), [item]
+
+        def get_all_latent_cache_files(self):
+            return [str(old_cache), str(new_cache)]
+
+    def encode(batch):
+        batch[0].latent_cache_path = str(new_cache)
+        new_cache.touch()
+
+    shared_cache_latents.encode_datasets(
+        [_Dataset()],
+        encode,
+        SimpleNamespace(num_workers=1, keep_cache=False, skip_existing=False, batch_size=None),
+    )
+
+    assert new_cache.is_file()
+    assert not old_cache.exists()
+
+
+def test_text_cache_cleanup_tracks_paths_after_encoder_renames_items(tmp_path: Path):
+    old_cache = tmp_path / "sample_minimax_h3_te.safetensors"
+    new_cache = tmp_path / "sample_00000-005_minimax_h3_te.safetensors"
+    item = ItemInfo(
+        str(tmp_path / "sample.png"),
+        "caption",
+        (64, 64),
+        (64, 64),
+    )
+    item.text_encoder_output_cache_path = str(old_cache)
+
+    class _Dataset:
+        def retrieve_text_encoder_output_cache_batches(self, _num_workers):
+            yield [item]
+
+    def encode(batch):
+        batch[0].text_encoder_output_cache_path = str(new_cache)
+
+    active_paths = [set()]
+    shared_text_cache.process_text_encoder_batches(
+        1,
+        False,
+        None,
+        [_Dataset()],
+        [set()],
+        active_paths,
+        encode,
+    )
+
+    assert active_paths == [{str(new_cache)}]
+
+
+def test_build_fl2va_image_mode_uses_control_frames_and_unsupervised_audio(tmp_path: Path):
+    record = H3Record(_touch(tmp_path / "target.png"), "caption", (), 1)
+    video_vae = _FakeH3VideoVAE()
+    audio_vae = _FakeH3AudioVAE()
+    decoder = _FakeH3MediaDecoder()
+    conditions = image_condition_set(
+        SimpleNamespace(
+            control_content=[
+                torch.zeros(64, 64, 3, dtype=torch.uint8).numpy(),
+                torch.full((64, 64, 3), 255, dtype=torch.uint8).numpy(),
+            ]
+        ),
+        "first_last",
+    )
+
+    payload = build_latent_tensors(
+        record=record,
+        task="fl2va",
+        target_frames=torch.full((5, 64, 64, 3), 128, dtype=torch.uint8),
+        target_waveform=torch.zeros(2, 6400),
+        audio_present=False,
+        crop_start_frame=0,
+        video_vae=video_vae,
+        audio_vae=audio_vae,
+        cache_seed=0,
+        media_decoder=decoder,
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={record.video_path: "target-image"},
+        allow_experimental_duration=True,
+        image_conditions=conditions,
+    )
+
+    assert payload.tensors[AUDIO_PRESENT_KEY].item() == 0.0
+    assert decoder.audio_calls == []
+    torch.testing.assert_close(video_vae.calls[1], torch.full_like(video_vae.calls[1], -1.0))
+    torch.testing.assert_close(video_vae.calls[2], torch.full_like(video_vae.calls[2], 1.0))
 
 
 def test_missing_target_audio_encodes_silence_with_presence_zero(tmp_path: Path):
