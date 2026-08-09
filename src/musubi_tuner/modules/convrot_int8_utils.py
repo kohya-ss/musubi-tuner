@@ -15,7 +15,6 @@ LoRA targets modules by class name "Linear", block swap streams ``module.weight.
 of Linear-named modules, and compile exclusion also keys on the class name.
 """
 
-import json
 import math
 import os
 from collections.abc import Iterable
@@ -30,6 +29,11 @@ import logging
 
 from tqdm import tqdm
 
+from musubi_tuner.modules.comfy_quant_utils import (
+    COMFY_QUANT_SUFFIX,
+    COMFY_WEIGHT_SCALE_SUFFIX,
+    decode_comfy_quant_spec,
+)
 from musubi_tuner.modules.convrot_int8_kernels import (
     HAS_TRITON,
     _build_hadamard,
@@ -45,10 +49,8 @@ logging.basicConfig(level=logging.INFO)
 
 CONVROT_GROUPSIZE = 256
 
-# ComfyUI pre-quantized checkpoint key suffixes: `.weight` (int8, rotated basis) +
+# ComfyUI pre-quantized ConvRot layers: `.weight` (int8, rotated basis) +
 # `.weight_scale` (fp32 [N, 1]) + `.comfy_quant` (uint8 bytes of a JSON spec).
-COMFY_QUANT_SUFFIX = ".comfy_quant"
-COMFY_WEIGHT_SCALE_SUFFIX = ".weight_scale"
 COMFY_QUANT_FORMAT_INT8 = "int8_tensorwise"
 
 
@@ -99,15 +101,7 @@ def parse_comfy_quant_spec(key: str, tensor: torch.Tensor) -> dict:
     Only ConvRot INT8 (``int8_tensorwise`` + ``convrot``) is supported; other formats
     (e.g. nvfp4) raise with a clear message.
     """
-    if tensor.dtype != torch.uint8 or tensor.ndim != 1:
-        raise ValueError(f"Invalid comfy_quant tensor for {key}: expected 1D uint8, got {tensor.dtype} ndim={tensor.ndim}")
-    try:
-        spec = json.loads(bytes(tensor.tolist()).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise ValueError(f"Invalid comfy_quant JSON for {key}: {e}") from e
-    if not isinstance(spec, dict):
-        raise ValueError(f"Invalid comfy_quant spec for {key}: expected a JSON object, got {type(spec).__name__}")
-
+    spec = decode_comfy_quant_spec(key, tensor)
     quant_format = spec.get("format")
     if quant_format != COMFY_QUANT_FORMAT_INT8 or not spec.get("convrot"):
         raise ValueError(

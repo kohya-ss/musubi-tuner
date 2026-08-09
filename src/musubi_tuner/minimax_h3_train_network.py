@@ -447,6 +447,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             device=device,
             dtype=torch.bfloat16,
             disable_mmap=getattr(args, "disable_numpy_memmap", False),
+            nvfp4_scaled_mm=getattr(args, "nvfp4_scaled_mm", False),
         )
         text_encoder.eval().requires_grad_(False)
         try:
@@ -1020,6 +1021,11 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         type=str,
         default=None,
         help="MiniMax-H3 Qwen3-VL checkpoint used to encode training sample prompts",
+    )
+    parser.add_argument(
+        "--nvfp4_scaled_mm",
+        action="store_true",
+        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
     )
     parser.add_argument(
         "--processor",

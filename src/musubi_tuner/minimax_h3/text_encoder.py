@@ -261,6 +261,7 @@ def load_h3_text_encoder(
     device: str | torch.device,
     dtype: torch.dtype = torch.bfloat16,
     disable_mmap: bool = False,
+    nvfp4_scaled_mm: bool = False,
 ):
     from transformers import Qwen3VLConfig, Qwen3VLModel
 
@@ -272,11 +273,14 @@ def load_h3_text_encoder(
 
     from accelerate import init_empty_weights
 
-    from musubi_tuner.modules.convrot_int8_utils import (
-        ConvRotInt8Quantizer,
-        apply_convrot_int8_monkey_patch,
-        has_comfy_quant_tensors,
+    from musubi_tuner.modules.comfy_quant_utils import (
+        FORMAT_CONVROT_INT8,
+        FORMAT_INT8_TENSORWISE,
+        FORMAT_NVFP4,
+        detect_comfy_quant_formats,
     )
+    from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
+    from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer, apply_nvfp4_monkey_patch
     from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
     from musubi_tuner.utils.safetensors_utils import load_safetensors
 
@@ -284,13 +288,8 @@ def load_h3_text_encoder(
         model = Qwen3VLModel(config)
         del model.language_model.norm
 
-    # loading straight to the target device avoids a resident full-model CPU copy
-    device = torch.device(device)
-    files = resolve_safetensors_files(checkpoint_path)
-    if has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap):
-        # pre-quantized ConvRot INT8 artifact: the same streaming loader as the transformer;
-        # an empty target list disables dynamic quantization, the file dictates the layers
-        quantizer = ConvRotInt8Quantizer(target_layer_keys=[])
+    def _load_with_quantizer(quantizer):
+        # the same streaming loader as the transformer; the file dictates the quantized layers
         sd = load_safetensors_with_lora_and_fp8(
             model_files=[str(checkpoint_path)],  # unexpanded: the loader expands split shards itself
             lora_weights_list=None,
@@ -301,20 +300,48 @@ def load_h3_text_encoder(
             disable_numpy_memmap=disable_mmap,
             quantizer=quantizer,
         )
-        sd = {normalize_h3_text_encoder_key(key): value for key, value in sd.items()}
+        return {normalize_h3_text_encoder_key(key): value for key, value in sd.items()}
+
+    # loading straight to the target device avoids a resident full-model CPU copy
+    device = torch.device(device)
+    files = resolve_safetensors_files(checkpoint_path)
+    formats = detect_comfy_quant_formats(files, disable_numpy_memmap=disable_mmap)
+    if formats == {FORMAT_CONVROT_INT8}:
+        # pre-quantized ConvRot INT8 artifact; an empty target list disables dynamic quantization
+        quantizer = ConvRotInt8Quantizer(target_layer_keys=[])
+        sd = _load_with_quantizer(quantizer)
         groupsize_map = {normalize_h3_text_encoder_key(key): value for key, value in quantizer.module_groupsizes.items()}
         apply_convrot_int8_monkey_patch(model, sd, groupsize_map=groupsize_map)
         # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps incoming
         # tensors with the meta params' requires_grad; the text encoder is frozen anyway
         model.requires_grad_(False)
+    elif FORMAT_NVFP4 in formats and formats <= {FORMAT_NVFP4, FORMAT_INT8_TENSORWISE}:
+        # pre-quantized ComfyUI NVFP4 (+AWQ) artifact with an INT8 per-row embedding
+        quantizer = NvFp4Quantizer()
+        sd = _load_with_quantizer(quantizer)
+        nvfp4_module_shapes = {normalize_h3_text_encoder_key(key): value for key, value in quantizer.nvfp4_module_shapes.items()}
+        int8_embedding_modules = [normalize_h3_text_encoder_key(key) for key in quantizer.int8_embedding_modules]
+        apply_nvfp4_monkey_patch(
+            model, sd, nvfp4_module_shapes, int8_embedding_modules, use_scaled_mm=nvfp4_scaled_mm, embedding_dtype=dtype
+        )
+        model.requires_grad_(False)
+    elif formats:
+        raise ValueError(
+            f"Unsupported ComfyUI quantization format combination in text encoder checkpoint: {sorted(formats)}."
+            " Supported: ConvRot INT8, or NVFP4 with an INT8 embedding."
+            f" / テキストエンコーダの量子化形式の組み合わせ {sorted(formats)} はサポートされていません。"
+            "ConvRot INT8、または NVFP4(+INT8 embedding) のみ対応しています。"
+        )
     else:
         sd = {}
         for file in files:
             shard = load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
             sd.update({normalize_h3_text_encoder_key(key): value for key, value in shard.items()})
 
+    # quantization scale tensors keep their own dtypes (fp32 row scales, fp8 block scales)
+    _KEEP_DTYPE_SUFFIXES = (".scale_weight", ".nvfp4_scale", ".nvfp4_block_scale")
     for key in sd.keys():
-        if sd[key].is_floating_point() and not key.endswith(".scale_weight"):
+        if sd[key].is_floating_point() and not key.endswith(_KEEP_DTYPE_SUFFIXES):
             sd[key] = sd[key].to(dtype)
     model.load_state_dict(sd, strict=True, assign=True)
     model.to(device)
