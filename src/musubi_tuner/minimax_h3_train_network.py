@@ -448,6 +448,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             dtype=torch.bfloat16,
             disable_mmap=getattr(args, "disable_numpy_memmap", False),
             nvfp4_scaled_mm=getattr(args, "nvfp4_scaled_mm", False),
+            blocks_to_swap=getattr(args, "text_encoder_blocks_to_swap", 0),
+            attn_mode=getattr(args, "text_encoder_attn_mode", None),
         )
         text_encoder.eval().requires_grad_(False)
         try:
@@ -1026,6 +1028,20 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--nvfp4_scaled_mm",
         action="store_true",
         help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
+    )
+    parser.add_argument(
+        "--text_encoder_blocks_to_swap",
+        type=int,
+        default=0,
+        help="number of the 50 Qwen3-VL decoder layers to stream from CPU while encoding training sample prompts"
+        " (0 = disabled, 50 = minimum VRAM; requires CUDA; unrelated to the transformer's --blocks_to_swap)",
+    )
+    parser.add_argument(
+        "--text_encoder_attn_mode",
+        choices=("sdpa", "flash_attention_2", "eager"),
+        default=None,
+        help="attention implementation for the sample-prompt text encoder (default: transformers default, sdpa)."
+        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
     parser.add_argument(
         "--processor",

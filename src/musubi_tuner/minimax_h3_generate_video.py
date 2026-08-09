@@ -188,6 +188,8 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
         dtype=torch.bfloat16,
         disable_mmap=args.disable_numpy_memmap,
         nvfp4_scaled_mm=args.nvfp4_scaled_mm,
+        blocks_to_swap=args.text_encoder_blocks_to_swap,
+        attn_mode=args.text_encoder_attn_mode,
     )
     hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
     del processor, text_encoder
@@ -304,6 +306,20 @@ def setup_parser() -> argparse.ArgumentParser:
         "--nvfp4_scaled_mm",
         action="store_true",
         help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
+    )
+    parser.add_argument(
+        "--text_encoder_blocks_to_swap",
+        type=int,
+        default=0,
+        help="number of the 50 Qwen3-VL decoder layers to stream from CPU instead of keeping them on the GPU"
+        " (0 = disabled, 50 = minimum VRAM; requires CUDA)",
+    )
+    parser.add_argument(
+        "--text_encoder_attn_mode",
+        choices=("sdpa", "flash_attention_2", "eager"),
+        default=None,
+        help="attention implementation for the text encoder (default: transformers default, sdpa)."
+        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache")
     parser.add_argument("--processor", default=DEFAULT_PROCESSOR_ID, help="Qwen3-VL processor repo or directory")
