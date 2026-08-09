@@ -230,34 +230,44 @@ def _timestep_args(timestep_sampling: str) -> SimpleNamespace:
     )
 
 
-def test_explicit_sampler_candidate_zero_reconstructs_from_returned_timestep():
-    sampler_names, get_noise_coefficients, trainer_type = _noise_coefficient_helpers()
+@pytest.mark.parametrize(
+    "timestep_sampling",
+    sorted(getattr(import_module("musubi_tuner.training.timesteps"), "BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS")),
+)
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        (torch.float32, 1e-5, 1e-6),
+        (torch.float16, 1e-3, 1e-3),
+        (torch.bfloat16, 1e-2, 1e-2),
+    ],
+)
+def test_explicit_sampler_candidate_zero_reconstructs_from_returned_timestep(timestep_sampling, dtype, rtol, atol):
+    _, get_noise_coefficients, trainer_type = _noise_coefficient_helpers()
     torch.manual_seed(9)
     trainer = trainer_type()
-    latents = torch.randn(2, 3, 2, 2, dtype=torch.float32)
+    latents = torch.randn(2, 3, 2, 2, dtype=dtype)
     noise = torch.randn_like(latents)
+    noisy, timesteps = trainer.get_noisy_model_input_and_timesteps(
+        _timestep_args(timestep_sampling),
+        noise,
+        latents,
+        [0.25, 0.75],
+        None,
+        torch.device("cpu"),
+        dtype,
+    )
+    sigma = get_noise_coefficients(
+        timestep_sampling,
+        None,
+        timesteps,
+        torch.device("cpu"),
+        latents.ndim,
+        latents.dtype,
+    )
 
-    for timestep_sampling in sorted(sampler_names):
-        noisy, timesteps = trainer.get_noisy_model_input_and_timesteps(
-            _timestep_args(timestep_sampling),
-            noise,
-            latents,
-            [0.25, 0.75],
-            None,
-            torch.device("cpu"),
-            torch.float32,
-        )
-        sigma = get_noise_coefficients(
-            timestep_sampling,
-            None,
-            timesteps,
-            torch.device("cpu"),
-            latents.ndim,
-            latents.dtype,
-        )
-
-        reconstructed = (1.0 - sigma) * latents + sigma * noise
-        torch.testing.assert_close(reconstructed, noisy, rtol=1e-5, atol=1e-6)
+    reconstructed = (1.0 - sigma) * latents + sigma * noise
+    torch.testing.assert_close(reconstructed, noisy, rtol=rtol, atol=atol, check_dtype=False)
 
 
 def test_scheduler_indexed_coefficients_reuse_fixed_scheduler_timestep():
