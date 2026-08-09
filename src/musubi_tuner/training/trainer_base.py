@@ -527,18 +527,26 @@ class NetworkTrainer:
         a, b = self.timestep_range_pool.pop()
         return random.uniform(a, b)
 
-    def get_noisy_model_input_and_timesteps(
+    def sample_timesteps(
         self,
         args: argparse.Namespace,
-        noise: torch.Tensor,
-        latents: torch.Tensor,
+        batch_size: int,
         timesteps: Optional[List[float]],
-        noise_scheduler: FlowMatchDiscreteScheduler,
+        latents: torch.Tensor,
         device: torch.device,
-        dtype: torch.dtype,
-    ):
-        batch_size = noise.shape[0]
+    ) -> torch.Tensor:
+        """Sample flow-matching timesteps t in [0, 1] (t=1 is pure noise) from the
+        distribution selected by --timestep_sampling, honoring min/max_timestep,
+        --preserve_distribution_shape and timestep bucketing.
 
+        ``timesteps``, if given, supplies pre-drawn uniform samples in [0, 1] (one
+        per batch item) that are transformed deterministically into the target
+        distribution instead of drawing fresh randomness. ``latents`` is only
+        consulted for its spatial shape by the resolution-dependent shift methods.
+
+        Only valid for BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS; weighting-scheme based
+        sampling cannot be expressed as a plain t draw and raises here.
+        """
         if timesteps is not None:
             timesteps = torch.tensor(timesteps, device=device)
 
@@ -716,9 +724,30 @@ class NetworkTrainer:
                     logger.warning(
                         f"Could not sample {batch_size} valid timesteps in {max_loops} loops / {max_loops}ループで{batch_size}個の有効なタイムステップをサンプリングできませんでした"
                     )
-                    available_t = compute_sampling_timesteps(timesteps)
+                    t = compute_sampling_timesteps(timesteps)
                 else:
                     t = torch.stack(available_t, dim=0)  # [batch_size, ]
+
+            return t
+
+        raise ValueError(
+            f"timestep_sampling '{args.timestep_sampling}' draws timesteps via the weighting scheme and cannot be sampled as t in [0, 1]"
+        )
+
+    def get_noisy_model_input_and_timesteps(
+        self,
+        args: argparse.Namespace,
+        noise: torch.Tensor,
+        latents: torch.Tensor,
+        timesteps: Optional[List[float]],
+        noise_scheduler: FlowMatchDiscreteScheduler,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        batch_size = noise.shape[0]
+
+        if args.timestep_sampling in BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+            t = self.sample_timesteps(args, batch_size, timesteps, latents, device)
 
             timesteps = t * 1000.0
             t = t.view(-1, 1, 1, 1, 1) if latents.ndim == 5 else t.view(-1, 1, 1, 1)

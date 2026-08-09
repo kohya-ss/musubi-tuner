@@ -41,6 +41,7 @@ from musubi_tuner.minimax_h3.packing import (
 )
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
+    create_sampling_generator,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
@@ -310,43 +311,18 @@ def _shift_noise_amount(base: torch.Tensor, shift: float) -> torch.Tensor:
     return shift * base / (1.0 + (shift - 1.0) * base)
 
 
-def _sample_base_time(args, batch: dict[str, Any], device: torch.device) -> torch.Tensor:
-    lower = (0.0 if args.min_timestep is None else float(args.min_timestep)) / 1000.0
-    upper = (1000.0 if args.max_timestep is None else float(args.max_timestep)) / 1000.0
-    if not 0.0 <= lower <= upper <= 1.0:
-        raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
-    pool = batch.get("timesteps")
-    if pool is None:
-        base = torch.rand((1,), device=device, dtype=torch.float32)[0]
-    else:
-        pool = torch.as_tensor(pool, device=device, dtype=torch.float32)
-        if pool.numel() != 1:
-            raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
-        base = pool.reshape(())
-    return lower + base * (upper - lower)
+def _augment_conditions(tensors: tuple[torch.Tensor, ...], clean: float) -> tuple[torch.Tensor, ...]:
+    """Blend independent Gaussian noise into condition latents: clean*x + (1-clean)*eps.
 
-
-def _augment_conditions(
-    tensors: tuple[torch.Tensor, ...],
-    clean: float,
-    seeds: torch.Tensor,
-    *,
-    seed_offset: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, ...]:
-    moved = tuple(tensor.to(device) for tensor in tensors)
+    Training draws fresh noise from the global RNG, like the target noise; only the
+    sampling path (minimax_h3.sampling) needs seed-reproducible condition noise.
+    """
     if clean == 1.0:
-        return moved
+        return tensors
     augmented = []
-    for tensor in moved:
-        samples = []
-        for sample, seed in zip(tensor, seeds):
-            generator = torch.Generator(device="cpu").manual_seed(int(seed.item()) + seed_offset)
-            noise = torch.randn(tuple(sample.shape), generator=generator, dtype=torch.float32, device="cpu").to(
-                device=sample.device, dtype=sample.dtype
-            )
-            samples.append(clean * sample + (1.0 - clean) * noise)
-        augmented.append(torch.stack(samples))
+    for tensor in tensors:
+        noise = torch.randn(tuple(tensor.shape), dtype=torch.float32, device=tensor.device).to(tensor.dtype)
+        augmented.append(clean * tensor + (1.0 - clean) * noise)
     return tuple(augmented)
 
 
@@ -419,6 +395,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise ValueError("MiniMax-H3 supports --weighting_scheme none only")
         if float(args.discrete_flow_shift) != 1.0:
             raise ValueError("MiniMax-H3 requires --discrete_flow_shift 1.0; use the two H3 shifts instead")
+        lower = 0.0 if args.min_timestep is None else float(args.min_timestep)
+        upper = 1000.0 if args.max_timestep is None else float(args.max_timestep)
+        if not 0.0 <= lower <= upper <= 1000.0:
+            raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
         for name in ("h3_shift_video", "h3_shift_audio"):
             value = float(getattr(args, name))
             if not 0.01 <= value <= 100.0:
@@ -678,6 +658,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if not has_self_ref_orig_mod:
             transformer.eval()
         try:
+            generator = create_sampling_generator(seed)
             initial_video, initial_audio = initialize_target_latents(
                 video_shape=(
                     1,
@@ -687,7 +668,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     layout.target_video.width,
                 ),
                 audio_shape=(1, 32, 2, layout.target_audio_frames),
-                seed=seed,
+                generator=generator,
                 device=device,
                 video_dtype=torch.float32,
                 audio_dtype=torch.float32,
@@ -695,7 +676,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             visual_conditions, audio_conditions = augment_condition_latents(
                 sample_parameter["h3_visual_conditions"],
                 sample_parameter["h3_audio_conditions"],
-                seed=seed,
+                generator=generator,
                 visual_clean=args.h3_visual_cond_clean,
                 audio_clean=args.h3_audio_cond_clean,
                 device=device,
@@ -926,33 +907,20 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         device = latents.device
         audio_latents = batch["latents_audio"].to(device=device)
         audio_noise = torch.randn_like(audio_latents)
-        base = _sample_base_time(args, batch, device)
+        pool = batch.get("timesteps")
+        if pool is not None and len(pool) != 1:
+            raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
+        base = self.sample_timesteps(args, 1, pool, latents, device)[0]
         sigma_video = _shift_noise_amount(base, args.h3_shift_video)
         sigma_audio = _shift_noise_amount(base, args.h3_shift_audio)
         model_t_video = 1.0 - sigma_video
         model_t_audio = 1.0 - sigma_audio
         noisy_audio = (1.0 - sigma_audio) * audio_latents + sigma_audio * audio_noise
-        needs_condition_noise = (bool(runtime.visual_conditions) and args.h3_visual_cond_clean != 1.0) or (
-            bool(runtime.audio_conditions) and args.h3_audio_cond_clean != 1.0
-        )
-        condition_seeds = (
-            torch.randint(0, 2**63 - 2, (latents.shape[0],), dtype=torch.int64, device="cpu")
-            if needs_condition_noise
-            else torch.empty(0, dtype=torch.int64)
-        )
         visual_conditions = _augment_conditions(
-            runtime.visual_conditions,
-            args.h3_visual_cond_clean,
-            condition_seeds,
-            seed_offset=0,
-            device=device,
+            tuple(tensor.to(device) for tensor in runtime.visual_conditions), args.h3_visual_cond_clean
         )
         audio_conditions = _augment_conditions(
-            runtime.audio_conditions,
-            args.h3_audio_cond_clean,
-            condition_seeds,
-            seed_offset=1,
-            device=device,
+            tuple(tensor.to(device) for tensor in runtime.audio_conditions), args.h3_audio_cond_clean
         )
         return _H3TrainingState(
             runtime=runtime,
