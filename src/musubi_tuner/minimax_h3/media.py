@@ -152,13 +152,13 @@ def _parse_references(
         path = _resolve_existing_path(raw_reference.get("path"), base_directory, f"{field_prefix}.path", line_number)
 
         if reference_type == "image":
-            if raw_reference.get("audio_path") is not None:
+            if "audio_path" in raw_reference:
                 raise ValueError(f"H3 JSONL line {line_number}: {field_prefix} image cannot have audio_path")
             references.append(H3Reference(type="image", path=path))
             continue
 
         if reference_type == "audio":
-            if raw_reference.get("audio_path") is not None:
+            if "audio_path" in raw_reference:
                 raise ValueError(f"H3 JSONL line {line_number}: {field_prefix} audio uses path, not audio_path")
             info = _probe_required_audio(path, probe, f"{field_prefix} audio", line_number)
             references.append(
@@ -180,15 +180,18 @@ def _parse_references(
         if duration is None or duration < 2.0 or duration > 15.0:
             raise ValueError(f"H3 JSONL line {line_number}: {field_prefix} video must be between 2 and 15 seconds; got {duration}")
 
+        # an explicit "audio_path": null makes the reference visual-only (e.g. a motion
+        # reference), suppressing the video's embedded audio track
         audio = None
-        if raw_reference.get("audio_path") is not None:
+        if "audio_path" not in raw_reference:
+            if video_info.has_audio:
+                audio = H3AudioSource(path=path, embedded=True)
+        elif raw_reference["audio_path"] is not None:
             audio_path = _resolve_existing_path(
                 raw_reference["audio_path"], base_directory, f"{field_prefix}.audio_path", line_number
             )
             _probe_required_audio(audio_path, probe, f"Explicit {field_prefix} audio", line_number)
             audio = H3AudioSource(path=audio_path, embedded=False)
-        elif video_info.has_audio:
-            audio = H3AudioSource(path=path, embedded=True)
         if audio is not None:
             audio_bearing_count += 1
         references.append(H3Reference(type="video", path=path, audio=audio, duration_seconds=duration))

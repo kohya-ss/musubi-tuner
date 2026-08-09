@@ -91,6 +91,8 @@ Each JSONL line contains the target plus its ordered references. Relative paths 
 {"video_path":"targets/clip.mp4","audio_path":"targets/clip.wav","caption":"A singer performs under stage lights.","references":[{"type":"image","path":"refs/style.png"},{"type":"video","path":"refs/motion.mp4","audio_path":"refs/motion.wav"},{"type":"audio","path":"refs/voice.wav"}]}
 ```
 
+Audio for a `video` reference resolves in this order: an explicit `audio_path` file, then the video's embedded audio track. Writing `"audio_path": null` disables audio for that reference: the video conditions visuals only (for example a motion or composition reference) even when the file contains an audio track, and it does not count as audio-bearing. A reference video without any audio track is likewise a visual-only reference; the official prompt guide treats reference-video audio as an explicitly enabled track, so silent reference videos are a normal input. `audio_path` is valid only on `video` references.
+
 Limits per Ref2VA record:
 
 - At most 12 references total.
