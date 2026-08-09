@@ -122,7 +122,17 @@ def _cache_dtype(name: str) -> torch.dtype:
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = cache_text_encoder_outputs.setup_parser_common()
-    parser.add_argument("--text_encoder", type=str, required=True, help="released MiniMax-H3 Qwen3-VL BF16 safetensors")
+    parser.add_argument(
+        "--text_encoder",
+        type=str,
+        required=True,
+        help="MiniMax-H3 Qwen3-VL safetensors (BF16, ConvRot INT8 or NVFP4, auto-detected)",
+    )
+    parser.add_argument(
+        "--nvfp4_scaled_mm",
+        action="store_true",
+        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
+    )
     parser.add_argument(
         "--processor",
         type=str,
@@ -173,6 +183,7 @@ def main() -> None:
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_mmap,
+        nvfp4_scaled_mm=args.nvfp4_scaled_mm,
     )
 
     decoded_reference_cache = {}

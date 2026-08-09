@@ -187,6 +187,7 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_numpy_memmap,
+        nvfp4_scaled_mm=args.nvfp4_scaled_mm,
     )
     hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
     del processor, text_encoder
@@ -297,7 +298,12 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video_vae", required=True, help="MiniMax-H3 video VAE safetensors path or directory")
     parser.add_argument("--audio_vae", required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
     parser.add_argument(
-        "--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path (BF16 or ConvRot INT8, auto-detected)"
+        "--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path (BF16, ConvRot INT8 or NVFP4, auto-detected)"
+    )
+    parser.add_argument(
+        "--nvfp4_scaled_mm",
+        action="store_true",
+        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
     )
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache")
     parser.add_argument("--processor", default=DEFAULT_PROCESSOR_ID, help="Qwen3-VL processor repo or directory")
