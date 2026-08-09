@@ -944,6 +944,9 @@ class MiniMaxH3Model(nn.Module):
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, index)
 
+        if hidden_states.device != execution_device:
+            hidden_states = hidden_states.to(execution_device)
+
         video_rows, audio_rows = self.final_layer(
             hidden_states,
             timestep_embeddings,
