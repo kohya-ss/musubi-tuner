@@ -9,8 +9,8 @@ This integration addresses [musubi-tuner issue
 references are the [Forward Explorative Modeling paper
 v1](https://arxiv.org/abs/2607.27372v1), the [project
 page](https://explorative-modeling.github.io/), and the Apache-2.0 [official
-implementation](https://github.com/alexiglad/XM) at commit
-`9d06ced61e2d2775a34782eb5830584ae4ef6094`.
+implementation at pinned commit
+`9d06ced61e2d2775a34782eb5830584ae4ef6094`](https://github.com/alexiglad/XM/commit/9d06ced61e2d2775a34782eb5830584ae4ef6094).
 
 ### Enabling The Modes
 
@@ -112,9 +112,23 @@ the shared `NetworkTrainer` loop and are unchanged.
 When enabled, standard XM logs `xm/candidate_loss_mean` and
 `xm/selection_gain`; H3 logs the separately named
 `h3_video_best_of_k/candidate_loss_mean` and
-`h3_video_best_of_k/selection_gain`. H3 metrics describe video-only candidate
-selection, not the final video-plus-weighted-audio objective. `K = 1` follows
-ordinary dispatch and emits none of these exploration metrics.
+`h3_video_best_of_k/selection_gain`. For `xm/`, the selection score is the
+architecture's actual weighted per-sample training loss. For the H3 prefix, it
+is the video-only per-sample selection loss.
+
+For either prefix, `candidate_loss_mean` is the mean selection score over every
+candidate and every sample. `selection_gain` is the mean candidate-zero
+selection score minus the mean selected-winner selection score. It is not the
+candidate mean minus a winner mean. Neither exploration metric is a cross-K
+quality metric. `K = 1` follows ordinary dispatch and emits none of these
+exploration metrics.
+
+For an H3 final update, `loss/current` is the final composite scalar. The
+winner's `loss/video` and `loss/audio` are unweighted component means;
+`audio_loss_weight` is applied when composing `loss/current` (through the
+effective per-sample audio weight, including audio-supervision gating). Thus the
+H3 exploration metrics describe video-only candidate selection, not the final
+video-plus-weighted-audio objective.
 
 Forward XM and H3 video best-of-K raise before backward when any candidate
 selection loss is NaN or infinite. They do not silently discard that candidate.
@@ -152,8 +166,8 @@ compatibility claim.
 #1019](https://github.com/kohya-ss/musubi-tuner/issues/1019) に対応します。動作上の
 参照元は [Forward Explorative Modeling 論文
 v1](https://arxiv.org/abs/2607.27372v1)、[プロジェクトページ](https://explorative-modeling.github.io/)、
-および commit `9d06ced61e2d2775a34782eb5830584ae4ef6094` の Apache-2.0
-[公式実装](https://github.com/alexiglad/XM) です。
+および Apache-2.0 の [固定済み commit
+`9d06ced61e2d2775a34782eb5830584ae4ef6094` にある公式実装](https://github.com/alexiglad/XM/commit/9d06ced61e2d2775a34782eb5830584ae4ef6094) です。
 
 ### 有効化
 
@@ -247,9 +261,23 @@ tradeoff を意図する場合だけ `--h3_video_best_of_k` を使ってくだ�
 
 有効時、標準 XM は `xm/candidate_loss_mean` と `xm/selection_gain` を記録します。
 H3 は別名の `h3_video_best_of_k/candidate_loss_mean` と
-`h3_video_best_of_k/selection_gain` を記録します。H3 のメトリクスは動画のみの候補
-選択を示し、最終の video + weighted audio objective を示すものではありません。
-`K = 1` は通常 dispatch を使うため、これらの探索メトリクスは記録しません。
+`h3_video_best_of_k/selection_gain` を記録します。`xm/` の選択 score は、各
+アーキテクチャの実際の重み付き per-sample 学習 loss です。H3 prefix の選択 score は
+動画のみの per-sample selection loss です。
+
+どちらの prefix でも `candidate_loss_mean` はすべての候補とすべての sample にわたる
+selection score の平均です。`selection_gain` は candidate-zero の selection score の
+平均から、選択された winner の selection score の平均を引いた値です。candidate mean
+から winner mean を引いたものではありません。どちらの探索メトリクスも cross-K の
+quality metric ではありません。`K = 1` は通常 dispatch を使うため、これらの探索
+メトリクスは記録しません。
+
+H3 の最終 update では、`loss/current` は最終 composite scalar です。winner の
+`loss/video` と `loss/audio` は重みなしの component mean であり、
+`audio_loss_weight` は `loss/current` を構成するときに適用されます（audio supervision
+の gating を含む effective per-sample audio weight を通じて）。したがって H3 の探索
+メトリクスは動画のみの候補選択を示し、最終の video + weighted audio objective を
+示すものではありません。
 
 Forward XM と H3 video best-of-K は、候補選択 loss に NaN または infinity が一つでも
 あれば backward 前に例外を送出します。その候補を黙って捨てることはしません。
@@ -270,7 +298,7 @@ loss scaling 設定によって backward 中に非有限 gradient を検出し�
 ### 検証環境
 
 R1 は Python 3.10.11、PyTorch `2.13.0+cu130`、CUDA 13.0、compute capability 8.9 の
-NVIDIA GeForce RTX 4090 で検証します。これは現在の検証 runtime のみであり、`cu124`
+NVIDIA GeForce RTX 4090 で検証済みです。これは現在の検証 runtime のみであり、`cu124`
 はこの機能の test matrix に含まれません。既存の public PyTorch API だけを使い
 version gate は追加しませんが、その他の runtime はこの test matrix の対象外です。
 stable API により別の環境で動作する可能性はありますが、互換性の主張ではありません。
