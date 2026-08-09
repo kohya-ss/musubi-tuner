@@ -986,8 +986,7 @@ class _ToyWanTrainer(WanNetworkTrainer):
         self.num_timestep_buckets = 1
         self.scale = torch.nn.Parameter(torch.tensor(0.0))
         self.noising_calls = 0
-        self.routes = []
-        self.forward_timesteps = []
+        self.resident_model_is_high_noise = False
 
     def get_bucketed_timestep(self):
         return 0.75
@@ -996,8 +995,25 @@ class _ToyWanTrainer(WanNetworkTrainer):
         self.noising_calls += 1
         return super().get_noisy_model_input_and_timesteps(*args, **kwargs)
 
-    def call_dit(
-        self,
+
+def test_standard_xm_freezes_wan_route_and_uses_one_resident_transition(monkeypatch):
+    trainer = _ToyWanTrainer()
+    assert trainer.call_dit.__func__ is WanNetworkTrainer.call_dit
+    trainer._best_of_k_count = 2
+    trainer._best_of_k_enabled = True
+    swap_requests = []
+    transitions = []
+    forward_records = []
+
+    def fake_swap_high_low_weights(args, accelerator, model):
+        del args, accelerator, model
+        requested = bool(trainer.next_model_is_high_noise)
+        swap_requests.append(requested)
+        if trainer.resident_model_is_high_noise != requested:
+            transitions.append((trainer.resident_model_is_high_noise, requested))
+            trainer.resident_model_is_high_noise = requested
+
+    def fake_call_dit(
         args,
         accelerator,
         transformer,
@@ -1010,18 +1026,20 @@ class _ToyWanTrainer(WanNetworkTrainer):
         **kwargs,
     ):
         del args, accelerator, transformer, batch, kwargs
-        self.routes.append(bool(self.next_model_is_high_noise))
-        self.forward_timesteps.append(timesteps.detach().clone())
+        forward_records.append(
+            {
+                "resident_high_noise": trainer.resident_model_is_high_noise,
+                "timestep": timesteps.detach().clone(),
+                "grad_enabled": torch.is_grad_enabled(),
+            }
+        )
         return DiTOutput(
-            pred=self.scale.to(network_dtype) * noisy_model_input.to(network_dtype),
+            pred=trainer.scale.to(network_dtype) * noisy_model_input.to(network_dtype),
             target=(latents - noise).to(network_dtype),
         )
 
-
-def test_standard_xm_freezes_wan_high_low_route_and_timesteps(monkeypatch):
-    trainer = _ToyWanTrainer()
-    trainer._best_of_k_count = 2
-    trainer._best_of_k_enabled = True
+    monkeypatch.setattr(trainer, "swap_high_low_weights", fake_swap_high_low_weights)
+    monkeypatch.setattr(trainer, "_call_dit", fake_call_dit)
     latents = torch.zeros(2, 1, 1, 1)
     noise = torch.tensor([1.0, 4.0]).reshape(2, 1, 1, 1)
     later = torch.tensor([5.0, 2.0]).reshape(2, 1, 1, 1)
@@ -1030,7 +1048,7 @@ def test_standard_xm_freezes_wan_high_low_route_and_timesteps(monkeypatch):
         "draw_candidate_noise",
         lambda reference, generator: later,
     )
-    trainer.process_batch_best_of_k(
+    loss, _ = trainer.process_batch_best_of_k(
         _xm_args(),
         _ToyAccelerator(),
         None,
@@ -1046,8 +1064,17 @@ def test_standard_xm_freezes_wan_high_low_route_and_timesteps(monkeypatch):
     )
 
     assert trainer.noising_calls == 1
-    assert trainer.routes == [True, True, True]
-    assert all(torch.equal(value, trainer.forward_timesteps[0]) for value in trainer.forward_timesteps[1:])
+    assert swap_requests == [True, True, True]
+    assert transitions == [(False, True)]
+    assert trainer.resident_model_is_high_noise is True
+    assert [record["resident_high_noise"] for record in forward_records] == [True, True, True]
+    assert [record["grad_enabled"] for record in forward_records] == [False, False, True]
+    assert all(torch.equal(record["timestep"], forward_records[0]["timestep"]) for record in forward_records[1:])
+
+    loss.backward()
+    assert trainer.scale.grad is not None
+    assert torch.isfinite(trainer.scale.grad)
+    assert trainer.scale.grad.abs().item() > 0
 
 
 def test_standard_xm_samples_distribution_preserving_timestep_once(monkeypatch):
@@ -1107,14 +1134,44 @@ def test_weighted_per_sample_selection_is_not_a_whole_candidate_reduction(monkey
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-def test_standard_xm_cuda_autocast_recomputes_finite_winner_gradients(monkeypatch):
-    trainer, _, loss, _ = _run_toy_xm(
+def test_standard_xm_cuda_autocast_recomputes_cached_weight_with_gradients(monkeypatch):
+    class _AutocastLinearTransformer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(1, 1, bias=False, device="cuda", dtype=torch.float32)
+            with torch.no_grad():
+                self.linear.weight.fill_(1.0)
+
+        def forward(self, value):
+            return self.linear(value)
+
+    class _AutocastToyTrainer(_ToyXMTrainer):
+        def __init__(self, device="cpu"):
+            super().__init__(device)
+            with torch.no_grad():
+                self.scale.fill_(1.0)
+
+    real_clear_autocast_cache = torch.clear_autocast_cache
+    clear_callers = []
+
+    def record_clear_autocast_cache():
+        caller = inspect.currentframe().f_back
+        clear_callers.append(Path(caller.f_code.co_filename).name)
+        return real_clear_autocast_cache()
+
+    monkeypatch.setattr(torch, "clear_autocast_cache", record_clear_autocast_cache)
+    trainer, transformer, loss, _ = _run_toy_xm(
         monkeypatch,
         device="cuda",
         autocast_dtype=torch.float16,
+        transformer_factory=_AutocastLinearTransformer,
+        trainer_factory=_AutocastToyTrainer,
     )
     loss.backward()
 
-    assert trainer.scale.grad is not None
-    assert torch.isfinite(trainer.scale.grad).all()
-    assert trainer.scale.grad.abs().item() > 0
+    weight_grad = transformer.linear.weight.grad
+    assert weight_grad is not None
+    assert torch.isfinite(weight_grad).all()
+    assert weight_grad.abs().item() > 0
+    assert clear_callers == ["autocast_mode.py"] * 3
+    assert "clear_autocast_cache" not in inspect.getsource(NetworkTrainer.process_batch_best_of_k)
