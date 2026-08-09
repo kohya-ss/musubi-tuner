@@ -55,8 +55,19 @@ def test_candidate_generator_owns_draws_after_one_global_seed_draw():
     create_candidate_generator, draw_candidate_noise, _ = _explorative_helpers()
     torch.manual_seed(1234)
     reference = torch.empty(2, 3)
+    torch.randint(
+        0,
+        torch.iinfo(torch.int64).max,
+        (),
+        device=reference.device,
+        dtype=torch.int64,
+    )
+    control_state_after_one_seed_draw = torch.random.get_rng_state().clone()
+
+    torch.manual_seed(1234)
     generator = create_candidate_generator(reference)
     global_state_after_creation = torch.random.get_rng_state().clone()
+    assert torch.equal(global_state_after_creation, control_state_after_one_seed_draw)
 
     first = draw_candidate_noise(reference, generator)
     second = draw_candidate_noise(reference, generator)
@@ -71,6 +82,43 @@ def test_candidate_generator_owns_draws_after_one_global_seed_draw():
     replay = create_candidate_generator(reference)
     torch.testing.assert_close(draw_candidate_noise(reference, replay), first)
     torch.testing.assert_close(draw_candidate_noise(reference, replay), second)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for CUDA generator coverage")
+def test_cuda_candidate_generator_owns_draws_after_one_global_seed_draw():
+    create_candidate_generator, draw_candidate_noise, _ = _explorative_helpers()
+    device = torch.device("cuda:0")
+    previous_device = torch.cuda.current_device()
+    previous_rng_state = torch.cuda.get_rng_state(device)
+    try:
+        torch.cuda.set_device(device)
+        reference = torch.empty(2, 3, device=device, dtype=torch.float16)
+        torch.cuda.manual_seed(4321)
+        torch.randint(
+            0,
+            torch.iinfo(torch.int64).max,
+            (),
+            device=device,
+            dtype=torch.int64,
+        )
+        control_state_after_one_seed_draw = torch.cuda.get_rng_state(device).clone()
+
+        torch.cuda.manual_seed(4321)
+        generator = create_candidate_generator(reference)
+        global_state_after_creation = torch.cuda.get_rng_state(device).clone()
+        assert torch.equal(global_state_after_creation, control_state_after_one_seed_draw)
+
+        first = draw_candidate_noise(reference, generator)
+        second = draw_candidate_noise(reference, generator)
+
+        assert torch.equal(torch.cuda.get_rng_state(device), global_state_after_creation)
+        assert first.shape == reference.shape
+        assert first.dtype == reference.dtype
+        assert first.device == reference.device
+        assert not torch.equal(first, second)
+    finally:
+        torch.cuda.set_rng_state(previous_rng_state, device)
+        torch.cuda.set_device(previous_device)
 
 
 @pytest.mark.parametrize("bad_losses", [torch.tensor([1.0, float("nan")]), torch.tensor([1.0, float("inf")])])
@@ -127,3 +175,30 @@ def test_update_winners_rejects_noise_shape_or_dtype_mismatch():
         update_winners(*common, torch.zeros(2, 2), 0)
     with pytest.raises(ValueError, match="share dtype and device"):
         update_winners(*common, torch.zeros(2, 1, dtype=torch.float64), 0)
+
+
+def test_update_winners_rejects_scalar_noise_with_a_value_error():
+    _, _, update_winners = _explorative_helpers()
+    with pytest.raises(ValueError, match="shapes must match"):
+        update_winners(
+            torch.full((1,), torch.inf),
+            torch.tensor(0.0),
+            torch.full((1,), -1, dtype=torch.long),
+            torch.tensor([1.0]),
+            torch.tensor(0.0),
+            0,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for cross-device validation coverage")
+def test_update_winners_rejects_noise_on_a_different_device_from_losses():
+    _, _, update_winners = _explorative_helpers()
+    with pytest.raises(ValueError, match="must share the loss device"):
+        update_winners(
+            torch.full((2,), torch.inf),
+            torch.empty(2, 1, device="cuda"),
+            torch.full((2,), -1, dtype=torch.long),
+            torch.tensor([1.0, 2.0]),
+            torch.zeros(2, 1, device="cuda"),
+            0,
+        )

@@ -40,8 +40,12 @@ def update_winners(
         raise ValueError("best-of-K candidate and best losses must share dtype and device")
     if winner_indices.shape != (batch_size,) or winner_indices.dtype != torch.long or winner_indices.device != best_losses.device:
         raise ValueError("best-of-K winner indices must be int64 on the loss device with shape [B]")
+    if candidate_noise.ndim == 0 or winner_noise.ndim == 0:
+        raise ValueError("best-of-K candidate and winner noise shapes must match [B, ...]")
     if candidate_noise.shape != winner_noise.shape or candidate_noise.shape[0] != batch_size:
         raise ValueError("best-of-K candidate and winner noise shapes must match [B, ...]")
+    if candidate_noise.device != best_losses.device or winner_noise.device != best_losses.device:
+        raise ValueError("best-of-K candidate and winner noise must share the loss device")
     if candidate_noise.dtype != winner_noise.dtype or candidate_noise.device != winner_noise.device:
         raise ValueError("best-of-K candidate and winner noise must share dtype and device")
     nonfinite = (~torch.isfinite(candidate_losses)).nonzero(as_tuple=False).flatten()
