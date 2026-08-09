@@ -294,22 +294,6 @@ def _shift_noise_amount(base: torch.Tensor, shift: float) -> torch.Tensor:
     return shift * base / (1.0 + (shift - 1.0) * base)
 
 
-def _sample_base_time(args, batch: dict[str, Any], device: torch.device) -> torch.Tensor:
-    lower = (0.0 if args.min_timestep is None else float(args.min_timestep)) / 1000.0
-    upper = (1000.0 if args.max_timestep is None else float(args.max_timestep)) / 1000.0
-    if not 0.0 <= lower <= upper <= 1.0:
-        raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
-    pool = batch.get("timesteps")
-    if pool is None:
-        base = torch.rand((1,), device=device, dtype=torch.float32)[0]
-    else:
-        pool = torch.as_tensor(pool, device=device, dtype=torch.float32)
-        if pool.numel() != 1:
-            raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
-        base = pool.reshape(())
-    return lower + base * (upper - lower)
-
-
 def _augment_conditions(
     tensors: tuple[torch.Tensor, ...],
     clean: float,
@@ -374,6 +358,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise ValueError("MiniMax-H3 supports --weighting_scheme none only")
         if float(args.discrete_flow_shift) != 1.0:
             raise ValueError("MiniMax-H3 requires --discrete_flow_shift 1.0; use the two H3 shifts instead")
+        lower = 0.0 if args.min_timestep is None else float(args.min_timestep)
+        upper = 1000.0 if args.max_timestep is None else float(args.max_timestep)
+        if not 0.0 <= lower <= upper <= 1000.0:
+            raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
         for name in ("h3_shift_video", "h3_shift_audio"):
             value = float(getattr(args, name))
             if not 0.01 <= value <= 100.0:
@@ -892,7 +880,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         device = latents.device
         audio_latents = batch["latents_audio"].to(device=device)
         audio_noise = torch.randn_like(audio_latents)
-        base = _sample_base_time(args, batch, device)
+        pool = batch.get("timesteps")
+        if pool is not None and len(pool) != 1:
+            raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
+        base = self.sample_timesteps(args, 1, pool, latents, device)[0]
         sigma_video = _shift_noise_amount(base, args.h3_shift_video)
         sigma_audio = _shift_noise_amount(base, args.h3_shift_audio)
         model_t_video = 1.0 - sigma_video
