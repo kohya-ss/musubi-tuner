@@ -30,6 +30,7 @@ from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
+    create_sampling_generator,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
@@ -440,6 +441,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         layout.text_length,
         layout.row_count,
     )
+    generator = create_sampling_generator(args.seed)
     initial_video, initial_audio = initialize_target_latents(
         video_shape=(
             1,
@@ -449,7 +451,7 @@ def run_generation(args: argparse.Namespace) -> Path:
             layout.target_video.width,
         ),
         audio_shape=(1, 32, 2, layout.target_audio_frames),
-        seed=args.seed,
+        generator=generator,
         device=device,
         video_dtype=torch.float32,
         audio_dtype=torch.float32,
@@ -457,7 +459,7 @@ def run_generation(args: argparse.Namespace) -> Path:
     visual_conditions, audio_conditions = augment_condition_latents(
         visual_conditions,
         audio_conditions,
-        seed=args.seed,
+        generator=generator,
         visual_clean=args.h3_visual_cond_clean,
         audio_clean=args.h3_audio_cond_clean,
         device=device,
