@@ -77,11 +77,19 @@ def build_shifted_schedule(
     return H3SigmaSchedule(base=base, video=_shift(base, video_shift), audio=_shift(base, audio_shift))
 
 
+def create_sampling_generator(seed: int) -> torch.Generator:
+    """One seed drives one CPU noise stream, consumed in call order:
+    initialize_target_latents (video, then audio), then augment_condition_latents
+    (visual conditions, then audio conditions). Sequential draws from the shared
+    stream keep every tensor's noise independent without per-purpose seed offsets."""
+    return torch.Generator(device="cpu").manual_seed(int(seed))
+
+
 def initialize_target_latents(
     *,
     video_shape: Sequence[int],
     audio_shape: Sequence[int],
-    seed: int,
+    generator: torch.Generator,
     device: torch.device | str,
     video_dtype: torch.dtype = torch.float16,
     audio_dtype: torch.dtype = torch.float32,
@@ -92,7 +100,6 @@ def initialize_target_latents(
         raise ValueError(f"MiniMax-H3 target video noise shape must be [B,24,F,H,W], got {video_shape}")
     if len(audio_shape) != 4 or audio_shape[1:3] != (32, 2) or audio_shape[0] != video_shape[0]:
         raise ValueError(f"MiniMax-H3 target audio noise shape must be [B,32,2,A], got {audio_shape}")
-    generator = torch.Generator(device="cpu").manual_seed(int(seed))
     video = torch.randn(video_shape, generator=generator, dtype=torch.float32, device="cpu").to(device=device, dtype=video_dtype)
     audio = torch.randn(audio_shape, generator=generator, dtype=torch.float32, device="cpu").to(device=device, dtype=audio_dtype)
     return video, audio
@@ -101,7 +108,7 @@ def initialize_target_latents(
 def _augment_condition_group(
     tensors: Sequence[torch.Tensor],
     *,
-    seed: int,
+    generator: torch.Generator,
     clean: float,
     device: torch.device | str,
 ) -> tuple[torch.Tensor, ...]:
@@ -110,7 +117,6 @@ def _augment_condition_group(
         return moved
     augmented = []
     for tensor in moved:
-        generator = torch.Generator(device="cpu").manual_seed(int(seed))
         noise = torch.randn(tuple(tensor.shape), generator=generator, dtype=torch.float32, device="cpu").to(
             device=tensor.device, dtype=tensor.dtype
         )
@@ -122,7 +128,7 @@ def augment_condition_latents(
     visual_conditions: Sequence[torch.Tensor],
     audio_conditions: Sequence[torch.Tensor],
     *,
-    seed: int,
+    generator: torch.Generator,
     visual_clean: float = 0.999,
     audio_clean: float = 1.0,
     device: torch.device | str,
@@ -132,8 +138,8 @@ def augment_condition_latents(
     if not 0.0 <= audio_clean <= 1.0:
         raise ValueError(f"MiniMax-H3 audio condition clean coefficient must be in [0,1], got {audio_clean}")
     return (
-        _augment_condition_group(visual_conditions, seed=seed, clean=visual_clean, device=device),
-        _augment_condition_group(audio_conditions, seed=seed + 1, clean=audio_clean, device=device),
+        _augment_condition_group(visual_conditions, generator=generator, clean=visual_clean, device=device),
+        _augment_condition_group(audio_conditions, generator=generator, clean=audio_clean, device=device),
     )
 
 

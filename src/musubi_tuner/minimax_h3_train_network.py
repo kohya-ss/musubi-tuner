@@ -41,6 +41,7 @@ from musubi_tuner.minimax_h3.packing import (
 )
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
+    create_sampling_generator,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
@@ -621,6 +622,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if not has_self_ref_orig_mod:
             transformer.eval()
         try:
+            generator = create_sampling_generator(seed)
             initial_video, initial_audio = initialize_target_latents(
                 video_shape=(
                     1,
@@ -630,7 +632,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     layout.target_video.width,
                 ),
                 audio_shape=(1, 32, 2, layout.target_audio_frames),
-                seed=seed,
+                generator=generator,
                 device=device,
                 video_dtype=torch.float32,
                 audio_dtype=torch.float32,
@@ -638,7 +640,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             visual_conditions, audio_conditions = augment_condition_latents(
                 sample_parameter["h3_visual_conditions"],
                 sample_parameter["h3_audio_conditions"],
-                seed=seed,
+                generator=generator,
                 visual_clean=args.h3_visual_cond_clean,
                 audio_clean=args.h3_audio_cond_clean,
                 device=device,
