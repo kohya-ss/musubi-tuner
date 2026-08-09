@@ -84,6 +84,25 @@ SS_METADATA_MINIMUM_KEYS = [
     SS_METADATA_KEY_NETWORK_ARGS,
 ]
 
+# --timestep_sampling methods that draw t in [0, 1] directly (handled by
+# NetworkTrainer.sample_timesteps); anything else goes through the
+# weighting-scheme density path in get_noisy_model_input_and_timesteps
+DIRECT_TIMESTEP_SAMPLING_METHODS = frozenset(
+    {
+        "uniform",
+        "sigmoid",
+        "shift",
+        "flux_shift",
+        "qwen_shift",
+        "krea2_shift",
+        "ideogram4_shift",
+        "logsnr",
+        "qinglong_flux",
+        "qinglong_qwen",
+        "flux2_shift",
+    }
+)
+
 
 @dataclass
 class DiTOutput:
@@ -522,18 +541,26 @@ class NetworkTrainer:
         a, b = self.timestep_range_pool.pop()
         return random.uniform(a, b)
 
-    def get_noisy_model_input_and_timesteps(
+    def sample_timesteps(
         self,
         args: argparse.Namespace,
-        noise: torch.Tensor,
-        latents: torch.Tensor,
+        batch_size: int,
         timesteps: Optional[List[float]],
-        noise_scheduler: FlowMatchDiscreteScheduler,
+        latents: torch.Tensor,
         device: torch.device,
-        dtype: torch.dtype,
-    ):
-        batch_size = noise.shape[0]
+    ) -> torch.Tensor:
+        """Sample flow-matching timesteps t in [0, 1] (t=1 is pure noise) from the
+        distribution selected by --timestep_sampling, honoring min/max_timestep,
+        --preserve_distribution_shape and timestep bucketing.
 
+        ``timesteps``, if given, supplies pre-drawn uniform samples in [0, 1] (one
+        per batch item) that are transformed deterministically into the target
+        distribution instead of drawing fresh randomness. ``latents`` is only
+        consulted for its spatial shape by the resolution-dependent shift methods.
+
+        Only valid for DIRECT_TIMESTEP_SAMPLING_METHODS; weighting-scheme based
+        sampling cannot be expressed as a plain t draw and raises here.
+        """
         if timesteps is not None:
             timesteps = torch.tensor(timesteps, device=device)
 
@@ -569,19 +596,7 @@ class NetworkTrainer:
             logsnr = mean + std * math.sqrt(2.0) * torch.erfinv(term)
             return logsnr
 
-        if (
-            args.timestep_sampling == "uniform"
-            or args.timestep_sampling == "sigmoid"
-            or args.timestep_sampling == "shift"
-            or args.timestep_sampling == "flux_shift"
-            or args.timestep_sampling == "qwen_shift"
-            or args.timestep_sampling == "krea2_shift"
-            or args.timestep_sampling == "ideogram4_shift"
-            or args.timestep_sampling == "logsnr"
-            or args.timestep_sampling == "qinglong_flux"
-            or args.timestep_sampling == "qinglong_qwen"
-            or args.timestep_sampling == "flux2_shift"
-        ):
+        if args.timestep_sampling in DIRECT_TIMESTEP_SAMPLING_METHODS:
 
             def compute_sampling_timesteps(org_timesteps: Optional[torch.Tensor]) -> torch.Tensor:
                 def rand(bs: int, org_ts: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -726,6 +741,27 @@ class NetworkTrainer:
                     available_t = compute_sampling_timesteps(timesteps)
                 else:
                     t = torch.stack(available_t, dim=0)  # [batch_size, ]
+
+            return t
+
+        raise ValueError(
+            f"timestep_sampling '{args.timestep_sampling}' draws timesteps via the weighting scheme and cannot be sampled as t in [0, 1]"
+        )
+
+    def get_noisy_model_input_and_timesteps(
+        self,
+        args: argparse.Namespace,
+        noise: torch.Tensor,
+        latents: torch.Tensor,
+        timesteps: Optional[List[float]],
+        noise_scheduler: FlowMatchDiscreteScheduler,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        batch_size = noise.shape[0]
+
+        if args.timestep_sampling in DIRECT_TIMESTEP_SAMPLING_METHODS:
+            t = self.sample_timesteps(args, batch_size, timesteps, latents, device)
 
             timesteps = t * 1000.0
             t = t.view(-1, 1, 1, 1, 1) if latents.ndim == 5 else t.view(-1, 1, 1, 1)
