@@ -6,9 +6,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+from musubi_tuner.flux_2_train_network_self_flow import Flux2SelfFlowNetworkTrainer
+from musubi_tuner.hidream_o1_train_network import HiDreamO1NetworkTrainer
+from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
+from musubi_tuner.training.trainer_base import NetworkTrainer
 
 
 def _explorative_helpers():
@@ -352,3 +356,168 @@ def test_explicit_coefficients_broadcast_with_declared_dtype_tolerance(dtype, rt
         rtol=rtol,
         atol=atol,
     )
+
+
+class _CompatibleTrainer(NetworkTrainer):
+    @property
+    def architecture(self):
+        return "synthetic"
+
+    @property
+    def architecture_full_name(self):
+        return "Synthetic"
+
+
+class _CustomBatchTrainer(_CompatibleTrainer):
+    def process_batch(self, *args, **kwargs):
+        return torch.tensor(0.0), {}
+
+
+class _ExplicitlyCompatibleCustomBatchTrainer(_CustomBatchTrainer):
+    def get_best_of_k_incompatibility_reason(self, args):
+        return None
+
+
+def test_common_parser_defaults_xm_best_of_k_to_one():
+    args = setup_parser_common().parse_args([])
+    assert args.xm_best_of_k == 1
+
+
+def test_common_parser_accepts_xm_best_of_k_from_cli():
+    args = setup_parser_common().parse_args(["--xm_best_of_k", "3"])
+    assert args.xm_best_of_k == 3
+
+
+def test_common_parser_accepts_xm_best_of_k_from_toml(tmp_path, monkeypatch):
+    config = tmp_path / "xm.toml"
+    config.write_text("xm_best_of_k = 4\n", encoding="utf-8")
+    parser = setup_parser_common()
+    monkeypatch.setattr(sys, "argv", ["trainer", "--config_file", str(config)])
+    args = parser.parse_args()
+    args = read_config_from_file(args, parser)
+    assert args.xm_best_of_k == 4
+
+
+def test_best_of_k_validation_rejects_values_below_one():
+    trainer = _CompatibleTrainer()
+    with pytest.raises(ValueError, match=r"--xm_best_of_k must be at least 1"):
+        trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=0))
+
+
+def test_best_of_k_validation_rejects_unconfirmed_custom_process_batch():
+    trainer = _CustomBatchTrainer()
+    with pytest.raises(ValueError, match=r"overrides process_batch"):
+        trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
+
+
+def test_best_of_k_validation_accepts_explicit_custom_process_compatibility():
+    trainer = _ExplicitlyCompatibleCustomBatchTrainer()
+    trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
+    assert trainer._best_of_k_enabled is True
+
+
+def test_training_dispatch_preserves_original_k_one_path(monkeypatch):
+    trainer = _CompatibleTrainer()
+    trainer._best_of_k_enabled = False
+    calls = []
+    monkeypatch.setattr(trainer, "process_batch", lambda *a, **k: calls.append("ordinary") or (torch.tensor(1.0), {}))
+    monkeypatch.setattr(
+        trainer,
+        "process_batch_best_of_k",
+        lambda *a, **k: calls.append("best-of-k") or (torch.tensor(2.0), {}),
+    )
+    state = torch.random.get_rng_state().clone()
+
+    loss, metrics = trainer._process_batch_for_training(None)
+
+    assert calls == ["ordinary"]
+    assert loss.item() == 1.0
+    assert metrics == {}
+    assert torch.equal(torch.random.get_rng_state(), state)
+
+
+def test_training_dispatch_uses_best_of_k_only_when_enabled(monkeypatch):
+    trainer = _CompatibleTrainer()
+    trainer._best_of_k_enabled = True
+    calls = []
+    monkeypatch.setattr(trainer, "process_batch", lambda *a, **k: calls.append("ordinary"))
+    monkeypatch.setattr(
+        trainer,
+        "process_batch_best_of_k",
+        lambda *a, **k: calls.append("best-of-k") or (torch.tensor(2.0), {"xm/selection_gain": 1.0}),
+    )
+
+    loss, metrics = trainer._process_batch_for_training(None)
+
+    assert calls == ["best-of-k"]
+    assert loss.item() == 2.0
+    assert metrics == {"xm/selection_gain": 1.0}
+
+
+def test_architecture_specific_standard_xm_compatibility_reasons(monkeypatch):
+    self_flow = Flux2SelfFlowNetworkTrainer.__new__(Flux2SelfFlowNetworkTrainer)
+    NetworkTrainer.__init__(self_flow)
+    hidream = HiDreamO1NetworkTrainer.__new__(HiDreamO1NetworkTrainer)
+    NetworkTrainer.__init__(hidream)
+
+    assert self_flow.get_best_of_k_incompatibility_reason(SimpleNamespace(self_flow=False)) is None
+    assert "--self_flow" in self_flow.get_best_of_k_incompatibility_reason(SimpleNamespace(self_flow=True))
+    assert "noise scaling/clipping" in hidream.get_best_of_k_incompatibility_reason(SimpleNamespace())
+
+    for trainer in (self_flow, hidream):
+        monkeypatch.setattr(
+            trainer,
+            "get_best_of_k_incompatibility_reason",
+            lambda args: (_ for _ in ()).throw(AssertionError("hook called at K=1")),
+        )
+        trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=1))
+        assert trainer._best_of_k_enabled is False
+
+
+def test_invalid_best_of_k_fails_before_session_or_dataset_allocation():
+    class _EarlyValidationTrainer(_CompatibleTrainer):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def handle_model_specific_args(self, args):
+            self.events.append("handle_model_specific_args")
+
+        def _init_session(self, args):
+            self.events.append("allocation_started")
+            raise AssertionError("session initialization must not start")
+
+        def _build_dataset(self, args):
+            raise AssertionError("dataset construction must not start")
+
+    trainer = _EarlyValidationTrainer()
+    args = SimpleNamespace(
+        cuda_allow_tf32=False,
+        cuda_cudnn_benchmark=False,
+        dataset_config="unused.toml",
+        dit="unused.safetensors",
+        fp8_scaled=False,
+        fp8_base=False,
+        sage_attn=False,
+        disable_numpy_memmap=False,
+        show_timesteps=None,
+        xm_best_of_k=0,
+    )
+    with pytest.raises(ValueError, match="--xm_best_of_k"):
+        trainer.train(args)
+    assert trainer.events == ["handle_model_specific_args"]
+
+
+def test_standard_xm_startup_log_is_explicit_and_k_one_is_silent(caplog):
+    caplog.set_level("INFO")
+    trainer = _CompatibleTrainer()
+    trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=1))
+    assert "Forward XM enabled" not in caplog.text
+
+    trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
+    assert "Forward XM enabled for Synthetic" in caplog.text
+    assert "K=2" in caplog.text
+    assert "sequential memory-saving mode" in caplog.text
+    assert "1.67x" in caplog.text
+    assert "pretraining results" in caplog.text
+    assert "LoRA fine-tuning" in caplog.text

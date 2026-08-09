@@ -113,6 +113,8 @@ class NetworkTrainer:
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # legacy frame-grid fallback; some architectures set 1 or use a custom formula
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
+        self._best_of_k_count = 1
+        self._best_of_k_enabled = False
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1140,6 +1142,51 @@ class NetworkTrainer:
     # Internal extension points — no API stability guarantees.
     # Subclasses live in this repo; if you fork, expect breakage on updates.
 
+    def get_best_of_k_count(self, args: argparse.Namespace) -> int:
+        return args.xm_best_of_k
+
+    def get_best_of_k_option_name(self, args: argparse.Namespace) -> str:
+        return "--xm_best_of_k"
+
+    def get_best_of_k_incompatibility_reason(self, args: argparse.Namespace) -> Optional[str]:
+        del args
+        if type(self).process_batch is not NetworkTrainer.process_batch:
+            return (
+                f"{self.architecture_full_name} overrides process_batch and has not confirmed "
+                "the standard Forward XM data-flow contract"
+            )
+        return None
+
+    def on_best_of_k_enabled(self, args: argparse.Namespace) -> None:
+        del args
+        multiplier = (self._best_of_k_count + 3) / 3
+        logger.info(
+            "Forward XM enabled for %s: K=%d, sequential memory-saving mode, approximate operation-count multiplier %.2fx",
+            self.architecture_full_name,
+            self._best_of_k_count,
+            multiplier,
+        )
+        logger.warning("Published Forward XM gains are pretraining results and have not been validated for LoRA fine-tuning.")
+
+    def _validate_and_init_best_of_k(self, args: argparse.Namespace) -> None:
+        option_name = self.get_best_of_k_option_name(args)
+        count = self.get_best_of_k_count(args)
+        if count < 1:
+            raise ValueError(f"{option_name} must be at least 1, got {count}")
+        self._best_of_k_count = count
+        self._best_of_k_enabled = count > 1
+        if not self._best_of_k_enabled:
+            return
+        reason = self.get_best_of_k_incompatibility_reason(args)
+        if reason is not None:
+            raise ValueError(f"{option_name}={count} is not supported: {reason}")
+        self.on_best_of_k_enabled(args)
+
+    def _process_batch_for_training(self, *args, **kwargs):
+        if self._best_of_k_enabled:
+            return self.process_batch_best_of_k(*args, **kwargs)
+        return self.process_batch(*args, **kwargs)
+
     def process_batch(
         self,
         args: argparse.Namespace,
@@ -1174,6 +1221,23 @@ class NetworkTrainer:
 
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+
+    def process_batch_best_of_k(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        network,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        sample_resources,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        raise NotImplementedError("best-of-K processing is implemented in Task 5")
 
     def compute_loss(
         self,
@@ -1475,6 +1539,7 @@ class NetworkTrainer:
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        self._validate_and_init_best_of_k(args)
 
         # show timesteps for debugging
         if args.show_timesteps:
@@ -2098,7 +2163,7 @@ class NetworkTrainer:
                     # Sample noise that we'll add to the latents
                     noise = torch.randn_like(latents)
 
-                    loss, loss_metrics = self.process_batch(
+                    loss, loss_metrics = self._process_batch_for_training(
                         args,
                         accelerator,
                         transformer,
