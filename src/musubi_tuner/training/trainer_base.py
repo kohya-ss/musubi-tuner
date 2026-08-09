@@ -1150,7 +1150,8 @@ class NetworkTrainer:
 
     def get_best_of_k_incompatibility_reason(self, args: argparse.Namespace) -> Optional[str]:
         del args
-        if type(self).process_batch is not NetworkTrainer.process_batch:
+        process_batch = getattr(self.process_batch, "__func__", self.process_batch)
+        if process_batch is not NetworkTrainer.process_batch:
             return (
                 f"{self.architecture_full_name} overrides process_batch and has not confirmed "
                 "the standard Forward XM data-flow contract"
@@ -1170,17 +1171,24 @@ class NetworkTrainer:
 
     def _validate_and_init_best_of_k(self, args: argparse.Namespace) -> None:
         option_name = self.get_best_of_k_option_name(args)
-        count = self.get_best_of_k_count(args)
-        if count < 1:
-            raise ValueError(f"{option_name} must be at least 1, got {count}")
+        try:
+            count = self.get_best_of_k_count(args)
+            if type(count) is not int or count < 1:
+                raise ValueError(f"{option_name} must be an integer of at least 1, got {count!r}")
+            enabled = count > 1
+            if enabled:
+                reason = self.get_best_of_k_incompatibility_reason(args)
+                if reason is not None:
+                    raise ValueError(f"{option_name}={count} is not supported: {reason}")
+        except Exception:
+            self._best_of_k_count = 1
+            self._best_of_k_enabled = False
+            raise
+
         self._best_of_k_count = count
-        self._best_of_k_enabled = count > 1
-        if not self._best_of_k_enabled:
-            return
-        reason = self.get_best_of_k_incompatibility_reason(args)
-        if reason is not None:
-            raise ValueError(f"{option_name}={count} is not supported: {reason}")
-        self.on_best_of_k_enabled(args)
+        self._best_of_k_enabled = enabled
+        if enabled:
+            self.on_best_of_k_enabled(args)
 
     def _process_batch_for_training(self, *args, **kwargs):
         if self._best_of_k_enabled:

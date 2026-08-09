@@ -1,3 +1,4 @@
+import inspect
 from importlib import import_module
 from pathlib import Path
 import sys
@@ -378,6 +379,41 @@ class _ExplicitlyCompatibleCustomBatchTrainer(_CustomBatchTrainer):
         return None
 
 
+class _InheritedCustomBatchTrainer(_CustomBatchTrainer):
+    pass
+
+
+class _EarlyValidationTrainer(_CompatibleTrainer):
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def handle_model_specific_args(self, args):
+        self.events.append("handle_model_specific_args")
+
+    def _init_session(self, args):
+        self.events.append("allocation_started")
+        raise AssertionError("session initialization must not start")
+
+    def _build_dataset(self, args):
+        raise AssertionError("dataset construction must not start")
+
+
+def _early_validation_args(xm_best_of_k):
+    return SimpleNamespace(
+        cuda_allow_tf32=False,
+        cuda_cudnn_benchmark=False,
+        dataset_config="unused.toml",
+        dit="unused.safetensors",
+        fp8_scaled=False,
+        fp8_base=False,
+        sage_attn=False,
+        disable_numpy_memmap=False,
+        show_timesteps=None,
+        xm_best_of_k=xm_best_of_k,
+    )
+
+
 def test_common_parser_defaults_xm_best_of_k_to_one():
     args = setup_parser_common().parse_args([])
     assert args.xm_best_of_k == 1
@@ -400,12 +436,44 @@ def test_common_parser_accepts_xm_best_of_k_from_toml(tmp_path, monkeypatch):
 
 def test_best_of_k_validation_rejects_values_below_one():
     trainer = _CompatibleTrainer()
-    with pytest.raises(ValueError, match=r"--xm_best_of_k must be at least 1"):
+    with pytest.raises(ValueError, match=r"--xm_best_of_k.*integer.*at least 1"):
         trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=0))
+
+
+@pytest.mark.parametrize("toml_value", ["1.5", "true", '"2"'])
+def test_best_of_k_validation_rejects_non_integer_toml_before_allocation(tmp_path, monkeypatch, toml_value):
+    config = tmp_path / "invalid-xm.toml"
+    config.write_text(
+        f'dataset_config = "unused.toml"\ndit = "unused.safetensors"\nxm_best_of_k = {toml_value}\n',
+        encoding="utf-8",
+    )
+    parser = setup_parser_common()
+    monkeypatch.setattr(sys, "argv", ["trainer", "--config_file", str(config)])
+    args = read_config_from_file(parser.parse_args(), parser)
+    trainer = _EarlyValidationTrainer()
+
+    with pytest.raises(ValueError, match=r"--xm_best_of_k.*integer.*at least 1"):
+        trainer.train(args)
+
+    assert trainer.events == ["handle_model_specific_args"]
+    assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (1, False)
 
 
 def test_best_of_k_validation_rejects_unconfirmed_custom_process_batch():
     trainer = _CustomBatchTrainer()
+    with pytest.raises(ValueError, match=r"overrides process_batch"):
+        trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
+
+
+def test_best_of_k_validation_rejects_inherited_custom_process_batch():
+    trainer = _InheritedCustomBatchTrainer()
+    with pytest.raises(ValueError, match=r"overrides process_batch"):
+        trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
+
+
+def test_best_of_k_validation_rejects_instance_process_batch_replacement():
+    trainer = _CompatibleTrainer()
+    trainer.process_batch = lambda *args, **kwargs: (torch.tensor(0.0), {})
     with pytest.raises(ValueError, match=r"overrides process_batch"):
         trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
 
@@ -416,42 +484,90 @@ def test_best_of_k_validation_accepts_explicit_custom_process_compatibility():
     assert trainer._best_of_k_enabled is True
 
 
+def test_best_of_k_validation_leaves_fresh_incompatible_trainer_disabled():
+    trainer = _CustomBatchTrainer()
+
+    with pytest.raises(ValueError, match=r"overrides process_batch"):
+        trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
+
+    assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (1, False)
+
+
+@pytest.mark.parametrize("invalid_count", [0, 1.5, True, "2"])
+def test_best_of_k_validation_resets_successful_configuration_after_invalid_revalidation(invalid_count):
+    trainer = _CompatibleTrainer()
+    trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=2))
+
+    with pytest.raises(ValueError, match=r"--xm_best_of_k.*(?:integer|at least 1)"):
+        trainer._validate_and_init_best_of_k(SimpleNamespace(xm_best_of_k=invalid_count))
+
+    assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (1, False)
+
+
 def test_training_dispatch_preserves_original_k_one_path(monkeypatch):
     trainer = _CompatibleTrainer()
     trainer._best_of_k_enabled = False
+    positional_sentinels = (object(), object(), object())
+    keyword_sentinels = {"keyword_one": object(), "keyword_two": object()}
+    loss = object()
+    metrics = {"ordinary": object()}
     calls = []
-    monkeypatch.setattr(trainer, "process_batch", lambda *a, **k: calls.append("ordinary") or (torch.tensor(1.0), {}))
+
+    def ordinary(*args, **kwargs):
+        calls.append("ordinary")
+        assert args == positional_sentinels
+        assert kwargs == keyword_sentinels
+        return loss, metrics
+
+    monkeypatch.setattr(trainer, "process_batch", ordinary)
     monkeypatch.setattr(
         trainer,
         "process_batch_best_of_k",
-        lambda *a, **k: calls.append("best-of-k") or (torch.tensor(2.0), {}),
+        lambda *args, **kwargs: pytest.fail("best-of-k arm must not be called at K=1"),
     )
     state = torch.random.get_rng_state().clone()
 
-    loss, metrics = trainer._process_batch_for_training(None)
+    returned_loss, returned_metrics = trainer._process_batch_for_training(*positional_sentinels, **keyword_sentinels)
 
     assert calls == ["ordinary"]
-    assert loss.item() == 1.0
-    assert metrics == {}
+    assert returned_loss is loss
+    assert returned_metrics is metrics
     assert torch.equal(torch.random.get_rng_state(), state)
 
 
 def test_training_dispatch_uses_best_of_k_only_when_enabled(monkeypatch):
     trainer = _CompatibleTrainer()
     trainer._best_of_k_enabled = True
+    positional_sentinels = (object(), object(), object())
+    keyword_sentinels = {"keyword_one": object(), "keyword_two": object()}
+    loss = object()
+    metrics = {"xm/selection_gain": object()}
     calls = []
-    monkeypatch.setattr(trainer, "process_batch", lambda *a, **k: calls.append("ordinary"))
+
+    def best_of_k(*args, **kwargs):
+        calls.append("best-of-k")
+        assert args == positional_sentinels
+        assert kwargs == keyword_sentinels
+        return loss, metrics
+
+    monkeypatch.setattr(trainer, "process_batch", lambda *args, **kwargs: pytest.fail("ordinary arm must not be called at K>1"))
     monkeypatch.setattr(
         trainer,
         "process_batch_best_of_k",
-        lambda *a, **k: calls.append("best-of-k") or (torch.tensor(2.0), {"xm/selection_gain": 1.0}),
+        best_of_k,
     )
 
-    loss, metrics = trainer._process_batch_for_training(None)
+    returned_loss, returned_metrics = trainer._process_batch_for_training(*positional_sentinels, **keyword_sentinels)
 
     assert calls == ["best-of-k"]
-    assert loss.item() == 2.0
-    assert metrics == {"xm/selection_gain": 1.0}
+    assert returned_loss is loss
+    assert returned_metrics is metrics
+
+
+def test_best_of_k_placeholder_signature_matches_process_batch():
+    ordinary_parameters = tuple(inspect.signature(NetworkTrainer.process_batch).parameters)
+    best_of_k_parameters = tuple(inspect.signature(NetworkTrainer.process_batch_best_of_k).parameters)
+    assert best_of_k_parameters == ordinary_parameters
 
 
 def test_architecture_specific_standard_xm_compatibility_reasons(monkeypatch):
@@ -475,34 +591,8 @@ def test_architecture_specific_standard_xm_compatibility_reasons(monkeypatch):
 
 
 def test_invalid_best_of_k_fails_before_session_or_dataset_allocation():
-    class _EarlyValidationTrainer(_CompatibleTrainer):
-        def __init__(self):
-            super().__init__()
-            self.events = []
-
-        def handle_model_specific_args(self, args):
-            self.events.append("handle_model_specific_args")
-
-        def _init_session(self, args):
-            self.events.append("allocation_started")
-            raise AssertionError("session initialization must not start")
-
-        def _build_dataset(self, args):
-            raise AssertionError("dataset construction must not start")
-
     trainer = _EarlyValidationTrainer()
-    args = SimpleNamespace(
-        cuda_allow_tf32=False,
-        cuda_cudnn_benchmark=False,
-        dataset_config="unused.toml",
-        dit="unused.safetensors",
-        fp8_scaled=False,
-        fp8_base=False,
-        sage_attn=False,
-        disable_numpy_memmap=False,
-        show_timesteps=None,
-        xm_best_of_k=0,
-    )
+    args = _early_validation_args(0)
     with pytest.raises(ValueError, match="--xm_best_of_k"):
         trainer.train(args)
     assert trainer.events == ["handle_model_specific_args"]
