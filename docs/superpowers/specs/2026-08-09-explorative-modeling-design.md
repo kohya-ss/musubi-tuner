@@ -1,8 +1,8 @@
-# Explorative Modeling (Forward XM) Support Design
+# Forward XM and MiniMax-H3 Video Best-of-K Support Design
 
 Date: 2026-08-09
 
-Status: Revised draft after second external review
+Status: Revised draft after third external review
 
 Branch: `codex/issue-1019-explorative-modeling`
 
@@ -11,12 +11,21 @@ Base: `kohya-ss/musubi-tuner@ff8a5c2db832f3d1b458c898e040cfb5d19d0a3d`
 ## 1. Summary
 
 R1 adds opt-in Forward Explorative Modeling (Forward XM) to compatible
-`NetworkTrainer`-based LoRA training entry points.
+`NetworkTrainer`-based LoRA training entry points. MiniMax-H3 uses the same
+best-of-K execution machinery for a separately named video-focused heuristic;
+that H3 mode is not Forward XM as defined by the paper because its selection
+score differs from its final training objective.
 
-Users enable it with:
+Users enable paper-defined Forward XM with:
 
 ```text
 --xm_best_of_k K
+```
+
+MiniMax-H3 uses a separate, honestly named option:
+
+```text
+--h3_video_best_of_k K
 ```
 
 The default is `K = 1`, which takes the existing training path without extra
@@ -24,10 +33,12 @@ random draws, forwards, validation restrictions, or logging, and keeps the same
 mathematical loss objective. For `K > 1`, each sample keeps its clean
 data/latent, timestep, text/image
 conditioning, and condition-drop decision fixed while exploring K independent
-noise candidates. Candidate quality is measured with the architecture's actual
-per-sample training loss, except for MiniMax-H3's explicit video-only selection
-contract described below. Only the selected candidate for each sample is
-recomputed with gradients and used for the optimizer update.
+noise candidates. Standard trainers measure candidate quality with the
+architecture's actual per-sample training loss. MiniMax-H3 instead varies video
+noise only and ranks candidates by video loss while retaining weighted audio
+loss in the final update; Sections 3 and 11 define that distinct contract. Only
+the selected candidate for each sample is recomputed with gradients and used
+for the optimizer update.
 
 R1 deliberately uses a sequential memory-saving implementation as the
 correctness reference. It performs K no-grad candidate forwards and one
@@ -98,12 +109,15 @@ that form and becomes a support-coverage objective as K grows. R1 therefore
 describes the feature as Forward XM best-of-K training, not as an exact
 likelihood implementation.
 
-MiniMax-H3 adds a user-selected projection of this objective: candidates vary
-only video noise and are ranked only by video reconstruction loss. Audio noise
-and audio supervision remain present in the final update. Because H3's joint
-transformer can change its audio prediction when video input changes, this is
-not mathematically identical to minimizing the full multimodal objective. It is
-documented as video-only XM selection rather than generic full-objective XM.
+MiniMax-H3 does not satisfy that Forward XM objective under R1. It explores
+video-noise candidates while keeping audio noise fixed, ranks them only by
+video reconstruction loss, then trains the winner with the full weighted
+video-plus-audio loss. Because H3's joint transformer can change its audio
+prediction when video input changes, the video-best candidate need not minimize
+the loss used for the update. The H3 mode is therefore named the
+**video-focused best-of-K heuristic**, not Forward XM or a projection of XM. It
+may trade composite-objective alignment for stronger video-loss selection; R1
+makes no claim that this improves video or multimodal quality.
 
 Reverse XM searches over data targets instead of generated candidates. It is
 mode-seeking and needs an entropy or coverage mechanism to avoid collapse. It
@@ -188,16 +202,17 @@ The feature is correct only if all of these invariants hold:
    condition, condition-drop decision, and other stochastic training choices.
    A flow velocity or noise-prediction target may change as the deterministic
    counterpart of the candidate noise; it must remain paired with that noise.
-3. Standard trainers select with the same weighted reconstruction objective
-   that the final update uses. MiniMax-H3 deliberately selects with only its
-   video-loss component while its final update retains the full video-plus-audio
-   objective; this exception must remain explicit in code, metrics, and docs.
-4. Selection happens independently for each sample in the microbatch.
-5. Only selected candidates contribute gradients.
-6. `K = 1` preserves the existing control flow and random-number consumption.
-7. Gradient accumulation and DDP keep their existing optimizer and reduction
+3. Paper-defined Forward XM selects with the same per-sample weighted
+   reconstruction objective that the final update uses.
+4. MiniMax-H3's separately named video-focused heuristic selects with video
+   loss while its final update retains the full video-plus-audio objective. The
+   mismatch must remain explicit in code, metric names, startup logs, and docs.
+5. Selection happens independently for each sample in the microbatch.
+6. Only selected candidates contribute gradients.
+7. `K = 1` preserves the existing control flow and random-number consumption.
+8. Gradient accumulation and DDP keep their existing optimizer and reduction
    semantics.
-8. Trainer modes whose complete candidate state or per-sample objective is
+9. Trainer modes whose complete candidate state or per-sample objective is
    unavailable fail before dataset or model allocation rather than silently
    applying a partial XM objective.
 
@@ -255,20 +270,30 @@ tensor tiling optimization. Sequential execution is the R1 semantic reference,
 not a claim that batching is unimportant. The optional hardware characterization
 in Section 19 records the actual cost and can motivate that follow-up.
 
-### 5.3 Duplicated per-architecture candidate loops (rejected)
+### 5.3 Per-architecture copies versus one H3-owned loop
 
-Each trainer could copy the official pattern and own its own candidate loop.
-This gives maximum local control but duplicates timestep freezing, RNG replay,
-minimum selection, metrics, and validation across more than ten trainers. The
-copies would drift and make `K = 1` compatibility harder to prove.
+Copying the entire candidate loop into every trainer is rejected. It would
+duplicate timestep freezing, RNG replay, winner selection, validation, and
+metrics across more than ten trainers, then make `K = 1` compatibility harder
+to prove.
+
+A generic callback-driven search framework is also rejected in R1. There are
+only two materially different consumers, and callbacks would hide the important
+difference between standard full-objective Forward XM and H3's video-only
+selection score. The base trainer owns the standard loop; MiniMax-H3 owns one
+explicit local loop and shares only narrow pure mechanics such as candidate
+generator setup and `update_winners`. This small duplication keeps each data
+flow readable without creating an abstraction for hypothetical consumers.
 
 ## 6. R1 Goals
 
-- Add Forward XM to compatible `NetworkTrainer` LoRA entry points.
+- Add Forward XM to compatible `NetworkTrainer` LoRA entry points and the
+  separately identified MiniMax-H3 video-focused best-of-K heuristic.
 - Match the paper's fixed-data, fixed-timestep, fixed-condition semantics while
   keeping each derived prediction target paired with its candidate noise.
-- Select winners per sample with the real weighted training loss, except for the
-  explicit MiniMax-H3 video-only selection projection.
+- Select Forward XM winners per sample with the real weighted training loss.
+- Let MiniMax-H3 rank video-noise candidates by video loss without presenting
+  that mismatched selection objective as paper-defined XM.
 - Keep activation memory near the baseline through no-grad search and winner
   recomputation.
 - Preserve baseline control flow, RNG consumption, and mathematical objective
@@ -290,8 +315,8 @@ copies would drift and make `K = 1` compatibility harder to prove.
 - Full-transformer fine-tuning scripts with independent training loops.
 - Candidate batching or `xm_chunk_bs_mult`.
 - An all-grad/FLOP-efficient mode.
-- Full joint video/audio MiniMax-H3 candidate exploration; R1 varies video noise
-  and ranks video loss only.
+- Full joint video/audio MiniMax-H3 candidate exploration; its R1 heuristic
+  varies video noise and ranks video loss only.
 - Candidate caches, vector databases, gradient-based latent search, or soft-min
   objectives.
 - Changing inference, samplers, guidance, checkpoint formats, cache formats, or
@@ -302,10 +327,11 @@ copies would drift and make `K = 1` compatibility harder to prove.
 
 ## 8. Supported Trainer Matrix
 
-R1 supports trainers that either satisfy the standard one-noise/base-flow
-contract or provide an explicit `process_batch_xm` adapter backed by the shared
-search loop. The candidate selection objective must be available per sample. A
-trainer is not rejected merely because it overrides `compute_loss`.
+R1 supports trainers that satisfy the standard one-noise/base-flow Forward XM
+contract. It also provides an explicit `process_batch_best_of_k` adapter for H3's
+separately named video-focused heuristic. The relevant selection objective must
+be available per sample. A trainer is not rejected merely because it overrides
+`compute_loss`.
 
 | Entry point | R1 status | Contract or concrete blocker |
 | --- | --- | --- |
@@ -322,10 +348,10 @@ trainer is not rejected merely because it overrides `compute_loss`.
 | `zimage_train_network.py` | Supported | Base weighted flow MSE |
 | `flux_2_train_network_self_flow.py` | Supported when `--self_flow` is off; rejected when on | This is a working vanilla Flux 2 mode: the first branch of `process_batch` immediately returns `super().process_batch(...)`. Only the enabled Self-Flow branch reaches its `NotImplementedError`; that unfinished branch requires two timesteps, teacher/student forwards, a per-token mask, EMA weights, and `L_gen + gamma * L_rep`. |
 | `hidream_o1_train_network.py` | Rejected for `K > 1` | It always applies sigma-dependent noise scaling outside the shared affine formula; dev mode may also derive clipping from one standard deviation over the candidate tensor, so assembled winners can change the transform. The optional DINO backend returns a batch-reduced scalar rather than `[B]`. |
-| `minimax_h3_train_network.py` | Supported with video-only XM selection | Vary and rank video noise only. Sample audio noise, the shared base time, separate video/audio sigmas, and condition augmentation once. Final recomputation keeps the selected video noise, fixed audio state, and ordinary `video_loss + weight * audio_loss` update. |
+| `minimax_h3_train_network.py` | Supports `--h3_video_best_of_k`; rejects Forward XM | Vary and rank video noise only. Sample audio noise, the shared base time, separate video/audio sigmas, and condition augmentation once. Final recomputation keeps the selected video noise, fixed audio state, and ordinary `video_loss + weight * audio_loss` update. This is a video-focused heuristic, not Forward XM. |
 
 `K = 1` remains valid for every trainer and mode, including the rejected rows,
-because it does not enter XM code.
+because it does not enter best-of-K code.
 
 The remaining exclusions are semantic, not permanent architecture bans.
 HiDream can be added after defining a stored candidate-noising state and a
@@ -353,17 +379,31 @@ Contract:
 - `> 1`: sequential memory-saving Forward XM.
 - Available through command line and TOML config like other common arguments.
 
+MiniMax-H3 adds its own model-specific argument:
+
+```text
+--h3_video_best_of_k INT
+```
+
+Its default and valid range are also `1` and integer `>= 1`. A value greater
+than one enables the video-focused heuristic described in Section 11.3. H3
+rejects `--xm_best_of_k > 1` rather than silently assigning the Forward XM name
+to a different objective. Non-H3 trainers do not expose the H3-specific option.
+
 R1 does not expose `--xm_save_mem_mode`, `--xm_chunk_bs_mult`, or
 `--xm_debug_mode`. There is only one execution strategy, so additional controls
 would imply unsupported behavior.
 
 Validation runs once from `_validate_args_and_init` after model-specific argument
-handling and before dataset, accelerator, or model construction. It validates
-`K >= 1`, sets `self._xm_enabled = args.xm_best_of_k > 1`, and only when enabled
-asks the trainer for an actionable incompatibility reason. The base capability
-check rejects a custom `process_batch` unless that trainer explicitly confirms
-that the shared XM data flow is equivalent. It does not reject a trainer solely
-for overriding `compute_loss`; the canonical per-sample primitive in Section 14
+handling and before dataset, accelerator, or model construction. A neutral
+`get_best_of_k_count(args)` hook returns `args.xm_best_of_k` in the base trainer
+and `args.h3_video_best_of_k` in H3 after rejecting XM there. Validation checks
+`K >= 1`, stores `self._best_of_k_count`, and sets
+`self._best_of_k_enabled = K > 1`. Only when enabled does it ask the trainer for
+an actionable incompatibility reason. The base capability check rejects a
+custom `process_batch` unless that trainer explicitly confirms that the shared
+Forward XM data flow is equivalent. It does not reject a trainer solely for
+overriding `compute_loss`; the canonical per-sample primitive in Section 14
 prevents that loss-specific special case.
 
 ## 10. Code Organization
@@ -374,17 +414,35 @@ Add:
 src/musubi_tuner/training/explorative.py
 tests/test_explorative_modeling.py
 docs/explorative_modeling.md
+.github/workflows/test-explorative-modeling.yml
+scripts/run_xm_min_torch_test.py
 ```
 
 `training/explorative.py` owns pure, model-independent mechanics:
 
 - Candidate noise generator creation.
-- PyTorch CPU and active-accelerator RNG isolation via `torch.random.fork_rng`.
 - Per-sample winner-state initialization and updates.
-- Candidate-search summary metrics.
-- A callback-based `search_best_noise` loop shared by the standard trainer path
-  and MiniMax-H3, so H3 does not copy candidate generation, RNG replay, winner
-  assembly, or metric accumulation.
+
+The pure update operation has this contract:
+
+```text
+update_winners(
+    best_losses,
+    winner_noise,
+    winner_indices,
+    candidate_losses,
+    candidate_noise,
+    candidate_index,
+) -> (best_losses, winner_noise, winner_indices)
+```
+
+It validates loss finiteness/shape and noise shape/dtype/device before returning
+updated tensors; it owns no trainer or callback state.
+
+The module does not own a callback-based search loop. The standard and H3 paths
+invoke `torch.random.fork_rng` directly so their different noising and scoring
+contracts remain visible at the call site. Each path also accumulates its two
+summary metrics directly; two scalar reductions do not justify a framework.
 
 Modify `training/timesteps.py` to add one pure
 `get_noise_coefficients_from_timesteps` helper. It returns the already sampled,
@@ -393,13 +451,14 @@ virtual method.
 
 Modify `training/trainer_base.py` to own trainer-aware integration:
 
-- XM compatibility validation.
-- The initialized `_xm_enabled` dispatch flag.
+- Best-of-K option and compatibility validation.
+- The initialized neutral `_best_of_k_count` and `_best_of_k_enabled` dispatch
+  state.
 - `compute_per_sample_loss`, the canonical per-sample objective from which the
   ordinary scalar loss is derived.
-- A base `process_batch_xm` implementation for standard flow trainers.
+- A base `process_batch_best_of_k` implementation for standard Forward XM.
 - Standard-flow candidate scoring and the final winner forward.
-- One standard-versus-XM dispatch branch in the training loop.
+- One standard-versus-best-of-K dispatch branch in the training loop.
 
 Modify `ideogram4_train_network.py` to move its unweighted MSE into
 `compute_per_sample_loss`; its scalar wrapper calls that primitive and only adds
@@ -410,14 +469,26 @@ incompatibility reasons.
 
 Modify `minimax_h3_train_network.py` to:
 
-- Override `process_batch_xm` while reusing `search_best_noise`.
+- Add the model-specific `--h3_video_best_of_k` option, reject
+  `--xm_best_of_k > 1`, and override `get_best_of_k_count`.
+- Override `process_batch_best_of_k` with an explicit H3-owned candidate loop.
 - Prepare one fixed audio/timestep/condition state for all video candidates.
-- Factor video, audio, and total per-sample losses through one local component
-  helper, using video loss for selection and total loss for the final update.
+- Factor video and audio per-sample losses through one private component helper,
+  using video loss for selection and a separate shared combiner for the final
+  weighted total.
 
 Extend `tests/test_minimax_h3_training.py` for H3 component and final-gradient
 coverage in addition to the model-independent cases in
 `tests/test_explorative_modeling.py`.
+
+The new workflow runs the focused tests on every relevant pull request and push
+under Python 3.10 with the PyTorch 2.5.1 CPU wheel, and asserts the runtime
+release tuple and CPU backend before pytest starts. The script provides one
+repeatable target that creates an isolated uv environment, installs the exact
+requested torch build, prints and asserts `torch.__version__`, checks the
+requested device, and runs the focused autocast test. Section 16.4 separately
+defines the CUDA minimum-version gate because GitHub-hosted CPU runners cannot
+validate CUDA autocast behavior.
 
 No model package, root entry point, dataset, cache, network, optimizer, or
 checkpoint module changes.
@@ -426,8 +497,9 @@ checkpoint module changes.
 
 ### 11.1 Disabled path
 
-At initialization, `xm_best_of_k == 1` sets `self._xm_enabled` to false. The
-current loop then takes the standard dispatch arm:
+At initialization, the active trainer's best-of-K value of 1 sets
+`self._best_of_k_enabled` to false. The current loop then takes the standard
+dispatch arm:
 
 1. Scale/shift latents.
 2. Draw one `torch.randn_like(latents)` noise tensor.
@@ -435,13 +507,13 @@ current loop then takes the standard dispatch arm:
 4. Backpropagate the returned scalar.
 
 There are no nested or helper-level `K == 1` checks. Compatibility checks are
-skipped at initialization when `_xm_enabled` is false, and the standard arm
-creates no candidate seed, RNG scope, winner state, or XM metrics. This is
-required for random-stream compatibility. The per-sample loss refactor may
+skipped at initialization when `_best_of_k_enabled` is false. The standard arm
+creates no candidate seed, RNG scope, winner state, or exploration metrics. This
+is required for random-stream compatibility. The per-sample loss refactor may
 change the final reduction's last bits; Section 19 defines the accepted numeric
 tolerance rather than claiming bitwise identity.
 
-### 11.2 Enabled path
+### 11.2 Standard Forward XM path
 
 For `K > 1`:
 
@@ -462,8 +534,8 @@ For `K > 1`:
      the context restores CPU and device states on exit, every candidate starts
      from the same condition state.
    - Call `call_dit` under `torch.no_grad()`.
-   - Compute a finite selection-score vector of shape `[batch_size]`. The base
-     path uses `compute_per_sample_loss`; MiniMax-H3 uses its video component.
+   - Compute a finite selection-score vector of shape `[batch_size]` with
+     `compute_per_sample_loss`.
    - Update the winning loss, index, and noise independently per sample.
 7. Assemble one winner-noise tensor by replacing only the improved samples as
    candidates stream through memory, then apply the fixed per-sample sigma:
@@ -491,15 +563,11 @@ The final microbatch may combine sample 0's candidate 3, sample 1's candidate 0,
 and sample 2's candidate 2. Selecting one candidate index for the entire batch
 is incorrect.
 
-The base and MiniMax-H3 paths both call the callback-based `search_best_noise`
-helper for steps 4 through 7. Architecture callbacks own construction and
-scoring of one candidate; the shared helper owns candidate generation, forked
-RNG scopes, finite/shape validation, per-sample replacement, and metrics.
+### 11.3 MiniMax-H3 video-focused best-of-K path
 
-### 11.3 MiniMax-H3 video-only path
-
-MiniMax-H3 overrides `process_batch_xm` because its ordinary `process_batch`
-owns joint video/audio preparation. For `K > 1` it:
+MiniMax-H3 overrides `process_batch_best_of_k` because its ordinary
+`process_batch` owns joint video/audio preparation. For
+`h3_video_best_of_k > 1` it:
 
 1. Builds `_runtime_batch_plan` once and preserves the existing batch-size-one
    rule.
@@ -507,10 +575,14 @@ owns joint video/audio preparation. For `K > 1` it:
    separately shifted `sigma_video` and `sigma_audio` once.
 3. Builds `noisy_audio`, condition seeds, visual conditions, audio conditions,
    and effective audio-loss weights once outside the candidate loop.
-4. Passes a callback to `search_best_noise` that varies only video noise, builds
-   `noisy_video`, calls the joint DiT, and returns only the `[B]` video-loss
+4. Runs its own sequential candidate loop. Each iteration draws only video
+   noise, enters `torch.random.fork_rng` directly, builds `noisy_video`, calls
+   the joint DiT under `torch.no_grad()`, and uses only the `[B]` video-loss
    component as the selection score.
-5. Recomputes once with the selected video noise and all fixed audio/condition
+5. Calls the shared pure `update_winners` helper to validate and stream the
+   winning video noise without retaining a K-sized candidate tensor. It
+   accumulates its candidate-score metrics locally.
+6. Recomputes once with the selected video noise and all fixed audio/condition
    state, then applies the ordinary total loss
    `video_loss + audio_loss_weight * audio_loss` and ordinary component metrics.
 
@@ -518,7 +590,9 @@ The fixed audio input and target do not imply a fixed audio loss: H3 is a joint
 model, so its audio prediction may respond to a changed video input. The audio
 component is intentionally ignored for candidate ranking but remains in the
 gradient-tracked final objective. No candidate audio noise is generated, and
-audio supervision is never disabled by XM.
+audio supervision is never disabled by the heuristic. Because its selection
+score differs from that final objective, this path must not use XM terminology
+in user-visible logs, metrics, or documentation.
 
 ## 12. Timestep and Noising Contract
 
@@ -594,8 +668,9 @@ training and distribution-preserving timestep sampling.
 
 ## 13. RNG and Condition Contract
 
-Forward XM must not select a candidate because it received more conditioning,
-a different dropout mask, or a different stochastic augmentation.
+Neither Forward XM nor the H3 heuristic may select a candidate because it
+received more conditioning, a different dropout mask, or a different stochastic
+augmentation.
 
 The candidate search uses `torch.random.fork_rng` with only the active
 accelerator device listed. PyTorch always forks the CPU RNG as part of that
@@ -614,7 +689,7 @@ model forward after candidate-generator setup.
 This fixes Kandinsky 5 visual-condition frame selection, which currently uses
 `torch.rand` on `cond_lat.device`, and covers model dropout. If a future
 supported trainer introduces Python or NumPy randomness inside its forward, its
-XM compatibility contract and tests must explicitly add the required state;
+best-of-K compatibility contract and tests must explicitly add the required state;
 R1 does not prepay that complexity. It also does not try to make
 nondeterministic accelerator kernels bitwise deterministic. Candidate selection
 is based on the no-grad scores; the final recomputation trains the selected
@@ -656,37 +731,44 @@ accumulate floating-point sums in different orders.
 
 ### 14.2 MiniMax-H3 loss components
 
-MiniMax-H3 factors its existing objective into one local helper returning three
-vectors of shape `[B]`:
+MiniMax-H3 factors its existing objective into one private
+`_compute_per_sample_component_losses` helper returning two vectors:
 
 ```text
-video_per_sample
-audio_per_sample
-total_per_sample = video_per_sample + audio_loss_weight * audio_per_sample
+(video_per_sample, audio_per_sample)  # each shape [B]
 ```
 
-`compute_per_sample_loss` returns `total_per_sample`. The ordinary
-`compute_loss` returns its mean and logs the means of the already computed video
-and audio components. The H3 XM candidate callback selects with
-`video_per_sample` only. All three consumers call the same component helper, so
-the video/audio formulas are not duplicated and cannot drift independently.
+One private `_combine_per_sample_losses` helper applies
+`video_per_sample + audio_loss_weight * audio_per_sample`.
+`compute_per_sample_loss` calls both helpers and returns the total vector. The
+ordinary `compute_loss` obtains the two components once, calls the same combiner,
+returns the total mean, and logs the component means. The H3 best-of-K loop calls
+the component helper and selects with `video_per_sample` only. Video/audio MSE
+and weighted-total formulas therefore each have one definition; adding another
+modality or cross-modal term must update the canonical component/combiner pair,
+not a public three-value return contract.
 
 The audio-loss weight keeps its existing validation and zero-weight behavior.
-Although H3 currently enforces `B = 1`, the component tensors retain a batch
-dimension so the XM search and loss contract do not introduce a scalar special
-case.
+Although H3 currently enforces `B = 1`, its actual inputs and model outputs
+already have a leading batch dimension, and loss reduction must preserve that
+dimension while averaging the others. Returning `[1]` therefore requires no
+synthetic wrap. Converting to a scalar and wrapping it again at the shared
+winner-update boundary would add a shape-destroying special case with no user
+benefit. Lifting H3's batch-size-one restriction is a separate model/runtime
+change and is outside R1.
 
 For `K > 1`, every candidate loss must be finite. A NaN or infinity raises with
 the trainer name, candidate index, and affected sample indices before backward.
 This does not affect `K = 1`. The current shared training loop has no generic
 "skip non-finite loss and continue" policy, and `argmin` over a vector containing
-NaN has no defined XM selection meaning. Treating non-finite values as losing
-candidates would silently mask instability, so fail-fast is the explicit XM
-policy.
+NaN has no defined best-of-K selection meaning. Treating non-finite values as
+losing candidates would silently mask instability, so fail-fast is the explicit
+policy for both selection modes.
 
 ## 15. Logging
 
-For `K > 1`, merge these detached values into `loss_metrics`:
+For standard Forward XM with `K > 1`, merge these detached values into
+`loss_metrics`:
 
 - `xm/candidate_loss_mean`: mean no-grad loss across all samples/candidates.
 - `xm/selection_gain`: candidate-zero mean loss minus selected mean loss.
@@ -698,9 +780,15 @@ key per candidate or a mean winner index: candidate labels are exchangeable, so
 their average index has no useful training interpretation, and tracker schemas
 should stay bounded.
 
-Both XM metrics summarize the candidate selection score. For MiniMax-H3 they
-therefore summarize video loss only; the existing final `loss/video` and
+MiniMax-H3 emits the same two quantities under distinct names:
+
+- `h3_video_best_of_k/candidate_loss_mean`
+- `h3_video_best_of_k/selection_gain`
+
+Those H3 metrics summarize video loss only. The existing final `loss/video` and
 `loss/audio` metrics continue to describe the gradient-tracked composite update.
+Using an H3-specific prefix prevents dashboards from presenting the heuristic
+as paper-defined XM.
 
 ## 16. Distributed and Runtime Compatibility
 
@@ -735,16 +823,23 @@ that demonstrates missing gradients or a detached cached cast.
 
 An automated mixed-precision regression runs a no-grad candidate forward
 followed by the gradient-enabled winner forward and asserts finite, nonzero
-trainable-parameter gradients. If that test exposes a version-specific PyTorch
-bug, the design must be amended with the failing versions and minimal
-reproducer before adding a workaround.
+trainable-parameter gradients. The dedicated workflow runs it on every relevant
+push and pull request under Python 3.10 and the 2.5.1 wheel from PyTorch's CPU
+index. The job prints `torch.__version__` and fails unless its normalized
+release is exactly `2.5.1` and `torch.version.cuda is None`. This is a real
+minimum-version regression gate, not an optional developer check. If it exposes
+a version-specific PyTorch bug, the design must be amended with the failing
+version and minimal reproducer before adding a workaround.
 
-The normal developer environment is not sufficient evidence because it may
-resolve a newer torch. Before merge, run this regression in a dedicated Python
-3.10 environment with exactly `torch==2.5.1+cu124` on CUDA, assert and record
-`torch.__version__` in the output, and attach the command/result to the PR. This
-minimum-version run is an acceptance gate. A CPU `torch==2.5.1` run may be added
-for CI convenience but does not replace the CUDA 2.5.1 cache-path check.
+CPU CI cannot establish CUDA autocast behavior. Before merge, and again after a
+rebase that changes the candidate path, run
+`scripts/run_xm_min_torch_test.py --torch 2.5.1+cu124 --device cuda`. The target
+creates an isolated Python 3.10 uv environment, installs from PyTorch's cu124
+index, prints and asserts `torch.__version__`, verifies CUDA is available, and
+runs only the focused autocast regression. Attach its captured command/output
+to the PR. This CUDA result is a merge gate until the repository has a GPU CI
+runner; if one is added, the same target becomes an automated job rather than a
+second test definition.
 
 ### 16.5 Compilation
 
@@ -753,20 +848,25 @@ compile graph for each K or candidate chunk size.
 
 ### 16.6 Checkpoints and resume
 
-XM adds no persistent model or optimizer state. The common config/logging path
-records `xm_best_of_k`. Candidate generators are recreated per step from the
-restored seeded RNG, so checkpoint resume at an optimizer-step boundary remains
-reproducible under the repository's existing guarantees.
+The selection modes add no persistent model or optimizer state. The existing
+config/logging path records the applicable `xm_best_of_k` or
+`h3_video_best_of_k` option. Candidate generators are recreated per step from
+the restored seeded RNG, so checkpoint resume at an optimizer-step boundary
+remains reproducible under the repository's existing guarantees.
 
 ## 17. Errors and Diagnostics
 
 Fail before dataset/model allocation for:
 
 - `xm_best_of_k < 1`.
+- `h3_video_best_of_k < 1` in MiniMax-H3.
+- MiniMax-H3 with `xm_best_of_k > 1`; the error points to
+  `--h3_video_best_of_k` and explains the objective mismatch.
 - `xm_best_of_k > 1` when
-  `get_xm_incompatibility_reason(args) -> str | None` returns a reason.
-- A custom `process_batch` without an explicit confirmation that the shared XM
-  data flow is equivalent or an architecture-owned XM integration.
+  `get_best_of_k_incompatibility_reason(args) -> str | None` returns a reason.
+- A custom `process_batch` without an explicit confirmation that the shared
+  Forward XM data flow is equivalent or an architecture-owned best-of-K
+  integration.
 
 Fail during the affected step for:
 
@@ -776,13 +876,14 @@ Fail during the affected step for:
 - A candidate-zero input that violates the tested fixed-timestep coefficient
   contract in a newly added architecture.
 
-Startup logs state K, sequential memory-saving mode, supported trainer name, and
-the approximate `(K + 3) / 3` operation-count multiplier for `K > 1`. They do
-not translate it into an unmeasured wall-clock claim. They also warn that
-published gains are pretraining results and are not validated for LoRA.
-MiniMax-H3 additionally logs `selection objective: video only` and
-`final objective: video + weighted audio` so a run cannot be mistaken for joint
-multimodal XM or video-only final training.
+Startup logs state the active option, K, sequential memory-saving mode,
+supported trainer name, and approximate `(K + 3) / 3` operation-count multiplier
+for `K > 1`. They do not translate it into an unmeasured wall-clock claim. They
+also warn that published XM gains are pretraining results and are not validated
+for LoRA. MiniMax-H3 instead logs `method: video-focused best-of-K heuristic
+(not Forward XM)`, `selection objective: video only`, and `final objective:
+video + weighted audio` so a run cannot be mistaken for joint multimodal XM or
+video-only final training.
 
 ## 18. Documentation
 
@@ -792,19 +893,21 @@ both `README.md` and `README.ja.md`. The document covers:
 - A minimal TOML and CLI example.
 - Exact fixed-data/fixed-timestep semantics and candidate-derived target pairing.
 - Supported and rejected entry points.
-- MiniMax-H3's video-only selection semantics: fixed audio noise/input,
-  video-only candidate score, and full video-plus-audio final update.
+- Why MiniMax-H3 uses the separate `--h3_video_best_of_k` option, is not Forward
+  XM, and keeps fixed audio noise/input while using a video-only candidate score
+  and full video-plus-audio final update.
 - Why `K = 1` is disabled behavior.
 - Sequential memory-saving compute cost, with wall-clock cost explicitly marked
   hardware/model dependent unless measured.
 - Loss non-comparability across K.
 - The lack of established LoRA quality gains.
 - Guidance and inference remaining unchanged.
-- The non-finite policy: XM raises immediately if any candidate selection loss
-  is NaN or infinite. Standard mixed-precision training may instead reach
-  backward and have GradScaler skip an update after detecting non-finite
-  gradients, depending on precision and loss-scaling configuration; users must
-  not assume the two modes recover identically.
+- The non-finite policy: standard mixed-precision training with GradScaler may
+  skip an update after detecting non-finite gradients during backward, depending
+  on precision and loss-scaling configuration. Forward XM and H3 best-of-K
+  instead raise before backward if any candidate selection loss is NaN or
+  infinite. Best-of-K training is deliberately stricter and fails faster; users
+  must not assume the modes recover identically from numerical instability.
 - A conservative experiment recipe: compare `K = 1` and `K = 2` with the same
   seed, data, optimizer-step budget, and downstream validation metric; do not
   compare raw training loss as the decision metric.
@@ -819,18 +922,19 @@ required.
 
 ### 19.1 Parser and validation
 
-- Default `xm_best_of_k` is 1.
-- TOML/CLI parsing accepts integers `>= 1`.
+- Default `xm_best_of_k` is 1; H3 also defaults `h3_video_best_of_k` to 1.
+- TOML/CLI parsing accepts integers `>= 1` for the applicable option.
 - Values below 1 fail before dataset construction.
 - `K > 1` accepts the Self-Flow entry point when `--self_flow` is off and rejects
-  the mode when it is on; it accepts MiniMax-H3's explicit video-only
-  integration and rejects HiDream-O1 with the concrete reason from Section 8.
+  the mode when it is on; it rejects Forward XM for MiniMax-H3 while accepting
+  H3's separate video-focused option, and rejects HiDream-O1 with the concrete
+  reason from Section 8.
 - `K = 1` remains accepted for those trainers.
 
 ### 19.2 Baseline compatibility
 
 - With `K = 1`, the original `process_batch` is called once.
-- The XM module is not called and no extra random number is drawn.
+- The explorative module is not called and no extra random number is drawn.
 - Float32 loss and trainable gradients match the pre-feature path under
   `rtol=1e-5, atol=1e-8`; metrics retain their existing keys/meaning, and the
   post-step RNG state is exactly equal.
@@ -838,16 +942,18 @@ required.
 ### 19.3 Candidate semantics
 
 - Construct a batch where different samples have different best candidate
-  indices and assert per-sample winner assembly.
-- Assert streaming `torch.where` winner assembly is equivalent to indexing each
-  sample from its winning candidate without retaining a `[K, B, ...]` tensor.
+  indices, then assert each winner-noise sample equals the corresponding sample
+  from its expected candidate. The test does not prescribe `where`, indexing,
+  scatter, or another assembly implementation.
 - Assert exactly K no-grad forwards and one grad-enabled winner forward.
 - Assert only winner noise contributes to trainable-parameter gradients.
 - Under an available autocast dtype, assert no-grad exploration followed by the
   winner recomputation yields finite, nonzero trainable-parameter gradients
   without an explicit cache-clear call.
-- Repeat that autocast regression on CUDA under exactly
-  `torch==2.5.1+cu124`, with the asserted torch version in captured evidence.
+- Run that regression automatically with the 2.5.1 CPU wheel, asserting the
+  normalized release and CPU backend; repeat it through the reproducible target
+  on CUDA under exact
+  `torch==2.5.1+cu124`, with asserted versions in both outputs.
 - Assert clean latents, timesteps, and conditions are identical across
   candidates, while each derived flow/noise target matches its candidate noise.
 - Assert candidate noise differs and uses the expected dtype/device/shape.
@@ -874,6 +980,12 @@ required.
   float32 `rtol=1e-5, atol=1e-6`, float16 `rtol=1e-3, atol=1e-3`, and bfloat16
   `rtol=1e-2, atol=1e-2`. No test relies on framework defaults or bitwise
   equality across devices.
+- The tolerances reflect representation precision: float16's ten stored
+  fraction bits give a relative scale near `2^-10 ~= 1e-3`, while bfloat16's
+  seven give `2^-7 ~= 1e-2`. Float32's `1e-5` relative tolerance is deliberately
+  above its single-operation epsilon to cover accumulated multi-operation and
+  backend reduction-order differences; its absolute tolerance covers values
+  near zero.
 - Distribution-preserving sampling draws timesteps once per microbatch.
 - Wan high/low mode selection happens once and every candidate stays on the
   selected side of the boundary.
@@ -885,9 +997,9 @@ required.
   reduction uses `torch.allclose(rtol=1e-5, atol=1e-8)`.
 - Ideogram 4 uses one unweighted per-sample MSE primitive; its scalar loss equals
   the primitive mean with the same tolerance while retaining diagnostic metrics.
-- MiniMax-H3's component helper returns `[B]` video, audio, and weighted-total
-  losses; the total matches the ordinary scalar loss with the same reduction
-  tolerance.
+- MiniMax-H3's private component helper returns `[B]` video and audio losses;
+  the separate canonical combiner returns a weighted-total `[B]` vector whose
+  mean matches the ordinary scalar loss with the same reduction tolerance.
 - MiniMax-H3 candidate selection ignores audio loss, keeps audio noise/time and
   augmented conditions identical across candidates, and the final winner loss
   still includes audio loss and produces audio-path gradients when its weight is
@@ -896,7 +1008,9 @@ required.
   full-objective-best candidate and assert that video-only selection wins. This
   prevents a later refactor from silently reverting to composite selection.
 - NaN/Inf candidate losses fail with candidate/sample diagnostics.
-- XM metrics are absent at K=1 and present with bounded keys at K>1.
+- Exploration metrics are absent at K=1 and present with bounded keys at K>1;
+  standard trainers use the `xm/` prefix and H3 uses
+  `h3_video_best_of_k/`.
 
 ### 19.7 Runtime integration
 
@@ -918,13 +1032,12 @@ not to replace tests with "ran once" evidence.
 
 If an architecture-local batched `K = 2` prototype exists, run it on the same
 model, batch, precision, block-swap configuration, warmup, and measurement
-window. Report sequential/batched step-time ratio, each peak VRAM value, and the
-VRAM delta. Without such a prototype, report only measured sequential numbers
-and do not label a hypothetical batched time. For R2 triage, less than 10% lower
-median step time keeps batching deferred; at least 25% lower median step time
-makes it an R2 priority if measured peak VRAM leaves at least 10% free memory on
-the tested device. Results between those thresholds are recorded as
-inconclusive, not rounded into either claim.
+window. Report raw median sequential and batched step times, their ratio, both
+peak VRAM values, the VRAM delta, device model, and software versions. Without
+such a prototype, report only measured sequential numbers and do not label a
+hypothetical batched time. R1 defines no universal go/no-go threshold: an R2
+decision must interpret the measured trade-off against target hardware and
+user workloads rather than encode arbitrary percentages in this spec.
 
 ## 20. Acceptance Criteria
 
@@ -932,32 +1045,37 @@ R1 is complete when:
 
 - The branch remains based on the recorded `upstream/dev` commit unless an
   intentional rebase is documented.
-- The common parser exposes only `--xm_best_of_k`, defaulting to 1.
+- The common parser exposes `--xm_best_of_k`, defaulting to 1; MiniMax-H3
+  exposes a separate `--h3_video_best_of_k`, also defaulting to 1, and rejects
+  XM rather than conflating the two methods.
 - `K = 1` follows the non-XM baseline path with exactly matching RNG behavior
   and loss/gradient agreement under the declared float32 tolerance.
 - `K > 1` holds clean data/latent, timestep, condition, and stochastic condition
   choices fixed while varying only noise and its deterministically derived
   prediction target.
-- Winners are selected independently per sample with the actual weighted loss;
-  MiniMax-H3 uses its documented video-only projection.
+- Forward XM winners are selected independently per sample with the actual
+  weighted loss. MiniMax-H3's separately named heuristic selects video noise by
+  video loss and is never described as Forward XM.
 - Candidate forwards build no graph and exactly one winner forward builds the
   graph used by backward.
-- No XM code mutates the global autocast cache, and mixed-precision winner
+- No best-of-K code mutates the global autocast cache, and mixed-precision winner
   recomputation produces valid trainable-parameter gradients.
-- The autocast regression also passes on CUDA with recorded
-  `torch==2.5.1+cu124` evidence.
+- The minimum-version autocast regression is automated on exact CPU
+  `torch==2.5.1` and also passes through the reproducible CUDA target with
+  recorded `torch==2.5.1+cu124` evidence.
 - Sequential search stores no K-sized latent or activation tensor.
 - Base and Ideogram 4 scalar losses are derived from their canonical per-sample
   objective primitives.
 - MiniMax-H3 varies only video noise, selects only by video loss, keeps the audio
   candidate state fixed, and retains weighted audio loss/gradients in the final
   update.
-- The supported trainer matrix runs through shared integration, and unsupported
-  candidate-state/objective modes fail before allocation with concrete reasons.
+- The supported trainer matrix runs through the neutral best-of-K dispatch;
+  unsupported candidate-state/objective modes fail before allocation with
+  concrete reasons.
 - Gradient accumulation and DDP retain one backward/update contract per
   microbatch/accumulation boundary.
 - Block swap, checkpointing, compilation, checkpoint saving, and resume require
-  no XM-specific persistent state.
+  no best-of-K-specific persistent state.
 - Automated tests pass.
 - User documentation states cost, scope, supported trainers, and evidence
   limits without promising LoRA quality gains.
@@ -969,7 +1087,7 @@ R1 is complete when:
 - HiDream-O1 support with a recomposable candidate-noising state and an explicit
   decision about whether selection uses flow MSE, DINO loss, or their composite.
 - Full MiniMax-H3 joint video/audio candidate exploration and composite
-  candidate selection beyond R1's video-only contract.
+  candidate selection beyond R1's video-focused heuristic.
 - Self-Flow candidate semantics.
 - Full-finetune loop support.
 - Reverse XM with a condition-aware data-search and anti-collapse contract.
