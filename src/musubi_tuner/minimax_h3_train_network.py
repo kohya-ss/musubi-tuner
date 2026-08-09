@@ -1092,6 +1092,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             except ValueError as error:
                 raise ValueError(f"MiniMax-H3: {error}") from error
 
+        if candidate_zero_mean is None:
+            raise RuntimeError("internal error: best-of-K candidate loop ran zero iterations")
+
         winner_input = (1.0 - state.sigma_video) * latents + state.sigma_video * winner_noise
         output = self._call_training_dit(
             args,
@@ -1113,7 +1116,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             network_dtype,
             global_step,
         )
-        assert candidate_zero_mean is not None
         return loss, {
             **metrics,
             "h3_video_best_of_k/candidate_loss_mean": (candidate_loss_sum / (self._best_of_k_count * batch_size)).item(),

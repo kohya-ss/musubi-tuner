@@ -175,6 +175,19 @@ def test_update_winners_rejects_batch_reduced_candidate_score():
         )
 
 
+def test_update_winners_rejects_nonvector_best_loss():
+    _, _, update_winners = _explorative_helpers()
+    with pytest.raises(ValueError, match=r"best loss must have shape \[B\]"):
+        update_winners(
+            torch.full((2, 1), torch.inf),
+            torch.empty(2, 1),
+            torch.full((2,), -1, dtype=torch.long),
+            torch.tensor([1.0, 2.0]),
+            torch.zeros(2, 1),
+            0,
+        )
+
+
 def test_update_winners_keeps_lower_index_on_equal_loss():
     _, _, update_winners = _explorative_helpers()
     best, noise, indices = update_winners(
@@ -200,7 +213,7 @@ def test_update_winners_rejects_noise_shape_or_dtype_mismatch():
     )
     with pytest.raises(ValueError, match="shapes must match"):
         update_winners(*common, torch.zeros(2, 2), 0)
-    with pytest.raises(ValueError, match="share dtype and device"):
+    with pytest.raises(ValueError, match=r"share dtype$"):
         update_winners(*common, torch.zeros(2, 1, dtype=torch.float64), 0)
 
 
@@ -849,6 +862,33 @@ def _run_toy_xm(
         0,
     )
     return trainer, transformer, loss, metrics
+
+
+def test_standard_xm_rejects_zero_iteration_internal_state_before_final_forward():
+    trainer = _ToyXMTrainer()
+    trainer._best_of_k_count = 0
+    trainer._best_of_k_enabled = True
+    transformer = _ToyTransformer()
+    latents = torch.zeros(2, 1, 1, 1)
+    noise = torch.ones_like(latents)
+
+    with pytest.raises(RuntimeError, match="candidate loop ran zero iterations"):
+        trainer.process_batch_best_of_k(
+            _xm_args(),
+            _ToyAccelerator(),
+            transformer,
+            None,
+            {"timesteps": [0.5, 0.5], "condition": torch.ones(2, 1)},
+            latents,
+            noise,
+            None,
+            torch.float32,
+            torch.float32,
+            None,
+            0,
+        )
+
+    assert transformer.forward_shapes == []
 
 
 def test_standard_xm_selects_mixed_winners_and_builds_one_gradient_graph(monkeypatch):

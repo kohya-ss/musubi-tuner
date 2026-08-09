@@ -1321,6 +1321,9 @@ class NetworkTrainer:
             except ValueError as error:
                 raise ValueError(f"{self.architecture_full_name}: {error}") from error
 
+        if candidate_zero_mean is None:
+            raise RuntimeError("internal error: best-of-K candidate loop ran zero iterations")
+
         # Samples may choose different candidates because sigma is per sample and fixed across candidates.
         winner_input = (1.0 - sigma) * latents + sigma * winner_noise
         output = self.call_dit(
@@ -1343,7 +1346,6 @@ class NetworkTrainer:
             network_dtype,
             global_step,
         )
-        assert candidate_zero_mean is not None
         return loss, {
             **metrics,
             "xm/candidate_loss_mean": (candidate_loss_sum / (self._best_of_k_count * batch_size)).item(),

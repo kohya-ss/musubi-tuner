@@ -812,6 +812,41 @@ def _run_h3_best_of_k(monkeypatch, trainer=None, device="cpu"):
     return trainer, loss, metrics
 
 
+def test_h3_best_of_k_rejects_zero_iteration_internal_state_before_final_forward():
+    trainer = _ToyH3BestOfKTrainer()
+    trainer._best_of_k_count = 0
+    trainer._best_of_k_enabled = True
+    args = _trainer_args(
+        task="ref2va",
+        h3_visual_cond_clean=0.5,
+        h3_audio_cond_clean=0.5,
+        h3_video_best_of_k=2,
+    )
+    batch = _training_batch()
+    batch["timesteps"] = [0.25]
+    batch["latents_ref_000_image"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["latents_ref_001_audio"] = torch.zeros(1, 32, 2, 8)
+    latents = torch.zeros(1, 24, 2, 4, 4)
+
+    with pytest.raises(RuntimeError, match="candidate loop ran zero iterations"):
+        trainer.process_batch_best_of_k(
+            args,
+            _Accelerator(),
+            None,
+            None,
+            batch,
+            latents,
+            torch.zeros_like(latents),
+            None,
+            torch.bfloat16,
+            torch.float32,
+            None,
+            0,
+        )
+
+    assert trainer.best_of_k_records == []
+
+
 @pytest.mark.parametrize(
     "device",
     [

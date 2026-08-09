@@ -46,8 +46,8 @@ def update_winners(
         raise ValueError("best-of-K candidate and winner noise shapes must match [B, ...]")
     if candidate_noise.device != best_losses.device or winner_noise.device != best_losses.device:
         raise ValueError("best-of-K candidate and winner noise must share the loss device")
-    if candidate_noise.dtype != winner_noise.dtype or candidate_noise.device != winner_noise.device:
-        raise ValueError("best-of-K candidate and winner noise must share dtype and device")
+    if candidate_noise.dtype != winner_noise.dtype:
+        raise ValueError("best-of-K candidate and winner noise must share dtype")
     nonfinite = (~torch.isfinite(candidate_losses)).nonzero(as_tuple=False).flatten()
     if nonfinite.numel():
         raise ValueError(f"candidate {candidate_index} has non-finite loss for sample indices {nonfinite.tolist()}")
