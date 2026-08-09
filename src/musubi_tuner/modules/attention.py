@@ -27,15 +27,6 @@ except ImportError:
     xops = None
 
 
-def _match_attention_qkv_dtype(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if q.dtype == k.dtype == v.dtype:
-        return q, k, v
-    for dtype in (torch.bfloat16, torch.float16):
-        if q.dtype == dtype or k.dtype == dtype or v.dtype == dtype:
-            return q.to(dtype), k.to(dtype), v.to(dtype)
-    return q.to(v.dtype), k.to(v.dtype), v
-
-
 @dataclass
 class AttentionParams:
     attn_mode: Optional[str] = None
@@ -186,7 +177,6 @@ def attention(
                     g = qi.shape[1] // ki.shape[1]  # [B, H, L, D] -> heads at dim 1
                     ki = ki.repeat_interleave(g, dim=1)
                     vi = vi.repeat_interleave(g, dim=1)
-                qi, ki, vi = _match_attention_qkv_dtype(qi, ki, vi)
                 x_i = torch.nn.functional.scaled_dot_product_attention(qi, ki, vi, dropout_p=drop_rate)
                 q[i] = None
                 k[i] = None
@@ -200,7 +190,6 @@ def attention(
                 g = q.shape[1] // k.shape[1]  # [B, H, L, D] -> heads at dim 1
                 k = k.repeat_interleave(g, dim=1)
                 v = v.repeat_interleave(g, dim=1)
-            q, k, v = _match_attention_qkv_dtype(q, k, v)
             x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate)
             q, k, v = None, None, None
 
@@ -213,7 +202,6 @@ def attention(
                     g = qi.shape[2] // ki.shape[2]
                     ki = ki.repeat_interleave(g, dim=2)
                     vi = vi.repeat_interleave(g, dim=2)
-                qi, ki, vi = _match_attention_qkv_dtype(qi, ki, vi)
                 x_i = xops.memory_efficient_attention(qi, ki, vi, p=drop_rate)
                 q[i] = None
                 k[i] = None
@@ -227,7 +215,6 @@ def attention(
                 g = q.shape[2] // k.shape[2]
                 k = k.repeat_interleave(g, dim=2)
                 v = v.repeat_interleave(g, dim=2)
-            q, k, v = _match_attention_qkv_dtype(q, k, v)
             x = xops.memory_efficient_attention(q, k, v, attn_bias=attn_params.attention_mask, p=drop_rate)
             q, k, v = None, None, None
 
@@ -236,8 +223,7 @@ def attention(
             x = []
             for i in range(len(q)):
                 # HND seems to cause an error
-                qi, ki, vi = _match_attention_qkv_dtype(q[i], k[i], v[i])
-                x_i = sageattn(qi, ki, vi)  # B, H, L, D. No dropout support
+                x_i = sageattn(q[i], k[i], v[i])  # B, H, L, D. No dropout support
                 q[i] = None
                 k[i] = None
                 v[i] = None
@@ -245,7 +231,6 @@ def attention(
             x = torch.cat(x, dim=0)
             q, k, v = None, None, None
         elif attn_params.cu_seqlens is None:  # all tokens are valid
-            q, k, v = _match_attention_qkv_dtype(q, k, v)
             x = sageattn(q, k, v)  # B, L, H, D. No dropout support
             q, k, v = None, None, None
         else:
@@ -256,7 +241,6 @@ def attention(
             q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
             k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
             v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
-            q, k, v = _match_attention_qkv_dtype(q, k, v)
 
             # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv. No dropout support
             x = sageattn_varlen(
@@ -272,8 +256,7 @@ def attention(
             x = []
             for i in range(len(q)):
                 # HND seems to cause an error
-                qi, ki, vi = _match_attention_qkv_dtype(q[i], k[i], v[i])
-                x_i = flash_attn_func(qi, ki, vi, drop_rate)  # B, L, H, D
+                x_i = flash_attn_func(q[i], k[i], v[i], drop_rate)  # B, L, H, D
                 q[i] = None
                 k[i] = None
                 v[i] = None
@@ -281,7 +264,6 @@ def attention(
             x = torch.cat(x, dim=0)
             q, k, v = None, None, None
         elif attn_params.cu_seqlens is None:  # all tokens are valid
-            q, k, v = _match_attention_qkv_dtype(q, k, v)
             x = flash_attn_func(q, k, v, drop_rate)  # B, L, H, D
             q, k, v = None, None, None
         else:
@@ -292,7 +274,6 @@ def attention(
             q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
             k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
             v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
-            q, k, v = _match_attention_qkv_dtype(q, k, v)
 
             # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv
             x = flash_attn_varlen_func(

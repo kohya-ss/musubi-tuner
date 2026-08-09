@@ -17,6 +17,10 @@ AUDIO_SIDECAR_EXTENSIONS = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", "
 
 # tolerance for timestamp gaps/overlaps between decoded audio chunks (codec jitter)
 DEFAULT_TIMESTAMP_TOLERANCE_SAMPLES = 2
+# tolerance for pts oscillation around the decode-order sample positions (muxers that stamp
+# audio pts from a wall clock, e.g. screen captures); bounded oscillation with no net drift
+# means the samples themselves are contiguous and only the timestamps wobble
+DEFAULT_PTS_JITTER_TOLERANCE_SECONDS = 0.1
 # tolerance for missing samples at the end of a stream (codec priming/padding); shortfalls
 # within this tolerance are zero-padded, larger shortfalls are an error
 DEFAULT_CODEC_PAD_TOLERANCE_SAMPLES = 800
@@ -130,22 +134,45 @@ def assemble_audio_chunks(
     *,
     channels: int,
     timestamp_tolerance_samples: int = DEFAULT_TIMESTAMP_TOLERANCE_SAMPLES,
+    pts_jitter_tolerance_samples: int = 0,
 ) -> torch.Tensor:
     """Concatenates (start_sample, [C, L]) chunks into one waveform.
 
     Small gaps within the tolerance are zero-filled and small overlaps are trimmed;
-    larger discontinuities are an error.
+    larger discontinuities are an error. Timestamps that only oscillate around the
+    decode-order sample positions and return to them by the last chunk carry no missing
+    or duplicated samples — the stream is contiguous and merely stamped with a jittery
+    clock — so the chunks are concatenated in decode order, ignoring pts. A real gap or
+    overlap shifts all subsequent timestamps permanently and never takes this path.
+    `pts_jitter_tolerance_samples` bounds the oscillation; 0 disables the recovery.
     """
     if not chunks:
         raise ValueError("Audio chunk list is empty")
     if timestamp_tolerance_samples < 0:
         raise ValueError("Audio timestamp tolerance must be nonnegative")
+    if pts_jitter_tolerance_samples < 0:
+        raise ValueError("Audio pts jitter tolerance must be nonnegative")
+    for _, chunk in chunks:
+        if chunk.ndim != 2 or chunk.shape[0] != channels:
+            raise ValueError(f"Audio chunk must be [{channels},L], got {tuple(chunk.shape)}")
+
+    if pts_jitter_tolerance_samples > 0:
+        deviations = []
+        nominal_start = chunks[0][0]
+        for start_sample, chunk in chunks:
+            deviations.append(start_sample - nominal_start)
+            nominal_start += chunk.shape[1]
+        peak_deviation = max(abs(deviation) for deviation in deviations)
+        if peak_deviation <= pts_jitter_tolerance_samples and abs(deviations[-1]) <= timestamp_tolerance_samples:
+            if peak_deviation > timestamp_tolerance_samples:
+                logger.debug(
+                    f"Audio pts jitter up to {peak_deviation} samples with no net drift; concatenating chunks in decode order"
+                )
+            return torch.cat([chunk for _, chunk in chunks], dim=1)
 
     expected_start = chunks[0][0]
     assembled = []
     for start_sample, chunk in chunks:
-        if chunk.ndim != 2 or chunk.shape[0] != channels:
-            raise ValueError(f"Audio chunk must be [{channels},L], got {tuple(chunk.shape)}")
         delta = start_sample - expected_start
         if abs(delta) > timestamp_tolerance_samples:
             raise ValueError(f"Audio stream is discontinuous: expected sample {expected_start}, got {start_sample}")
@@ -193,7 +220,12 @@ def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> tor
 
     if not chunks:
         raise ValueError(f"Audio source decoded no samples: {source.path}")
-    return assemble_audio_chunks(chunks, channels=channels, timestamp_tolerance_samples=timestamp_tolerance).contiguous()
+    return assemble_audio_chunks(
+        chunks,
+        channels=channels,
+        timestamp_tolerance_samples=timestamp_tolerance,
+        pts_jitter_tolerance_samples=round(sample_rate * DEFAULT_PTS_JITTER_TOLERANCE_SECONDS),
+    ).contiguous()
 
 
 def slice_audio_window(

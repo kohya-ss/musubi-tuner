@@ -23,16 +23,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 
-from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_safetensors_files
-from musubi_tuner.minimax_h3.comfy_quant_loader import checkpoint_has_comfy_quant, load_quantized_text_encoder
+from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
+
+logger = logging.getLogger(__name__)
 
 
 TEXT_WIDTH = 5120
@@ -222,23 +224,6 @@ def _language_layers(model) -> list:
     return layers
 
 
-def extract_layer_50_pre_norm(output, model) -> torch.Tensor:
-    layers = _language_layers(model)
-    if len(layers) < LAYER_50_HIDDEN_STATE_INDEX:
-        raise ValueError(f"MiniMax-H3 Qwen3-VL needs at least 50 layers, got {len(layers)}")
-
-    captured = getattr(output, "h3_layer_50_pre_norm", None)
-    if captured is None:
-        captured = getattr(model, "_h3_layer_50_pre_norm", None)
-    if captured is not None:
-        return captured
-
-    hidden_states = getattr(output, "hidden_states", None)
-    if hidden_states is None or len(hidden_states) <= LAYER_50_HIDDEN_STATE_INDEX:
-        raise ValueError("MiniMax-H3 layer-50 pre-norm state was not captured")
-    return hidden_states[LAYER_50_HIDDEN_STATE_INDEX]
-
-
 def normalize_h3_text_encoder_key(key: str) -> str:
     if key.startswith("model."):
         return "language_model." + key.removeprefix("model.")
@@ -259,42 +244,175 @@ def load_h3_text_encoder(
     device: str | torch.device,
     dtype: torch.dtype = torch.bfloat16,
     disable_mmap: bool = False,
+    nvfp4_scaled_mm: bool = False,
+    blocks_to_swap: int = 0,
+    attn_mode: str | None = None,
 ):
     from transformers import Qwen3VLConfig, Qwen3VLModel
+
+    device = torch.device(device)
+    if blocks_to_swap > 0 and device.type != "cuda":
+        raise ValueError(
+            "--text_encoder_blocks_to_swap requires a CUDA device. / --text_encoder_blocks_to_swap には CUDA デバイスが必要です。"
+        )
 
     config = Qwen3VLConfig.from_pretrained(processor_path, revision=revision)
     if config.text_config.hidden_size != TEXT_WIDTH:
         raise ValueError(f"MiniMax-H3 Qwen3-VL hidden size must be {TEXT_WIDTH}, got {config.text_config.hidden_size}")
     config.text_config.num_hidden_layers = LAYER_50_HIDDEN_STATE_INDEX
     config.text_config.use_cache = False
+    if attn_mode is not None:
+        # sdpa falls back to the O(L^2) math kernel at long context; flash_attention_2 is
+        # recommended for presentations beyond ~3k rows
+        config._attn_implementation = attn_mode
 
-    def factory():
+    from accelerate import init_empty_weights
+
+    from musubi_tuner.modules.comfy_quant_utils import (
+        FORMAT_CONVROT_INT8,
+        FORMAT_INT8_TENSORWISE,
+        FORMAT_NVFP4,
+        detect_comfy_quant_formats,
+    )
+    from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
+    from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer, apply_nvfp4_monkey_patch
+    from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+    from musubi_tuner.utils.safetensors_utils import load_safetensors
+
+    with init_empty_weights():
         model = Qwen3VLModel(config)
-        del model.language_model.norm
-        return model
+        # the layer-50 pre-norm convention: the model is truncated to 50 layers and the final
+        # norm is replaced by Identity, so last_hidden_state IS the layer-50 pre-norm state
+        model.language_model.norm = nn.Identity()
+
+    # with block swap the state dict stays on the CPU and the streamed layers never fully
+    # reside on the device; otherwise loading straight to the target device avoids a
+    # resident full-model CPU copy
+    streaming = blocks_to_swap > 0
+    load_device = torch.device("cpu") if streaming else device
+
+    def _load_with_quantizer(quantizer):
+        # the same streaming loader as the transformer; the file dictates the quantized layers
+        sd = load_safetensors_with_lora_and_fp8(
+            model_files=[str(checkpoint_path)],  # unexpanded: the loader expands split shards itself
+            lora_weights_list=None,
+            lora_multipliers=None,
+            fp8_optimization=False,
+            calc_device=device,
+            move_to_device=not streaming,
+            disable_numpy_memmap=disable_mmap,
+            quantizer=quantizer,
+        )
+        return {normalize_h3_text_encoder_key(key): value for key, value in sd.items()}
 
     files = resolve_safetensors_files(checkpoint_path)
-    if checkpoint_has_comfy_quant(files):
-        return load_quantized_text_encoder(
-            factory,
-            files,
-            device=device,
-            dtype=dtype,
-            key_transform=normalize_h3_text_encoder_key,
+    formats = detect_comfy_quant_formats(files, disable_numpy_memmap=disable_mmap)
+    if formats == {FORMAT_CONVROT_INT8}:
+        # pre-quantized ConvRot INT8 artifact; an empty target list disables dynamic quantization
+        quantizer = ConvRotInt8Quantizer(target_layer_keys=[])
+        sd = _load_with_quantizer(quantizer)
+        groupsize_map = {normalize_h3_text_encoder_key(key): value for key, value in quantizer.module_groupsizes.items()}
+        apply_convrot_int8_monkey_patch(model, sd, groupsize_map=groupsize_map)
+        # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps incoming
+        # tensors with the meta params' requires_grad; the text encoder is frozen anyway
+        model.requires_grad_(False)
+    elif FORMAT_NVFP4 in formats and formats <= {FORMAT_NVFP4, FORMAT_INT8_TENSORWISE}:
+        # pre-quantized ComfyUI NVFP4 (+AWQ) artifact with an INT8 per-row embedding
+        quantizer = NvFp4Quantizer()
+        sd = _load_with_quantizer(quantizer)
+        nvfp4_module_shapes = {normalize_h3_text_encoder_key(key): value for key, value in quantizer.nvfp4_module_shapes.items()}
+        int8_embedding_modules = [normalize_h3_text_encoder_key(key) for key in quantizer.int8_embedding_modules]
+        apply_nvfp4_monkey_patch(
+            model, sd, nvfp4_module_shapes, int8_embedding_modules, use_scaled_mm=nvfp4_scaled_mm, embedding_dtype=dtype
+        )
+        model.requires_grad_(False)
+    elif formats:
+        raise ValueError(
+            f"Unsupported ComfyUI quantization format combination in text encoder checkpoint: {sorted(formats)}."
+            " Supported: ConvRot INT8, or NVFP4 with an INT8 embedding."
+            f" / テキストエンコーダの量子化形式の組み合わせ {sorted(formats)} はサポートされていません。"
+            "ConvRot INT8、または NVFP4(+INT8 embedding) のみ対応しています。"
+        )
+    else:
+        sd = {}
+        for file in files:
+            shard = load_safetensors(str(file), device=load_device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
+            sd.update({normalize_h3_text_encoder_key(key): value for key, value in shard.items()})
+
+    # quantization scale tensors keep their own dtypes (fp32 row scales, fp8 block scales)
+    _KEEP_DTYPE_SUFFIXES = (".scale_weight", ".nvfp4_scale", ".nvfp4_block_scale")
+    for key in sd.keys():
+        if sd[key].is_floating_point() and not key.endswith(_KEEP_DTYPE_SUFFIXES):
+            sd[key] = sd[key].to(dtype)
+    model.load_state_dict(sd, strict=True, assign=True)
+    if streaming:
+        # the offloader requires frozen weights (the text encoder is frozen by contract anyway;
+        # the quantized branches have already dropped requires_grad, BF16 has not)
+        model.requires_grad_(False)
+        _enable_h3_text_encoder_streaming(model, device, blocks_to_swap)
+    else:
+        model.to(device)
+    model.eval()
+    return model
+
+
+# quantization tensors that the ConvRot INT8 / NVFP4 monkey patches hang off the patched Linear
+# modules; streamed together with the weight. An explicit allowlist keeps unrelated (tiny)
+# buffers resident instead of silently streaming whatever a future patch registers.
+_TE_STREAM_QUANT_BUFFER_NAMES = ("scale_weight", "nvfp4_block_scale", "nvfp4_scale", "pre_quant_scale")
+
+
+def _te_swap_tensor_selector(block: nn.Module) -> list[tuple[nn.Module, str]]:
+    jobs: list[tuple[nn.Module, str]] = []
+    for _, module in block.named_modules():
+        if isinstance(module, nn.Linear) and module.weight is not None:
+            jobs.append((module, "weight"))
+            for name in _TE_STREAM_QUANT_BUFFER_NAMES:
+                if name in module._buffers:
+                    jobs.append((module, name))
+    return jobs
+
+
+def _enable_h3_text_encoder_streaming(model, device: torch.device, blocks_to_swap: int) -> None:
+    """Stream ``blocks_to_swap`` of the 50 Qwen3-VL decoder layers from CPU masters (H2D only).
+
+    The text encoder is frozen and forward-only, so ``LoRAStreamOffloader`` applies as-is;
+    the transformers forward loop does not know about the offloader, so it is driven from
+    forward hooks. Everything outside the decoder layers (embeddings, vision tower, norms)
+    stays resident on the device. Masters are pageable (staged copier): no giant pinned
+    allocation, which matters on Windows.
+    """
+    from musubi_tuner.modules.custom_offloading_utils import LoRAStreamOffloader, attach_forward_streaming_hooks
+
+    layers = list(_language_layers(model))
+    num_layers = len(layers)
+    if blocks_to_swap > num_layers:
+        raise ValueError(
+            f"--text_encoder_blocks_to_swap must be at most the number of text encoder layers ({num_layers}), got {blocks_to_swap}"
         )
 
-    return load_safetensors_module(
-        factory,
-        files,
+    for name, child in model.named_children():
+        if name != "language_model":
+            child.to(device)
+    for name, child in model.language_model.named_children():
+        if name != "layers":
+            child.to(device)
+
+    offloader = LoRAStreamOffloader(
+        "mmh3-te",
+        layers,
+        num_layers,
+        blocks_to_swap,
+        supports_backward=False,
         device=device,
-        dtype=dtype,
-        key_transform=normalize_h3_text_encoder_key,
-        disable_mmap=disable_mmap,
+        ring_size=2,
+        use_pinned_memory=False,
+        swap_tensor_selector=_te_swap_tensor_selector,
     )
-
-
-class _Layer50Captured(Exception):
-    pass
+    # the handles are kept on the model so the hooks live exactly as long as the model does
+    model._h3_te_stream_hook_handles = attach_forward_streaming_hooks(offloader, layers)
+    offloader.prepare_block_devices_before_forward(layers)
+    model.h3_te_offloader = offloader
 
 
 def _processor_value(value):
@@ -335,31 +453,23 @@ def encode_h3_presentation(processor, model, presentation: H3Presentation) -> tu
     layers = _language_layers(model)
     if len(layers) != LAYER_50_HIDDEN_STATE_INDEX:
         raise ValueError(f"Released MiniMax-H3 text encoder must contain exactly 50 layers, got {len(layers)}")
-    captured = {}
+    norm = getattr(model.language_model, "norm", None)
+    if not isinstance(norm, nn.Identity):
+        raise ValueError("MiniMax-H3 text encoder must have an Identity final norm (load via load_h3_text_encoder)")
 
-    def capture_layer_50(module, args, output):
-        del module, args
-        captured["hidden"] = output[0] if isinstance(output, tuple) else output
-        raise _Layer50Captured
-
-    handle = layers[LAYER_50_HIDDEN_STATE_INDEX - 1].register_forward_hook(capture_layer_50)
-    device = next(model.parameters()).device
+    # with block swap the layer weights live on CPU masters, so the input device is taken
+    # from the always-resident embedding
+    device = model.language_model.embed_tokens.weight.device
     model_inputs = {
         key: value.to(device) if isinstance(value, torch.Tensor) else value
         for key, value in processed.items()
         if key != "token_type_ids"
     }
-    try:
-        model(**model_inputs, use_cache=False)
-    except _Layer50Captured:
-        pass
-    finally:
-        handle.remove()
-    if "hidden" not in captured:
-        raise RuntimeError("MiniMax-H3 text encoder did not reach layer 50")
-
-    output = SimpleNamespace(h3_layer_50_pre_norm=captured["hidden"], hidden_states=None, last_hidden_state=None)
-    hidden_states = extract_layer_50_pre_norm(output, model)
+    # the model is truncated to 50 layers and the final norm is Identity, so
+    # last_hidden_state is the layer-50 pre-norm hidden state
+    hidden_states = model(**model_inputs, use_cache=False).last_hidden_state
+    if hidden_states is None:
+        raise RuntimeError("MiniMax-H3 text encoder returned no last_hidden_state")
     if hidden_states.ndim != 3 or hidden_states.shape[0] != 1:
         raise ValueError(f"MiniMax-H3 layer-50 output must be [1,L,{TEXT_WIDTH}], got {tuple(hidden_states.shape)}")
     hidden_states = hidden_states[0]

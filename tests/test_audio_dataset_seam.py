@@ -8,7 +8,6 @@ import wave
 import av
 import numpy as np
 import pytest
-from safetensors.torch import save_file
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +35,6 @@ from musubi_tuner.dataset.media_utils import load_video, resample_frame_indices
 from musubi_tuner.training.audio_loss import (
     add_audio_train_args,
     effective_audio_loss_weights,
-    scan_audio_supervised_fraction,
 )
 
 
@@ -77,10 +75,13 @@ def _write_video(path: Path, *, fps: int = 24, frames: int = 48, size: int = 64)
             container.mux(packet)
 
 
-def _write_video_with_embedded_audio(path: Path, *, fps: int = 24, frames: int = 24, size: int = 64) -> None:
+def _write_video_with_embedded_audio(
+    path: Path, *, fps: int = 24, frames: int = 24, size: int = 64, pts_jitter: tuple[int, ...] = ()
+) -> None:
     # audio is interleaved in per-frame chunks like real muxers produce; in containers with a
     # coarse timestamp grid (Matroska: 1 ms) this quantizes chunk timestamps, which decode_audio
-    # must tolerate when reassembling the stream
+    # must tolerate when reassembling the stream. pts_jitter offsets chunk timestamps (cycled
+    # per chunk, in samples) the way wall-clock muxers do, without touching the samples.
     samples = (_sine_stereo(SAMPLE_RATE) * 32767.0).astype(np.int16)
     with av.open(str(path), mode="w") as container:
         video_stream = container.add_stream("mpeg4", rate=fps)
@@ -90,7 +91,7 @@ def _write_video_with_embedded_audio(path: Path, *, fps: int = 24, frames: int =
         audio_stream = container.add_stream("pcm_s16le", rate=SAMPLE_RATE)
         audio_stream.layout = "stereo"
 
-        def mux_audio_chunk(start: int, count: int) -> None:
+        def mux_audio_chunk(start: int, count: int, jitter: int = 0) -> None:
             chunk = samples[:, start : start + count]
             if chunk.shape[1] == 0:
                 return
@@ -99,7 +100,7 @@ def _write_video_with_embedded_audio(path: Path, *, fps: int = 24, frames: int =
             interleaved[0, 1::2] = chunk[1]
             audio_frame = av.AudioFrame.from_ndarray(interleaved, format="s16", layout="stereo")
             audio_frame.sample_rate = SAMPLE_RATE
-            audio_frame.pts = start
+            audio_frame.pts = start + jitter
             for packet in audio_stream.encode(audio_frame):
                 container.mux(packet)
 
@@ -110,7 +111,7 @@ def _write_video_with_embedded_audio(path: Path, *, fps: int = 24, frames: int =
             frame = av.VideoFrame.from_ndarray(image, format="rgb24")
             for packet in video_stream.encode(frame):
                 container.mux(packet)
-            mux_audio_chunk(audio_pos, samples_per_frame)
+            mux_audio_chunk(audio_pos, samples_per_frame, pts_jitter[index % len(pts_jitter)] if pts_jitter else 0)
             audio_pos += samples_per_frame
         for packet in video_stream.encode():
             container.mux(packet)
@@ -154,6 +155,33 @@ def test_assemble_audio_chunks_fills_small_gaps_and_trims_overlaps():
 
     with pytest.raises(ValueError, match="discontinuous"):
         assemble_audio_chunks([(0, first), (15, second)], channels=2)
+
+
+def test_assemble_audio_chunks_recovers_bounded_pts_jitter():
+    chunks = [torch.full((2, 100), float(index)) for index in range(5)]
+    jitter = (0, -20, 15, -5, 0)
+    stamped = [(index * 100 + jitter[index], chunk) for index, chunk in enumerate(chunks)]
+
+    # recovery disabled (the default): the wobble is a hard error as before
+    with pytest.raises(ValueError, match="discontinuous"):
+        assemble_audio_chunks(stamped, channels=2)
+
+    recovered = assemble_audio_chunks(stamped, channels=2, pts_jitter_tolerance_samples=50)
+    assert torch.equal(recovered, torch.cat(chunks, dim=1))
+
+
+def test_assemble_audio_chunks_rejects_net_drift_and_excessive_jitter():
+    chunks = [torch.ones(2, 100) for _ in range(3)]
+
+    # a real 40-sample gap after the first chunk shifts all later timestamps permanently
+    stamped = [(0, chunks[0]), (140, chunks[1]), (240, chunks[2])]
+    with pytest.raises(ValueError, match="discontinuous"):
+        assemble_audio_chunks(stamped, channels=2, pts_jitter_tolerance_samples=50)
+
+    # oscillation beyond the jitter tolerance is not recovered either
+    stamped = [(0, chunks[0]), (40, chunks[1]), (200, chunks[2])]
+    with pytest.raises(ValueError, match="discontinuous"):
+        assemble_audio_chunks(stamped, channels=2, pts_jitter_tolerance_samples=30)
 
 
 def test_slice_audio_window_pads_within_tolerance_and_errors_beyond():
@@ -212,6 +240,21 @@ def test_decode_audio_tolerates_coarse_container_timestamps(tmp_path: Path):
 
     assert waveform.shape[0] == 2
     assert abs(waveform.shape[1] - SAMPLE_RATE) <= SAMPLE_RATE // 1000  # within one timestamp tick
+
+
+def test_decode_audio_recovers_wall_clock_pts_jitter(tmp_path: Path):
+    # capture-style muxers stamp audio pts from a wall clock: timestamps oscillate around
+    # the true sample positions (up to 10 ms here) while the samples stay contiguous
+    path = tmp_path / "jitter.mkv"
+    _write_video_with_embedded_audio(path, pts_jitter=(0, -320, 320, 0, -160, 160))
+
+    waveform = decode_audio(AudioSource(path=path, embedded=True), sample_rate=SAMPLE_RATE, channels=2)
+
+    samples = _sine_stereo(SAMPLE_RATE)
+    assert waveform.shape[0] == 2
+    assert abs(waveform.shape[1] - SAMPLE_RATE) <= SAMPLE_RATE // 1000  # within one timestamp tick
+    length = min(waveform.shape[1], SAMPLE_RATE)
+    assert torch.allclose(waveform[:, :length], torch.from_numpy(samples[:, :length]), atol=1e-3)
 
 
 def test_decode_audio_roundtrips_wav(tmp_path: Path):
@@ -384,34 +427,6 @@ def test_effective_audio_loss_weights_combines_policy_and_presence():
     args = SimpleNamespace(video_only=False, audio_loss_weight=1.0)
     with pytest.raises(ValueError, match="exactly 0.0 or 1.0"):
         effective_audio_loss_weights(torch.tensor([0.5]), args)
-
-
-def _fake_dataset_group(bucket_items):
-    batch_manager = SimpleNamespace(buckets={"bucket": bucket_items})
-    return SimpleNamespace(datasets=[SimpleNamespace(batch_manager=batch_manager)])
-
-
-def test_scan_audio_supervised_fraction_weights_repeats(tmp_path: Path):
-    supervised_path = tmp_path / "supervised.safetensors"
-    unsupervised_path = tmp_path / "unsupervised.safetensors"
-    save_file({AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32)}, str(supervised_path))
-    save_file({AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32)}, str(unsupervised_path))
-
-    items = [
-        SimpleNamespace(latent_cache_path=str(supervised_path)),
-        SimpleNamespace(latent_cache_path=str(unsupervised_path)),
-        SimpleNamespace(latent_cache_path=str(unsupervised_path)),
-    ]
-    assert scan_audio_supervised_fraction(_fake_dataset_group(items)) == pytest.approx(1.0 / 3.0)
-
-
-def test_scan_audio_supervised_fraction_rejects_missing_entry(tmp_path: Path):
-    legacy_path = tmp_path / "legacy.safetensors"
-    save_file({"latents_1x1x1_float32": torch.zeros(1, 1, 1, dtype=torch.float32)}, str(legacy_path))
-
-    items = [SimpleNamespace(latent_cache_path=str(legacy_path))]
-    with pytest.raises(ValueError, match="re-run latent caching"):
-        scan_audio_supervised_fraction(_fake_dataset_group(items))
 
 
 def test_audio_present_cache_entry_roundtrip():

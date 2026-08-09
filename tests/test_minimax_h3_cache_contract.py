@@ -12,6 +12,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+import musubi_tuner.cache_latents as shared_cache_latents
+import musubi_tuner.cache_text_encoder_outputs as shared_text_cache
 from musubi_tuner.minimax_h3.media import (
     H3AudioSource,
     H3MediaInfo,
@@ -42,6 +44,7 @@ from musubi_tuner.dataset.cache_io import (
     save_text_encoder_output_cache_minimax_h3,
 )
 from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo
+from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _image_dataset_info_map, _target_image_paths_for_item
 
 
 @pytest.mark.parametrize(
@@ -222,6 +225,69 @@ def test_ref2va_reference_audio_resolution_and_media_paths(tmp_path: Path):
     assert probed == [reference_video, reference_audio]
     assert record.references[0].audio == H3AudioSource(path=reference_audio, embedded=False)
     assert record_media_paths(record) == {video, reference_video, reference_audio}
+
+
+def test_ref2va_null_audio_path_makes_video_reference_visual_only(tmp_path: Path):
+    video = _touch(tmp_path / "target.mp4")
+    motion = _touch(tmp_path / "motion.mp4")
+    voices = [_touch(tmp_path / f"voice_{index}.wav") for index in range(3)]
+    jsonl = tmp_path / "data.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "video_path": "target.mp4",
+                "caption": "caption",
+                "references": [
+                    # the motion video has an embedded audio track, but null opts out; without
+                    # the opt-out this record would exceed the 3 audio-bearing reference limit
+                    {"type": "video", "path": "motion.mp4", "audio_path": None},
+                    *({"type": "audio", "path": f"voice_{index}.wav"} for index in range(3)),
+                ],
+            }
+        ],
+    )
+
+    record = load_h3_jsonl_records(
+        jsonl,
+        "ref2va",
+        lambda path: H3MediaInfo(has_audio=True, duration_seconds=5.0),
+    )[0]
+
+    assert record.references[0].type == "video"
+    assert record.references[0].audio is None
+    assert record_media_paths(record) == {video, motion, *voices}
+
+
+@pytest.mark.parametrize(
+    ("reference", "message"),
+    [
+        ({"type": "image", "path": "face.png", "audio_path": None}, "image cannot have audio_path"),
+        ({"type": "audio", "path": "voice.wav", "audio_path": None}, "audio uses path, not audio_path"),
+    ],
+)
+def test_ref2va_null_audio_path_is_rejected_on_non_video_references(tmp_path: Path, reference: dict, message: str):
+    _touch(tmp_path / "target.mp4")
+    _touch(tmp_path / "face.png")
+    _touch(tmp_path / reference["path"])
+    jsonl = tmp_path / "data.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "video_path": "target.mp4",
+                "caption": "caption",
+                "references": [{"type": "image", "path": "face.png"}, reference],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_h3_jsonl_records(
+            jsonl,
+            "ref2va",
+            lambda path: H3MediaInfo(has_audio=True, duration_seconds=5.0),
+        )
 
 
 def test_audio_presence_summary_is_aggregated(caplog):
@@ -645,10 +711,7 @@ def test_h3_image_multiple_targets_upsample_five_frames_to_twenty_two(tmp_path: 
         caption="caption",
         original_size=(64, 64),
         bucket_size=(64, 64),
-        content=[
-            torch.full((64, 64, 3), value, dtype=torch.uint8).numpy()
-            for value in (0, 32, 64, 96, 128)
-        ],
+        content=[torch.full((64, 64, 3), value, dtype=torch.uint8).numpy() for value in (0, 32, 64, 96, 128)],
         latent_cache_path=str(tmp_path / "target_0064x0064_mmh3.safetensors"),
     )
 
@@ -748,6 +811,142 @@ def test_h3_image_dataset_multiple_target_accepts_zero_indexed_base_frame(tmp_pa
     assert len(item.control_content) == 1
     target_frames = target_frames_from_image(item, 5)
     assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 32, 64, 96, 128]
+
+
+def test_multiple_target_zero_suffix_with_own_caption_is_not_rebased(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(image_dir / "pose_0.png")
+    Image.new("RGB", (64, 64), (32, 32, 32)).save(image_dir / "pose_0_1.png")
+    Image.new("RGB", (64, 64), (255, 255, 255)).save(image_dir / "pose_1.png")
+    (image_dir / "pose_0.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(control_dir / "pose_0.png")
+
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        multiple_target=True,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    item = list(dataset.retrieve_latent_cache_batches(num_workers=1))[0][1][0]
+
+    assert Path(item.item_key).name == "pose_0.png"
+    assert len(item.content) == 2
+    assert [int(frame[0, 0, 0]) for frame in item.content] == [0, 32]
+
+
+def test_jsonl_image_mode_maps_all_targets_and_controls(tmp_path: Path):
+    target_0 = tmp_path / "target_0.png"
+    target_1 = tmp_path / "target_1.png"
+    control = tmp_path / "control.png"
+    for path in (target_0, target_1, control):
+        Image.new("RGB", (64, 64)).save(path)
+    jsonl = tmp_path / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "image_path_0": str(target_0),
+                "image_path_1": str(target_1),
+                "control_path_0": str(control),
+                "caption": "caption",
+            }
+        ],
+    )
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=None,
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_jsonl_file=str(jsonl),
+        multiple_target=True,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    image_info = _image_dataset_info_map([dataset])
+    targets = _target_image_paths_for_item(target_0.resolve(), dataset)
+    source_targets, source_controls = dataset.datasource.get_media_paths(str(target_0))
+
+    assert image_info[target_0.resolve()][0] == [control.resolve()]
+    assert targets == [target_0.resolve(), target_1.resolve()]
+    assert [Path(path).resolve() for path in source_targets] == targets
+    assert [Path(path).resolve() for path in source_controls] == [control.resolve()]
+
+
+def test_cache_cleanup_tracks_paths_after_encoder_renames_items(tmp_path: Path):
+    old_cache = tmp_path / "sample_0064x0064_minimax_h3.safetensors"
+    new_cache = tmp_path / "sample_00000-005_0064x0064_minimax_h3.safetensors"
+    old_cache.touch()
+    item = ItemInfo(
+        str(tmp_path / "sample.png"),
+        "caption",
+        (64, 64),
+        (64, 64),
+        content=[torch.zeros(64, 64, 3)],
+        latent_cache_path=str(old_cache),
+    )
+
+    class _Dataset:
+        def retrieve_latent_cache_batches(self, _num_workers):
+            yield (64, 64), [item]
+
+        def get_all_latent_cache_files(self):
+            return [str(old_cache), str(new_cache)]
+
+    def encode(batch):
+        batch[0].latent_cache_path = str(new_cache)
+        new_cache.touch()
+
+    shared_cache_latents.encode_datasets(
+        [_Dataset()],
+        encode,
+        SimpleNamespace(num_workers=1, keep_cache=False, skip_existing=False, batch_size=None),
+    )
+
+    assert new_cache.is_file()
+    assert not old_cache.exists()
+
+
+def test_text_cache_cleanup_tracks_paths_after_encoder_renames_items(tmp_path: Path):
+    old_cache = tmp_path / "sample_minimax_h3_te.safetensors"
+    new_cache = tmp_path / "sample_00000-005_minimax_h3_te.safetensors"
+    item = ItemInfo(
+        str(tmp_path / "sample.png"),
+        "caption",
+        (64, 64),
+        (64, 64),
+    )
+    item.text_encoder_output_cache_path = str(old_cache)
+
+    class _Dataset:
+        def retrieve_text_encoder_output_cache_batches(self, _num_workers):
+            yield [item]
+
+    def encode(batch):
+        batch[0].text_encoder_output_cache_path = str(new_cache)
+
+    active_paths = [set()]
+    shared_text_cache.process_text_encoder_batches(
+        1,
+        False,
+        None,
+        [_Dataset()],
+        [set()],
+        active_paths,
+        encode,
+    )
+
+    assert active_paths == [{str(new_cache)}]
 
 
 def test_build_fl2va_image_mode_uses_control_frames_and_unsupervised_audio(tmp_path: Path):

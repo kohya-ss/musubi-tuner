@@ -548,7 +548,9 @@ class ImageDataset(BaseDataset):
                 frame_count = None
                 item_key = "_".join(tokens[:-2])
                 text_item_key = item_key
-            text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{text_item_key}_{self.architecture}_te.safetensors")
+            text_encoder_output_cache_file = os.path.join(
+                self.cache_directory, f"{text_item_key}_{self.architecture}_te.safetensors"
+            )
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue

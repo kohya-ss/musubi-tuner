@@ -4,7 +4,7 @@
 
 Musubi Tuner supports MiniMax-H3 text-to-video-with-audio (T2VA), first/last-frame-to-video-with-audio (FL2VA), and reference-to-video-with-audio (Ref2VA) LoRA training and standalone generation.
 
-The MiniMax-H3 path follows the released packing, Qwen3-VL conditioning, dual video/audio flow schedules, and two VAE layouts. It supports the published BF16 FL2VA and Ref2VA transformers, plus experimental Comfy-Org quantized artifacts for local LoRA training.
+The implementation follows the released MiniMax-H3 packing, Qwen3-VL conditioning, dual video/audio flow schedules, and two VAE layouts. It supports the published BF16 transformers, the full and pruned ConvRot INT8 transformers, and the ConvRot INT8 and NVFP4+AWQ Qwen3-VL text encoders.
 
 Read and accept the [MiniMax-H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) before downloading or using the weights.
 
@@ -12,27 +12,23 @@ Read and accept the [MiniMax-H3 Community License](https://huggingface.co/MiniMa
 
 Download the following files from [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
 
-| Component | File |
+| Component | Supported file |
 | --- | --- |
 | FL2VA and T2VA transformer | `diffusion_models/minimax_h3_fl2va_bf16.safetensors` |
+| FL2VA and T2VA ConvRot INT8 transformer | `diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors` |
+| FL2VA and T2VA pruned ConvRot INT8 transformer | `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
 | Ref2VA transformer | `diffusion_models/minimax_h3_ref2va_bf16.safetensors` |
+| Ref2VA ConvRot INT8 transformer | `diffusion_models/minimax_h3_ref2va_int8_convrot.safetensors` |
+| Ref2VA pruned ConvRot INT8 transformer | `diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors` |
 | Qwen3-VL-32B text encoder | `text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors` |
+| Qwen3-VL-32B ConvRot INT8 text encoder | `text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors` |
+| Qwen3-VL-32B NVFP4+AWQ text encoder | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` |
 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` |
 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` |
 
-T2VA uses the FL2VA transformer without first/last conditions.
+T2VA uses an FL2VA transformer without first/last conditions. Pre-quantized files (ConvRot INT8 full or pruned, transformer or text encoder; NVFP4+AWQ text encoder) are detected automatically from their tensor structure — no extra flag is needed. FP8, NVFP4 transformers, and malformed or partial quantized files are rejected rather than silently interpreted as BF16. See [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights) and [NVFP4 Text Encoder](#nvfp4-text-encoder) for details.
 
-Experimental quantized checkpoints are also accepted when they use the Comfy-style quant metadata supported by Musubi:
-
-| Component | Experimental file |
-| --- | --- |
-| FL2VA and T2VA transformer | `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
-| Qwen3-VL-32B text encoder | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` |
-| Qwen3-VL-32B text encoder | `text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors` |
-
-The quantized transformer is dequantized/materialized to ordinary PyTorch modules during model loading so LoRA training does not dequantize every layer on every forward pass. The quantized text encoder is supported for text-cache creation. Keep these artifacts isolated from upstream Musubi licensing assumptions; the quant loader code is separated in `src/musubi_tuner/minimax_h3/comfy_quant_loader.py` with its own license header.
-
-The Qwen processor/config defaults to `Qwen/Qwen3-VL-32B-Instruct` and is downloaded by Transformers. Pass `--processor` when using a local copy. The text encoder cache format is the same for BF16 and supported quantized text encoders, so training consumes the generated cache normally.
+The Qwen processor/config defaults to `Qwen/Qwen3-VL-32B-Instruct` and is downloaded by Transformers. Pass `--processor` when using a local copy.
 
 ## Implementation Provenance
 
@@ -244,6 +240,8 @@ Each JSONL line contains the target plus its ordered references. Relative paths 
 {"video_path":"targets/clip.mp4","audio_path":"targets/clip.wav","caption":"A singer performs under stage lights.","references":[{"type":"image","path":"refs/style.png"},{"type":"video","path":"refs/motion.mp4","audio_path":"refs/motion.wav"},{"type":"audio","path":"refs/voice.wav"}]}
 ```
 
+Audio for a `video` reference resolves in this order: an explicit `audio_path` file, then the video's embedded audio track. Writing `"audio_path": null` disables audio for that reference: the video conditions visuals only (for example a motion or composition reference) even when the file contains an audio track, and it does not count as audio-bearing. A reference video without any audio track is likewise a visual-only reference; the official prompt guide treats reference-video audio as an explicitly enabled track, so silent reference videos are a normal input. `audio_path` is valid only on `video` references.
+
 Limits per Ref2VA record:
 
 - At most 12 references total.
@@ -290,7 +288,7 @@ python minimax_h3_cache_text_encoder_outputs.py \
   --skip_existing
 ```
 
-The cache stores the state after the first 50 Qwen layers, before a final language-model norm. `hidden_states[0]` is the embedding output, so this is `hidden_states[50]`. The cache also stores per-row modality tags and presentation fingerprints; stale or structurally incompatible caches are rejected.
+The same command accepts the ConvRot INT8 text encoder (`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`) and the NVFP4+AWQ text encoder (`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`); the formats are detected automatically. On VRAM-limited GPUs add `--text_encoder_blocks_to_swap 50` to stream the encoder layers from CPU, and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations (see Text Encoder Layer Streaming below). The cache stores the state after the first 50 Qwen layers, before a final language-model norm. `hidden_states[0]` is the embedding output, so this is `hidden_states[50]`. The cache also stores per-row modality tags and presentation fingerprints; stale or structurally incompatible caches are rejected.
 
 ## LoRA Training
 
@@ -348,19 +346,21 @@ Two training arguments control audio supervision:
 - `--video_only` disables audio supervision entirely (audio loss weight 0 for all samples). The model still attends to the real audio latents as context, which matches the inference-time distribution where audio tokens are always generated audio, never silence.
 - `--audio_loss_weight` (default 1.0) scales the audio loss term for supervised samples, e.g. to rebalance a small audio loss against the video loss.
 
-The trainer logs the supervised fraction as `supervised_audio_fraction` and saves it as `ss_minimax_h3_supervised_audio_fraction`, along with `ss_minimax_h3_audio_loss_weight` and `ss_minimax_h3_video_only`. It also records `ss_minimax_h3_loss_policy=video_mean_plus_weighted_audio_mean` and `ss_minimax_h3_audio_supervision=presence_gated_training_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
+The latent caching script logs the supervised fraction as `supervised_audio_fraction` in its end-of-run summary, and warns when no cached item has real audio. The trainer records the fraction it actually observed during training as `ss_minimax_h3_supervised_audio_fraction` (exact once a full epoch has run), along with `ss_minimax_h3_audio_loss_weight` and `ss_minimax_h3_video_only`, and warns at the end of the first epoch if audio supervision is enabled but no sample with real audio was seen. It also records `ss_minimax_h3_loss_policy=video_mean_plus_weighted_audio_mean` and `ss_minimax_h3_audio_supervision=presence_gated_training_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3. This mirrors the released inference schedule (and the ai-toolkit trainer): one base time is drawn uniformly and both per-stream sigmas are derived from it, so video and audio always sit on the same `(sigma_video, sigma_audio)` curve the sampler visits.
+
+`--min_timestep` and `--max_timestep` clip the shared base variable, in base units where 1000 is pure noise, before the two per-stream shifts are applied. Clipping in base space keeps the video and audio streams consistent; the bounds are not sigma values of either stream. For example `--max_timestep 900` removes the highest-noise 10% of the base range, which corresponds to `sigma_video > 0.9908` (shift 12) and `sigma_audio > 0.9643` (shift 3).
 
 Zero audio loss does not preserve the base model's audio behavior. H3 is single-stream, and these LoRA targets modify the same attention and MLP weights used by video and audio tokens. A `--video_only` or low-`supervised_audio_fraction` LoRA can therefore produce audio worse than the base model; the risk generally increases with adapter capacity/strength and training exposure, although degradation is not guaranteed to be monotonic. Treat audio from a fully video-only LoRA as unconstrained output.
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.
 
-R1 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The batch-size gate runs immediately after dataset construction and reads no cache files. The supervised-fraction scan then uses the cache paths already stored in the constructed batch managers, counts repeats from those entries, and opens each unique cache once to read its `audio_present` entry; it does not run a second glob or load video/audio latent payloads. The runtime/model repeat the batch-size check for direct API calls. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
+MiniMax-H3 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The latent caching script warns when a dataset config sets any other value, and the trainer rejects the first batch whose size is not 1. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
 
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 
 ### Training-time joint AV samples
 
-H3 overrides the shared single-VAE/video-only sampling hook. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`.
+H3 overrides the shared `prepare_sampling` hook (whose default covers single-VAE architectures) and returns both VAEs as its sampling resources. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`.
 
 Add the sampling assets and normal sampling schedule flags to the training command:
 
@@ -374,7 +374,7 @@ Add the sampling assets and normal sampling schedule flags to the training comma
 
 The text presentations and condition latents are prepared once before the transformer is loaded. The two decode VAEs then remain on CPU and are moved to the accelerator one at a time for each scheduled sample. The shared trainer still owns sampling cadence, distributed prompt assignment, RNG restoration, and the block-swap inference/training transition.
 
-R1 prepares sample prompts by loading the released Qwen3-VL text encoder on the training accelerator. The BF16 artifact is approximately 48 GB, so `--sample_prompts` currently requires roughly 50 GB of available accelerator memory before the transformer is loaded. Omit scheduled sampling on smaller accelerators; a text-encoder device override or cached sample conditioning is follow-up scope.
+Training-time samples load the selected Qwen3-VL text encoder on the training accelerator before the transformer. The BF16 artifact is approximately 48 GB, so `--sample_prompts` requires roughly 50 GB of available accelerator memory there; the ConvRot INT8 artifact lowers the persistent text-encoder weights to ~25 GB and the NVFP4+AWQ artifact to ~15 GB, selected simply by passing their paths. `--text_encoder_blocks_to_swap` (see Text Encoder Layer Streaming below) removes most of the remaining weight footprint by streaming the encoder layers from CPU during this phase.
 
 All entries in one run use the training `--task`. T2VA JSON entries use the common prompt fields:
 
@@ -397,20 +397,46 @@ Sample geometry must be 32-pixel aligned. Frame counts of at least 5 are rounded
 
 ## ConvRot INT8 Quantized Base Weights
 
-`--convrot_int8` quantizes the frozen DiT base weights to int8 with ConvRot ([arXiv:2512.03673](https://arxiv.org/abs/2512.03673)), the same scheme as Krea 2 (see `docs/krea2.md` for the mechanism and backward modes). It is supported for both LoRA training and generation, and accepts either base artifact:
+MiniMax-H3 supports ConvRot INT8 ([arXiv:2512.03673](https://arxiv.org/abs/2512.03673)) frozen base weights for both LoRA training and generation, the same scheme as Krea 2 (see `docs/krea2.md` for the mechanism and backward modes). Two base artifacts are accepted:
 
-- **BF16 checkpoints** are quantized on the fly at load time.
-- **ComfyUI pre-quantized ConvRot INT8 checkpoints** (`weight` int8 + `weight_scale` + `comfy_quant` tensors) are converted to the Musubi layout during the same streaming load. Both routes produce bit-identical models: Musubi's dynamic quantization reproduces the published ComfyUI INT8 ConvRot distribution exactly, layer by layer.
+- **ComfyUI pre-quantized ConvRot INT8 checkpoints** (`weight` int8 + `weight_scale` + `comfy_quant` tensors) are detected automatically from their tensor structure — pass them as `--dit` and no extra flag is needed. The tensors are converted to the Musubi layout during the streaming load.
+- **BF16 checkpoints** are quantized on the fly at load time when `--convrot_int8` is passed.
 
-The quantization scope mirrors the ComfyUI distribution: the five Linears in each of the 50 main DiT blocks (`attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, `mlp.fc2`, and `adaln_proj.linear`). `adaln_proj` uses ConvRot group size 64 (its input width 2688 is not a multiple of 256); the rest use 256. The token refiner, final layer, embedders, and heads stay BF16/FP32. The base checkpoint shrinks from ~66 GB (BF16) to ~34 GB of weights.
+Both routes produce bit-identical models: Musubi's dynamic quantization reproduces the published ComfyUI INT8 ConvRot distribution exactly, layer by layer.
 
-Training flags match Krea 2: `--convrot_int8` plus optional `--convrot_int8_bwd {bf16,int8}` (default `bf16`). The LoRA trains in BF16 on top of the int8 base as usual, and block swap (including `--block_swap_h2d_only`) combines with quantization — quantization runs on the accelerator while the weights load to CPU. `--fp8_base`/`--fp8_scaled` remain unsupported for H3. Triton (`triton-windows` on Windows) is required for the fused int8 kernels; without it the forward falls back to a slower transient dequantization (the memory saving remains). `torch.compile` excludes the patched Linears automatically.
+The published quantization scope is the five Linears in each of the 50 main DiT blocks (`attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, `mlp.fc2`, and `adaln_proj.linear`). `adaln_proj` uses ConvRot group size 64 (its input width 2688 is not a multiple of 256); the rest use 256. The token refiner, final layer, embedders, and heads stay BF16/FP32. The base checkpoint shrinks from ~66 GB (BF16) to ~34 GB of weights. For pre-quantized files the checkpoint itself dictates the quantized set: the per-layer `comfy_quant` specs are validated strictly (malformed or partial triples are rejected), while artifacts that quantize a different layer set than the published scope load as declared.
 
-For generation, add `--convrot_int8` to `minimax_h3_generate_video.py`. With `--lora_weight`, the LoRA is merged into the BF16 weights during the streaming load and the merged result is then quantized, so LoRA generation requires the BF16 base checkpoint; merging into a pre-quantized int8 checkpoint is rejected with an explicit error.
+**Pruned transformers.** The released pruned ConvRot INT8 artifacts additionally replace the sinusoidal time embedder with a published FP32 `[1025, 8]` AdaLN curve table (`adaln_t_table`) and 8-wide AdaLN projections. They are recognized structurally and interpolated in FP32 over the model time `t = 1 - sigma` in `[0, 1]`. Pruned BF16 files are not published and not supported.
+
+**Text encoder.** `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` is likewise detected automatically wherever `--text_encoder` is accepted (TE caching, training-time sampling, generation), lowering the text-encoder weight footprint from ~48 GB to ~25 GB.
+
+**Training.** Flags match Krea 2: `--convrot_int8` for BF16 sources (pre-quantized files need no flag) plus optional `--convrot_int8_bwd {bf16,int8}` (default `bf16`; `int8` requires triton and CUDA). The LoRA trains in BF16 on top of the int8 base as usual, and block swap (including `--block_swap_h2d_only`) combines with quantization — quantization runs on the accelerator while the weights load to CPU, and the FP32 scale buffers stay resident on the execution device. Because block-swap training is transfer-bound, halving the weight bytes roughly halves the step time (measured: classic swap 48 27 -> 12.7 s/it, `--block_swap_h2d_only` + 32 8 -> ~4 s/it on the same GPU). `--fp8_base`/`--fp8_scaled` and `--base_weights` remain unsupported for an INT8 base. Triton (`triton-windows` on Windows) is required for the fused int8 kernels; without it the forward falls back to a slower transient dequantization (the memory saving remains). `torch.compile` excludes the patched Linears automatically.
+
+**Generation.** Pre-quantized checkpoints work as-is; add `--convrot_int8` only to quantize a BF16 checkpoint at load time. With `--lora_weight` the route depends on the base: a BF16 base with `--convrot_int8` merges the LoRA into the BF16 weights during the streaming load and quantizes the merged result (fastest inference); a pre-quantized base attaches each LoRA as a runtime additive branch with its own multiplier for the sampling lifetime — the INT8 base tensors are never modified or requantized, so LoRA generation no longer requires downloading the BF16 checkpoint.
+
+## NVFP4 Text Encoder
+
+The published NVFP4+AWQ Qwen3-VL text encoder (`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`, ~14.6 GB) is accepted wherever `--text_encoder` is accepted (TE caching, training-time sampling, generation) and is detected automatically from its tensor structure, like the ConvRot INT8 artifacts.
+
+The artifact quantizes the 350 language-model Linears to NVFP4 (4-bit E2M1 values with FP8 per-16-block scales and an FP32 per-tensor scale) and the token embedding to per-row INT8; norms, biases, and the vision tower stay BF16. The quantization is AWQ-calibrated: two projections per layer carry an explicit `pre_quant_scale` that Musubi multiplies into their inputs at runtime, and the remaining scales are already folded into the checkpoint's norm weights. Because AWQ requires calibration data, there is deliberately no on-the-fly NVFP4 quantization of BF16 weights — for dynamic quantization use ConvRot INT8, which reproduces the published INT8 artifact bit-exactly.
+
+By default the patched layers run weight-only: the NVFP4 weight is transiently dequantized each forward and multiplied in BF16, which works on any GPU and matches the artifact's own `full_precision_matrix_mult` declaration. `--nvfp4_scaled_mm` opts into W4A4 matmuls via `torch.nn.functional.scaled_mm`, which also quantizes the activations to NVFP4; it requires PyTorch 2.10+ and a Blackwell-generation GPU, and trades some quality for speed (measured end-to-end against a BF16 text encoder with an identical DiT/seed: mean 5.9/255 decoded deviation in the default mode, 7.2/255 with `--nvfp4_scaled_mm`; the ConvRot INT8 text encoder scores 3.5/255 and a typical LoRA effect ~79/255 on the same pipeline).
+
+The text encoder is frozen in every Musubi flow, so the NVFP4 path is inference-only; it does not affect LoRA training of the transformer. Text-encoder LoRAs cannot be merged into or attached to the NVFP4 artifact.
+
+## Text Encoder Layer Streaming
+
+`--text_encoder_blocks_to_swap N` streams `N` of the 50 Qwen3-VL decoder layers from CPU memory instead of keeping them resident on the GPU, wherever `--text_encoder` is accepted (TE caching, training-time sampling, generation). `N=50` minimizes the device footprint; smaller values keep `50-N` layers resident and transfer proportionally less per record (useful when the encoder almost fits). Requires CUDA.
+
+The text encoder is frozen and forward-only in every Musubi flow, so this uses the H2D-only streaming machinery from `docs/block_swap.md`: the layer weights stay in pageable CPU masters (no large pinned allocation) and are prefetched layer by layer into a small ring of two reused GPU buffers while earlier layers compute; nothing is ever copied back. Quantized layers stream their weights together with their scale tensors, so the mechanism combines with every accepted artifact. The computed values are identical to a fully resident run — the same weights are read from the same bytes, only their location changes.
+
+With `--text_encoder_blocks_to_swap 50` the resident weights reduce to the embedding, the vision tower, and the norms, plus two ring buffers of one layer each (per-layer stream size: ~0.9 GB BF16, ~0.5 GB ConvRot INT8, ~0.3 GB NVFP4) and activations. This brings TE caching and training-time sampling with the quantized artifacts into reach of consumer GPUs; the trade-off is the CPU-side resident copy (the artifact size) and per-record transfer time of the streamed layers.
+
+`--text_encoder_attn_mode {sdpa,flash_attention_2,eager}` separately selects the transformers attention implementation for the text encoder (default: transformers' own default, sdpa). At long context, transformers' sdpa can fall back to the O(L^2) FP32 math kernel — around 12k rows the attention workspace alone exceeds 30 GB, defeating the streaming savings. Pass `flash_attention_2` (requires flash-attn) for long Ref2VA presentations of more than a few thousand rows.
 
 ## Generation
 
-T2VA generation with the FL2VA BF16 base:
+T2VA generation with the FL2VA base:
 
 ```bash
 python minimax_h3_generate_video.py \
@@ -434,6 +460,8 @@ Add a trained LoRA with:
 ```text
 --lora_weight /data/h3/output/h3-lora.safetensors --lora_multiplier 1.0
 ```
+
+The same command accepts the full or pruned ConvRot INT8 transformer and the ConvRot INT8 or NVFP4+AWQ text encoder; formats are detected automatically. With a BF16 transformer, LoRAs are merged destructively once after loading (fastest inference); with a ConvRot INT8 base, each `--lora_weight` stays a separate runtime additive branch with its corresponding multiplier (see [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights)).
 
 For FL2VA, keep the FL2VA base and replace the task inputs:
 
@@ -470,7 +498,7 @@ For two-condition still-image inference:
 
 `--frame_count` defaults to `5` in image mode. Increase it only if the LoRA was trained with a longer H3-compatible image frame count. `--h3_select_frame` selects which decoded frame is saved for image outputs and defaults to `0`.
 
-For Ref2VA, use the Ref2VA BF16 base and an ordered JSONL record:
+For Ref2VA, use a Ref2VA base (BF16 or ConvRot INT8) and an ordered JSONL record:
 
 ```text
 --task ref2va --dit /models/minimax_h3_ref2va_bf16.safetensors --reference_jsonl /data/h3/ref2va.jsonl --reference_index 0
@@ -480,13 +508,15 @@ The Ref2VA generation JSONL intentionally uses the same validated schema as trai
 
 T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. The cache must match the requested task, cache format version, and exact presentation fingerprint (which covers the prompt, frame count, and size+mtime identities of the reference media, so the cache must be used on the machine holding the original files). T2VA still requires `--prompt` so that identity can be verified; Ref2VA uses the selected record caption unless `--prompt` overrides it. FL2VA generation does not accept a dataset text cache because external first/last images cannot be proven identical to the crop presentation that produced that cache.
 
+`--steps N` means N model evaluations, so the schedule uses N+1 grid points. The released implementations (SGLang serving and the diffusers scheduler) instead count grid points: their `num_inference_steps = N` performs N-1 evaluations. Musubi `--steps N` is therefore grid-identical to official `num_inference_steps = N+1`; to reproduce the official 50-step serving default exactly, pass `--steps 49`.
+
 The native sampler builds one common base grid, derives independent shifted video and audio sigma grids, and advances each modality with its own finite sigma interval. It does not apply CFG, negate the model heads, or apply ComfyUI's single-sampler audio slope adapter. Musubi also adds condition noise before packing, while ComfyUI adds it after packing; the distributions agree but RNG placement does not. These two intentional differences mean the same seed is not bitwise reproducible against ComfyUI. Video and audio are decoded sequentially, trimmed to a common duration, and muxed with PyAV as H.264 plus AAC.
 
 ## Limitations
 
-- BF16 or ConvRot INT8 FL2VA/Ref2VA transformer bases are supported. The Comfy-Org FL2VA INT8 ConvRot/pruned transformer remains experimental for LoRA training.
-- BF16 Qwen3-VL text encoder is the reference path. Comfy-Org NVFP4/AWQ and INT8 ConvRot text encoders are supported experimentally for text-cache creation.
-- Other FP8/quantized formats outside the supported Comfy metadata are not supported.
+- Released BF16 full and ConvRot INT8 full/pruned FL2VA/Ref2VA transformer bases only; pruned BF16 files are not published and not supported.
+- BF16, ConvRot INT8, or NVFP4+AWQ Qwen3-VL text encoder only.
+- No FP8 artifact loading, and no NVFP4 transformer loading.
 - No CFG or negative prompt.
 - No numbered reference-directory convention.
 - Dataset `batch_size` is fixed to 1; use gradient accumulation for larger effective batches.

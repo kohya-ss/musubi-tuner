@@ -74,19 +74,21 @@ def _image_dataset_info_map(datasets) -> dict[Path, tuple[list[Path], ImageDatas
     mapping: dict[Path, tuple[list[Path], ImageDataset]] = {}
     for dataset in datasets:
         datasource = getattr(dataset, "datasource", None)
-        for image_path, control_paths in getattr(datasource, "control_paths", {}).items():
+        if not isinstance(dataset, ImageDataset) or datasource is None:
+            continue
+        for index in range(len(datasource)):
+            image_path, _caption = datasource.get_caption(index)
+            _target_paths, control_paths = datasource.get_media_paths(image_path)
             mapping[Path(image_path).resolve()] = ([Path(path).resolve() for path in control_paths], dataset)
     return mapping
 
 
 def _target_image_paths_for_item(image_path: Path, dataset: ImageDataset) -> list[Path]:
     datasource = getattr(dataset, "datasource", None)
-    target_paths = []
-    for source_path, paths in getattr(datasource, "target_paths", {}).items():
-        if Path(source_path).resolve() == image_path:
-            target_paths = paths
-            break
-    return [image_path, *[Path(path).resolve() for path in target_paths]]
+    if datasource is None:
+        raise ValueError("MiniMax-H3 image dataset is missing its datasource")
+    target_paths, _control_paths = datasource.get_media_paths(str(image_path))
+    return [Path(path).resolve() for path in target_paths]
 
 
 def _load_h3_image_item_pixels(
@@ -196,7 +198,31 @@ def _cache_dtype(name: str) -> torch.dtype:
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = cache_text_encoder_outputs.setup_parser_common()
-    parser.add_argument("--text_encoder", type=str, required=True, help="released MiniMax-H3 Qwen3-VL BF16 safetensors")
+    parser.add_argument(
+        "--text_encoder",
+        type=str,
+        required=True,
+        help="MiniMax-H3 Qwen3-VL safetensors (BF16, ConvRot INT8 or NVFP4, auto-detected)",
+    )
+    parser.add_argument(
+        "--nvfp4_scaled_mm",
+        action="store_true",
+        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
+    )
+    parser.add_argument(
+        "--text_encoder_blocks_to_swap",
+        type=int,
+        default=0,
+        help="number of the 50 Qwen3-VL decoder layers to stream from CPU instead of keeping them on the GPU"
+        " (0 = disabled, 50 = minimum VRAM; requires CUDA)",
+    )
+    parser.add_argument(
+        "--text_encoder_attn_mode",
+        choices=("sdpa", "flash_attention_2", "eager"),
+        default=None,
+        help="attention implementation for the text encoder (default: transformers default, sdpa)."
+        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
+    )
     parser.add_argument(
         "--processor",
         type=str,
@@ -259,9 +285,13 @@ def main() -> None:
         records_by_dir[dataset_cache_dir_key(dataset.cache_directory)] = h3_records_from_datasource(dataset.datasource, args.task)
 
     all_cache_files, all_cache_paths = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
+    image_info_by_path = _image_dataset_info_map(datasets)
     text_paths = {
         path for records in records_by_dir.values() for record in records for path in _text_media_paths(record, args.task)
     }
+    for image_path, (control_paths, dataset) in image_info_by_path.items():
+        text_paths.update(_target_image_paths_for_item(image_path, dataset))
+        text_paths.update(control_paths)
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
     logger.info("Loading MiniMax-H3 Qwen3-VL processor from %s", args.processor)
@@ -276,15 +306,14 @@ def main() -> None:
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_mmap,
+        nvfp4_scaled_mm=args.nvfp4_scaled_mm,
+        blocks_to_swap=args.text_encoder_blocks_to_swap,
+        attn_mode=args.text_encoder_attn_mode,
     )
 
     decoded_reference_cache = {}
-    image_info_by_path = _image_dataset_info_map(datasets)
     skip_matching_cache = args.skip_existing
     args.skip_existing = False
-    if args.h3_image_mode != "none" and not args.keep_cache:
-        logger.info("MiniMax-H3 image mode keeps existing text cache files because it rewrites image dataset cache names")
-        args.keep_cache = True
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
@@ -302,7 +331,11 @@ def main() -> None:
                 record = records[datasource_index]
             visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
             presentation = build_presentation(record, args.task, visuals)
-            record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
+            record_media_paths = _text_media_paths(record, args.task)
+            if args.h3_image_mode != "none":
+                control_paths, dataset = image_info_by_path[record.video_path]
+                record_media_paths = set(_target_image_paths_for_item(record.video_path, dataset)) | set(control_paths)
+            record_media_fingerprints = {path: media_fingerprints[path] for path in record_media_paths}
             presentation_identity = presentation_fingerprint(
                 presentation,
                 record_media_fingerprints,

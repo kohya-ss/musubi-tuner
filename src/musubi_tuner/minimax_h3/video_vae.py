@@ -675,14 +675,21 @@ def load_video_vae(
     dtype: torch.dtype = VIDEO_VAE_DECODE_DTYPE,
     disable_mmap: bool = False,
 ) -> MiniMaxH3VideoVAE:
-    from musubi_tuner.minimax_h3.checkpoint import load_safetensors_module, resolve_safetensors_files
+    from accelerate import init_empty_weights
 
-    files = resolve_safetensors_files(path)
-    return load_safetensors_module(
-        MiniMaxH3VideoVAE,
-        files,
-        device=device,
-        dtype=dtype,
-        key_prefixes=("first_stage_model.", "video_vae.", "vae."),
-        disable_mmap=disable_mmap,
-    )
+    from musubi_tuner.minimax_h3.checkpoint import strip_key_prefixes
+    from musubi_tuner.utils.safetensors_utils import load_safetensors
+
+    with init_empty_weights():
+        vae = MiniMaxH3VideoVAE()
+    # loading straight to the target device avoids a resident full-model CPU copy
+    device = torch.device(device)
+    sd = load_safetensors(str(path), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
+    sd = strip_key_prefixes(sd, ("first_stage_model.", "video_vae.", "vae."))
+    for key in sd.keys():
+        if sd[key].is_floating_point():
+            sd[key] = sd[key].to(dtype)
+    vae.load_state_dict(sd, strict=True, assign=True)
+    vae.to(device)
+    vae.eval()
+    return vae

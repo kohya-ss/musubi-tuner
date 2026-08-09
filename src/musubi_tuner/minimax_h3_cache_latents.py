@@ -536,12 +536,10 @@ def fingerprint_file(path: str | Path) -> str:
 
 
 def fingerprint_checkpoint(path: str | Path) -> str:
-    path = Path(path).resolve()
-    files = resolve_safetensors_files(path)
+    files = resolve_safetensors_files(Path(path).resolve())
     digest = hashlib.sha256()
     for file in files:
-        relative_name = file.name if path.is_file() else file.relative_to(path).as_posix()
-        digest.update(relative_name.encode("utf-8"))
+        digest.update(file.name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(fingerprint_file(file).encode("ascii"))
         digest.update(b"\0")
@@ -596,6 +594,11 @@ def log_audio_presence_summary(presence_counts: Mapping[bool, int]) -> None:
         missing_audio,
         fraction,
     )
+    if total and real_audio == 0:
+        logger.warning(
+            "No cached item has real audio: training with these caches keeps the audio loss at 0; "
+            "if this is intended, pass --video_only to the trainer explicitly"
+        )
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -650,9 +653,17 @@ def main() -> None:
 
     records_by_dir: dict[str, list[H3Record]] = {}
     audio_sources_by_dir: dict[str, list] = {}
-    for dataset in datasets:
+    image_media_paths_by_dir: dict[str, dict[Path, set[Path]]] = {}
+    for dataset_index, dataset in enumerate(datasets):
         if isinstance(dataset, VideoDataset):
             validate_h3_dataset(dataset)
+        if int(dataset.batch_size) != 1:
+            logger.warning(
+                "MiniMax-H3 dataset %d has batch_size=%d in the dataset config; training requires batch_size=1 "
+                "(use gradient accumulation for a larger effective batch) and will stop on the first training batch",
+                dataset_index,
+                int(dataset.batch_size),
+            )
         key = dataset_cache_dir_key(dataset.cache_directory)
         records = h3_records_from_datasource(dataset.datasource, args.task)
         audio_sources = getattr(dataset.datasource, "audio_sources", None)
@@ -660,6 +671,13 @@ def main() -> None:
             audio_sources = [None] * len(records)
         records_by_dir[key] = records
         audio_sources_by_dir[key] = audio_sources
+        if isinstance(dataset, ImageDataset):
+            media_paths = {}
+            for index in range(len(dataset.datasource)):
+                image_path, _caption = dataset.datasource.get_caption(index)
+                targets, controls = dataset.datasource.get_media_paths(image_path)
+                media_paths[Path(image_path).resolve()] = {Path(path).resolve() for path in [*targets, *controls]}
+            image_media_paths_by_dir[key] = media_paths
 
     if args.debug_mode is not None:
         cache_latents.show_datasets(
@@ -682,6 +700,9 @@ def main() -> None:
         for source in audio_sources_by_dir[key]:
             if source is not None:
                 media_fingerprints[source.path] = fingerprint_file(source.path)
+        for paths in image_media_paths_by_dir.get(key, {}).values():
+            for path in paths:
+                media_fingerprints[path] = fingerprint_file(path)
 
     logger.info("Loading MiniMax-H3 video VAE from %s", args.video_vae)
     video_vae = load_video_vae(
@@ -696,9 +717,6 @@ def main() -> None:
     decoder = PyAVH3MediaDecoder()
     skip_matching_cache = args.skip_existing
     args.skip_existing = False
-    if args.h3_image_mode != "none" and not args.keep_cache:
-        logger.info("MiniMax-H3 image mode keeps existing cache files because it rewrites image dataset cache names")
-        args.keep_cache = True
     presence_counts: Counter[bool] = Counter()
 
     def encode(batch: list[ItemInfo]) -> None:
@@ -723,7 +741,10 @@ def main() -> None:
             if item.audio_content is None or item.audio_present is None:
                 raise ValueError(f"MiniMax-H3 cache item is missing its audio window: {item.item_key}")
             presence_counts[item.audio_present] += 1
-            record_fingerprints = {path: media_fingerprints[path] for path in record_media_paths(record)}
+            record_paths = record_media_paths(record)
+            if args.h3_image_mode != "none":
+                record_paths |= image_media_paths_by_dir[key][record.video_path]
+            record_fingerprints = {path: media_fingerprints[path] for path in record_paths}
             if audio_source is not None:
                 record_fingerprints[audio_source.path] = media_fingerprints[audio_source.path]
             expected_metadata = build_latent_metadata(

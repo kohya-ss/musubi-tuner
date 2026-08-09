@@ -15,6 +15,7 @@ from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
     build_shifted_schedule,
+    create_sampling_generator,
     decode_joint_av,
     initialize_target_latents,
     sample_joint_av,
@@ -57,10 +58,11 @@ def test_shifted_schedule_rejects_out_of_contract_shifts(shift):
 
 
 def test_target_initialization_draws_video_then_audio_from_one_request_generator():
+    generator = create_sampling_generator(123)
     video, audio = initialize_target_latents(
         video_shape=(1, 24, 2, 4, 4),
         audio_shape=(1, 32, 2, 8),
-        seed=123,
+        generator=generator,
         device=torch.device("cpu"),
         video_dtype=torch.float16,
         audio_dtype=torch.float32,
@@ -73,29 +75,33 @@ def test_target_initialization_draws_video_then_audio_from_one_request_generator
     assert torch.equal(audio, expected_audio)
 
 
-def test_condition_augmentation_resets_visual_stream_and_uses_seed_plus_one_for_audio():
+def test_condition_augmentation_consumes_one_shared_generator_in_condition_order():
     visuals = (torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4))
     audios = (torch.zeros(1, 32, 2, 8),)
 
+    generator = create_sampling_generator(456)
     augmented_visuals, augmented_audios = augment_condition_latents(
         visuals,
         audios,
-        seed=456,
+        generator=generator,
         visual_clean=0.5,
         audio_clean=0.5,
         device=torch.device("cpu"),
     )
 
-    expected_visual = 0.5 * _cpu_noise((1, 24, 1, 4, 4), torch.Generator(device="cpu").manual_seed(456))
-    expected_audio = 0.5 * _cpu_noise((1, 32, 2, 8), torch.Generator(device="cpu").manual_seed(457))
-    assert torch.equal(augmented_visuals[0], expected_visual)
-    assert torch.equal(augmented_visuals[1], expected_visual)
+    expected_generator = create_sampling_generator(456)
+    expected_visual_0 = 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected_generator)
+    expected_visual_1 = 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected_generator)
+    expected_audio = 0.5 * _cpu_noise((1, 32, 2, 8), expected_generator)
+    assert torch.equal(augmented_visuals[0], expected_visual_0)
+    assert torch.equal(augmented_visuals[1], expected_visual_1)
     assert torch.equal(augmented_audios[0], expected_audio)
 
+    changed_generator = create_sampling_generator(457)
     changed_visuals, changed_audios = augment_condition_latents(
         visuals,
         audios,
-        seed=457,
+        generator=changed_generator,
         visual_clean=0.5,
         audio_clean=0.5,
         device=torch.device("cpu"),
@@ -104,19 +110,21 @@ def test_condition_augmentation_resets_visual_stream_and_uses_seed_plus_one_for_
     assert not torch.equal(changed_audios[0], augmented_audios[0])
 
 
-def test_condition_augmentation_does_not_change_target_noise_sequence():
+def test_condition_augmentation_advances_the_shared_noise_sequence():
+    expected_generator = create_sampling_generator(789)
     expected = initialize_target_latents(
         video_shape=(1, 24, 2, 4, 4),
         audio_shape=(1, 32, 2, 8),
-        seed=789,
+        generator=expected_generator,
         device=torch.device("cpu"),
         video_dtype=torch.float32,
         audio_dtype=torch.float32,
     )
+    advanced_generator = create_sampling_generator(789)
     augment_condition_latents(
         (torch.zeros(1, 24, 1, 4, 4),),
         (torch.zeros(1, 32, 2, 8),),
-        seed=789,
+        generator=advanced_generator,
         visual_clean=0.5,
         audio_clean=0.5,
         device=torch.device("cpu"),
@@ -124,14 +132,14 @@ def test_condition_augmentation_does_not_change_target_noise_sequence():
     actual = initialize_target_latents(
         video_shape=(1, 24, 2, 4, 4),
         audio_shape=(1, 32, 2, 8),
-        seed=789,
+        generator=advanced_generator,
         device=torch.device("cpu"),
         video_dtype=torch.float32,
         audio_dtype=torch.float32,
     )
 
-    assert torch.equal(actual[0], expected[0])
-    assert torch.equal(actual[1], expected[1])
+    assert not torch.equal(actual[0], expected[0])
+    assert not torch.equal(actual[1], expected[1])
 
 
 def test_joint_sampler_uses_native_dataward_predictions_and_each_sigma_delta():
@@ -444,6 +452,10 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         disable_numpy_memmap=False,
         processor_revision=None,
     )
+    # the pre-quantization probe reads the DiT file headers; the stub DiT here is not
+    # a real safetensors file, so report an ordinary (non-pre-quantized) checkpoint
+    monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
+    monkeypatch.setattr(generate, "has_comfy_quant_tensors", lambda files, **kwargs: False)
     events = []
 
     class Transformer:
@@ -499,7 +511,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         lambda decoded, output: captured.update(decoded=decoded, output=output),
     )
 
-    output = run_generation(args)
+    output = generate.run_generation(args)
 
     assert output == Path(args.output)
     assert [event[0] for event in events] == [
@@ -536,6 +548,8 @@ def test_generation_orchestrates_image_output_without_audio_decode(tmp_path, mon
         disable_numpy_memmap=False,
         processor_revision=None,
     )
+    monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
+    monkeypatch.setattr(generate, "has_comfy_quant_tensors", lambda files, **kwargs: False)
     events = []
 
     class Transformer:

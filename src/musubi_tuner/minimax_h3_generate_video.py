@@ -25,10 +25,13 @@ from musubi_tuner.minimax_h3.media import (
     audio_latent_frames,
     video_latent_frames,
 )
+from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
+from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
+    create_sampling_generator,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
@@ -257,6 +260,9 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_numpy_memmap,
+        nvfp4_scaled_mm=args.nvfp4_scaled_mm,
+        blocks_to_swap=args.text_encoder_blocks_to_swap,
+        attn_mode=args.text_encoder_attn_mode,
     )
     hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
     del processor, text_encoder
@@ -299,25 +305,95 @@ def _merge_lora_weights(transformer, args) -> None:
         network.merge_to(None, transformer, state, dtype=torch.bfloat16, device="cpu")
 
 
+def _apply_lora_weights(transformer, args, device: torch.device) -> list[torch.nn.Module]:
+    """Attach LoRAs as runtime additive branches (pre-quantized INT8 bases).
+
+    The INT8 base tensors are never modified or requantized; each LoRA stays a separate
+    branch with its own multiplier for the sampling lifetime.
+    """
+    weights = args.lora_weight or []
+    multipliers = args.lora_multiplier or []
+    includes = args.include_patterns or []
+    excludes = args.exclude_patterns or []
+    networks = []
+    for index, path in enumerate(weights):
+        multiplier = multipliers[index] if index < len(multipliers) else 1.0
+        include = includes[index] if index < len(includes) else None
+        exclude = excludes[index] if index < len(excludes) else None
+        logger.info("Attaching MiniMax-H3 LoRA %s with multiplier %s", path, multiplier)
+        state = filter_lora_state_dict(load_file(path), include, exclude)
+        network = lora_minimax_h3.create_arch_network_from_weights(
+            multiplier,
+            state,
+            unet=transformer,
+            for_inference=True,
+        )
+        if not network.unet_loras:
+            raise ValueError(f"MiniMax-H3 LoRA {path} contains no compatible target modules")
+        network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
+        network.load_state_dict(state, strict=True)
+        network.eval().requires_grad_(False).to(device)
+        networks.append(network)
+    return networks
+
+
+def _configure_lora_weights(transformer, args, device: torch.device, *, prequantized: bool) -> list[torch.nn.Module]:
+    """Route LoRA application by base artifact.
+
+    Pre-quantized INT8 bases get runtime additive branches; a BF16 base with
+    --convrot_int8 was already merged during the streaming load (no-op here); a plain
+    BF16 base gets the one-time destructive CPU merge.
+    """
+    if not args.lora_weight:
+        return []
+    if prequantized:
+        return _apply_lora_weights(transformer, args, device)
+    if not args.convrot_int8:
+        _merge_lora_weights(transformer, args)
+    return []
+
+
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
     parser.add_argument(
         "--dit",
         required=True,
-        help="MiniMax-H3 transformer safetensors path or directory (BF16, or ConvRot INT8 with --convrot_int8)",
+        help="MiniMax-H3 transformer safetensors path or directory (BF16 or ConvRot INT8; pre-quantized full and "
+        "pruned ConvRot INT8 checkpoints are detected automatically)",
     )
     parser.add_argument(
         "--convrot_int8",
         action="store_true",
-        help="use ConvRot INT8 for the DiT base weights: quantizes BF16 weights at load time or loads ComfyUI "
-        "pre-quantized ConvRot INT8 checkpoints directly (requires triton for the fused kernels; falls back to "
-        "slower dequantized bf16 matmul without it). LoRA weights are merged before quantization, so LoRA "
-        "requires BF16 base weights.",
+        help="quantize BF16 DiT base weights to ConvRot INT8 at load time (requires triton for the fused kernels; "
+        "falls back to slower dequantized bf16 matmul without it). ComfyUI pre-quantized ConvRot INT8 checkpoints "
+        "are detected automatically and do not need this flag. With a BF16 base, LoRA weights are merged before "
+        "quantization; with a pre-quantized base, LoRAs are attached as runtime branches instead.",
     )
     parser.add_argument("--video_vae", required=True, help="MiniMax-H3 video VAE safetensors path or directory")
     parser.add_argument("--audio_vae", required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
-    parser.add_argument("--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL BF16 safetensors path")
+    parser.add_argument(
+        "--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path (BF16, ConvRot INT8 or NVFP4, auto-detected)"
+    )
+    parser.add_argument(
+        "--nvfp4_scaled_mm",
+        action="store_true",
+        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
+    )
+    parser.add_argument(
+        "--text_encoder_blocks_to_swap",
+        type=int,
+        default=0,
+        help="number of the 50 Qwen3-VL decoder layers to stream from CPU instead of keeping them on the GPU"
+        " (0 = disabled, 50 = minimum VRAM; requires CUDA)",
+    )
+    parser.add_argument(
+        "--text_encoder_attn_mode",
+        choices=("sdpa", "flash_attention_2", "eager"),
+        default=None,
+        help="attention implementation for the text encoder (default: transformers default, sdpa)."
+        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
+    )
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache")
     parser.add_argument("--processor", default=DEFAULT_PROCESSOR_ID, help="Qwen3-VL processor repo or directory")
     parser.add_argument("--processor_revision", default=None)
@@ -444,6 +520,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         layout.text_length,
         layout.row_count,
     )
+    generator = create_sampling_generator(args.seed)
     initial_video, initial_audio = initialize_target_latents(
         video_shape=(
             1,
@@ -453,7 +530,7 @@ def run_generation(args: argparse.Namespace) -> Path:
             layout.target_video.width,
         ),
         audio_shape=(1, 32, 2, layout.target_audio_frames),
-        seed=args.seed,
+        generator=generator,
         device=device,
         video_dtype=torch.float32,
         audio_dtype=torch.float32,
@@ -461,17 +538,23 @@ def run_generation(args: argparse.Namespace) -> Path:
     visual_conditions, audio_conditions = augment_condition_latents(
         visual_conditions,
         audio_conditions,
-        seed=args.seed,
+        generator=generator,
         visual_clean=args.h3_visual_cond_clean,
         audio_clean=args.h3_audio_cond_clean,
         device=device,
     )
 
-    # ConvRot INT8 merges LoRA during the streaming load (merge into BF16, then quantize),
-    # so the post-load CPU merge path is only used for the plain BF16 route.
-    load_on_cpu = bool(args.blocks_to_swap or (args.lora_weight and not args.convrot_int8))
-    lora_weights, lora_multipliers = (_load_lora_state_dicts(args), args.lora_multiplier) if args.convrot_int8 else (None, None)
-    logger.info("Loading MiniMax-H3 transformer%s", " (ConvRot INT8)" if args.convrot_int8 else "")
+    # Three LoRA routes, keyed on the base artifact:
+    # - BF16 base + --convrot_int8: merge into BF16 during the streaming load, then quantize.
+    # - Pre-quantized INT8 base (auto-detected): attach LoRAs as runtime additive branches;
+    #   the INT8 tensors cannot be merged into.
+    # - Plain BF16 base: one-time destructive CPU merge after loading (fastest inference).
+    prequantized = has_comfy_quant_tensors(resolve_safetensors_files(args.dit), disable_numpy_memmap=args.disable_numpy_memmap)
+    convrot_int8 = args.convrot_int8 or prequantized
+    merge_at_load = bool(args.lora_weight) and args.convrot_int8 and not prequantized
+    load_on_cpu = bool(args.blocks_to_swap or (args.lora_weight and not convrot_int8))
+    lora_weights, lora_multipliers = (_load_lora_state_dicts(args), args.lora_multiplier) if merge_at_load else (None, None)
+    logger.info("Loading MiniMax-H3 transformer%s", " (ConvRot INT8)" if convrot_int8 else "")
     transformer = load_h3_transformer(
         args.dit,
         device="cpu" if load_on_cpu else device,
@@ -484,8 +567,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         lora_weights=lora_weights,
         lora_multipliers=lora_multipliers,
     )
-    if args.lora_weight and not args.convrot_int8:
-        _merge_lora_weights(transformer, args)
+    attached_lora_networks = _configure_lora_weights(transformer, args, device, prequantized=prequantized)
     if args.blocks_to_swap:
         swap_config = BlockSwapConfig(
             device=device,
@@ -521,7 +603,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         )
     if transformer.offloader is not None:
         transformer.offloader.set_forward_only(True)
-    del transformer, text_hidden_states, text_token_tags, visual_conditions, audio_conditions
+    del transformer, attached_lora_networks, text_hidden_states, text_token_tags, visual_conditions, audio_conditions
     gc.collect()
     clean_memory_on_device(device)
 

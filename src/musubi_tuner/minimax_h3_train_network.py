@@ -41,6 +41,7 @@ from musubi_tuner.minimax_h3.packing import (
 )
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
+    create_sampling_generator,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
@@ -55,12 +56,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
-from musubi_tuner.training.audio_loss import (
-    add_audio_train_args,
-    effective_audio_loss_weights,
-    log_audio_supervision_summary,
-    scan_audio_supervised_fraction,
-)
+from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
@@ -161,17 +157,6 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
         seed=None if seed is None else int(seed),
     )
     return sample
-
-
-def validate_h3_dataset_batch_size(dataset_group) -> None:
-    """Keep R1 on one real sample per step; gradient accumulation provides batching."""
-    for dataset_index, dataset in enumerate(dataset_group.datasets):
-        batch_size = int(dataset.batch_manager.batch_size)
-        if batch_size != 1:
-            raise ValueError(
-                f"MiniMax-H3 R1 dataset {dataset_index} requires batch_size=1, got batch_size={batch_size}; "
-                "use gradient accumulation for a larger effective batch"
-            )
 
 
 def _validate_audio_present(value: Any, batch_size: int) -> torch.Tensor:
@@ -310,48 +295,38 @@ def _shift_noise_amount(base: torch.Tensor, shift: float) -> torch.Tensor:
     return shift * base / (1.0 + (shift - 1.0) * base)
 
 
-def _sample_base_time(args, batch: dict[str, Any], device: torch.device) -> torch.Tensor:
-    lower = (0.0 if args.min_timestep is None else float(args.min_timestep)) / 1000.0
-    upper = (1000.0 if args.max_timestep is None else float(args.max_timestep)) / 1000.0
-    if not 0.0 <= lower <= upper <= 1.0:
-        raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
-    pool = batch.get("timesteps")
-    if pool is None:
-        base = torch.rand((1,), device=device, dtype=torch.float32)[0]
-    else:
-        pool = torch.as_tensor(pool, device=device, dtype=torch.float32)
-        if pool.numel() != 1:
-            raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
-        base = pool.reshape(())
-    return lower + base * (upper - lower)
+def _augment_conditions(tensors: tuple[torch.Tensor, ...], clean: float) -> tuple[torch.Tensor, ...]:
+    """Blend independent Gaussian noise into condition latents: clean*x + (1-clean)*eps.
 
-
-def _augment_conditions(
-    tensors: tuple[torch.Tensor, ...],
-    clean: float,
-    seeds: torch.Tensor,
-    *,
-    seed_offset: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, ...]:
-    moved = tuple(tensor.to(device) for tensor in tensors)
+    Training draws fresh noise from the global RNG, like the target noise; only the
+    sampling path (minimax_h3.sampling) needs seed-reproducible condition noise.
+    """
     if clean == 1.0:
-        return moved
+        return tensors
     augmented = []
-    for tensor in moved:
-        samples = []
-        for sample, seed in zip(tensor, seeds):
-            generator = torch.Generator(device="cpu").manual_seed(int(seed.item()) + seed_offset)
-            noise = torch.randn(tuple(sample.shape), generator=generator, dtype=torch.float32, device="cpu").to(
-                device=sample.device, dtype=sample.dtype
-            )
-            samples.append(clean * sample + (1.0 - clean) * noise)
-        augmented.append(torch.stack(samples))
+    for tensor in tensors:
+        noise = torch.randn(tuple(tensor.shape), dtype=torch.float32, device=tensor.device).to(tensor.dtype)
+        augmented.append(clean * tensor + (1.0 - clean) * noise)
     return tuple(augmented)
+
+
+@dataclass(frozen=True)
+class H3SamplingResources:
+    """Training-time sampling payload: H3 decodes samples with two separate VAEs."""
+
+    video_vae: torch.nn.Module
+    audio_vae: torch.nn.Module
 
 
 class MiniMaxH3NetworkTrainer(NetworkTrainer):
     audio_spec = H3_AUDIO_SPEC
+
+    def __init__(self):
+        super().__init__()
+        # per-rank audio-supervision accounting, fed by process_batch; drives the
+        # first-epoch warning and the observed fraction saved in metadata
+        self._audio_items_seen = 0
+        self._audio_supervised_seen = 0
 
     @property
     def architecture(self) -> str:
@@ -375,6 +350,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise ValueError("MiniMax-H3 supports --weighting_scheme none only")
         if float(args.discrete_flow_shift) != 1.0:
             raise ValueError("MiniMax-H3 requires --discrete_flow_shift 1.0; use the two H3 shifts instead")
+        lower = 0.0 if args.min_timestep is None else float(args.min_timestep)
+        upper = 1000.0 if args.max_timestep is None else float(args.max_timestep)
+        if not 0.0 <= lower <= upper <= 1000.0:
+            raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
         for name in ("h3_shift_video", "h3_shift_audio"):
             value = float(getattr(args, name))
             if not 0.01 <= value <= 100.0:
@@ -389,8 +368,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise ValueError("--blocks_to_swap for MiniMax-H3 must be <= 48")
         if getattr(args, "fp8_base", False) or getattr(args, "fp8_scaled", False):
             raise ValueError("MiniMax-H3 does not support fp8 transformer bases; use --convrot_int8 for a quantized base")
-        if args.convrot_int8_bwd == "int8" and not args.convrot_int8:
-            raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
         if getattr(args, "dit_dtype", None) not in {None, "bfloat16", "bf16"}:
             raise ValueError("MiniMax-H3 R1 requires --dit_dtype bfloat16")
         if (
@@ -400,29 +377,40 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         ):
             raise ValueError("MiniMax-H3 --block_swap_h2d_only training requires --gradient_checkpointing")
 
-    def _build_dataset(self, args):
-        dataset_group, collator, current_epoch = super()._build_dataset(args)
-        validate_h3_dataset_batch_size(dataset_group)
-        self._supervised_audio_fraction = scan_audio_supervised_fraction(dataset_group)
-        log_audio_supervision_summary(self._supervised_audio_fraction, args)
-        return dataset_group, collator, current_epoch
+    def on_transformer_loaded(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+    ) -> None:
+        # pre-quantized ConvRot INT8 checkpoints are detected during loading, so these
+        # guards can only run once the effective base quantization is known
+        is_convrot_int8 = bool(getattr(transformer, "is_convrot_int8", False))
+        if args.convrot_int8_bwd == "int8":
+            if not is_convrot_int8:
+                raise ValueError(
+                    "--convrot_int8_bwd int8 requires a ConvRot INT8 base"
+                    " (--convrot_int8 or a pre-quantized ConvRot INT8 checkpoint)"
+                )
+            if torch.device(accelerator.device).type != "cuda":
+                raise ValueError("--convrot_int8_bwd int8 requires a CUDA training device")
+        if is_convrot_int8 and getattr(args, "base_weights", None):
+            raise ValueError("MiniMax-H3 --base_weights cannot be merged into a ConvRot INT8 transformer base")
 
-    def _prepare_sampling(self, args, accelerator, vae_dtype):
-        del vae_dtype
-        self._sampling_video_vae = None
-        self._sampling_audio_vae = None
+    def process_sample_prompts(self, args, accelerator, sample_prompts):
+        # only the default prepare_sampling needs this seam; guard against future
+        # base-side callers silently getting the base NotImplementedError instead
+        raise NotImplementedError(
+            "MiniMax-H3 prepares sample prompts inside prepare_sampling, which returns joint AV sampling resources"
+        )
+
+    def prepare_sampling(self, args, accelerator, vae_dtype):
+        del vae_dtype  # the H3 video/audio VAE dtypes are fixed per stage
         if not args.sample_prompts:
             return None, None
         for label in ("video_vae", "audio_vae", "text_encoder"):
             _require_sampling_path(getattr(args, label, None), label)
-        return self.process_sample_prompts(args, accelerator, args.sample_prompts), None
-
-    def process_sample_prompts(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        sample_prompts: str,
-    ):
+        sample_prompts = args.sample_prompts
         logger.info("Preparing MiniMax-H3 joint AV training samples from %s", sample_prompts)
         parameters = [_normalize_h3_sample_parameter(args, item) for item in load_prompts(sample_prompts)]
         if not parameters:
@@ -439,6 +427,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             device=device,
             dtype=torch.bfloat16,
             disable_mmap=getattr(args, "disable_numpy_memmap", False),
+            nvfp4_scaled_mm=getattr(args, "nvfp4_scaled_mm", False),
+            blocks_to_swap=getattr(args, "text_encoder_blocks_to_swap", 0),
+            attn_mode=getattr(args, "text_encoder_attn_mode", None),
         )
         text_encoder.eval().requires_grad_(False)
         try:
@@ -503,7 +494,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             video_vae.to(device="cpu", dtype=VIDEO_VAE_DECODE_DTYPE)
             gc.collect()
             clean_memory_on_device(device)
-        self._sampling_video_vae = video_vae
 
         logger.info("Loading MiniMax-H3 audio VAE for training samples")
         has_audio_conditions = any(parameter["_h3_has_audio_conditions"] for parameter in parameters)
@@ -534,7 +524,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             audio_vae.to("cpu")
             gc.collect()
             clean_memory_on_device(device)
-        self._sampling_audio_vae = audio_vae
 
         for parameter in parameters:
             references = (
@@ -577,7 +566,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 "_h3_has_audio_conditions",
             ):
                 parameter.pop(key)
-        return parameters
+        return parameters, H3SamplingResources(video_vae=video_vae, audio_vae=audio_vae)
 
     def sample_image_inference(
         self,
@@ -585,17 +574,17 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         args,
         transformer,
         dit_dtype,
-        vae,
+        sample_resources,
         save_dir,
         sample_parameter,
         epoch,
         steps,
     ):
-        del dit_dtype, vae
-        video_vae = getattr(self, "_sampling_video_vae", None)
-        audio_vae = getattr(self, "_sampling_audio_vae", None)
-        if video_vae is None or audio_vae is None:
+        del dit_dtype
+        if not isinstance(sample_resources, H3SamplingResources):
             raise RuntimeError("MiniMax-H3 training sample VAEs were not prepared")
+        video_vae = sample_resources.video_vae
+        audio_vae = sample_resources.audio_vae
         layout = sample_parameter["h3_layout"]
         sample_steps = sample_parameter["sample_steps"]
         frame_count = sample_parameter["frame_count"]
@@ -624,6 +613,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if not has_self_ref_orig_mod:
             transformer.eval()
         try:
+            generator = create_sampling_generator(seed)
             initial_video, initial_audio = initialize_target_latents(
                 video_shape=(
                     1,
@@ -633,7 +623,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     layout.target_video.width,
                 ),
                 audio_shape=(1, 32, 2, layout.target_audio_frames),
-                seed=seed,
+                generator=generator,
                 device=device,
                 video_dtype=torch.float32,
                 audio_dtype=torch.float32,
@@ -641,7 +631,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             visual_conditions, audio_conditions = augment_condition_latents(
                 sample_parameter["h3_visual_conditions"],
                 sample_parameter["h3_audio_conditions"],
-                seed=seed,
+                generator=generator,
                 visual_clean=args.h3_visual_cond_clean,
                 audio_clean=args.h3_audio_cond_clean,
                 device=device,
@@ -724,8 +714,19 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             gc.collect()
             clean_memory_on_device(device)
 
+    def on_epoch_end(self, args: argparse.Namespace, accelerator: Accelerator, network, transformer, epoch: int) -> None:
+        del network, transformer
+        if epoch != 1 or args.video_only or args.audio_loss_weight <= 0:
+            return
+        # per-rank observation: under DDP each process only sees its own shard
+        if accelerator.is_main_process and self._audio_items_seen > 0 and self._audio_supervised_seen == 0:
+            logger.warning(
+                "No training item with real audio was seen during the first epoch, so the audio loss is always 0; "
+                "if this is intended, consider passing --video_only explicitly"
+            )
+
     def extra_metadata(self, args: argparse.Namespace) -> dict:
-        return {
+        metadata = {
             "ss_minimax_h3_task": args.task,
             "ss_minimax_h3_base_family": "ref2va" if args.task == "ref2va" else "fl2va",
             "ss_minimax_h3_shift_video": args.h3_shift_video,
@@ -734,14 +735,17 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_audio_cond_clean": args.h3_audio_cond_clean,
             "ss_minimax_h3_loss_policy": "video_mean_plus_weighted_audio_mean",
             "ss_minimax_h3_audio_supervision": "presence_gated_training_weight",
-            "ss_minimax_h3_supervised_audio_fraction": getattr(self, "_supervised_audio_fraction", 1.0),
             "ss_minimax_h3_audio_loss_weight": args.audio_loss_weight,
             "ss_minimax_h3_video_only": args.video_only,
             "ss_minimax_h3_target_modules": "attn.qkv_proj,attn.out_proj,mlp.fc1,mlp.fc2",
-            "ss_minimax_h3_convrot_int8": args.convrot_int8,
+            "ss_minimax_h3_convrot_int8": getattr(self, "_convrot_int8_active", args.convrot_int8),
             "ss_minimax_h3_latent_cache_version": "2",
             "ss_minimax_h3_text_cache_version": "1",
         }
+        if self._audio_items_seen > 0:
+            # fraction observed on this rank so far (exact once a full epoch has run)
+            metadata["ss_minimax_h3_supervised_audio_fraction"] = round(self._audio_supervised_seen / self._audio_items_seen, 6)
+        return metadata
 
     def load_transformer(
         self,
@@ -755,7 +759,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
     ):
         if dit_weight_dtype not in {None, torch.bfloat16}:
             raise ValueError("MiniMax-H3 transformer weights must stay BF16")
-        return load_h3_transformer(
+        transformer = load_h3_transformer(
             dit_path,
             device=loading_device,
             dtype=torch.bfloat16,
@@ -768,6 +772,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             # for block swap (cf. the Krea 2 calc-device fix in #1008)
             quant_device=accelerator.device,
         )
+        # pre-quantized ConvRot INT8 checkpoints are detected during loading, so the
+        # effective base quantization can differ from the --convrot_int8 flag
+        self._convrot_int8_active = bool(getattr(transformer, "is_convrot_int8", False))
+        return transformer
 
     def compile_transformer(self, args, transformer):
         # ConvRot int8 Linears are excluded from compile: the custom autograd.Function +
@@ -776,7 +784,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             args,
             transformer,
             [transformer.blocks],
-            disable_linear=bool(self.blocks_to_swap) or args.convrot_int8,
+            disable_linear=bool(self.blocks_to_swap) or bool(getattr(transformer, "is_convrot_int8", False)),
         )
 
     def scale_shift_latents(self, latents):
@@ -852,17 +860,23 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         noise_scheduler,
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
-        vae,
+        sample_resources,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del network, vae
+        del network, sample_resources
+        # _runtime_batch_plan rejects batches larger than one item (batch_size=1 rule)
         runtime = _runtime_batch_plan(batch, latents)
+        self._audio_items_seen += int(runtime.audio_present.numel())
+        self._audio_supervised_seen += int(runtime.audio_present.sum().item())
         if runtime.layout.task != args.task:
             raise ValueError(f"MiniMax-H3 --task {args.task} cannot train a {runtime.layout.task.upper()} cache batch")
         device = latents.device
         audio_latents = batch["latents_audio"].to(device=device)
         audio_noise = torch.randn_like(audio_latents)
-        base = _sample_base_time(args, batch, device)
+        pool = batch.get("timesteps")
+        if pool is not None and len(pool) != 1:
+            raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
+        base = self.sample_timesteps(args, 1, pool, latents, device)[0]
         sigma_video = _shift_noise_amount(base, args.h3_shift_video)
         sigma_audio = _shift_noise_amount(base, args.h3_shift_audio)
         model_t_video = 1.0 - sigma_video
@@ -870,27 +884,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         noisy_video = (1.0 - sigma_video) * latents + sigma_video * noise
         noisy_audio = (1.0 - sigma_audio) * audio_latents + sigma_audio * audio_noise
 
-        needs_condition_noise = (bool(runtime.visual_conditions) and args.h3_visual_cond_clean != 1.0) or (
-            bool(runtime.audio_conditions) and args.h3_audio_cond_clean != 1.0
-        )
-        condition_seeds = (
-            torch.randint(0, 2**63 - 2, (latents.shape[0],), dtype=torch.int64, device="cpu")
-            if needs_condition_noise
-            else torch.empty(0, dtype=torch.int64)
-        )
         visual_conditions = _augment_conditions(
-            runtime.visual_conditions,
-            args.h3_visual_cond_clean,
-            condition_seeds,
-            seed_offset=0,
-            device=device,
+            tuple(tensor.to(device) for tensor in runtime.visual_conditions), args.h3_visual_cond_clean
         )
         audio_conditions = _augment_conditions(
-            runtime.audio_conditions,
-            args.h3_audio_cond_clean,
-            condition_seeds,
-            seed_offset=1,
-            device=device,
+            tuple(tensor.to(device) for tensor in runtime.audio_conditions), args.h3_audio_cond_clean
         )
         output = self.call_dit(
             args,
@@ -995,6 +993,25 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         help="MiniMax-H3 Qwen3-VL checkpoint used to encode training sample prompts",
     )
     parser.add_argument(
+        "--nvfp4_scaled_mm",
+        action="store_true",
+        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
+    )
+    parser.add_argument(
+        "--text_encoder_blocks_to_swap",
+        type=int,
+        default=0,
+        help="number of the 50 Qwen3-VL decoder layers to stream from CPU while encoding training sample prompts"
+        " (0 = disabled, 50 = minimum VRAM; requires CUDA; unrelated to the transformer's --blocks_to_swap)",
+    )
+    parser.add_argument(
+        "--text_encoder_attn_mode",
+        choices=("sdpa", "flash_attention_2", "eager"),
+        default=None,
+        help="attention implementation for the sample-prompt text encoder (default: transformers default, sdpa)."
+        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
+    )
+    parser.add_argument(
         "--processor",
         type=str,
         default=DEFAULT_PROCESSOR_ID,
@@ -1010,18 +1027,18 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument(
         "--convrot_int8",
         action="store_true",
-        help="use ConvRot INT8 for the DiT base weights. Quantizes the per-block Linears (attn/mlp/adaln_proj) at "
-        "load time with Hadamard rotation + int8, or loads ComfyUI pre-quantized ConvRot INT8 checkpoints directly; "
-        "forward runs fused Triton int8 GEMM (requires triton / triton-windows; falls back to slower "
-        "dequantized bf16 matmul without it).",
+        help="quantize the BF16 DiT base weights to ConvRot INT8 at load time (Hadamard rotation + int8 on the "
+        "per-block Linears: attn/mlp/adaln_proj). ComfyUI pre-quantized ConvRot INT8 checkpoints (full or pruned) "
+        "are detected automatically and do not need this flag. Forward runs fused Triton int8 GEMM (requires "
+        "triton / triton-windows; falls back to slower dequantized bf16 matmul without it).",
     )
     parser.add_argument(
         "--convrot_int8_bwd",
         type=str,
         default="bf16",
         choices=["bf16", "int8"],
-        help="backward mode for --convrot_int8. bf16 (default): transient dequantized matmul, most accurate. "
-        "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton).",
+        help="backward mode for a ConvRot INT8 base. bf16 (default): transient dequantized matmul, most accurate. "
+        "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton and CUDA).",
     )
     return parser
 
