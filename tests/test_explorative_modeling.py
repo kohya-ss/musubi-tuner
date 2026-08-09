@@ -1,6 +1,7 @@
 from importlib import import_module
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -202,3 +203,142 @@ def test_update_winners_rejects_noise_on_a_different_device_from_losses():
             torch.zeros(2, 1, device="cuda"),
             0,
         )
+
+
+def _noise_coefficient_helpers():
+    module = import_module("musubi_tuner.training.timesteps")
+    trainer_module = import_module("musubi_tuner.training.trainer_base")
+    return (
+        getattr(module, "BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS"),
+        getattr(module, "get_noise_coefficients_from_timesteps"),
+        getattr(trainer_module, "NetworkTrainer"),
+    )
+
+
+def _timestep_args(timestep_sampling: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        timestep_sampling=timestep_sampling,
+        discrete_flow_shift=3.0,
+        sigmoid_scale=1.0,
+        min_timestep=None,
+        max_timestep=None,
+        preserve_distribution_shape=False,
+        weighting_scheme="none",
+        logit_mean=0.0,
+        logit_std=1.0,
+        mode_scale=1.29,
+    )
+
+
+def test_explicit_sampler_candidate_zero_reconstructs_from_returned_timestep():
+    sampler_names, get_noise_coefficients, trainer_type = _noise_coefficient_helpers()
+    torch.manual_seed(9)
+    trainer = trainer_type()
+    latents = torch.randn(2, 3, 2, 2, dtype=torch.float32)
+    noise = torch.randn_like(latents)
+
+    for timestep_sampling in sorted(sampler_names):
+        noisy, timesteps = trainer.get_noisy_model_input_and_timesteps(
+            _timestep_args(timestep_sampling),
+            noise,
+            latents,
+            [0.25, 0.75],
+            None,
+            torch.device("cpu"),
+            torch.float32,
+        )
+        sigma = get_noise_coefficients(
+            timestep_sampling,
+            None,
+            timesteps,
+            torch.device("cpu"),
+            latents.ndim,
+            latents.dtype,
+        )
+
+        reconstructed = (1.0 - sigma) * latents + sigma * noise
+        torch.testing.assert_close(reconstructed, noisy, rtol=1e-5, atol=1e-6)
+
+
+def test_scheduler_indexed_coefficients_reuse_fixed_scheduler_timestep():
+    _, get_noise_coefficients, _ = _noise_coefficient_helpers()
+    scheduler = SimpleNamespace(
+        timesteps=torch.tensor([1000.0, 500.0, 1.0]),
+        sigmas=torch.tensor([1.0, 0.5, 0.0]),
+    )
+    sigma = get_noise_coefficients(
+        "sigma",
+        scheduler,
+        torch.tensor([500.0, 1.0]),
+        torch.device("cpu"),
+        5,
+        torch.float32,
+    )
+
+    assert sigma.shape == (2, 1, 1, 1, 1)
+    torch.testing.assert_close(sigma[:, 0, 0, 0, 0], torch.tensor([0.5, 0.0]))
+
+
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        (torch.float32, 1e-5, 1e-6),
+        (torch.float16, 1e-3, 1e-3),
+        (torch.bfloat16, 1e-2, 1e-2),
+    ],
+)
+def test_scheduler_candidate_zero_reconstructs_with_declared_dtype_tolerance(monkeypatch, dtype, rtol, atol):
+    _, get_noise_coefficients, trainer_type = _noise_coefficient_helpers()
+    trainer_base_module = import_module("musubi_tuner.training.trainer_base")
+    scheduler = SimpleNamespace(
+        config=SimpleNamespace(num_train_timesteps=3),
+        timesteps=torch.tensor([1000.0, 500.0, 1.0]),
+        sigmas=torch.tensor([1.0, 0.5, 0.0]),
+    )
+    monkeypatch.setattr(
+        trainer_base_module,
+        "compute_density_for_timestep_sampling",
+        lambda **kwargs: torch.tensor([0.34, 0.67]),
+    )
+    trainer = trainer_type()
+    latents = torch.linspace(-1.0, 1.0, 8, dtype=torch.float32).to(dtype).reshape(2, 1, 2, 2)
+    noise = torch.flip(latents, dims=(-1,))
+    args = _timestep_args("sigma")
+    args.max_timestep = scheduler.config.num_train_timesteps
+    noisy, timesteps = trainer.get_noisy_model_input_and_timesteps(
+        args, noise, latents, None, scheduler, torch.device("cpu"), dtype
+    )
+    sigma = get_noise_coefficients("sigma", scheduler, timesteps, torch.device("cpu"), latents.ndim, dtype)
+
+    torch.testing.assert_close(
+        (1.0 - sigma) * latents + sigma * noise,
+        noisy,
+        rtol=rtol,
+        atol=atol,
+    )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        (torch.float32, 1e-5, 1e-6),
+        (torch.float16, 1e-3, 1e-3),
+        (torch.bfloat16, 1e-2, 1e-2),
+    ],
+)
+@pytest.mark.parametrize("shape", [(2, 3, 4, 4), (2, 3, 2, 4, 4)])
+def test_explicit_coefficients_broadcast_with_declared_dtype_tolerance(dtype, rtol, atol, shape):
+    _, get_noise_coefficients, _ = _noise_coefficient_helpers()
+    latents = torch.linspace(-1.0, 1.0, int(torch.tensor(shape).prod().item()), dtype=torch.float32).to(dtype).reshape(shape)
+    noise = torch.flip(latents, dims=(-1,))
+    timesteps = torch.tensor([251.0, 751.0], dtype=torch.float32)
+    sigma = get_noise_coefficients("uniform", None, timesteps, torch.device("cpu"), len(shape), dtype)
+    expected_sigma = torch.tensor([0.25, 0.75], dtype=dtype).reshape(2, *([1] * (len(shape) - 1)))
+
+    torch.testing.assert_close(sigma, expected_sigma, rtol=rtol, atol=atol)
+    torch.testing.assert_close(
+        (1.0 - sigma) * latents + sigma * noise,
+        (1.0 - expected_sigma) * latents + expected_sigma * noise,
+        rtol=rtol,
+        atol=atol,
+    )

@@ -60,6 +60,7 @@ from musubi_tuner.training.accelerator_setup import (
 )
 from musubi_tuner.training.sampling_prompts import should_sample_images
 from musubi_tuner.training.timesteps import (
+    BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS,
     compute_density_for_timestep_sampling,
     compute_ideogram4_shift_timestep,
     compute_loss_weighting_for_sd3,
@@ -569,19 +570,7 @@ class NetworkTrainer:
             logsnr = mean + std * math.sqrt(2.0) * torch.erfinv(term)
             return logsnr
 
-        if (
-            args.timestep_sampling == "uniform"
-            or args.timestep_sampling == "sigmoid"
-            or args.timestep_sampling == "shift"
-            or args.timestep_sampling == "flux_shift"
-            or args.timestep_sampling == "qwen_shift"
-            or args.timestep_sampling == "krea2_shift"
-            or args.timestep_sampling == "ideogram4_shift"
-            or args.timestep_sampling == "logsnr"
-            or args.timestep_sampling == "qinglong_flux"
-            or args.timestep_sampling == "qinglong_qwen"
-            or args.timestep_sampling == "flux2_shift"
-        ):
+        if args.timestep_sampling in BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
 
             def compute_sampling_timesteps(org_timesteps: Optional[torch.Tensor]) -> torch.Tensor:
                 def rand(bs: int, org_ts: Optional[torch.Tensor] = None) -> torch.Tensor:
