@@ -172,6 +172,14 @@ Two training arguments control audio supervision:
 
 The latent caching script logs the supervised fraction as `supervised_audio_fraction` in its end-of-run summary, and warns when no cached item has real audio. The trainer records the fraction it actually observed during training as `ss_minimax_h3_supervised_audio_fraction` (exact once a full epoch has run), along with `ss_minimax_h3_audio_loss_weight` and `ss_minimax_h3_video_only`, and warns at the end of the first epoch if audio supervision is enabled but no sample with real audio was seen. It also records `ss_minimax_h3_loss_policy=video_mean_plus_weighted_audio_mean` and `ss_minimax_h3_audio_supervision=presence_gated_training_weight`. H3 enforces uniform base-time sampling, no generic SD3 loss weighting, and independent video/audio shifts of 12 and 3.
 
+`--h3_video_best_of_k K` enables a video-focused best-of-K heuristic (not
+Forward XM) when `K > 1`. It varies and ranks video noise by video loss while
+keeping the audio candidate state fixed; the selected update still optimizes
+video loss plus weighted audio loss. MiniMax-H3 rejects the common
+`--xm_best_of_k` option for `K > 1`. See [Explorative Modeling and Forward
+XM](./explorative_modeling.md) for semantics, cost, compatibility, and the
+strict non-finite-loss policy.
+
 Zero audio loss does not preserve the base model's audio behavior. H3 is single-stream, and these LoRA targets modify the same attention and MLP weights used by video and audio tokens. A `--video_only` or low-`supervised_audio_fraction` LoRA can therefore produce audio worse than the base model; the risk generally increases with adapter capacity/strength and training exposure, although degradation is not guaranteed to be monotonic. Treat audio from a fully video-only LoRA as unconstrained output.
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.
