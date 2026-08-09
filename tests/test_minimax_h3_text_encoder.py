@@ -19,7 +19,6 @@ from musubi_tuner.minimax_h3.text_encoder import (
     H3TextVisual,
     build_presentation,
     build_token_tags,
-    extract_layer_50_pre_norm,
     load_h3_text_encoder,
     normalize_h3_text_encoder_key,
     validate_text_rows,
@@ -108,30 +107,6 @@ def test_ref2va_presentation_preserves_jsonl_order_and_timestamp_format(tmp_path
     assert [tuple(video_block.shape) for video_block in presentation.videos] == [
         (3, 32, 32, 3),
     ]
-
-
-def test_layer_50_uses_hidden_state_index_50_where_zero_is_embeddings():
-    hidden_states = tuple(torch.full((1, 2, 4), float(index)) for index in range(51))
-    output = SimpleNamespace(hidden_states=hidden_states, last_hidden_state=torch.full((1, 2, 4), -1.0))
-    model = SimpleNamespace(language_model=SimpleNamespace(layers=[object() for _ in range(64)]))
-
-    actual = extract_layer_50_pre_norm(output, model)
-
-    torch.testing.assert_close(actual, hidden_states[50])
-
-
-def test_truncated_50_layer_output_prefers_captured_pre_norm_state():
-    captured = torch.full((1, 2, 4), 50.0)
-    output = SimpleNamespace(
-        hidden_states=None,
-        last_hidden_state=torch.full((1, 2, 4), -50.0),
-        h3_layer_50_pre_norm=captured,
-    )
-    model = SimpleNamespace(language_model=SimpleNamespace(layers=[object() for _ in range(50)]))
-
-    actual = extract_layer_50_pre_norm(output, model)
-
-    assert actual is captured
 
 
 def test_token_tags_cover_expanded_vision_rows_and_both_flanking_tokens():
@@ -370,6 +345,41 @@ def test_load_h3_text_encoder_accepts_nonpublished_convrot_layers_permissively(t
 
     assert loaded.visual.weight.dtype is torch.int8
     assert loaded.convrot_int8_layer_count == 351
+
+
+def test_load_h3_text_encoder_installs_identity_final_norm_for_layer_50_convention(tmp_path, monkeypatch):
+    # the hidden-state convention: 50 decoder layers + Identity final norm, so the model's
+    # last_hidden_state is exactly the layer-50 pre-norm state (no capture hook involved)
+    _install_fake_transformers(monkeypatch)
+    state, _scale = _fake_text_state(quantized=False)
+    checkpoint = tmp_path / "qwen3vl-bf16.safetensors"
+    save_file(state, checkpoint)
+
+    loaded = load_h3_text_encoder(
+        checkpoint,
+        processor_path="fake",
+        device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    assert isinstance(loaded.language_model.norm, nn.Identity)
+    assert len(loaded.language_model.layers) == 50
+
+
+def test_load_h3_text_encoder_rejects_streaming_without_cuda(tmp_path, monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    state, _scale = _fake_text_state(quantized=False)
+    checkpoint = tmp_path / "qwen3vl-bf16.safetensors"
+    save_file(state, checkpoint)
+
+    with pytest.raises(ValueError, match="CUDA"):
+        load_h3_text_encoder(
+            checkpoint,
+            processor_path="fake",
+            device="cpu",
+            dtype=torch.bfloat16,
+            blocks_to_swap=50,
+        )
 
 
 def test_load_h3_text_encoder_rejects_convrot_layer_missing_from_the_model(tmp_path, monkeypatch):

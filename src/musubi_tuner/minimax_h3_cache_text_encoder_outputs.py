@@ -134,6 +134,20 @@ def setup_parser() -> argparse.ArgumentParser:
         help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
     )
     parser.add_argument(
+        "--text_encoder_blocks_to_swap",
+        type=int,
+        default=0,
+        help="number of the 50 Qwen3-VL decoder layers to stream from CPU instead of keeping them on the GPU"
+        " (0 = disabled, 50 = minimum VRAM; requires CUDA)",
+    )
+    parser.add_argument(
+        "--text_encoder_attn_mode",
+        choices=("sdpa", "flash_attention_2", "eager"),
+        default=None,
+        help="attention implementation for the text encoder (default: transformers default, sdpa)."
+        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
+    )
+    parser.add_argument(
         "--processor",
         type=str,
         default=DEFAULT_PROCESSOR_ID,
@@ -184,6 +198,8 @@ def main() -> None:
         dtype=torch.bfloat16,
         disable_mmap=args.disable_mmap,
         nvfp4_scaled_mm=args.nvfp4_scaled_mm,
+        blocks_to_swap=args.text_encoder_blocks_to_swap,
+        attn_mode=args.text_encoder_attn_mode,
     )
 
     decoded_reference_cache = {}

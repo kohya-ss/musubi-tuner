@@ -137,7 +137,7 @@ python minimax_h3_cache_text_encoder_outputs.py \
   --skip_existing
 ```
 
-The same command accepts the ConvRot INT8 text encoder (`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`) and the NVFP4+AWQ text encoder (`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`); the formats are detected automatically. The cache stores the state after the first 50 Qwen layers, before a final language-model norm. `hidden_states[0]` is the embedding output, so this is `hidden_states[50]`. The cache also stores per-row modality tags and presentation fingerprints; stale or structurally incompatible caches are rejected.
+The same command accepts the ConvRot INT8 text encoder (`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`) and the NVFP4+AWQ text encoder (`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`); the formats are detected automatically. On VRAM-limited GPUs add `--text_encoder_blocks_to_swap 50` to stream the encoder layers from CPU, and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations (see Text Encoder Layer Streaming below). The cache stores the state after the first 50 Qwen layers, before a final language-model norm. `hidden_states[0]` is the embedding output, so this is `hidden_states[50]`. The cache also stores per-row modality tags and presentation fingerprints; stale or structurally incompatible caches are rejected.
 
 ## LoRA Training
 
@@ -194,7 +194,7 @@ Add the sampling assets and normal sampling schedule flags to the training comma
 
 The text presentations and condition latents are prepared once before the transformer is loaded. The two decode VAEs then remain on CPU and are moved to the accelerator one at a time for each scheduled sample. The shared trainer still owns sampling cadence, distributed prompt assignment, RNG restoration, and the block-swap inference/training transition.
 
-Training-time samples load the selected Qwen3-VL text encoder on the training accelerator before the transformer. The BF16 artifact is approximately 48 GB, so `--sample_prompts` requires roughly 50 GB of available accelerator memory there; the ConvRot INT8 artifact lowers the persistent text-encoder weights to ~25 GB and the NVFP4+AWQ artifact to ~15 GB, selected simply by passing their paths. Omit scheduled sampling when the selected encoder does not fit; a text-encoder device override or cached sample conditioning is follow-up scope.
+Training-time samples load the selected Qwen3-VL text encoder on the training accelerator before the transformer. The BF16 artifact is approximately 48 GB, so `--sample_prompts` requires roughly 50 GB of available accelerator memory there; the ConvRot INT8 artifact lowers the persistent text-encoder weights to ~25 GB and the NVFP4+AWQ artifact to ~15 GB, selected simply by passing their paths. `--text_encoder_blocks_to_swap` (see Text Encoder Layer Streaming below) removes most of the remaining weight footprint by streaming the encoder layers from CPU during this phase.
 
 All entries in one run use the training `--task`. T2VA JSON entries use the common prompt fields:
 
@@ -243,6 +243,16 @@ The artifact quantizes the 350 language-model Linears to NVFP4 (4-bit E2M1 value
 By default the patched layers run weight-only: the NVFP4 weight is transiently dequantized each forward and multiplied in BF16, which works on any GPU and matches the artifact's own `full_precision_matrix_mult` declaration. `--nvfp4_scaled_mm` opts into W4A4 matmuls via `torch.nn.functional.scaled_mm`, which also quantizes the activations to NVFP4; it requires PyTorch 2.10+ and a Blackwell-generation GPU, and trades some quality for speed (measured end-to-end against a BF16 text encoder with an identical DiT/seed: mean 5.9/255 decoded deviation in the default mode, 7.2/255 with `--nvfp4_scaled_mm`; the ConvRot INT8 text encoder scores 3.5/255 and a typical LoRA effect ~79/255 on the same pipeline).
 
 The text encoder is frozen in every Musubi flow, so the NVFP4 path is inference-only; it does not affect LoRA training of the transformer. Text-encoder LoRAs cannot be merged into or attached to the NVFP4 artifact.
+
+## Text Encoder Layer Streaming
+
+`--text_encoder_blocks_to_swap N` streams `N` of the 50 Qwen3-VL decoder layers from CPU memory instead of keeping them resident on the GPU, wherever `--text_encoder` is accepted (TE caching, training-time sampling, generation). `N=50` minimizes the device footprint; smaller values keep `50-N` layers resident and transfer proportionally less per record (useful when the encoder almost fits). Requires CUDA.
+
+The text encoder is frozen and forward-only in every Musubi flow, so this uses the H2D-only streaming machinery from `docs/block_swap.md`: the layer weights stay in pageable CPU masters (no large pinned allocation) and are prefetched layer by layer into a small ring of two reused GPU buffers while earlier layers compute; nothing is ever copied back. Quantized layers stream their weights together with their scale tensors, so the mechanism combines with every accepted artifact. The computed values are identical to a fully resident run — the same weights are read from the same bytes, only their location changes.
+
+With `--text_encoder_blocks_to_swap 50` the resident weights reduce to the embedding, the vision tower, and the norms, plus two ring buffers of one layer each (per-layer stream size: ~0.9 GB BF16, ~0.5 GB ConvRot INT8, ~0.3 GB NVFP4) and activations. This brings TE caching and training-time sampling with the quantized artifacts into reach of consumer GPUs; the trade-off is the CPU-side resident copy (the artifact size) and per-record transfer time of the streamed layers.
+
+`--text_encoder_attn_mode {sdpa,flash_attention_2,eager}` separately selects the transformers attention implementation for the text encoder (default: transformers' own default, sdpa). At long context, transformers' sdpa can fall back to the O(L^2) FP32 math kernel — around 12k rows the attention workspace alone exceeds 30 GB, defeating the streaming savings. Pass `flash_attention_2` (requires flash-attn) for long Ref2VA presentations of more than a few thousand rows.
 
 ## Generation
 
