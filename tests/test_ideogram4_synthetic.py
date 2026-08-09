@@ -714,15 +714,25 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             normalized = trainer.scale_shift_latents(latents)
             self.assertTrue(torch.allclose(normalized, ideogram4_utils.normalize_token_grid(latents)))
 
-            # compute_loss: plain mean MSE in velocity space; with pred == target loss is zero and the
-            # log_loss_stats diagnostics fall out (cosine == 1, timestep mean preserved).
+            # The canonical selection primitive is unweighted MSE in velocity space;
+            # diagnostics still accompany the scalar wrapper.
             target = torch.linspace(-1.0, 1.0, 4 * 2 * 2, dtype=torch.float32).reshape(1, 4, 2, 2)
             output = DiTOutput(pred=target.clone(), target=target.clone())
             args = SimpleNamespace(log_loss_stats=True)
+            timesteps = torch.full((1,), 251.0)
+            per_sample = trainer.compute_per_sample_loss(
+                args,
+                output,
+                timesteps,
+                object(),  # noise_scheduler (unused)
+                torch.float32,
+                torch.float32,
+                0,
+            )
             loss, metrics = trainer.compute_loss(
                 args,
                 output,
-                torch.full((1,), 251.0),
+                timesteps,
                 object(),  # noise_scheduler (unused)
                 torch.float32,
                 torch.float32,
@@ -747,6 +757,21 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
                 sys.modules.pop("musubi_tuner.training.trainer_base", None)
 
         self.assertEqual(float(loss.item()), 0.0)
+        self.assertEqual(per_sample.shape, (output.pred.shape[0],))
+        self.assertTrue(torch.allclose(loss, per_sample.mean(), rtol=1e-5, atol=1e-8))
+        self.assertEqual(
+            set(metrics),
+            {
+                "loss/zero_pred",
+                "loss/flipped_pred",
+                "loss/pred_rms",
+                "loss/target_rms",
+                "loss/pred_target_cosine",
+                "timestep/mean",
+                "timestep/min",
+                "timestep/max",
+            },
+        )
         self.assertGreater(metrics["loss/zero_pred"], 0.0)
         self.assertGreater(metrics["loss/flipped_pred"], 0.0)
         self.assertAlmostEqual(metrics["loss/pred_target_cosine"], 1.0, places=6)

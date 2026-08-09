@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from musubi_tuner.flux_2_train_network_self_flow import Flux2SelfFlowNetworkTrainer
 from musubi_tuner.hidream_o1_train_network import HiDreamO1NetworkTrainer
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
-from musubi_tuner.training.trainer_base import NetworkTrainer
+from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
+import musubi_tuner.training.trainer_base as trainer_base_module
 
 
 def _explorative_helpers():
@@ -611,3 +612,71 @@ def test_standard_xm_startup_log_is_explicit_and_k_one_is_silent(caplog):
     assert "1.67x" in caplog.text
     assert "pretraining results" in caplog.text
     assert "LoRA fine-tuning" in caplog.text
+
+
+def test_base_per_sample_loss_applies_weight_before_nonbatch_reduction(monkeypatch):
+    trainer = NetworkTrainer()
+    output = DiTOutput(
+        pred=torch.tensor([[[[1.0, 3.0]]], [[[2.0, 4.0]]]]),
+        target=torch.zeros(2, 1, 1, 2),
+    )
+    weighting = torch.tensor([2.0, 0.5]).reshape(2, 1, 1, 1)
+    monkeypatch.setattr(trainer_base_module, "compute_loss_weighting_for_sd3", lambda *a, **k: weighting)
+    args = SimpleNamespace(weighting_scheme="cosmap")
+
+    per_sample = trainer.compute_per_sample_loss(args, output, torch.tensor([1.0, 2.0]), None, torch.float32, torch.float32, 0)
+    scalar, metrics = trainer.compute_loss(args, output, torch.tensor([1.0, 2.0]), None, torch.float32, torch.float32, 0)
+
+    torch.testing.assert_close(per_sample, torch.tensor([10.0, 5.0]))
+    assert torch.allclose(scalar, per_sample.mean(), rtol=1e-5, atol=1e-8)
+    assert metrics == {}
+
+
+def test_base_per_sample_loss_rejects_missing_batch_axis():
+    trainer = NetworkTrainer()
+    output = DiTOutput(pred=torch.tensor(1.0), target=torch.tensor(0.0))
+
+    with pytest.raises(ValueError, match=r"per-sample loss requires a leading batch axis"):
+        trainer.compute_per_sample_loss(
+            SimpleNamespace(weighting_scheme="none"), output, torch.tensor([1.0]), None, torch.float32, torch.float32, 0
+        )
+
+
+def test_base_per_sample_loss_rejects_mismatched_batch_axis():
+    trainer = NetworkTrainer()
+    output = DiTOutput(pred=torch.zeros(2, 1), target=torch.zeros(3, 1))
+
+    with pytest.raises(ValueError, match=r"prediction and target batch sizes differ"):
+        trainer.compute_per_sample_loss(
+            SimpleNamespace(weighting_scheme="none"), output, torch.tensor([1.0, 2.0]), None, torch.float32, torch.float32, 0
+        )
+
+
+def test_base_scalar_loss_and_gradient_match_direct_baseline_reduction(monkeypatch):
+    trainer = NetworkTrainer()
+    weighting = torch.tensor([0.75, 1.25]).reshape(2, 1, 1, 1)
+    monkeypatch.setattr(trainer_base_module, "compute_loss_weighting_for_sd3", lambda *args, **kwargs: weighting)
+    new_parameter = torch.nn.Parameter(torch.tensor(0.3))
+    old_parameter = torch.nn.Parameter(new_parameter.detach().clone())
+    inputs = torch.tensor([1.0, 2.0]).reshape(2, 1, 1, 1)
+    target = torch.tensor([-1.0, 0.5]).reshape(2, 1, 1, 1)
+    timesteps = torch.tensor([100.0, 900.0])
+    args = SimpleNamespace(weighting_scheme="cosmap")
+
+    new_loss, metrics = trainer.compute_loss(
+        args,
+        DiTOutput(pred=new_parameter * inputs, target=target),
+        timesteps,
+        None,
+        torch.float32,
+        torch.float32,
+        0,
+    )
+    old_elementwise = torch.nn.functional.mse_loss(old_parameter * inputs, target, reduction="none")
+    old_loss = (old_elementwise * weighting).mean()
+    new_grad = torch.autograd.grad(new_loss, new_parameter)[0]
+    old_grad = torch.autograd.grad(old_loss, old_parameter)[0]
+
+    assert torch.allclose(new_loss, old_loss, rtol=1e-5, atol=1e-8)
+    assert torch.allclose(new_grad, old_grad, rtol=1e-5, atol=1e-8)
+    assert metrics == {}

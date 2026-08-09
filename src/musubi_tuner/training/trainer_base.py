@@ -1259,24 +1259,47 @@ class NetworkTrainer:
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
-        Default implementation: weighted MSE between ``output.pred`` and
-        ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
-        then ``.mean()``. Override to swap the loss formulation entirely
-        (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary terms
-        (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses are
-        responsible for whatever weighting/reduction they need — this hook owns
-        the full loss computation, not just the per-element MSE.
+        Default implementation: the mean of the canonical weighted per-sample
+        MSE from ``compute_per_sample_loss``. Override that primitive to swap
+        the loss formulation entirely, or override this wrapper to add scalar
+        auxiliary terms and loss-decomposition metrics.
 
         ``global_step`` is provided for step-gated terms (e.g. computing an
         auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
         populate with named scalars for loss-decomposition logging
         (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
+        per_sample = self.compute_per_sample_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        return per_sample.mean(), {}
+
+    def compute_per_sample_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> torch.Tensor:
+        """Reduce a ``DiTOutput`` to one weighted MSE loss per batch sample."""
+        del global_step
+        if output.pred.ndim < 1 or output.target.ndim < 1:
+            raise ValueError("per-sample loss requires a leading batch axis")
+
+        batch_size = output.pred.shape[0]
+        if output.target.shape[0] != batch_size:
+            raise ValueError("prediction and target batch sizes differ")
+
         weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
-        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
+        elementwise = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
-            loss = loss * weighting
-        return loss.mean(), {}
+            elementwise = elementwise * weighting
+
+        per_sample = elementwise.reshape(batch_size, -1).mean(dim=1)
+        if per_sample.shape != (batch_size,):
+            raise ValueError(f"per-sample loss must have shape [{batch_size}], got {tuple(per_sample.shape)}")
+        return per_sample
 
     def on_transformer_loaded(
         self,
