@@ -1,8 +1,12 @@
+import gc
 import inspect
+import weakref
+from contextlib import nullcontext
 from importlib import import_module
 from pathlib import Path
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -15,6 +19,22 @@ from musubi_tuner.hidream_o1_train_network import HiDreamO1NetworkTrainer
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
 import musubi_tuner.training.trainer_base as trainer_base_module
+
+
+class _EasyDict(dict):
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as error:
+            raise AttributeError(key) from error
+
+    __setattr__ = dict.__setitem__
+
+
+easydict_stub = ModuleType("easydict")
+easydict_stub.EasyDict = _EasyDict
+with patch.dict(sys.modules, {"easydict": easydict_stub, "flash_attn": None}):
+    from musubi_tuner.wan_train_network import WanNetworkTrainer
 
 
 def _explorative_helpers():
@@ -705,3 +725,396 @@ def test_base_scalar_loss_and_gradient_match_direct_baseline_reduction(monkeypat
     assert torch.allclose(new_loss, old_loss, rtol=1e-5, atol=1e-8)
     assert torch.allclose(new_grad, old_grad, rtol=1e-5, atol=1e-8)
     assert metrics == {}
+
+
+class _ToyAccelerator:
+    def __init__(self, device="cpu", autocast_dtype=None):
+        self.device = torch.device(device)
+        self.autocast_dtype = autocast_dtype
+
+    def autocast(self):
+        if self.autocast_dtype is None:
+            return nullcontext()
+        return torch.autocast(self.device.type, dtype=self.autocast_dtype)
+
+
+class _ToyTransformer:
+    def __init__(self):
+        self.forward_shapes = []
+        self.block_swap_calls = 0
+        self.checkpoint_calls = 0
+
+    def __call__(self, value):
+        self.forward_shapes.append(tuple(value.shape))
+        self.block_swap_calls += 1
+        self.checkpoint_calls += 1
+        return value
+
+
+class _ToyXMTrainer(_CompatibleTrainer):
+    def __init__(self, device="cpu"):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.tensor(0.0, device=device))
+        self.records = []
+        self.output_refs = []
+        self.noising_calls = 0
+
+    def get_noisy_model_input_and_timesteps(self, *args, **kwargs):
+        self.noising_calls += 1
+        return super().get_noisy_model_input_and_timesteps(*args, **kwargs)
+
+    def call_dit(
+        self,
+        args,
+        accelerator,
+        transformer,
+        latents,
+        batch,
+        noise,
+        noisy_model_input,
+        timesteps,
+        network_dtype,
+        **kwargs,
+    ):
+        del args, kwargs
+        cpu_mask = torch.rand((), device="cpu")
+        device_mask = (
+            torch.rand((), device=accelerator.device) if accelerator.device.type == "cuda" else torch.rand((), device="cpu")
+        )
+        with accelerator.autocast():
+            features = transformer(noisy_model_input)
+            prediction = self.scale.to(network_dtype) * features.to(network_dtype)
+            target = (latents - noise).to(network_dtype)
+        output = DiTOutput(pred=prediction, target=target)
+        self.output_refs.append(weakref.ref(output.pred))
+        self.records.append(
+            {
+                "noise": noise.detach().clone(),
+                "noisy_model_input": noisy_model_input.detach().clone(),
+                "timesteps": timesteps.detach().clone(),
+                "condition": batch["condition"].detach().clone(),
+                "target": target.detach().clone(),
+                "grad_enabled": torch.is_grad_enabled(),
+                "cpu_mask": cpu_mask.detach().clone(),
+                "device_mask": device_mask.detach().cpu().clone(),
+            }
+        )
+        return output
+
+
+def _xm_args(best_of_k=2):
+    args = _timestep_args("uniform")
+    args.xm_best_of_k = best_of_k
+    args.gradient_checkpointing = True
+    return args
+
+
+def _run_toy_xm(
+    monkeypatch,
+    device="cpu",
+    autocast_dtype=None,
+    transformer_factory=_ToyTransformer,
+    trainer_factory=_ToyXMTrainer,
+    args=None,
+):
+    accelerator = _ToyAccelerator(device, autocast_dtype)
+    trainer = trainer_factory(device)
+    trainer._best_of_k_count = 2
+    trainer._best_of_k_enabled = True
+    transformer = transformer_factory()
+    latents = torch.zeros(2, 1, 1, 1, device=device)
+    candidate_zero = torch.tensor([1.0, 4.0], device=device).reshape(2, 1, 1, 1)
+    candidate_one = torch.tensor([5.0, 2.0], device=device).reshape(2, 1, 1, 1)
+    monkeypatch.setattr(
+        trainer_base_module,
+        "draw_candidate_noise",
+        lambda reference, generator: candidate_one.to(dtype=reference.dtype),
+    )
+    batch = {
+        "timesteps": [0.5, 0.5],
+        "condition": torch.tensor([[7.0], [11.0]], device=device),
+    }
+    loss, metrics = trainer.process_batch_best_of_k(
+        args or _xm_args(),
+        accelerator,
+        transformer,
+        None,
+        batch,
+        latents,
+        candidate_zero,
+        None,
+        autocast_dtype or torch.float32,
+        autocast_dtype or torch.float32,
+        None,
+        0,
+    )
+    return trainer, transformer, loss, metrics
+
+
+def test_standard_xm_selects_mixed_winners_and_builds_one_gradient_graph(monkeypatch):
+    trainer, transformer, loss, metrics = _run_toy_xm(monkeypatch)
+
+    assert [record["grad_enabled"] for record in trainer.records] == [False, False, True]
+    torch.testing.assert_close(trainer.records[-1]["noise"][:, 0, 0, 0], torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(trainer.records[-1]["target"], -trainer.records[-1]["noise"])
+    assert all(torch.equal(record["timesteps"], trainer.records[0]["timesteps"]) for record in trainer.records)
+    assert all(torch.equal(record["condition"], trainer.records[0]["condition"]) for record in trainer.records)
+    assert torch.allclose(loss, torch.tensor(2.5), rtol=1e-5, atol=1e-8)
+    assert metrics == {
+        "xm/candidate_loss_mean": 11.5,
+        "xm/selection_gain": 6.0,
+    }
+    assert transformer.forward_shapes == [(2, 1, 1, 1)] * 3
+    assert transformer.block_swap_calls == 3
+    assert transformer.checkpoint_calls == 3
+    assert trainer.noising_calls == 1
+
+    gc.collect()
+    assert trainer.output_refs[0]() is None
+    assert trainer.output_refs[1]() is None
+    assert loss.grad_fn is not None
+
+    class _BackwardRecorder:
+        def __init__(self):
+            self.calls = 0
+
+        def backward(self, value):
+            self.calls += 1
+            value.backward()
+
+    backward = _BackwardRecorder()
+    backward.backward(loss)
+    assert backward.calls == 1
+    assert trainer.scale.grad is not None
+    assert torch.isfinite(trainer.scale.grad)
+    assert trainer.scale.grad.item() == pytest.approx(2.5)
+
+
+def test_standard_xm_preserves_final_architecture_metrics(monkeypatch):
+    class _MetricToyTrainer(_ToyXMTrainer):
+        def compute_loss(self, *args, **kwargs):
+            loss, metrics = super().compute_loss(*args, **kwargs)
+            return loss, {**metrics, "loss/architecture": 7.0}
+
+    _, _, _, metrics = _run_toy_xm(monkeypatch, trainer_factory=_MetricToyTrainer)
+
+    assert metrics == {
+        "loss/architecture": 7.0,
+        "xm/candidate_loss_mean": 11.5,
+        "xm/selection_gain": 6.0,
+    }
+
+
+@pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile is unavailable")
+def test_standard_xm_compiled_path_keeps_original_microbatch_shape(monkeypatch):
+    class _CompiledToyTransformer(_ToyTransformer):
+        def __init__(self):
+            super().__init__()
+            self.compiled_identity = torch.compile(lambda value: value, backend="eager")
+
+        def __call__(self, value):
+            self.forward_shapes.append(tuple(value.shape))
+            self.block_swap_calls += 1
+            self.checkpoint_calls += 1
+            return self.compiled_identity(value)
+
+    _, transformer, _, _ = _run_toy_xm(monkeypatch, transformer_factory=_CompiledToyTransformer)
+    assert transformer.forward_shapes == [(2, 1, 1, 1)] * 3
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable"),
+        ),
+    ],
+)
+def test_standard_xm_replays_forward_rng_and_advances_final_forward_once(monkeypatch, device):
+    torch.manual_seed(1234)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(1234)
+    initial_cpu = torch.random.get_rng_state().clone()
+    initial_device = torch.cuda.get_rng_state(torch.device(device)).clone() if device == "cuda" else None
+    captured = {}
+    real_create = trainer_base_module.create_candidate_generator
+
+    def capture_after_generator(reference):
+        generator = real_create(reference)
+        captured["cpu"] = torch.random.get_rng_state().clone()
+        if reference.device.type == "cuda":
+            captured["device"] = torch.cuda.get_rng_state(reference.device).clone()
+        return generator
+
+    monkeypatch.setattr(trainer_base_module, "create_candidate_generator", capture_after_generator)
+    trainer, _, _, metrics = _run_toy_xm(monkeypatch, device=device)
+    first_winner = trainer.records[-1]["noise"].clone()
+    first_post_cpu = torch.random.get_rng_state().clone()
+    first_post_device = torch.cuda.get_rng_state(torch.device(device)).clone() if device == "cuda" else None
+
+    for record in trainer.records[1:]:
+        torch.testing.assert_close(record["cpu_mask"], trainer.records[0]["cpu_mask"])
+        torch.testing.assert_close(record["device_mask"], trainer.records[0]["device_mask"])
+
+    torch.random.set_rng_state(captured["cpu"])
+    if device == "cuda":
+        torch.cuda.set_rng_state(captured["device"], torch.device(device))
+    torch.rand((), device="cpu")
+    torch.rand((), device=torch.device(device) if device == "cuda" else "cpu")
+    assert torch.equal(torch.random.get_rng_state(), first_post_cpu)
+    if device == "cuda":
+        assert torch.equal(torch.cuda.get_rng_state(torch.device(device)), first_post_device)
+
+    torch.random.set_rng_state(initial_cpu)
+    if device == "cuda":
+        torch.cuda.set_rng_state(initial_device, torch.device(device))
+    replay_trainer, _, _, replay_metrics = _run_toy_xm(monkeypatch, device=device)
+    torch.testing.assert_close(replay_trainer.records[-1]["noise"], first_winner)
+    assert replay_metrics == metrics
+    assert torch.equal(torch.random.get_rng_state(), first_post_cpu)
+    if device == "cuda":
+        assert torch.equal(torch.cuda.get_rng_state(torch.device(device)), first_post_device)
+
+
+class _ToyWanTrainer(WanNetworkTrainer):
+    def __init__(self):
+        NetworkTrainer.__init__(self)
+        self.high_low_training = True
+        self.timestep_boundary = 0.5
+        self.num_timestep_buckets = 1
+        self.scale = torch.nn.Parameter(torch.tensor(0.0))
+        self.noising_calls = 0
+        self.routes = []
+        self.forward_timesteps = []
+
+    def get_bucketed_timestep(self):
+        return 0.75
+
+    def get_noisy_model_input_and_timesteps(self, *args, **kwargs):
+        self.noising_calls += 1
+        return super().get_noisy_model_input_and_timesteps(*args, **kwargs)
+
+    def call_dit(
+        self,
+        args,
+        accelerator,
+        transformer,
+        latents,
+        batch,
+        noise,
+        noisy_model_input,
+        timesteps,
+        network_dtype,
+        **kwargs,
+    ):
+        del args, accelerator, transformer, batch, kwargs
+        self.routes.append(bool(self.next_model_is_high_noise))
+        self.forward_timesteps.append(timesteps.detach().clone())
+        return DiTOutput(
+            pred=self.scale.to(network_dtype) * noisy_model_input.to(network_dtype),
+            target=(latents - noise).to(network_dtype),
+        )
+
+
+def test_standard_xm_freezes_wan_high_low_route_and_timesteps(monkeypatch):
+    trainer = _ToyWanTrainer()
+    trainer._best_of_k_count = 2
+    trainer._best_of_k_enabled = True
+    latents = torch.zeros(2, 1, 1, 1)
+    noise = torch.tensor([1.0, 4.0]).reshape(2, 1, 1, 1)
+    later = torch.tensor([5.0, 2.0]).reshape(2, 1, 1, 1)
+    monkeypatch.setattr(
+        trainer_base_module,
+        "draw_candidate_noise",
+        lambda reference, generator: later,
+    )
+    trainer.process_batch_best_of_k(
+        _xm_args(),
+        _ToyAccelerator(),
+        None,
+        None,
+        {"timesteps": [0.75, 0.75], "condition": torch.ones(2, 1)},
+        latents,
+        noise,
+        None,
+        torch.float32,
+        torch.float32,
+        None,
+        0,
+    )
+
+    assert trainer.noising_calls == 1
+    assert trainer.routes == [True, True, True]
+    assert all(torch.equal(value, trainer.forward_timesteps[0]) for value in trainer.forward_timesteps[1:])
+
+
+def test_standard_xm_samples_distribution_preserving_timestep_once(monkeypatch):
+    args = _xm_args()
+    args.preserve_distribution_shape = True
+    trainer, _, _, _ = _run_toy_xm(monkeypatch, args=args)
+    assert trainer.noising_calls == 1
+
+
+def test_standard_xm_prefixes_nonfinite_candidate_diagnostics(monkeypatch):
+    class _NaNTrainer(_ToyXMTrainer):
+        def __init__(self, device="cpu"):
+            super().__init__(device)
+            self.score_calls = 0
+
+        def compute_per_sample_loss(self, *args, **kwargs):
+            losses = super().compute_per_sample_loss(*args, **kwargs)
+            if self.score_calls == 1:
+                losses = losses.clone()
+                losses[1] = torch.nan
+            self.score_calls += 1
+            return losses
+
+    with pytest.raises(ValueError, match=r"Synthetic.*candidate 1.*sample indices \[1\]"):
+        _run_toy_xm(monkeypatch, trainer_factory=_NaNTrainer)
+
+
+def test_weighted_per_sample_selection_is_not_a_whole_candidate_reduction(monkeypatch):
+    _, _, update_winners = _explorative_helpers()
+    trainer = NetworkTrainer()
+    weighting = torch.tensor([10.0, 1.0]).reshape(2, 1, 1, 1)
+    monkeypatch.setattr(
+        trainer_base_module,
+        "compute_loss_weighting_for_sd3",
+        lambda *args, **kwargs: weighting,
+    )
+    args = SimpleNamespace(weighting_scheme="cosmap")
+    timesteps = torch.tensor([100.0, 900.0])
+
+    def score(unweighted):
+        output = DiTOutput(
+            pred=torch.sqrt(torch.tensor(unweighted)).reshape(2, 1, 1, 1),
+            target=torch.zeros(2, 1, 1, 1),
+        )
+        return trainer.compute_per_sample_loss(args, output, timesteps, None, torch.float32, torch.float32, 0)
+
+    candidate_zero = score([1.0, 4.0])
+    candidate_one = score([2.0, 1.0])
+    best = torch.full((2,), torch.inf)
+    winner_noise = torch.empty(2, 1)
+    indices = torch.full((2,), -1, dtype=torch.long)
+    best, winner_noise, indices = update_winners(best, winner_noise, indices, candidate_zero, torch.tensor([[0.0], [0.0]]), 0)
+    best, winner_noise, indices = update_winners(best, winner_noise, indices, candidate_one, torch.tensor([[1.0], [1.0]]), 1)
+
+    assert indices.tolist() == [0, 1]
+    assert candidate_zero.mean() < candidate_one.mean()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_standard_xm_cuda_autocast_recomputes_finite_winner_gradients(monkeypatch):
+    trainer, _, loss, _ = _run_toy_xm(
+        monkeypatch,
+        device="cuda",
+        autocast_dtype=torch.float16,
+    )
+    loss.backward()
+
+    assert trainer.scale.grad is not None
+    assert torch.isfinite(trainer.scale.grad).all()
+    assert trainer.scale.grad.abs().item() > 0

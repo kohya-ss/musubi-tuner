@@ -59,11 +59,13 @@ from musubi_tuner.training.accelerator_setup import (
     prepare_accelerator,
 )
 from musubi_tuner.training.sampling_prompts import should_sample_images
+from musubi_tuner.training.explorative import create_candidate_generator, draw_candidate_noise, update_winners
 from musubi_tuner.training.timesteps import (
     BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS,
     compute_density_for_timestep_sampling,
     compute_ideogram4_shift_timestep,
     compute_loss_weighting_for_sd3,
+    get_noise_coefficients_from_timesteps,
     get_sigmas,
 )
 
@@ -1245,7 +1247,108 @@ class NetworkTrainer:
         sample_resources,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        raise NotImplementedError("best-of-K processing is implemented in Task 5")
+        del network, sample_resources
+        noisy_candidate_zero, timesteps = self.get_noisy_model_input_and_timesteps(
+            args,
+            noise,
+            latents,
+            batch["timesteps"],
+            noise_scheduler,
+            accelerator.device,
+            dit_dtype,
+        )
+        sigma = get_noise_coefficients_from_timesteps(
+            args.timestep_sampling,
+            noise_scheduler,
+            timesteps,
+            accelerator.device,
+            latents.ndim,
+            dit_dtype,
+        )
+        generator = create_candidate_generator(noise)
+        batch_size = latents.shape[0]
+        best_losses = torch.full((batch_size,), torch.inf, device=latents.device, dtype=torch.float32)
+        winner_noise = torch.empty_like(noise)
+        winner_indices = torch.full((batch_size,), -1, device=latents.device, dtype=torch.long)
+        candidate_loss_sum = torch.zeros((), device=latents.device, dtype=torch.float32)
+        candidate_zero_mean = None
+        device = torch.device(accelerator.device)
+        fork_devices = [device] if device.type == "cuda" else []
+
+        for candidate_index in range(self._best_of_k_count):
+            if candidate_index == 0:
+                candidate_noise = noise
+                candidate_input = noisy_candidate_zero
+            else:
+                candidate_noise = draw_candidate_noise(noise, generator)
+                candidate_input = (1.0 - sigma) * latents + sigma * candidate_noise
+
+            with torch.random.fork_rng(devices=fork_devices):
+                with torch.no_grad():
+                    output = self.call_dit(
+                        args,
+                        accelerator,
+                        transformer,
+                        latents,
+                        batch,
+                        candidate_noise,
+                        candidate_input,
+                        timesteps,
+                        network_dtype,
+                    )
+                    candidate_losses = self.compute_per_sample_loss(
+                        args,
+                        output,
+                        timesteps,
+                        noise_scheduler,
+                        dit_dtype,
+                        network_dtype,
+                        global_step,
+                    )
+            candidate_losses_f32 = candidate_losses.detach().float()
+            candidate_loss_sum = candidate_loss_sum + candidate_losses_f32.sum()
+            if candidate_index == 0:
+                candidate_zero_mean = candidate_losses_f32.mean()
+            try:
+                best_losses, winner_noise, winner_indices = update_winners(
+                    best_losses,
+                    winner_noise,
+                    winner_indices,
+                    candidate_losses_f32,
+                    candidate_noise,
+                    candidate_index,
+                )
+            except ValueError as error:
+                raise ValueError(f"{self.architecture_full_name}: {error}") from error
+
+        # Samples may choose different candidates because sigma is per sample and fixed across candidates.
+        winner_input = (1.0 - sigma) * latents + sigma * winner_noise
+        output = self.call_dit(
+            args,
+            accelerator,
+            transformer,
+            latents,
+            batch,
+            winner_noise,
+            winner_input,
+            timesteps,
+            network_dtype,
+        )
+        loss, metrics = self.compute_loss(
+            args,
+            output,
+            timesteps,
+            noise_scheduler,
+            dit_dtype,
+            network_dtype,
+            global_step,
+        )
+        assert candidate_zero_mean is not None
+        return loss, {
+            **metrics,
+            "xm/candidate_loss_mean": (candidate_loss_sum / (self._best_of_k_count * batch_size)).item(),
+            "xm/selection_gain": (candidate_zero_mean - best_losses.detach().float().mean()).item(),
+        }
 
     def compute_loss(
         self,
