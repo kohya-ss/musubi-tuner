@@ -18,6 +18,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _numbered_suffix_index(path_without_extension: str, prefix: str) -> int | None:
+    marker = prefix + "_"
+    if not path_without_extension.startswith(marker):
+        return None
+    suffix = path_without_extension[len(marker) :]
+    return int(suffix) if suffix.isdigit() else None
+
+
 class ContentDatasource:
     def __init__(self):
         self.caption_only = False  # set to True to only fetch caption for Text Encoder caching
@@ -125,21 +133,16 @@ class ImageDirectoryDatasource(ImageDatasource):
                         match_prefix = os.path.splitext(self.caption_paths[image_path])[0]
 
                     # find matching multiple-target images
-                    potential_paths = [p for p in multiple_target_candidates if p.startswith(match_prefix + "_")]
+                    indexed_paths = [
+                        (index, path)
+                        for path in multiple_target_candidates
+                        if (index := _numbered_suffix_index(os.path.splitext(path)[0], match_prefix)) is not None
+                    ]
 
-                    if potential_paths:
+                    if indexed_paths:
                         # sort by the digits (`_0000`) suffix
-                        def sort_key(path):
-                            path_no_ext = os.path.splitext(path)[0]
-                            digits_suffix = path_no_ext.rsplit("_", 1)[-1]
-                            if not digits_suffix.isdigit():
-                                raise ValueError(
-                                    f"Invalid digits suffix in '{path_no_ext}'. Expected a numeric suffix after '_' "
-                                    f"(e.g., '_0', '_1', '_2') for proper sorting of multiple target images."
-                                )
-                            return int(digits_suffix)
-
-                        potential_paths.sort(key=sort_key)
+                        indexed_paths.sort()
+                        potential_paths = [path for _index, path in indexed_paths]
                         self.target_paths[image_path] = potential_paths
 
                         # remove to avoid duplicate matching
@@ -184,29 +187,22 @@ class ImageDirectoryDatasource(ImageDatasource):
                     control_match_basename = os.path.splitext(os.path.basename(self.caption_paths[image_path]))[0]
 
                 # find matching control images
-                potential_paths = [
-                    p
-                    for p in all_control_image_paths
-                    if os.path.basename(p).startswith(control_match_basename + ".")
-                    or os.path.basename(p).startswith(control_match_basename + "_")
-                ]
+                indexed_paths = []
+                for path in all_control_image_paths:
+                    basename_no_ext = os.path.splitext(os.path.basename(path))[0]
+                    if basename_no_ext == control_match_basename:
+                        indexed_paths.append((0, path))
+                        continue
+                    index = _numbered_suffix_index(basename_no_ext, control_match_basename)
+                    if index is not None:
+                        indexed_paths.append((index + 1, path))
+                indexed_paths.sort()
+                potential_paths = [path for _index, path in indexed_paths]
 
                 # remove to avoid duplicate matching
                 all_control_image_paths.difference_update(potential_paths)
 
                 if potential_paths:
-                    # sort by the digits (`_0000`) suffix, prefer the one without the suffix
-                    def sort_key(path):
-                        basename = os.path.basename(path)
-                        basename_no_ext = os.path.splitext(basename)[0]
-                        if control_match_basename == basename_no_ext:  # prefer the one without suffix
-                            return 0
-                        digits_suffix = basename_no_ext.rsplit("_", 1)[-1]
-                        if not digits_suffix.isdigit():
-                            raise ValueError(f"Invalid digits suffix in {basename_no_ext}")
-                        return int(digits_suffix) + 1
-
-                    potential_paths.sort(key=sort_key)
                     if control_count_per_image is not None and len(potential_paths) < control_count_per_image:
                         logger.error(
                             f"Not enough control images for {image_path}: found {len(potential_paths)}, expected {control_count_per_image}"

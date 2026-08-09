@@ -38,6 +38,7 @@ from musubi_tuner.minimax_h3_cache_latents import (
 )
 from musubi_tuner.dataset.bucket import BucketBatchManager
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
+from musubi_tuner.dataset.datasources import ImageDirectoryDatasource
 from musubi_tuner.dataset.cache_io import (
     AUDIO_PRESENT_KEY,
     save_latent_cache_minimax_h3,
@@ -841,6 +842,47 @@ def test_multiple_target_zero_suffix_with_own_caption_is_not_rebased(tmp_path: P
     assert Path(item.item_key).name == "pose_0.png"
     assert len(item.content) == 2
     assert [int(frame[0, 0, 0]) for frame in item.content] == [0, 32]
+
+
+def test_multiple_target_ignores_same_prefix_nonnumeric_assets(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    image_dir.mkdir()
+    for name in ("pose_0.png", "pose_1.png", "pose_depth.png"):
+        Image.new("RGB", (64, 64)).save(image_dir / name)
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+
+    datasource = ImageDirectoryDatasource(
+        str(image_dir),
+        caption_extension=".txt",
+        multiple_target=True,
+    )
+    targets, controls = datasource.get_media_paths(str(image_dir / "pose_0.png"))
+
+    assert [Path(path).name for path in targets] == ["pose_0.png", "pose_1.png"]
+    assert controls == []
+
+
+def test_control_matching_ignores_same_prefix_nonnumeric_assets(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    for name in ("pose.png", "pose_1.png"):
+        Image.new("RGB", (64, 64)).save(image_dir / name)
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    for name in ("pose.png", "pose_1.png", "pose_mask.png"):
+        Image.new("RGB", (64, 64)).save(control_dir / name)
+
+    datasource = ImageDirectoryDatasource(
+        str(image_dir),
+        caption_extension=".txt",
+        control_directory=str(control_dir),
+        multiple_target=True,
+    )
+    targets, controls = datasource.get_media_paths(str(image_dir / "pose.png"))
+
+    assert [Path(path).name for path in targets] == ["pose.png", "pose_1.png"]
+    assert [Path(path).name for path in controls] == ["pose.png", "pose_1.png"]
 
 
 def test_jsonl_image_mode_maps_all_targets_and_controls(tmp_path: Path):
