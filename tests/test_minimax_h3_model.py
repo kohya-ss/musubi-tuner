@@ -633,6 +633,23 @@ def test_gradient_checkpointed_forward_and_backward_recompute_the_same_block():
     assert model.blocks[0].attn.qkv_proj.weight.grad is not None
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="activation CPU offloading requires CUDA")
+def test_activation_cpu_offloading_restores_hidden_states_before_final_layer():
+    model = _tiny_model(num_layers=1).cuda()
+    model.enable_gradient_checkpointing(activation_cpu_offloading=True)
+    inputs = {
+        key: value.cuda() if isinstance(value, torch.Tensor) else value
+        for key, value in _t2_inputs(batch_size=1).items()
+    }
+
+    output = model(**inputs)
+    (output.video.square().mean() + output.audio.square().mean()).backward()
+
+    assert output.video.device.type == "cuda"
+    assert output.audio.device.type == "cuda"
+    assert model.blocks[0].attn.qkv_proj.weight.grad is not None
+
+
 def test_block_device_assertion_catches_parameters_left_off_execution_device():
     model = _tiny_model(num_layers=1)
     model._execution_device = torch.device("meta")
