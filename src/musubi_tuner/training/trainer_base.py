@@ -738,7 +738,7 @@ class NetworkTrainer:
                     logger.warning(
                         f"Could not sample {batch_size} valid timesteps in {max_loops} loops / {max_loops}ループで{batch_size}個の有効なタイムステップをサンプリングできませんでした"
                     )
-                    available_t = compute_sampling_timesteps(timesteps)
+                    t = compute_sampling_timesteps(timesteps)
                 else:
                     t = torch.stack(available_t, dim=0)  # [batch_size, ]
 
