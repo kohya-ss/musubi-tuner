@@ -50,6 +50,7 @@ def _load_training_module(monkeypatch):
         monkeypatch,
         "musubi_tuner.minimax_h3.sampling",
         augment_condition_latents=noop,
+        create_sampling_generator=noop,
         initialize_target_latents=noop,
         sample_joint_av=noop,
         synchronize_decoded_av=noop,
