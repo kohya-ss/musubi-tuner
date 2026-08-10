@@ -100,6 +100,9 @@ class LoRAModule(torch.nn.Module):
         self.dropout = dropout
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
+        # honored by the training forward too, so LoRANetwork.set_enabled(False) yields the
+        # frozen base everywhere (e.g. the MiniMax-H3 teacher-matching forward)
+        self.enabled = True
 
     def _autocast_enabled_for(self, x):
         if not x.is_floating_point():
@@ -136,6 +139,9 @@ class LoRAModule(torch.nn.Module):
         del self.org_module
 
     def forward(self, x):
+        if not self.enabled:
+            return self.org_forward(x)
+
         org_forwarded = self.org_forward(x)
 
         # module dropout
@@ -213,7 +219,6 @@ class LoRAInfModule(LoRAModule):
         super().__init__(lora_name, org_module, multiplier, lora_dim, alpha)
 
         self.org_module_ref = [org_module]  # for reference
-        self.enabled = True
         self.network: LoRANetwork = None
 
     def set_network(self, network):

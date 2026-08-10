@@ -1612,3 +1612,64 @@ def test_teacher_matching_metadata_is_recorded_only_when_active():
     on = trainer.extra_metadata(_trainer_args(h3_teacher_matching=True, h3_teacher_conditions=" first , last "))
     assert on["ss_minimax_h3_teacher_matching"] is True
     assert on["ss_minimax_h3_teacher_conditions"] == "first,last"
+
+
+def test_lora_set_enabled_bypasses_training_modules():
+    # regression guard for the teacher-matching smoke bug: only LoRAInfModule honored
+    # `enabled`, so set_enabled(False) silently kept the LoRA active in training forwards
+    model = _tiny_model(num_layers=1)
+    network = lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, model)
+    network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+    for lora in network.unet_loras:
+        torch.nn.init.normal_(lora.lora_up.weight, std=1.0)
+    proj = model.blocks[0].attn.qkv_proj
+    x = torch.randn(2, proj.weight.shape[1])
+
+    with torch.no_grad():
+        adapted = proj(x)
+        network.set_enabled(False)
+        disabled = proj(x)
+        network.set_enabled(True)
+        restored = proj(x)
+
+    base = torch.nn.functional.linear(x, proj.weight, proj.bias)
+    assert not torch.allclose(adapted, base)
+    torch.testing.assert_close(disabled, base)
+    torch.testing.assert_close(restored, adapted)
+
+
+def test_teacher_matching_bypasses_the_lora_on_a_real_network(monkeypatch):
+    # end-to-end against the real tiny model and a real LoRA network: the lora_down
+    # projections must fire only in the student forward, never in the teacher forward
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True)
+    trainer.handle_model_specific_args(args)
+    model = _tiny_model(num_layers=1)
+    model.requires_grad_(False)
+    network = lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, model)
+    network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+    for lora in network.unet_loras:
+        torch.nn.init.normal_(lora.lora_up.weight, std=1.0)
+    lora_down_calls = []
+    network.unet_loras[0].lora_down.register_forward_hook(lambda module, inputs, output: lora_down_calls.append(1))
+    _patch_deterministic_noise(monkeypatch)
+
+    loss, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        model,
+        network,
+        _teacher_batch(),
+        torch.zeros(1, 24, 2, 4, 4),
+        torch.zeros(1, 24, 2, 4, 4),
+        None,
+        torch.float32,
+        torch.float32,
+        None,
+        0,
+    )
+
+    assert len(lora_down_calls) == 1
+    assert all(lora.enabled for lora in network.unet_loras)
+    assert torch.isfinite(loss)
+    assert metrics["teacher/base_sigma"] == pytest.approx(0.25)

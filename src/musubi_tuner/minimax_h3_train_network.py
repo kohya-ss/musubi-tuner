@@ -1133,6 +1133,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise RuntimeError("MiniMax-H3 teacher matching requires the LoRA network to disable it for the teacher forward")
         unwrap = getattr(accelerator, "unwrap_model", None)
         base_network = unwrap(network) if callable(unwrap) else network
+        if not hasattr(base_network, "set_enabled"):
+            raise RuntimeError(
+                "MiniMax-H3 teacher matching requires a network exposing set_enabled (e.g. networks.lora_minimax_h3)"
+            )
         autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
         # the teacher forward runs before the grad forward so the block-swap offloader keeps
         # its forward->backward alternation and no autograd graph is live yet
