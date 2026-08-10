@@ -52,6 +52,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     encode_h3_presentation,
     load_h3_processor,
     load_h3_text_encoder,
+    load_h3_uncond_cache,
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
@@ -326,6 +327,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         # first-epoch warning and the observed fraction saved in metadata
         self._audio_items_seen = 0
         self._audio_supervised_seen = 0
+        # guidance-loss uncond probe (CPU hidden rows + tags), loaded when
+        # --h3_guidance_loss_scale is active
+        self._guidance_uncond: tuple[torch.Tensor, torch.Tensor] | None = None
 
     @property
     def architecture(self) -> str:
@@ -375,6 +379,33 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             and not getattr(args, "gradient_checkpointing", False)
         ):
             raise ValueError("MiniMax-H3 --block_swap_h2d_only training requires --gradient_checkpointing")
+
+        guidance_scale = float(args.h3_guidance_loss_scale)
+        if guidance_scale < 0.0:
+            raise ValueError(f"--h3_guidance_loss_scale must be nonnegative, got {guidance_scale}")
+        if args.h3_guidance_loss_scale_audio is not None and float(args.h3_guidance_loss_scale_audio) < 0.0:
+            raise ValueError(f"--h3_guidance_loss_scale_audio must be nonnegative, got {args.h3_guidance_loss_scale_audio}")
+        if not 0.0 <= float(args.h3_guidance_loss_sigma_min) <= 1.0:
+            raise ValueError(f"--h3_guidance_loss_sigma_min must be in [0.0,1.0], got {args.h3_guidance_loss_sigma_min}")
+        self._guidance_uncond = None
+        if guidance_scale > 0.0:
+            if not args.h3_guidance_loss_uncond_cache:
+                raise ValueError(
+                    "--h3_guidance_loss_scale requires --h3_guidance_loss_uncond_cache"
+                    " (write one with minimax_h3_cache_text_encoder_outputs.py --uncond_output)"
+                )
+            hidden_states, token_tags, metadata = load_h3_uncond_cache(args.h3_guidance_loss_uncond_cache)
+            self._guidance_uncond = (hidden_states, token_tags)
+            logger.info(
+                "MiniMax-H3 guidance loss: scale=%s scale_audio=%s sigma_min=%s uncond=%r (%d rows)",
+                guidance_scale,
+                self._guidance_audio_scale(args),
+                args.h3_guidance_loss_sigma_min,
+                metadata.get("text", "?"),
+                hidden_states.shape[0],
+            )
+        elif args.h3_guidance_loss_uncond_cache:
+            logger.warning("--h3_guidance_loss_uncond_cache is ignored because --h3_guidance_loss_scale is 0")
 
     def on_transformer_loaded(
         self,
@@ -739,6 +770,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_latent_cache_version": "2",
             "ss_minimax_h3_text_cache_version": "1",
         }
+        if float(args.h3_guidance_loss_scale) > 0.0:
+            metadata["ss_minimax_h3_guidance_loss_scale"] = args.h3_guidance_loss_scale
+            metadata["ss_minimax_h3_guidance_loss_scale_audio"] = self._guidance_audio_scale(args)
+            metadata["ss_minimax_h3_guidance_loss_sigma_min"] = args.h3_guidance_loss_sigma_min
         if self._audio_items_seen > 0:
             # fraction observed on this rank so far (exact once a full epoch has run)
             metadata["ss_minimax_h3_supervised_audio_fraction"] = round(self._audio_supervised_seen / self._audio_items_seen, 6)
@@ -800,7 +835,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         **kwargs,
     ) -> DiTOutput:
-        del batch, timesteps
+        del batch  # timesteps (the pre-shift base sigma) gates the guidance-loss forward
         audio_latents = kwargs.pop("audio_latents")
         audio_noise = kwargs.pop("audio_noise")
         noisy_audio_input = kwargs.pop("noisy_audio_input")
@@ -816,11 +851,40 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         text_hidden_states = runtime.text_hidden_states.to(device=accelerator.device, dtype=network_dtype)
         noisy_model_input = noisy_model_input.to(accelerator.device)
         noisy_audio_input = noisy_audio_input.to(accelerator.device)
+        autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
+
+        video_target = latents - noise
+        audio_target = audio_latents - audio_noise
+        guidance_log: dict[str, torch.Tensor] = {}
+        if self._guidance_uncond is not None:
+            # the uncond forward runs before the grad forward so the block-swap offloader
+            # keeps its forward->backward alternation and no autograd graph is live yet
+            applied = float(timesteps) >= float(args.h3_guidance_loss_sigma_min)
+            # the drawn pre-shift sigma, so the logged gap magnitudes can be binned by noise level
+            guidance_log["guidance/base_sigma"] = torch.as_tensor(float(timesteps))
+            guidance_log["guidance/applied"] = torch.tensor(1.0 if applied else 0.0)
+            if applied:
+                video_target, audio_target, gap_log = self._apply_guidance_loss_targets(
+                    args,
+                    accelerator,
+                    transformer,
+                    runtime,
+                    noisy_model_input,
+                    noisy_audio_input,
+                    model_t_video,
+                    model_t_audio,
+                    visual_conditions,
+                    audio_conditions,
+                    video_target,
+                    audio_target,
+                    network_dtype,
+                )
+                guidance_log.update(gap_log)
+
         if args.gradient_checkpointing:
             noisy_model_input.requires_grad_(True)
             noisy_audio_input.requires_grad_(True)
             text_hidden_states.requires_grad_(True)
-        autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
         with autocast():
             prediction = transformer(
                 video_latents=noisy_model_input,
@@ -837,13 +901,92 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             )
         return DiTOutput(
             pred=prediction.video,
-            target=latents - noise,
+            target=video_target,
             extra={
                 "audio_pred": prediction.audio,
-                "audio_target": audio_latents - audio_noise,
+                "audio_target": audio_target,
                 "audio_loss_weight": audio_loss_weight,
+                "guidance_log": guidance_log,
             },
         )
+
+    def _guidance_audio_scale(self, args: argparse.Namespace) -> float:
+        if args.h3_guidance_loss_scale_audio is not None:
+            return float(args.h3_guidance_loss_scale_audio)
+        return float(args.h3_guidance_loss_scale)
+
+    def _apply_guidance_loss_targets(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        runtime: _H3RuntimeBatch,
+        noisy_model_input: torch.Tensor,
+        noisy_audio_input: torch.Tensor,
+        model_t_video,
+        model_t_audio,
+        visual_conditions: tuple[torch.Tensor, ...],
+        audio_conditions: tuple[torch.Tensor, ...],
+        video_target: torch.Tensor,
+        audio_target: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """Re-anchor the flow targets in the CFG-amplified space of the distilled base.
+
+        The released H3 weights are CFG-distilled: ``g(c) = u + s*(c(c) - u)``. Training
+        on the plain velocity target would pull the student out of that amplified space
+        (de-distillation drift). Instead the target is rebuilt as
+        ``u + scale*(v - u)`` where ``u`` is the model's own prediction under the uncond
+        probe -- the true velocity slots into the CFG identity where the conditional
+        prediction would go. The probe (a single space by default) was screened against
+        the released checkpoint: see docs/minimax_h3.md.
+
+        The uncond forward is no_grad but keeps the LoRA active, matching how the
+        adapted model will be run at inference; only the text condition is swapped, all
+        visual/audio conditions stay (the same augmented tensors as the main forward).
+        """
+        uncond_hidden, uncond_tags = self._guidance_uncond
+        if uncond_hidden.shape[1] != runtime.text_hidden_states.shape[2]:
+            raise ValueError(
+                f"MiniMax-H3 guidance-loss uncond cache width {uncond_hidden.shape[1]} does not match"
+                f" the text cache width {runtime.text_hidden_states.shape[2]}"
+            )
+        uncond_layout = build_h3_layout(
+            task=runtime.layout.task,
+            text_length=uncond_hidden.shape[0],
+            target_video=runtime.layout.target_video,
+            target_audio_frames=runtime.layout.target_audio_frames,
+            visual_conditions=runtime.layout.visual_conditions,
+            references=runtime.layout.references,
+        )
+        autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
+        with torch.no_grad(), autocast():
+            uncond = transformer(
+                video_latents=noisy_model_input,
+                audio_latents=noisy_audio_input,
+                text_hidden_states=uncond_hidden.to(device=accelerator.device, dtype=network_dtype).unsqueeze(0),
+                text_token_tags=uncond_tags.to(accelerator.device).unsqueeze(0),
+                layout=uncond_layout,
+                model_t_video=model_t_video,
+                model_t_audio=model_t_audio,
+                visual_condition_latents=visual_conditions,
+                audio_condition_latents=audio_conditions,
+                visual_condition_clean=args.h3_visual_cond_clean,
+                audio_condition_clean=args.h3_audio_cond_clean,
+            )
+        uncond_video = uncond.video.detach().float()
+        uncond_audio = uncond.audio.detach().float()
+        video_gap = video_target.float() - uncond_video
+        audio_gap = audio_target.float() - uncond_audio
+        # the sigma-binned gap magnitudes are the measured guidance signal; they feed the
+        # sigma_min gate and any future scale schedule
+        gap_log = {
+            "guidance/video_gap_rms": video_gap.pow(2).mean().sqrt().detach(),
+            "guidance/audio_gap_rms": audio_gap.pow(2).mean().sqrt().detach(),
+        }
+        video_target = uncond_video + float(args.h3_guidance_loss_scale) * video_gap
+        audio_target = uncond_audio + self._guidance_audio_scale(args) * audio_gap
+        return video_target, audio_target, gap_log
 
     def process_batch(
         self,
@@ -942,10 +1085,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 output.extra["audio_target"].to(network_dtype),
                 reduction="mean",
             )
-        return video_loss + weight * audio_loss, {
+        logs = {
             "loss/video": video_loss.detach(),
             "loss/audio": audio_loss.detach(),
         }
+        logs.update(output.extra.get("guidance_log") or {})
+        return video_loss + weight * audio_loss, logs
 
 
 def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -1012,6 +1157,35 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--h3_allow_experimental_sample_duration",
         action="store_true",
         help="allow training samples outside the released 5-15 second duration range",
+    )
+    parser.add_argument(
+        "--h3_guidance_loss_scale",
+        type=float,
+        default=0.0,
+        help="guidance-distillation countermeasure: rebuild the flow target as uncond + scale*(target - uncond) using a"
+        " no-grad uncond forward per step (0 = disabled; field reports suggest 3-4). Requires"
+        " --h3_guidance_loss_uncond_cache.",
+    )
+    parser.add_argument(
+        "--h3_guidance_loss_scale_audio",
+        type=float,
+        default=None,
+        help="separate guidance-loss scale for the audio target (default: same as --h3_guidance_loss_scale)",
+    )
+    parser.add_argument(
+        "--h3_guidance_loss_sigma_min",
+        type=float,
+        default=0.0,
+        help="skip the guidance-loss forward when the drawn pre-shift base sigma is below this threshold"
+        " (0 = always on; the text-guidance signal concentrates at high sigma, so gating saves the extra"
+        " forward where the correction is negligible)",
+    )
+    parser.add_argument(
+        "--h3_guidance_loss_uncond_cache",
+        type=str,
+        default=None,
+        help="uncond probe embedding for the guidance loss, written by"
+        " minimax_h3_cache_text_encoder_outputs.py --uncond_output",
     )
     parser.add_argument("--dit_dtype", type=str, default=None, help="MiniMax-H3 DiT dtype; R1 requires bfloat16")
     parser.add_argument(
