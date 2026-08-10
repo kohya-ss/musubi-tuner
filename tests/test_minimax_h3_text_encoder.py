@@ -316,7 +316,7 @@ def test_load_h3_text_encoder_rejects_non_fp32_convrot_scale(tmp_path, monkeypat
     with pytest.raises(ValueError, match=r"scale.*FP32|scale.*F32"):
         load_h3_text_encoder(
             checkpoint,
-                device="cpu",
+            device="cpu",
             dtype=torch.bfloat16,
         )
 
@@ -370,7 +370,7 @@ def test_load_h3_text_encoder_rejects_streaming_without_cuda(tmp_path, monkeypat
     with pytest.raises(ValueError, match="CUDA"):
         load_h3_text_encoder(
             checkpoint,
-                device="cpu",
+            device="cpu",
             dtype=torch.bfloat16,
             blocks_to_swap=50,
         )
@@ -388,6 +388,6 @@ def test_load_h3_text_encoder_rejects_convrot_layer_missing_from_the_model(tmp_p
     with pytest.raises(ValueError, match=r"missing module missing_tower"):
         load_h3_text_encoder(
             checkpoint,
-                device="cpu",
+            device="cpu",
             dtype=torch.bfloat16,
         )
