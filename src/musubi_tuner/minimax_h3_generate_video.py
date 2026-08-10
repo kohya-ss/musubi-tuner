@@ -284,8 +284,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dit",
         required=True,
-        help="MiniMax-H3 transformer safetensors path or directory (BF16 or ConvRot INT8; pre-quantized full and "
-        "pruned ConvRot INT8 checkpoints are detected automatically)",
+        help="MiniMax-H3 transformer safetensors path or directory (BF16 or ConvRot INT8, each full or pruned; "
+        "pre-quantized and pruned checkpoints are detected automatically)",
     )
     parser.add_argument(
         "--convrot_int8",
@@ -294,6 +294,13 @@ def setup_parser() -> argparse.ArgumentParser:
         "falls back to slower dequantized bf16 matmul without it). ComfyUI pre-quantized ConvRot INT8 checkpoints "
         "are detected automatically and do not need this flag. With a BF16 base, LoRA weights are merged before "
         "quantization; with a pre-quantized base, LoRAs are attached as runtime branches instead.",
+    )
+    parser.add_argument(
+        "--prune_adaln",
+        action="store_true",
+        help="prune the AdaLN projections of a full BF16 DiT at load time (mean-centered rank-8 basis, time "
+        "embedder retained). Published pruned checkpoints do not need this flag; pre-quantized ConvRot INT8 "
+        "checkpoints are rejected. Combines with --convrot_int8.",
     )
     parser.add_argument("--video_vae", required=True, help="MiniMax-H3 video VAE safetensors path or directory")
     parser.add_argument("--audio_vae", required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
@@ -482,6 +489,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         quant_device=device,
         lora_weights=lora_weights,
         lora_multipliers=lora_multipliers,
+        prune_adaln=args.prune_adaln,
     )
     attached_lora_networks = _configure_lora_weights(transformer, args, device, prequantized=prequantized)
     if args.blocks_to_swap:

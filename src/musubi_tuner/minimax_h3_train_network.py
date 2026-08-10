@@ -803,6 +803,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             # quantization runs on the accelerator device even when the weights load to CPU
             # for block swap (cf. the Krea 2 calc-device fix in #1008)
             quant_device=accelerator.device,
+            prune_adaln=args.prune_adaln,
         )
         # pre-quantized ConvRot INT8 checkpoints are detected during loading, so the
         # effective base quantization can differ from the --convrot_int8 flag
@@ -1202,6 +1203,15 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         choices=["bf16", "int8"],
         help="backward mode for a ConvRot INT8 base. bf16 (default): transient dequantized matmul, most accurate. "
         "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton and CUDA).",
+    )
+    parser.add_argument(
+        "--prune_adaln",
+        action="store_true",
+        help="prune the AdaLN projections of a full BF16 DiT at load time (mean-centered rank-8 basis of the "
+        "time-embedding curve, computed on the fly; the time embedder is retained, so timesteps stay exact and "
+        "continuous). Cuts the AdaLN weights from ~26 GB to a few MB with near-identical outputs. Published pruned "
+        "checkpoints are already pruned and do not need this flag; pre-quantized ConvRot INT8 checkpoints are "
+        "rejected. Combines with --convrot_int8 to reproduce the published pruned INT8 scope from a full BF16 file.",
     )
     return parser
 

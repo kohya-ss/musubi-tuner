@@ -20,10 +20,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -46,10 +47,12 @@ from musubi_tuner.minimax_h3.packing import (
     unpack_targets,
 )
 from musubi_tuner.modules.attention import AttentionParams, attention
-from musubi_tuner.modules.convrot_int8_utils import COMFY_QUANT_SUFFIX, canonicalize_convrot_int8_key, has_comfy_quant_tensors
+from musubi_tuner.modules.convrot_int8_utils import canonicalize_convrot_int8_key, has_comfy_quant_tensors
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, WeightTransformHooks
+
+logger = logging.getLogger(__name__)
 
 _ROTARY_CACHE_SIZE = 2
 
@@ -76,6 +79,10 @@ class MiniMaxH3Config:
     # pruned-AdaLN artifacts: the sinusoidal time embedder is replaced by a published
     # FP32 [adaln_curve_grid, time_embed_dim] lookup table interpolated over t in [0, 1]
     adaln_curve_grid: int | None = None
+    # self-pruned AdaLN (--prune_adaln): the sinusoidal time embedder is retained and its
+    # SiLU'd output is projected onto a load-time mean-centered rank-r SVD basis; AdaLN
+    # projections take the r basis coefficients plus a constant channel carrying the mean
+    adaln_rank: int | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -105,14 +112,25 @@ class MiniMaxH3Config:
         if self.rope_inv_freq_len * 6 > self.attention_head_dim:
             raise ValueError("MiniMax-H3 rotary width exceeds the attention head width")
         if self.adaln_curve_grid is not None:
+            if self.adaln_rank is not None:
+                raise ValueError("MiniMax-H3 pruned AdaLN curve table and self-pruned basis are mutually exclusive")
             if self.adaln_curve_grid != 1025:
                 raise ValueError("MiniMax-H3 pruned AdaLN requires exactly 1025 curve rows")
             if self.time_embed_dim != 8:
                 raise ValueError("MiniMax-H3 pruned AdaLN requires time_embed_dim=8")
+        if self.adaln_rank is not None and self.adaln_rank <= 0:
+            raise ValueError("MiniMax-H3 self-pruned AdaLN rank must be positive")
 
     @property
     def is_pruned(self) -> bool:
-        return self.adaln_curve_grid is not None
+        return self.adaln_curve_grid is not None or self.adaln_rank is not None
+
+    @property
+    def adaln_in_features(self) -> int:
+        if self.adaln_rank is not None:
+            # r basis coefficients plus the constant channel carrying the curve mean
+            return self.adaln_rank + 1
+        return self.time_embed_dim
 
     @property
     def attention_inner_dim(self) -> int:
@@ -219,10 +237,10 @@ def classify_h3_transformer(
 ) -> MiniMaxH3Config:
     """Classify a transformer checkpoint as the published full or pruned-AdaLN structure.
 
-    Pruned artifacts are recognized structurally: the ``adaln_t_table`` FP32 [1025, 8]
-    curve table replaces the sinusoidal time embedder, and every AdaLN projection takes
-    the 8-wide interpolated embedding directly (no SiLU). Full checkpoints keep the
-    published-config metadata validation.
+    Pruned artifacts (published as ConvRot INT8 and as BF16) are recognized structurally:
+    the ``adaln_t_table`` FP32 [1025, 8] curve table replaces the sinusoidal time
+    embedder, and every AdaLN projection takes the 8-wide interpolated embedding
+    directly (no SiLU). Full checkpoints keep the published-config metadata validation.
     """
     headers = _read_h3_tensor_headers(files)
     table = headers.get("adaln_t_table")
@@ -235,12 +253,6 @@ def classify_h3_transformer(
         raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must be F32, got {table_dtype}")
     if table_shape != (1025, 8):
         raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must have shape [1025, 8], got {table_shape}")
-    if not any(key.endswith(COMFY_QUANT_SUFFIX) for key in headers):
-        raise ValueError(
-            "Pruned MiniMax-H3 checkpoints are only published as ConvRot INT8 artifacts;"
-            " this file has the pruned AdaLN table but no ConvRot INT8 layers"
-        )
-
     config = _published_pruned_h3_config()
     for index in range(config.num_layers):
         prefix = f"blocks.{index}.adaln_proj.linear"
@@ -251,6 +263,70 @@ def classify_h3_transformer(
     )
     _require_pruned_adaln_header(headers, "final_layer.adaln_proj.linear.bias", (config.final_adaln_out_features,))
     return config
+
+
+# --prune_adaln: rank 8 matches the published pruned artifacts; the grid samples the
+# model time t in [0, 1] densely for the mean-centered SVD (the curve is smooth, so the
+# basis is insensitive to the exact grid size beyond a few hundred points)
+H3_PRUNE_ADALN_RANK = 8
+H3_PRUNE_ADALN_GRID = 4096
+
+_H3_ADALN_WEIGHT_SUFFIX = ".adaln_proj.linear.weight"
+_H3_TIME_EMBEDDER_PREFIX = "time_embedder."
+
+
+def read_h3_time_embedder_state(files: Sequence[str | Path]) -> dict[str, torch.Tensor]:
+    state: dict[str, torch.Tensor] = {}
+    for file in files:
+        with MemoryEfficientSafeOpen(str(Path(file).resolve())) as handle:
+            for key in handle.keys():
+                if key.startswith(_H3_TIME_EMBEDDER_PREFIX):
+                    state[key] = handle.get_tensor(key)
+    return state
+
+
+def compute_pruned_adaln_basis(
+    time_embedder_state: Mapping[str, torch.Tensor],
+    config: MiniMaxH3Config,
+    *,
+    rank: int = H3_PRUNE_ADALN_RANK,
+    grid: int = H3_PRUNE_ADALN_GRID,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mean-centered rank-``rank`` SVD basis of the SiLU'd time-embedding curve.
+
+    Returns FP32 ``(basis [time_embed_dim, rank], mean [time_embed_dim])`` computed over
+    a uniform ``grid``-point sampling of the model time t in [0, 1]. The SiLU that the
+    full model applies per block is baked into the curve, so pruned projections consume
+    the coefficients directly.
+    """
+    embedder = TimeEmbedder(config.timestep_input_dim, config.time_embed_hidden_size, config.time_embed_dim)
+    embedder.load_state_dict({key.removeprefix(_H3_TIME_EMBEDDER_PREFIX): value for key, value in time_embedder_state.items()})
+    with torch.no_grad():
+        curve = F.silu(embedder(torch.linspace(0.0, 1.0, grid, dtype=torch.float32)))
+    mean = curve.mean(dim=0)
+    _, _, v_rows = torch.linalg.svd(curve - mean, full_matrices=False)
+    return v_rows[:rank].T.contiguous(), mean
+
+
+def build_prune_adaln_hooks(basis: torch.Tensor, mean: torch.Tensor) -> WeightTransformHooks:
+    """Streaming rewrite W [out, D] -> W @ [basis | mean] [out, rank + 1] in BF16.
+
+    A pure per-tensor transform: biases are untouched because the constant coefficient
+    channel applies the mean term at runtime. The rank + 1 input width is not divisible
+    by any ConvRot group size, so --convrot_int8 skips the rewritten projections, the
+    same scope as the published pruned INT8 artifacts.
+    """
+    projection = torch.cat((basis, mean[:, None]), dim=1)
+
+    def split_hook(key: str, tensor: torch.Tensor | None):
+        if not key.endswith(_H3_ADALN_WEIGHT_SUFFIX):
+            return None, None
+        if tensor is None:
+            return [key], None
+        pruned = (tensor.to(torch.float32) @ projection.to(tensor.device)).to(torch.bfloat16)
+        return [key], [pruned]
+
+    return WeightTransformHooks(split_hook=split_hook)
 
 
 class TimeEmbedder(nn.Module):
@@ -469,7 +545,7 @@ class DiTBlock(nn.Module):
         )
         self.mlp = MLP(config.hidden_size, config.ffn_hidden_size, dtype=dtype, device=device)
         self.adaln_proj = AdalnProj(
-            config.time_embed_dim,
+            config.adaln_in_features,
             config.hidden_size,
             expand=6,
             modalities=3,
@@ -567,7 +643,7 @@ class MiniMaxH3Model(nn.Module):
         self.video_patch_proj = nn.Linear(config.video_patch_dim, config.hidden_size, dtype=torch.float32, device=device)
         self.audio_patch_proj = nn.Linear(config.audio_in_channels, config.hidden_size, dtype=torch.float32, device=device)
         self.condition_proj = nn.Linear(config.text_dim, config.hidden_size, dtype=dtype, device=device)
-        if config.is_pruned:
+        if config.adaln_curve_grid is not None:
             self.time_embedder = None
             self.register_buffer(
                 "adaln_t_table",
@@ -580,6 +656,16 @@ class MiniMaxH3Model(nn.Module):
                 config.time_embed_dim,
                 device=device,
             )
+            if config.adaln_rank is not None:
+                # load-time mean-centered SVD basis of the SiLU'd time-embedding curve
+                self.register_buffer(
+                    "adaln_basis",
+                    torch.empty(config.time_embed_dim, config.adaln_rank, dtype=torch.float32, device=device),
+                )
+                self.register_buffer(
+                    "adaln_mean",
+                    torch.empty(config.time_embed_dim, dtype=torch.float32, device=device),
+                )
         self.rope = nn.Module()
         inv_freq = torch.empty(config.rope_inv_freq_len, dtype=torch.float32, device=device)
         self.rope.register_buffer("inv_freq", inv_freq)
@@ -598,7 +684,7 @@ class MiniMaxH3Model(nn.Module):
         )
         self.final_layer = FinalLayer(
             config.hidden_size,
-            config.time_embed_dim,
+            config.adaln_in_features,
             config.video_patch_dim,
             config.audio_in_channels,
             norm_eps=config.final_norm_eps,
@@ -639,6 +725,15 @@ class MiniMaxH3Model(nn.Module):
             raise ValueError("MiniMax-H3 unique timesteps must be a one-dimensional tensor")
         if not self.config.is_pruned:
             return self.time_embedder(unique_timesteps.to(execution_device)).to(self.dtype)
+
+        if self.config.adaln_rank is not None:
+            # self-pruned AdaLN: the exact FP32 time-embedding curve projected onto the
+            # load-time basis; the trailing constant channel applies the curve mean via
+            # the per-block projections (their weights are W @ [basis | mean])
+            embedding = self.time_embedder(unique_timesteps.to(execution_device))
+            centered = F.silu(embedding) - self.adaln_mean
+            coefficients = F.pad(centered @ self.adaln_basis, (0, 1), value=1.0)
+            return coefficients.to(self.dtype)
 
         # pruned AdaLN: FP32 linear interpolation over the published [1025, 8] curve
         # table; the model time t = 1 - sigma lives in [0, 1] and maps onto the grid
@@ -980,13 +1075,16 @@ def _load_h3_transformer_convrot_int8(
     disable_mmap: bool,
     lora_weights: list[dict] | None = None,
     lora_multipliers: list[float] | None = None,
+    prune_hooks: WeightTransformHooks | None = None,
+    prune_state: dict[str, torch.Tensor] | None = None,
 ) -> MiniMaxH3Model:
     """Load the transformer with ConvRot INT8 base weights.
 
     BF16 checkpoints are quantized on the fly on ``quant_device`` (LoRA weights, if any,
     are merged into the BF16 weights first); ComfyUI pre-quantized checkpoints are
     converted to the Musubi layout during the same streaming pass. ``device`` is where
-    the weights end up ("cpu" under block swap).
+    the weights end up ("cpu" under block swap). ``prune_hooks`` (--prune_adaln) rewrites
+    the AdaLN projections before the quantization decision, which then skips them.
     """
     from accelerate import init_empty_weights
 
@@ -1010,8 +1108,11 @@ def _load_h3_transformer_convrot_int8(
         move_to_device=(device == quant_device),
         dit_weight_dtype=None,
         disable_numpy_memmap=disable_mmap,
+        weight_transform_hooks=prune_hooks,
         quantizer=quantizer,
     )
+    if prune_state is not None:
+        sd.update(prune_state)
     apply_convrot_int8_monkey_patch(model, sd, bwd_mode=bwd_mode, groupsize_map=quantizer.module_groupsizes)
     # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps incoming
     # tensors with the meta params' requires_grad (default True); the base is frozen anyway.
@@ -1037,6 +1138,8 @@ def _load_h3_transformer_bf16(
     attn_mode: str,
     split_attn: bool,
     disable_mmap: bool,
+    prune_hooks: WeightTransformHooks | None = None,
+    prune_state: dict[str, torch.Tensor] | None = None,
 ) -> MiniMaxH3Model:
     from accelerate import init_empty_weights
 
@@ -1050,8 +1153,29 @@ def _load_h3_transformer_bf16(
     # becomes a no-op; under block swap the caller passes "cpu" and nothing changes
     device = torch.device(device)
     sd: dict[str, torch.Tensor] = {}
-    for file in files:
-        sd.update(load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap))
+    if prune_hooks is not None:
+        # streaming per-tensor load so each full [out, D] AdaLN weight is rewritten to
+        # [out, rank + 1] as it arrives; peak memory stays near the pruned model size
+        from musubi_tuner.utils.lora_utils import load_safetensors_with_fp8_optimization_and_hook
+
+        sd = load_safetensors_with_fp8_optimization_and_hook(
+            [str(file) for file in files],
+            False,
+            device,
+            move_to_device=True,
+            weight_transform_hooks=prune_hooks,
+            disable_numpy_memmap=disable_mmap,
+        )
+        sd.update(prune_state or {})
+    else:
+        for file in files:
+            sd.update(load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap))
+    # pruned artifacts publish the AdaLN projections in F16; convert them to the BF16
+    # compute dtype (the same treatment as the ConvRot INT8 loader)
+    if config.is_pruned:
+        for key, tensor in sd.items():
+            if ".adaln_proj.linear." in key and tensor.dtype == torch.float16:
+                sd[key] = tensor.to(torch.bfloat16)
     # the model definition is the dtype source of truth: BF16 compute weights plus FP32
     # fixed-precision islands must arrive exactly as published, without silent conversion
     expected_state = model.state_dict()
@@ -1081,15 +1205,37 @@ def load_h3_transformer(
     quant_device: torch.device | str | None = None,
     lora_weights: list[dict] | None = None,
     lora_multipliers: list[float] | None = None,
+    prune_adaln: bool = False,
 ) -> MiniMaxH3Model:
     if dtype != torch.bfloat16:
         raise ValueError("MiniMax-H3 accepts only BF16 transformer checkpoints")
     files = resolve_safetensors_files(checkpoint_path)
-    # Pre-quantized ConvRot INT8 artifacts (full or pruned) are detected from their
-    # tensor structure; --convrot_int8 additionally quantizes BF16 checkpoints on the fly.
+    # Pre-quantized ConvRot INT8 artifacts (full or pruned) and pruned BF16 artifacts are
+    # detected from their tensor structure; --convrot_int8 additionally quantizes BF16
+    # checkpoints (full or pruned) on the fly — pruned AdaLN projections are 8-wide and
+    # fall outside every ConvRot group size, so the quantizer skips them automatically.
     prequantized = has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap)
     use_convrot_int8 = convrot_int8 or prequantized
     config = classify_h3_transformer(files, allow_convrot_int8=use_convrot_int8)
+    prune_hooks: WeightTransformHooks | None = None
+    prune_state: dict[str, torch.Tensor] | None = None
+    if prune_adaln:
+        if config.is_pruned:
+            logger.info("MiniMax-H3 checkpoint is already pruned; --prune_adaln has no effect")
+        elif prequantized:
+            raise ValueError(
+                "--prune_adaln requires a BF16 MiniMax-H3 checkpoint; pre-quantized ConvRot INT8 checkpoints"
+                " cannot be pruned at load time (use the published pruned artifact instead)"
+            )
+        else:
+            config = replace(config, adaln_rank=H3_PRUNE_ADALN_RANK)
+            basis, mean = compute_pruned_adaln_basis(read_h3_time_embedder_state(files), config)
+            prune_hooks = build_prune_adaln_hooks(basis, mean)
+            prune_state = {"adaln_basis": basis, "adaln_mean": mean}
+            logger.info(
+                f"Pruning MiniMax-H3 AdaLN projections at load time (mean-centered rank-{H3_PRUNE_ADALN_RANK} basis,"
+                " time embedder retained)"
+            )
     if use_convrot_int8:
         device = torch.device(device)
         return _load_h3_transformer_convrot_int8(
@@ -1103,6 +1249,8 @@ def load_h3_transformer(
             disable_mmap=disable_mmap,
             lora_weights=lora_weights,
             lora_multipliers=lora_multipliers,
+            prune_hooks=prune_hooks,
+            prune_state=prune_state,
         )
     if lora_weights:
         raise ValueError("MiniMax-H3 load-time LoRA merge is only wired for the ConvRot INT8 path")
@@ -1113,4 +1261,6 @@ def load_h3_transformer(
         attn_mode=attn_mode,
         split_attn=split_attn,
         disable_mmap=disable_mmap,
+        prune_hooks=prune_hooks,
+        prune_state=prune_state,
     )
