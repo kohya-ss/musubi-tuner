@@ -39,6 +39,7 @@ from diffusers.optimization import (
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.dataset.architectures import round_down_frame_count
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
@@ -83,6 +84,25 @@ SS_METADATA_MINIMUM_KEYS = [
     SS_METADATA_KEY_NETWORK_ARGS,
 ]
 
+# --timestep_sampling methods that draw t in [0, 1] directly (handled by
+# NetworkTrainer.sample_timesteps); anything else goes through the
+# weighting-scheme density path in get_noisy_model_input_and_timesteps
+DIRECT_TIMESTEP_SAMPLING_METHODS = frozenset(
+    {
+        "uniform",
+        "sigmoid",
+        "shift",
+        "flux_shift",
+        "qwen_shift",
+        "krea2_shift",
+        "ideogram4_shift",
+        "logsnr",
+        "qinglong_flux",
+        "qinglong_qwen",
+        "flux2_shift",
+    }
+)
+
 
 @dataclass
 class DiTOutput:
@@ -100,11 +120,16 @@ class DiTOutput:
 
 
 class NetworkTrainer:
+    # audio-capable architectures override this class attribute with their AudioSpec so that
+    # dataset construction enables audio (class attribute because _build_dataset runs before
+    # handle_model_specific_args)
+    audio_spec = None
+
     def __init__(self):
         self.blocks_to_swap = None
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
-        self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
+        self.vae_frame_stride = 4  # legacy frame-grid fallback; some architectures set 1 or use a custom formula
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
 
     # TODO 他のスクリプトと共通化する
@@ -516,18 +541,26 @@ class NetworkTrainer:
         a, b = self.timestep_range_pool.pop()
         return random.uniform(a, b)
 
-    def get_noisy_model_input_and_timesteps(
+    def sample_timesteps(
         self,
         args: argparse.Namespace,
-        noise: torch.Tensor,
-        latents: torch.Tensor,
+        batch_size: int,
         timesteps: Optional[List[float]],
-        noise_scheduler: FlowMatchDiscreteScheduler,
+        latents: torch.Tensor,
         device: torch.device,
-        dtype: torch.dtype,
-    ):
-        batch_size = noise.shape[0]
+    ) -> torch.Tensor:
+        """Sample flow-matching timesteps t in [0, 1] (t=1 is pure noise) from the
+        distribution selected by --timestep_sampling, honoring min/max_timestep,
+        --preserve_distribution_shape and timestep bucketing.
 
+        ``timesteps``, if given, supplies pre-drawn uniform samples in [0, 1] (one
+        per batch item) that are transformed deterministically into the target
+        distribution instead of drawing fresh randomness. ``latents`` is only
+        consulted for its spatial shape by the resolution-dependent shift methods.
+
+        Only valid for DIRECT_TIMESTEP_SAMPLING_METHODS; weighting-scheme based
+        sampling cannot be expressed as a plain t draw and raises here.
+        """
         if timesteps is not None:
             timesteps = torch.tensor(timesteps, device=device)
 
@@ -563,19 +596,7 @@ class NetworkTrainer:
             logsnr = mean + std * math.sqrt(2.0) * torch.erfinv(term)
             return logsnr
 
-        if (
-            args.timestep_sampling == "uniform"
-            or args.timestep_sampling == "sigmoid"
-            or args.timestep_sampling == "shift"
-            or args.timestep_sampling == "flux_shift"
-            or args.timestep_sampling == "qwen_shift"
-            or args.timestep_sampling == "krea2_shift"
-            or args.timestep_sampling == "ideogram4_shift"
-            or args.timestep_sampling == "logsnr"
-            or args.timestep_sampling == "qinglong_flux"
-            or args.timestep_sampling == "qinglong_qwen"
-            or args.timestep_sampling == "flux2_shift"
-        ):
+        if args.timestep_sampling in DIRECT_TIMESTEP_SAMPLING_METHODS:
 
             def compute_sampling_timesteps(org_timesteps: Optional[torch.Tensor]) -> torch.Tensor:
                 def rand(bs: int, org_ts: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -717,9 +738,30 @@ class NetworkTrainer:
                     logger.warning(
                         f"Could not sample {batch_size} valid timesteps in {max_loops} loops / {max_loops}ループで{batch_size}個の有効なタイムステップをサンプリングできませんでした"
                     )
-                    available_t = compute_sampling_timesteps(timesteps)
+                    t = compute_sampling_timesteps(timesteps)
                 else:
                     t = torch.stack(available_t, dim=0)  # [batch_size, ]
+
+            return t
+
+        raise ValueError(
+            f"timestep_sampling '{args.timestep_sampling}' draws timesteps via the weighting scheme and cannot be sampled as t in [0, 1]"
+        )
+
+    def get_noisy_model_input_and_timesteps(
+        self,
+        args: argparse.Namespace,
+        noise: torch.Tensor,
+        latents: torch.Tensor,
+        timesteps: Optional[List[float]],
+        noise_scheduler: FlowMatchDiscreteScheduler,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        batch_size = noise.shape[0]
+
+        if args.timestep_sampling in DIRECT_TIMESTEP_SAMPLING_METHODS:
+            t = self.sample_timesteps(args, batch_size, timesteps, latents, device)
 
             timesteps = t * 1000.0
             t = t.view(-1, 1, 1, 1, 1) if latents.ndim == 5 else t.view(-1, 1, 1, 1)
@@ -833,7 +875,9 @@ class NetworkTrainer:
                 line += "#" * int(w / max_weighting * CONSOLE_WIDTH)
                 print(line)
 
-    def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
+    def sample_images(
+        self, accelerator: Accelerator, args, epoch, steps, sample_resources, transformer, sample_parameters, dit_dtype
+    ):
         """architecture independent sample images"""
         if not should_sample_images(args, steps, epoch):
             return
@@ -867,7 +911,7 @@ class NetworkTrainer:
             with torch.no_grad(), accelerator.autocast():
                 for sample_parameter in sample_parameters:
                     self.sample_image_inference(
-                        accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps
+                        accelerator, args, transformer, dit_dtype, sample_resources, save_dir, sample_parameter, epoch, steps
                     )
                     clean_memory_on_device(accelerator.device)
         else:
@@ -881,7 +925,7 @@ class NetworkTrainer:
                 with distributed_state.split_between_processes(per_process_params) as sample_parameter_lists:
                     for sample_parameter in sample_parameter_lists[0]:
                         self.sample_image_inference(
-                            accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps
+                            accelerator, args, transformer, dit_dtype, sample_resources, save_dir, sample_parameter, epoch, steps
                         )
                         clean_memory_on_device(accelerator.device)
 
@@ -909,8 +953,7 @@ class NetworkTrainer:
         width = (width // 8) * 8
         height = (height // 8) * 8
 
-        # 1, 5, 9, 13, ... For HunyuanVideo and Wan2.1
-        frame_count = (frame_count - 1) // self.vae_frame_stride * self.vae_frame_stride + 1
+        frame_count = round_down_frame_count(frame_count, self.architecture, self.vae_frame_stride)
 
         if self.i2v_training:
             image_path = sample_parameter.get("image_path", None)
@@ -1065,6 +1108,11 @@ class NetworkTrainer:
         accelerator: Accelerator,
         sample_prompts: str,
     ):
+        """Parses and encodes ``--sample_prompts`` for the default ``prepare_sampling``.
+
+        Architectures using the default ``prepare_sampling`` must implement this;
+        those overriding ``prepare_sampling`` wholesale may leave it unimplemented.
+        """
         raise NotImplementedError("subclass must implement `process_sample_prompts`")
 
     def do_inference(
@@ -1151,7 +1199,7 @@ class NetworkTrainer:
         noise_scheduler,
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
-        vae,
+        sample_resources,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute scalar loss for one training batch (pre-backward).
@@ -1273,8 +1321,45 @@ class NetworkTrainer:
         so subclasses uploading companion files can match the same behaviour.
         """
 
+    def on_epoch_end(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        network,
+        transformer,
+        epoch: int,
+    ) -> None:
+        """Called once per epoch, after its last inner step and before end-of-epoch saving/sampling.
+
+        ``epoch`` is the 1-based number of the epoch that just finished (the final
+        epoch may be partial when ``--max_train_steps`` ends it early). Use for
+        epoch-level bookkeeping such as dataset-coverage warnings after the first epoch.
+        """
+
+    def prepare_sampling(self, args, accelerator, vae_dtype):
+        """Prepares training-time sampling; returns ``(sample_parameters, sample_resources)``.
+
+        ``sample_resources`` is an architecture-defined payload that the base trainer
+        threads through unchanged to ``sample_image_inference`` and the sample-image
+        hooks. The default implementation covers single-VAE architectures: it parses
+        prompts via ``process_sample_prompts`` and returns the sampling VAE as the
+        resources. Architectures whose sampling needs more (e.g. separate video and
+        audio VAEs) override this wholesale and return their own payload.
+        Both values are None when ``--sample_prompts`` is not set.
+        """
+        sample_parameters = None
+        vae = None
+        if args.sample_prompts:
+            sample_parameters = self.process_sample_prompts(args, accelerator, args.sample_prompts)
+
+            # Load VAE model for sampling images: VAE is loaded to cpu to save gpu memory
+            vae = self.load_vae(args, vae_dtype=vae_dtype, vae_path=args.vae)
+            vae.requires_grad_(False)
+            vae.eval()
+        return sample_parameters, vae
+
     def on_before_sample_images(
-        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+        self, accelerator, args, epoch, steps, sample_resources, transformer, network, sample_parameters, dit_dtype
     ) -> None:
         """Called just before sample image generation begins, while the transformer is still in training mode.
 
@@ -1284,7 +1369,7 @@ class NetworkTrainer:
         pass
 
     def on_after_sample_images(
-        self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype
+        self, accelerator, args, epoch, steps, sample_resources, transformer, network, sample_parameters, dit_dtype
     ) -> None:
         """Called after sample image generation completes and the transformer has been switched back to training mode.
 
@@ -1314,7 +1399,10 @@ class NetworkTrainer:
     def extra_metadata(self, args: argparse.Namespace) -> dict:
         """Returns extra ``ss_*`` metadata keys to embed in saved safetensors.
 
-        Default: empty dict. Override to add extension-specific metadata.
+        Called once when the training metadata is first built and again at every
+        checkpoint save, so values observed during training stay current. It must
+        therefore be cheap and side-effect free. Default: empty dict. Override to
+        add extension-specific metadata.
         """
         return {}
 
@@ -1336,9 +1424,12 @@ class NetworkTrainer:
         session_id, training_started_at = self._init_session(args)
         train_dataset_group, collator, current_epoch = self._build_dataset(args)
         accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
-        sample_parameters, vae = self._prepare_sampling(args, accelerator, vae_dtype)
+        sample_parameters, sample_resources = self.prepare_sampling(args, accelerator, vae_dtype)
         transformer = self._load_dit_and_swap(args, accelerator, dit_weight_dtype)
-        network = self._build_network(args, accelerator, transformer, vae, weight_dtype)
+        # the network factories take a LyCORIS-compatible vae argument; the sampling
+        # resources fill it only when they are a plain module (single-VAE architectures)
+        network_vae = sample_resources if isinstance(sample_resources, torch.nn.Module) else None
+        network = self._build_network(args, accelerator, transformer, network_vae, weight_dtype)
         if network is None:
             return
         (
@@ -1390,7 +1481,7 @@ class NetworkTrainer:
             optimizer_eval_fn,
             lr_scheduler,
             lr_descriptions,
-            vae,
+            sample_resources,
             sample_parameters,
             dit_dtype,
             network_dtype,
@@ -1462,7 +1553,11 @@ class NetworkTrainer:
         user_config = config_utils.load_user_config(args.dataset_config)
         blueprint = blueprint_generator.generate(user_config, args, architecture=self.architecture)
         train_dataset_group = config_utils.generate_dataset_group_by_blueprint(
-            blueprint.dataset_group, training=True, num_timestep_buckets=self.num_timestep_buckets, shared_epoch=current_epoch
+            blueprint.dataset_group,
+            training=True,
+            num_timestep_buckets=self.num_timestep_buckets,
+            shared_epoch=current_epoch,
+            audio_spec=self.audio_spec,
         )
 
         if train_dataset_group.num_train_items == 0:
@@ -1497,19 +1592,6 @@ class NetworkTrainer:
 
         vae_dtype = torch.float16 if args.vae_dtype is None else model_utils.str_to_dtype(args.vae_dtype)
         return accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype
-
-    def _prepare_sampling(self, args, accelerator, vae_dtype):
-        # get embedding for sampling images
-        sample_parameters = None
-        vae = None
-        if args.sample_prompts:
-            sample_parameters = self.process_sample_prompts(args, accelerator, args.sample_prompts)
-
-            # Load VAE model for sampling images: VAE is loaded to cpu to save gpu memory
-            vae = self.load_vae(args, vae_dtype=vae_dtype, vae_path=args.vae)
-            vae.requires_grad_(False)
-            vae.eval()
-        return sample_parameters, vae
 
     def _load_dit_and_swap(self, args, accelerator, dit_weight_dtype):
         # load DiT model
@@ -1803,7 +1885,7 @@ class NetworkTrainer:
         optimizer_eval_fn,
         lr_scheduler,
         lr_descriptions,
-        vae,
+        sample_resources,
         sample_parameters,
         dit_dtype,
         network_dtype,
@@ -1963,6 +2045,9 @@ class NetworkTrainer:
             metadata["ss_training_finished_at"] = str(time.time())
             metadata["ss_steps"] = str(steps)
             metadata["ss_epoch"] = str(epoch_no)
+            # re-evaluated per save so values observed during training (rather than
+            # fixed at startup) are stored current
+            metadata.update({k: str(v) for k, v in self.extra_metadata(args).items()})
 
             metadata_to_save = minimum_metadata if args.no_metadata else metadata
 
@@ -2006,13 +2091,15 @@ class NetworkTrainer:
             if not should_sample_images(args, steps_arg, epoch_arg):
                 return
             self.on_before_sample_images(
-                accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
+                accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, network, sample_parameters, dit_dtype
             )
             try:
-                self.sample_images(accelerator, args, epoch_arg, steps_arg, vae, transformer, sample_parameters, dit_dtype)
+                self.sample_images(
+                    accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, sample_parameters, dit_dtype
+                )
             finally:
                 self.on_after_sample_images(
-                    accelerator, args, epoch_arg, steps_arg, vae, transformer, network, sample_parameters, dit_dtype
+                    accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, network, sample_parameters, dit_dtype
                 )
 
         # For --sample_at_first
@@ -2069,7 +2156,7 @@ class NetworkTrainer:
                         noise_scheduler,
                         dit_dtype,
                         network_dtype,
-                        vae,
+                        sample_resources,
                         global_step,
                     )
 
@@ -2155,6 +2242,8 @@ class NetworkTrainer:
 
                 if global_step >= args.max_train_steps:
                     break
+
+            self.on_epoch_end(args, accelerator, network, transformer, epoch + 1)
 
             if len(accelerator.trackers) > 0:
                 logs = {"loss/epoch": loss_recorder.moving_average}

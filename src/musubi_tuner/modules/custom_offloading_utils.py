@@ -65,6 +65,46 @@ def weighs_to_device(layer: nn.Module, device: torch.device):
             module.weight.data = module.weight.data.to(device, non_blocking=device.type != "cpu")
 
 
+def default_swap_tensor_selector(block: nn.Module) -> list[tuple[nn.Module, str]]:
+    """Default streaming selection rule: the ``weight`` of every ``*Linear`` module.
+
+    Same rule as ``ModelOffloader.swap_weight_devices_cuda``. An offloader can be given a
+    different selector to also stream tensors that a quantization scheme hangs off the same
+    modules (per-group scales etc.); each entry is ``(module, attribute_name)`` where the
+    attribute is a parameter or a registered buffer of the module.
+    """
+    jobs = []
+    for _, module in block.named_modules():
+        if hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear"):
+            jobs.append((module, "weight"))
+    return jobs
+
+
+def attach_forward_streaming_hooks(offloader, blocks: list[nn.Module]) -> list:
+    """Drive a block-swap offloader from forward hooks.
+
+    For models whose forward loop does not call the offloader itself (e.g. a Hugging Face
+    text encoder): each block waits for its own weights before running and releases/prefetches
+    after it finishes. Forward-only offloaders handle the pass boundary (wrap-around preload)
+    internally. Hooks must be attached before any per-call hooks so the prefetch of the last
+    block runs first. Returns the hook handles so callers can detach them.
+    """
+    handles = []
+    for index, block in enumerate(blocks):
+
+        def _wait_hook(module, args, _index=index):
+            del module, args
+            offloader.wait_for_block(_index)
+
+        def _submit_hook(module, args, output, _index=index):
+            del module, args, output
+            offloader.submit_move_blocks_forward(blocks, _index)
+
+        handles.append(block.register_forward_pre_hook(_wait_hook))
+        handles.append(block.register_forward_hook(_submit_hook))
+    return handles
+
+
 @dataclass
 class BlockSwapConfig:
     """
@@ -737,6 +777,10 @@ class LoRAStreamOffloader:
       - Because the streamed weights are frozen (no ``.grad`` to preserve), we swap the whole ``module.weight``
         *reference* between its CPU master Parameter and a preallocated GPU ring Parameter, instead of the
         ``.data`` storage trick used by ``ModelOffloader``. No per-step ``cudaMalloc``.
+      - What is streamed is decided by ``swap_tensor_selector`` (default: every ``*Linear`` ``weight``). A
+        selector may return several tensors per module -- e.g. a quantized weight together with its scale
+        buffers -- as ``(module, attribute_name)`` pairs; parameters are rebound as ``nn.Parameter`` ring
+        views, registered buffers as plain tensor views.
       - All swap weights of a block are packed into a single contiguous (byte) buffer -- one pinned CPU
         buffer per streaming block and one GPU buffer per ring slot -- and the individual weights are
         dtype/shape views into it. Loading a block is therefore a single H2D ``copy_`` instead of one
@@ -763,6 +807,7 @@ class LoRAStreamOffloader:
         ring_size: int = 2,
         use_pinned_memory: bool = True,
         debug: bool = False,
+        swap_tensor_selector=None,
     ):
         self.block_type = block_type
         self._blocks = blocks
@@ -772,6 +817,7 @@ class LoRAStreamOffloader:
         self.use_pinned_memory = use_pinned_memory
         self.supports_backward = supports_backward
         self.forward_only = not supports_backward
+        self.swap_tensor_selector = swap_tensor_selector if swap_tensor_selector is not None else default_swap_tensor_selector
 
         import os
 
@@ -791,11 +837,12 @@ class LoRAStreamOffloader:
         self.B = min(ring_size, self.S)  # clamp ring to number of streaming blocks
 
         # ---- finetuning guard: H2D-only must never lose weight updates ----
+        self._job_cache = {}  # block_idx -> [(module, attr_name, is_param) per swap tensor]
         for b in stream_idx:
-            for m in self._swap_modules(blocks[b]):
-                assert not m.weight.requires_grad, (
+            for m, name, is_param in self._jobs(b):
+                assert not (is_param and getattr(m, name).requires_grad), (
                     "LoRAStreamOffloader requires frozen base weights (LoRA / no full fine-tune). "
-                    f"Found a trainable Linear weight in block {b}."
+                    f"Found a trainable swap tensor {name} in block {b}."
                 )
 
         # ---- transfer engine: owns the copy stream and all H2D primitives ----
@@ -807,14 +854,13 @@ class LoRAStreamOffloader:
             self.copier = _StagedCopier(device, num_staging=self.B, debug=self.debug)
 
         # ---- runtime state (GPU buffers allocated lazily in prepare_block_devices_before_forward) ----
-        self.cpu_master = {}  # block_idx -> [CPU (pinned) Parameter per swap weight] (views into cpu_flat)
+        self.cpu_master = {}  # block_idx -> [CPU (pinned) Parameter / buffer tensor per swap tensor] (views into cpu_flat)
         self.cpu_flat = {}  # block_idx -> flat (pinned) uint8 CPU tensor backing the masters
-        self.ring_param = None  # [slot] -> [GPU nn.Parameter per swap weight] (views into ring_flat)
+        self.ring_param = None  # [slot] -> [GPU nn.Parameter / buffer tensor per swap tensor] (views into ring_flat)
         self.ring_flat = None  # [slot] -> flat uint8 GPU tensor backing the ring params
-        self._layout = None  # ([byte offset per swap weight], total bytes) shared by all streaming blocks
+        self._layout = None  # ([byte offset per swap tensor], total bytes) shared by all streaming blocks
         self.in_slot = [None] * self.B  # slot -> block_idx currently bound to this slot (or None)
         self.free_event = [None] * self.B  # slot -> cuda.Event recording when compute finished using the slot
-        self._module_cache = {}  # block_idx -> [modules with swap weights]
 
         self._wait_ctx = "fwd"  # context tag for wait/load timing ("fwd" while in the forward loop, "bwd" in hooks)
         if self.debug:
@@ -836,24 +882,30 @@ class LoRAStreamOffloader:
 
     # ------------------------------------------------------------------ helpers
 
-    def _swap_modules(self, block: nn.Module) -> list[nn.Module]:
-        # same selection rule as ModelOffloader.swap_weight_devices_cuda: Linear layers with a weight
-        mods = []
-        for _, m in block.named_modules():
-            if hasattr(m, "weight") and m.weight is not None and m.__class__.__name__.endswith("Linear"):
-                mods.append(m)
-        return mods
-
-    def _modules(self, block_idx: int) -> list[nn.Module]:
-        cached = self._module_cache.get(block_idx)
+    def _jobs(self, block_idx: int) -> list[tuple[nn.Module, str, bool]]:
+        """Swap jobs of a block: ``(module, attr_name, is_param)`` per streamed tensor, cached."""
+        cached = self._job_cache.get(block_idx)
         if cached is None:
-            cached = self._swap_modules(self._blocks[block_idx])
-            self._module_cache[block_idx] = cached
+            cached = []
+            for m, name in self.swap_tensor_selector(self._blocks[block_idx]):
+                if name in m._parameters:
+                    is_param = True
+                elif name in m._buffers:
+                    is_param = False
+                else:
+                    raise ValueError(
+                        f"swap tensor selector returned {name!r}, which is neither a parameter nor a"
+                        f" registered buffer of {m.__class__.__name__} (block {block_idx})"
+                    )
+                cached.append((m, name, is_param))
+            self._job_cache[block_idx] = cached
         return cached
 
-    def _bind(self, block_idx: int, params: list[nn.Parameter]):
-        for m, p in zip(self._modules(block_idx), params):
-            m.weight = p
+    def _bind(self, block_idx: int, tensors: list[torch.Tensor]):
+        # parameters arrive as nn.Parameter, buffers as plain tensors; setattr keeps them in the
+        # module's _parameters / _buffers dicts respectively (buffer names are already registered)
+        for (m, name, _is_param), t in zip(self._jobs(block_idx), tensors):
+            setattr(m, name, t)
 
     @staticmethod
     def _compute_layout(weights: list[torch.Tensor]) -> tuple[list[int], int]:
@@ -867,9 +919,10 @@ class LoRAStreamOffloader:
             total += w.numel() * w.element_size()
         return offsets, total
 
-    def _flat_views(self, flat: torch.Tensor, weights: list[torch.Tensor]) -> list[torch.Tensor]:
-        """dtype/shape views into a flat uint8 buffer, one per swap weight, following ``self._layout``."""
-        offsets, _ = self._layout
+    @staticmethod
+    def _flat_views(flat: torch.Tensor, weights: list[torch.Tensor], layout: tuple[list[int], int]) -> list[torch.Tensor]:
+        """dtype/shape views into a flat uint8 buffer, one per swap tensor, following ``layout``."""
+        offsets, _ = layout
         return [flat[off : off + w.numel() * w.element_size()].view(w.dtype).view(w.shape) for off, w in zip(offsets, weights)]
 
     def _load(self, rank: int, slot: int, ctx: str = "fwd"):
@@ -931,46 +984,81 @@ class LoRAStreamOffloader:
                     weighs_to_device(b, self.device)
                 continue
 
-            if first_time:
-                # move the whole block to device (buffers, norms, bias), then pull the swap weights back to
-                # the CPU into one flat (pinned) buffer per block as the persistent masters
-                b.to(self.device)
-                mods = self._modules(i)
-                weights = [m.weight.data for m in mods]
-                if self._layout is None:
-                    self._layout = self._compute_layout(weights)  # first streaming block defines the shared layout
-                flat = torch.empty(self._layout[1], dtype=torch.uint8, device=cpu_device)
-                if self.use_pinned_memory:
-                    flat = flat.pin_memory(device=self.device)
-                master = []
-                for m, view in zip(mods, self._flat_views(flat, weights)):
-                    view.copy_(m.weight.data)  # one-time D2H into the flat master
-                    m.weight.data = view
-                    master.append(m.weight)  # keep the original Parameter object as the persistent master
-                self.cpu_flat[i] = flat
-                self.cpu_master[i] = master
-            else:
+            if not first_time:
                 # re-prepare (e.g. around in-training sampling): the non-swap parts are already on the device
                 # and the CPU masters have stayed on the CPU throughout, so just repoint weights to the masters.
                 # IMPORTANT: do NOT call b.to(device) here -- it would drag the CPU masters onto the GPU and
                 # they would never be released (every swap block would end up resident).
                 self._bind(i, self.cpu_master[i])
+                continue
+
+            jobs = self._jobs(i)
+            tensors = [getattr(m, name).data for m, name, _ in jobs]
+            if self._layout is None:
+                self._layout = self._compute_layout(tensors)  # first streaming block defines the shared layout
+            flat = torch.empty(self._layout[1], dtype=torch.uint8, device=cpu_device)
+            if self.use_pinned_memory:
+                flat = flat.pin_memory(device=self.device)
+            views = self._flat_views(flat, tensors, self._layout)
+            master = []
+
+            if all(t.device.type == "cpu" for t in tensors):
+                # CPU-direct: build the flat masters host-to-host, detach the swap tensors from the
+                # module so the block's device move cannot drag them, then restore them as the masters.
+                # Avoids the H2D+D2H round trip of every streamed tensor that the general path below
+                # pays when the model starts on the CPU.
+                for (m, name, is_param), t, view in zip(jobs, tensors, views):
+                    view.copy_(t)  # host-to-host memcpy into the flat master
+                    placeholder = torch.empty(0, dtype=t.dtype, device=cpu_device)
+                    if is_param:
+                        m._parameters[name].data = placeholder
+                    else:
+                        m._buffers[name] = placeholder
+                b.to(self.device)  # non-swap params/buffers to the device; the placeholders are empty
+                for (m, name, is_param), view in zip(jobs, views):
+                    if is_param:
+                        p = m._parameters[name]
+                        p.data = view
+                        master.append(p)  # keep the original Parameter object as the persistent master
+                    else:
+                        m._buffers[name] = view
+                        master.append(view)
+            else:
+                # swap tensors already live on an accelerator: move the whole block to the device
+                # (buffers, norms, bias), then pull the swap tensors back into the flat master (one-time D2H)
+                b.to(self.device)
+                for (m, name, is_param), view in zip(jobs, views):
+                    t = getattr(m, name)
+                    view.copy_(t.data)
+                    if is_param:
+                        t.data = view
+                        master.append(t)  # keep the original Parameter object as the persistent master
+                    else:
+                        m._buffers[name] = view
+                        master.append(view)
+
+            self.cpu_flat[i] = flat
+            self.cpu_master[i] = master
 
         # validate homogeneous streaming blocks (shared ring template)
         template = self.cpu_master[self.stream_idx[0]]
         for b in self.stream_idx[1:]:
-            assert len(self.cpu_master[b]) == len(template), f"block {b} has a different number of swap weights"
+            assert len(self.cpu_master[b]) == len(template), f"block {b} has a different number of swap tensors"
             for p, t in zip(self.cpu_master[b], template):
                 assert p.data.shape == t.data.shape and p.data.dtype == t.data.dtype, (
-                    f"block {b} swap-weight shape/dtype differs from the streaming template"
+                    f"block {b} swap-tensor shape/dtype differs from the streaming template"
                 )
 
         # preallocate the GPU ring (once); copies happen into these flat buffers, never reallocated
         if self.ring_param is None:
+            template_jobs = self._jobs(self.stream_idx[0])
             template_weights = [p.data for p in template]
             self.ring_flat = [torch.empty(self._layout[1], dtype=torch.uint8, device=self.device) for _ in range(self.B)]
             self.ring_param = [
-                [nn.Parameter(view, requires_grad=False) for view in self._flat_views(flat, template_weights)]
+                [
+                    nn.Parameter(view, requires_grad=False) if is_param else view
+                    for (_m, _name, is_param), view in zip(template_jobs, self._flat_views(flat, template_weights, self._layout))
+                ]
                 for flat in self.ring_flat
             ]
 
