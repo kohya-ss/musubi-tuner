@@ -13,6 +13,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from musubi_tuner.hv_train_network import setup_parser_common
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
@@ -116,30 +117,26 @@ class _RecordingTransformer:
         )
 
 
-def _trainer_args(**overrides):
-    values = {
-        "timestep_sampling": "uniform",
-        "weighting_scheme": "none",
-        "discrete_flow_shift": 1.0,
-        "h3_shift_video": 12.0,
-        "h3_shift_audio": 3.0,
-        "h3_visual_cond_clean": 0.999,
-        "h3_audio_cond_clean": 1.0,
-        "min_timestep": None,
-        "max_timestep": None,
-        "preserve_distribution_shape": False,
-        "blocks_to_swap": 0,
-        "sample_prompts": None,
-        "gradient_checkpointing": False,
-        "task": "t2va",
-        "video_only": False,
-        "audio_loss_weight": 1.0,
-        "convrot_int8": False,
-        "convrot_int8_bwd": "bf16",
-        "base_weights": None,
+def _parser_defaults() -> dict[str, object]:
+    parser = minimax_h3_setup_parser(setup_parser_common())
+    return {
+        action.dest: action.default
+        for action in parser._actions
+        if action.dest != "help" and action.default is not argparse.SUPPRESS
     }
-    values.update(overrides)
-    return SimpleNamespace(**values)
+
+
+# the trainer reads plain argparse attributes, so the fake args start from the real parser defaults:
+# a hand-written subset goes stale without a failing assertion whenever the shared training
+# arguments grow, and only the values the tests actually choose are spelled out here
+_TRAINER_DEFAULTS = _parser_defaults() | {
+    "task": "t2va",  # required on the real command line
+    "blocks_to_swap": 0,  # the parser leaves this None to mean "disabled"
+}
+
+
+def _trainer_args(**overrides):
+    return SimpleNamespace(**(_TRAINER_DEFAULTS | overrides))
 
 
 def _training_batch(batch_size: int = 1, *, text_length: int = 3):
@@ -273,8 +270,6 @@ def test_h3_parser_exposes_the_dual_vae_and_text_assets_needed_for_training_samp
     assert args.video_vae == "video.safetensors"
     assert args.audio_vae == "audio.safetensors"
     assert args.text_encoder == "qwen.safetensors"
-    assert args.processor == "Qwen/Qwen3-VL-32B-Instruct"
-    assert args.processor_revision is None
     assert args.h3_allow_experimental_sample_duration is False
 
 
@@ -411,8 +406,6 @@ def test_prepare_training_samples_encodes_text_once_and_returns_both_vaes_as_sam
         asset_paths[name] = str(path)
     args = _trainer_args(
         sample_prompts=str(prompt_file),
-        processor="processor",
-        processor_revision=None,
         h3_allow_experimental_sample_duration=True,
         disable_numpy_memmap=False,
         **asset_paths,
@@ -512,8 +505,6 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
     args = _trainer_args(
         task="ref2va",
         sample_prompts=str(prompt_file),
-        processor="processor",
-        processor_revision=None,
         h3_allow_experimental_sample_duration=True,
         disable_numpy_memmap=False,
         **asset_paths,
@@ -734,7 +725,24 @@ def test_process_batch_video_only_disables_audio_loss_even_with_real_audio(monke
     assert torch.count_nonzero(transformer.calls[0]["audio_latents"]) > 0
 
 
-def test_condition_noise_uses_fresh_draws_per_role_and_step(monkeypatch):
+def _recording_randn(monkeypatch) -> list[torch.Tensor]:
+    """Record every global-RNG normal draw while still returning real noise."""
+    real_randn = torch.randn
+    draws: list[torch.Tensor] = []
+
+    def recording_randn(*args, **kwargs):
+        noise = real_randn(*args, **kwargs)
+        draws.append(noise)
+        return noise
+
+    monkeypatch.setattr(torch, "randn", recording_randn)
+    return draws
+
+
+def test_condition_noise_is_drawn_from_the_global_rng_per_condition_and_step(monkeypatch):
+    # per-role condition seeds (visuals from seed, audio from seed + 1) made one item's audio noise
+    # the next item's visual noise; training now draws from the global RNG like the target noise,
+    # so every condition tensor and every step gets its own independent draw
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(task="ref2va", h3_visual_cond_clean=0.5, h3_audio_cond_clean=0.5)
     trainer.handle_model_specific_args(args)
@@ -743,13 +751,8 @@ def test_condition_noise_uses_fresh_draws_per_role_and_step(monkeypatch):
     batch["latents_ref_000_image"] = torch.zeros(1, 24, 1, 4, 4)
     batch["latents_ref_001_audio"] = torch.zeros(1, 32, 2, 8)
     video_latents = torch.zeros(1, 24, 2, 4, 4)
+    draws = _recording_randn(monkeypatch)
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
-    condition_noise_values = iter((1.0, 2.0, 3.0, 4.0))
-    monkeypatch.setattr(
-        torch,
-        "randn",
-        lambda shape, **kwargs: torch.full(shape, next(condition_noise_values), **kwargs),
-    )
     monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
 
     for step in range(2):
@@ -768,13 +771,16 @@ def test_condition_noise_uses_fresh_draws_per_role_and_step(monkeypatch):
             step,
         )
 
+    # one draw per condition tensor, visuals before audio, repeated for the second step
+    assert [tuple(noise.shape) for noise in draws] == [(1, 24, 1, 4, 4), (1, 32, 2, 8)] * 2
     first_call, second_call = transformer.calls
-    first_visual = first_call["visual_condition_latents"][0]
-    first_audio = first_call["audio_condition_latents"][0]
-    assert torch.equal(first_visual, torch.full_like(first_visual, 0.5))
-    assert torch.equal(first_audio, torch.full_like(first_audio, 1.0))
-    assert torch.equal(second_call["visual_condition_latents"][0], torch.full_like(first_visual, 1.5))
-    assert torch.equal(second_call["audio_condition_latents"][0], torch.full_like(first_audio, 2.0))
+    # the conditions are zeros here, so clean*x + (1-clean)*eps collapses to the scaled draw
+    assert torch.equal(first_call["visual_condition_latents"][0], 0.5 * draws[0])
+    assert torch.equal(first_call["audio_condition_latents"][0], 0.5 * draws[1])
+    assert not torch.equal(draws[0], draws[2])
+    assert not torch.equal(draws[1], draws[3])
+    assert not torch.equal(first_call["visual_condition_latents"][0], second_call["visual_condition_latents"][0])
+    assert not torch.equal(first_call["audio_condition_latents"][0], second_call["audio_condition_latents"][0])
 
 
 def test_runtime_rejects_batch_size_above_one():
@@ -885,17 +891,13 @@ def test_runtime_rejects_a_batch_from_a_different_authoritative_task():
         )
 
 
-def test_t2va_does_not_advance_the_condition_seed_stream(monkeypatch):
+def test_t2va_draws_no_condition_noise(monkeypatch):
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args()
     trainer.handle_model_specific_args(args)
+    draws = _recording_randn(monkeypatch)
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
     monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
-    monkeypatch.setattr(
-        torch,
-        "randint",
-        lambda *args, **kwargs: pytest.fail("T2VA without conditions must not draw a condition seed"),
-    )
     video_latents = torch.zeros(1, 24, 2, 4, 4)
 
     trainer.process_batch(
@@ -912,6 +914,8 @@ def test_t2va_does_not_advance_the_condition_seed_stream(monkeypatch):
         None,
         0,
     )
+
+    assert not draws, "T2VA has no conditions to augment, so it must not draw condition noise"
 
 
 def test_compute_loss_is_video_mean_plus_weighted_audio_mean_mse():

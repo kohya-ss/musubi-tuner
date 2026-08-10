@@ -46,7 +46,14 @@ IMAGE_TOKEN_ID = 151655
 VIDEO_TOKEN_ID = 151656
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 VIDEO_PLACEHOLDER = "<|vision_start|><|video_pad|><|vision_end|>"
-DEFAULT_PROCESSOR_ID = "Qwen/Qwen3-VL-32B-Instruct"
+# the H3 encoder is Qwen3-VL-32B, but the released repository ships its own processor and config:
+# the tokenizer adds <d>, </d>, <|cutoff|>, <|lyrics_start|>, <|lyrics_end|>, <|caption_start|> and
+# <|caption_end|> as special tokens (ids 151669-151675), which Qwen/Qwen3-VL-32B-Instruct splits into
+# ordinary tokens instead. The released prompt format writes dialogue and lyrics as <d>[Language] ...</d>,
+# so the H3 files are required, not interchangeable with the upstream Qwen ones.
+H3_REPO_ID = "MiniMaxAI/MiniMax-H3"
+PROCESSOR_SUBFOLDER = "processor"
+TEXT_ENCODER_CONFIG_SUBFOLDER = "text_encoder"
 
 
 @dataclass(frozen=True)
@@ -230,17 +237,17 @@ def normalize_h3_text_encoder_key(key: str) -> str:
     return key
 
 
-def load_h3_processor(path: str = DEFAULT_PROCESSOR_ID, *, revision: str | None = None):
-    from transformers import AutoProcessor
+def load_h3_processor():
+    # the concrete class, not AutoProcessor: the auto class resolves the processor type from the
+    # repository root, where the H3 release keeps a diffusers model_index.json instead of a config
+    from transformers import Qwen3VLProcessor
 
-    return AutoProcessor.from_pretrained(path, revision=revision)
+    return Qwen3VLProcessor.from_pretrained(H3_REPO_ID, subfolder=PROCESSOR_SUBFOLDER)
 
 
 def load_h3_text_encoder(
     checkpoint_path: str | Path,
     *,
-    processor_path: str = DEFAULT_PROCESSOR_ID,
-    revision: str | None = None,
     device: str | torch.device,
     dtype: torch.dtype = torch.bfloat16,
     disable_mmap: bool = False,
@@ -256,7 +263,7 @@ def load_h3_text_encoder(
             "--text_encoder_blocks_to_swap requires a CUDA device. / --text_encoder_blocks_to_swap には CUDA デバイスが必要です。"
         )
 
-    config = Qwen3VLConfig.from_pretrained(processor_path, revision=revision)
+    config = Qwen3VLConfig.from_pretrained(H3_REPO_ID, subfolder=TEXT_ENCODER_CONFIG_SUBFOLDER)
     if config.text_config.hidden_size != TEXT_WIDTH:
         raise ValueError(f"MiniMax-H3 Qwen3-VL hidden size must be {TEXT_WIDTH}, got {config.text_config.hidden_size}")
     config.text_config.num_hidden_layers = LAYER_50_HIDDEN_STATE_INDEX

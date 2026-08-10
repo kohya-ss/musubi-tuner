@@ -69,6 +69,38 @@ def _t2_inputs(batch_size: int = 1, text_length: int = 3):
     }
 
 
+def test_attention_restores_qk_dtype_before_backend(monkeypatch):
+    class PromoteToFloat(nn.Module):
+        def forward(self, tensor):
+            return tensor.float()
+
+    layer = h3_model.Attention(
+        hidden_size=16,
+        num_heads=2,
+        head_dim=8,
+        qk_norm_eps=1e-6,
+        attn_mode="flash",
+        split_attn=False,
+        dtype=torch.bfloat16,
+    )
+    layer.q_norm = PromoteToFloat()
+    layer.k_norm = PromoteToFloat()
+    seen_dtypes = None
+
+    def capture_attention(qkv, *, attn_params):
+        nonlocal seen_dtypes
+        del attn_params
+        seen_dtypes = tuple(tensor.dtype for tensor in qkv)
+        return qkv[2].reshape(qkv[2].shape[0], qkv[2].shape[1], -1)
+
+    monkeypatch.setattr(h3_model, "attention", capture_attention)
+
+    output = layer(torch.randn(1, 3, 16, dtype=torch.bfloat16))
+
+    assert seen_dtypes == (torch.bfloat16, torch.bfloat16, torch.bfloat16)
+    assert output.dtype == torch.bfloat16
+
+
 def test_released_config_and_meta_state_dict_match_published_bf16_header():
     config = MiniMaxH3Config()
 
@@ -598,6 +630,20 @@ def test_gradient_checkpointed_forward_and_backward_recompute_the_same_block():
     output = model(**_t2_inputs(batch_size=1))
     (output.video.square().mean() + output.audio.square().mean()).backward()
 
+    assert model.blocks[0].attn.qkv_proj.weight.grad is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="activation CPU offloading requires CUDA")
+def test_activation_cpu_offloading_restores_hidden_states_before_final_layer():
+    model = _tiny_model(num_layers=1).cuda()
+    model.enable_gradient_checkpointing(activation_cpu_offloading=True)
+    inputs = {key: value.cuda() if isinstance(value, torch.Tensor) else value for key, value in _t2_inputs(batch_size=1).items()}
+
+    output = model(**inputs)
+    (output.video.square().mean() + output.audio.square().mean()).backward()
+
+    assert output.video.device.type == "cuda"
+    assert output.audio.device.type == "cuda"
     assert model.blocks[0].attn.qkv_proj.weight.grad is not None
 
 

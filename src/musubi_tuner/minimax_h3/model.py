@@ -350,6 +350,8 @@ class Attention(nn.Module):
         if rotation_table is not None:
             query = _apply_rope_split_half(query, rotation_table)
             key = _apply_rope_split_half(key, rotation_table)
+        query = query.to(value)
+        key = key.to(value)
 
         if self.attn_mode == "flash3":
             try:
@@ -941,6 +943,9 @@ class MiniMaxH3Model(nn.Module):
                 )
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, index)
+
+        if hidden_states.device != execution_device:
+            hidden_states = hidden_states.to(execution_device)
 
         video_rows, audio_rows = self.final_layer(
             hidden_states,

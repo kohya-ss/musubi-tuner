@@ -227,8 +227,8 @@ def test_h3_text_encoder_cache_parser_defaults_to_one_megapixel_visual_cap():
 
 class _FakeQwen3VLConfig:
     @classmethod
-    def from_pretrained(cls, _path, revision=None):
-        del revision
+    def from_pretrained(cls, _path, subfolder=None):
+        del subfolder
         return SimpleNamespace(
             text_config=SimpleNamespace(
                 hidden_size=5120,
@@ -321,7 +321,6 @@ def test_load_h3_text_encoder_auto_detects_all_350_convrot_linears(tmp_path, mon
 
     loaded = load_h3_text_encoder(
         checkpoint,
-        processor_path="fake",
         device="cpu",
         dtype=torch.bfloat16,
     )
@@ -344,7 +343,6 @@ def test_load_h3_text_encoder_keeps_existing_bf16_conversion_for_ordinary_files(
 
     loaded = load_h3_text_encoder(
         checkpoint,
-        processor_path="fake",
         device="cpu",
         dtype=torch.bfloat16,
     )
@@ -364,7 +362,6 @@ def test_load_h3_text_encoder_rejects_non_fp32_convrot_scale(tmp_path, monkeypat
     with pytest.raises(ValueError, match=r"scale.*FP32|scale.*F32"):
         load_h3_text_encoder(
             checkpoint,
-            processor_path="fake",
             device="cpu",
             dtype=torch.bfloat16,
         )
@@ -384,7 +381,6 @@ def test_load_h3_text_encoder_accepts_nonpublished_convrot_layers_permissively(t
 
     loaded = load_h3_text_encoder(
         checkpoint,
-        processor_path="fake",
         device="cpu",
         dtype=torch.bfloat16,
     )
@@ -403,7 +399,6 @@ def test_load_h3_text_encoder_installs_identity_final_norm_for_layer_50_conventi
 
     loaded = load_h3_text_encoder(
         checkpoint,
-        processor_path="fake",
         device="cpu",
         dtype=torch.bfloat16,
     )
@@ -421,7 +416,6 @@ def test_load_h3_text_encoder_rejects_streaming_without_cuda(tmp_path, monkeypat
     with pytest.raises(ValueError, match="CUDA"):
         load_h3_text_encoder(
             checkpoint,
-            processor_path="fake",
             device="cpu",
             dtype=torch.bfloat16,
             blocks_to_swap=50,
@@ -440,7 +434,6 @@ def test_load_h3_text_encoder_rejects_convrot_layer_missing_from_the_model(tmp_p
     with pytest.raises(ValueError, match=r"missing module missing_tower"):
         load_h3_text_encoder(
             checkpoint,
-            processor_path="fake",
             device="cpu",
             dtype=torch.bfloat16,
         )

@@ -38,7 +38,6 @@ from musubi_tuner.minimax_h3.sampling import (
     write_joint_av,
 )
 from musubi_tuner.minimax_h3.text_encoder import (
-    DEFAULT_PROCESSOR_ID,
     TEXT_CACHE_FORMAT,
     build_presentation,
     encode_h3_presentation,
@@ -252,11 +251,9 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
             presentation_identity=presentation_identity,
         )
     logger.info("Loading MiniMax-H3 Qwen3-VL text encoder")
-    processor = load_h3_processor(args.processor, revision=args.processor_revision)
+    processor = load_h3_processor()
     text_encoder = load_h3_text_encoder(
         args.text_encoder,
-        processor_path=args.processor,
-        revision=args.processor_revision,
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_numpy_memmap,
@@ -395,8 +392,6 @@ def setup_parser() -> argparse.ArgumentParser:
         " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache")
-    parser.add_argument("--processor", default=DEFAULT_PROCESSOR_ID, help="Qwen3-VL processor repo or directory")
-    parser.add_argument("--processor_revision", default=None)
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--first_frame", default=None)
     parser.add_argument("--last_frame", default=None)
