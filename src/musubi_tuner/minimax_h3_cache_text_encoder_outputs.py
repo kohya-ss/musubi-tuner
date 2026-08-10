@@ -13,7 +13,6 @@ from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_minimax
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ItemInfo, VideoDataset
 from musubi_tuner.minimax_h3.text_encoder import (
-    DEFAULT_PROCESSOR_ID,
     H3TextVisual,
     TEXT_CACHE_FORMAT,
     build_presentation,
@@ -147,13 +146,6 @@ def setup_parser() -> argparse.ArgumentParser:
         help="attention implementation for the text encoder (default: transformers default, sdpa)."
         " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
-    parser.add_argument(
-        "--processor",
-        type=str,
-        default=DEFAULT_PROCESSOR_ID,
-        help="Qwen3-VL-32B processor repo or local directory",
-    )
-    parser.add_argument("--processor_revision", type=str, default=None, help="optional processor revision")
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
     parser.add_argument("--text_cache_dtype", choices=("bf16", "float32"), default="bf16")
     parser.add_argument("--disable_mmap", action="store_true", help="disable memory-mapped safetensors loading")
@@ -185,15 +177,13 @@ def main() -> None:
     }
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
-    logger.info("Loading MiniMax-H3 Qwen3-VL processor from %s", args.processor)
-    processor = load_h3_processor(args.processor, revision=args.processor_revision)
+    logger.info("Loading MiniMax-H3 Qwen3-VL processor")
+    processor = load_h3_processor()
     processor_identity = processor_fingerprint(processor)
     text_encoder_identity = fingerprint_checkpoint(args.text_encoder)
     logger.info("Loading MiniMax-H3 text encoder from %s", args.text_encoder)
     text_encoder = load_h3_text_encoder(
         args.text_encoder,
-        processor_path=args.processor,
-        revision=args.processor_revision,
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_mmap,

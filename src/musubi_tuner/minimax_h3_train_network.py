@@ -48,7 +48,6 @@ from musubi_tuner.minimax_h3.sampling import (
     write_joint_av,
 )
 from musubi_tuner.minimax_h3.text_encoder import (
-    DEFAULT_PROCESSOR_ID,
     build_presentation,
     encode_h3_presentation,
     load_h3_processor,
@@ -419,11 +418,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         decoder = PyAVH3MediaDecoder()
 
         logger.info("Loading MiniMax-H3 Qwen3-VL text encoder for training samples")
-        processor = load_h3_processor(args.processor, revision=args.processor_revision)
+        processor = load_h3_processor()
         text_encoder = load_h3_text_encoder(
             args.text_encoder,
-            processor_path=args.processor,
-            revision=args.processor_revision,
             device=device,
             dtype=torch.bfloat16,
             disable_mmap=getattr(args, "disable_numpy_memmap", False),
@@ -1011,13 +1008,6 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         help="attention implementation for the sample-prompt text encoder (default: transformers default, sdpa)."
         " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
-    parser.add_argument(
-        "--processor",
-        type=str,
-        default=DEFAULT_PROCESSOR_ID,
-        help="Qwen3-VL processor repository or directory for training samples",
-    )
-    parser.add_argument("--processor_revision", type=str, default=None)
     parser.add_argument(
         "--h3_allow_experimental_sample_duration",
         action="store_true",

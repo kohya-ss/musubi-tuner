@@ -272,8 +272,6 @@ def test_h3_parser_exposes_the_dual_vae_and_text_assets_needed_for_training_samp
     assert args.video_vae == "video.safetensors"
     assert args.audio_vae == "audio.safetensors"
     assert args.text_encoder == "qwen.safetensors"
-    assert args.processor == "Qwen/Qwen3-VL-32B-Instruct"
-    assert args.processor_revision is None
     assert args.h3_allow_experimental_sample_duration is False
 
 
@@ -410,8 +408,6 @@ def test_prepare_training_samples_encodes_text_once_and_returns_both_vaes_as_sam
         asset_paths[name] = str(path)
     args = _trainer_args(
         sample_prompts=str(prompt_file),
-        processor="processor",
-        processor_revision=None,
         h3_allow_experimental_sample_duration=True,
         disable_numpy_memmap=False,
         **asset_paths,
@@ -511,8 +507,6 @@ def test_prepare_ref_training_sample_carries_ordered_visual_and_audio_conditions
     args = _trainer_args(
         task="ref2va",
         sample_prompts=str(prompt_file),
-        processor="processor",
-        processor_revision=None,
         h3_allow_experimental_sample_duration=True,
         disable_numpy_memmap=False,
         **asset_paths,
