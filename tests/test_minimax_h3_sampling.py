@@ -238,7 +238,6 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "task": task,
         "prompt": "a test prompt",
         "text_cache": None,
-        "processor": "Qwen/Qwen3-VL-32B-Instruct",
         "first_frame": None,
         "last_frame": None,
         "reference_jsonl": None,
@@ -374,7 +373,6 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         include_patterns=None,
         exclude_patterns=None,
         disable_numpy_memmap=False,
-        processor_revision=None,
     )
     # the pre-quantization probe reads the DiT file headers; the stub DiT here is not
     # a real safetensors file, so report an ordinary (non-pre-quantized) checkpoint
