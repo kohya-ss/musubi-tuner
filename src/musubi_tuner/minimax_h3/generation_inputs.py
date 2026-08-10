@@ -9,6 +9,8 @@ from PIL import Image
 import torch
 
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode
+from musubi_tuner.minimax_h3.constants import H3_TEXT_VISUAL_MAX_PIXELS
+from musubi_tuner.minimax_h3.image_training import read_h3_text_image
 from musubi_tuner.minimax_h3.media import (
     H3Record,
     audio_latent_frames,
@@ -69,10 +71,17 @@ def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecode
     if args.task == "t2va":
         return raw_visuals, text_visuals
     if args.task == "fl2va":
+        text_visual_max_pixels = getattr(args, "h3_text_visual_max_pixels", H3_TEXT_VISUAL_MAX_PIXELS) or None
+        text_frames_by_path = {}
         for role, path in (("first", args.first_frame), ("last", args.last_frame)):
             frames = load_image_frames(path, width=args.width, height=args.height)
             raw_visuals[role] = frames
-            text_visuals[role] = H3TextVisual(frames)
+            path_key = str(Path(path).expanduser().resolve())
+            text_frames = text_frames_by_path.get(path_key)
+            if text_frames is None:
+                text_frames = torch.from_numpy(read_h3_text_image(path, text_visual_max_pixels)).unsqueeze(0)
+                text_frames_by_path[path_key] = text_frames
+            text_visuals[role] = H3TextVisual(text_frames)
         return raw_visuals, text_visuals
 
     for reference in record.references:

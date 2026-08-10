@@ -94,7 +94,7 @@ File names are not fixed. For a target such as `pose front.png`, put the caption
 
 Input image sizes may be mixed. With `enable_bucket = true`, target and control images are resized into a matching H3 bucket automatically, and H3 buckets are aligned to 32-pixel steps. `resolution` is the maximum bucket area, not a required exact source size.
 
-Text encoder caching also caps large H3 image-mode visuals before they are passed to Qwen3-VL. The default `--h3_text_visual_max_pixels 1048576` keeps the aspect ratio, rounds width/height down to 32-pixel multiples, and affects only the text encoder's temporary visual input; original files and latent-cache images are not rewritten. Use a smaller value such as `786432` for faster text caching, or `0` to disable this cap. Changing this value changes the text-cache metadata, so stale caches are rebuilt even with `--skip_existing`.
+Text encoder caching and generation cap large H3 image-mode visuals before they are passed to Qwen3-VL. The shared default `--h3_text_visual_max_pixels 1048576` keeps the aspect ratio, rounds width/height down to 32-pixel multiples, and affects only the text encoder's temporary visual input; original files and VAE inputs are not rewritten. Use a smaller value such as `786432` for faster text encoding, or `0` to disable this cap. Changing it during cache creation changes the text-cache metadata, so stale caches are rebuilt even with `--skip_existing`.
 
 The two supported still-image conditioning modes are:
 
@@ -145,12 +145,13 @@ python minimax_h3_cache_text_encoder_outputs.py \
 
 `h3_image_frame_count` may be set in each image dataset block, so different image datasets can use different H3-compatible temporal lengths. The value must satisfy `frame_count = 17 * k + 5` with integer `k >= 0`; the minimum is `5`, and the next valid value is `22`. For still-image LoRA training, keep `5` unless you explicitly want the target image repeated across a longer H3-compatible frame grid. The CLI option `--h3_image_frame_count` overrides the TOML value for all image datasets. If source, condition images, or frame count change, rebuild caches without `--skip_existing`.
 
-To train against multiple output frames from the same input condition(s), enable the existing image-dataset `multiple_target` option. Two filename layouts are supported:
+To train against multiple output frames from the same input condition(s), enable the existing image-dataset `multiple_target` option. Three filename layouts are supported:
 
 - Unsuffixed base frame: `pose.png`, `pose_1.png`, `pose_2.png`, ...
 - Zero-indexed base frame: `pose_0.png`, `pose_1.png`, `pose_2.png`, ...
+- One-indexed base frame: `pose_1.png`, `pose_2.png`, `pose_3.png`, ...
 
-The zero-indexed layout is useful when every output frame should have an explicit frame index. In that layout, keep captions and one-image controls unsuffixed: `pose.txt` and `control/pose.png` are matched to `image/pose_0.png`.
+The indexed layouts are useful when every output frame should have an explicit frame index. Keep captions and one-image controls unsuffixed: `pose.txt` and `control/pose.png` are matched to the first numbered frame. Zero-padded suffixes such as `pose_0000.png` are also accepted. H3 image datasets reject missing or duplicate indexes instead of silently dropping frames.
 
 ```toml
 [[datasets]]
@@ -197,7 +198,7 @@ inputs/pose_0.png
 inputs/pose_1.png
 ```
 
-For `h3_image_frame_count = 22`, provide up to 22 target frames using the same suffix order. If the number of target frames differs from the requested H3 frame count, the provided frames are resampled across the requested timeline with nearest-neighbor frame selection. For example, five keyed target images can be expanded to 22 H3 frames while preserving the first and last frames. Changing `multiple_target`, target frame files, or `h3_image_frame_count` changes the latent content, so rebuild both latent and text caches without `--skip_existing`.
+For `h3_image_frame_count = 22`, provide up to 22 target frames using the same suffix order. If the number of target frames differs from the requested H3 frame count, the provided frames are resampled across the requested timeline with nearest-neighbor frame selection. For example, five keyed target images can be expanded to 22 H3 frames while preserving the first and last frames. Target/control order, processed geometry, image mode, frame count, and media identities are included in a common sample fingerprint. `--skip_existing` therefore rebuilds stale cache files, and training rejects a latent/text cache pair whose fingerprints differ.
 
 Windows example for one-input image training:
 
@@ -496,7 +497,7 @@ For two-condition still-image inference:
 --h3_image_mode first_last --first_frame first.png --last_frame end.png --output output.png
 ```
 
-`--frame_count` defaults to `5` in image mode. Increase it only if the LoRA was trained with a longer H3-compatible image frame count. `--h3_select_frame` selects which decoded frame is saved for image outputs and defaults to `0`.
+`--frame_count` defaults to `5` in image mode. Increase it only if the LoRA was trained with a longer H3-compatible image frame count. `--h3_select_frame` selects which decoded frame is saved for image outputs and defaults to `0`; an out-of-range index is clamped with a warning. `--audio_vae` is not required when `--output` is an image file because that path does not decode audio.
 
 For Ref2VA, use a Ref2VA base (BF16 or ConvRot INT8) and an ordered JSONL record:
 

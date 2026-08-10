@@ -292,7 +292,8 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
         all_latent_cache_paths = []
         for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
             batch: list[ItemInfo] = batch
-            source_batch = batch
+            # Keep the same ItemInfo objects so architecture encoders can rewrite cache paths and cleanup sees the final names.
+            path_tracking_items = batch
             if not supports_alpha:
                 # make sure content has 3 channels
                 for item in batch:
@@ -305,14 +306,14 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
             if args.skip_existing:
                 filtered_batch = [item for item in batch if not os.path.exists(item.latent_cache_path)]
                 if len(filtered_batch) == 0:
-                    all_latent_cache_paths.extend(item.latent_cache_path for item in source_batch)
+                    all_latent_cache_paths.extend(item.latent_cache_path for item in path_tracking_items)
                     continue
                 batch = filtered_batch
 
             bs = args.batch_size if args.batch_size is not None else len(batch)
             for i in range(0, len(batch), bs):
                 encode(batch[i : i + bs])
-            all_latent_cache_paths.extend(item.latent_cache_path for item in source_batch)
+            all_latent_cache_paths.extend(item.latent_cache_path for item in path_tracking_items)
 
         # normalize paths
         all_latent_cache_paths = [os.path.normpath(p) for p in all_latent_cache_paths]

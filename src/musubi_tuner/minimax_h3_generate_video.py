@@ -12,6 +12,7 @@ import torch
 from tqdm.auto import tqdm
 
 from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
+from musubi_tuner.minimax_h3.constants import H3_IMAGE_MODES, H3_TEXT_VISUAL_MAX_PIXELS
 from musubi_tuner.minimax_h3.generation_inputs import (
     VIDEO_VAE_SPATIAL_RATIO,
     build_reference_geometries,
@@ -56,7 +57,6 @@ from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 logger = logging.getLogger(__name__)
 
-H3_IMAGE_MODES = frozenset({"none", "first", "first_last"})
 IMAGE_OUTPUT_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 VIDEO_OUTPUT_SUFFIXES = frozenset({".mp4", ".mkv", ".mov"})
 
@@ -91,6 +91,7 @@ def _normalize_image_generation_args(args: argparse.Namespace) -> None:
         raise ValueError("MiniMax-H3 image generation requires --task fl2va")
     if getattr(args, "frame_count", None) is None:
         args.frame_count = 5
+    # Image mode intentionally uses short H3 frame grids outside the released 5-15 second video range.
     args.allow_experimental_duration = True
     if mode == "first":
         _require_path(args.first_frame, "first_frame")
@@ -107,7 +108,15 @@ def save_selected_frame(decoded_video: torch.Tensor, output: str | Path, frame_i
         raise ValueError(f"MiniMax-H3 decoded video must be [F,H,W,3], got {tuple(decoded_video.shape)}")
     if decoded_video.shape[0] == 0:
         raise ValueError("MiniMax-H3 decoded video has no frames to save")
-    index = min(max(int(frame_index), 0), int(decoded_video.shape[0]) - 1)
+    requested_index = int(frame_index)
+    index = min(max(requested_index, 0), int(decoded_video.shape[0]) - 1)
+    if index != requested_index:
+        logger.warning(
+            "MiniMax-H3 selected frame index %d is outside the decoded range [0,%d]; clamping to %d",
+            requested_index,
+            int(decoded_video.shape[0]) - 1,
+            index,
+        )
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frame = decoded_video[index].detach().cpu().to(torch.uint8).numpy()
@@ -134,7 +143,10 @@ def validate_generation_args(args: argparse.Namespace) -> None:
     _normalize_image_generation_args(args)
     if args.task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError("MiniMax-H3 --task must be t2va, fl2va, or ref2va")
-    for label in ("dit", "video_vae", "audio_vae"):
+    required_model_paths = ["dit", "video_vae"]
+    if not (_is_image_generation(args) and _is_image_output(args.output)):
+        required_model_paths.append("audio_vae")
+    for label in required_model_paths:
         _require_path(getattr(args, label, None), label)
     using_text_cache = getattr(args, "text_cache", None) is not None
     if not using_text_cache:
@@ -144,6 +156,9 @@ def validate_generation_args(args: argparse.Namespace) -> None:
 
     if args.width <= 0 or args.height <= 0 or args.width % 32 or args.height % 32:
         raise ValueError(f"MiniMax-H3 width and height must be positive and divisible by 32, got {args.width}x{args.height}")
+    args.h3_text_visual_max_pixels = getattr(args, "h3_text_visual_max_pixels", H3_TEXT_VISUAL_MAX_PIXELS)
+    if args.h3_text_visual_max_pixels < 0:
+        raise ValueError("MiniMax-H3 --h3_text_visual_max_pixels must be non-negative")
     video_latent_frames(args.frame_count)
     duration = args.frame_count / 24.0
     if not args.allow_experimental_duration and not 5.0 <= duration <= 15.0:
@@ -368,7 +383,11 @@ def setup_parser() -> argparse.ArgumentParser:
         "quantization; with a pre-quantized base, LoRAs are attached as runtime branches instead.",
     )
     parser.add_argument("--video_vae", required=True, help="MiniMax-H3 video VAE safetensors path or directory")
-    parser.add_argument("--audio_vae", required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
+    parser.add_argument(
+        "--audio_vae",
+        default=None,
+        help="MiniMax-H3 audio VAE safetensors path or directory (not needed for image-file output)",
+    )
     parser.add_argument(
         "--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path (BF16, ConvRot INT8 or NVFP4, auto-detected)"
     )
@@ -401,6 +420,12 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--height", type=int, default=1344)
     parser.add_argument("--frame_count", type=int, default=None)
     parser.add_argument("--allow_experimental_duration", action="store_true")
+    parser.add_argument(
+        "--h3_text_visual_max_pixels",
+        type=int,
+        default=H3_TEXT_VISUAL_MAX_PIXELS,
+        help="maximum pixel count for images passed to the MiniMax-H3 text encoder; use 0 to disable",
+    )
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", required=True)

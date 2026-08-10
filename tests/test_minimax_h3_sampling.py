@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
+from musubi_tuner.minimax_h3.generation_inputs import decode_generation_visuals
+from musubi_tuner.minimax_h3.media import H3Record
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
     build_shifted_schedule,
@@ -25,6 +28,7 @@ from musubi_tuner.minimax_h3_generate_video import (
     load_cached_text_conditioning,
     run_generation,
     save_selected_frame,
+    setup_parser,
     validate_generation_args,
 )
 
@@ -328,6 +332,22 @@ def test_generation_validation_normalizes_first_image_mode(tmp_path):
     assert args.allow_experimental_duration is True
 
 
+def test_image_output_does_not_require_unused_audio_vae_checkpoint(tmp_path):
+    first = tmp_path / "first.png"
+    first.touch()
+    args = _generation_args(
+        tmp_path,
+        task="fl2va",
+        first_frame=str(first),
+        frame_count=None,
+        output=str(tmp_path / "result.png"),
+        h3_image_mode="first",
+        audio_vae=None,
+    )
+
+    validate_generation_args(args)
+
+
 def test_generation_validation_enforces_image_mode_contract(tmp_path):
     first = tmp_path / "first.png"
     last = tmp_path / "last.png"
@@ -360,14 +380,56 @@ def test_generation_validation_enforces_image_mode_contract(tmp_path):
         validate_generation_args(_generation_args(tmp_path, output=str(tmp_path / "result.png")))
 
 
-def test_save_selected_frame_clamps_and_writes_image(tmp_path):
+def test_save_selected_frame_clamps_warns_and_writes_image(tmp_path, caplog):
     video = torch.zeros(2, 4, 4, 3, dtype=torch.uint8)
     video[1, :, :, 0] = 255
     output = tmp_path / "frame.png"
 
-    save_selected_frame(video, output, 99)
+    with caplog.at_level(logging.WARNING):
+        save_selected_frame(video, output, 99)
 
     assert output.exists()
+    assert "clamping to 1" in caplog.text
+
+
+def test_generation_parser_uses_same_text_visual_pixel_cap_as_cache_cli():
+    args = setup_parser().parse_args(
+        [
+            "--task",
+            "t2va",
+            "--dit",
+            "dit.safetensors",
+            "--video_vae",
+            "video.safetensors",
+            "--audio_vae",
+            "audio.safetensors",
+            "--output",
+            "output.mp4",
+        ]
+    )
+
+    assert args.h3_text_visual_max_pixels == 1024 * 1024
+
+
+def test_image_generation_caps_text_visual_without_changing_vae_geometry(tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (3000, 2000)).save(source)
+    args = SimpleNamespace(
+        task="fl2va",
+        first_frame=str(source),
+        last_frame=str(source),
+        width=64,
+        height=96,
+        h3_text_visual_max_pixels=1024 * 1024,
+    )
+    record = H3Record(Path("."), "caption", (), 0)
+
+    raw_visuals, text_visuals = decode_generation_visuals(args, record, decoder=None)
+
+    assert raw_visuals["first"].shape == (1, 96, 64, 3)
+    assert text_visuals["first"].frames.shape == (1, 832, 1248, 3)
 
 
 def test_cached_text_conditioning_validates_task_width_and_tags(tmp_path):

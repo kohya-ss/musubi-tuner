@@ -12,6 +12,7 @@ SharedEpoch = Optional["Synchronized[int]"]
 
 
 import numpy as np
+from safetensors import safe_open
 import torch
 from PIL import Image
 
@@ -153,6 +154,28 @@ def _parse_latent_cache_filename(
     if not item_key:
         return None
     return _LatentCacheFilename(item_key, (int(width), int(height)), frame_token, frame_pos, frame_count)
+
+
+def _validate_h3_image_cache_pair(latent_path: str, text_path: str) -> None:
+    with safe_open(latent_path, framework="pt", device="cpu") as latent_handle:
+        latent_metadata = latent_handle.metadata() or {}
+    with safe_open(text_path, framework="pt", device="cpu") as text_handle:
+        text_metadata = text_handle.metadata() or {}
+
+    latent_mode = latent_metadata.get("image_training_mode")
+    text_mode = text_metadata.get("image_training_mode")
+    if latent_mode is None and text_mode is None:
+        return
+    if latent_mode != text_mode:
+        raise ValueError(
+            f"MiniMax-H3 latent/text cache image modes do not match: {latent_path} ({latent_mode}) vs {text_path} ({text_mode})"
+        )
+    latent_fingerprint = latent_metadata.get("sample_fingerprint")
+    text_fingerprint = text_metadata.get("sample_fingerprint")
+    if not latent_fingerprint or not text_fingerprint or latent_fingerprint != text_fingerprint:
+        raise ValueError(
+            f"MiniMax-H3 latent/text cache sample fingerprint mismatch; rebuild both caches together: {latent_path} vs {text_path}"
+        )
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -390,7 +413,13 @@ class ImageDataset(BaseDataset):
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
-                image_directory, caption_extension, control_directory, control_count_per_image, multiple_target
+                image_directory,
+                caption_extension,
+                control_directory,
+                control_count_per_image,
+                multiple_target,
+                allow_indexed_caption_alias=self.architecture == ARCHITECTURE_MINIMAX_H3,
+                require_contiguous_targets=self.architecture == ARCHITECTURE_MINIMAX_H3,
             )
         elif image_jsonl_file is not None:
             self.datasource = ImageJsonlDatasource(image_jsonl_file, control_count_per_image, multiple_target)
@@ -594,6 +623,8 @@ class ImageDataset(BaseDataset):
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue
+            if self.architecture == ARCHITECTURE_MINIMAX_H3:
+                _validate_h3_image_cache_pair(cache_file, text_encoder_output_cache_file)
 
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
             if self.architecture == ARCHITECTURE_MINIMAX_H3:

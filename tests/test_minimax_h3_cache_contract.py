@@ -1,5 +1,6 @@
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -30,22 +31,29 @@ from musubi_tuner.minimax_h3_cache_latents import (
     cache_metadata_matches,
     configure_h3_image_item,
     h3_image_frame_count_for_item,
+    image_record_for_item,
     image_condition_set,
     log_audio_presence_summary,
+    make_h3_image_cache_paths,
     record_media_paths,
     setup_parser,
     target_frames_from_image,
 )
+import musubi_tuner.minimax_h3.image_training as h3_image_training
+from musubi_tuner.minimax_h3.image_training import (
+    describe_h3_image_samples,
+    prepare_h3_image_text_item,
+    validate_h3_cache_datasets,
+)
 from musubi_tuner.dataset.bucket import BucketBatchManager
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
-from musubi_tuner.dataset.datasources import ImageDirectoryDatasource
+from musubi_tuner.dataset.datasources import ImageDirectoryDatasource, ImageJsonlDatasource
 from musubi_tuner.dataset.cache_io import (
     AUDIO_PRESENT_KEY,
     save_latent_cache_minimax_h3,
     save_text_encoder_output_cache_minimax_h3,
 )
 from musubi_tuner.dataset.image_video_dataset import BaseDataset, ImageDataset, ItemInfo
-from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _image_dataset_info_map, _target_image_paths_for_item
 
 
 @pytest.mark.parametrize(
@@ -82,6 +90,39 @@ def test_h3_frame_count_fields_are_declared_with_none_defaults():
 
     assert item.h3_image_frame_count is None
     assert dataset.h3_image_frame_count is None
+
+
+@pytest.mark.parametrize("frame_count", [0, 4, 6, 21, 23])
+def test_h3_image_frame_count_rejects_invalid_geometry(frame_count: int):
+    item = ItemInfo("sample.png", "caption", (64, 64))
+    item.h3_image_frame_count = frame_count
+
+    with pytest.raises(ValueError, match=r"17\*n\+5"):
+        h3_image_frame_count_for_item(item, None)
+
+
+def test_h3_image_cache_paths_use_structured_item_fields_not_existing_stem(tmp_path: Path):
+    item = ItemInfo(
+        str(tmp_path / "portrait_768x1344_v2.png"),
+        "caption",
+        (80, 112),
+        (64, 96),
+        latent_cache_path=str(tmp_path / "unrelated_9999x9999_mmh3.safetensors"),
+    )
+
+    latent_path, text_path = make_h3_image_cache_paths(item, 5)
+
+    assert Path(latent_path).name == "portrait_768x1344_v2_00000-005_0080x0112_mmh3.safetensors"
+    assert Path(text_path).name == "portrait_768x1344_v2_00000-005_mmh3_te.safetensors"
+
+
+def test_h3_image_record_lookup_requires_canonical_absolute_item_key(tmp_path: Path):
+    target = _touch(tmp_path / "target.png")
+    record = H3Record(target, "caption", (), 0)
+    item = ItemInfo("target.png", "caption", (64, 64))
+
+    with pytest.raises(ValueError, match="absolute canonical path"):
+        image_record_for_item(item, {target: record})
 
 
 def test_h3_image_records_match_arbitrary_names_and_bucket_input_sizes(tmp_path: Path):
@@ -452,7 +493,7 @@ def test_h3_image_cache_names_are_discovered_by_image_dataset_training(tmp_path:
             "latents_first_1x4x4_float16": torch.zeros(24, 1, 4, 4, dtype=torch.float16),
             "latents_last_1x4x4_float16": torch.zeros(24, 1, 4, 4, dtype=torch.float16),
         },
-        {"task": "fl2va", "image_training_mode": "first"},
+        {"task": "fl2va", "image_training_mode": "first", "sample_fingerprint": "sha256:sample"},
     )
     save_text_encoder_output_cache_minimax_h3(
         item,
@@ -460,7 +501,7 @@ def test_h3_image_cache_names_are_discovered_by_image_dataset_training(tmp_path:
             "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
             "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
         },
-        {"task": "fl2va", "image_training_mode": "first"},
+        {"task": "fl2va", "image_training_mode": "first", "sample_fingerprint": "sha256:sample"},
     )
     dataset = ImageDataset(
         resolution=(64, 64),
@@ -482,6 +523,56 @@ def test_h3_image_cache_names_are_discovered_by_image_dataset_training(tmp_path:
     assert batch["latents"].shape == (1, 24, 2, 4, 4)
     assert batch["latents_first"].shape == (1, 24, 1, 4, 4)
     assert batch["latents_last"].shape == (1, 24, 1, 4, 4)
+
+
+def test_h3_image_training_rejects_mismatched_latent_and_text_sample_fingerprints(tmp_path: Path):
+    target_dir = tmp_path / "targets"
+    control_dir = tmp_path / "controls"
+    target = _touch(target_dir / "target.png")
+    _touch(control_dir / "target.png")
+    (target_dir / "target.txt").write_text("caption", encoding="utf-8")
+    item = ItemInfo(
+        item_key=str(target),
+        caption="caption",
+        original_size=(64, 64),
+        bucket_size=(64, 64),
+        latent_cache_path=str(tmp_path / "cache" / "target_0064x0064_mmh3.safetensors"),
+    )
+    configure_h3_image_item(item, 5)
+    save_latent_cache_minimax_h3(
+        item,
+        {
+            "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+            "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+            AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
+            "latents_first_1x4x4_float16": torch.zeros(24, 1, 4, 4, dtype=torch.float16),
+            "latents_last_1x4x4_float16": torch.zeros(24, 1, 4, 4, dtype=torch.float16),
+        },
+        {"task": "fl2va", "image_training_mode": "first", "sample_fingerprint": "sha256:latent"},
+    )
+    save_text_encoder_output_cache_minimax_h3(
+        item,
+        {
+            "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+            "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+        },
+        {"task": "fl2va", "image_training_mode": "first", "sample_fingerprint": "sha256:text"},
+    )
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(target_dir),
+        control_directory=str(control_dir),
+        cache_directory=str(tmp_path / "cache"),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    with pytest.raises(ValueError, match="sample fingerprint"):
+        dataset.prepare_for_training()
 
 
 def test_h3_image_training_ignores_legacy_cache_names_without_frame_tokens(tmp_path: Path, caplog: pytest.LogCaptureFixture):
@@ -849,6 +940,185 @@ def test_h3_image_dataset_multiple_target_accepts_zero_indexed_base_frame(tmp_pa
     assert [int(target_frames[index, 0, 0, 0]) for index in range(5)] == [0, 32, 64, 96, 128]
 
 
+def test_h3_image_dataset_multiple_target_accepts_one_indexed_base_frame(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    for index, value in enumerate((0, 32, 64, 96, 128), start=1):
+        Image.new("RGB", (64, 64), (value, value, value)).save(image_dir / f"pose_{index}.png")
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(control_dir / "pose.png")
+
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        multiple_target=True,
+        h3_image_frame_count=5,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    item = list(dataset.retrieve_latent_cache_batches(num_workers=1))[0][1][0]
+
+    assert Path(item.item_key).name == "pose_1.png"
+    assert item.caption == "caption"
+    assert [int(frame[0, 0, 0]) for frame in item.content] == [0, 32, 64, 96, 128]
+
+
+def test_h3_image_dataset_multiple_target_accepts_zero_padded_base_frame(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    for index, value in enumerate((0, 32, 64, 96, 128)):
+        Image.new("RGB", (64, 64), (value, value, value)).save(image_dir / f"pose_{index:04d}.png")
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(control_dir / "pose.png")
+
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        multiple_target=True,
+        h3_image_frame_count=5,
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    item = list(dataset.retrieve_latent_cache_batches(num_workers=1))[0][1][0]
+
+    assert Path(item.item_key).name == "pose_0000.png"
+    assert [int(frame[0, 0, 0]) for frame in item.content] == [0, 32, 64, 96, 128]
+
+
+def test_h3_image_sample_fingerprint_preserves_media_roles_order_and_geometry(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    Image.new("RGB", (96, 64)).save(image_dir / "pose.png")
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    for index in range(2):
+        Image.new("RGB", (96, 64), (index * 64, 0, 0)).save(control_dir / f"pose_{index}.png")
+    dataset = ImageDataset(
+        resolution=(96, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    descriptor = next(iter(describe_h3_image_samples(dataset, "first_last", 5).values()))
+    identities = {path: f"identity-{index}" for index, path in enumerate((*descriptor.target_paths, *descriptor.control_paths))}
+
+    original = descriptor.fingerprint(identities)
+    reordered = replace(descriptor, control_paths=tuple(reversed(descriptor.control_paths))).fingerprint(identities)
+    resized = replace(descriptor, target_size=(64, 64)).fingerprint(identities)
+
+    assert original != reordered
+    assert original != resized
+
+
+def test_h3_image_dataset_rejects_independent_control_geometry(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    Image.new("RGB", (64, 64)).save(image_dir / "pose.png")
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64)).save(control_dir / "pose.png")
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        control_resolution=(32, 32),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    with pytest.raises(ValueError, match="target bucket geometry"):
+        validate_h3_cache_datasets([dataset], "first", operation="latent caching")
+
+
+def test_h3_image_mode_rejects_mixed_image_and_video_dataset_types(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    Image.new("RGB", (64, 64)).save(image_dir / "pose.png")
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64)).save(control_dir / "pose.png")
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    with pytest.raises(ValueError, match="requires only image datasets"):
+        validate_h3_cache_datasets([dataset, object()], "first", operation="latent caching")
+
+
+def test_h3_text_item_preparation_reads_controls_without_reloading_targets(tmp_path: Path, monkeypatch):
+    image_dir = tmp_path / "image"
+    control_dir = tmp_path / "control"
+    image_dir.mkdir()
+    control_dir.mkdir()
+    target = image_dir / "pose.png"
+    control = control_dir / "pose.png"
+    Image.new("RGB", (64, 64)).save(target)
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+    Image.new("RGB", (64, 64)).save(control)
+    dataset = ImageDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        image_directory=str(image_dir),
+        control_directory=str(control_dir),
+        cache_directory=str(tmp_path / "cache"),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    descriptor = describe_h3_image_samples(dataset, "first", 5)[target.resolve()]
+    item = ItemInfo(str(target.resolve()), "caption", (0, 0), (0, 0))
+    item.text_encoder_output_cache_path = dataset.get_text_encoder_output_cache_path(item)
+    calls = []
+
+    def fake_read(path, _max_pixels):
+        calls.append(Path(path))
+        return torch.zeros(64, 64, 3, dtype=torch.uint8).numpy()
+
+    monkeypatch.setattr(h3_image_training, "read_h3_text_image", fake_read)
+    prepare_h3_image_text_item(item, descriptor, text_visual_max_pixels=1024 * 1024)
+
+    assert calls == [control.resolve()]
+    assert item.content is None
+    assert item.original_size == (64, 64)
+    assert Path(item.latent_cache_path).name == "pose_00000-005_0064x0064_mmh3.safetensors"
+
+
 def test_multiple_target_zero_suffix_with_own_caption_is_not_rebased(tmp_path: Path):
     image_dir = tmp_path / "image"
     control_dir = tmp_path / "control"
@@ -890,6 +1160,8 @@ def test_multiple_target_ignores_same_prefix_nonnumeric_assets(tmp_path: Path):
         str(image_dir),
         caption_extension=".txt",
         multiple_target=True,
+        allow_indexed_caption_alias=True,
+        require_contiguous_targets=True,
     )
     targets, controls = datasource.get_media_paths(str(image_dir / "pose_0.png"))
 
@@ -932,7 +1204,25 @@ def test_multiple_target_rejects_gapped_numeric_suffixes(tmp_path: Path):
             str(image_dir),
             caption_extension=".txt",
             multiple_target=True,
+            require_contiguous_targets=True,
         )
+
+
+def test_multiple_target_keeps_legacy_gaps_when_strict_validation_is_disabled(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    image_dir.mkdir()
+    for name in ("pose.png", "pose_1.png", "pose_3.png"):
+        Image.new("RGB", (64, 64)).save(image_dir / name)
+    (image_dir / "pose.txt").write_text("caption", encoding="utf-8")
+
+    datasource = ImageDirectoryDatasource(
+        str(image_dir),
+        caption_extension=".txt",
+        multiple_target=True,
+    )
+
+    targets, _controls = datasource.get_media_paths(str(image_dir / "pose.png"))
+    assert [Path(path).name for path in targets] == ["pose.png", "pose_1.png", "pose_3.png"]
 
 
 def test_multiple_target_preserves_legacy_zero_started_secondary_images(tmp_path: Path):
@@ -982,14 +1272,53 @@ def test_jsonl_image_mode_maps_all_targets_and_controls(tmp_path: Path):
         architecture=ARCHITECTURE_MINIMAX_H3,
     )
 
-    image_info = _image_dataset_info_map([dataset])
-    targets = _target_image_paths_for_item(target_0.resolve(), dataset)
+    descriptor = describe_h3_image_samples(dataset, "first", 5)[target_0.resolve()]
     source_targets, source_controls = dataset.datasource.get_media_paths(str(target_0))
 
-    assert image_info[target_0.resolve()][0] == [control.resolve()]
-    assert targets == [target_0.resolve(), target_1.resolve()]
-    assert [Path(path).resolve() for path in source_targets] == targets
+    assert list(descriptor.control_paths) == [control.resolve()]
+    assert list(descriptor.target_paths) == [target_0.resolve(), target_1.resolve()]
+    assert [Path(path).resolve() for path in source_targets] == list(descriptor.target_paths)
     assert [Path(path).resolve() for path in source_controls] == [control.resolve()]
+
+
+def test_jsonl_multiple_target_rejects_gapped_image_indexes(tmp_path: Path):
+    target_0 = _touch(tmp_path / "target_0.png")
+    target_2 = _touch(tmp_path / "target_2.png")
+    jsonl = tmp_path / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [{"image_path_0": str(target_0), "image_path_2": str(target_2), "caption": "caption"}],
+    )
+
+    with pytest.raises(ValueError, match="contiguous image_path indexes"):
+        ImageJsonlDatasource(str(jsonl), multiple_target=True)
+
+
+def test_jsonl_relative_media_paths_are_resolved_from_jsonl_directory(tmp_path: Path, monkeypatch):
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    target_0 = _touch(metadata_dir / "target_0.png")
+    target_1 = _touch(metadata_dir / "target_1.png")
+    control = _touch(metadata_dir / "control.png")
+    jsonl = metadata_dir / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "image_path_0": target_0.name,
+                "image_path_1": target_1.name,
+                "control_path_0": control.name,
+                "caption": "caption",
+            }
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    datasource = ImageJsonlDatasource(str(jsonl), multiple_target=True)
+    targets, controls = datasource.get_media_paths(str(target_0))
+
+    assert [Path(path) for path in targets] == [target_0, target_1]
+    assert [Path(path) for path in controls] == [control]
 
 
 def test_cache_cleanup_tracks_paths_after_encoder_renames_items(tmp_path: Path):

@@ -11,7 +11,6 @@ import logging
 import math
 import os
 from pathlib import Path
-import re
 from typing import Protocol
 
 import numpy as np
@@ -30,6 +29,15 @@ from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo, Vid
 from musubi_tuner.dataset.media_utils import load_video
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode, load_audio_vae
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
+from musubi_tuner.minimax_h3.constants import H3_IMAGE_MODES, normalize_h3_image_mode, validate_h3_frame_count
+from musubi_tuner.minimax_h3.image_training import (
+    configure_h3_image_item,
+    describe_h3_image_samples,
+    H3ImageSampleDescriptor,
+    h3_image_frame_count_for_item as _h3_image_frame_count_for_item,
+    make_h3_image_cache_paths as _make_h3_image_cache_paths,
+    validate_h3_cache_datasets,
+)
 from musubi_tuner.minimax_h3.media import (
     AUDIO_SAMPLE_RATE,
     AUDIO_TERMINAL_TOLERANCE_SAMPLES,
@@ -59,7 +67,6 @@ logging.basicConfig(level=logging.INFO)
 CANVAS_MULTIPLE = 32
 BASE_SHORT_EDGE = 768
 MAX_PIXELS = 768 * 1344
-H3_IMAGE_MODES = frozenset({"none", "first", "first_last"})
 
 
 @dataclass(frozen=True)
@@ -225,49 +232,15 @@ def _prepare_pixels(frames: torch.Tensor | np.ndarray) -> torch.Tensor:
 
 
 def align_h3_frame_count(frame_count: int) -> int:
-    frame_count = max(5, int(frame_count))
-    remainder = (frame_count - 5) % 17
-    return frame_count if remainder == 0 else frame_count + (17 - remainder)
+    return validate_h3_frame_count(frame_count)
 
 
 def h3_image_frame_count_for_item(item: ItemInfo, cli_frame_count: int | None) -> int:
-    requested = cli_frame_count if cli_frame_count is not None else item.h3_image_frame_count
-    if requested is None:
-        requested = 5
-    aligned = align_h3_frame_count(requested)
-    if aligned != requested:
-        logger.warning("MiniMax-H3 image frame count %d was rounded up to %d", requested, aligned)
-    return aligned
+    return _h3_image_frame_count_for_item(item, cli_frame_count)
 
 
 def make_h3_image_cache_paths(item: ItemInfo, frame_count: int, architecture: str = ARCHITECTURE_MINIMAX_H3) -> tuple[str, str]:
-    cache_path = Path(item.latent_cache_path)
-    stem = cache_path.stem
-    suffix = f"_{architecture}"
-    if stem.endswith(suffix):
-        stem = stem[: -len(suffix)]
-    image_size = stem.rsplit("_", 1)[-1]
-    if "x" not in image_size:
-        width, height = item.original_size
-        image_size = f"{width:04d}x{height:04d}"
-        base = stem
-    else:
-        base = stem[: -(len(image_size) + 1)]
-    frame_token = f"00000-{frame_count:03d}"
-    latent_path = cache_path.with_name(f"{base}_{frame_token}_{image_size}_{architecture}.safetensors")
-    text_path = cache_path.with_name(f"{base}_{frame_token}_{architecture}_te.safetensors")
-    return str(latent_path), str(text_path)
-
-
-def configure_h3_image_item(item: ItemInfo, frame_count: int) -> None:
-    frame_count = align_h3_frame_count(frame_count)
-    item.frame_count = frame_count
-    if len(item.bucket_size) == 2:
-        item.bucket_size = (*item.bucket_size, frame_count)
-    item.latent_cache_path, item.text_encoder_output_cache_path = make_h3_image_cache_paths(item, frame_count)
-    path = Path(item.item_key)
-    if not re.fullmatch(r".*_\d{5}-\d{3}", path.stem):
-        item.item_key = str(path.with_name(f"{path.stem}_00000-{frame_count:03d}{path.suffix}"))
+    return _make_h3_image_cache_paths(item, frame_count, architecture)
 
 
 def _resample_image_target_frames(frames: list[torch.Tensor], frame_count: int) -> list[torch.Tensor]:
@@ -339,10 +312,7 @@ def image_condition_set(item: ItemInfo, mode: str) -> H3ImageConditionSet:
 
 
 def _validate_h3_image_mode(mode: str) -> str:
-    normalized = mode.replace("-", "_")
-    if normalized not in H3_IMAGE_MODES:
-        raise ValueError(f"Unsupported MiniMax-H3 image mode {mode!r}; expected one of {sorted(H3_IMAGE_MODES)}")
-    return normalized
+    return normalize_h3_image_mode(mode)
 
 
 def _encode_target_video(video_vae, pixels: torch.Tensor, cache_seed: int, item_key: str) -> torch.Tensor:
@@ -395,8 +365,9 @@ def build_latent_metadata(
     video_vae_fingerprint: str,
     audio_vae_fingerprint: str,
     media_fingerprints: Mapping[Path, str],
+    sample_fingerprint: str | None = None,
 ) -> dict[str, str]:
-    return {
+    metadata = {
         "task": task,
         "cache_seed": str(cache_seed),
         "crop_start_frame": str(crop_start_frame),
@@ -405,6 +376,9 @@ def build_latent_metadata(
         "audio_vae_fingerprint": audio_vae_fingerprint,
         "media_fingerprints": _media_fingerprint_metadata(media_fingerprints),
     }
+    if sample_fingerprint is not None:
+        metadata["sample_fingerprint"] = sample_fingerprint
+    return metadata
 
 
 def cache_metadata_matches(path: str | Path, expected: Mapping[str, str]) -> bool:
@@ -432,6 +406,7 @@ def build_latent_tensors(
     video_vae_fingerprint: str,
     audio_vae_fingerprint: str,
     media_fingerprints: Mapping[Path, str],
+    sample_fingerprint: str | None = None,
     allow_experimental_duration: bool = False,
     image_conditions: H3ImageConditionSet | None = None,
 ) -> H3LatentCachePayload:
@@ -525,6 +500,7 @@ def build_latent_tensors(
         video_vae_fingerprint=video_vae_fingerprint,
         audio_vae_fingerprint=audio_vae_fingerprint,
         media_fingerprints=media_fingerprints,
+        sample_fingerprint=sample_fingerprint,
     )
     return H3LatentCachePayload(tensors=tensors, metadata=metadata)
 
@@ -560,12 +536,24 @@ def validate_h3_dataset(dataset: VideoDataset) -> None:
         raise ValueError("MiniMax-H3 does not use the shared control-video fields")
 
 
-def image_record_for_item(item: ItemInfo, records: Sequence[H3Record]) -> H3Record:
-    item_path = Path(item.item_key).resolve()
-    matches = [record for record in records if record.video_path == item_path]
-    if len(matches) != 1:
+def index_h3_records(records: Sequence[H3Record]) -> dict[Path, H3Record]:
+    indexed: dict[Path, H3Record] = {}
+    for record in records:
+        path = record.video_path.resolve()
+        if path in indexed:
+            raise ValueError(f"MiniMax-H3 datasource contains duplicate media path: {path}")
+        indexed[path] = record
+    return indexed
+
+
+def image_record_for_item(item: ItemInfo, records: Mapping[Path, H3Record]) -> H3Record:
+    item_path = Path(item.item_key)
+    if not item_path.is_absolute():
+        raise ValueError(f"MiniMax-H3 image cache item_key must be an absolute canonical path: {item.item_key}")
+    record = records.get(item_path.resolve())
+    if record is None:
         raise ValueError(f"MiniMax-H3 image cache item does not map to exactly one datasource record: {item.item_key}")
-    return matches[0]
+    return record
 
 
 def dataset_cache_dir_key(cache_directory: str) -> str:
@@ -637,6 +625,9 @@ def main() -> None:
     args.h3_image_mode = _validate_h3_image_mode(args.h3_image_mode)
     if args.h3_image_mode != "none" and args.task != "fl2va":
         raise ValueError("MiniMax-H3 image training modes require --task fl2va")
+    if args.h3_image_mode != "none":
+        # Still-image samples intentionally use the short 5/22/... frame grids, outside the released video duration range.
+        args.allow_experimental_duration = True
     if args.disable_cudnn_backend:
         torch.backends.cudnn.enabled = False
 
@@ -647,13 +638,12 @@ def main() -> None:
     blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_MINIMAX_H3)
     dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, audio_spec=H3_AUDIO_SPEC)
     datasets = dataset_group.datasets
-    allowed_dataset_types = (ImageDataset, VideoDataset) if args.h3_image_mode != "none" else (VideoDataset,)
-    if not all(isinstance(dataset, allowed_dataset_types) for dataset in datasets):
-        raise ValueError("MiniMax-H3 latent caching accepts image datasets only with --h3_image_mode")
+    validate_h3_cache_datasets(datasets, args.h3_image_mode, operation="latent caching")
 
     records_by_dir: dict[str, list[H3Record]] = {}
+    image_records_by_dir: dict[str, dict[Path, H3Record]] = {}
     audio_sources_by_dir: dict[str, list] = {}
-    image_media_paths_by_dir: dict[str, dict[Path, set[Path]]] = {}
+    image_samples_by_dir: dict[str, dict[Path, H3ImageSampleDescriptor]] = {}
     for dataset_index, dataset in enumerate(datasets):
         if isinstance(dataset, VideoDataset):
             validate_h3_dataset(dataset)
@@ -672,12 +662,8 @@ def main() -> None:
         records_by_dir[key] = records
         audio_sources_by_dir[key] = audio_sources
         if isinstance(dataset, ImageDataset):
-            media_paths = {}
-            for index in range(len(dataset.datasource)):
-                image_path, _caption = dataset.datasource.get_caption(index)
-                targets, controls = dataset.datasource.get_media_paths(image_path)
-                media_paths[Path(image_path).resolve()] = {Path(path).resolve() for path in [*targets, *controls]}
-            image_media_paths_by_dir[key] = media_paths
+            image_records_by_dir[key] = index_h3_records(records)
+            image_samples_by_dir[key] = describe_h3_image_samples(dataset, args.h3_image_mode, args.h3_image_frame_count)
 
     if args.debug_mode is not None:
         cache_latents.show_datasets(
@@ -700,8 +686,8 @@ def main() -> None:
         for source in audio_sources_by_dir[key]:
             if source is not None:
                 media_fingerprints[source.path] = fingerprint_file(source.path)
-        for paths in image_media_paths_by_dir.get(key, {}).values():
-            for path in paths:
+        for descriptor in image_samples_by_dir.get(key, {}).values():
+            for path in (*descriptor.target_paths, *descriptor.control_paths):
                 media_fingerprints[path] = fingerprint_file(path)
 
     logger.info("Loading MiniMax-H3 video VAE from %s", args.video_vae)
@@ -723,17 +709,20 @@ def main() -> None:
         for item in batch:
             key = item_cache_dir_key(item)
             image_conditions = None
+            sample_fingerprint = None
             if args.h3_image_mode != "none":
-                record = image_record_for_item(item, records_by_dir[key])
+                record = image_record_for_item(item, image_records_by_dir[key])
+                descriptor = image_samples_by_dir[key][record.video_path]
                 crop_start = 0
                 audio_source = None
-                image_frame_count = h3_image_frame_count_for_item(item, args.h3_image_frame_count)
+                image_frame_count = descriptor.frame_count
                 configure_h3_image_item(item, image_frame_count)
                 image_conditions = image_condition_set(item, args.h3_image_mode)
                 item.content = target_frames_from_image(item, image_frame_count)
                 target_samples = waveform_samples(audio_latent_frames(image_frame_count))
                 item.audio_content = torch.zeros((2, target_samples), dtype=torch.float32)
                 item.audio_present = False
+                sample_fingerprint = descriptor.fingerprint(media_fingerprints)
             else:
                 datasource_index, crop_start = item_record_inputs(item)
                 record = records_by_dir[key][datasource_index]
@@ -743,7 +732,7 @@ def main() -> None:
             presence_counts[item.audio_present] += 1
             record_paths = record_media_paths(record)
             if args.h3_image_mode != "none":
-                record_paths |= image_media_paths_by_dir[key][record.video_path]
+                record_paths |= set(descriptor.target_paths) | set(descriptor.control_paths)
             record_fingerprints = {path: media_fingerprints[path] for path in record_paths}
             if audio_source is not None:
                 record_fingerprints[audio_source.path] = media_fingerprints[audio_source.path]
@@ -754,6 +743,7 @@ def main() -> None:
                 video_vae_fingerprint=video_vae_fingerprint,
                 audio_vae_fingerprint=audio_vae_fingerprint,
                 media_fingerprints=record_fingerprints,
+                sample_fingerprint=sample_fingerprint,
             )
             if args.h3_image_mode != "none":
                 expected_metadata["image_training_mode"] = args.h3_image_mode
@@ -776,7 +766,8 @@ def main() -> None:
                 video_vae_fingerprint=video_vae_fingerprint,
                 audio_vae_fingerprint=audio_vae_fingerprint,
                 media_fingerprints=record_fingerprints,
-                allow_experimental_duration=args.allow_experimental_duration or args.h3_image_mode != "none",
+                sample_fingerprint=sample_fingerprint,
+                allow_experimental_duration=args.allow_experimental_duration,
                 image_conditions=image_conditions,
             )
             if args.h3_image_mode != "none":

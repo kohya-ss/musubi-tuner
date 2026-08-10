@@ -98,7 +98,7 @@ def process_text_encoder_batches(
         for batch in tqdm(batches):
             if requires_content:
                 batch = batch[1]  # batch is (key, items), so use items
-            source_batch = batch
+            path_tracking_items = batch
 
             # skip existing cache files
             if skip_existing:
@@ -107,7 +107,7 @@ def process_text_encoder_batches(
                 ]
                 # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
                 if len(filtered_batch) == 0:
-                    all_cache_paths.update(os.path.normpath(item.text_encoder_output_cache_path) for item in source_batch)
+                    all_cache_paths.update(os.path.normpath(item.text_encoder_output_cache_path) for item in path_tracking_items)
                     continue
                 batch = filtered_batch
 
@@ -115,7 +115,7 @@ def process_text_encoder_batches(
             for i in range(0, len(batch), bs):
                 encode(batch[i : i + bs])
             # Encoders may rewrite cache names after resolving model-specific geometry.
-            all_cache_paths.update(os.path.normpath(item.text_encoder_output_cache_path) for item in source_batch)
+            all_cache_paths.update(os.path.normpath(item.text_encoder_output_cache_path) for item in path_tracking_items)
 
 
 def post_process_cache_files(

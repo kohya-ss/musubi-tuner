@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 import torch
@@ -24,6 +25,38 @@ def _numbered_suffix_index(path_without_extension: str, prefix: str) -> int | No
         return None
     suffix = path_without_extension[len(marker) :]
     return int(suffix) if suffix.isdigit() else None
+
+
+def _canonical_path_key(path: str) -> str:
+    return os.path.normcase(str(Path(path).expanduser().resolve()))
+
+
+def _indexed_path_values(data: dict, prefix: str, line_number: int) -> dict[int, object]:
+    values: dict[int, object] = {}
+    marker = prefix + "_"
+    for key, value in data.items():
+        if not key.startswith(marker):
+            continue
+        suffix = key[len(marker) :]
+        if not suffix.isdigit():
+            raise ValueError(f"Image JSONL line {line_number}: {key} must end in a numeric index")
+        index = int(suffix)
+        if index in values:
+            raise ValueError(f"Image JSONL line {line_number}: duplicate {prefix} index {index}")
+        values[index] = value
+    return values
+
+
+def _resolve_jsonl_media_path(value: object, base_directory: Path, label: str, line_number: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Image JSONL line {line_number}: {label} must be a non-empty path")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_directory / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"Image JSONL line {line_number}: {label} not found: {path}")
+    return str(path)
 
 
 class ContentDatasource:
@@ -78,13 +111,17 @@ class ImageDirectoryDatasource(ImageDatasource):
         control_directory: Optional[str] = None,
         control_count_per_image: Optional[int] = None,
         multiple_target: bool = False,
+        allow_indexed_caption_alias: bool = False,
+        require_contiguous_targets: bool = False,
     ):
         super().__init__()
-        self.image_directory = image_directory
+        self.image_directory = os.path.abspath(os.path.expanduser(image_directory))
         self.caption_extension = caption_extension
-        self.control_directory = control_directory
+        self.control_directory = os.path.abspath(os.path.expanduser(control_directory)) if control_directory is not None else None
         self.control_count_per_image = control_count_per_image
         self.multiple_target = multiple_target
+        self.allow_indexed_caption_alias = allow_indexed_caption_alias
+        self.require_contiguous_targets = require_contiguous_targets
         self.current_idx = 0
 
         # glob images
@@ -96,24 +133,35 @@ class ImageDirectoryDatasource(ImageDatasource):
             if self.caption_extension
         }
         self.caption_alias_paths: set[str] = set()
-        if self.multiple_target and self.caption_extension:
+        self.caption_alias_indexes: dict[str, int] = {}
+        if self.multiple_target and self.caption_extension and self.allow_indexed_caption_alias:
             all_image_paths = glob_images(self.image_directory)
             image_paths = set(self.image_paths)
             captioned_image_stems = {os.path.splitext(path)[0] for path in image_paths}
+            indexed_groups: dict[str, list[tuple[int, str]]] = {}
             for image_path in all_image_paths:
                 image_path_no_ext = os.path.splitext(image_path)[0]
                 suffix = image_path_no_ext.rsplit("_", 1)[-1]
-                if suffix != "0" or image_path in image_paths:
+                if not suffix.isdigit():
                     continue
                 base_no_ext = image_path_no_ext[: -(len(suffix) + 1)]
+                indexed_groups.setdefault(base_no_ext, []).append((int(suffix), image_path))
+
+            for base_no_ext, indexed_paths in indexed_groups.items():
                 if base_no_ext in captioned_image_stems:
                     continue
                 caption_path = base_no_ext + self.caption_extension
-                if os.path.exists(caption_path):
-                    self.image_paths.append(image_path)
-                    self.caption_paths[image_path] = caption_path
-                    self.caption_alias_paths.add(image_path)
-                    image_paths.add(image_path)
+                if not os.path.exists(caption_path):
+                    continue
+                indexed_paths.sort()
+                alias_index, image_path = indexed_paths[0]
+                if alias_index not in (0, 1) or image_path in image_paths:
+                    continue
+                self.image_paths.append(image_path)
+                self.caption_paths[image_path] = caption_path
+                self.caption_alias_paths.add(image_path)
+                self.caption_alias_indexes[image_path] = alias_index
+                image_paths.add(image_path)
             self.image_paths.sort()
         logger.info(f"found {len(self.image_paths)} images")
 
@@ -146,11 +194,16 @@ class ImageDirectoryDatasource(ImageDatasource):
                         # sort by the digits (`_0000`) suffix
                         indexed_paths.sort()
                         indexes = [index for index, _path in indexed_paths]
-                        expected_indexes = list(range(indexes[0], indexes[0] + len(indexes)))
-                        if indexes[0] not in (0, 1) or indexes != expected_indexes:
+                        sequence_indexes = indexes
+                        if image_path in self.caption_alias_indexes:
+                            sequence_indexes = [self.caption_alias_indexes[image_path], *indexes]
+                        expected_indexes = list(range(sequence_indexes[0], sequence_indexes[0] + len(sequence_indexes)))
+                        if self.require_contiguous_targets and (
+                            sequence_indexes[0] not in (0, 1) or sequence_indexes != expected_indexes
+                        ):
                             raise ValueError(
                                 f"Multiple-target images for {image_path} must use contiguous numeric suffixes "
-                                f"starting at 0 or 1, got {indexes}"
+                                f"starting at 0 or 1, got {sequence_indexes}"
                             )
                         potential_paths = [path for _index, path in indexed_paths]
                         self.target_paths[image_path] = potential_paths
@@ -245,6 +298,8 @@ class ImageDirectoryDatasource(ImageDatasource):
                 logger.error(f"Could not find matching control images for {missing_controls} images: {missing_control_paths}")
                 raise ValueError(f"Could not find matching control images for {missing_controls} images")
 
+        self._source_paths_by_key = {_canonical_path_key(path): path for path in self.image_paths}
+
     def is_indexable(self):
         return True
 
@@ -279,11 +334,7 @@ class ImageDirectoryDatasource(ImageDatasource):
         return image_path, images, caption, controls
 
     def get_media_paths(self, image_path: str) -> tuple[list[str], list[str]]:
-        normalized = os.path.normcase(os.path.abspath(image_path))
-        source_path = next(
-            (path for path in self.image_paths if os.path.normcase(os.path.abspath(path)) == normalized),
-            None,
-        )
+        source_path = self._source_paths_by_key.get(_canonical_path_key(image_path))
         if source_path is None:
             raise KeyError(f"Image path is not present in the datasource: {image_path}")
         targets = [source_path, *self.target_paths.get(source_path, [])]
@@ -332,7 +383,7 @@ class ImageDirectoryDatasource(ImageDatasource):
 class ImageJsonlDatasource(ImageDatasource):
     def __init__(self, image_jsonl_file: str, control_count_per_image: Optional[int] = None, multiple_target: bool = False):
         super().__init__()
-        self.image_jsonl_file = image_jsonl_file
+        self.image_jsonl_file = str(Path(image_jsonl_file).expanduser().resolve())
         self.control_count_per_image = control_count_per_image
         self.multiple_target = multiple_target
         self.current_idx = 0
@@ -341,37 +392,84 @@ class ImageJsonlDatasource(ImageDatasource):
         logger.info(f"load image jsonl from {self.image_jsonl_file}")
         self.data = []
         with open(self.image_jsonl_file, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_number, line in enumerate(f, start=1):
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     logger.error(f"failed to load json: {line} @ {self.image_jsonl_file}")
                     raise
+                if not isinstance(data, dict):
+                    raise ValueError(f"Image JSONL line {line_number}: each record must be an object")
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} images")
 
-        # Normalize control paths
-        for item in self.data:
-            if "control_path" in item:
-                item["control_path_0"] = item.pop("control_path")
+        base_directory = Path(self.image_jsonl_file).parent
+        for line_number, item in enumerate(self.data, start=1):
+            indexed_images = _indexed_path_values(item, "image_path", line_number)
+            plain_image = item.get("image_path")
+            if self.multiple_target:
+                if plain_image is not None:
+                    if 0 in indexed_images:
+                        raise ValueError(
+                            f"Image JSONL line {line_number}: image_path and image_path_0 cannot both define the primary image"
+                        )
+                    indexes = sorted(indexed_images)
+                    expected = list(range(1, 1 + len(indexes)))
+                    if indexes != expected:
+                        raise ValueError(
+                            f"Image JSONL line {line_number}: expected contiguous image_path indexes starting at 1, got {indexes}"
+                        )
+                    raw_image_paths = [plain_image, *(indexed_images[index] for index in indexes)]
+                else:
+                    indexes = sorted(indexed_images)
+                    expected = list(range(len(indexes)))
+                    if not indexes or indexes != expected:
+                        raise ValueError(
+                            f"Image JSONL line {line_number}: expected contiguous image_path indexes starting at 0, got {indexes}"
+                        )
+                    raw_image_paths = [indexed_images[index] for index in indexes]
+            else:
+                primary = plain_image if plain_image is not None else indexed_images.get(0)
+                if primary is None:
+                    raise ValueError(f"Image JSONL line {line_number}: image_path or image_path_0 is required")
+                raw_image_paths = [primary]
+            item["_image_paths"] = tuple(
+                _resolve_jsonl_media_path(path, base_directory, f"image_path_{index}", line_number)
+                for index, path in enumerate(raw_image_paths)
+            )
 
-            # Ensure control paths are named consistently, from control_path_0000 to control_path_0, control_path_1, etc.
-            control_path_keys = [key for key in item.keys() if key.startswith("control_path_")]
-            control_path_keys.sort(key=lambda x: int(x.split("_")[-1]))
-            for i, key in enumerate(control_path_keys):
-                if key != f"control_path_{i}":
-                    item[f"control_path_{i}"] = item.pop(key)
+            indexed_controls = _indexed_path_values(item, "control_path", line_number)
+            plain_control = item.get("control_path")
+            if plain_control is not None and 0 in indexed_controls:
+                raise ValueError(
+                    f"Image JSONL line {line_number}: control_path and control_path_0 cannot both define the first control"
+                )
+            if plain_control is not None:
+                control_indexes = sorted(indexed_controls)
+                expected_control_indexes = list(range(1, 1 + len(control_indexes)))
+                raw_control_paths = [plain_control, *(indexed_controls[index] for index in control_indexes)]
+            else:
+                control_indexes = sorted(indexed_controls)
+                expected_control_indexes = list(range(len(control_indexes)))
+                raw_control_paths = [indexed_controls[index] for index in control_indexes]
+            if control_indexes != expected_control_indexes:
+                raise ValueError(f"Image JSONL line {line_number}: expected contiguous control_path indexes, got {control_indexes}")
+            control_paths = tuple(
+                _resolve_jsonl_media_path(path, base_directory, f"control_path_{index}", line_number)
+                for index, path in enumerate(raw_control_paths)
+            )
+            if self.control_count_per_image is not None:
+                control_paths = control_paths[: self.control_count_per_image]
+            item["_control_paths"] = control_paths
 
         # Check if there are control paths in the JSONL
-        self.has_control = any("control_path_0" in item for item in self.data)
+        self.has_control = any(item["_control_paths"] for item in self.data)
         if self.has_control:
             if self.control_count_per_image is None:
                 logger.info(f"found {len(self.data)} images with arbitrary control images per image in JSONL data")
             else:
                 missing_control_images = [
-                    item["image_path"]
-                    for item in self.data
-                    if sum(f"control_path_{i}" not in item for i in range(self.control_count_per_image)) > 0
+                    item["_image_paths"][0] for item in self.data if len(item["_control_paths"]) < self.control_count_per_image
                 ]
                 if missing_control_images:
                     logger.error(f"Some images do not have control paths in JSONL data: {missing_control_images}")
@@ -379,6 +477,13 @@ class ImageJsonlDatasource(ImageDatasource):
                 logger.info(
                     f"found {len(self.data)} images with {self.control_count_per_image} control images per image in JSONL data"
                 )
+
+        self._data_by_primary_path: dict[str, dict] = {}
+        for item in self.data:
+            key = _canonical_path_key(item["_image_paths"][0])
+            if key in self._data_by_primary_path:
+                raise ValueError(f"Image JSONL contains a duplicate primary image path: {item['_image_paths'][0]}")
+            self._data_by_primary_path[key] = item
 
     def is_indexable(self):
         return True
@@ -388,19 +493,8 @@ class ImageJsonlDatasource(ImageDatasource):
 
     def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
         data = self.data[idx]
-        image_path = data.get("image_path", data.get("image_path_0"))
-        image_paths = [image_path]
-        if self.multiple_target:
-            # load multiple-target images
-            while True:
-                next_index = len(image_paths)  # start from 1
-                next_image_path = data.get("image_path_" + str(next_index), None)
-                if next_image_path is None:
-                    break
-                if not os.path.exists(next_image_path):
-                    raise ValueError(f"multiple-target image not found: {next_image_path}")
-
-                image_paths.append(next_image_path)
+        image_paths = data["_image_paths"]
+        image_path = image_paths[0]
 
         images = []
         for path in image_paths:
@@ -414,10 +508,7 @@ class ImageJsonlDatasource(ImageDatasource):
         controls = None
         if self.has_control:
             controls = []
-            for i in range(self.control_count_per_image or 1000):  # arbitrary large number if control_count_per_image is None
-                if f"control_path_{i}" not in data:
-                    break
-                control_path = data[f"control_path_{i}"]
+            for control_path in data["_control_paths"]:
                 control = Image.open(control_path)
                 if control.mode != "RGB" and control.mode != "RGBA":
                     control = control.convert("RGB")
@@ -426,28 +517,14 @@ class ImageJsonlDatasource(ImageDatasource):
         return image_path, images, caption, controls
 
     def get_media_paths(self, image_path: str) -> tuple[list[str], list[str]]:
-        normalized = os.path.normcase(os.path.abspath(image_path))
-        for data in self.data:
-            primary = data.get("image_path", data.get("image_path_0"))
-            if primary is None or os.path.normcase(os.path.abspath(primary)) != normalized:
-                continue
-            targets = [primary]
-            if self.multiple_target:
-                index = 1
-                while (path := data.get(f"image_path_{index}")) is not None:
-                    targets.append(path)
-                    index += 1
-            controls = []
-            index = 0
-            while (path := data.get(f"control_path_{index}")) is not None:
-                controls.append(path)
-                index += 1
-            return targets, controls
-        raise KeyError(f"Image path is not present in the datasource: {image_path}")
+        data = self._data_by_primary_path.get(_canonical_path_key(image_path))
+        if data is None:
+            raise KeyError(f"Image path is not present in the datasource: {image_path}")
+        return list(data["_image_paths"]), list(data["_control_paths"])
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]
-        image_path = data.get("image_path", data.get("image_path_0"))
+        image_path = data["_image_paths"][0]
         caption = data["caption"]
         return image_path, caption
 
