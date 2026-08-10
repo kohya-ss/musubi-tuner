@@ -637,10 +637,7 @@ def test_gradient_checkpointed_forward_and_backward_recompute_the_same_block():
 def test_activation_cpu_offloading_restores_hidden_states_before_final_layer():
     model = _tiny_model(num_layers=1).cuda()
     model.enable_gradient_checkpointing(activation_cpu_offloading=True)
-    inputs = {
-        key: value.cuda() if isinstance(value, torch.Tensor) else value
-        for key, value in _t2_inputs(batch_size=1).items()
-    }
+    inputs = {key: value.cuda() if isinstance(value, torch.Tensor) else value for key, value in _t2_inputs(batch_size=1).items()}
 
     output = model(**inputs)
     (output.video.square().mean() + output.audio.square().mean()).backward()

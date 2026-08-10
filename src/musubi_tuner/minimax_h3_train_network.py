@@ -1184,8 +1184,7 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--h3_guidance_loss_uncond_cache",
         type=str,
         default=None,
-        help="uncond probe embedding for the guidance loss, written by"
-        " minimax_h3_cache_text_encoder_outputs.py --uncond_output",
+        help="uncond probe embedding for the guidance loss, written by minimax_h3_cache_text_encoder_outputs.py --uncond_output",
     )
     parser.add_argument("--dit_dtype", type=str, default=None, help="MiniMax-H3 DiT dtype; R1 requires bfloat16")
     parser.add_argument(
