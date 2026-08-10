@@ -1183,6 +1183,7 @@ class NetworkTrainer:
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
         global_step: int,
+        reduction: str = "mean",
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
@@ -1198,11 +1199,29 @@ class NetworkTrainer:
         auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
         populate with named scalars for loss-decomposition logging
         (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
+
+        ``reduction="mean"`` (default): reduce over every element, return a
+        0-d scalar tensor. ``reduction="none"``: reduce only over non-batch
+        dims, return a ``(batch_size,)`` tensor of per-example losses — useful
+        for callers that need to compare or select among examples before the
+        final batch-level reduction (e.g. best-of-K sampling). Subclasses
+        overriding ``compute_loss`` are not required to support
+        ``reduction="none"`` unless they need per-example losses.
         """
         weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
         loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
+            # `weighting` is always built as a `(batch_size, 1, 1, 1, 1)` tensor (see
+            # `compute_loss_weighting_for_sd3` / `get_sigmas`, hardcoded to n_dim=5), which
+            # only broadcasts correctly against a 5-dim `loss`. For architectures whose
+            # `DiTOutput.pred`/`target` are a different rank (e.g. 4-dim after squeezing),
+            # raw `loss * weighting` broadcasts as an accidental (B, B, ...) outer product
+            # instead of per-example elementwise weighting. Reshape to `loss`'s actual rank
+            # first so this is correct regardless of `loss.ndim`.
+            weighting = weighting.reshape(-1, *([1] * (loss.ndim - 1)))
             loss = loss * weighting
+        if reduction == "none":
+            return loss.mean(dim=tuple(range(1, loss.ndim))), {}
         return loss.mean(), {}
 
     def on_transformer_loaded(
