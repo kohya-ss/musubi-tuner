@@ -139,6 +139,8 @@ python minimax_h3_cache_text_encoder_outputs.py \
   --skip_existing
 ```
 
+Add `--uncond_output /data/h3/uncond_space.safetensors` to also write the tiny uncond probe embedding used by the training guidance loss (see Guidance-distillation countermeasure below); `--uncond_text` overrides the probe text (default: a single space).
+
 The same command accepts the ConvRot INT8 text encoder (`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`) and the NVFP4+AWQ text encoder (`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`); the formats are detected automatically. On VRAM-limited GPUs add `--text_encoder_blocks_to_swap 50` to stream the encoder layers from CPU, and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations (see Text Encoder Layer Streaming below). The cache stores the state after the first 50 Qwen layers, before a final language-model norm. `hidden_states[0]` is the embedding output, so this is `hidden_states[50]`. The cache also stores per-row modality tags and presentation fingerprints; stale or structurally incompatible caches are rejected.
 
 ## LoRA Training
@@ -181,6 +183,30 @@ Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is a
 MiniMax-H3 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The latent caching script warns when a dataset config sets any other value, and the trainer rejects the first batch whose size is not 1. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
 
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
+
+### Guidance-distillation countermeasure (guidance loss)
+
+The released H3 checkpoints are CFG-distilled: their prediction lives in the amplified space `g(c) = u + s*(c(c) - u)`, where `u` is the unconditional velocity baked in during distillation. Training a LoRA on the plain flow-matching target pulls the model out of that space (de-distillation drift: washed-out, low-adherence outputs as training progresses). The guidance loss re-anchors the target in the amplified space instead:
+
+```
+target = uncond + scale * (velocity - uncond)
+```
+
+where `uncond` is the model's own no-grad prediction for the same noised input under an uncond probe embedding, with the LoRA active (matching how the adapted model runs at inference). This is the same mechanism as the ai-toolkit guidance loss; community reports suggest `scale` 3-4, with 4 more reliable for longer runs.
+
+```text
+--h3_guidance_loss_scale 4.0 \
+--h3_guidance_loss_uncond_cache /data/h3/uncond_space.safetensors
+```
+
+The uncond cache is written by `minimax_h3_cache_text_encoder_outputs.py --uncond_output` (about 10 KB; one text-encoder forward). The default probe, a single space, was selected by screening candidate uncond conditions against the released checkpoint: probes carrying content (e.g. quality-style negative prompts) are interpreted as conditions and amplified, while near-empty probes (single space, single EOS token, an all-zero row) form one tight equivalent cluster whose stand-alone generations show no CFG burn — the signature of the true distillation uncond.
+
+Optional refinements:
+
+- `--h3_guidance_loss_scale_audio` sets a separate scale for the audio target (default: same as video). The audio guidance signal survives to lower noise levels than video on its own sigma axis.
+- `--h3_guidance_loss_sigma_min` skips the extra uncond forward when the drawn base sigma (pre-shift, 1 = pure noise) is below the threshold. Measured on the released checkpoint, the relative text-guidance magnitude `|g(cond) - g(uncond)| / |g|` for video collapses from ~46% at `sigma_video 0.98` to ~3% at `0.71`, so low-sigma corrections mostly amplify per-sample noise while still paying a full forward. Training logs confirm this: below base sigma ~0.15 the logged gap magnitudes are dominated by the irreducible per-sample residual (the part of the noise draw no prediction can know — especially visible in the audio gap, which *rises* toward low sigma), i.e. amplified label noise rather than guidance signal. **Recommended: `0.15`** — it skips the noisiest ~15% of steps while keeping nearly all of the video and audio guidance signal. `0` (default) always applies the loss, matching ai-toolkit.
+
+Each step logs `guidance/applied` and the sigma-dependent gap magnitudes `guidance/video_gap_rms` / `guidance/audio_gap_rms`; the metadata records `ss_minimax_h3_guidance_loss_scale`, `..._scale_audio`, and `..._sigma_min`. The cost is one extra no-grad forward per applied step (roughly +50% step time without gating; less with `--h3_guidance_loss_sigma_min`).
 
 ### Training-time joint AV samples
 

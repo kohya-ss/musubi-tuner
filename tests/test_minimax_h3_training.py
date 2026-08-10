@@ -1188,3 +1188,217 @@ def test_h3_lora_gets_gradients_over_frozen_int8_convrot_base_with_checkpointing
     gradients = [parameter.grad for parameter in network.parameters()]
     assert any(gradient is not None and torch.count_nonzero(gradient) for gradient in gradients)
     assert all(model.get_submodule(path).weight.grad is None for path in target_paths)
+
+
+# --- guidance-distillation loss (contrastive guidance targets) ---
+
+
+def _uncond_cache(tmp_path, *, rows: int = 2, width: int = 12, value: float = 0.0) -> str:
+    from musubi_tuner.minimax_h3.text_encoder import save_h3_uncond_cache
+
+    path = tmp_path / "uncond_space.safetensors"
+    save_h3_uncond_cache(
+        path,
+        torch.full((rows, width), value),
+        torch.ones(rows, dtype=torch.int64),
+        metadata={"text": " "},
+    )
+    return str(path)
+
+
+def test_h3_parser_defaults_leave_the_guidance_loss_off():
+    parser = minimax_h3_setup_parser(argparse.ArgumentParser())
+
+    args = parser.parse_args(["--task", "t2va"])
+
+    assert args.h3_guidance_loss_scale == 0.0
+    assert args.h3_guidance_loss_scale_audio is None
+    assert args.h3_guidance_loss_sigma_min == 0.0
+    assert args.h3_guidance_loss_uncond_cache is None
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"h3_guidance_loss_scale": -1.0}, "h3_guidance_loss_scale"),
+        ({"h3_guidance_loss_scale": 3.0, "h3_guidance_loss_scale_audio": -0.5}, "h3_guidance_loss_scale_audio"),
+        ({"h3_guidance_loss_scale": 3.0, "h3_guidance_loss_sigma_min": 1.5}, "h3_guidance_loss_sigma_min"),
+        ({"h3_guidance_loss_scale": 3.0}, "h3_guidance_loss_uncond_cache"),
+    ],
+)
+def test_h3_guidance_loss_rejects_invalid_coordinates(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(**overrides))
+
+
+def test_h3_uncond_cache_round_trips_and_rejects_foreign_formats(tmp_path):
+    from safetensors.torch import save_file
+
+    from musubi_tuner.minimax_h3.text_encoder import load_h3_uncond_cache
+
+    path = _uncond_cache(tmp_path, rows=2, width=12, value=0.5)
+    hidden, tags, metadata = load_h3_uncond_cache(path)
+    assert hidden.shape == (2, 12)
+    assert torch.equal(tags, torch.ones(2, dtype=torch.int64))
+    assert metadata["text"] == " "
+
+    foreign = tmp_path / "foreign.safetensors"
+    save_file({"hidden_states": torch.zeros(2, 12), "token_tags": torch.ones(2, dtype=torch.int64)}, str(foreign))
+    with pytest.raises(ValueError, match="cache format"):
+        load_h3_uncond_cache(foreign)
+
+
+def test_guidance_loss_rewrites_both_targets_around_the_uncond_prediction(tmp_path, monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_guidance_loss_scale=3.0, h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path))
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer(video_prediction=2.0, audio_prediction=-1.0)
+    batch = _training_batch()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    loss, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    # two forwards: the no-grad uncond probe first, then the conditional pass
+    assert len(transformer.calls) == 2
+    uncond_call, cond_call = transformer.calls
+    assert uncond_call["layout"].text_length == 2
+    assert cond_call["layout"].text_length == 3
+    assert uncond_call["text_hidden_states"].shape == (1, 2, 12)
+    assert torch.equal(uncond_call["text_token_tags"], torch.ones(1, 2, dtype=torch.int64))
+    # everything but the text condition is shared with the conditional pass
+    assert torch.equal(uncond_call["video_latents"], cond_call["video_latents"])
+    assert torch.equal(uncond_call["audio_latents"], cond_call["audio_latents"])
+    assert uncond_call["model_t_video"] is cond_call["model_t_video"]
+
+    # both fake forwards return the same constants, so uncond_video=2, uncond_audio=-1;
+    # video target 0 -> 2 + 3*(0-2) = -4, audio target 4 -> -1 + 3*(4+1) = 14
+    assert metrics["loss/video"] == pytest.approx(torch.nn.functional.mse_loss(torch.tensor(2.0), torch.tensor(-4.0)).item())
+    assert metrics["loss/audio"] == pytest.approx(torch.nn.functional.mse_loss(torch.tensor(-1.0), torch.tensor(14.0)).item())
+    assert metrics["guidance/applied"] == 1.0
+    assert metrics["guidance/base_sigma"] == pytest.approx(0.25)
+    assert metrics["guidance/video_gap_rms"] == pytest.approx(2.0)
+    assert metrics["guidance/audio_gap_rms"] == pytest.approx(5.0)
+    assert torch.isfinite(loss)
+
+
+def test_guidance_loss_audio_scale_can_differ_from_video(tmp_path, monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        h3_guidance_loss_scale=3.0,
+        h3_guidance_loss_scale_audio=1.0,
+        h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path),
+    )
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer(video_prediction=2.0, audio_prediction=-1.0)
+    batch = _training_batch()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    _, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    # audio scale 1 keeps the audio target at the plain velocity: -1 + 1*(4+1) = 4
+    assert metrics["loss/audio"] == pytest.approx(torch.nn.functional.mse_loss(torch.tensor(-1.0), torch.tensor(4.0)).item())
+
+
+def test_guidance_loss_sigma_gate_skips_the_uncond_forward(tmp_path, monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        h3_guidance_loss_scale=3.0,
+        h3_guidance_loss_sigma_min=0.5,
+        h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path),
+    )
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer(video_prediction=2.0)
+    batch = _training_batch()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    _, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    # base sigma 0.25 < 0.5: single conditional forward, plain velocity target
+    assert len(transformer.calls) == 1
+    assert metrics["guidance/applied"] == 0.0
+    assert metrics["guidance/base_sigma"] == pytest.approx(0.25)
+    assert "guidance/video_gap_rms" not in metrics
+    assert metrics["loss/video"] == pytest.approx(torch.nn.functional.mse_loss(torch.tensor(2.0), torch.tensor(0.0)).item())
+
+
+def test_guidance_loss_rejects_a_width_mismatch_against_the_text_cache(tmp_path, monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_guidance_loss_scale=3.0, h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path, width=8))
+    trainer.handle_model_specific_args(args)
+    batch = _training_batch()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    with pytest.raises(ValueError, match="width"):
+        trainer.process_batch(
+            args,
+            _Accelerator(),
+            _RecordingTransformer(),
+            None,
+            batch,
+            video_latents,
+            torch.zeros_like(video_latents),
+            None,
+            torch.bfloat16,
+            torch.float32,
+            None,
+            0,
+        )
+
+
+def test_guidance_loss_metadata_is_recorded_only_when_active(tmp_path):
+    trainer = MiniMaxH3NetworkTrainer()
+    off = trainer.extra_metadata(_trainer_args())
+    assert not any(key.startswith("ss_minimax_h3_guidance") for key in off)
+
+    args = _trainer_args(h3_guidance_loss_scale=4.0, h3_guidance_loss_sigma_min=0.3)
+    on = trainer.extra_metadata(args)
+    assert on["ss_minimax_h3_guidance_loss_scale"] == 4.0
+    assert on["ss_minimax_h3_guidance_loss_scale_audio"] == 4.0
+    assert on["ss_minimax_h3_guidance_loss_sigma_min"] == 0.3

@@ -63,6 +63,7 @@ def _load_training_module(monkeypatch):
         encode_h3_presentation=noop,
         load_h3_processor=noop,
         load_h3_text_encoder=noop,
+        load_h3_uncond_cache=noop,
     )
     _stub(
         monkeypatch,
