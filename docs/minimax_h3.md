@@ -4,7 +4,7 @@
 
 Musubi Tuner supports MiniMax-H3 text-to-video-with-audio (T2VA), first/last-frame-to-video-with-audio (FL2VA), and reference-to-video-with-audio (Ref2VA) LoRA training and standalone generation.
 
-The implementation follows the released MiniMax-H3 packing, Qwen3-VL conditioning, dual video/audio flow schedules, and two VAE layouts. It supports the published BF16 transformers, the full and pruned ConvRot INT8 transformers, and the ConvRot INT8 and NVFP4+AWQ Qwen3-VL text encoders.
+The implementation follows the released MiniMax-H3 packing, Qwen3-VL conditioning, dual video/audio flow schedules, and two VAE layouts. It supports the published full and pruned BF16 transformers, the full and pruned ConvRot INT8 transformers, and the ConvRot INT8 and NVFP4+AWQ Qwen3-VL text encoders.
 
 Read and accept the [MiniMax-H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) before downloading or using the weights.
 
@@ -15,9 +15,11 @@ Download the following files from [Comfy-Org/MiniMax-H3](https://huggingface.co/
 | Component | Supported file |
 | --- | --- |
 | FL2VA and T2VA transformer | `diffusion_models/minimax_h3_fl2va_bf16.safetensors` |
+| FL2VA and T2VA pruned transformer | `diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors` |
 | FL2VA and T2VA ConvRot INT8 transformer | `diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors` |
 | FL2VA and T2VA pruned ConvRot INT8 transformer | `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
 | Ref2VA transformer | `diffusion_models/minimax_h3_ref2va_bf16.safetensors` |
+| Ref2VA pruned transformer | `diffusion_models/minimax_h3_ref2va_pruned_bf16.safetensors` |
 | Ref2VA ConvRot INT8 transformer | `diffusion_models/minimax_h3_ref2va_int8_convrot.safetensors` |
 | Ref2VA pruned ConvRot INT8 transformer | `diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors` |
 | Qwen3-VL-32B text encoder | `text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors` |
@@ -26,7 +28,7 @@ Download the following files from [Comfy-Org/MiniMax-H3](https://huggingface.co/
 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` |
 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` |
 
-T2VA uses an FL2VA transformer without first/last conditions. Pre-quantized files (ConvRot INT8 full or pruned, transformer or text encoder; NVFP4+AWQ text encoder) are detected automatically from their tensor structure — no extra flag is needed. FP8, NVFP4 transformers, and malformed or partial quantized files are rejected rather than silently interpreted as BF16. See [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights) and [NVFP4 Text Encoder](#nvfp4-text-encoder) for details.
+T2VA uses an FL2VA transformer without first/last conditions. Pre-quantized files (ConvRot INT8 full or pruned, transformer or text encoder; NVFP4+AWQ text encoder) and pruned BF16 transformers are detected automatically from their tensor structure — no extra flag is needed. FP8, NVFP4 transformers, and malformed or partial quantized files are rejected rather than silently interpreted as BF16. See [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights) and [NVFP4 Text Encoder](#nvfp4-text-encoder) for details.
 
 The Qwen3-VL processor and config are downloaded by Transformers from the official [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) repository (`processor` and `text_encoder` subfolders, a few config and tokenizer files only, no weights). The upstream `Qwen/Qwen3-VL-32B-Instruct` files are not interchangeable: the H3 tokenizer adds `<d>`, `</d>`, `<|cutoff|>`, `<|lyrics_start|>`, `<|lyrics_end|>`, `<|caption_start|>`, and `<|caption_end|>` as special tokens, and the released prompt format writes dialogue and lyrics as `<d>[Language] ...</d>`.
 
@@ -256,7 +258,7 @@ Both routes produce bit-identical models: Musubi's dynamic quantization reproduc
 
 The published quantization scope is the five Linears in each of the 50 main DiT blocks (`attn.qkv_proj`, `attn.out_proj`, `mlp.fc1`, `mlp.fc2`, and `adaln_proj.linear`). `adaln_proj` uses ConvRot group size 64 (its input width 2688 is not a multiple of 256); the rest use 256. The token refiner, final layer, embedders, and heads stay BF16/FP32. The base checkpoint shrinks from ~66 GB (BF16) to ~34 GB of weights. For pre-quantized files the checkpoint itself dictates the quantized set: the per-layer `comfy_quant` specs are validated strictly (malformed or partial triples are rejected), while artifacts that quantize a different layer set than the published scope load as declared.
 
-**Pruned transformers.** The released pruned ConvRot INT8 artifacts additionally replace the sinusoidal time embedder with a published FP32 `[1025, 8]` AdaLN curve table (`adaln_t_table`) and 8-wide AdaLN projections. They are recognized structurally and interpolated in FP32 over the model time `t = 1 - sigma` in `[0, 1]`. Pruned BF16 files are not published and not supported.
+**Pruned transformers.** The released pruned artifacts (BF16 and ConvRot INT8) replace the sinusoidal time embedder with a published FP32 `[1025, 8]` AdaLN curve table (`adaln_t_table`) and 8-wide F16 AdaLN projections (loaded as BF16). They are recognized structurally and interpolated in FP32 over the model time `t = 1 - sigma` in `[0, 1]`. Pruning removes the ~26 GB AdaLN projection weights (BF16: ~66 GB to ~40 GB; INT8: ~34 GB to ~21 GB) and shrinks each swappable block by ~40%, cutting block-swap transfer time by the same fraction. `--convrot_int8` also works on a pruned BF16 file: the 8-wide AdaLN projections fall outside every ConvRot group size and stay BF16, reproducing the published pruned INT8 scope.
 
 **Text encoder.** `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` is likewise detected automatically wherever `--text_encoder` is accepted (TE caching, training-time sampling, generation), lowering the text-encoder weight footprint from ~48 GB to ~25 GB.
 
@@ -311,7 +313,7 @@ Add a trained LoRA with:
 --lora_weight /data/h3/output/h3-lora.safetensors --lora_multiplier 1.0
 ```
 
-The same command accepts the full or pruned ConvRot INT8 transformer and the ConvRot INT8 or NVFP4+AWQ text encoder; formats are detected automatically. With a BF16 transformer, LoRAs are merged destructively once after loading (fastest inference); with a ConvRot INT8 base, each `--lora_weight` stays a separate runtime additive branch with its corresponding multiplier (see [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights)).
+The same command accepts the full or pruned BF16 or ConvRot INT8 transformer and the ConvRot INT8 or NVFP4+AWQ text encoder; formats are detected automatically. With a BF16 transformer, LoRAs are merged destructively once after loading (fastest inference); with a ConvRot INT8 base, each `--lora_weight` stays a separate runtime additive branch with its corresponding multiplier (see [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights)).
 
 For FL2VA, keep the FL2VA base and replace the task inputs:
 
@@ -335,7 +337,7 @@ The native sampler builds one common base grid, derives independent shifted vide
 
 ## Limitations
 
-- Released BF16 full and ConvRot INT8 full/pruned FL2VA/Ref2VA transformer bases only; pruned BF16 files are not published and not supported.
+- Released BF16 and ConvRot INT8 (each full or pruned) FL2VA/Ref2VA transformer bases only.
 - BF16, ConvRot INT8, or NVFP4+AWQ Qwen3-VL text encoder only.
 - No FP8 artifact loading, and no NVFP4 transformer loading.
 - No CFG or negative prompt.

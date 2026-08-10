@@ -888,11 +888,43 @@ def test_pruned_classifier_rejects_non_eight_wide_adaln(tmp_path: Path, monkeypa
         h3_model.classify_h3_transformer([checkpoint])
 
 
-def test_pruned_classifier_requires_convrot_artifact(tmp_path: Path):
-    config = _tiny_config(num_layers=1, pruned=True)
-    state = MiniMaxH3Model(config, dtype=torch.bfloat16).state_dict()
+def test_pruned_classifier_accepts_pruned_bf16_artifact(tmp_path: Path, monkeypatch):
+    # pruned artifacts are published both as ConvRot INT8 and as plain BF16; the BF16
+    # variant has no comfy_quant tensors and no config metadata, only the structure
+    config, state = _synthetic_convrot_h3_state(pruned=True, layers={})
     checkpoint = tmp_path / "pruned-bf16.safetensors"
     save_file(state, checkpoint)
+    monkeypatch.setattr(h3_model, "_published_pruned_h3_config", lambda: config)
 
-    with pytest.raises(ValueError, match="pruned.*ConvRot"):
-        h3_model.classify_h3_transformer([checkpoint])
+    classified = h3_model.classify_h3_transformer([checkpoint])
+
+    assert classified.is_pruned
+
+
+def test_load_h3_transformer_loads_pruned_bf16_and_converts_f16_adaln(tmp_path: Path, monkeypatch):
+    config, state = _synthetic_convrot_h3_state(pruned=True, layers={})
+    checkpoint = tmp_path / "pruned-bf16.safetensors"
+    save_file(state, checkpoint)
+    monkeypatch.setattr(h3_model, "_published_pruned_h3_config", lambda: config)
+
+    loaded = h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16)
+
+    assert loaded.config.is_pruned
+    assert not getattr(loaded, "is_convrot_int8", False)
+    assert loaded.time_embedder is None
+    assert loaded.adaln_t_table.dtype is torch.float32
+    assert state["blocks.0.adaln_proj.linear.weight"].dtype is torch.float16
+    assert loaded.blocks[0].adaln_proj.linear.weight.dtype is torch.bfloat16
+    assert loaded.final_layer.adaln_proj.linear.bias.dtype is torch.bfloat16
+    assert loaded.blocks[0].attn.qkv_proj.weight.dtype is torch.bfloat16
+
+
+def test_pruned_bf16_loader_converts_f16_only_for_adaln_projections(tmp_path: Path, monkeypatch):
+    config, state = _synthetic_convrot_h3_state(pruned=True, layers={})
+    state["blocks.0.norm1.weight"] = state["blocks.0.norm1.weight"].to(torch.float16)
+    checkpoint = tmp_path / "pruned-bf16-stray-f16.safetensors"
+    save_file(state, checkpoint)
+    monkeypatch.setattr(h3_model, "_published_pruned_h3_config", lambda: config)
+
+    with pytest.raises(ValueError, match=r"dtype mismatch.*norm1"):
+        h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16)

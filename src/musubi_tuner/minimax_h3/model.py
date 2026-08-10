@@ -46,7 +46,7 @@ from musubi_tuner.minimax_h3.packing import (
     unpack_targets,
 )
 from musubi_tuner.modules.attention import AttentionParams, attention
-from musubi_tuner.modules.convrot_int8_utils import COMFY_QUANT_SUFFIX, canonicalize_convrot_int8_key, has_comfy_quant_tensors
+from musubi_tuner.modules.convrot_int8_utils import canonicalize_convrot_int8_key, has_comfy_quant_tensors
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
@@ -219,10 +219,10 @@ def classify_h3_transformer(
 ) -> MiniMaxH3Config:
     """Classify a transformer checkpoint as the published full or pruned-AdaLN structure.
 
-    Pruned artifacts are recognized structurally: the ``adaln_t_table`` FP32 [1025, 8]
-    curve table replaces the sinusoidal time embedder, and every AdaLN projection takes
-    the 8-wide interpolated embedding directly (no SiLU). Full checkpoints keep the
-    published-config metadata validation.
+    Pruned artifacts (published as ConvRot INT8 and as BF16) are recognized structurally:
+    the ``adaln_t_table`` FP32 [1025, 8] curve table replaces the sinusoidal time
+    embedder, and every AdaLN projection takes the 8-wide interpolated embedding
+    directly (no SiLU). Full checkpoints keep the published-config metadata validation.
     """
     headers = _read_h3_tensor_headers(files)
     table = headers.get("adaln_t_table")
@@ -235,12 +235,6 @@ def classify_h3_transformer(
         raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must be F32, got {table_dtype}")
     if table_shape != (1025, 8):
         raise ValueError(f"Pruned MiniMax-H3 adaln_t_table must have shape [1025, 8], got {table_shape}")
-    if not any(key.endswith(COMFY_QUANT_SUFFIX) for key in headers):
-        raise ValueError(
-            "Pruned MiniMax-H3 checkpoints are only published as ConvRot INT8 artifacts;"
-            " this file has the pruned AdaLN table but no ConvRot INT8 layers"
-        )
-
     config = _published_pruned_h3_config()
     for index in range(config.num_layers):
         prefix = f"blocks.{index}.adaln_proj.linear"
@@ -1052,6 +1046,12 @@ def _load_h3_transformer_bf16(
     sd: dict[str, torch.Tensor] = {}
     for file in files:
         sd.update(load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap))
+    # pruned artifacts publish the AdaLN projections in F16; convert them to the BF16
+    # compute dtype (the same treatment as the ConvRot INT8 loader)
+    if config.is_pruned:
+        for key, tensor in sd.items():
+            if ".adaln_proj.linear." in key and tensor.dtype == torch.float16:
+                sd[key] = tensor.to(torch.bfloat16)
     # the model definition is the dtype source of truth: BF16 compute weights plus FP32
     # fixed-precision islands must arrive exactly as published, without silent conversion
     expected_state = model.state_dict()
@@ -1085,8 +1085,10 @@ def load_h3_transformer(
     if dtype != torch.bfloat16:
         raise ValueError("MiniMax-H3 accepts only BF16 transformer checkpoints")
     files = resolve_safetensors_files(checkpoint_path)
-    # Pre-quantized ConvRot INT8 artifacts (full or pruned) are detected from their
-    # tensor structure; --convrot_int8 additionally quantizes BF16 checkpoints on the fly.
+    # Pre-quantized ConvRot INT8 artifacts (full or pruned) and pruned BF16 artifacts are
+    # detected from their tensor structure; --convrot_int8 additionally quantizes BF16
+    # checkpoints (full or pruned) on the fly — pruned AdaLN projections are 8-wide and
+    # fall outside every ConvRot group size, so the quantizer skips them automatically.
     prequantized = has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap)
     use_convrot_int8 = convrot_int8 or prequantized
     config = classify_h3_transformer(files, allow_convrot_int8=use_convrot_int8)

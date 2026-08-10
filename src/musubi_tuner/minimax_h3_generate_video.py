@@ -284,8 +284,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dit",
         required=True,
-        help="MiniMax-H3 transformer safetensors path or directory (BF16 or ConvRot INT8; pre-quantized full and "
-        "pruned ConvRot INT8 checkpoints are detected automatically)",
+        help="MiniMax-H3 transformer safetensors path or directory (BF16 or ConvRot INT8, each full or pruned; "
+        "pre-quantized and pruned checkpoints are detected automatically)",
     )
     parser.add_argument(
         "--convrot_int8",
