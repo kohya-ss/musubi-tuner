@@ -1458,6 +1458,7 @@ def test_h3_parser_defaults_leave_teacher_matching_off():
 
     assert args.h3_teacher_matching is False
     assert args.h3_teacher_conditions == "first,last"
+    assert args.h3_teacher_condition_sigma_max == 1.0
 
 
 @pytest.mark.parametrize(
@@ -1466,6 +1467,8 @@ def test_h3_parser_defaults_leave_teacher_matching_off():
         ({"h3_teacher_matching": True, "task": "fl2va"}, "t2va"),
         ({"h3_teacher_matching": True, "h3_guidance_loss_scale": 3.0}, "mutually exclusive"),
         ({"h3_teacher_matching": True, "h3_teacher_conditions": "first"}, "first,last"),
+        ({"h3_teacher_matching": True, "h3_teacher_condition_sigma_max": 1.5}, "h3_teacher_condition_sigma_max"),
+        ({"h3_teacher_matching": True, "h3_teacher_condition_sigma_max": -0.1}, "h3_teacher_condition_sigma_max"),
     ],
 )
 def test_h3_teacher_matching_rejects_invalid_configurations(overrides, message):
@@ -1528,9 +1531,52 @@ def test_teacher_matching_replaces_both_targets_with_the_frozen_base_predictions
     assert metrics["loss/video"] == pytest.approx(1.0)
     assert metrics["loss/audio"] == pytest.approx(2.25)
     assert metrics["teacher/base_sigma"] == pytest.approx(0.25)
+    assert metrics["teacher/conditioned"] == 1.0
     # flow targets are 0 (video) and 4 (audio), so the logged teacher deviations are 3.0 and 3.5
     assert metrics["teacher/video_flow_gap_rms"] == pytest.approx(3.0)
     assert metrics["teacher/audio_flow_gap_rms"] == pytest.approx(3.5)
+    assert torch.isfinite(loss)
+
+
+def test_teacher_condition_sigma_max_switches_the_teacher_to_a_preservation_anchor(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    # the drawn base sigma (0.25) lies above the threshold, so the teacher must drop the
+    # endpoint conditions and run on the student's own text and layout
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_condition_sigma_max=0.2)
+    trainer.handle_model_specific_args(args)
+    network = _ToggleNetwork()
+    transformer = _TeacherAwareTransformer(
+        network, teacher_video=3.0, teacher_audio=0.5, video_prediction=2.0, audio_prediction=-1.0
+    )
+    batch = _teacher_batch()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    _patch_deterministic_noise(monkeypatch)
+
+    loss, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        network,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    teacher_call, student_call = transformer.calls
+    assert teacher_call["layout"].task == "t2va"
+    assert teacher_call["layout"] is student_call["layout"]
+    assert teacher_call["text_hidden_states"].shape == (1, 3, 12)
+    assert len(teacher_call["visual_condition_latents"]) == 0
+    # the LoRA is still disabled for the anchor forward, and the targets are its predictions
+    assert network.calls == [False, True]
+    assert metrics["teacher/conditioned"] == 0.0
+    assert metrics["loss/video"] == pytest.approx(1.0)
+    assert metrics["loss/audio"] == pytest.approx(2.25)
     assert torch.isfinite(loss)
 
 
@@ -1609,9 +1655,12 @@ def test_teacher_matching_metadata_is_recorded_only_when_active():
     off = trainer.extra_metadata(_trainer_args())
     assert not any(key.startswith("ss_minimax_h3_teacher") for key in off)
 
-    on = trainer.extra_metadata(_trainer_args(h3_teacher_matching=True, h3_teacher_conditions=" first , last "))
+    on = trainer.extra_metadata(
+        _trainer_args(h3_teacher_matching=True, h3_teacher_conditions=" first , last ", h3_teacher_condition_sigma_max=0.5)
+    )
     assert on["ss_minimax_h3_teacher_matching"] is True
     assert on["ss_minimax_h3_teacher_conditions"] == "first,last"
+    assert on["ss_minimax_h3_teacher_condition_sigma_max"] == 0.5
 
 
 def test_lora_set_enabled_bypasses_training_modules():

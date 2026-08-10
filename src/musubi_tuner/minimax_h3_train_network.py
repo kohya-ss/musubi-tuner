@@ -467,7 +467,14 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     " the teacher target already lives in the distilled guided space"
                 )
             conditions = normalize_teacher_conditions(args.h3_teacher_conditions)
-            logger.info("MiniMax-H3 teacher matching: FL2VA teacher conditioned on %s", conditions)
+            sigma_max = float(args.h3_teacher_condition_sigma_max)
+            if not 0.0 <= sigma_max <= 1.0:
+                raise ValueError(f"--h3_teacher_condition_sigma_max must be in [0.0,1.0], got {sigma_max}")
+            logger.info(
+                "MiniMax-H3 teacher matching: FL2VA teacher conditioned on %s up to base sigma %s (base-preservation anchor above)",
+                conditions,
+                sigma_max,
+            )
         if args.h3_guidance_loss_scale_audio is not None and float(args.h3_guidance_loss_scale_audio) < 0.0:
             raise ValueError(f"--h3_guidance_loss_scale_audio must be nonnegative, got {args.h3_guidance_loss_scale_audio}")
         if not 0.0 <= float(args.h3_guidance_loss_sigma_min) <= 1.0:
@@ -862,6 +869,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if getattr(args, "h3_teacher_matching", False):
             metadata["ss_minimax_h3_teacher_matching"] = True
             metadata["ss_minimax_h3_teacher_conditions"] = normalize_teacher_conditions(args.h3_teacher_conditions)
+            metadata["ss_minimax_h3_teacher_condition_sigma_max"] = args.h3_teacher_condition_sigma_max
         if self._audio_items_seen > 0:
             # fraction observed on this rank so far (exact once a full epoch has run)
             metadata["ss_minimax_h3_supervised_audio_fraction"] = round(self._audio_supervised_seen / self._audio_items_seen, 6)
@@ -1114,7 +1122,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         base_sigma,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-        """Replace both flow targets with the frozen base model's FL2VA predictions.
+        """Replace both flow targets with the frozen base model's predictions.
 
         The teacher shares weights with the student: the same transformer runs once with the
         LoRA disabled, conditioned on the real first/last frames and the Picture-prefixed text
@@ -1126,6 +1134,14 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         sigma-binned teacher/*_flow_gap_rms logs rather than expecting it to reach zero. The
         audio target degenerates to a base-preservation anchor: the visual endpoints carry
         almost no audio information, so real audio content is not learned in this mode.
+
+        Above --h3_teacher_condition_sigma_max the teacher instead runs on the student's own
+        text and layout with no endpoint conditions, turning the target into a pure
+        base-preservation anchor. The teacher target is a noiseless regression label
+        (deterministic per x_t), and near pure noise the endpoint content is unpredictable
+        from the text, so unrestricted teaching there rapidly overwrites the base composition
+        prior with the dataset mean; anchoring that band to the base also counters the
+        collateral drift of the LoRA's shared weights.
         """
         if runtime.teacher_layout is None or runtime.teacher_text_hidden_states is None:
             raise RuntimeError("MiniMax-H3 teacher matching batch plan is missing the teacher layout")
@@ -1137,6 +1153,17 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise RuntimeError(
                 "MiniMax-H3 teacher matching requires a network exposing set_enabled (e.g. networks.lora_minimax_h3)"
             )
+        conditioned = float(base_sigma) <= float(args.h3_teacher_condition_sigma_max)
+        if conditioned:
+            teacher_text = runtime.teacher_text_hidden_states
+            teacher_tags = runtime.teacher_text_token_tags
+            teacher_layout = runtime.teacher_layout
+        else:
+            # base-preservation anchor: same text and layout as the student, LoRA off
+            teacher_text = runtime.text_hidden_states
+            teacher_tags = runtime.text_token_tags
+            teacher_layout = runtime.layout
+            teacher_visual_conditions = ()
         autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
         # the teacher forward runs before the grad forward so the block-swap offloader keeps
         # its forward->backward alternation and no autograd graph is live yet
@@ -1146,9 +1173,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 teacher = transformer(
                     video_latents=noisy_model_input,
                     audio_latents=noisy_audio_input,
-                    text_hidden_states=runtime.teacher_text_hidden_states.to(device=accelerator.device, dtype=network_dtype),
-                    text_token_tags=runtime.teacher_text_token_tags.to(accelerator.device),
-                    layout=runtime.teacher_layout,
+                    text_hidden_states=teacher_text.to(device=accelerator.device, dtype=network_dtype),
+                    text_token_tags=teacher_tags.to(accelerator.device),
+                    layout=teacher_layout,
                     model_t_video=model_t_video,
                     model_t_audio=model_t_audio,
                     visual_condition_latents=teacher_visual_conditions,
@@ -1164,6 +1191,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         # target (guidance amplification + endpoint information), binned by base sigma
         teacher_log = {
             "teacher/base_sigma": torch.as_tensor(float(base_sigma)),
+            "teacher/conditioned": torch.tensor(1.0 if conditioned else 0.0),
             "teacher/video_flow_gap_rms": (teacher_video - video_target.float()).pow(2).mean().sqrt().detach(),
             "teacher/audio_flow_gap_rms": (teacher_audio - audio_target.float()).pow(2).mean().sqrt().detach(),
         }
@@ -1389,6 +1417,15 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         default="first,last",
         help="visual conditions handed to the FL2VA teacher (currently only 'first,last' is supported;"
         " the flag exists so single-sided or anchored teachers can be added later)",
+    )
+    parser.add_argument(
+        "--h3_teacher_condition_sigma_max",
+        type=float,
+        default=1.0,
+        help="teacher matching only: above this drawn base sigma (pre-shift, 1 = pure noise) the teacher drops the"
+        " endpoint conditions and runs on the student's own text, turning the target into a pure base-preservation"
+        " anchor. Near pure noise the endpoint content is unpredictable from the text, so unrestricted teaching"
+        " there rapidly overwrites the base composition prior (recommended 0.4-0.5; 1.0 = always conditioned)",
     )
     parser.add_argument("--dit_dtype", type=str, default=None, help="MiniMax-H3 DiT dtype; R1 requires bfloat16")
     parser.add_argument(
