@@ -278,6 +278,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "lora_weight": None,
         "lora_multiplier": None,
         "convrot_int8": False,
+        "prune_adaln": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

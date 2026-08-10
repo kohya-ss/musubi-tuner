@@ -919,6 +919,106 @@ def test_load_h3_transformer_loads_pruned_bf16_and_converts_f16_adaln(tmp_path: 
     assert loaded.blocks[0].attn.qkv_proj.weight.dtype is torch.bfloat16
 
 
+def test_self_pruned_config_validation():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        MiniMaxH3Config(time_embed_dim=8, adaln_curve_grid=1025, adaln_rank=8)
+    with pytest.raises(ValueError, match="rank must be positive"):
+        MiniMaxH3Config(adaln_rank=0)
+    config = MiniMaxH3Config(adaln_rank=8)
+    assert config.is_pruned
+    assert config.adaln_in_features == 9
+    assert MiniMaxH3Config().adaln_in_features == 2688
+    assert MiniMaxH3Config(time_embed_dim=8, adaln_curve_grid=1025).adaln_in_features == 8
+
+
+def test_prune_adaln_load_matches_full_modulation(tmp_path: Path, monkeypatch):
+    torch.manual_seed(0)
+    config = _tiny_config(num_layers=1)
+    full = MiniMaxH3Model(config, dtype=torch.bfloat16)
+    state = {key: tensor.detach().cpu().clone() for key, tensor in full.state_dict().items()}
+    checkpoint = tmp_path / "full-bf16.safetensors"
+    save_file(state, checkpoint, metadata={"config": "{}"})
+    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata, **_kwargs: config)
+
+    pruned = h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16, prune_adaln=True)
+
+    assert pruned.config.adaln_rank == 8
+    assert pruned.config.adaln_curve_grid is None
+    assert pruned.time_embedder is not None
+    assert pruned.adaln_basis.shape == (config.time_embed_dim, 8)
+    assert pruned.adaln_basis.dtype is torch.float32
+    assert pruned.adaln_mean.dtype is torch.float32
+    assert pruned.blocks[0].adaln_proj.linear.weight.shape == (config.block_adaln_out_features, 9)
+    assert pruned.blocks[0].adaln_proj.linear.weight.dtype is torch.bfloat16
+    assert pruned.final_layer.adaln_proj.linear.weight.shape == (config.final_adaln_out_features, 9)
+
+    # the tiny config has time_embed_dim == rank, so the basis spans the full embedding
+    # space and the pruned modulation must match the full model up to BF16 rounding
+    reference = MiniMaxH3Model(config, dtype=torch.bfloat16)
+    reference.load_state_dict(state)
+    reference = reference.to(torch.float32)
+    timesteps = torch.tensor([0.0, 0.1234, 0.5, 0.75, 0.987, 1.0])
+    device = torch.device("cpu")
+    reference_chunks = reference.blocks[0].adaln_proj(reference._timestep_embeddings(timesteps, device))
+    pruned_chunks = pruned.blocks[0].adaln_proj(pruned._timestep_embeddings(timesteps, device))
+    for pruned_chunk, reference_chunk in zip(pruned_chunks, reference_chunks):
+        torch.testing.assert_close(pruned_chunk.float(), reference_chunk, rtol=0.05, atol=0.02)
+    reference_final = reference.final_layer.adaln_proj(reference._timestep_embeddings(timesteps, device))
+    pruned_final = pruned.final_layer.adaln_proj(pruned._timestep_embeddings(timesteps, device))
+    for pruned_chunk, reference_chunk in zip(pruned_final, reference_final):
+        torch.testing.assert_close(pruned_chunk.float(), reference_chunk, rtol=0.05, atol=0.02)
+
+
+def test_prune_adaln_rejects_prequantized_checkpoints(tmp_path: Path, monkeypatch):
+    config, state = _synthetic_convrot_h3_state(
+        pruned=False,
+        layers=_tiny_transformer_convrot_layers(pruned=False),
+    )
+    checkpoint = tmp_path / "full-int8-convrot.safetensors"
+    save_file(state, checkpoint, metadata={"config": "{}"})
+    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata, **_kwargs: config)
+
+    with pytest.raises(ValueError, match="prune_adaln requires a BF16"):
+        h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16, prune_adaln=True)
+
+
+def test_prune_adaln_is_noop_on_published_pruned_artifacts(tmp_path: Path, monkeypatch):
+    config, state = _synthetic_convrot_h3_state(
+        pruned=True,
+        layers=_tiny_transformer_convrot_layers(pruned=True),
+    )
+    checkpoint = tmp_path / "pruned-int8-convrot.safetensors"
+    save_file(state, checkpoint)
+    monkeypatch.setattr(h3_model, "_published_pruned_h3_config", lambda: config)
+
+    loaded = h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16, prune_adaln=True)
+
+    assert loaded.config.adaln_curve_grid == 1025
+    assert loaded.config.adaln_rank is None
+    assert loaded.is_convrot_int8
+
+
+def test_prune_adaln_combines_with_convrot_int8(tmp_path: Path, monkeypatch):
+    torch.manual_seed(0)
+    config = _convrot_test_config(pruned=False)
+    full = MiniMaxH3Model(config, dtype=torch.bfloat16)
+    state = {key: tensor.detach().cpu().clone() for key, tensor in full.state_dict().items()}
+    checkpoint = tmp_path / "full-bf16.safetensors"
+    save_file(state, checkpoint, metadata={"config": "{}"})
+    monkeypatch.setattr(h3_model, "parse_h3_transformer_config", lambda _metadata, **_kwargs: config)
+
+    loaded = h3_model.load_h3_transformer(checkpoint, device="cpu", dtype=torch.bfloat16, convrot_int8=True, prune_adaln=True)
+
+    assert loaded.config.adaln_rank == 8
+    assert loaded.is_convrot_int8
+    assert loaded.blocks[0].attn.qkv_proj.weight.dtype is torch.int8
+    # the rewritten 9-wide AdaLN projection falls outside every ConvRot group size and
+    # stays BF16, matching the published pruned INT8 scope
+    assert loaded.blocks[0].adaln_proj.linear.weight.dtype is torch.bfloat16
+    assert loaded.blocks[0].adaln_proj.linear.weight.shape == (config.block_adaln_out_features, 9)
+    assert loaded.adaln_basis.shape == (config.time_embed_dim, 8)
+
+
 def test_pruned_bf16_loader_converts_f16_only_for_adaln_projections(tmp_path: Path, monkeypatch):
     config, state = _synthetic_convrot_h3_state(pruned=True, layers={})
     state["blocks.0.norm1.weight"] = state["blocks.0.norm1.weight"].to(torch.float16)
