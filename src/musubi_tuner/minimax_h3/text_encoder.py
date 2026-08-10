@@ -484,6 +484,60 @@ def encode_h3_presentation(processor, model, presentation: H3Presentation) -> tu
     return hidden_states, token_tags
 
 
+# The guidance-loss uncond cache: one text-only probe embedding (layer-50 hidden rows +
+# token tags), shared between the cache script that writes it and the trainer that reads
+# it. The format id matches the uncond-probe screening harness so screened probes load
+# directly. Bump on any semantic change so stale caches are rejected.
+UNCOND_CACHE_FORMAT = "h3-uncond-probe-v1"
+
+
+def _validate_uncond_cache_tensors(hidden_states: torch.Tensor, token_tags: torch.Tensor, label: str) -> None:
+    if hidden_states.ndim != 2 or hidden_states.shape[0] < 1:
+        raise ValueError(f"MiniMax-H3 uncond cache {label} hidden states must be [L>=1,width], got {tuple(hidden_states.shape)}")
+    if hidden_states.shape[0] > MAX_TEXT_ROWS:
+        raise _text_size_error(hidden_states.shape[0], token_tags)
+    if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
+        raise ValueError(f"MiniMax-H3 uncond cache {label} token tags must be int64 [L]")
+    if not torch.all((token_tags == 0) | (token_tags == 1)):
+        raise ValueError(f"MiniMax-H3 uncond cache {label} token tags may contain only 0 and 1")
+
+
+def save_h3_uncond_cache(
+    path: str | Path,
+    hidden_states: torch.Tensor,
+    token_tags: torch.Tensor,
+    *,
+    metadata: Mapping[str, str] | None = None,
+) -> None:
+    from safetensors.torch import save_file
+
+    _validate_uncond_cache_tensors(hidden_states, token_tags, str(path))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file(
+        {"hidden_states": hidden_states.contiguous(), "token_tags": token_tags.contiguous()},
+        str(path),
+        metadata={"cache_format": UNCOND_CACHE_FORMAT, **dict(metadata or {})},
+    )
+
+
+def load_h3_uncond_cache(path: str | Path) -> tuple[torch.Tensor, torch.Tensor, dict[str, str]]:
+    from safetensors import safe_open
+
+    path = Path(path)
+    with safe_open(str(path), framework="pt", device="cpu") as handle:
+        metadata = dict(handle.metadata() or {})
+        cached_format = metadata.get("cache_format")
+        if cached_format != UNCOND_CACHE_FORMAT:
+            raise ValueError(f"MiniMax-H3 uncond cache format must be {UNCOND_CACHE_FORMAT!r}, got {cached_format!r}: {path}")
+        if set(handle.keys()) != {"hidden_states", "token_tags"}:
+            raise ValueError(f"MiniMax-H3 uncond cache has an invalid tensor-key set: {path}")
+        hidden_states = handle.get_tensor("hidden_states")
+        token_tags = handle.get_tensor("token_tags")
+    _validate_uncond_cache_tensors(hidden_states, token_tags, str(path))
+    return hidden_states, token_tags, metadata
+
+
 def processor_fingerprint(processor) -> str:
     tokenizer = getattr(processor, "tokenizer", None)
     payload = {
