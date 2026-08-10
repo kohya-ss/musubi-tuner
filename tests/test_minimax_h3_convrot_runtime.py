@@ -64,6 +64,7 @@ def _load_training_module(monkeypatch):
         load_h3_processor=noop,
         load_h3_text_encoder=noop,
         load_h3_uncond_cache=noop,
+        normalize_teacher_conditions=noop,
     )
     _stub(
         monkeypatch,

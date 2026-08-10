@@ -600,31 +600,41 @@ def save_text_encoder_output_cache_minimax_h3(
     tensors: dict[str, torch.Tensor],
     metadata: Optional[dict[str, str]] = None,
 ):
-    hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_hidden_states_")]
-    if len(hidden_keys) != 1:
-        raise ValueError(f"MiniMax-H3 text cache requires exactly one hidden-state tensor, found {len(hidden_keys)}")
-    hidden_key = hidden_keys[0]
-    hidden_states = tensors[hidden_key]
+    # the teacher prefix must be split off before matching the student prefix, because
+    # "varlen_mmh3_teacher_hidden_states_*" does not share the student prefix
+    student_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_hidden_states_")]
+    teacher_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_teacher_hidden_states_")]
+    if len(student_hidden_keys) != 1:
+        raise ValueError(f"MiniMax-H3 text cache requires exactly one hidden-state tensor, found {len(student_hidden_keys)}")
     tags_key = "varlen_mmh3_token_tags_int64"
-    if set(tensors) != {hidden_key, tags_key}:
-        raise ValueError(f"MiniMax-H3 text cache requires keys {hidden_key!r} and {tags_key!r}")
-    token_tags = tensors[tags_key]
+    teacher_tags_key = "varlen_mmh3_teacher_token_tags_int64"
 
-    if hidden_states.ndim != 2 or hidden_states.shape[1] != 5120:
-        raise ValueError(f"MiniMax-H3 hidden states must be [L,5120], got {tuple(hidden_states.shape)}")
-    if not _h3_dtype_matches(hidden_states, hidden_key.removeprefix("varlen_mmh3_hidden_states_")):
-        raise ValueError(f"MiniMax-H3 hidden-state key dtype does not match tensor: {hidden_key}")
-    if hidden_states.shape[0] > 32768:
-        raise ValueError(f"MiniMax-H3 text cache exceeds 32768 rows: {hidden_states.shape[0]}")
-    if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
-        raise ValueError("MiniMax-H3 token tags must be int64 [L]")
-    if not torch.all((token_tags == 0) | (token_tags == 1)):
-        raise ValueError("MiniMax-H3 token tags may contain only 0 and 1")
+    pairs = [(student_hidden_keys[0], "varlen_mmh3_hidden_states_", tags_key)]
+    expected_keys = {student_hidden_keys[0], tags_key}
+    if teacher_hidden_keys or teacher_tags_key in tensors:
+        if len(teacher_hidden_keys) != 1 or teacher_tags_key not in tensors:
+            raise ValueError("MiniMax-H3 teacher text rows require exactly one hidden-state tensor and its token tags")
+        pairs.append((teacher_hidden_keys[0], "varlen_mmh3_teacher_hidden_states_", teacher_tags_key))
+        expected_keys |= {teacher_hidden_keys[0], teacher_tags_key}
+    if set(tensors) != expected_keys:
+        raise ValueError(f"MiniMax-H3 text cache requires exactly the keys {sorted(expected_keys)}")
 
-    normalized = {
-        hidden_key: hidden_states.detach().cpu().contiguous(),
-        tags_key: token_tags.detach().cpu().contiguous(),
-    }
+    normalized = {}
+    for hidden_key, hidden_prefix, pair_tags_key in pairs:
+        hidden_states = tensors[hidden_key]
+        token_tags = tensors[pair_tags_key]
+        if hidden_states.ndim != 2 or hidden_states.shape[1] != 5120:
+            raise ValueError(f"MiniMax-H3 hidden states must be [L,5120], got {tuple(hidden_states.shape)}")
+        if not _h3_dtype_matches(hidden_states, hidden_key.removeprefix(hidden_prefix)):
+            raise ValueError(f"MiniMax-H3 hidden-state key dtype does not match tensor: {hidden_key}")
+        if hidden_states.shape[0] > 32768:
+            raise ValueError(f"MiniMax-H3 text cache exceeds 32768 rows: {hidden_states.shape[0]}")
+        if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
+            raise ValueError("MiniMax-H3 token tags must be int64 [L]")
+        if not torch.all((token_tags == 0) | (token_tags == 1)):
+            raise ValueError("MiniMax-H3 token tags may contain only 0 and 1")
+        normalized[hidden_key] = hidden_states.detach().cpu().contiguous()
+        normalized[pair_tags_key] = token_tags.detach().cpu().contiguous()
     save_text_encoder_output_cache_common(
         item_info,
         normalized,

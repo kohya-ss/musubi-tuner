@@ -143,6 +143,8 @@ python minimax_h3_cache_text_encoder_outputs.py \
 
 Add `--uncond_output /data/h3/uncond_space.safetensors` to also write the tiny uncond probe embedding used by the training guidance loss (see Guidance-distillation countermeasure below); `--uncond_text` overrides the probe text (default: a single space).
 
+Add `--teacher_conditions first,last` (with `--task t2va`) to also store the FL2VA teacher presentation of each item alongside the plain caption rows, for teacher-matching training (see Teacher-matching training below). The caption is shared between the two presentations; the teacher rows only add the `<Picture 1>`/`<Picture 2>` prefix with the first/last frames of the crop window. The latent caches for that mode must be created with `--task fl2va`.
+
 The same command accepts the ConvRot INT8 text encoder (`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`) and the NVFP4+AWQ text encoder (`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`); the formats are detected automatically. On VRAM-limited GPUs add `--text_encoder_blocks_to_swap 50` to stream the encoder layers from CPU, and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations (see Text Encoder Layer Streaming below). The cache stores the state after the first 50 Qwen layers, before a final language-model norm. `hidden_states[0]` is the embedding output, so this is `hidden_states[50]`. The cache also stores per-row modality tags and presentation fingerprints; stale or structurally incompatible caches are rejected.
 
 ## LoRA Training
@@ -209,6 +211,30 @@ Optional refinements:
 - `--h3_guidance_loss_sigma_min` skips the extra uncond forward when the drawn base sigma (pre-shift, 1 = pure noise) is below the threshold. Measured on the released checkpoint, the relative text-guidance magnitude `|g(cond) - g(uncond)| / |g|` for video collapses from ~46% at `sigma_video 0.98` to ~3% at `0.71`, so low-sigma corrections mostly amplify per-sample noise while still paying a full forward. Training logs confirm this: below base sigma ~0.15 the logged gap magnitudes are dominated by the irreducible per-sample residual (the part of the noise draw no prediction can know — especially visible in the audio gap, which *rises* toward low sigma), i.e. amplified label noise rather than guidance signal. **Recommended: `0.15`** — it skips the noisiest ~15% of steps while keeping nearly all of the video and audio guidance signal. `0` (default) always applies the loss, matching ai-toolkit.
 
 Each step logs `guidance/applied` and the sigma-dependent gap magnitudes `guidance/video_gap_rms` / `guidance/audio_gap_rms`; the metadata records `ss_minimax_h3_guidance_loss_scale`, `..._scale_audio`, and `..._sigma_min`. The cost is one extra no-grad forward per applied step (roughly +50% step time without gating; less with `--h3_guidance_loss_sigma_min`).
+
+### Teacher-matching training (FL2VA teacher for a T2VA student)
+
+`--h3_teacher_matching` trains a T2VA LoRA against the frozen base model's FL2VA predictions instead of the flow-matching target. Each step runs one extra no-grad forward of the same transformer with the LoRA disabled, conditioned on the real first and last frames of the training clip and the Picture-prefixed FL2VA text presentation — privileged information the text-only student never sees:
+
+```
+loss = || student(x_t, text) - teacher(x_t, text, first, last) ||^2
+```
+
+The teacher prediction lives in the distilled guided space, so the target needs no guidance scale and no uncond probe, and the de-distillation drift of plain flow targets is structurally avoided. `--h3_teacher_matching` is therefore mutually exclusive with `--h3_guidance_loss_scale`, and requires `--task t2va`.
+
+Data preparation differs from plain T2VA in two places:
+
+- Latent caching runs with `--task fl2va`, so the caches include the first/last condition latents (they feed only the teacher forward).
+- Text caching runs with `--task t2va --teacher_conditions first,last`, so each cache stores both presentations: the plain caption rows for the student and the FL2VA presentation for the teacher. The caption itself is shared.
+
+Training then runs with `--task t2va --h3_teacher_matching`. What to expect:
+
+- **The loss does not converge to zero.** The teacher sees the real endpoints, so its prediction contains content the text alone cannot determine; this information gap is an irreducible floor, largest at high sigma. Read the per-step logs `teacher/video_flow_gap_rms` / `teacher/audio_flow_gap_rms` binned by `teacher/base_sigma` — they measure how far the teacher deviates from the raw velocity target (guidance amplification plus endpoint information) — rather than expecting `loss/video` to vanish.
+- **Audio degenerates to a base-preservation anchor.** The visual endpoints carry almost no audio information, so the teacher's audio prediction stays close to the base model's text-conditioned prediction, and matching it preserves the base audio behavior instead of learning the audio content of the training data. Because H3 is single-stream, this anchor also protects the video path from drift entering through the shared weights. Training voice or audio content needs the guidance loss instead. `--video_only` and `--audio_loss_weight` gate the audio term as usual.
+- The appearance signal is the strongest part of the teacher target (endpoints plus `x_t` leakage); intermediate motion is weaker at high sigma, following the sigma profile measured for the guidance loss.
+- The cost is one extra no-grad forward per step, roughly +50% step time (same as the ungated guidance loss).
+
+`--h3_teacher_conditions` currently accepts only `first,last`: training videos always provide both endpoints, and the FL2VA base is most in-distribution with both anchors. The flag reserves the interface for single-sided or anchored teacher variants. The metadata records `ss_minimax_h3_teacher_matching` and `ss_minimax_h3_teacher_conditions`.
 
 ### Training-time joint AV samples
 

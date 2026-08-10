@@ -557,6 +557,21 @@ def processor_fingerprint(processor) -> str:
 # algorithm, text layout constants, or the fingerprint formats) so stale caches are rebuilt/rejected.
 TEXT_CACHE_FORMAT = "minimax-h3-text-v2"
 
+# The teacher-matching initial scope fixes the teacher conditioning to both endpoints: full
+# training videos always provide first and last frames, and the FL2VA base is most
+# in-distribution with both anchors. The value is validated through this seam so single-sided
+# or anchored teachers can slot in later without changing the cache or trainer interfaces.
+TEACHER_CONDITIONS_FIRST_LAST = "first,last"
+
+
+def normalize_teacher_conditions(value: str) -> str:
+    parts = [part.strip() for part in str(value).split(",")]
+    if parts != ["first", "last"]:
+        raise ValueError(
+            f"MiniMax-H3 teacher matching supports only teacher conditions '{TEACHER_CONDITIONS_FIRST_LAST}', got {value!r}"
+        )
+    return TEACHER_CONDITIONS_FIRST_LAST
+
 
 def presentation_fingerprint(
     presentation: H3Presentation,

@@ -1402,3 +1402,213 @@ def test_guidance_loss_metadata_is_recorded_only_when_active(tmp_path):
     assert on["ss_minimax_h3_guidance_loss_scale"] == 4.0
     assert on["ss_minimax_h3_guidance_loss_scale_audio"] == 4.0
     assert on["ss_minimax_h3_guidance_loss_sigma_min"] == 0.3
+
+
+# --- teacher matching (FL2VA teacher targets for a T2VA student) ---
+
+
+class _ToggleNetwork:
+    def __init__(self):
+        self.enabled = True
+        self.calls = []
+
+    def set_enabled(self, value):
+        self.enabled = bool(value)
+        self.calls.append(bool(value))
+
+
+class _TeacherAwareTransformer(_RecordingTransformer):
+    """Returns the teacher constants while the LoRA is disabled, the student constants otherwise."""
+
+    def __init__(self, network, *, teacher_video: float = 3.0, teacher_audio: float = 0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.network = network
+        self.teacher_video = teacher_video
+        self.teacher_audio = teacher_audio
+
+    def __call__(self, **kwargs):
+        if not self.network.enabled:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                video=torch.full_like(kwargs["video_latents"], self.teacher_video),
+                audio=torch.full_like(kwargs["audio_latents"], self.teacher_audio),
+            )
+        return super().__call__(**kwargs)
+
+
+def _teacher_batch(*, text_length: int = 3, teacher_text_length: int = 5, teacher_width: int = 12):
+    batch = _training_batch(text_length=text_length)
+    batch["latents_first"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["latents_last"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["mmh3_teacher_hidden_states"] = [torch.zeros(teacher_text_length, teacher_width)]
+    batch["mmh3_teacher_token_tags"] = [torch.tensor([1, 0, 0, 1, 1][:teacher_text_length], dtype=torch.int64)]
+    return batch
+
+
+def _patch_deterministic_noise(monkeypatch):
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+    monkeypatch.setattr(torch, "randn", lambda shape, **kwargs: torch.zeros(shape, dtype=kwargs.get("dtype")))
+
+
+def test_h3_parser_defaults_leave_teacher_matching_off():
+    parser = minimax_h3_setup_parser(argparse.ArgumentParser())
+
+    args = parser.parse_args(["--task", "t2va"])
+
+    assert args.h3_teacher_matching is False
+    assert args.h3_teacher_conditions == "first,last"
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"h3_teacher_matching": True, "task": "fl2va"}, "t2va"),
+        ({"h3_teacher_matching": True, "h3_guidance_loss_scale": 3.0}, "mutually exclusive"),
+        ({"h3_teacher_matching": True, "h3_teacher_conditions": "first"}, "first,last"),
+    ],
+)
+def test_h3_teacher_matching_rejects_invalid_configurations(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(**overrides))
+
+
+def test_h3_teacher_conditions_normalizes_whitespace():
+    MiniMaxH3NetworkTrainer().handle_model_specific_args(
+        _trainer_args(h3_teacher_matching=True, h3_teacher_conditions=" first , last ")
+    )
+
+
+def test_teacher_matching_replaces_both_targets_with_the_frozen_base_predictions(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True)
+    trainer.handle_model_specific_args(args)
+    network = _ToggleNetwork()
+    transformer = _TeacherAwareTransformer(
+        network, teacher_video=3.0, teacher_audio=0.5, video_prediction=2.0, audio_prediction=-1.0
+    )
+    batch = _teacher_batch()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    _patch_deterministic_noise(monkeypatch)
+
+    loss, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        network,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    # two forwards: the no-grad LoRA-disabled teacher first, then the student pass
+    assert len(transformer.calls) == 2
+    teacher_call, student_call = transformer.calls
+    assert teacher_call["layout"].task == "fl2va"
+    assert teacher_call["layout"].text_length == 5
+    assert len(teacher_call["visual_condition_latents"]) == 2
+    assert teacher_call["text_hidden_states"].shape == (1, 5, 12)
+    assert student_call["layout"].task == "t2va"
+    assert student_call["layout"].text_length == 3
+    assert len(student_call["visual_condition_latents"]) == 0
+    # the LoRA is disabled exactly for the teacher forward and restored afterwards
+    assert network.calls == [False, True]
+    assert network.enabled is True
+    # everything but the conditioning is shared between the two passes
+    assert torch.equal(teacher_call["video_latents"], student_call["video_latents"])
+    assert torch.equal(teacher_call["audio_latents"], student_call["audio_latents"])
+    assert teacher_call["model_t_video"] is student_call["model_t_video"]
+
+    # both targets are the teacher predictions: student 2.0 vs teacher 3.0, audio -1.0 vs 0.5
+    assert metrics["loss/video"] == pytest.approx(1.0)
+    assert metrics["loss/audio"] == pytest.approx(2.25)
+    assert metrics["teacher/base_sigma"] == pytest.approx(0.25)
+    # flow targets are 0 (video) and 4 (audio), so the logged teacher deviations are 3.0 and 3.5
+    assert metrics["teacher/video_flow_gap_rms"] == pytest.approx(3.0)
+    assert metrics["teacher/audio_flow_gap_rms"] == pytest.approx(3.5)
+    assert torch.isfinite(loss)
+
+
+def _teacher_matching_process_batch(trainer, args, batch, *, network, transformer=None):
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    return trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer if transformer is not None else _RecordingTransformer(),
+        network,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+
+def test_teacher_matching_requires_teacher_text_rows(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True)
+    trainer.handle_model_specific_args(args)
+    batch = _teacher_batch()
+    del batch["mmh3_teacher_hidden_states"]
+    del batch["mmh3_teacher_token_tags"]
+
+    with pytest.raises(ValueError, match="teacher text rows"):
+        _teacher_matching_process_batch(trainer, args, batch, network=_ToggleNetwork())
+
+
+def test_teacher_matching_requires_fl2va_latent_caches(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True)
+    trainer.handle_model_specific_args(args)
+    batch = _teacher_batch()
+    del batch["latents_first"]
+    del batch["latents_last"]
+
+    with pytest.raises(ValueError, match="FL2VA-style latent caches"):
+        _teacher_matching_process_batch(trainer, args, batch, network=_ToggleNetwork())
+
+
+def test_teacher_text_rows_are_rejected_without_the_teacher_matching_flag():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+
+    with pytest.raises(ValueError, match="--h3_teacher_matching"):
+        _teacher_matching_process_batch(trainer, args, _teacher_batch(), network=None)
+
+
+def test_teacher_matching_rejects_a_teacher_text_width_mismatch(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True)
+    trainer.handle_model_specific_args(args)
+
+    with pytest.raises(ValueError, match="width"):
+        _teacher_matching_process_batch(trainer, args, _teacher_batch(teacher_width=8), network=_ToggleNetwork())
+
+
+def test_teacher_matching_requires_the_lora_network(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True)
+    trainer.handle_model_specific_args(args)
+    _patch_deterministic_noise(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="LoRA network"):
+        _teacher_matching_process_batch(trainer, args, _teacher_batch(), network=None)
+
+
+def test_teacher_matching_metadata_is_recorded_only_when_active():
+    trainer = MiniMaxH3NetworkTrainer()
+    off = trainer.extra_metadata(_trainer_args())
+    assert not any(key.startswith("ss_minimax_h3_teacher") for key in off)
+
+    on = trainer.extra_metadata(_trainer_args(h3_teacher_matching=True, h3_teacher_conditions=" first , last "))
+    assert on["ss_minimax_h3_teacher_matching"] is True
+    assert on["ss_minimax_h3_teacher_conditions"] == "first,last"
