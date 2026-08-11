@@ -1535,6 +1535,12 @@ def test_teacher_matching_replaces_both_targets_with_the_frozen_base_predictions
     # flow targets are 0 (video) and 4 (audio), so the logged teacher deviations are 3.0 and 3.5
     assert metrics["teacher/video_flow_gap_rms"] == pytest.approx(3.0)
     assert metrics["teacher/audio_flow_gap_rms"] == pytest.approx(3.5)
+    # direction/magnitude decomposition: video 2.0 vs 3.0 is parallel at 2/3 the norm,
+    # audio -1.0 vs 0.5 is anti-parallel at twice the norm
+    assert metrics["teacher/video_cos"] == pytest.approx(1.0)
+    assert metrics["teacher/video_norm_ratio"] == pytest.approx(2.0 / 3.0)
+    assert metrics["teacher/audio_cos"] == pytest.approx(-1.0)
+    assert metrics["teacher/audio_norm_ratio"] == pytest.approx(2.0)
     assert torch.isfinite(loss)
 
 

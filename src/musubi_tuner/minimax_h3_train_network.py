@@ -370,6 +370,24 @@ def _shift_noise_amount(base: torch.Tensor, shift: float) -> torch.Tensor:
     return shift * base / (1.0 + (shift - 1.0) * base)
 
 
+def _prediction_geometry_log(label: str, prediction: torch.Tensor, target: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Cosine similarity and norm ratio between the student prediction and its target.
+
+    cos isolates the direction component of the residual; norm_ratio (student/target, 1 =
+    matched) isolates the magnitude component and drifting above 1 is an early warning for
+    burn-style amplification.
+    """
+    student = prediction.detach().float().flatten()
+    reference = target.detach().float().flatten()
+    student_norm = student.norm()
+    reference_norm = reference.norm()
+    eps = 1e-12
+    return {
+        f"teacher/{label}_cos": torch.dot(student, reference) / (student_norm * reference_norm + eps),
+        f"teacher/{label}_norm_ratio": student_norm / (reference_norm + eps),
+    }
+
+
 def _augment_conditions(tensors: tuple[torch.Tensor, ...], clean: float) -> tuple[torch.Tensor, ...]:
     """Blend independent Gaussian noise into condition latents: clean*x + (1-clean)*eps.
 
@@ -1016,6 +1034,13 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 visual_condition_clean=args.h3_visual_cond_clean,
                 audio_condition_clean=args.h3_audio_cond_clean,
             )
+        if getattr(args, "h3_teacher_matching", False):
+            # direction/magnitude decomposition of the student-teacher residual (observation
+            # only): MSE mixes both, but content errors are direction-flavored while
+            # burn/wash-out drift is magnitude-flavored, so the split (binned by
+            # teacher/base_sigma) shows which one dominates in each noise band
+            guidance_log.update(_prediction_geometry_log("video", prediction.video, video_target))
+            guidance_log.update(_prediction_geometry_log("audio", prediction.audio, audio_target))
         return DiTOutput(
             pred=prediction.video,
             target=video_target,
