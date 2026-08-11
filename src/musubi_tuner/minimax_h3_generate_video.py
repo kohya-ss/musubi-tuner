@@ -267,11 +267,16 @@ def _configure_lora_weights(transformer, args, device: torch.device, *, prequant
 
     Pre-quantized INT8 bases get runtime additive branches; a BF16 base with
     --convrot_int8 was already merged during the streaming load (no-op here); a plain
-    BF16 base gets the one-time destructive CPU merge.
+    BF16 base gets the one-time destructive CPU merge. --lora_runtime_attach forces the
+    runtime-branch route on any base: merging rounds the fused weights to the base
+    storage grid (BF16 mantissa step, or the INT8 quantization grid), which silently
+    erases LoRAs whose per-element deltas sit below it -- small-magnitude adapters such
+    as teacher-matching LoRAs. The runtime branch keeps the LoRA in its own precision,
+    matching how it ran during training.
     """
     if not args.lora_weight:
         return []
-    if prequantized:
+    if prequantized or getattr(args, "lora_runtime_attach", False):
         return _apply_lora_weights(transformer, args, device)
     if not args.convrot_int8:
         _merge_lora_weights(transformer, args)
@@ -354,6 +359,14 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--h3_audio_cond_clean", type=float, default=1.0)
     parser.add_argument("--lora_weight", nargs="*", default=None)
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None)
+    parser.add_argument(
+        "--lora_runtime_attach",
+        action="store_true",
+        help="attach LoRAs as runtime additive branches instead of merging them into the base weights"
+        " (always the case for pre-quantized INT8 bases). Merging rounds the fused weights to the base"
+        " storage grid, which silently erases LoRAs whose deltas are below the BF16 mantissa step --"
+        " small-magnitude adapters such as teacher-matching LoRAs. Slightly slower, exact.",
+    )
     parser.add_argument("--include_patterns", nargs="*", default=None)
     parser.add_argument("--exclude_patterns", nargs="*", default=None)
     parser.add_argument("--disable_numpy_memmap", action="store_true")
@@ -472,10 +485,12 @@ def run_generation(args: argparse.Namespace) -> Path:
     # - Pre-quantized INT8 base (auto-detected): attach LoRAs as runtime additive branches;
     #   the INT8 tensors cannot be merged into.
     # - Plain BF16 base: one-time destructive CPU merge after loading (fastest inference).
+    # --lora_runtime_attach overrides the two merge routes with runtime branches, for
+    # small-magnitude LoRAs whose deltas would be rounded away by the merge.
     prequantized = has_comfy_quant_tensors(resolve_safetensors_files(args.dit), disable_numpy_memmap=args.disable_numpy_memmap)
     convrot_int8 = args.convrot_int8 or prequantized
-    merge_at_load = bool(args.lora_weight) and args.convrot_int8 and not prequantized
-    load_on_cpu = bool(args.blocks_to_swap or (args.lora_weight and not convrot_int8))
+    merge_at_load = bool(args.lora_weight) and args.convrot_int8 and not prequantized and not args.lora_runtime_attach
+    load_on_cpu = bool(args.blocks_to_swap or (args.lora_weight and not convrot_int8 and not args.lora_runtime_attach))
     lora_weights, lora_multipliers = (_load_lora_state_dicts(args), args.lora_multiplier) if merge_at_load else (None, None)
     logger.info("Loading MiniMax-H3 transformer%s", " (ConvRot INT8)" if convrot_int8 else "")
     transformer = load_h3_transformer(

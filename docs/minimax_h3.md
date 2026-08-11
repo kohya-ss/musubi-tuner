@@ -347,6 +347,8 @@ Add a trained LoRA with:
 
 The same command accepts the full or pruned BF16 or ConvRot INT8 transformer and the ConvRot INT8 or NVFP4+AWQ text encoder; formats are detected automatically. With a BF16 transformer, LoRAs are merged destructively once after loading (fastest inference); with a ConvRot INT8 base, each `--lora_weight` stays a separate runtime additive branch with its corresponding multiplier (see [ConvRot INT8 Quantized Base Weights](#convrot-int8-quantized-base-weights)).
 
+`--lora_runtime_attach` forces the runtime-branch route on any base. The merge rounds the fused weights back to the base storage grid, and a BF16 mantissa step is about 0.4% of each weight's magnitude — per-element LoRA deltas below that are silently erased. Adapters trained toward small equilibria (teacher matching in particular) can lose most or all of their effect this way while behaving normally during training, whose forward keeps the LoRA as a separate full-precision branch. Runtime attachment reproduces the training-time forward exactly, at a small speed cost.
+
 For FL2VA, keep the FL2VA base and replace the task inputs:
 
 ```text
