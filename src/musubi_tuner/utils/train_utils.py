@@ -93,6 +93,16 @@ def get_last_ckpt_name(model_name):
     return model_name + ".safetensors"
 
 
+def should_save_at_step(save_every_n_steps: int | None, global_step: int, max_train_steps: int) -> bool:
+    """Whether a step-interval checkpoint should be written at this step.
+
+    Skips the final training step: the unconditional end-of-training save already
+    writes the same weights as the "last" checkpoint, so an interval-triggered save
+    here would just duplicate it (see kohya-ss/musubi-tuner#1048).
+    """
+    return save_every_n_steps is not None and global_step % save_every_n_steps == 0 and global_step < max_train_steps
+
+
 def get_remove_epoch_no(args: argparse.Namespace, epoch_no: int):
     if args.save_last_n_epochs is None:
         return None

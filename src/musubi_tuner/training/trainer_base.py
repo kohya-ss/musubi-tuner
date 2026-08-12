@@ -57,7 +57,7 @@ from musubi_tuner.training.accelerator_setup import (
     collator_class,
     prepare_accelerator,
 )
-from musubi_tuner.training.sampling_prompts import should_sample_images
+from musubi_tuner.training.sampling_prompts import should_sample_at_epoch_end, should_sample_images
 from musubi_tuner.training.timesteps import (
     compute_density_for_timestep_sampling,
     compute_ideogram4_shift_timestep,
@@ -1941,6 +1941,7 @@ class NetworkTrainer:
 
         epoch_to_start = 0
         global_step = 0
+        last_sampled_step = None
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
         loss_recorder = train_utils.LossRecorder()
@@ -2113,12 +2114,13 @@ class NetworkTrainer:
 
                     # to avoid calling optimizer_eval_fn() too frequently, we call it only when we need to sample images or save the model
                     should_sampling = should_sample_images(args, global_step, epoch=None)
-                    should_saving = args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0
+                    should_saving = train_utils.should_save_at_step(args.save_every_n_steps, global_step, args.max_train_steps)
 
                     if should_sampling or should_saving:
                         optimizer_eval_fn()
                         if should_sampling:
                             _do_sample(None, global_step)
+                            last_sampled_step = global_step
 
                         if should_saving:
                             accelerator.wait_for_everyone()
@@ -2178,7 +2180,8 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            _do_sample(epoch + 1, global_step)
+            if should_sample_at_epoch_end(global_step, last_sampled_step):
+                _do_sample(epoch + 1, global_step)
             optimizer_train_fn()
 
             # end of epoch
