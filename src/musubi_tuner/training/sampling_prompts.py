@@ -141,3 +141,14 @@ def should_sample_images(args, steps, epoch=None):
         if not should_sample_by_steps and not should_sample_by_epochs:
             return False
     return True
+
+
+def should_sample_at_epoch_end(global_step, last_sampled_step):
+    """Whether the end-of-epoch sample call should proceed.
+
+    Guards against re-sampling at the same global_step already handled by the
+    in-loop step-based trigger, which otherwise fires a duplicate sample whenever
+    an epoch boundary coincides with a step interval -- most commonly on the final
+    training step (see kohya-ss/musubi-tuner#1048).
+    """
+    return global_step != last_sampled_step
