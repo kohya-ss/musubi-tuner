@@ -221,8 +221,7 @@ pytest
 # Test your changes manually with the relevant scripts
 ```
 
-New test files should go in `tests/` and be named `test_*.py`. Tests use pytest (fixtures, marks,
-etc.), so run them with `pytest`, not `python -m unittest`.
+New test files should go in `tests/` and be named `test_*.py`. Use pytest to run them.
 
 CI runs the same test suite on every push and pull request, against two PyTorch versions.
 See [`.github/workflows/test.yml`](.github/workflows/test.yml).
