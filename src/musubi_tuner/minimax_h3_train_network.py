@@ -420,6 +420,27 @@ def _decomposed_flow_loss(pred: torch.Tensor, target: torch.Tensor, mag_weight: 
     return (mag_weight * magnitude_term + dir_weight * direction_term) / pred_flat.numel()
 
 
+def _preservation_density_compensation(sigma_max: float, focus_min: float, focus_max: float, focus_prob: float) -> float:
+    """Loss-weight correction that keeps the preservation anchor's expected gradient share
+    invariant under timestep focus.
+
+    Focus concentrates the base-sigma draw on the teaching band and thins the anchor band
+    (base sigma > sigma_max) from its uniform share ``1 - sigma_max`` to
+    ``(1-p)*(1-sigma_max) + p*overlap/(max-min)``; multiplying each anchor step's loss by
+    uniform/focused restores the anchor's per-unit-time pull, so raising the focus does not
+    silently weaken the drift protection.
+    """
+    anchor_width = 1.0 - sigma_max
+    if anchor_width <= 0.0 or focus_prob <= 0.0:
+        return 1.0
+    overlap = max(0.0, focus_max - max(focus_min, sigma_max))
+    focused_share = (1.0 - focus_prob) * anchor_width + focus_prob * overlap / (focus_max - focus_min)
+    if focused_share <= 0.0:
+        # the anchor band is never sampled, so the multiplier is never applied
+        return 1.0
+    return anchor_width / focused_share
+
+
 def _prediction_geometry_log(label: str, prediction: torch.Tensor, target: torch.Tensor) -> dict[str, torch.Tensor]:
     """Cosine similarity, norm ratio, and residual DC/AC split between prediction and target.
 
@@ -555,21 +576,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         guidance_scale = float(args.h3_guidance_loss_scale)
         if guidance_scale < 0.0:
             raise ValueError(f"--h3_guidance_loss_scale must be nonnegative, got {guidance_scale}")
-        teacher_dc_weight = float(args.h3_teacher_loss_dc_weight)
-        if teacher_dc_weight < 0.0:
-            raise ValueError(f"--h3_teacher_loss_dc_weight must be nonnegative, got {teacher_dc_weight}")
-        for name in ("h3_teacher_loss_mag_weight", "h3_teacher_loss_dir_weight"):
-            if float(getattr(args, name)) < 0.0:
-                raise ValueError(f"--{name} must be nonnegative, got {getattr(args, name)}")
-        if not args.h3_teacher_loss_decompose and (
-            float(args.h3_teacher_loss_mag_weight) != 1.0 or float(args.h3_teacher_loss_dir_weight) != 1.0
-        ):
-            raise ValueError("--h3_teacher_loss_mag_weight/--h3_teacher_loss_dir_weight require --h3_teacher_loss_decompose")
-        if not getattr(args, "h3_teacher_matching", False) and (teacher_dc_weight != 1.0 or args.h3_teacher_loss_decompose):
-            raise ValueError(
-                "--h3_teacher_loss_dc_weight and --h3_teacher_loss_decompose reshape the teacher-matching loss"
-                " and require --h3_teacher_matching"
-            )
+        for name in ("h3_teacher_loss_dc_weight", "h3_teacher_loss_mag_weight", "h3_teacher_preservation_weight"):
+            value = float(getattr(args, name))
+            if value < 0.0:
+                raise ValueError(f"--{name} must be nonnegative, got {value}")
+            if value != 1.0 and not getattr(args, "h3_teacher_matching", False):
+                raise ValueError(f"--{name} shapes the teacher-matching loss and requires --h3_teacher_matching")
         if getattr(args, "h3_teacher_matching", False):
             if args.task != "t2va":
                 raise ValueError("MiniMax-H3 --h3_teacher_matching trains a T2VA student and requires --task t2va")
@@ -982,12 +994,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             metadata["ss_minimax_h3_teacher_matching"] = True
             metadata["ss_minimax_h3_teacher_conditions"] = normalize_teacher_conditions(args.h3_teacher_conditions)
             metadata["ss_minimax_h3_teacher_condition_sigma_max"] = args.h3_teacher_condition_sigma_max
-            if float(args.h3_teacher_loss_dc_weight) != 1.0:
-                metadata["ss_minimax_h3_teacher_loss_dc_weight"] = args.h3_teacher_loss_dc_weight
-            if args.h3_teacher_loss_decompose:
-                metadata["ss_minimax_h3_teacher_loss_decompose"] = True
-                metadata["ss_minimax_h3_teacher_loss_mag_weight"] = args.h3_teacher_loss_mag_weight
-                metadata["ss_minimax_h3_teacher_loss_dir_weight"] = args.h3_teacher_loss_dir_weight
+            metadata["ss_minimax_h3_teacher_loss"] = "decomposed_mag_dir"
+            metadata["ss_minimax_h3_teacher_loss_mag_weight"] = args.h3_teacher_loss_mag_weight
+            metadata["ss_minimax_h3_teacher_loss_dc_weight"] = args.h3_teacher_loss_dc_weight
+            metadata["ss_minimax_h3_teacher_preservation_weight"] = args.h3_teacher_preservation_weight
         if float(args.h3_timestep_focus_prob) > 0.0:
             metadata["ss_minimax_h3_timestep_focus_min"] = args.h3_timestep_focus_min
             metadata["ss_minimax_h3_timestep_focus_max"] = args.h3_timestep_focus_max
@@ -1413,17 +1423,21 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del timesteps, noise_scheduler, dit_dtype, global_step
+        teacher_matching = bool(getattr(args, "h3_teacher_matching", False))
+        guidance_log = output.extra.get("guidance_log") or {}
+        conditioned_flag = guidance_log.get("teacher/conditioned")
+        conditioned = bool(conditioned_flag.item() > 0.5) if isinstance(conditioned_flag, torch.Tensor) else True
         dc_weight = float(getattr(args, "h3_teacher_loss_dc_weight", 1.0))
-        decompose = bool(getattr(args, "h3_teacher_loss_decompose", False))
         mag_weight = float(getattr(args, "h3_teacher_loss_mag_weight", 1.0))
-        dir_weight = float(getattr(args, "h3_teacher_loss_dir_weight", 1.0))
 
         def flow_loss(pred: torch.Tensor, target: torch.Tensor, *, attenuate_dc: bool) -> torch.Tensor:
-            if attenuate_dc and dc_weight != 1.0:
+            if not teacher_matching:
+                return torch.nn.functional.mse_loss(pred, target, reduction="mean")
+            # the DC attenuation applies only to conditioned teaching steps: on preservation
+            # steps the DC penalty is exactly what pulls palette drift back to the base
+            if attenuate_dc and conditioned and dc_weight != 1.0:
                 pred = _dc_attenuated_prediction(pred, target, dc_weight)
-            if decompose:
-                return _decomposed_flow_loss(pred, target, mag_weight, dir_weight)
-            return torch.nn.functional.mse_loss(pred, target, reduction="mean")
+            return _decomposed_flow_loss(pred, target, mag_weight, 1.0)
 
         # the DC attenuation targets the video palette axis; the audio anchor keeps its full DC
         video_loss = flow_loss(output.pred.to(network_dtype), output.target.to(network_dtype), attenuate_dc=True)
@@ -1448,8 +1462,21 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "loss/video": video_loss.detach(),
             "loss/audio": audio_loss.detach(),
         }
-        logs.update(output.extra.get("guidance_log") or {})
-        return video_loss + weight * audio_loss, logs
+        logs.update(guidance_log)
+        total_loss = video_loss + weight * audio_loss
+        if teacher_matching and not conditioned:
+            # preservation-anchor step: user weight on top of the automatic focus compensation,
+            # so raising the timestep focus does not silently weaken the drift protection.
+            # loss/video and loss/audio are logged unweighted to keep sigma-binned reads comparable
+            multiplier = float(getattr(args, "h3_teacher_preservation_weight", 1.0)) * _preservation_density_compensation(
+                float(args.h3_teacher_condition_sigma_max),
+                float(getattr(args, "h3_timestep_focus_min", 0.4)),
+                float(getattr(args, "h3_timestep_focus_max", 0.8)),
+                float(getattr(args, "h3_timestep_focus_prob", 0.0)),
+            )
+            if multiplier != 1.0:
+                total_loss = total_loss * multiplier
+        return total_loss, logs
 
 
 def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -1565,40 +1592,40 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument(
         "--h3_teacher_condition_sigma_max",
         type=float,
-        default=1.0,
+        default=0.75,
         help="teacher matching only: above this drawn base sigma (pre-shift, 1 = pure noise) the teacher drops the"
         " endpoint conditions and runs on the student's own text, turning the target into a pure base-preservation"
         " anchor. Near pure noise the endpoint content is unpredictable from the text, so unrestricted teaching"
-        " there rapidly overwrites the base composition prior (recommended 0.4-0.5; 1.0 = always conditioned)",
+        " there rapidly overwrites the base composition prior. The identity-decision band was measured at base"
+        " sigma 0.6-0.75 on diverse character data, so the default keeps it in the teaching band; lower toward"
+        " 0.4-0.5 for low-diversity data (1.0 = always conditioned, unprotected)",
     )
     parser.add_argument(
         "--h3_teacher_loss_dc_weight",
         type=float,
         default=1.0,
-        help="teacher matching only: weight of the video residual's per-channel DC component in the loss"
-        " (1.0 = plain MSE). The DC axis is a global color/tone cast, so lowering it (e.g. 0.0-0.3) stops the"
-        " coherent absorption of the dataset's palette while leaving the spatially structured content signal"
-        " untouched. The audio anchor keeps its full DC",
-    )
-    parser.add_argument(
-        "--h3_teacher_loss_decompose",
-        action="store_true",
-        help="teacher matching only: split the loss into magnitude and direction terms with the norm-shrinkage"
-        " coupling removed (the direction gradient becomes purely rotational, and the magnitude optimum becomes the"
-        " per-sample teacher norm instead of the shrunken conditional-mean norm). Counters the wash-out/delayed-"
-        "commitment drift of MSE against a privileged teacher; at unit weights the loss value equals the MSE",
+        help="teacher matching only: weight of the video residual's per-channel DC component on conditioned"
+        " teaching steps (1.0 = unchanged). The DC axis is a global color/tone cast, so lowering it (e.g. 0.0-0.3)"
+        " stops the coherent absorption of the dataset's palette while leaving the spatially structured content"
+        " signal untouched. Preservation-anchor steps and the audio anchor always keep their full DC penalty --"
+        " there it is what pulls palette drift back to the base",
     )
     parser.add_argument(
         "--h3_teacher_loss_mag_weight",
         type=float,
         default=1.0,
-        help="weight of the magnitude term of the decomposed teacher-matching loss (requires --h3_teacher_loss_decompose)",
+        help="teacher matching only: weight of the magnitude term of the decomposed loss, relative to the"
+        " direction term fixed at 1.0. At 1.0 the loss value equals the plain MSE (only the gradient geometry"
+        " differs); lower it to prioritize direction matching (0 = pure direction)",
     )
     parser.add_argument(
-        "--h3_teacher_loss_dir_weight",
+        "--h3_teacher_preservation_weight",
         type=float,
         default=1.0,
-        help="weight of the direction term of the decomposed teacher-matching loss (requires --h3_teacher_loss_decompose)",
+        help="teacher matching only: loss weight of preservation-anchor steps (base sigma above"
+        " --h3_teacher_condition_sigma_max), applied on top of an automatic correction that keeps the anchor's"
+        " expected gradient share invariant under --h3_timestep_focus_prob. Raise it if the anchor-band drift"
+        " (teacher/*_residual_dc_rms on unconditioned steps) keeps growing",
     )
     parser.add_argument(
         "--h3_timestep_focus_min",

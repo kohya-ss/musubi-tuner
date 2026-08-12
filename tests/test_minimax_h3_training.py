@@ -1461,7 +1461,8 @@ def test_h3_parser_defaults_leave_teacher_matching_off():
 
     assert args.h3_teacher_matching is False
     assert args.h3_teacher_conditions == "first,last"
-    assert args.h3_teacher_condition_sigma_max == 1.0
+    # the identity-decision band was measured at base sigma 0.6-0.75, so the default anchor starts at 0.75
+    assert args.h3_teacher_condition_sigma_max == 0.75
 
 
 @pytest.mark.parametrize(
@@ -1531,8 +1532,9 @@ def test_teacher_matching_replaces_both_targets_with_the_frozen_base_predictions
     assert teacher_call["model_t_video"] is student_call["model_t_video"]
 
     # both targets are the teacher predictions: student 2.0 vs teacher 3.0, audio -1.0 vs 0.5
-    assert metrics["loss/video"] == pytest.approx(1.0)
-    assert metrics["loss/audio"] == pytest.approx(2.25)
+    # the decomposed teacher-matching loss equals the MSE up to float32 rounding of the norm path
+    assert metrics["loss/video"] == pytest.approx(1.0, rel=1e-4)
+    assert metrics["loss/audio"] == pytest.approx(2.25, rel=1e-4)
     assert metrics["teacher/base_sigma"] == pytest.approx(0.25)
     assert metrics["teacher/conditioned"] == 1.0
     # flow targets are 0 (video) and 4 (audio), so the logged teacher deviations are 3.0 and 3.5
@@ -1571,9 +1573,10 @@ def test_timestep_focus_remaps_a_uniform_draw_into_the_band_mixture():
         ({"h3_timestep_focus_prob": 0.5, "h3_timestep_focus_min": 0.8, "h3_timestep_focus_max": 0.4}, "min < max"),
         ({"h3_timestep_focus_prob": 0.5, "min_timestep": 100}, "min_timestep"),
         ({"h3_teacher_loss_dc_weight": 0.0}, "h3_teacher_matching"),
-        ({"h3_teacher_loss_decompose": True}, "h3_teacher_matching"),
-        ({"h3_teacher_matching": True, "h3_teacher_loss_mag_weight": 0.5}, "decompose"),
-        ({"h3_teacher_matching": True, "h3_teacher_loss_decompose": True, "h3_teacher_loss_dir_weight": -1.0}, "nonnegative"),
+        ({"h3_teacher_loss_mag_weight": 0.5}, "h3_teacher_matching"),
+        ({"h3_teacher_preservation_weight": 2.0}, "h3_teacher_matching"),
+        ({"h3_teacher_matching": True, "h3_teacher_loss_mag_weight": -1.0}, "nonnegative"),
+        ({"h3_teacher_matching": True, "h3_teacher_preservation_weight": -0.5}, "nonnegative"),
     ],
 )
 def test_teacher_loss_and_timestep_focus_validation(overrides, message):
@@ -1581,21 +1584,29 @@ def test_teacher_loss_and_timestep_focus_validation(overrides, message):
         MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(**overrides))
 
 
-def test_compute_loss_attenuates_the_video_residual_dc_component():
-    trainer = MiniMaxH3NetworkTrainer()
+def _dc_split_output(conditioned: float) -> DiTOutput:
     target = torch.zeros(1, 2, 2, 2, 2)
     pred = torch.zeros(1, 2, 2, 2, 2)
     # channel 0: constant +2 offset (pure DC, energy 2.0); channel 1: +/-1 pattern (pure AC, energy 0.5)
     pred[:, 0] += 2.0
     pred[:, 1, ..., 0] += 1.0
     pred[:, 1, ..., 1] -= 1.0
-    extra = {"audio_pred": None, "audio_target": None, "audio_loss_weight": torch.tensor([0.0])}
-    output = DiTOutput(pred=pred, target=target, extra=extra)
+    extra = {
+        "audio_pred": None,
+        "audio_target": None,
+        "audio_loss_weight": torch.tensor([0.0]),
+        "guidance_log": {"teacher/conditioned": torch.tensor(conditioned)},
+    }
+    return DiTOutput(pred=pred, target=target, extra=extra)
+
+
+def test_compute_loss_attenuates_the_video_residual_dc_component_on_teaching_steps():
+    trainer = MiniMaxH3NetworkTrainer()
 
     for dc_weight, expected in ((1.0, 2.5), (0.25, 1.0), (0.0, 0.5)):
         loss, logs = trainer.compute_loss(
             _trainer_args(h3_teacher_matching=True, h3_teacher_loss_dc_weight=dc_weight),
-            output,
+            _dc_split_output(conditioned=1.0),
             None,
             None,
             torch.bfloat16,
@@ -1603,6 +1614,37 @@ def test_compute_loss_attenuates_the_video_residual_dc_component():
             0,
         )
         assert logs["loss/video"].item() == pytest.approx(expected)
+        assert loss.item() == pytest.approx(expected)
+
+
+def test_compute_loss_keeps_full_dc_and_applies_the_preservation_weight_on_anchor_steps():
+    trainer = MiniMaxH3NetworkTrainer()
+
+    loss, logs = trainer.compute_loss(
+        _trainer_args(h3_teacher_matching=True, h3_teacher_loss_dc_weight=0.0, h3_teacher_preservation_weight=2.0),
+        _dc_split_output(conditioned=0.0),
+        None,
+        None,
+        torch.bfloat16,
+        torch.float32,
+        0,
+    )
+
+    # the anchor step ignores the DC attenuation (full MSE value) and doubles the returned loss;
+    # loss/video is logged unweighted so sigma-binned reads stay comparable
+    assert logs["loss/video"].item() == pytest.approx(2.5)
+    assert loss.item() == pytest.approx(5.0)
+
+
+def test_preservation_density_compensation_restores_the_anchor_share_under_focus():
+    from musubi_tuner.minimax_h3_train_network import _preservation_density_compensation
+
+    # run3 coordinates: anchor width 0.25, focus band [0.4,0.8) at prob 0.5 leaves the anchor 0.1875
+    assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.5) == pytest.approx(0.25 / 0.1875)
+    assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.0) == 1.0  # focus off = no correction
+    assert _preservation_density_compensation(1.0, 0.4, 0.8, 0.5) == 1.0  # no anchor band
+    # focus band fully below the anchor: the anchor thins to (1-p)*width, compensation 1/(1-p)
+    assert _preservation_density_compensation(0.8, 0.4, 0.7, 0.5) == pytest.approx(2.0)
 
 
 def test_decomposed_flow_loss_keeps_the_mse_value_but_splits_the_gradient_geometry():
@@ -1629,29 +1671,29 @@ def test_decomposed_flow_loss_keeps_the_mse_value_but_splits_the_gradient_geomet
     assert tangential.norm().item() < 1e-5 * grad.norm().item()
 
 
-def test_extra_metadata_records_teacher_loss_reshapes_and_timestep_focus():
+def test_extra_metadata_records_teacher_loss_shape_and_timestep_focus():
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(
         h3_teacher_matching=True,
         h3_teacher_loss_dc_weight=0.2,
-        h3_teacher_loss_decompose=True,
-        h3_teacher_loss_dir_weight=2.0,
+        h3_teacher_loss_mag_weight=0.5,
+        h3_teacher_preservation_weight=1.5,
         h3_timestep_focus_prob=0.5,
     )
 
     metadata = trainer.extra_metadata(args)
 
+    assert metadata["ss_minimax_h3_teacher_loss"] == "decomposed_mag_dir"
     assert metadata["ss_minimax_h3_teacher_loss_dc_weight"] == 0.2
-    assert metadata["ss_minimax_h3_teacher_loss_decompose"] is True
-    assert metadata["ss_minimax_h3_teacher_loss_mag_weight"] == 1.0
-    assert metadata["ss_minimax_h3_teacher_loss_dir_weight"] == 2.0
+    assert metadata["ss_minimax_h3_teacher_loss_mag_weight"] == 0.5
+    assert metadata["ss_minimax_h3_teacher_preservation_weight"] == 1.5
     assert metadata["ss_minimax_h3_timestep_focus_min"] == 0.4
     assert metadata["ss_minimax_h3_timestep_focus_max"] == 0.8
     assert metadata["ss_minimax_h3_timestep_focus_prob"] == 0.5
 
-    plain = trainer.extra_metadata(_trainer_args(h3_teacher_matching=True))
+    plain = trainer.extra_metadata(_trainer_args())
+    assert "ss_minimax_h3_teacher_loss" not in plain
     assert "ss_minimax_h3_teacher_loss_dc_weight" not in plain
-    assert "ss_minimax_h3_teacher_loss_decompose" not in plain
     assert "ss_minimax_h3_timestep_focus_prob" not in plain
 
 
@@ -1713,8 +1755,9 @@ def test_teacher_condition_sigma_max_switches_the_teacher_to_a_preservation_anch
     # the LoRA is still disabled for the anchor forward, and the targets are its predictions
     assert network.calls == [False, True]
     assert metrics["teacher/conditioned"] == 0.0
-    assert metrics["loss/video"] == pytest.approx(1.0)
-    assert metrics["loss/audio"] == pytest.approx(2.25)
+    # the decomposed teacher-matching loss equals the MSE up to float32 rounding of the norm path
+    assert metrics["loss/video"] == pytest.approx(1.0, rel=1e-4)
+    assert metrics["loss/audio"] == pytest.approx(2.25, rel=1e-4)
     assert torch.isfinite(loss)
 
 
