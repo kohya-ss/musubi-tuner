@@ -215,8 +215,16 @@ ruff check
 # Format code
 ruff format src
 
+# Run the unit tests
+pytest
+
 # Test your changes manually with the relevant scripts
 ```
+
+New test files should go in `tests/` and be named `test_*.py`. Use pytest to run them.
+
+CI runs the same test suite on every push and pull request, against two PyTorch versions.
+See [`.github/workflows/test.yml`](.github/workflows/test.yml).
 
 ### Manual Testing Guidelines
 
