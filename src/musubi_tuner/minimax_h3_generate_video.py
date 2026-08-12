@@ -30,11 +30,14 @@ from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
+    build_shifted_schedule,
     create_sampling_generator,
+    decoded_video_to_uint8,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
     write_joint_av,
+    write_video_only,
 )
 from musubi_tuner.minimax_h3.text_encoder import (
     TEXT_CACHE_FORMAT,
@@ -99,6 +102,8 @@ def validate_generation_args(args: argparse.Namespace) -> None:
             raise ValueError(f"MiniMax-H3 --{label} must be in [0.0,1.0], got {value}")
     if Path(args.output).suffix.lower() not in {".mp4", ".mkv", ".mov"}:
         raise ValueError("MiniMax-H3 --output must use .mp4, .mkv, or .mov")
+    if args.trajectory_stride < 1:
+        raise ValueError(f"MiniMax-H3 --trajectory_stride must be at least 1, got {args.trajectory_stride}")
 
     if args.task == "t2va":
         if not args.prompt:
@@ -370,6 +375,20 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include_patterns", nargs="*", default=None)
     parser.add_argument("--exclude_patterns", nargs="*", default=None)
     parser.add_argument("--disable_numpy_memmap", action="store_true")
+    parser.add_argument(
+        "--trajectory_dir",
+        default=None,
+        help="diagnostic: decode each denoising step's clean estimate (x0_hat = x_t + sigma*v) to a"
+        " video-only mp4 in this directory and write the per-step sigma schedule to sigma_schedule.csv,"
+        " showing at which step the video content settles. The per-step latents are held on the CPU and"
+        " decoded after the normal output, so peak VRAM is unchanged; decode time grows with the step count",
+    )
+    parser.add_argument(
+        "--trajectory_stride",
+        type=int,
+        default=1,
+        help="decode every N-th step into --trajectory_dir (the last step is always included)",
+    )
     return parser
 
 
@@ -521,6 +540,39 @@ def run_generation(args: argparse.Namespace) -> Path:
         transformer.to(device)
     transformer.eval().requires_grad_(False)
 
+    trajectory_dir = Path(args.trajectory_dir).expanduser() if args.trajectory_dir else None
+    trajectory_schedule = None
+    trajectory: list[tuple[int, torch.Tensor]] = []
+    x0_callback = None
+    if trajectory_dir is not None:
+        trajectory_dir.mkdir(parents=True, exist_ok=True)
+        trajectory_schedule = build_shifted_schedule(
+            args.steps,
+            video_shift=args.h3_shift_video,
+            audio_shift=args.h3_shift_audio,
+        )
+        with open(trajectory_dir / "sigma_schedule.csv", "w", encoding="utf-8", newline="") as handle:
+            handle.write("step,base_sigma,sigma_video,sigma_audio\n")
+            for index in range(args.steps):
+                handle.write(
+                    f"{index},{trajectory_schedule.base[index]:.6f},"
+                    f"{trajectory_schedule.video[index]:.6f},{trajectory_schedule.audio[index]:.6f}\n"
+                )
+        for index in range(args.steps):
+            logger.info(
+                "MiniMax-H3 step %d/%d: base sigma %.4f, video sigma %.4f, audio sigma %.4f",
+                index,
+                args.steps,
+                trajectory_schedule.base[index],
+                trajectory_schedule.video[index],
+                trajectory_schedule.audio[index],
+            )
+
+        def x0_callback(index: int, x0_video: torch.Tensor, x0_audio: torch.Tensor) -> None:
+            del x0_audio  # the diagnostic decodes video only
+            if index % args.trajectory_stride == 0 or index == args.steps - 1:
+                trajectory.append((index, x0_video.detach().to(device="cpu", dtype=torch.float32)))
+
     text_hidden_states = text_hidden_states.to(device=device, dtype=torch.bfloat16)
     text_token_tags = text_token_tags.unsqueeze(0).to(device)
     with tqdm(total=args.steps, desc="MiniMax-H3", unit="step") as progress:
@@ -539,6 +591,7 @@ def run_generation(args: argparse.Namespace) -> Path:
             visual_condition_clean=args.h3_visual_cond_clean,
             audio_condition_clean=args.h3_audio_cond_clean,
             step_callback=lambda completed, total: progress.update(1),
+            x0_callback=x0_callback,
         )
     if transformer.offloader is not None:
         transformer.offloader.set_forward_only(True)
@@ -559,6 +612,19 @@ def run_generation(args: argparse.Namespace) -> Path:
     )
     with torch.no_grad():
         decoded_video = video_vae.decode(video_latents.to(device=device, dtype=VIDEO_VAE_DECODE_DTYPE)).cpu()
+    if trajectory_dir is not None:
+        logger.info("Decoding MiniMax-H3 trajectory (%d of %d steps)", len(trajectory), args.steps)
+        for index, x0_latents in trajectory:
+            with torch.no_grad():
+                step_video = video_vae.decode(x0_latents.to(device=device, dtype=VIDEO_VAE_DECODE_DTYPE)).cpu()
+            step_path = trajectory_dir / (
+                f"step{index:03d}_base{trajectory_schedule.base[index]:.4f}_sigv{trajectory_schedule.video[index]:.4f}.mp4"
+            )
+            write_video_only(decoded_video_to_uint8(step_video, frame_limit=args.frame_count), step_path)
+            del step_video
+            clean_memory_on_device(device)
+            logger.info("Saved MiniMax-H3 trajectory step: %s", step_path)
+    trajectory.clear()
     del video_vae, video_latents
     gc.collect()
     clean_memory_on_device(device)
