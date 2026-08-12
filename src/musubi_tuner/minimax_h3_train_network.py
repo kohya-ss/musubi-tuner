@@ -370,21 +370,83 @@ def _shift_noise_amount(base: torch.Tensor, shift: float) -> torch.Tensor:
     return shift * base / (1.0 + (shift - 1.0) * base)
 
 
+def _apply_timestep_focus(base: torch.Tensor, low: float, high: float, prob: float) -> torch.Tensor:
+    """Deterministic remap of a uniform [0,1) draw that concentrates sampling on a band.
+
+    With probability ``prob`` the sample lands uniformly in [low, high); otherwise it stays
+    uniform over [0, 1). The band density becomes prob + (1-prob)*(high-low), so the rest of
+    the range (including a base-preservation anchor band) keeps nonzero coverage. The shift
+    family s*u/(1+(s-1)u) can only pile mass onto an endpoint, which is why an interior
+    decision band needs this mixture form instead.
+    """
+    if prob <= 0.0:
+        return base
+    focused = low + (high - low) * (base / prob)
+    passthrough = (base - prob) / max(1.0 - prob, 1e-8)
+    return torch.where(base < prob, focused, passthrough)
+
+
+def _dc_attenuated_prediction(pred: torch.Tensor, target: torch.Tensor, dc_weight: float) -> torch.Tensor:
+    """Scale the residual's per-channel DC so that mse(pred', target) = mse_ac + dc_weight*mse_dc.
+
+    The DC of the residual is a global color/tone cast (the style axis); attenuating it in the
+    loss stops the coherent palette absorption without touching the spatially structured AC
+    content. Implemented as a linear map of the residual, so gradients stay exact.
+    """
+    residual = pred - target
+    residual_dc = residual.mean(dim=tuple(range(2, residual.ndim)), keepdim=True)
+    return pred - (1.0 - dc_weight**0.5) * residual_dc
+
+
+def _decomposed_flow_loss(pred: torch.Tensor, target: torch.Tensor, mag_weight: float, dir_weight: float) -> torch.Tensor:
+    """Magnitude/direction split of the MSE with the norm-shrinkage coupling removed.
+
+    Exact identity: ||p - t||^2 = (||p|| - ||t||)^2 + 2*||p||*||t||*(1 - cos). In plain MSE the
+    direction term's ||p|| factor couples the two components: hedging the direction pays off by
+    shrinking the norm, which drives the prediction toward the conditional mean's reduced
+    magnitude (the wash-out). Detaching ||p|| in the direction term makes its gradient purely
+    rotational, so the magnitude optimum becomes E[||t||] (full per-sample commitment) instead
+    of ||E[t]||. At unit weights the loss VALUE still equals the MSE exactly (detaching changes
+    gradients only), so loss curves stay comparable across the switch.
+    """
+    pred_flat = pred.flatten()
+    target_flat = target.flatten()
+    pred_norm = pred_flat.norm()
+    target_norm = target_flat.norm()
+    eps = 1e-12
+    cos = torch.dot(pred_flat, target_flat) / (pred_norm * target_norm + eps)
+    magnitude_term = (pred_norm - target_norm).pow(2)
+    direction_term = 2.0 * pred_norm.detach() * target_norm * (1.0 - cos)
+    return (mag_weight * magnitude_term + dir_weight * direction_term) / pred_flat.numel()
+
+
 def _prediction_geometry_log(label: str, prediction: torch.Tensor, target: torch.Tensor) -> dict[str, torch.Tensor]:
-    """Cosine similarity and norm ratio between the student prediction and its target.
+    """Cosine similarity, norm ratio, and residual DC/AC split between prediction and target.
 
     cos isolates the direction component of the residual; norm_ratio (student/target, 1 =
     matched) isolates the magnitude component and drifting above 1 is an early warning for
-    burn-style amplification.
+    burn-style amplification. At the conditional-mean optimum of MSE teacher matching the
+    per-bin averages of cos and norm_ratio coincide, so their gap reads as remaining
+    training distance and their common limit as the band's irreducible share.
+
+    The residual (student - target) is additionally split into its per-channel mean over
+    all non-batch/channel axes (DC: a global color/tone cast, the style component) and the
+    remainder (AC: spatially structured content). rms(residual)^2 = dc_rms^2 + ac_rms^2,
+    so the split shows whether a shrinking gap is style or content being learned.
     """
-    student = prediction.detach().float().flatten()
-    reference = target.detach().float().flatten()
-    student_norm = student.norm()
-    reference_norm = reference.norm()
+    student = prediction.detach().float()
+    reference = target.detach().float()
+    student_norm = student.flatten().norm()
+    reference_norm = reference.flatten().norm()
     eps = 1e-12
+    residual = student - reference
+    residual_dc = residual.mean(dim=tuple(range(2, residual.ndim)), keepdim=True)
+    residual_ac = residual - residual_dc
     return {
-        f"teacher/{label}_cos": torch.dot(student, reference) / (student_norm * reference_norm + eps),
+        f"teacher/{label}_cos": torch.dot(student.flatten(), reference.flatten()) / (student_norm * reference_norm + eps),
         f"teacher/{label}_norm_ratio": student_norm / (reference_norm + eps),
+        f"teacher/{label}_residual_dc_rms": residual_dc.pow(2).mean().sqrt(),
+        f"teacher/{label}_residual_ac_rms": residual_ac.pow(2).mean().sqrt(),
     }
 
 
@@ -473,9 +535,41 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         ):
             raise ValueError("MiniMax-H3 --block_swap_h2d_only training requires --gradient_checkpointing")
 
+        focus_prob = float(args.h3_timestep_focus_prob)
+        if not 0.0 <= focus_prob <= 1.0:
+            raise ValueError(f"--h3_timestep_focus_prob must be in [0.0,1.0], got {focus_prob}")
+        if focus_prob > 0.0:
+            focus_min = float(args.h3_timestep_focus_min)
+            focus_max = float(args.h3_timestep_focus_max)
+            if not 0.0 <= focus_min < focus_max <= 1.0:
+                raise ValueError(f"--h3_timestep_focus_min/max must satisfy 0 <= min < max <= 1, got {focus_min}/{focus_max}")
+            if args.min_timestep is not None or args.max_timestep is not None:
+                raise ValueError("--h3_timestep_focus_prob does not compose with --min_timestep/--max_timestep")
+            logger.info(
+                "MiniMax-H3 timestep focus: base sigma band [%s,%s) sampled with density %.3f (uniform elsewhere)",
+                focus_min,
+                focus_max,
+                focus_prob + (1.0 - focus_prob) * (focus_max - focus_min),
+            )
+
         guidance_scale = float(args.h3_guidance_loss_scale)
         if guidance_scale < 0.0:
             raise ValueError(f"--h3_guidance_loss_scale must be nonnegative, got {guidance_scale}")
+        teacher_dc_weight = float(args.h3_teacher_loss_dc_weight)
+        if teacher_dc_weight < 0.0:
+            raise ValueError(f"--h3_teacher_loss_dc_weight must be nonnegative, got {teacher_dc_weight}")
+        for name in ("h3_teacher_loss_mag_weight", "h3_teacher_loss_dir_weight"):
+            if float(getattr(args, name)) < 0.0:
+                raise ValueError(f"--{name} must be nonnegative, got {getattr(args, name)}")
+        if not args.h3_teacher_loss_decompose and (
+            float(args.h3_teacher_loss_mag_weight) != 1.0 or float(args.h3_teacher_loss_dir_weight) != 1.0
+        ):
+            raise ValueError("--h3_teacher_loss_mag_weight/--h3_teacher_loss_dir_weight require --h3_teacher_loss_decompose")
+        if not getattr(args, "h3_teacher_matching", False) and (teacher_dc_weight != 1.0 or args.h3_teacher_loss_decompose):
+            raise ValueError(
+                "--h3_teacher_loss_dc_weight and --h3_teacher_loss_decompose reshape the teacher-matching loss"
+                " and require --h3_teacher_matching"
+            )
         if getattr(args, "h3_teacher_matching", False):
             if args.task != "t2va":
                 raise ValueError("MiniMax-H3 --h3_teacher_matching trains a T2VA student and requires --task t2va")
@@ -888,6 +982,16 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             metadata["ss_minimax_h3_teacher_matching"] = True
             metadata["ss_minimax_h3_teacher_conditions"] = normalize_teacher_conditions(args.h3_teacher_conditions)
             metadata["ss_minimax_h3_teacher_condition_sigma_max"] = args.h3_teacher_condition_sigma_max
+            if float(args.h3_teacher_loss_dc_weight) != 1.0:
+                metadata["ss_minimax_h3_teacher_loss_dc_weight"] = args.h3_teacher_loss_dc_weight
+            if args.h3_teacher_loss_decompose:
+                metadata["ss_minimax_h3_teacher_loss_decompose"] = True
+                metadata["ss_minimax_h3_teacher_loss_mag_weight"] = args.h3_teacher_loss_mag_weight
+                metadata["ss_minimax_h3_teacher_loss_dir_weight"] = args.h3_teacher_loss_dir_weight
+        if float(args.h3_timestep_focus_prob) > 0.0:
+            metadata["ss_minimax_h3_timestep_focus_min"] = args.h3_timestep_focus_min
+            metadata["ss_minimax_h3_timestep_focus_max"] = args.h3_timestep_focus_max
+            metadata["ss_minimax_h3_timestep_focus_prob"] = args.h3_timestep_focus_prob
         if self._audio_items_seen > 0:
             # fraction observed on this rank so far (exact once a full epoch has run)
             metadata["ss_minimax_h3_supervised_audio_fraction"] = round(self._audio_supervised_seen / self._audio_items_seen, 6)
@@ -1251,6 +1355,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if pool is not None and len(pool) != 1:
             raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
         base = self.sample_timesteps(args, 1, pool, latents, device)[0]
+        base = _apply_timestep_focus(
+            base,
+            float(getattr(args, "h3_timestep_focus_min", 0.4)),
+            float(getattr(args, "h3_timestep_focus_max", 0.8)),
+            float(getattr(args, "h3_timestep_focus_prob", 0.0)),
+        )
         sigma_video = _shift_noise_amount(base, args.h3_shift_video)
         sigma_audio = _shift_noise_amount(base, args.h3_shift_audio)
         model_t_video = 1.0 - sigma_video
@@ -1302,12 +1412,21 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del args, timesteps, noise_scheduler, dit_dtype, global_step
-        video_loss = torch.nn.functional.mse_loss(
-            output.pred.to(network_dtype),
-            output.target.to(network_dtype),
-            reduction="mean",
-        )
+        del timesteps, noise_scheduler, dit_dtype, global_step
+        dc_weight = float(getattr(args, "h3_teacher_loss_dc_weight", 1.0))
+        decompose = bool(getattr(args, "h3_teacher_loss_decompose", False))
+        mag_weight = float(getattr(args, "h3_teacher_loss_mag_weight", 1.0))
+        dir_weight = float(getattr(args, "h3_teacher_loss_dir_weight", 1.0))
+
+        def flow_loss(pred: torch.Tensor, target: torch.Tensor, *, attenuate_dc: bool) -> torch.Tensor:
+            if attenuate_dc and dc_weight != 1.0:
+                pred = _dc_attenuated_prediction(pred, target, dc_weight)
+            if decompose:
+                return _decomposed_flow_loss(pred, target, mag_weight, dir_weight)
+            return torch.nn.functional.mse_loss(pred, target, reduction="mean")
+
+        # the DC attenuation targets the video palette axis; the audio anchor keeps its full DC
+        video_loss = flow_loss(output.pred.to(network_dtype), output.target.to(network_dtype), attenuate_dc=True)
         audio_loss_weight = output.extra.get("audio_loss_weight")
         if (
             not isinstance(audio_loss_weight, torch.Tensor)
@@ -1320,10 +1439,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if weight == 0.0:
             audio_loss = video_loss.detach().new_zeros(())
         else:
-            audio_loss = torch.nn.functional.mse_loss(
+            audio_loss = flow_loss(
                 output.extra["audio_pred"].to(network_dtype),
                 output.extra["audio_target"].to(network_dtype),
-                reduction="mean",
+                attenuate_dc=False,
             )
         logs = {
             "loss/video": video_loss.detach(),
@@ -1451,6 +1570,56 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         " endpoint conditions and runs on the student's own text, turning the target into a pure base-preservation"
         " anchor. Near pure noise the endpoint content is unpredictable from the text, so unrestricted teaching"
         " there rapidly overwrites the base composition prior (recommended 0.4-0.5; 1.0 = always conditioned)",
+    )
+    parser.add_argument(
+        "--h3_teacher_loss_dc_weight",
+        type=float,
+        default=1.0,
+        help="teacher matching only: weight of the video residual's per-channel DC component in the loss"
+        " (1.0 = plain MSE). The DC axis is a global color/tone cast, so lowering it (e.g. 0.0-0.3) stops the"
+        " coherent absorption of the dataset's palette while leaving the spatially structured content signal"
+        " untouched. The audio anchor keeps its full DC",
+    )
+    parser.add_argument(
+        "--h3_teacher_loss_decompose",
+        action="store_true",
+        help="teacher matching only: split the loss into magnitude and direction terms with the norm-shrinkage"
+        " coupling removed (the direction gradient becomes purely rotational, and the magnitude optimum becomes the"
+        " per-sample teacher norm instead of the shrunken conditional-mean norm). Counters the wash-out/delayed-"
+        "commitment drift of MSE against a privileged teacher; at unit weights the loss value equals the MSE",
+    )
+    parser.add_argument(
+        "--h3_teacher_loss_mag_weight",
+        type=float,
+        default=1.0,
+        help="weight of the magnitude term of the decomposed teacher-matching loss (requires --h3_teacher_loss_decompose)",
+    )
+    parser.add_argument(
+        "--h3_teacher_loss_dir_weight",
+        type=float,
+        default=1.0,
+        help="weight of the direction term of the decomposed teacher-matching loss (requires --h3_teacher_loss_decompose)",
+    )
+    parser.add_argument(
+        "--h3_timestep_focus_min",
+        type=float,
+        default=0.4,
+        help="lower edge of the base-sigma focus band for --h3_timestep_focus_prob",
+    )
+    parser.add_argument(
+        "--h3_timestep_focus_max",
+        type=float,
+        default=0.8,
+        help="upper edge of the base-sigma focus band for --h3_timestep_focus_prob",
+    )
+    parser.add_argument(
+        "--h3_timestep_focus_prob",
+        type=float,
+        default=0.0,
+        help="probability of drawing the training base sigma uniformly from the focus band instead of [0,1)"
+        " (0 = uniform sampling, unchanged). Concentrates training on the band where content is decided while the"
+        " rest of the range, including the base-preservation anchor band, keeps (1-prob) of the samples. The band"
+        " density becomes prob + (1-prob)*(max-min)",
     )
     parser.add_argument("--dit_dtype", type=str, default=None, help="MiniMax-H3 DiT dtype; R1 requires bfloat16")
     parser.add_argument(

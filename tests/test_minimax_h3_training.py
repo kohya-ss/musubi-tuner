@@ -21,6 +21,9 @@ from musubi_tuner.modules.convrot_int8_utils import apply_convrot_int8_monkey_pa
 from musubi_tuner.minimax_h3_train_network import (
     H3SamplingResources,
     MiniMaxH3NetworkTrainer,
+    _apply_timestep_focus,
+    _decomposed_flow_loss,
+    _prediction_geometry_log,
     minimax_h3_setup_parser,
 )
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
@@ -1541,7 +1544,136 @@ def test_teacher_matching_replaces_both_targets_with_the_frozen_base_predictions
     assert metrics["teacher/video_norm_ratio"] == pytest.approx(2.0 / 3.0)
     assert metrics["teacher/audio_cos"] == pytest.approx(-1.0)
     assert metrics["teacher/audio_norm_ratio"] == pytest.approx(2.0)
+    # constant residuals (-1.0 video, -1.5 audio) are pure DC
+    assert metrics["teacher/video_residual_dc_rms"] == pytest.approx(1.0)
+    assert metrics["teacher/video_residual_ac_rms"] == pytest.approx(0.0, abs=1e-6)
+    assert metrics["teacher/audio_residual_dc_rms"] == pytest.approx(1.5)
+    assert metrics["teacher/audio_residual_ac_rms"] == pytest.approx(0.0, abs=1e-6)
     assert torch.isfinite(loss)
+
+
+def test_timestep_focus_remaps_a_uniform_draw_into_the_band_mixture():
+    u = torch.linspace(0.0, 0.999, 1000)
+
+    out = _apply_timestep_focus(u, 0.4, 0.8, 0.5)
+
+    assert out[u < 0.5].min() >= 0.4 and out[u < 0.5].max() < 0.8  # focused draws stay in the band
+    assert out[u >= 0.5].min() >= 0.0 and out[u >= 0.5].max() <= 1.0  # the rest stays uniform over [0,1)
+    in_band = ((out >= 0.4) & (out < 0.8)).float().mean().item()
+    assert in_band == pytest.approx(0.5 + 0.5 * 0.4, abs=0.02)  # density = prob + (1-prob)*(max-min)
+    torch.testing.assert_close(_apply_timestep_focus(u, 0.4, 0.8, 0.0), u)  # prob 0 = identity
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"h3_timestep_focus_prob": 1.5}, "focus_prob"),
+        ({"h3_timestep_focus_prob": 0.5, "h3_timestep_focus_min": 0.8, "h3_timestep_focus_max": 0.4}, "min < max"),
+        ({"h3_timestep_focus_prob": 0.5, "min_timestep": 100}, "min_timestep"),
+        ({"h3_teacher_loss_dc_weight": 0.0}, "h3_teacher_matching"),
+        ({"h3_teacher_loss_decompose": True}, "h3_teacher_matching"),
+        ({"h3_teacher_matching": True, "h3_teacher_loss_mag_weight": 0.5}, "decompose"),
+        ({"h3_teacher_matching": True, "h3_teacher_loss_decompose": True, "h3_teacher_loss_dir_weight": -1.0}, "nonnegative"),
+    ],
+)
+def test_teacher_loss_and_timestep_focus_validation(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(**overrides))
+
+
+def test_compute_loss_attenuates_the_video_residual_dc_component():
+    trainer = MiniMaxH3NetworkTrainer()
+    target = torch.zeros(1, 2, 2, 2, 2)
+    pred = torch.zeros(1, 2, 2, 2, 2)
+    # channel 0: constant +2 offset (pure DC, energy 2.0); channel 1: +/-1 pattern (pure AC, energy 0.5)
+    pred[:, 0] += 2.0
+    pred[:, 1, ..., 0] += 1.0
+    pred[:, 1, ..., 1] -= 1.0
+    extra = {"audio_pred": None, "audio_target": None, "audio_loss_weight": torch.tensor([0.0])}
+    output = DiTOutput(pred=pred, target=target, extra=extra)
+
+    for dc_weight, expected in ((1.0, 2.5), (0.25, 1.0), (0.0, 0.5)):
+        loss, logs = trainer.compute_loss(
+            _trainer_args(h3_teacher_matching=True, h3_teacher_loss_dc_weight=dc_weight),
+            output,
+            None,
+            None,
+            torch.bfloat16,
+            torch.float32,
+            0,
+        )
+        assert logs["loss/video"].item() == pytest.approx(expected)
+
+
+def test_decomposed_flow_loss_keeps_the_mse_value_but_splits_the_gradient_geometry():
+    generator = torch.Generator().manual_seed(0)
+    pred = torch.randn(1, 3, 2, 2, 2, generator=generator)
+    target = torch.randn(1, 3, 2, 2, 2, generator=generator)
+
+    # at unit weights the value equals the MSE exactly (only the gradients differ)
+    unit = _decomposed_flow_loss(pred.clone().requires_grad_(True), target, 1.0, 1.0)
+    torch.testing.assert_close(unit, torch.nn.functional.mse_loss(pred, target))
+
+    # direction-only gradient is purely rotational: orthogonal to the prediction
+    rotational = pred.clone().requires_grad_(True)
+    _decomposed_flow_loss(rotational, target, 0.0, 1.0).backward()
+    grad = rotational.grad.flatten()
+    radial_unit = pred.flatten() / pred.flatten().norm()
+    assert abs(torch.dot(grad, radial_unit).item()) < 1e-5 * grad.norm().item()
+
+    # magnitude-only gradient is purely radial: no rotational component
+    radial = pred.clone().requires_grad_(True)
+    _decomposed_flow_loss(radial, target, 1.0, 0.0).backward()
+    grad = radial.grad.flatten()
+    tangential = grad - torch.dot(grad, radial_unit) * radial_unit
+    assert tangential.norm().item() < 1e-5 * grad.norm().item()
+
+
+def test_extra_metadata_records_teacher_loss_reshapes_and_timestep_focus():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        h3_teacher_matching=True,
+        h3_teacher_loss_dc_weight=0.2,
+        h3_teacher_loss_decompose=True,
+        h3_teacher_loss_dir_weight=2.0,
+        h3_timestep_focus_prob=0.5,
+    )
+
+    metadata = trainer.extra_metadata(args)
+
+    assert metadata["ss_minimax_h3_teacher_loss_dc_weight"] == 0.2
+    assert metadata["ss_minimax_h3_teacher_loss_decompose"] is True
+    assert metadata["ss_minimax_h3_teacher_loss_mag_weight"] == 1.0
+    assert metadata["ss_minimax_h3_teacher_loss_dir_weight"] == 2.0
+    assert metadata["ss_minimax_h3_timestep_focus_min"] == 0.4
+    assert metadata["ss_minimax_h3_timestep_focus_max"] == 0.8
+    assert metadata["ss_minimax_h3_timestep_focus_prob"] == 0.5
+
+    plain = trainer.extra_metadata(_trainer_args(h3_teacher_matching=True))
+    assert "ss_minimax_h3_teacher_loss_dc_weight" not in plain
+    assert "ss_minimax_h3_teacher_loss_decompose" not in plain
+    assert "ss_minimax_h3_timestep_focus_prob" not in plain
+
+
+def test_prediction_geometry_log_splits_the_residual_into_style_dc_and_content_ac():
+    prediction = torch.zeros(1, 2, 2, 2, 2)
+    target = torch.zeros(1, 2, 2, 2, 2)
+    # channel 0: constant +2 offset (pure DC); channel 1: zero-mean +/-1 pattern (pure AC)
+    prediction[:, 0] += 2.0
+    prediction[:, 1, ..., 0] += 1.0
+    prediction[:, 1, ..., 1] -= 1.0
+
+    metrics = _prediction_geometry_log("video", prediction, target)
+
+    # DC energy: channel 0 contributes 2^2 over half the channels -> rms sqrt(4/2)
+    assert metrics["teacher/video_residual_dc_rms"] == pytest.approx((4.0 / 2.0) ** 0.5)
+    # AC energy: channel 1 contributes 1^2 everywhere over half the elements -> rms sqrt(1/2)
+    assert metrics["teacher/video_residual_ac_rms"] == pytest.approx((1.0 / 2.0) ** 0.5)
+    # the split conserves the residual energy: rms^2 = dc_rms^2 + ac_rms^2
+    residual_rms = (prediction - target).pow(2).mean().sqrt()
+    assert metrics["teacher/video_residual_dc_rms"] ** 2 + metrics["teacher/video_residual_ac_rms"] ** 2 == pytest.approx(
+        residual_rms.item() ** 2
+    )
 
 
 def test_teacher_condition_sigma_max_switches_the_teacher_to_a_preservation_anchor(monkeypatch):
