@@ -43,6 +43,10 @@ cu132 = [
     "torch>=2.12.0",
     "torchvision>=0.27.0",
 ]
+cpu = [
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
+]
 gui = [
     "gradio>=4.0.0, <6.0.0",
 ]
@@ -53,6 +57,7 @@ hidream_o1 = [
 [tool.uv]
 conflicts = [
   [
+    { extra = "cpu" },
     { extra = "cu124" },
     { extra = "cu128" },
     { extra = "cu130" },
@@ -66,6 +71,7 @@ dev = [
   "matplotlib==3.10.0",
   "tensorboard",
   "prompt-toolkit==3.0.51",
+  "pytest>=8.0",
   "ruff>=0.12.10",
 ]
 
@@ -73,14 +79,19 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.uv.sources]
 torch = [
+  { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu124", extra = "cu124" },
   { index = "pytorch-cu128", extra = "cu128" },
   { index = "pytorch-cu130", extra = "cu130" },
   { index = "pytorch-cu132", extra = "cu132" },
 ]
 torchvision = [
+  { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu124", extra = "cu124" },
   { index = "pytorch-cu128", extra = "cu128" },
   { index = "pytorch-cu130", extra = "cu130" },
@@ -105,6 +116,11 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.ruff]
