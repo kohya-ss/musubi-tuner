@@ -290,7 +290,8 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
     for i, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_latent_cache_paths = []
-        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
+        total = dataset.get_total_image_count() if hasattr(dataset, "get_total_image_count") else None
+        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers), total=total):
             batch: list[ItemInfo] = batch
             if not supports_alpha:
                 # make sure content has 3 channels
