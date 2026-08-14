@@ -195,6 +195,35 @@ def test_joint_sampler_uses_native_dataward_predictions_and_each_sigma_delta():
     torch.testing.assert_close(result.audio, initial_audio + 3.0)
 
 
+def test_joint_sampler_reports_the_per_step_clean_estimate():
+    class Transformer:
+        def __call__(self, **kwargs):
+            return SimpleNamespace(
+                video=torch.full_like(kwargs["video_latents"], 2.0),
+                audio=torch.full_like(kwargs["audio_latents"], 3.0),
+            )
+
+    captured = []
+    result = sample_joint_av(
+        Transformer(),
+        layout=_layout(),
+        text_hidden_states=torch.zeros(1, 3, 12),
+        text_token_tags=torch.tensor([[1, 0, 1]]),
+        initial_video=torch.full((1, 24, 2, 4, 4), 5.0),
+        initial_audio=torch.full((1, 32, 2, 8), 7.0),
+        steps=2,
+        video_shift=12.0,
+        audio_shift=3.0,
+        x0_callback=lambda index, video, audio: captured.append((index, video, audio)),
+    )
+
+    assert [index for index, _, _ in captured] == [0, 1]
+    # under a constant velocity, x0_hat = x_t + sigma * v equals the trajectory endpoint at every step
+    for _, video, audio in captured:
+        torch.testing.assert_close(video, result.video)
+        torch.testing.assert_close(audio, result.audio)
+
+
 def test_joint_decode_trims_video_and_audio_to_one_planned_duration():
     class VideoVAE:
         def decode(self, latents):
@@ -279,6 +308,8 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "lora_multiplier": None,
         "convrot_int8": False,
         "prune_adaln": False,
+        "trajectory_dir": None,
+        "trajectory_stride": 1,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -469,3 +500,76 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     assert captured["decoded"].video.shape == (5, 4, 4, 3)
     assert captured["decoded"].audio.shape == (2, 6667)
     assert captured["output"] == args.output
+
+
+def test_generation_trajectory_dump_writes_sigma_schedule_and_per_step_videos(tmp_path, monkeypatch):
+    import musubi_tuner.minimax_h3_generate_video as generate
+
+    args = _generation_args(
+        tmp_path,
+        frame_count=5,
+        allow_experimental_duration=True,
+        output=str(tmp_path / "result.mp4"),
+        device="cpu",
+        attn_mode="torch",
+        split_attn=False,
+        use_pinned_memory_for_block_swap=False,
+        include_patterns=None,
+        exclude_patterns=None,
+        disable_numpy_memmap=False,
+        trajectory_dir=str(tmp_path / "trajectory"),
+    )
+    monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
+    monkeypatch.setattr(generate, "has_comfy_quant_tensors", lambda files, **kwargs: False)
+
+    class Transformer:
+        offloader = None
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+        def requires_grad_(self, value):
+            return self
+
+        def __call__(self, **kwargs):
+            return SimpleNamespace(
+                video=torch.zeros_like(kwargs["video_latents"]),
+                audio=torch.zeros_like(kwargs["audio_latents"]),
+            )
+
+    decode_calls = []
+
+    class VideoVAE:
+        def decode(self, latents):
+            decode_calls.append(tuple(latents.shape))
+            return torch.zeros(1, 3, 5, 32, 32)
+
+    class AudioVAE:
+        def decode(self, latents):
+            return torch.zeros(1, 2, 6667)
+
+    monkeypatch.setattr(
+        generate,
+        "_encode_text",
+        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(3, dtype=torch.int64)),
+    )
+    monkeypatch.setattr(generate, "load_h3_transformer", lambda *unused, **kwargs: Transformer())
+    monkeypatch.setattr(generate, "load_video_vae", lambda *unused, **kwargs: VideoVAE())
+    monkeypatch.setattr(generate, "load_audio_vae", lambda *unused, **kwargs: AudioVAE())
+    monkeypatch.setattr(generate, "write_joint_av", lambda decoded, output: None)
+
+    generate.run_generation(args)
+
+    trajectory_dir = tmp_path / "trajectory"
+    schedule_lines = (trajectory_dir / "sigma_schedule.csv").read_text(encoding="utf-8").splitlines()
+    assert schedule_lines[0] == "step,base_sigma,sigma_video,sigma_audio"
+    assert schedule_lines[1] == "0,1.000000,1.000000,1.000000"
+    assert schedule_lines[2] == "1,0.500000,0.923077,0.750000"
+    assert len(schedule_lines) == 1 + args.steps
+    step_files = sorted(path.name for path in trajectory_dir.glob("*.mp4"))
+    assert step_files == ["step000_base1.0000_sigv1.0000.mp4", "step001_base0.5000_sigv0.9231.mp4"]
+    # the final output decode plus one decode per dumped step
+    assert len(decode_calls) == 1 + args.steps

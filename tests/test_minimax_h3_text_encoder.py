@@ -15,18 +15,22 @@ sys.path.insert(0, str(ROOT / "src"))
 from musubi_tuner.minimax_h3.media import H3AudioSource, H3Record, H3Reference
 from musubi_tuner.minimax_h3.text_encoder import (
     IMAGE_PLACEHOLDER,
+    REF_TEACHER_CAPTION_HEADER,
     VIDEO_PLACEHOLDER,
     H3TextVisual,
     build_presentation,
     build_token_tags,
     load_h3_text_encoder,
     normalize_h3_text_encoder_key,
+    normalize_teacher_conditions,
     validate_text_rows,
+    wrap_ref_teacher_caption,
 )
 
 try:
-    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _text_cache_metadata
+    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _ref_teacher_presentation, _text_cache_metadata
 except ImportError as error:
+    _ref_teacher_presentation = None
     _text_cache_metadata = None
     _text_cache_import_error = str(error)
 else:
@@ -107,6 +111,56 @@ def test_ref2va_presentation_preserves_jsonl_order_and_timestamp_format(tmp_path
     assert [tuple(video_block.shape) for video_block in presentation.videos] == [
         (3, 32, 32, 3),
     ]
+
+
+def test_normalize_teacher_conditions_accepts_both_kinds_and_rejects_everything_else():
+    assert normalize_teacher_conditions(" first , last ") == "first,last"
+    assert normalize_teacher_conditions(" ref ") == "ref"
+    for invalid in ("first", "last,first", "ref,first", "reference", ""):
+        with pytest.raises(ValueError, match="teacher conditions"):
+            normalize_teacher_conditions(invalid)
+
+
+def test_wrap_ref_teacher_caption_prepends_the_copy_declaration_boilerplate():
+    caption = "A bright scene with clear sound."
+
+    wrapped = wrap_ref_teacher_caption(caption)
+
+    assert wrapped == REF_TEACHER_CAPTION_HEADER + caption
+    assert wrapped.startswith("subject_definitions:")
+    # the audio fully_copy declaration is what opens audio education (probe round 2)
+    assert "<Audio 1>: fully_copy" in wrapped
+    assert "<Video 1> (all shots): fully_preserved" in wrapped
+    assert wrapped.endswith(f"detailed_description:\n{caption}")
+
+
+@pytest.mark.skipif(_ref_teacher_presentation is None, reason="cache script import failed")
+def test_ref_teacher_presentation_caps_oversized_targets_to_the_reference_canvas(tmp_path: Path):
+    record = _record(tmp_path)
+    # 1536x1536 exceeds the released reference canvas (768 short edge / MAX_PIXELS), so the
+    # sampled text frames must be downscaled like decode_reference_visual does; targets within
+    # the canvas stay untouched (covered by the golden test below, which uses 32x32 frames)
+    item = SimpleNamespace(content=torch.zeros(6, 1536, 1536, 3, dtype=torch.uint8))
+
+    presentation = _ref_teacher_presentation(record, item)
+
+    assert [tuple(video_block.shape) for video_block in presentation.videos] == [(1, 768, 768, 3)]
+
+
+@pytest.mark.skipif(_ref_teacher_presentation is None, reason="cache script import failed")
+def test_ref_teacher_presentation_wraps_the_caption_and_samples_the_target_crop(tmp_path: Path):
+    record = _record(tmp_path)
+    item = SimpleNamespace(content=torch.zeros(29, 32, 32, 3))
+
+    presentation = _ref_teacher_presentation(record, item)
+
+    wrapped = wrap_ref_teacher_caption(record.caption)
+    # 29 frames sampled at stride 12 -> 3 text frames at 2 fps (timestamps 0.0/0.5/1.0),
+    # padded to 4 for the two-frame blocks: block timestamps 0.25 -> "0.2" and 1.0
+    assert presentation.text == (f"<Audio 1>: <Video 1>: <0.2 seconds>{VIDEO_PLACEHOLDER}<1.0 seconds>{VIDEO_PLACEHOLDER}{wrapped}")
+    assert presentation.processor_text == f"<Audio 1>: <Video 1>: {VIDEO_PLACEHOLDER}{wrapped}"
+    assert presentation.images == ()
+    assert [tuple(video_block.shape) for video_block in presentation.videos] == [(3, 32, 32, 3)]
 
 
 def test_token_tags_cover_expanded_vision_rows_and_both_flanking_tokens():

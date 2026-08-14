@@ -59,11 +59,13 @@ def _load_training_module(monkeypatch):
     _stub(
         monkeypatch,
         "musubi_tuner.minimax_h3.text_encoder",
+        TEACHER_CONDITIONS_REF="ref",
         build_presentation=noop,
         encode_h3_presentation=noop,
         load_h3_processor=noop,
         load_h3_text_encoder=noop,
         load_h3_uncond_cache=noop,
+        normalize_teacher_conditions=noop,
     )
     _stub(
         monkeypatch,
@@ -237,7 +239,13 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     # no LoRA: nothing happens on any route
     no_lora = SimpleNamespace(lora_weight=None, convrot_int8=False)
     assert generate._configure_lora_weights(bf16, no_lora, device, prequantized=False) == []
-    assert calls == [("merge", bf16), ("attach", int8, device)]
+    # --lora_runtime_attach overrides both merge routes with runtime branches (the merge
+    # rounds small-magnitude LoRAs -- e.g. teacher matching -- out of the BF16 weights)
+    attach_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=False, lora_runtime_attach=True)
+    assert generate._configure_lora_weights(bf16, attach_args, device, prequantized=False) is attached
+    attach_int8_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=True, lora_runtime_attach=True)
+    assert generate._configure_lora_weights(int8, attach_int8_args, device, prequantized=False) is attached
+    assert calls == [("merge", bf16), ("attach", int8, device), ("attach", bf16, device), ("attach", int8, device)]
 
 
 def _tiny_model(*, num_layers: int = 1):

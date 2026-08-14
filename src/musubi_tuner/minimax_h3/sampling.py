@@ -160,6 +160,7 @@ def sample_joint_av(
     visual_condition_clean: float = 0.999,
     audio_condition_clean: float = 1.0,
     step_callback: Callable[[int, int], None] | None = None,
+    x0_callback: Callable[[int, torch.Tensor, torch.Tensor], None] | None = None,
 ) -> H3SampleResult:
     if initial_video.ndim != 5 or tuple(initial_video.shape[2:]) != (
         layout.target_video.frames,
@@ -204,6 +205,14 @@ def sample_joint_av(
         )
         if prediction.video.shape != video.shape or prediction.audio.shape != audio.shape:
             raise ValueError("MiniMax-H3 transformer predictions do not match the target latent shapes")
+        if x0_callback is not None:
+            # the model predicts the dataward velocity v = x0 - eps, so the step's clean
+            # estimate is x0_hat = x_t + sigma * v
+            x0_callback(
+                index,
+                video + sigma_video.to(video) * prediction.video,
+                audio + sigma_audio.to(audio) * prediction.audio,
+            )
         video_delta = (schedule.video[index] - schedule.video[index + 1]).to(video)
         audio_delta = (schedule.audio[index] - schedule.audio[index + 1]).to(audio)
         video = video + video_delta * prediction.video
@@ -260,14 +269,42 @@ def synchronize_decoded_av(
         max(1, round(Fraction(common_audio_samples * fps, sample_rate))),
     )
 
-    decoded_video = decoded_video[0, :, :common_video_frames].detach().cpu()
+    video = decoded_video_to_uint8(decoded_video, frame_limit=common_video_frames)
+    audio = decoded_audio[0, :, :common_audio_samples].detach().cpu().float().clamp(-1.0, 1.0).contiguous()
+    return H3DecodedAV(video=video, audio=audio, fps=fps, sample_rate=sample_rate)
+
+
+def decoded_video_to_uint8(decoded_video: torch.Tensor, *, frame_limit: int) -> torch.Tensor:
+    """Convert a [1,3,F,H,W] video in [-1,1] to uint8 [F,H,W,3], trimmed to frame_limit frames."""
+    if decoded_video.ndim != 5 or decoded_video.shape[0] != 1 or decoded_video.shape[1] != 3:
+        raise ValueError(f"MiniMax-H3 decoded video must be [1,3,F,H,W], got {tuple(decoded_video.shape)}")
+    if frame_limit <= 0:
+        raise ValueError(f"MiniMax-H3 decoded video frame limit must be positive, got {frame_limit}")
+    decoded_video = decoded_video[0, :, :frame_limit].detach().cpu()
     video_chunks = []
     for chunk in decoded_video.split(16, dim=1):
         chunk = chunk.float().clamp(-1.0, 1.0)
         video_chunks.append(((chunk + 1.0) * 127.5).round().to(torch.uint8).permute(1, 2, 3, 0))
-    video = torch.cat(video_chunks).contiguous()
-    audio = decoded_audio[0, :, :common_audio_samples].detach().cpu().float().clamp(-1.0, 1.0).contiguous()
-    return H3DecodedAV(video=video, audio=audio, fps=fps, sample_rate=sample_rate)
+    return torch.cat(video_chunks).contiguous()
+
+
+def write_video_only(video: torch.Tensor, output_path: str | Path, *, fps: int = 24) -> None:
+    """Write a silent video-only container; the diagnostic trajectory dumps have no audio track."""
+    if video.ndim != 4 or video.shape[-1] != 3 or video.dtype != torch.uint8:
+        raise ValueError(f"MiniMax-H3 video-only write needs uint8 [F,H,W,3], got {tuple(video.shape)} {video.dtype}")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(output_path), mode="w") as container:
+        video_stream = container.add_stream("libx264", rate=fps)
+        video_stream.width = video.shape[2]
+        video_stream.height = video.shape[1]
+        video_stream.pix_fmt = "yuv420p"
+        for pixels in video:
+            frame = av.VideoFrame.from_ndarray(pixels.numpy(), format="rgb24")
+            for packet in video_stream.encode(frame):
+                container.mux(packet)
+        for packet in video_stream.encode():
+            container.mux(packet)
 
 
 def mux_audio_video(

@@ -415,6 +415,121 @@ def test_h3_text_writer_rejects_invalid_token_tags(tmp_path: Path, tags: torch.T
         save_text_encoder_output_cache_minimax_h3(item, tensors)
 
 
+def test_h3_teacher_text_rows_round_trip_through_the_bucket_collator(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    latent_tensors = {
+        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+        AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32),
+        "latents_first_1x4x4_float16": torch.ones(24, 1, 4, 4, dtype=torch.float16),
+        "latents_last_1x4x4_float16": torch.ones(24, 1, 4, 4, dtype=torch.float16),
+    }
+    text_tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+        "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_teacher_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
+    }
+    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "fl2va"})
+    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va", "teacher_conditions": "first,last"})
+
+    manager = BucketBatchManager({(64, 64, 5): [item]}, batch_size=1)
+    batch = manager[0]
+
+    assert batch["mmh3_hidden_states"][0].shape == (3, 5120)
+    assert isinstance(batch["mmh3_teacher_hidden_states"], list)
+    assert batch["mmh3_teacher_hidden_states"][0].shape == (5, 5120)
+    torch.testing.assert_close(batch["mmh3_teacher_token_tags"][0], torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64))
+
+
+def test_h3_text_writer_rejects_a_one_sided_teacher_pair(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    student = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+    }
+
+    with pytest.raises(ValueError, match="teacher"):
+        save_text_encoder_output_cache_minimax_h3(
+            item,
+            {**student, "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16)},
+        )
+    with pytest.raises(ValueError, match="teacher"):
+        save_text_encoder_output_cache_minimax_h3(
+            item,
+            {**student, "varlen_mmh3_teacher_token_tags_int64": torch.ones(5, dtype=torch.int64)},
+        )
+
+
+def test_h3_ref_teacher_text_rows_round_trip_through_the_bucket_collator(tmp_path: Path):
+    # the ref teacher needs no endpoint condition latents: a plain T2VA latent cache suffices
+    item = _h3_item(tmp_path)
+    latent_tensors = {
+        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
+        AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32),
+    }
+    text_tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+        "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_teacher_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
+    }
+    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "t2va"})
+    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va", "teacher_conditions": "ref"})
+
+    manager = BucketBatchManager({(64, 64, 5): [item]}, batch_size=1)
+    batch = manager[0]
+
+    assert batch["mmh3_hidden_states"][0].shape == (3, 5120)
+    assert "mmh3_teacher_hidden_states" not in batch
+    assert isinstance(batch["mmh3_teacher_ref_hidden_states"], list)
+    assert batch["mmh3_teacher_ref_hidden_states"][0].shape == (5, 5120)
+    torch.testing.assert_close(batch["mmh3_teacher_ref_token_tags"][0], torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64))
+
+
+def test_h3_text_writer_rejects_a_one_sided_ref_teacher_pair_and_mixed_teacher_kinds(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    student = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+    }
+    fl_pair = {
+        "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_teacher_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
+    }
+    ref_pair = {
+        "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_teacher_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
+    }
+
+    with pytest.raises(ValueError, match="teacher"):
+        save_text_encoder_output_cache_minimax_h3(
+            item,
+            {**student, "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16)},
+        )
+    with pytest.raises(ValueError, match="teacher"):
+        save_text_encoder_output_cache_minimax_h3(
+            item,
+            {**student, "varlen_mmh3_teacher_ref_token_tags_int64": torch.ones(5, dtype=torch.int64)},
+        )
+    with pytest.raises(ValueError, match="mix"):
+        save_text_encoder_output_cache_minimax_h3(item, {**student, **fl_pair, **ref_pair})
+
+
+def test_h3_text_writer_validates_teacher_rows_like_student_rows(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+        "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_teacher_token_tags_int64": torch.tensor([1, 2, 0, 1, 1], dtype=torch.int64),
+    }
+
+    with pytest.raises(ValueError, match="token tags"):
+        save_text_encoder_output_cache_minimax_h3(item, tensors)
+
+
 class _FakeH3VideoVAE(torch.nn.Module):
     def __init__(self):
         super().__init__()
