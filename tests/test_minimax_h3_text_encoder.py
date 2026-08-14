@@ -135,6 +135,19 @@ def test_wrap_ref_teacher_caption_prepends_the_copy_declaration_boilerplate():
 
 
 @pytest.mark.skipif(_ref_teacher_presentation is None, reason="cache script import failed")
+def test_ref_teacher_presentation_caps_oversized_targets_to_the_reference_canvas(tmp_path: Path):
+    record = _record(tmp_path)
+    # 1536x1536 exceeds the released reference canvas (768 short edge / MAX_PIXELS), so the
+    # sampled text frames must be downscaled like decode_reference_visual does; targets within
+    # the canvas stay untouched (covered by the golden test below, which uses 32x32 frames)
+    item = SimpleNamespace(content=torch.zeros(6, 1536, 1536, 3, dtype=torch.uint8))
+
+    presentation = _ref_teacher_presentation(record, item)
+
+    assert [tuple(video_block.shape) for video_block in presentation.videos] == [(1, 768, 768, 3)]
+
+
+@pytest.mark.skipif(_ref_teacher_presentation is None, reason="cache script import failed")
 def test_ref_teacher_presentation_wraps_the_caption_and_samples_the_target_crop(tmp_path: Path):
     record = _record(tmp_path)
     item = SimpleNamespace(content=torch.zeros(29, 32, 32, 3))

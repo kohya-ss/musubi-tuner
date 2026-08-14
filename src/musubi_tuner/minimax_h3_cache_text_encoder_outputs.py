@@ -30,6 +30,8 @@ from musubi_tuner.minimax_h3.text_encoder import (
 from musubi_tuner.minimax_h3.media import H3AudioSource, H3Record, H3Reference, h3_records_from_datasource
 from musubi_tuner.minimax_h3_cache_latents import (
     PyAVH3MediaDecoder,
+    _adapt_canvas,
+    _resize_frames,
     cache_metadata_matches,
     dataset_cache_dir_key,
     fingerprint_checkpoint,
@@ -121,6 +123,13 @@ def _ref_teacher_presentation(record, item: ItemInfo) -> H3Presentation:
         jsonl_line=record.jsonl_line,
     )
     sampled = target_frames[::REF_TEACHER_TEXT_FRAME_STRIDE]
+    # the same downscale-only canvas cap that decode_reference_visual applies to reference
+    # videos: identity for targets within the released canvas (typical buckets), so only
+    # oversized targets are resized and normal cache fingerprints are unaffected
+    source_height, source_width = int(sampled.shape[1]), int(sampled.shape[2])
+    width, height = _adapt_canvas(source_width, source_height)
+    if source_width * source_height > width * height:
+        sampled = _resize_frames(sampled.numpy(), (width, height))
     timestamps = tuple(index / 2.0 for index in range(sampled.shape[0]))
     return build_presentation(teacher_record, "ref2va", {reference.path: H3TextVisual(sampled, timestamps)})
 
