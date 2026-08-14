@@ -1448,6 +1448,18 @@ def _teacher_batch(*, text_length: int = 3, teacher_text_length: int = 5, teache
     return batch
 
 
+def _ref_teacher_batch(*, text_length: int = 3, teacher_text_length: int = 5, teacher_width: int = 12, include_fl: bool = False):
+    # the ref teacher needs no first/last latents (a plain T2VA latent cache suffices);
+    # include_fl mimics reusing an FL2VA latent cache, whose endpoint latents go unused
+    batch = _training_batch(text_length=text_length)
+    if include_fl:
+        batch["latents_first"] = torch.zeros(1, 24, 1, 4, 4)
+        batch["latents_last"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["mmh3_teacher_ref_hidden_states"] = [torch.zeros(teacher_text_length, teacher_width)]
+    batch["mmh3_teacher_ref_token_tags"] = [torch.tensor([1, 0, 0, 1, 1][:teacher_text_length], dtype=torch.int64)]
+    return batch
+
+
 def _patch_deterministic_noise(monkeypatch):
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
     monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
@@ -1819,6 +1831,146 @@ def test_teacher_matching_rejects_a_teacher_text_width_mismatch(monkeypatch):
 
     with pytest.raises(ValueError, match="width"):
         _teacher_matching_process_batch(trainer, args, _teacher_batch(teacher_width=8), network=_ToggleNetwork())
+
+
+# --- ref teacher (Ref2VA self-reference teacher for a T2VA student) ---
+
+
+def test_h3_teacher_conditions_accepts_ref_and_records_it_in_metadata():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions=" ref ")
+    trainer.handle_model_specific_args(args)
+
+    metadata = trainer.extra_metadata(args)
+    assert metadata["ss_minimax_h3_teacher_conditions"] == "ref"
+
+
+def test_ref_teacher_matching_runs_the_teacher_on_the_self_reference_layout(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="ref")
+    trainer.handle_model_specific_args(args)
+    network = _ToggleNetwork()
+    transformer = _TeacherAwareTransformer(
+        network, teacher_video=3.0, teacher_audio=0.5, video_prediction=2.0, audio_prediction=-1.0
+    )
+    batch = _ref_teacher_batch()
+    video_latents = torch.full((1, 24, 2, 4, 4), 2.0)
+    _patch_deterministic_noise(monkeypatch)
+
+    loss, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        network,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    # two forwards: the no-grad LoRA-disabled teacher on the Ref2VA layout, then the student pass
+    assert len(transformer.calls) == 2
+    teacher_call, student_call = transformer.calls
+    assert teacher_call["layout"].task == "ref2va"
+    assert teacher_call["layout"].text_length == 5
+    assert len(teacher_call["layout"].references) == 1
+    reference = teacher_call["layout"].references[0]
+    assert reference.kind == "video"
+    assert (reference.video.frames, reference.video.height, reference.video.width) == (2, 4, 4)
+    assert reference.audio_frames == batch["latents_audio"].shape[-1]
+    # the reference conditions are the cached target latents with the standard clean augmentation
+    assert len(teacher_call["visual_condition_latents"]) == 1
+    torch.testing.assert_close(teacher_call["visual_condition_latents"][0], torch.full_like(video_latents, 2.0 * 0.999))
+    assert len(teacher_call["audio_condition_latents"]) == 1
+    torch.testing.assert_close(teacher_call["audio_condition_latents"][0], batch["latents_audio"])  # audio clean 1.0
+    assert student_call["layout"].task == "t2va"
+    assert len(student_call["visual_condition_latents"]) == 0
+    assert len(student_call["audio_condition_latents"]) == 0
+    assert network.calls == [False, True]
+    # both targets are the teacher predictions: student 2.0 vs teacher 3.0, audio -1.0 vs 0.5
+    assert metrics["teacher/conditioned"] == 1.0
+    assert metrics["loss/video"] == pytest.approx(1.0, rel=1e-4)
+    assert metrics["loss/audio"] == pytest.approx(2.25, rel=1e-4)
+    assert torch.isfinite(loss)
+
+
+def test_ref_teacher_works_without_fl_latents_and_ignores_them_when_present(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="ref")
+    trainer.handle_model_specific_args(args)
+    _patch_deterministic_noise(monkeypatch)
+
+    # an FL2VA latent cache can be reused: the endpoint latents never reach the teacher forward
+    network = _ToggleNetwork()
+    transformer = _TeacherAwareTransformer(network)
+    _teacher_matching_process_batch(trainer, args, _ref_teacher_batch(include_fl=True), network=network, transformer=transformer)
+    teacher_call = transformer.calls[0]
+    assert teacher_call["layout"].task == "ref2va"
+    assert len(teacher_call["visual_condition_latents"]) == 1  # the self-reference only
+
+
+def test_ref_teacher_switches_to_the_preservation_anchor_above_sigma_max(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    # the drawn base sigma (0.25) lies above the threshold, so the teacher must drop the
+    # reference conditions and run on the student's own text and layout
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="ref", h3_teacher_condition_sigma_max=0.2)
+    trainer.handle_model_specific_args(args)
+    network = _ToggleNetwork()
+    transformer = _TeacherAwareTransformer(network)
+    _patch_deterministic_noise(monkeypatch)
+
+    _, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        network,
+        _ref_teacher_batch(),
+        torch.zeros(1, 24, 2, 4, 4),
+        torch.zeros(1, 24, 2, 4, 4),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    teacher_call, student_call = transformer.calls
+    assert teacher_call["layout"] is student_call["layout"]
+    assert len(teacher_call["visual_condition_latents"]) == 0
+    assert len(teacher_call["audio_condition_latents"]) == 0
+    assert metrics["teacher/conditioned"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "conditions, batch_factory, message",
+    [
+        # the text cache kind must match the configured teacher conditions: distinct tensor
+        # keys per kind turn a cache/flag mismatch into a hard error instead of a silent desync
+        ("ref", _teacher_batch, "first,last teacher rows"),
+        ("ref", _training_batch, "reference teacher text rows"),
+        ("first,last", lambda: _ref_teacher_batch(include_fl=True), "ref teacher rows"),
+    ],
+)
+def test_teacher_mode_and_text_cache_kind_must_match(conditions, batch_factory, message):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions=conditions)
+    trainer.handle_model_specific_args(args)
+
+    with pytest.raises(ValueError, match=message):
+        _teacher_matching_process_batch(trainer, args, batch_factory(), network=_ToggleNetwork())
+
+
+def test_ref_teacher_text_rows_are_rejected_without_the_teacher_matching_flag():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+
+    with pytest.raises(ValueError, match="--h3_teacher_matching"):
+        _teacher_matching_process_batch(trainer, args, _ref_teacher_batch(), network=None)
 
 
 def test_teacher_matching_requires_the_lora_network(monkeypatch):

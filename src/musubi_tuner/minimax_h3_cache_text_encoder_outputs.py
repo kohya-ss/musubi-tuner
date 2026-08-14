@@ -15,6 +15,7 @@ from musubi_tuner.dataset.image_video_dataset import ItemInfo, VideoDataset
 from musubi_tuner.minimax_h3.text_encoder import (
     H3Presentation,
     H3TextVisual,
+    TEACHER_CONDITIONS_REF,
     TEXT_CACHE_FORMAT,
     build_presentation,
     encode_h3_presentation,
@@ -24,8 +25,9 @@ from musubi_tuner.minimax_h3.text_encoder import (
     presentation_fingerprint,
     processor_fingerprint,
     save_h3_uncond_cache,
+    wrap_ref_teacher_caption,
 )
-from musubi_tuner.minimax_h3.media import h3_records_from_datasource
+from musubi_tuner.minimax_h3.media import H3AudioSource, H3Record, H3Reference, h3_records_from_datasource
 from musubi_tuner.minimax_h3_cache_latents import (
     PyAVH3MediaDecoder,
     cache_metadata_matches,
@@ -90,6 +92,37 @@ def _build_visuals(
             timestamps = tuple(index / 2.0 for index in range(sampled.shape[0]))
             visuals[reference.path] = H3TextVisual(sampled, timestamps)
     return visuals
+
+
+# the same 2 fps text-visual sampling as the Ref2VA reference path (decode_generation_visuals)
+REF_TEACHER_TEXT_FRAME_STRIDE = 12
+
+
+def _ref_teacher_presentation(record, item: ItemInfo) -> H3Presentation:
+    """Ref2VA teacher presentation of the item: the training crop itself as the copy-source reference.
+
+    The visuals come from the already-decoded target crop, so the teacher sees exactly the
+    trained window (a re-decode from the file would miss the crop start). The audio track is
+    always declared: its latent condition at training time is the cached target audio, which is
+    encoded silence for audio-less items, and the audio loss stays presence-gated there.
+    """
+    target_frames = torch.as_tensor(item.content)
+    if target_frames.ndim != 4:
+        raise ValueError(f"MiniMax-H3 target frames must be [F,H,W,C], got {tuple(target_frames.shape)}")
+    reference = H3Reference(
+        type="video",
+        path=record.video_path,
+        audio=H3AudioSource(path=record.video_path, embedded=True),
+    )
+    teacher_record = H3Record(
+        video_path=record.video_path,
+        caption=wrap_ref_teacher_caption(record.caption),
+        references=(reference,),
+        jsonl_line=record.jsonl_line,
+    )
+    sampled = target_frames[::REF_TEACHER_TEXT_FRAME_STRIDE]
+    timestamps = tuple(index / 2.0 for index in range(sampled.shape[0]))
+    return build_presentation(teacher_record, "ref2va", {reference.path: H3TextVisual(sampled, timestamps)})
 
 
 def _text_cache_metadata(
@@ -161,8 +194,9 @@ def setup_parser() -> argparse.ArgumentParser:
         "--teacher_conditions",
         type=str,
         default=None,
-        help="also cache an FL2VA teacher presentation for --h3_teacher_matching training"
-        " (--task t2va only; the only supported value is 'first,last')",
+        help="also cache a teacher presentation for --h3_teacher_matching training (--task t2va only)."
+        " 'first,last' stores the FL2VA presentation with the crop endpoints; 'ref' stores the Ref2VA"
+        " presentation with the training crop itself (video + audio copy declaration) as the reference",
     )
     parser.add_argument("--text_cache_dtype", choices=("bf16", "float32"), default="bf16")
     parser.add_argument("--disable_mmap", action="store_true", help="disable memory-mapped safetensors loading")
@@ -189,7 +223,7 @@ def main() -> None:
     teacher_conditions = None
     if args.teacher_conditions is not None:
         if args.task != "t2va":
-            raise ValueError("--teacher_conditions requires --task t2va (the teacher presentation is FL2VA-style)")
+            raise ValueError("--teacher_conditions requires --task t2va (teacher matching trains a T2VA student)")
         teacher_conditions = normalize_teacher_conditions(args.teacher_conditions)
 
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -270,11 +304,16 @@ def main() -> None:
             )
             teacher_presentation = None
             teacher_presentation_identity = None
-            if teacher_conditions:
+            if teacher_conditions == TEACHER_CONDITIONS_REF:
+                # the student rows stay a plain T2VA presentation; the teacher rows are the
+                # Ref2VA presentation with the training crop itself as the copy-source reference
+                teacher_presentation = _ref_teacher_presentation(record, item)
+            elif teacher_conditions:
                 # the student rows stay a plain T2VA presentation; the teacher rows are the
                 # FL2VA presentation of the same record (first/last frames of the crop window)
                 teacher_visuals = _build_visuals(record, "fl2va", item, decoder, decoded_reference_cache)
                 teacher_presentation = build_presentation(record, "fl2va", teacher_visuals)
+            if teacher_presentation is not None:
                 teacher_presentation_identity = presentation_fingerprint(
                     teacher_presentation,
                     {record.video_path: media_fingerprints[record.video_path]},
@@ -307,8 +346,10 @@ def main() -> None:
             if teacher_presentation is not None:
                 teacher_hidden, teacher_tags = encode_h3_presentation(processor, text_encoder, teacher_presentation)
                 teacher_hidden = teacher_hidden.to(_cache_dtype(args.text_cache_dtype))
-                tensors[f"varlen_mmh3_teacher_hidden_states_{dtype_to_str(teacher_hidden.dtype)}"] = teacher_hidden
-                tensors["varlen_mmh3_teacher_token_tags_int64"] = teacher_tags
+                # distinct keys per teacher kind, so the trainer hard-fails on a mode mismatch
+                key_prefix = "varlen_mmh3_teacher_ref" if teacher_conditions == TEACHER_CONDITIONS_REF else "varlen_mmh3_teacher"
+                tensors[f"{key_prefix}_hidden_states_{dtype_to_str(teacher_hidden.dtype)}"] = teacher_hidden
+                tensors[f"{key_prefix}_token_tags_int64"] = teacher_tags
                 payload_mib += teacher_hidden.numel() * teacher_hidden.element_size() / (1024**2)
                 teacher_note = f", teacher_rows={teacher_hidden.shape[0]}"
             logger.info(

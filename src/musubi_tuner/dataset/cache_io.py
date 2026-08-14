@@ -600,22 +600,36 @@ def save_text_encoder_output_cache_minimax_h3(
     tensors: dict[str, torch.Tensor],
     metadata: Optional[dict[str, str]] = None,
 ):
-    # the teacher prefix must be split off before matching the student prefix, because
-    # "varlen_mmh3_teacher_hidden_states_*" does not share the student prefix
+    # the teacher prefixes must be split off before matching the student prefix, because
+    # "varlen_mmh3_teacher[_ref]_hidden_states_*" does not share the student prefix; the two
+    # teacher kinds (FL2VA "first,last" vs Ref2VA "ref") use distinct keys so the trainer can
+    # hard-fail on a cache/flag mode mismatch instead of silently misreading the rows
     student_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_hidden_states_")]
     teacher_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_teacher_hidden_states_")]
+    teacher_ref_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_teacher_ref_hidden_states_")]
     if len(student_hidden_keys) != 1:
         raise ValueError(f"MiniMax-H3 text cache requires exactly one hidden-state tensor, found {len(student_hidden_keys)}")
     tags_key = "varlen_mmh3_token_tags_int64"
     teacher_tags_key = "varlen_mmh3_teacher_token_tags_int64"
+    teacher_ref_tags_key = "varlen_mmh3_teacher_ref_token_tags_int64"
+
+    has_fl_teacher = bool(teacher_hidden_keys) or teacher_tags_key in tensors
+    has_ref_teacher = bool(teacher_ref_hidden_keys) or teacher_ref_tags_key in tensors
+    if has_fl_teacher and has_ref_teacher:
+        raise ValueError("MiniMax-H3 text cache cannot mix first,last and ref teacher rows")
 
     pairs = [(student_hidden_keys[0], "varlen_mmh3_hidden_states_", tags_key)]
     expected_keys = {student_hidden_keys[0], tags_key}
-    if teacher_hidden_keys or teacher_tags_key in tensors:
+    if has_fl_teacher:
         if len(teacher_hidden_keys) != 1 or teacher_tags_key not in tensors:
             raise ValueError("MiniMax-H3 teacher text rows require exactly one hidden-state tensor and its token tags")
         pairs.append((teacher_hidden_keys[0], "varlen_mmh3_teacher_hidden_states_", teacher_tags_key))
         expected_keys |= {teacher_hidden_keys[0], teacher_tags_key}
+    if has_ref_teacher:
+        if len(teacher_ref_hidden_keys) != 1 or teacher_ref_tags_key not in tensors:
+            raise ValueError("MiniMax-H3 teacher text rows require exactly one hidden-state tensor and its token tags")
+        pairs.append((teacher_ref_hidden_keys[0], "varlen_mmh3_teacher_ref_hidden_states_", teacher_ref_tags_key))
+        expected_keys |= {teacher_ref_hidden_keys[0], teacher_ref_tags_key}
     if set(tensors) != expected_keys:
         raise ValueError(f"MiniMax-H3 text cache requires exactly the keys {sorted(expected_keys)}")
 

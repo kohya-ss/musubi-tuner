@@ -59,6 +59,7 @@ def _load_training_module(monkeypatch):
     _stub(
         monkeypatch,
         "musubi_tuner.minimax_h3.text_encoder",
+        TEACHER_CONDITIONS_REF="ref",
         build_presentation=noop,
         encode_h3_presentation=noop,
         load_h3_processor=noop,

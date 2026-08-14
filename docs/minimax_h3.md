@@ -145,6 +145,8 @@ Add `--uncond_output /data/h3/uncond_space.safetensors` to also write the tiny u
 
 Add `--teacher_conditions first,last` (with `--task t2va`) to also store the FL2VA teacher presentation of each item alongside the plain caption rows, for teacher-matching training (see Teacher-matching training below). The caption is shared between the two presentations; the teacher rows only add the `<Picture 1>`/`<Picture 2>` prefix with the first/last frames of the crop window. The latent caches for that mode must be created with `--task fl2va`.
 
+`--teacher_conditions ref` (also `--task t2va` only) instead stores the Ref2VA teacher presentation: the training crop itself as the copy-source reference (its 2 fps sampled frames plus an `<Audio 1>` declaration), with the copy-declaration boilerplate wrapped around the shared caption automatically (see Reference teacher below). The two teacher kinds use distinct cache keys, so the trainer hard-fails when the cache and `--h3_teacher_conditions` disagree. Latent caches for the ref mode can be `--task fl2va` or plain `--task t2va`: the reference condition latents at training time are the cached target latents themselves.
+
 The same command accepts the ConvRot INT8 text encoder (`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`) and the NVFP4+AWQ text encoder (`qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`); the formats are detected automatically. On VRAM-limited GPUs add `--text_encoder_blocks_to_swap 50` to stream the encoder layers from CPU, and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations (see Text Encoder Layer Streaming below). The cache stores the state after the first 50 Qwen layers, before a final language-model norm. `hidden_states[0]` is the embedding output, so this is `hidden_states[50]`. The cache also stores per-row modality tags and presentation fingerprints; stale or structurally incompatible caches are rejected.
 
 ## LoRA Training
@@ -212,7 +214,7 @@ Optional refinements:
 
 Each step logs `guidance/applied` and the sigma-dependent gap magnitudes `guidance/video_gap_rms` / `guidance/audio_gap_rms`; the metadata records `ss_minimax_h3_guidance_loss_scale`, `..._scale_audio`, and `..._sigma_min`. The cost is one extra no-grad forward per applied step (roughly +50% step time without gating; less with `--h3_guidance_loss_sigma_min`).
 
-### Teacher-matching training (FL2VA teacher for a T2VA student)
+### Teacher-matching training (privileged-condition teacher for a T2VA student)
 
 `--h3_teacher_matching` trains a T2VA LoRA against the frozen base model's FL2VA predictions instead of the flow-matching target. Each step runs one extra no-grad forward of the same transformer with the LoRA disabled, conditioned on the real first and last frames of the training clip and the Picture-prefixed FL2VA text presentation — privileged information the text-only student never sees:
 
@@ -230,7 +232,7 @@ Data preparation differs from plain T2VA in two places:
 Training then runs with `--task t2va --h3_teacher_matching`. What to expect:
 
 - **The loss does not converge to zero.** The teacher sees the real endpoints, so its prediction contains content the text alone cannot determine; this information gap is an irreducible floor, largest at high sigma. Read the per-step logs `teacher/video_flow_gap_rms` / `teacher/audio_flow_gap_rms` binned by `teacher/base_sigma` — they measure how far the teacher deviates from the raw velocity target (guidance amplification plus endpoint information) — rather than expecting `loss/video` to vanish.
-- **Audio degenerates to a base-preservation anchor.** The visual endpoints carry almost no audio information, so the teacher's audio prediction stays close to the base model's text-conditioned prediction, and matching it preserves the base audio behavior instead of learning the audio content of the training data. Because H3 is single-stream, this anchor also protects the video path from drift entering through the shared weights. Training voice or audio content needs the guidance loss instead. `--video_only` and `--audio_loss_weight` gate the audio term as usual.
+- **Audio degenerates to a base-preservation anchor.** The visual endpoints carry almost no audio information, so the teacher's audio prediction stays close to the base model's text-conditioned prediction, and matching it preserves the base audio behavior instead of learning the audio content of the training data. Because H3 is single-stream, this anchor also protects the video path from drift entering through the shared weights. Training voice or audio content needs the guidance loss or the reference teacher (below) instead. `--video_only` and `--audio_loss_weight` gate the audio term as usual.
 - The appearance signal is the strongest part of the teacher target (endpoints plus `x_t` leakage); intermediate motion is weaker at high sigma, following the sigma profile measured for the guidance loss.
 - The cost is one extra no-grad forward per step, roughly +50% step time (same as the ungated guidance loss).
 
@@ -253,7 +255,25 @@ A validated starting recipe for identity training (character data, appearance ke
 --h3_teacher_matching --h3_teacher_loss_dc_weight 0.3 --h3_timestep_focus_prob 0.5
 ```
 
-`--h3_teacher_conditions` currently accepts only `first,last`: training videos always provide both endpoints, and the FL2VA base is most in-distribution with both anchors. The flag reserves the interface for single-sided or anchored teacher variants. The metadata records `ss_minimax_h3_teacher_matching`, `ss_minimax_h3_teacher_conditions`, `ss_minimax_h3_teacher_condition_sigma_max`, the loss-shape settings (`ss_minimax_h3_teacher_loss*`, `ss_minimax_h3_teacher_preservation_weight`), and the timestep-focus settings when enabled.
+`--h3_teacher_conditions` selects the teacher's privileged conditions: `first,last` (default; training videos always provide both endpoints, and the FL2VA base is most in-distribution with both anchors) or `ref` (the reference teacher below). The seam reserves the interface for further variants (single-sided, anchored, segmented teachers). The metadata records `ss_minimax_h3_teacher_matching`, `ss_minimax_h3_teacher_conditions`, `ss_minimax_h3_teacher_condition_sigma_max`, the loss-shape settings (`ss_minimax_h3_teacher_loss*`, `ss_minimax_h3_teacher_preservation_weight`), and the timestep-focus settings when enabled.
+
+#### Reference teacher (`--h3_teacher_conditions ref`)
+
+`--h3_teacher_conditions ref` switches the teacher from the two endpoints to the training clip itself: the teacher runs on the Ref2VA layout with the cached target video and audio latents as its reference condition (same per-step clean augmentation as regular condition latents), and the teacher text rows carry the clip's 2 fps sampled frames plus the official editing-style copy declaration (`fully_preserved` / `fully_copy`), which the cache script wraps around the shared caption automatically. The teacher therefore sees complete information at every sigma instead of only what the endpoints pin down.
+
+Measured on the released FL2VA weights — which handle a self-reference far more literally than the Ref2VA weights (their condition semantics is "exact frames of this video", so the weight-shared FL2VA base is also the better copy machine), while an unrelated reference is simply ignored (content-specific use, no style bleed from the mechanism itself):
+
+- The teaching-band video gap collapses to a flat model-error floor (base sigma 0.15-0.75: rms ~0.10-0.14, cos 0.995+), 3-5x below the endpoint teacher in the identity-decision band. The irreducible endpoint-information floor is gone, and with it most of the conditional-mean hedging.
+- The reference audio is copied too, so **audio becomes a real teaching target** in this mode; the `fully_copy` declaration is what opens the full teaching band for audio (without it, audio education stops around base sigma 0.55). The audio loss stays presence-gated as usual; for items without real audio the reference degenerates to encoded silence and the audio term stays off.
+- Above base sigma ~0.85 the FL2VA weights fail to align the reference against the noise-dominated `x_t` (structural — prompting does not fix it), so keep `--h3_teacher_condition_sigma_max` at its default 0.75: the gate boundary coincides with the edge of the healthy range.
+
+Data preparation: re-run text caching with `--teacher_conditions ref` (the teacher rows use their own cache keys, so a cache/flag mode mismatch is a hard error rather than a silent layout desync). Latent caches need no changes: existing `--task fl2va` caches work as-is (the first/last latents are simply unused), and plain `--task t2va` caches suffice for new datasets.
+
+Caveats:
+
+- The teacher forward carries the full reference video and audio tokens on top of the target tokens, so the teacher step is slower and more memory-hungry than with the endpoint teacher.
+- A complete-information teacher leaves almost no guided-space wedge inside the teaching band, so the de-distillation pressure there returns to roughly flow-matching levels; the protection moves to the anchor band, the decomposed loss, and monitoring. Starting recipe relative to the endpoint teacher: keep `--h3_teacher_condition_sigma_max 0.75`, lower `--h3_teacher_loss_mag_weight` (the remaining distillation wedge inside the band is mostly a magnitude effect), consider raising `--h3_teacher_preservation_weight`, and watch the sigma-binned `teacher/*_norm_ratio` — a student norm ratio shrinking toward 1.0 in the upper teaching band (base 0.65-0.75, where the text-only base still over-commits) is the early de-amplification signature.
+- Because the teacher is complete-information at every sigma, the learning signal is no longer tied to the high-sigma attribution window; shifting the focus band lower (e.g. `--h3_timestep_focus_min 0.3 --h3_timestep_focus_max 0.6`) becomes a meaningful A/B, at the cost of thinning the composition-commitment band 0.6-0.75.
 
 ### Training-time joint AV samples
 

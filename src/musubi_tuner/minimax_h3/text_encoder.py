@@ -557,20 +557,52 @@ def processor_fingerprint(processor) -> str:
 # algorithm, text layout constants, or the fingerprint formats) so stale caches are rebuilt/rejected.
 TEXT_CACHE_FORMAT = "minimax-h3-text-v2"
 
-# The teacher-matching initial scope fixes the teacher conditioning to both endpoints: full
-# training videos always provide first and last frames, and the FL2VA base is most
-# in-distribution with both anchors. The value is validated through this seam so single-sided
-# or anchored teachers can slot in later without changing the cache or trainer interfaces.
+# Teacher-matching condition seam. "first,last" conditions the FL2VA teacher on both endpoints
+# (full training videos always provide them, and the FL2VA base is most in-distribution with
+# both anchors). "ref" conditions the teacher on the training clip itself through the Ref2VA
+# layout (reference video plus its audio track), giving the teacher complete information at
+# every sigma. The value is validated through this seam so further variants (single-sided,
+# anchored, segmented teachers) can slot in later without changing the cache or trainer
+# interfaces.
 TEACHER_CONDITIONS_FIRST_LAST = "first,last"
+TEACHER_CONDITIONS_REF = "ref"
 
 
 def normalize_teacher_conditions(value: str) -> str:
     parts = [part.strip() for part in str(value).split(",")]
-    if parts != ["first", "last"]:
-        raise ValueError(
-            f"MiniMax-H3 teacher matching supports only teacher conditions '{TEACHER_CONDITIONS_FIRST_LAST}', got {value!r}"
-        )
-    return TEACHER_CONDITIONS_FIRST_LAST
+    if parts == ["first", "last"]:
+        return TEACHER_CONDITIONS_FIRST_LAST
+    if parts == [TEACHER_CONDITIONS_REF]:
+        return TEACHER_CONDITIONS_REF
+    raise ValueError(
+        f"MiniMax-H3 teacher matching supports only teacher conditions "
+        f"'{TEACHER_CONDITIONS_FIRST_LAST}' or '{TEACHER_CONDITIONS_REF}', got {value!r}"
+    )
+
+
+# The ref-teacher caption wrap: the official editing-prompt declaration blocks that make the
+# base model treat the reference as a 1:1 copy source. subject_definitions / summary /
+# retention_analysis are content-independent boilerplate, so the cache script wraps the user
+# caption automatically, like the FL2VA Picture prefix. Probe-validated on the released FL2VA
+# weights: the video copy semantics saturate even without any declaration, but the
+# `<Audio 1>: fully_copy` declaration is what opens audio education across the teaching band.
+REF_TEACHER_CAPTION_HEADER = """subject_definitions:
+<Video 1> is the source video for the target video edit.
+<Audio 1> is the synchronized audio track of <Video 1> and is reused in the target video.
+
+summary:
+[video editing + audio reuse] The target video is an edited version of <Video 1> with no changes; all shots, subjects, camera movement, and sound are preserved as they are.
+
+retention_analysis:
+<Video 1> (all shots): fully_preserved - every shot, subject, action, and camera movement of the source video is retained without modification.
+<Audio 1>: fully_copy - <Audio 1> is reused 1:1 as the target video's complete final audio track.
+
+detailed_description:
+"""
+
+
+def wrap_ref_teacher_caption(caption: str) -> str:
+    return REF_TEACHER_CAPTION_HEADER + caption
 
 
 def presentation_fingerprint(
