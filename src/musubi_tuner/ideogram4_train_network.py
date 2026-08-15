@@ -65,6 +65,9 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         if args.weighting_scheme != "none":
             raise ValueError("Ideogram 4 currently supports --weighting_scheme none only.")
 
+    def use_unconditional_dit_for_sampling(self, args: argparse.Namespace) -> bool:
+        return should_use_unconditional_dit_for_lora_sampling(args)
+
     def process_sample_prompts(
         self,
         args: argparse.Namespace,
@@ -85,7 +88,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
 
         sample_parameters = []
         with torch.no_grad():
-            use_unconditional_dit = should_use_unconditional_dit_for_lora_sampling(args)
+            use_unconditional_dit = self.use_unconditional_dit_for_sampling(args)
             if args.unconditional_dit and not use_unconditional_dit:
                 logger.warning(
                     "Ignoring --unconditional_dit for Ideogram 4 LoRA sampling. "
@@ -126,7 +129,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         sample_parameters,
         dit_dtype,
     ) -> None:
-        if should_use_unconditional_dit_for_lora_sampling(args) and self.unconditional_transformer is None:
+        if self.use_unconditional_dit_for_sampling(args) and self.unconditional_transformer is None:
             logger.info(f"Loading Ideogram 4 unconditional DiT from {args.unconditional_dit}")
             self.unconditional_transformer = ideogram4_utils.load_ideogram4_transformer(
                 args.unconditional_dit,
@@ -137,6 +140,8 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 attn_mode=self._attn_mode,
                 split_attn=self._split_attn,
             )
+            self.unconditional_transformer.requires_grad_(False)
+            self.unconditional_transformer.eval()
 
     def on_after_sample_images(
         self,
@@ -232,13 +237,14 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        del accelerator, dit_weight_dtype
+        del accelerator
         self._attn_mode = attn_mode
         self._split_attn = split_attn
+        effective_dtype = dit_weight_dtype if dit_weight_dtype is not None else model_utils.str_to_dtype(args.dit_dtype)
         return ideogram4_utils.load_ideogram4_transformer(
             dit_path,
             device=loading_device,
-            dtype=model_utils.str_to_dtype(args.dit_dtype),
+            dtype=effective_dtype,
             expected_model_type=ideogram4_utils.IDEOGRAM4_COND_MODEL_TYPE,
             disable_mmap=args.disable_numpy_memmap,
             attn_mode=attn_mode,
@@ -271,7 +277,9 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         **kwargs,
     ) -> DiTOutput:
         del kwargs
-        model = transformer
+        raw_model = (
+            accelerator.unwrap_model(transformer, keep_fp32_wrapper=False) if hasattr(accelerator, "unwrap_model") else transformer
+        )
         bsize, _, grid_h, grid_w = noisy_model_input.shape
         text_features = [x.to(dtype=network_dtype) for x in batch["i4_llm_features"]]
         image_height = grid_h * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
@@ -284,7 +292,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         text_padding = torch.zeros(
             bsize,
             int(inputs["max_text_tokens"]),
-            model.config.in_channels,
+            raw_model.config.in_channels,
             dtype=network_dtype,
             device=accelerator.device,
         )
@@ -308,7 +316,7 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         # fp32 internally; without that guard autocast would collapse the image RoPE positions to a single
         # value (offset 2**16, below bf16 resolution) and produce a flat checkerboard.
         with accelerator.autocast():
-            model_pred = model(
+            model_pred = transformer(
                 llm_features=llm_features,
                 x=x,
                 t=model_t,

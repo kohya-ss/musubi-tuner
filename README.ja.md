@@ -38,7 +38,11 @@
 
 ## はじめに
 
-このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、FLUX.2 dev/klein、Qwen-Image、Z-ImageのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、それらの公式リポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、FLUX.2 dev/klein、Ideogram 4、Krea 2、Qwen-Image、Z-Image向けのLoRA学習スクリプトを提供します。
+
+FLUX.1 Kontext、FLUX.2、Ideogram 4、Krea 2は、LoRAとDiT全体のファインチューニングの両方に対応しています。DiT全体のファインチューニングで更新されるのはDiTのみで、VAEとテキストエンコーダーは凍結されたままです。
+
+このリポジトリは非公式であり、それらの公式リポジトリとは関係ありません。
 
 *リポジトリは開発中です。*
 

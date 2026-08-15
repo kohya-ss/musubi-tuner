@@ -129,9 +129,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         device = accelerator.device
 
         # Get embeddings
-        ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)  # [1, 512, 15360]
+        ctx = sample_parameter["ctx_vec"].to(device=device, dtype=dit_dtype)  # [1, 512, 15360]
         ctx, ctx_ids = flux2_utils.prc_txt(ctx)  # [1, 512, 15360], [1, 512, 4]
-        negative_ctx = sample_parameter.get("negative_ctx_vec").to(device=device, dtype=torch.bfloat16)
+        negative_ctx = sample_parameter.get("negative_ctx_vec").to(device=device, dtype=dit_dtype)
         negative_ctx, negative_ctx_ids = flux2_utils.prc_txt(negative_ctx)
 
         # Initialize latents
@@ -140,7 +140,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             (1, 128, packed_latent_height, packed_latent_width),  # [1, 128, 52, 78]
             generator=generator,
             device=device,
-            dtype=torch.bfloat16,
+            dtype=dit_dtype,
         )
         x, x_ids = flux2_utils.prc_img(latents)  # [1, 4056, 128], [1, 4056, 4]
 
@@ -161,6 +161,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
                     control_latent_list.append(control_latent.squeeze(0))
 
             ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent_list)
+            ref_tokens = ref_tokens.to(device=device, dtype=dit_dtype)
 
             vae.to("cpu")
             clean_memory_on_device(device)

@@ -147,8 +147,8 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
         device = accelerator.device
 
         # Get embeddings
-        t5_vec = sample_parameter["t5_vec"].to(device=device, dtype=torch.bfloat16)
-        clip_l_pooler = sample_parameter["clip_l_pooler"].to(device=device, dtype=torch.bfloat16)
+        t5_vec = sample_parameter["t5_vec"].to(device=device, dtype=dit_dtype)
+        clip_l_pooler = sample_parameter["clip_l_pooler"].to(device=device, dtype=dit_dtype)
 
         txt_ids = torch.zeros(t5_vec.shape[0], t5_vec.shape[1], 3, device=t5_vec.device)
 
@@ -162,7 +162,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
             generator=generator,
             dtype=noise_dtype,
             device=device,
-        ).to(device, dtype=torch.bfloat16)
+        ).to(device, dtype=dit_dtype)
 
         img_ids = flux_utils.prepare_img_ids(1, packed_latent_height, packed_latent_width).to(device)
 
@@ -185,7 +185,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
             control_latent = rearrange(control_latent, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
             control_latent_ids = flux_utils.prepare_img_ids(1, ctrl_packed_height, ctrl_packed_width, is_ctrl=True).to(device)
 
-            control_latent = control_latent.to(torch.bfloat16)
+            control_latent = control_latent.to(dit_dtype)
 
         vae.to("cpu")
         clean_memory_on_device(device)

@@ -41,7 +41,9 @@
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, FLUX.2 dev/klein, Qwen-Image, and Z-Image architectures. 
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, FLUX.2 dev/klein, Ideogram 4, Krea 2, Qwen-Image, and Z-Image architectures.
+
+FLUX.1 Kontext, FLUX.2, Ideogram 4, and Krea 2 support both LoRA and full-DiT finetuning. Full-DiT finetuning updates only the DiT; the VAE and text encoder(s) remain frozen.
 
 This repository is unofficial and not affiliated with the official repositories of these architectures.
 

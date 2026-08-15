@@ -94,6 +94,9 @@ class Krea2NetworkTrainer(NetworkTrainer):
         if args.turbo_dit and not args.sample_prompts:
             logger.warning("--turbo_dit is set but --sample_prompts is not; Turbo is only used for sample generation.")
 
+    def use_turbo_sampling_schedule(self, args: argparse.Namespace) -> bool:
+        return bool(args.turbo_dit)
+
     def process_sample_prompts(
         self,
         args: argparse.Namespace,
@@ -167,12 +170,13 @@ class Krea2NetworkTrainer(NetworkTrainer):
         sample parameters (no encoder) and the trainer's DiT + Qwen-Image VAE. CFG (standard
         uncond + scale*(cond-uncond)) is enabled when a negative prompt is present and cfg_scale > 1
         (musubi convention).
-        Resolution-aware mu time-shift uses the K2 raw defaults (y1=0.5, y2=1.15); the distilled
-        (turbo) fixed-mu schedule is not wired here.
+        Resolution-aware mu time-shift uses the K2 RAW defaults (y1=0.5, y2=1.15). A Turbo
+        primary checkpoint, or the LoRA-only temporary Turbo swap, uses fixed mu=1.15.
         """
-        model = transformer  # SingleStreamDiT
+        model = transformer
+        raw_model = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
         device = accelerator.device
-        patch = model.config.patch
+        patch = raw_model.config.patch
         compression = qwen_image_utils.VAE_SCALE_FACTOR  # Qwen-Image VAE: 8x
 
         # Standard CFG (uncond + scale*(cond-uncond)), enabled when cfg_scale > 1 — matches the
@@ -189,7 +193,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
         lat_h, lat_w = height // compression, width // compression
 
         def build_branch(embed):
-            embed = embed.to(device=device, dtype=torch.bfloat16).unsqueeze(0)  # (1, seq, L, D)
+            embed = embed.to(device=device, dtype=dit_dtype).unsqueeze(0)  # (1, seq, L, D)
             txtmask = torch.ones(1, embed.shape[1], device=device, dtype=torch.bool)
             return embed, txtmask
 
@@ -198,7 +202,15 @@ class Krea2NetworkTrainer(NetworkTrainer):
             untxt, untxtmask = build_branch(sample_parameter["negative_krea2_vl_embed"])
 
         # Seeded gaussian latent noise (generator already seeded by the base sampler).
-        noise = torch.randn(1, model.config.channels, lat_h, lat_w, device=device, dtype=torch.bfloat16, generator=generator)
+        noise = torch.randn(
+            1,
+            raw_model.config.channels,
+            lat_h,
+            lat_w,
+            device=device,
+            dtype=dit_dtype,
+            generator=generator,
+        )
 
         img, pos, mask = krea2_sampling.prepare(noise, txt.shape[1], patch, txtmask)
         if do_cfg:
@@ -208,8 +220,8 @@ class Krea2NetworkTrainer(NetworkTrainer):
         x1 = (256 // align) ** 2
         x2 = (1280 // align) ** 2
         # The distilled Turbo checkpoint was trained at a fixed mu=1.15; the RAW checkpoint
-        # uses resolution-aware mu interpolation. When sampling on Turbo (--turbo_dit), pin mu.
-        turbo_mu = 1.15 if args.turbo_dit else None
+        # uses resolution-aware mu interpolation. The trainer policy selects the schedule.
+        turbo_mu = 1.15 if self.use_turbo_sampling_schedule(args) else None
         ts = krea2_sampling.timesteps(img.shape[1], sample_steps, x1, x2, y1=0.5, y2=1.15, mu=turbo_mu)
 
         for tcurr, tprev in tqdm(zip(ts[:-1], ts[1:]), total=len(ts) - 1, desc="Denoising steps"):
@@ -418,9 +430,10 @@ class Krea2NetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         **kwargs,
     ) -> DiTOutput:
-        model = transformer  # SingleStreamDiT
+        model = transformer  # prepared SingleStreamDiT; keep wrapper hooks active for forward
+        raw_model = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
         device = accelerator.device
-        patch = model.config.patch
+        patch = raw_model.config.patch
 
         latents = batch["latents"]  # (B, C, 1, H, W)
         bsize = latents.shape[0]

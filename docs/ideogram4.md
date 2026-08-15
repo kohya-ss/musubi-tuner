@@ -11,7 +11,9 @@ This document describes how to train and run inference for Ideogram 4 within the
 
 This adapter targets the Comfy-Org single-file component layout. The model license is non-commercial; read and accept the relevant terms before downloading or using the weights.
 
-Ideogram 4 is distributed only in quantized form (FP8 and NVFP4); there are no official BF16/FP16 DiT weights. The DiT is therefore always loaded from a pre-quantized FP8 checkpoint — for both inference and LoRA training — and kept in FP8 as the frozen base. The FP8 weights are dequantized on the fly to the compute dtype, and any LoRA modules run in the compute dtype, so this is the normal (and only) operating mode rather than an optional memory optimization.
+Ideogram 4 is officially distributed only in quantized form (FP8 and NVFP4); there are no official BF16/FP16 DiT weights. Inference and LoRA training therefore load a pre-quantized FP8 checkpoint and keep it as a frozen base. The FP8 weights are dequantized on the fly to the compute dtype, and LoRA modules run in the compute dtype.
+
+Full DiT finetuning is a separate path. It requires a plain conditional checkpoint whose tensors are fp32, fp16, or bf16; the official prequantized files cannot be used directly. Musubi Tuner does not create or download that plain checkpoint.
 
 Many options are shared with other architectures and can be found via `--help`. Refer to the [HunyuanVideo documentation](./hunyuan_video.md) as needed. This feature is experimental.
 
@@ -27,7 +29,9 @@ Many options are shared with other architectures and can be found via `--help`. 
 
 このアダプターはComfy-Orgの単一ファイル形式を対象としています。モデルのライセンスは非商用です。重みをダウンロード・使用する前に、関連する規約を読んで同意してください。
 
-Ideogram 4は量子化された形式（FP8およびNVFP4）でのみ配布されており、公式のBF16/FP16 DiT重みは存在しません。そのためDiTは、推論・LoRA学習のどちらでも常に事前量子化されたFP8チェックポイントから読み込まれ、凍結したベースとしてFP8のまま保持されます。FP8重みはオンザフライでcompute dtypeに逆量子化され、LoRAモジュールもcompute dtypeで動作します。つまりこれはオプションのメモリ最適化ではなく、通常の（そして唯一の）動作モードです。
+Ideogram 4は公式には量子化された形式（FP8およびNVFP4）でのみ配布されており、公式のBF16/FP16 DiT重みは存在しません。そのため推論とLoRA学習では、事前量子化されたFP8チェックポイントを読み込み、凍結したベースとして保持します。FP8重みはオンザフライでcompute dtypeに逆量子化され、LoRAモジュールもcompute dtypeで動作します。
+
+DiT全体のファインチューニングは別の経路です。テンソルがfp32、fp16、またはbf16のplain conditionalチェックポイントが必要で、公式の事前量子化ファイルは直接使用できません。Musubi Tunerはこのplainチェックポイントを作成またはダウンロードしません。
 
 多くのオプションは他のアーキテクチャと共通で、`--help`で確認できます。必要に応じて[HunyuanVideoのドキュメント](./hunyuan_video.md)も参照してください。この機能は実験的なものです。
 
@@ -44,6 +48,8 @@ Required files:
 - `text_encoders/qwen3vl_8b_fp8_scaled.safetensors` — Qwen3-VL text encoder
 - `vae/flux2-vae.safetensors` — Flux2 VAE
 
+These official quantized DiT files support inference and LoRA training. Full finetuning instead requires a separately obtained plain conditional DiT with `model_type=ideogram4_cond` metadata.
+
 The tokenizer is downloaded automatically from `Qwen/Qwen3-VL-8B-Instruct`; the text-encoder config is bundled in this repository. There are no tokenizer/config CLI arguments.
 
 <details>
@@ -57,6 +63,8 @@ The tokenizer is downloaded automatically from `Qwen/Qwen3-VL-8B-Instruct`; the 
 - `diffusion_models/ideogram4_unconditional_fp8_scaled.safetensors` — unconditional DiT（推論／非対称CFG用）
 - `text_encoders/qwen3vl_8b_fp8_scaled.safetensors` — Qwen3-VL text encoder
 - `vae/flux2-vae.safetensors` — Flux2 VAE
+
+これらの公式量子化DiTファイルは推論とLoRA学習に使用できます。DiT全体のファインチューニングには、`model_type=ideogram4_cond`メタデータを持つplain conditional DiTを別途用意する必要があります。
 
 トークナイザーは`Qwen/Qwen3-VL-8B-Instruct`から自動でダウンロードされます。text encoderのconfigはこのリポジトリ内に同梱されています。トークナイザー/config用のCLI引数はありません。
 
@@ -133,7 +141,7 @@ python src/musubi_tuner/ideogram4_cache_text_encoder_outputs.py `
 
 ## Training / 学習
 
-Training uses a dedicated script `ideogram4_train_network.py`.
+LoRA training uses the dedicated script `ideogram4_train_network.py`.
 
 ```powershell
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/ideogram4_train_network.py `
@@ -157,7 +165,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 <details>
 <summary>日本語</summary>
 
-学習は専用のスクリプト`ideogram4_train_network.py`を使用します。コマンド例は英語版を参照してください。
+LoRA学習は専用のスクリプト`ideogram4_train_network.py`を使用します。コマンド例は英語版を参照してください。
 
 - `ideogram4_train_network.py`を使用し、`--network_module networks.lora_ideogram4`の指定が**必要**です。
 - LoRA v1はconditional transformerのみを学習します。対象は`Ideogram4TransformerBlock`内の`attention.qkv`、`attention.o`、`feed_forward.w1/w2/w3`です。
@@ -166,6 +174,48 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - Ideogram 4は単純なMSEのflow-matching lossを使用します。`none`以外の`--weighting_scheme`はエラーになります。
 - `--log_loss_stats`は学習中にprediction/targetの診断情報をログ出力します。
 - attentionのバックエンドは共通フラグ（`--sdpa`（既定）、`--flash_attn`、`--xformers`、`--split_attn`）を使用します。SageAttentionはhead次元（256）がint8/fp8カーネルの対応外のため使用できません。
+
+</details>
+
+### Full DiT Finetuning / DiT全体のファインチューニング
+
+Full finetuning uses `ideogram4_train.py` and trains every parameter of the conditional DiT. Run latent and text-encoder-output pre-caching before training.
+
+```powershell
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision no ideogram4_train.py `
+  --dataset_config path\to\dataset.toml `
+  --dit path\to\ideogram4_cond_plain.safetensors `
+  --output_dir outputs\i4_full `
+  --output_name my_i4_full `
+  --optimizer_type Adafactor `
+  --learning_rate 1e-5 `
+  --gradient_checkpointing `
+  --mixed_precision no `
+  --sdpa
+```
+
+- `--dit` must be a plain fp32, fp16, or bf16 **conditional** checkpoint with `model_type=ideogram4_cond`. BNB 4-bit and prequantized FP8 checkpoints are rejected from their safetensors headers before model construction. The official Comfy-Org FP8 files cannot be full-finetuned directly.
+- Parameters and exported checkpoints are fp32 by default. To train and save in bf16, pass both `--full_bf16` and `--mixed_precision bf16`. Full fp16 parameters are not supported.
+- The exported safetensors contains the complete conditional DiT and preserves `model_type=ideogram4_cond`; it does not contain LoRA weights.
+- `--blocks_to_swap` is available for a single training process. `--fp8_base`, `--fp8_scaled`, `--block_swap_h2d_only`, and LoRA/network arguments are not supported for full finetuning.
+- Multi-process full finetuning is limited to ordinary Accelerate DDP without block swap or fused backward. FSDP, DeepSpeed, tensor parallelism (TP), Megatron, and XLA are not supported.
+- `--text_encoder` and `--vae` remain frozen and are needed only for training-time sampling.
+- When `--unconditional_dit` is supplied, it is loaded only while sampling, remains frozen, and is used automatically for asymmetric CFG. Do not pass the LoRA-only `--use_unconditional_dit_for_lora_sampling` switch; the full trainer rejects it.
+- Use `--save_state` when optimizer, scheduler, and exact training-progress state are also needed for resume.
+
+<details>
+<summary>日本語</summary>
+
+DiT全体のファインチューニングには`ideogram4_train.py`を使用し、conditional DiTの全パラメータを学習します。学習前にlatentとテキストエンコーダー出力を事前キャッシュしてください。コマンド例は英語版を参照してください。
+
+- `--dit`には、`model_type=ideogram4_cond`メタデータを持つfp32、fp16、またはbf16のplain **conditional**チェックポイントが必要です。BNB 4-bitおよび事前量子化FP8チェックポイントは、モデル構築前にsafetensorsヘッダーから検出して拒否されます。公式のComfy-Org FP8ファイルを直接フルファインチューニングすることはできません。
+- デフォルトではfp32のパラメータを学習し、fp32でチェックポイントを保存します。bf16で学習および保存する場合は、`--full_bf16`と`--mixed_precision bf16`を両方指定してください。full fp16パラメータはサポートされていません。
+- 出力されるsafetensorsにはconditional DiT全体が含まれ、`model_type=ideogram4_cond`が保持されます。LoRAウェイトは含まれません。
+- `--blocks_to_swap`は単一プロセスの学習で使用できます。`--fp8_base`、`--fp8_scaled`、`--block_swap_h2d_only`、およびLoRA/network引数は、DiT全体のファインチューニングでは使用できません。
+- マルチプロセスのフルファインチューニングは、block swapとfused backwardを使用しない通常のAccelerate DDPに限られます。FSDP、DeepSpeed、tensor parallelism（TP）、Megatron、XLAはサポートされていません。
+- `--text_encoder`と`--vae`は凍結されたままで、学習中のサンプル生成を行う場合にのみ必要です。
+- `--unconditional_dit`を指定すると、サンプル生成時だけ読み込まれ、凍結されたまま非対称CFGに自動で使用されます。LoRA専用の`--use_unconditional_dit_for_lora_sampling`は指定しないでください。full trainerではエラーになります。
+- 再開に必要なオプティマイザ、スケジューラ、および正確な学習進捗も保存する場合は`--save_state`を使用してください。
 
 </details>
 
@@ -184,18 +234,18 @@ Ideogram 4の学習は既定で`--timestep_sampling ideogram4_shift`を使用し
 
 - `--blocks_to_swap` offloads some DiT blocks to CPU. The maximum is 33.
 - `--gradient_checkpointing` (and `--gradient_checkpointing_cpu_offload`) reduce VRAM usage. See the [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
-- The DiT base is already FP8 (see [Overview](#overview--概要)), so no separate `--fp8_base` flag is needed for it.
+- For LoRA training, the frozen DiT base is already FP8 (see [Overview](#overview--概要)), so no separate `--fp8_base` flag is needed. Full finetuning rejects DiT FP8 options.
 
 <details>
 <summary>日本語</summary>
 
 - `--blocks_to_swap`は一部のDiTブロックをCPUにオフロードします。最大値は33です。
 - `--gradient_checkpointing`（および`--gradient_checkpointing_cpu_offload`）でVRAM使用量を削減できます。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
-- DiTベースは既にFP8です（[概要](#overview--概要)参照）。そのため別途`--fp8_base`フラグは不要です。
+- LoRA学習では凍結されたDiTベースが既にFP8です（[概要](#overview--概要)参照）。そのため別途`--fp8_base`フラグは不要です。DiT全体のファインチューニングではDiTのFP8オプションを使用できません。
 
 </details>
 
-### Sampling during training / 学習中のサンプル生成
+### Sampling during LoRA training / LoRA学習中のサンプル生成
 
 Sampling during training requires the remaining local components:
 

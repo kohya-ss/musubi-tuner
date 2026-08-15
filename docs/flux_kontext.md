@@ -136,6 +136,45 @@ FLUX.1 Kontextの学習は専用のスクリプト`flux_kontext_train_network.py
 
 </details>
 
+### Full DiT Finetuning / DiT全体のファインチューニング
+
+Full finetuning uses `flux_kontext_train.py`. Run both latent pre-caching and text encoder output pre-caching before training; the cached reference/control latent is required in every training batch.
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision no flux_kontext_train.py \
+    --dit path/to/dit_model \
+    --dataset_config path/to/toml \
+    --sdpa --mixed_precision no \
+    --timestep_sampling flux_shift --weighting_scheme none \
+    --optimizer_type Adafactor --learning_rate 1e-5 --gradient_checkpointing \
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers \
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
+    --output_dir path/to/output_dir --output_name name-of-full-model
+```
+
+- The complete active DiT/Transformer loaded from `--dit` is trainable. The text encoders and VAE are not trained. Their checkpoint arguments are only needed when `--sample_prompts` requires on-the-fly sample encoding or decoding.
+- Full finetuning uses fp32 parameters and checkpoints by default. To train and save in bf16, specify both `--full_bf16` and `--mixed_precision bf16`. Full fp16 parameters are not supported.
+- Adafactor and `--gradient_checkpointing` are recommended because full-model parameters and optimizer states require substantially more memory than LoRA training.
+- `--blocks_to_swap` is supported only for a single training process. `--block_swap_optimizer_patch_params` is intended for AdamW and Adafactor, not 8-bit or arbitrary third-party optimizers.
+- Multi-process full finetuning is limited to ordinary Accelerate DDP without block swap or fused backward. FSDP, DeepSpeed, tensor parallelism (TP), Megatron, and XLA are not supported.
+- DiT FP8 options (`--fp8_base` and `--fp8_scaled`) and `--block_swap_h2d_only` are not supported for full finetuning. `--fp8_t5` remains available only for the frozen T5 encoder used by sample prompts.
+- Exported checkpoints contain the full DiT state dict, not LoRA weights. Use `--save_state` when optimizer, scheduler, and training-progress state is also required for resume.
+
+<details>
+<summary>日本語</summary>
+
+DiT全体のファインチューニングには`flux_kontext_train.py`を使用します。学習前にlatentとテキストエンコーダー出力の両方を事前キャッシュしてください。キャッシュされた参照画像のcontrol latentは、すべての学習バッチで必要です。
+
+- `--dit`から読み込まれた有効なDiT/Transformerの全パラメータを学習します。テキストエンコーダーとVAEは学習しません。これらのチェックポイント引数は、`--sample_prompts`によるサンプル生成でエンコードまたはデコードを行う場合にのみ必要です。
+- デフォルトではfp32のパラメータを学習し、fp32でチェックポイントを保存します。bf16で学習および保存する場合は、`--full_bf16`と`--mixed_precision bf16`を両方指定してください。パラメータのfull fp16学習はサポートされていません。
+- フルモデルのパラメータとオプティマイザ状態はLoRA学習より大きなメモリを必要とするため、Adafactorと`--gradient_checkpointing`を推奨します。
+- `--blocks_to_swap`は単一プロセスの学習でのみ使用できます。`--block_swap_optimizer_patch_params`はAdamWとAdafactor向けであり、8-bitオプティマイザや任意のサードパーティ製オプティマイザ向けではありません。
+- マルチプロセスのフルファインチューニングは、block swapとfused backwardを使用しない通常のAccelerate DDPに限られます。FSDP、DeepSpeed、tensor parallelism（TP）、Megatron、XLAはサポートされていません。
+- DiTのFP8オプション（`--fp8_base`と`--fp8_scaled`）および`--block_swap_h2d_only`は、DiT全体のファインチューニングでは使用できません。`--fp8_t5`は、サンプルプロンプト用の凍結されたT5エンコーダーにのみ使用できます。
+- 出力されるチェックポイントにはLoRAウェイトではなくDiT全体のstate dictが含まれます。再開に必要なオプティマイザ、スケジューラ、学習進捗も保存する場合は`--save_state`を使用してください。
+
+</details>
+
 ## Inference / 推論
 
 Inference uses a dedicated script `flux_kontext_generate_image.py`.
