@@ -259,6 +259,53 @@ def disable_linear_from_compile(module: torch.nn.Module):
             sub_module.forward = sub_module._eager_forward  # override forward to disable compile
 
 
+def setup_parser_compile(parser: argparse.ArgumentParser) -> None:
+    """Add the torch.compile argument set consumed by compile_transformer below.
+
+    Same arguments as hv_generate_video.setup_parser_compile and the compile slice of
+    training's parser_common, placed here so scripts can add them without importing an
+    architecture module or the training-only dynamo/tf32 arguments.
+    """
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile (requires Triton) / torch.compileを有効にする（Tritonが必要）",
+    )
+    parser.add_argument(
+        "--compile_backend",
+        type=str,
+        default="inductor",
+        help="torch.compile backend (default: inductor) / torch.compileのバックエンド（デフォルト: inductor）",
+    )
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        default="default",
+        choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+        help="torch.compile mode (default: default) / torch.compileのモード（デフォルト: default）",
+    )
+    parser.add_argument(
+        "--compile_dynamic",
+        type=str,
+        default=None,
+        choices=["true", "false", "auto"],
+        help="Dynamic shapes mode for torch.compile (default: None, same as auto)"
+        " / torch.compileの動的形状モード（デフォルト: None、autoと同じ動作）",
+    )
+    parser.add_argument(
+        "--compile_fullgraph",
+        action="store_true",
+        help="Enable fullgraph mode in torch.compile / torch.compileでフルグラフモードを有効にする",
+    )
+    parser.add_argument(
+        "--compile_cache_size_limit",
+        type=int,
+        default=None,
+        help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32)"
+        " / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
+    )
+
+
 def compile_transformer(
     args: argparse.Namespace,
     transformer: torch.nn.Module,

@@ -642,7 +642,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     assert next(event for event in events if event[0] == "load_video_vae")[2] is torch.float16
     assert captured["decoded"].video.shape == (5, 4, 4, 3)
     assert captured["decoded"].audio.shape == (2, 6667)
-    assert captured["output"] == args.output
+    assert captured["output"] == Path(args.output)
 
 
 def test_generation_trajectory_dump_writes_sigma_schedule_and_per_step_videos(tmp_path, monkeypatch):
