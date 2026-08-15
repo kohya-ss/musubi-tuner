@@ -24,6 +24,7 @@ from musubi_tuner.minimax_h3.generation_inputs import (
     encode_audio_conditions,
     encode_visual_conditions,
     load_generation_record,
+    parse_one_frame_options,
 )
 from musubi_tuner.minimax_h3.media import (
     H3Record,
@@ -83,43 +84,10 @@ def _time_flag() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
 
 
-def _parse_one_frame_options(spec: str) -> tuple[int, tuple[int, ...] | None]:
-    """Parses --one_frame "target_index=N,control_index=A;B" into 24 fps pixel-frame indices."""
-
-    def nonnegative_index(value: str, label: str) -> int:
-        try:
-            index = int(value)
-        except ValueError as error:
-            raise ValueError(f"MiniMax-H3 --one_frame {label} must be an integer, got {value!r}") from error
-        if index < 0:
-            raise ValueError(f"MiniMax-H3 --one_frame {label} must be nonnegative, got {index}")
-        return index
-
-    target_index = 0
-    control_indices = None
-    seen = set()
-    for part in spec.split(","):
-        key, separator, value = part.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if not separator or not key or not value:
-            raise ValueError(f"MiniMax-H3 --one_frame options must be key=value, got {part!r}")
-        if key not in {"target_index", "control_index"}:
-            raise ValueError(f"MiniMax-H3 --one_frame has unknown option {key!r} (allowed: target_index, control_index)")
-        if key in seen:
-            raise ValueError(f"MiniMax-H3 --one_frame has duplicate option {key!r}")
-        seen.add(key)
-        if key == "target_index":
-            target_index = nonnegative_index(value, "target_index")
-        else:
-            control_indices = tuple(nonnegative_index(item, "control_index") for item in value.split(";"))
-    return target_index, control_indices
-
-
 def _one_frame_time_overrides(args: argparse.Namespace) -> H3TimeOverrides | None:
     if args.frame_count != 1:
         return None
-    target_index, control_indices = _parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
+    target_index, control_indices = parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
     return H3TimeOverrides(
         condition_times=tuple(FRAME_RESCALE * index for index in (control_indices or ())),
         target_time=FRAME_RESCALE * target_index,
@@ -189,7 +157,7 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
         raise ValueError(f"MiniMax-H3 width and height must be positive and divisible by 32, got {args.width}x{args.height}")
     one_frame = args.frame_count == 1
     if one_frame:
-        _, control_indices = _parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
+        _, control_indices = parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
         if args.task == "fl2va":
             provided_frames = int(bool(args.first_frame)) + int(bool(args.last_frame))
             # a missing-frames error is raised by the task input checks below

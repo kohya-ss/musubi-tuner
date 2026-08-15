@@ -50,7 +50,7 @@ The transformer, video VAE, packed-sequence logic, text presentation, and dual s
 
 ## Dataset Configuration
 
-T2VA and FL2VA accept ordinary video directories. FL2VA derives its first and last conditions from each selected target crop.
+T2VA and FL2VA accept ordinary video directories. FL2VA derives its first and last conditions from each selected target crop. Image datasets are supported by the experimental one-frame (image LoRA) training mode — see `docs/minimax_h3_1f.md`.
 
 ```toml
 [general]

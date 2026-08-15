@@ -30,21 +30,28 @@ from musubi_tuner.minimax_h3.generation_inputs import (
     encode_visual_conditions,
     load_generation_record,
     module_device_dtype,
+    parse_one_frame_options,
 )
 from musubi_tuner.minimax_h3.media import H3_AUDIO_SPEC, audio_latent_frames, parse_inline_references, video_latent_frames
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
+    FRAME_RESCALE,
     H3PackedLayout,
     H3ReferenceGeometry,
+    H3TimeOverrides,
     H3VideoGeometry,
+    ONE_FRAME_AUDIO_LATENT_FRAMES,
+    ONE_FRAME_VIDEO_LATENT_FRAMES,
     build_h3_layout,
 )
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
     create_sampling_generator,
+    decoded_video_to_uint8,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
+    write_image,
     write_joint_av,
 )
 from musubi_tuner.minimax_h3.text_encoder import (
@@ -97,26 +104,39 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
     width = int(sample.get("width", 768))
     height = int(sample.get("height", 1344))
     requested_frame_count = int(sample.get("frame_count", 124))
-    frame_count = round_down_frame_count(requested_frame_count, ARCHITECTURE_MINIMAX_H3, 17)
-    if frame_count != requested_frame_count:
-        logger.warning(
-            "MiniMax-H3 sample frame count %d was rounded down to %d (17*n+5)",
-            requested_frame_count,
-            frame_count,
+    one_frame_spec = sample.get("one_frame")
+    if requested_frame_count == 1:
+        # experimental one-frame (image) sample: single-token target, no duration semantics
+        if args.task != "t2va":
+            raise ValueError("MiniMax-H3 one-frame training samples (--f 1) currently support --task t2va only")
+        frame_count = 1
+        target_index, control_indices = parse_one_frame_options(one_frame_spec) if one_frame_spec else (0, None)
+        if control_indices is not None:
+            raise ValueError("MiniMax-H3 T2VA one-frame training sample does not accept control_index")
+        sample["one_frame_target_index"] = target_index
+    else:
+        if one_frame_spec is not None:
+            raise ValueError("MiniMax-H3 sample --of options require --f 1")
+        frame_count = round_down_frame_count(requested_frame_count, ARCHITECTURE_MINIMAX_H3, 17)
+        if frame_count != requested_frame_count:
+            logger.warning(
+                "MiniMax-H3 sample frame count %d was rounded down to %d (17*n+5)",
+                requested_frame_count,
+                frame_count,
+            )
+        video_latent_frames(frame_count)
+        duration = frame_count / 24.0
+        allow_experimental = bool(
+            getattr(args, "h3_allow_experimental_sample_duration", False) or sample.get("allow_experimental_duration", False)
         )
+        if not allow_experimental and not 5.0 <= duration <= 15.0:
+            raise ValueError(
+                f"MiniMax-H3 sample duration {duration:.3f}s is outside the released 5-15s range; "
+                "pass --h3_allow_experimental_sample_duration to proceed"
+            )
     sample_steps = int(sample.get("sample_steps", 30))
     if width <= 0 or height <= 0 or width % 32 or height % 32:
         raise ValueError(f"MiniMax-H3 sample width and height must be positive and divisible by 32, got {width}x{height}")
-    video_latent_frames(frame_count)
-    duration = frame_count / 24.0
-    allow_experimental = bool(
-        getattr(args, "h3_allow_experimental_sample_duration", False) or sample.get("allow_experimental_duration", False)
-    )
-    if not allow_experimental and not 5.0 <= duration <= 15.0:
-        raise ValueError(
-            f"MiniMax-H3 sample duration {duration:.3f}s is outside the released 5-15s range; "
-            "pass --h3_allow_experimental_sample_duration to proceed"
-        )
     if sample_steps <= 0:
         raise ValueError("MiniMax-H3 sample_steps must be positive")
 
@@ -262,6 +282,7 @@ def _runtime_batch_plan(
     video_latents: torch.Tensor,
     *,
     teacher_conditions: str | None = None,
+    one_frame: bool = False,
 ) -> _H3RuntimeBatch:
     if video_latents.ndim != 5 or video_latents.shape[1] != 24:
         raise ValueError(f"MiniMax-H3 target video latents must be [B,24,F,H,W], got {tuple(video_latents.shape)}")
@@ -299,6 +320,30 @@ def _runtime_batch_plan(
             reference_roles.setdefault(int(match.group(1)), {})[match.group(2)] = value
     if has_fl_condition and reference_roles:
         raise ValueError("MiniMax-H3 batch cannot mix FL2VA and Ref2VA condition roles")
+
+    is_one_frame_batch = video_latents.shape[2] == 1
+    one_frame_index_value = batch.get("one_frame_target_index")
+    time_overrides = None
+    if is_one_frame_batch:
+        if not one_frame:
+            raise ValueError("MiniMax-H3 batch carries a one-frame latent cache; pass --one_frame to train on image targets")
+        if has_fl_condition or reference_roles or teacher_conditions is not None:
+            raise ValueError("MiniMax-H3 one-frame training currently supports plain T2VA caches only")
+        if (
+            not isinstance(one_frame_index_value, torch.Tensor)
+            or one_frame_index_value.shape != (batch_size,)
+            or one_frame_index_value.dtype != torch.int64
+        ):
+            raise ValueError(
+                "MiniMax-H3 one-frame batch requires an int64 one_frame_target_index tensor;"
+                " re-run minimax_h3_cache_latents.py --one_frame"
+            )
+        target_index = int(one_frame_index_value.item())
+        if target_index < 0:
+            raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
+        time_overrides = H3TimeOverrides(condition_times=(), target_time=FRAME_RESCALE * target_index)
+    elif one_frame_index_value is not None:
+        raise ValueError("MiniMax-H3 video batch cannot carry one_frame_target_index; re-run latent caching")
 
     visual_conditions = []
     audio_conditions = []
@@ -424,6 +469,8 @@ def _runtime_batch_plan(
         target_audio_frames=audio_latents.shape[-1],
         visual_conditions=tuple(condition_geometries),
         references=tuple(references),
+        one_frame=is_one_frame_batch,
+        time_overrides=time_overrides,
     )
     return _H3RuntimeBatch(
         layout=layout,
@@ -597,6 +644,16 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         self.default_discrete_flow_shift = 1.0
         if getattr(args, "task", None) not in {"t2va", "fl2va", "ref2va"}:
             raise ValueError("MiniMax-H3 requires --task t2va, fl2va, or ref2va")
+        if getattr(args, "one_frame", False):
+            if args.task != "t2va":
+                raise ValueError("MiniMax-H3 one-frame training currently requires --task t2va")
+            if getattr(args, "h3_teacher_matching", False):
+                raise ValueError("--h3_teacher_matching does not support --one_frame yet")
+            logger.info(
+                "MiniMax-H3 one-frame training: image batches carry a silence audio placeholder that presence"
+                " gating excludes from the audio loss; pass --video_only for image-only runs to skip the"
+                " audio-loss bookkeeping entirely"
+            )
         if args.timestep_sampling != "uniform":
             raise ValueError("MiniMax-H3 supports --timestep_sampling uniform only")
         if args.weighting_scheme != "none":
@@ -861,17 +918,26 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 if args.task == "ref2va"
                 else ()
             )
+            one_frame_sample = parameter["frame_count"] == 1
             parameter["h3_layout"] = build_h3_layout(
                 task=args.task,
                 text_length=parameter["h3_text_hidden_states"].shape[1],
                 target_video=H3VideoGeometry(
-                    video_latent_frames(parameter["frame_count"]),
+                    ONE_FRAME_VIDEO_LATENT_FRAMES if one_frame_sample else video_latent_frames(parameter["frame_count"]),
                     parameter["height"] // VIDEO_VAE_SPATIAL_RATIO,
                     parameter["width"] // VIDEO_VAE_SPATIAL_RATIO,
                 ),
-                target_audio_frames=audio_latent_frames(parameter["frame_count"]),
+                target_audio_frames=(
+                    ONE_FRAME_AUDIO_LATENT_FRAMES if one_frame_sample else audio_latent_frames(parameter["frame_count"])
+                ),
                 visual_conditions=parameter["_h3_visual_geometries"],
                 references=references,
+                one_frame=one_frame_sample,
+                time_overrides=(
+                    H3TimeOverrides(condition_times=(), target_time=FRAME_RESCALE * parameter["one_frame_target_index"])
+                    if one_frame_sample
+                    else None
+                ),
             )
             layout = parameter["h3_layout"]
             logger.info(
@@ -1001,24 +1067,33 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             del video_latents
             clean_memory_on_device(device)
 
-            logger.info("Decoding MiniMax-H3 training sample audio")
-            audio_vae.to(device).eval()
-            _, audio_dtype = module_device_dtype(audio_vae, torch.float32)
-            decoded_audio = audio_vae.decode(audio_latents.to(device=device, dtype=audio_dtype)).cpu()
-            audio_vae.to("cpu")
-            del audio_latents
-            clean_memory_on_device(device)
-
-            decoded = synchronize_decoded_av(decoded_video, decoded_audio, frame_count=frame_count)
             timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
             number = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
             original_seed = sample_parameter.get("seed")
             seed_suffix = "" if original_seed is None else f"_{original_seed}"
             prompt_index = sample_parameter.get("enum", 0)
             prefix = "" if args.output_name is None else f"{args.output_name}_"
-            output_path = Path(save_dir) / f"{prefix}{number}_{prompt_index:02d}_{timestamp}{seed_suffix}.mp4"
-            write_joint_av(decoded, output_path)
-            logger.info("Saved MiniMax-H3 joint training sample: %s", output_path)
+            output_stem = f"{prefix}{number}_{prompt_index:02d}_{timestamp}{seed_suffix}"
+
+            if frame_count == 1:
+                # one-frame sample: the audio rows are a byproduct and are never decoded
+                del audio_latents
+                output_path = Path(save_dir) / f"{output_stem}.png"
+                write_image(decoded_video_to_uint8(decoded_video, frame_limit=1)[0], output_path)
+                logger.info("Saved MiniMax-H3 one-frame training sample: %s", output_path)
+            else:
+                logger.info("Decoding MiniMax-H3 training sample audio")
+                audio_vae.to(device).eval()
+                _, audio_dtype = module_device_dtype(audio_vae, torch.float32)
+                decoded_audio = audio_vae.decode(audio_latents.to(device=device, dtype=audio_dtype)).cpu()
+                audio_vae.to("cpu")
+                del audio_latents
+                clean_memory_on_device(device)
+
+                decoded = synchronize_decoded_av(decoded_video, decoded_audio, frame_count=frame_count)
+                output_path = Path(save_dir) / f"{output_stem}.mp4"
+                write_joint_av(decoded, output_path)
+                logger.info("Saved MiniMax-H3 joint training sample: %s", output_path)
 
             try:
                 wandb_tracker = accelerator.get_tracker("wandb")
@@ -1030,7 +1105,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 except ImportError:
                     logger.warning("wandb tracker is active but wandb is not installed")
                 else:
-                    wandb_tracker.log({f"sample_{prompt_index}": wandb.Video(str(output_path), fps=24)}, step=steps)
+                    if frame_count == 1:
+                        wandb_tracker.log({f"sample_{prompt_index}": wandb.Image(str(output_path))}, step=steps)
+                    else:
+                        wandb_tracker.log({f"sample_{prompt_index}": wandb.Video(str(output_path), fps=24)}, step=steps)
             return output_path
         finally:
             video_vae.to("cpu")
@@ -1068,6 +1146,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             "ss_minimax_h3_latent_cache_version": "2",
             "ss_minimax_h3_text_cache_version": "1",
         }
+        if getattr(args, "one_frame", False):
+            metadata["ss_minimax_h3_one_frame"] = True
         if float(args.h3_guidance_loss_scale) > 0.0:
             metadata["ss_minimax_h3_guidance_loss_scale"] = args.h3_guidance_loss_scale
             metadata["ss_minimax_h3_guidance_loss_scale_audio"] = self._guidance_audio_scale(args)
@@ -1452,7 +1532,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             normalize_teacher_conditions(args.h3_teacher_conditions) if getattr(args, "h3_teacher_matching", False) else None
         )
         # _runtime_batch_plan rejects batches larger than one item (batch_size=1 rule)
-        runtime = _runtime_batch_plan(batch, latents, teacher_conditions=teacher_conditions)
+        runtime = _runtime_batch_plan(
+            batch,
+            latents,
+            teacher_conditions=teacher_conditions,
+            one_frame=bool(getattr(args, "one_frame", False)),
+        )
         self._audio_items_seen += int(runtime.audio_present.numel())
         self._audio_supervised_seen += int(runtime.audio_present.sum().item())
         if runtime.layout.task != args.task:
@@ -1590,6 +1675,13 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         network_module="networks.lora_minimax_h3",
     )
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), default=None, help="MiniMax-H3 training task")
+    parser.add_argument(
+        "--one_frame",
+        action="store_true",
+        help="experimental one-frame (image) training: accept single-token latent caches written by"
+        " minimax_h3_cache_latents.py --one_frame (currently --task t2va only; video batches are unaffected,"
+        " so image and video datasets can mix in one run)",
+    )
     add_audio_train_args(parser)
     parser.add_argument("--h3_shift_video", type=float, default=12.0, help="MiniMax-H3 target-video flow shift")
     parser.add_argument("--h3_shift_audio", type=float, default=3.0, help="MiniMax-H3 target-audio flow shift")

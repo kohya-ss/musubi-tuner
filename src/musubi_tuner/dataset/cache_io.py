@@ -46,9 +46,20 @@ logger = logging.getLogger(__name__)
 #   policy (loss weights, video-only training) is decided at training time.
 AUDIO_PRESENT_KEY = "audio_present_float32"
 
+# - ONE_FRAME_TARGET_INDEX_KEY holds a scalar int64 tensor with the one-frame target's 24 fps
+#   pixel-frame index. It travels as a tensor (not metadata) because the bucket collator only
+#   loads tensors; the trainer converts it to a RoPE time override at layout-build time.
+ONE_FRAME_TARGET_INDEX_KEY = "one_frame_target_index_int64"
+
 
 def append_audio_present_entry(sd: dict[str, torch.Tensor], audio_present: bool):
     sd[AUDIO_PRESENT_KEY] = torch.tensor(1.0 if audio_present else 0.0, dtype=torch.float32)
+
+
+def append_one_frame_target_index_entry(sd: dict[str, torch.Tensor], target_index: int):
+    if target_index < 0:
+        raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
+    sd[ONE_FRAME_TARGET_INDEX_KEY] = torch.tensor(target_index, dtype=torch.int64)
 
 
 def validate_audio_present_entry(sd: dict[str, torch.Tensor]) -> float:
@@ -548,6 +559,11 @@ def save_latent_cache_minimax_h3(
         if not isinstance(tensor, torch.Tensor):
             raise ValueError(f"MiniMax-H3 cache value must be a tensor: {key}")
         if key == AUDIO_PRESENT_KEY:
+            normalized[key] = tensor.detach().cpu().contiguous()
+            continue
+        if key == ONE_FRAME_TARGET_INDEX_KEY:
+            if tensor.shape != torch.Size([]) or tensor.dtype != torch.int64 or tensor.item() < 0:
+                raise ValueError(f"MiniMax-H3 {ONE_FRAME_TARGET_INDEX_KEY} must be a nonnegative scalar int64 tensor")
             normalized[key] = tensor.detach().cpu().contiguous()
             continue
 

@@ -24,7 +24,9 @@ from musubi_tuner.minimax_h3.media import (
 )
 from musubi_tuner.minimax_h3_cache_latents import (
     build_latent_tensors,
+    build_one_frame_latent_tensors,
     cache_metadata_matches,
+    encode_one_frame_silence_latent,
     log_audio_presence_summary,
     record_media_paths,
     setup_parser,
@@ -32,6 +34,7 @@ from musubi_tuner.minimax_h3_cache_latents import (
 from musubi_tuner.dataset.bucket import BucketBatchManager
 from musubi_tuner.dataset.cache_io import (
     AUDIO_PRESENT_KEY,
+    ONE_FRAME_TARGET_INDEX_KEY,
     save_latent_cache_minimax_h3,
     save_text_encoder_output_cache_minimax_h3,
 )
@@ -919,3 +922,119 @@ def test_build_ref2va_revalidates_limits_before_any_model_work(tmp_path: Path):
     assert audio_vae.calls == []
     assert decoder.audio_calls == []
     assert decoder.visual_calls == []
+
+
+def test_one_frame_silence_latent_is_the_two_frame_placeholder():
+    audio_vae = _FakeH3AudioVAE()
+
+    latent = encode_one_frame_silence_latent(audio_vae)
+
+    assert latent.shape == (32, 2, 2)
+    assert len(audio_vae.calls) == 1
+    assert audio_vae.calls[0].shape == (1, 2, 1600)
+    assert torch.count_nonzero(audio_vae.calls[0]) == 0
+
+
+def test_build_one_frame_latents_pack_silence_and_the_target_index(tmp_path: Path):
+    image_path = _touch(tmp_path / "portrait.png")
+    video_vae = _FakeH3VideoVAE()
+    silence = torch.zeros(32, 2, 2)
+
+    payload = build_one_frame_latent_tensors(
+        image_frames=torch.zeros(64, 64, 3, dtype=torch.uint8),
+        target_index=24,
+        video_vae=video_vae,
+        silence_audio_latent=silence,
+        cache_seed=123,
+        item_key=str(image_path),
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={image_path: "portrait-image"},
+    )
+
+    assert set(payload.tensors) == {
+        "latents_1x4x4_float32",
+        "latents_audio_32x2x2_float32",
+        AUDIO_PRESENT_KEY,
+        ONE_FRAME_TARGET_INDEX_KEY,
+    }
+    assert payload.tensors[AUDIO_PRESENT_KEY].item() == 0.0
+    index = payload.tensors[ONE_FRAME_TARGET_INDEX_KEY]
+    assert index.dtype == torch.int64 and index.shape == torch.Size([]) and index.item() == 24
+    assert [call.shape for call in video_vae.calls] == [(1, 3, 1, 64, 64)]
+    assert payload.metadata["task"] == "t2va"
+    assert payload.metadata["crop_start_frame"] == "0"
+    assert payload.metadata["one_frame"] == "1"
+    assert payload.metadata["one_frame_target_index"] == "24"
+    assert json.loads(payload.metadata["media_fingerprints"]) == {str(image_path): "portrait-image"}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"target_index": -1}, "nonnegative"),
+        ({"image_frames": torch.zeros(60, 64, 3, dtype=torch.uint8)}, "divisible by 32"),
+        ({"image_frames": torch.zeros(2, 64, 64, 3, dtype=torch.uint8)}, "single"),
+        ({"silence_audio_latent": torch.zeros(32, 2, 8)}, r"\[32,2,2\]"),
+    ],
+)
+def test_build_one_frame_latents_reject_invalid_inputs(tmp_path: Path, overrides: dict, message: str):
+    image_path = _touch(tmp_path / "portrait.png")
+    inputs = dict(
+        image_frames=torch.zeros(64, 64, 3, dtype=torch.uint8),
+        target_index=0,
+        video_vae=_FakeH3VideoVAE(),
+        silence_audio_latent=torch.zeros(32, 2, 2),
+        cache_seed=0,
+        item_key=str(image_path),
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={image_path: "portrait-image"},
+    )
+    inputs.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        build_one_frame_latent_tensors(**inputs)
+
+
+def test_one_frame_cache_keys_round_trip_through_the_bucket_collator(tmp_path: Path):
+    item = ItemInfo("portrait", "an image caption", (64, 64), (64, 64))
+    item.latent_cache_path = str(tmp_path / "portrait_0064x0064_mmh3.safetensors")
+    item.text_encoder_output_cache_path = str(tmp_path / "portrait_mmh3_te.safetensors")
+    latent_tensors = {
+        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
+        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
+        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
+        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(24, dtype=torch.int64),
+    }
+    text_tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 1, 1], dtype=torch.int64),
+    }
+    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "t2va", "one_frame": "1"})
+    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va"})
+
+    manager = BucketBatchManager({(64, 64): [item]}, batch_size=1)
+    batch = manager[0]
+
+    assert batch["latents"].shape == (1, 24, 1, 4, 4)
+    assert batch["latents_audio"].shape == (1, 32, 2, 2)
+    torch.testing.assert_close(batch["audio_present"], torch.tensor([0.0]))
+    torch.testing.assert_close(batch["one_frame_target_index"], torch.tensor([24], dtype=torch.int64))
+
+
+def test_h3_latent_writer_rejects_invalid_one_frame_target_indices(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    base = {
+        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
+        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
+        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
+    }
+    invalid = (
+        torch.tensor([24], dtype=torch.int64),
+        torch.tensor(24, dtype=torch.int32),
+        torch.tensor(-1, dtype=torch.int64),
+    )
+    for index in invalid:
+        with pytest.raises(ValueError, match=ONE_FRAME_TARGET_INDEX_KEY):
+            save_latent_cache_minimax_h3(item, {**base, ONE_FRAME_TARGET_INDEX_KEY: index}, {"task": "t2va"})
