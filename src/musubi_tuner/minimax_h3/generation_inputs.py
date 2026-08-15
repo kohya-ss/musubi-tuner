@@ -13,6 +13,7 @@ from musubi_tuner.minimax_h3.media import (
     H3Record,
     audio_latent_frames,
     load_h3_jsonl_records,
+    parse_inline_references,
     waveform_samples,
 )
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry
@@ -53,6 +54,12 @@ def prepare_pixels(frames: torch.Tensor) -> torch.Tensor:
 def load_generation_record(args) -> H3Record:
     if args.task in {"t2va", "fl2va"}:
         return dummy_record(args.prompt or "")
+
+    ref_specs = getattr(args, "ref", None)
+    if ref_specs:
+        base_directory = Path(getattr(args, "ref_base_directory", None) or Path.cwd())
+        references = parse_inline_references(ref_specs, base_directory)
+        return H3Record(video_path=Path("."), caption=args.prompt or "", references=references, jsonl_line=0)
 
     records = load_h3_jsonl_records(args.reference_jsonl, "ref2va")
     if args.reference_index >= len(records):
