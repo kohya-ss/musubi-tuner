@@ -452,9 +452,7 @@ def build_one_frame_latent_tensors(
     canonical_item_key = f"{item_key}#1f"
     target_video = _encode_target_video(video_vae, target_pixels, cache_seed, canonical_item_key)[0]
     if target_video.shape[1] != ONE_FRAME_VIDEO_LATENT_FRAMES:
-        raise ValueError(
-            f"MiniMax-H3 video VAE returned {target_video.shape[1]} frames, expected {ONE_FRAME_VIDEO_LATENT_FRAMES}"
-        )
+        raise ValueError(f"MiniMax-H3 video VAE returned {target_video.shape[1]} frames, expected {ONE_FRAME_VIDEO_LATENT_FRAMES}")
 
     tensors = {
         _visual_key("", target_video): target_video,
@@ -599,9 +597,7 @@ def main() -> None:
         audio_sources_by_dir[key] = dataset.datasource.audio_sources
     colliding = image_dirs & set(records_by_dir)
     if colliding:
-        raise ValueError(
-            f"MiniMax-H3 image and video datasets cannot share a cache_directory: {sorted(colliding)}"
-        )
+        raise ValueError(f"MiniMax-H3 image and video datasets cannot share a cache_directory: {sorted(colliding)}")
 
     if args.debug_mode is not None:
         cache_latents.show_datasets(
