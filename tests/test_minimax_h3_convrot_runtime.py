@@ -38,6 +38,7 @@ def _load_training_module(monkeypatch):
         encode_visual_conditions=noop,
         load_generation_record=noop,
         module_device_dtype=noop,
+        parse_one_frame_options=noop,
     )
     _stub(
         monkeypatch,
@@ -52,9 +53,11 @@ def _load_training_module(monkeypatch):
         "musubi_tuner.minimax_h3.sampling",
         augment_condition_latents=noop,
         create_sampling_generator=noop,
+        decoded_video_to_uint8=noop,
         initialize_target_latents=noop,
         sample_joint_av=noop,
         synchronize_decoded_av=noop,
+        write_image=noop,
         write_joint_av=noop,
     )
     _stub(
@@ -190,6 +193,7 @@ def _load_generation_module(monkeypatch):
         encode_audio_conditions=noop,
         encode_visual_conditions=noop,
         load_generation_record=noop,
+        parse_one_frame_options=noop,
     )
     _stub(
         monkeypatch,

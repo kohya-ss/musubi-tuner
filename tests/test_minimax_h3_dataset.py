@@ -19,7 +19,7 @@ from musubi_tuner.dataset.architectures import (
     round_down_frame_count,
 )
 from musubi_tuner.dataset.bucket import BucketSelector
-from musubi_tuner.dataset.image_video_dataset import VideoDataset
+from musubi_tuner.dataset.image_video_dataset import ImageDataset, VideoDataset
 from musubi_tuner.training import trainer_base
 from musubi_tuner.training.trainer_base import NetworkTrainer
 
@@ -141,6 +141,61 @@ def test_h3_full_frame_extraction_preserves_valid_frame_count(tmp_path: Path):
     assert items[0].frame_count == 56
     assert items[0].content.shape[0] == 56
     assert Path(items[0].text_encoder_output_cache_path).name == "clip_00000-056_mmh3_te.safetensors"
+
+
+def _h3_image_dataset(tmp_path: Path, **overrides):
+    parameters = dict(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        image_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+    parameters.update(overrides)
+    return ImageDataset(**parameters)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"control_directory": "controls"}, "control images"),
+        ({"multiple_target": True}, "multiple targets"),
+        ({"fp_1f_clean_indices": [0]}, "fp_1f_clean_indices"),
+        ({"fp_1f_target_index": -1}, "nonnegative"),
+    ],
+)
+def test_h3_image_dataset_rejects_unsupported_one_frame_features(tmp_path: Path, overrides: dict, message: str):
+    with pytest.raises(ValueError, match=message):
+        _h3_image_dataset(tmp_path, **overrides)
+
+
+def test_h3_image_dataset_forwards_the_target_index_to_items(tmp_path: Path):
+    dataset = _h3_image_dataset(tmp_path, fp_1f_target_index=24)
+
+    class FakeImageDatasource:
+        has_control = False
+
+        def __iter__(self):
+            from PIL import Image
+
+            image = Image.new("RGB", (64, 64))
+            yield lambda: (str(tmp_path / "portrait.png"), [image], "caption", None)
+
+    dataset.datasource = FakeImageDatasource()
+
+    batches = list(dataset.retrieve_latent_cache_batches(num_workers=1))
+
+    assert len(batches) == 1
+    bucket, items = batches[0]
+    assert bucket == (64, 64)
+    assert items[0].fp_1f_target_index == 24
+    assert items[0].content.shape == (64, 64, 3)
+    assert Path(items[0].latent_cache_path).name == "portrait_0064x0064_mmh3.safetensors"
+    assert Path(items[0].text_encoder_output_cache_path).name == "portrait_mmh3_te.safetensors"
 
 
 def test_h3_prepare_for_training_pairs_each_crop_with_its_own_text_cache(tmp_path: Path):

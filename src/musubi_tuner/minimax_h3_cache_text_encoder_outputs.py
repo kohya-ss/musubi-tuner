@@ -11,7 +11,7 @@ from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_minimax_h3
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import ItemInfo, VideoDataset
+from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo, VideoDataset
 from musubi_tuner.minimax_h3.text_encoder import (
     H3Presentation,
     H3TextVisual,
@@ -200,6 +200,12 @@ def setup_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
     parser.add_argument(
+        "--one_frame",
+        action="store_true",
+        help="experimental one-frame (image) training caches: accept image datasets, whose captions are encoded"
+        " as plain T2VA presentations (currently --task t2va only)",
+    )
+    parser.add_argument(
         "--teacher_conditions",
         type=str,
         default=None,
@@ -233,7 +239,11 @@ def main() -> None:
     if args.teacher_conditions is not None:
         if args.task != "t2va":
             raise ValueError("--teacher_conditions requires --task t2va (teacher matching trains a T2VA student)")
+        if args.one_frame:
+            raise ValueError("--teacher_conditions does not support --one_frame yet")
         teacher_conditions = normalize_teacher_conditions(args.teacher_conditions)
+    if args.one_frame and args.task != "t2va":
+        raise ValueError("MiniMax-H3 one-frame caching currently supports --task t2va only")
 
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info("Loading dataset config from %s", args.dataset_config)
@@ -241,14 +251,23 @@ def main() -> None:
     blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_MINIMAX_H3)
     dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
     datasets = dataset_group.datasets
-    if not all(isinstance(dataset, VideoDataset) for dataset in datasets):
-        raise ValueError("MiniMax-H3 text caching accepts only video datasets")
 
     decoder = PyAVH3MediaDecoder()
     records_by_dir = {}
+    image_dirs: set[str] = set()
     for dataset in datasets:
         validate_h3_dataset(dataset)
+        if isinstance(dataset, ImageDataset):
+            if not args.one_frame:
+                raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
+            image_dirs.add(dataset_cache_dir_key(dataset.cache_directory))
+            continue
+        if not isinstance(dataset, VideoDataset):
+            raise ValueError("MiniMax-H3 text caching accepts only image and video datasets")
         records_by_dir[dataset_cache_dir_key(dataset.cache_directory)] = h3_records_from_datasource(dataset.datasource, args.task)
+    colliding = image_dirs & set(records_by_dir)
+    if colliding:
+        raise ValueError(f"MiniMax-H3 image and video datasets cannot share a cache_directory: {sorted(colliding)}")
 
     all_cache_files, all_cache_paths = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
     text_paths = {
@@ -300,16 +319,32 @@ def main() -> None:
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
-            records = records_by_dir[dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))]
-            datasource_index, crop_start = item_record_inputs(item)
-            record = records[datasource_index]
-            visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
-            presentation = build_presentation(record, args.task, visuals)
+            cache_dir_key = dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))
+            if cache_dir_key in image_dirs:
+                # one-frame image item: a plain T2VA presentation of the caption; the target
+                # time index lives in the latent cache, never in the text rows
+                record = H3Record(
+                    video_path=Path(item.item_key).resolve(),
+                    caption=item.caption,
+                    references=(),
+                    jsonl_line=0,
+                )
+                crop_start = 0
+                frame_count = 1
+                visuals = {}
+                presentation = build_presentation(record, "t2va", visuals)
+            else:
+                records = records_by_dir[cache_dir_key]
+                datasource_index, crop_start = item_record_inputs(item)
+                record = records[datasource_index]
+                frame_count = item.frame_count
+                visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
+                presentation = build_presentation(record, args.task, visuals)
             record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
             presentation_identity = presentation_fingerprint(
                 presentation,
                 record_media_fingerprints,
-                frame_count=item.frame_count,
+                frame_count=frame_count,
             )
             teacher_presentation = None
             teacher_presentation_identity = None

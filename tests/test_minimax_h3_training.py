@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.hv_train_network import setup_parser_common
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
-from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
+from musubi_tuner.minimax_h3.packing import FRAME_RESCALE, H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
 from musubi_tuner.modules.convrot_int8_utils import apply_convrot_int8_monkey_patch
 from musubi_tuner.minimax_h3_train_network import (
@@ -961,6 +961,168 @@ def test_runtime_rejects_a_batch_from_a_different_authoritative_task():
         )
 
 
+def _one_frame_batch(target_index: int | None = 24):
+    batch = {
+        "latents_audio": torch.full((1, 32, 2, 2), 4.0),
+        "audio_present": torch.zeros(1, dtype=torch.float32),
+        "mmh3_hidden_states": [torch.full((3, 12), 0.0)],
+        "mmh3_token_tags": [torch.tensor([1, 0, 1], dtype=torch.int64)],
+        "timesteps": None,
+    }
+    if target_index is not None:
+        batch["one_frame_target_index"] = torch.tensor([target_index], dtype=torch.int64)
+    return batch
+
+
+def _one_frame_process_batch(trainer, args, batch, transformer):
+    video_latents = torch.zeros(1, 24, 1, 4, 4)
+    return trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+
+def test_one_frame_batch_builds_the_time_override_layout(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(one_frame=True)
+    trainer.handle_model_specific_args(args)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    transformer = _RecordingTransformer()
+
+    _one_frame_process_batch(trainer, args, _one_frame_batch(target_index=24), transformer)
+
+    layout = transformer.calls[0]["layout"]
+    assert layout.task == "t2va"
+    assert layout.target_video.frames == 1
+    assert layout.target_audio_frames == 2
+    assert layout.time_overrides is not None
+    assert layout.time_overrides.condition_times == ()
+    assert layout.time_overrides.target_time == FRAME_RESCALE * 24
+    # the silence placeholder stays excluded from audio supervision
+    assert trainer._audio_items_seen == 1
+    assert trainer._audio_supervised_seen == 0
+
+
+def test_one_frame_batch_requires_the_training_flag():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+    trainer.handle_model_specific_args(args)
+
+    with pytest.raises(ValueError, match=r"pass --one_frame"):
+        _one_frame_process_batch(trainer, args, _one_frame_batch(), _RecordingTransformer())
+
+
+@pytest.mark.parametrize(
+    "index",
+    [None, torch.tensor(24, dtype=torch.int64), torch.tensor([24], dtype=torch.int32), torch.tensor([-1], dtype=torch.int64)],
+)
+def test_one_frame_batch_requires_a_valid_index_tensor(index):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(one_frame=True)
+    trainer.handle_model_specific_args(args)
+    batch = _one_frame_batch(target_index=None)
+    if index is not None:
+        batch["one_frame_target_index"] = index
+
+    with pytest.raises(ValueError, match="one_frame_target_index|nonnegative"):
+        _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
+
+
+def test_one_frame_batch_rejects_condition_latents():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(one_frame=True)
+    trainer.handle_model_specific_args(args)
+    batch = _one_frame_batch()
+    batch["latents_first"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["latents_last"] = torch.zeros(1, 24, 1, 4, 4)
+
+    with pytest.raises(ValueError, match="plain T2VA"):
+        _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
+
+
+def test_video_batch_rejects_a_stray_one_frame_index():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(one_frame=True)
+    trainer.handle_model_specific_args(args)
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    batch = _training_batch()
+    batch["one_frame_target_index"] = torch.tensor([0], dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="video batch cannot carry one_frame_target_index"):
+        trainer.process_batch(
+            args,
+            _Accelerator(),
+            _RecordingTransformer(),
+            None,
+            batch,
+            video_latents,
+            torch.zeros_like(video_latents),
+            None,
+            torch.bfloat16,
+            torch.float32,
+            None,
+            0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"one_frame": True, "task": "fl2va"}, "requires --task t2va"),
+        ({"one_frame": True, "task": "ref2va"}, "requires --task t2va"),
+        ({"one_frame": True, "h3_teacher_matching": True}, "does not support --one_frame"),
+    ],
+)
+def test_one_frame_training_flag_validations(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(**overrides))
+
+
+def test_one_frame_training_records_provenance_metadata():
+    args = _trainer_args(one_frame=True)
+    metadata = MiniMaxH3NetworkTrainer().extra_metadata(args)
+    assert metadata["ss_minimax_h3_one_frame"] is True
+    assert "ss_minimax_h3_one_frame" not in MiniMaxH3NetworkTrainer().extra_metadata(_trainer_args())
+
+
+def test_one_frame_sample_normalization_parses_the_of_option():
+    args = _trainer_args(one_frame=True)
+
+    sample = _normalize_h3_sample_parameter(
+        args, {"prompt": "a lighthouse", "frame_count": 1, "one_frame": "target_index=24", "width": 64, "height": 64}
+    )
+
+    assert sample["frame_count"] == 1
+    assert sample["one_frame_target_index"] == 24
+    default = _normalize_h3_sample_parameter(args, {"prompt": "a lighthouse", "frame_count": 1})
+    assert default["one_frame_target_index"] == 0
+
+
+@pytest.mark.parametrize(
+    ("args_overrides", "sample", "message"),
+    [
+        ({"task": "fl2va"}, {"prompt": "x", "frame_count": 1, "first_frame": "a.png", "last_frame": "b.png"}, "t2va only"),
+        ({}, {"prompt": "x", "frame_count": 1, "one_frame": "target_index=0,control_index=0"}, "control_index"),
+        ({}, {"prompt": "x", "frame_count": 124, "one_frame": "target_index=24"}, r"require --f 1"),
+    ],
+)
+def test_one_frame_sample_normalization_rejects_invalid_requests(args_overrides, sample, message):
+    args = _trainer_args(**args_overrides)
+
+    with pytest.raises(ValueError, match=message):
+        _normalize_h3_sample_parameter(args, sample)
+
+
 def test_t2va_draws_no_condition_noise(monkeypatch):
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args()
@@ -1364,6 +1526,31 @@ def test_guidance_loss_rewrites_both_targets_around_the_uncond_prediction(tmp_pa
     assert metrics["guidance/video_gap_rms"] == pytest.approx(2.0)
     assert metrics["guidance/audio_gap_rms"] == pytest.approx(5.0)
     assert torch.isfinite(loss)
+
+
+def test_guidance_loss_uncond_layout_carries_the_one_frame_overrides(tmp_path, monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        one_frame=True,
+        h3_guidance_loss_scale=3.0,
+        h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path),
+    )
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer()
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    _, metrics = _one_frame_process_batch(trainer, args, _one_frame_batch(target_index=24), transformer)
+
+    # the no-grad uncond probe first, then the conditional pass, both on one-frame layouts
+    assert len(transformer.calls) == 2
+    uncond_call, cond_call = transformer.calls
+    assert uncond_call["layout"].text_length == 2
+    assert uncond_call["layout"].target_video.frames == 1
+    assert uncond_call["layout"].target_audio_frames == 2
+    assert uncond_call["layout"].time_overrides == cond_call["layout"].time_overrides
+    assert uncond_call["layout"].time_overrides.target_time == FRAME_RESCALE * 24
+    assert metrics["guidance/applied"] == 1.0
 
 
 def test_guidance_loss_audio_scale_can_differ_from_video(tmp_path, monkeypatch):

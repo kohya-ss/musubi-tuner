@@ -21,15 +21,17 @@ from musubi_tuner.minimax_h3.sampling import (
     sample_joint_av,
     write_joint_av,
 )
-from musubi_tuner.minimax_h3.generation_inputs import load_generation_record
+from musubi_tuner.minimax_h3.generation_inputs import load_generation_record, parse_one_frame_options
 from musubi_tuner.minimax_h3.packing import FRAME_RESCALE, H3TimeOverrides
 from musubi_tuner.minimax_h3.sampling import write_image
 from musubi_tuner.minimax_h3_generate_video import (
     _one_frame_time_overrides,
-    _parse_one_frame_options,
     load_cached_text_conditioning,
     validate_generation_args,
 )
+
+# the parser moved to generation_inputs so the trainer's sample prompts share it
+_parse_one_frame_options = parse_one_frame_options
 
 
 def _layout():
@@ -458,6 +460,22 @@ def test_generation_validation_gates_the_one_frame_mode(tmp_path):
         )
     with pytest.raises(ValueError, match="requires --first_frame and/or --last_frame"):
         validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, one_frame="control_index=0"))
+
+
+def test_mux_encodes_above_the_1mbps_pyav_default(tmp_path):
+    # regression: without an explicit CRF, PyAV's libx264 default is ~1 Mbps ABR, which crushes
+    # fine detail in evaluation outputs. Noise frames at CRF 16 must blow far past that cap.
+    from musubi_tuner.minimax_h3.sampling import mux_audio_video
+
+    generator = torch.Generator().manual_seed(0)
+    video = torch.randint(0, 256, (12, 256, 256, 3), generator=generator, dtype=torch.uint8)
+    audio = torch.zeros(2, 16000)
+    output = tmp_path / "noise.mp4"
+
+    mux_audio_video(video, audio, output, fps=24, sample_rate=32000)
+
+    bits_per_second = output.stat().st_size * 8 / (12 / 24)
+    assert bits_per_second > 3_000_000
 
 
 def test_write_image_saves_a_single_uint8_frame(tmp_path):
