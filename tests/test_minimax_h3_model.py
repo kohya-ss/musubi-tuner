@@ -18,7 +18,7 @@ from musubi_tuner.minimax_h3.model import (
     MiniMaxH3Model,
     parse_h3_transformer_config,
 )
-from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
+from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3TimeOverrides, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 
@@ -278,6 +278,43 @@ def test_tiny_model_rejects_batch_size_above_one_in_r1():
 
     with pytest.raises(ValueError, match=r"R1 requires batch_size=1"):
         model(**_t2_inputs(batch_size=2))
+
+
+def _one_frame_t2_layout(time_overrides=None):
+    return build_h3_layout(
+        task="t2va",
+        text_length=3,
+        target_video=H3VideoGeometry(1, 4, 4),
+        target_audio_frames=2,
+        one_frame=True,
+        time_overrides=time_overrides,
+    )
+
+
+def test_tiny_model_runs_one_frame_layouts_and_keys_the_rotary_cache_by_time_overrides():
+    model = _tiny_model(num_layers=1, training=False)
+    inputs = {
+        "video_latents": torch.randn(1, 24, 1, 4, 4),
+        "audio_latents": torch.randn(1, 32, 2, 2),
+        "text_hidden_states": torch.randn(1, 3, 12),
+        "text_token_tags": torch.tensor([[1, 0, 1]]),
+        "layout": _one_frame_t2_layout(),
+        "model_t_video": torch.tensor([0.25]),
+        "model_t_audio": torch.tensor([0.75]),
+    }
+
+    output = model(**inputs)
+
+    assert output.video.shape == (1, 24, 1, 4, 4)
+    assert output.audio.shape == (1, 32, 2, 2)
+    assert torch.isfinite(output.video).all() and torch.isfinite(output.audio).all()
+
+    # a layout that differs only in its time overrides must not reuse the cached rotary state
+    offset_layout = _one_frame_t2_layout(H3TimeOverrides(condition_times=(), target_time=40.0))
+    offset_output = model(**{**inputs, "layout": offset_layout})
+
+    assert len(model._rotary_cache) == 2
+    assert not torch.equal(offset_output.video, output.video)
 
 
 def test_model_reuses_rotary_state_for_the_same_layout(monkeypatch):

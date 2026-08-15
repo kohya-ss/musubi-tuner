@@ -101,8 +101,14 @@ def build_presentation(
     images = []
     videos = []
     if task == "fl2va":
-        for index, key in enumerate(("first", "last"), start=1):
-            visual = _require_visual(visuals, key, f"FL2VA {key}")
+        # the released builder numbers <Picture i> over the pictures that are present,
+        # in packed (first, last) order: a lone last frame is still <Picture 1>, and the
+        # first/last distinction is carried only by the rotary anchor times
+        present_keys = [key for key in ("first", "last") if key in visuals]
+        if not present_keys:
+            raise ValueError("MiniMax-H3 FL2VA presentation requires at least one of the first and last visuals")
+        for index, key in enumerate(present_keys, start=1):
+            visual = visuals[key]
             if visual.frames.shape[0] != 1:
                 raise ValueError(f"MiniMax-H3 FL2VA {key} visual must contain exactly one frame")
             part = f"<Picture {index}>: {IMAGE_PLACEHOLDER}"

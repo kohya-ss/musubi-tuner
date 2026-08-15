@@ -25,6 +25,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import av
+from PIL import Image
 import torch
 
 from musubi_tuner.minimax_h3.packing import H3PackedLayout
@@ -286,6 +287,15 @@ def decoded_video_to_uint8(decoded_video: torch.Tensor, *, frame_limit: int) -> 
         chunk = chunk.float().clamp(-1.0, 1.0)
         video_chunks.append(((chunk + 1.0) * 127.5).round().to(torch.uint8).permute(1, 2, 3, 0))
     return torch.cat(video_chunks).contiguous()
+
+
+def write_image(frame: torch.Tensor, output_path: str | Path) -> None:
+    """Write one uint8 [H,W,3] frame as an image file; one-frame generation outputs."""
+    if frame.ndim != 3 or frame.shape[-1] != 3 or frame.dtype != torch.uint8:
+        raise ValueError(f"MiniMax-H3 image write needs uint8 [H,W,3], got {tuple(frame.shape)} {frame.dtype}")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(frame.cpu().numpy()).save(output_path)
 
 
 def write_video_only(video: torch.Tensor, output_path: str | Path, *, fps: int = 24) -> None:
