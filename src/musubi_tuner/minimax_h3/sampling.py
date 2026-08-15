@@ -298,6 +298,12 @@ def write_image(frame: torch.Tensor, output_path: str | Path) -> None:
     Image.fromarray(frame.cpu().numpy()).save(output_path)
 
 
+# Without an explicit rate control, PyAV encodes libx264 at its ~1 Mbps ABR default — far too
+# low for 1 MP/24 fps outputs and enough to masquerade as generation artifacts (mushy lines).
+# CRF keeps quality resolution- and content-independent; 16 is evaluation-grade.
+H3_VIDEO_CRF = 16
+
+
 def write_video_only(video: torch.Tensor, output_path: str | Path, *, fps: int = 24) -> None:
     """Write a silent video-only container; the diagnostic trajectory dumps have no audio track."""
     if video.ndim != 4 or video.shape[-1] != 3 or video.dtype != torch.uint8:
@@ -305,7 +311,7 @@ def write_video_only(video: torch.Tensor, output_path: str | Path, *, fps: int =
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with av.open(str(output_path), mode="w") as container:
-        video_stream = container.add_stream("libx264", rate=fps)
+        video_stream = container.add_stream("libx264", rate=fps, options={"crf": str(H3_VIDEO_CRF)})
         video_stream.width = video.shape[2]
         video_stream.height = video.shape[1]
         video_stream.pix_fmt = "yuv420p"
@@ -332,7 +338,7 @@ def mux_audio_video(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with av.open(str(output_path), mode="w") as container:
-        video_stream = container.add_stream("libx264", rate=fps)
+        video_stream = container.add_stream("libx264", rate=fps, options={"crf": str(H3_VIDEO_CRF)})
         video_stream.width = video.shape[2]
         video_stream.height = video.shape[1]
         video_stream.pix_fmt = "yuv420p"
