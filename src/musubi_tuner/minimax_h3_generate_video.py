@@ -27,7 +27,14 @@ from musubi_tuner.minimax_h3.media import (
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
 from musubi_tuner.minimax_h3.model import load_h3_transformer
-from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
+from musubi_tuner.minimax_h3.packing import (
+    FRAME_RESCALE,
+    ONE_FRAME_AUDIO_LATENT_FRAMES,
+    ONE_FRAME_VIDEO_LATENT_FRAMES,
+    H3TimeOverrides,
+    H3VideoGeometry,
+    build_h3_layout,
+)
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
     build_shifted_schedule,
@@ -36,6 +43,7 @@ from musubi_tuner.minimax_h3.sampling import (
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
+    write_image,
     write_joint_av,
     write_video_only,
 )
@@ -57,6 +65,49 @@ from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_one_frame_options(spec: str) -> tuple[int, tuple[int, ...] | None]:
+    """Parses --one_frame "target_index=N,control_index=A;B" into 24 fps pixel-frame indices."""
+
+    def nonnegative_index(value: str, label: str) -> int:
+        try:
+            index = int(value)
+        except ValueError as error:
+            raise ValueError(f"MiniMax-H3 --one_frame {label} must be an integer, got {value!r}") from error
+        if index < 0:
+            raise ValueError(f"MiniMax-H3 --one_frame {label} must be nonnegative, got {index}")
+        return index
+
+    target_index = 0
+    control_indices = None
+    seen = set()
+    for part in spec.split(","):
+        key, separator, value = part.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not separator or not key or not value:
+            raise ValueError(f"MiniMax-H3 --one_frame options must be key=value, got {part!r}")
+        if key not in {"target_index", "control_index"}:
+            raise ValueError(f"MiniMax-H3 --one_frame has unknown option {key!r} (allowed: target_index, control_index)")
+        if key in seen:
+            raise ValueError(f"MiniMax-H3 --one_frame has duplicate option {key!r}")
+        seen.add(key)
+        if key == "target_index":
+            target_index = nonnegative_index(value, "target_index")
+        else:
+            control_indices = tuple(nonnegative_index(item, "control_index") for item in value.split(";"))
+    return target_index, control_indices
+
+
+def _one_frame_time_overrides(args: argparse.Namespace) -> H3TimeOverrides | None:
+    if args.frame_count != 1:
+        return None
+    target_index, control_indices = _parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
+    return H3TimeOverrides(
+        condition_times=tuple(FRAME_RESCALE * index for index in (control_indices or ())),
+        target_time=FRAME_RESCALE * target_index,
+    )
 
 
 def _require_path(value: str | None, label: str) -> Path:
@@ -81,13 +132,29 @@ def validate_generation_args(args: argparse.Namespace) -> None:
 
     if args.width <= 0 or args.height <= 0 or args.width % 32 or args.height % 32:
         raise ValueError(f"MiniMax-H3 width and height must be positive and divisible by 32, got {args.width}x{args.height}")
-    video_latent_frames(args.frame_count)
-    duration = args.frame_count / 24.0
-    if not args.allow_experimental_duration and not 5.0 <= duration <= 15.0:
-        raise ValueError(
-            f"MiniMax-H3 duration {duration:.3f}s is outside the released 5-15s range; "
-            "pass --allow_experimental_duration to proceed"
-        )
+    one_frame = args.frame_count == 1
+    if one_frame:
+        _, control_indices = _parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
+        if args.task == "fl2va":
+            provided_frames = int(bool(args.first_frame)) + int(bool(args.last_frame))
+            # a missing-frames error is raised by the task input checks below
+            if provided_frames and (control_indices is None or len(control_indices) != provided_frames):
+                raise ValueError(
+                    "MiniMax-H3 one-frame FL2VA requires --one_frame control_index with one entry per provided frame, "
+                    'e.g. --one_frame "target_index=24,control_index=0" for a first frame at index 0'
+                )
+        elif control_indices is not None:
+            raise ValueError("MiniMax-H3 --one_frame control_index applies only to FL2VA conditions")
+    else:
+        if args.one_frame is not None:
+            raise ValueError("MiniMax-H3 --one_frame options require --frame_count 1")
+        video_latent_frames(args.frame_count)
+        duration = args.frame_count / 24.0
+        if not args.allow_experimental_duration and not 5.0 <= duration <= 15.0:
+            raise ValueError(
+                f"MiniMax-H3 duration {duration:.3f}s is outside the released 5-15s range; "
+                "pass --allow_experimental_duration to proceed"
+            )
     if args.steps <= 0:
         raise ValueError("MiniMax-H3 --steps must be positive")
     if not 0 <= args.blocks_to_swap <= 48:
@@ -100,7 +167,10 @@ def validate_generation_args(args: argparse.Namespace) -> None:
         value = float(getattr(args, label))
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"MiniMax-H3 --{label} must be in [0.0,1.0], got {value}")
-    if Path(args.output).suffix.lower() not in {".mp4", ".mkv", ".mov"}:
+    if one_frame:
+        if Path(args.output).suffix.lower() != ".png":
+            raise ValueError("MiniMax-H3 one-frame generation writes an image; --output must use .png")
+    elif Path(args.output).suffix.lower() not in {".mp4", ".mkv", ".mov"}:
         raise ValueError("MiniMax-H3 --output must use .mp4, .mkv, or .mov")
     if args.trajectory_stride < 1:
         raise ValueError(f"MiniMax-H3 --trajectory_stride must be at least 1, got {args.trajectory_stride}")
@@ -115,10 +185,17 @@ def validate_generation_args(args: argparse.Namespace) -> None:
             raise ValueError("MiniMax-H3 FL2VA generation does not accept --text_cache")
         if not args.prompt:
             raise ValueError("MiniMax-H3 FL2VA requires --prompt")
-        _require_path(args.first_frame, "first_frame")
-        _require_path(args.last_frame, "last_frame")
         if args.reference_jsonl or args.ref:
             raise ValueError("MiniMax-H3 FL2VA does not accept --reference_jsonl or --ref")
+        if one_frame:
+            if not args.first_frame and not args.last_frame:
+                raise ValueError("MiniMax-H3 one-frame FL2VA requires --first_frame and/or --last_frame")
+            for label in ("first_frame", "last_frame"):
+                if getattr(args, label):
+                    _require_path(getattr(args, label), label)
+        else:
+            _require_path(args.first_frame, "first_frame")
+            _require_path(args.last_frame, "last_frame")
     else:
         if bool(args.reference_jsonl) == bool(args.ref):
             raise ValueError("MiniMax-H3 Ref2VA requires exactly one of --reference_jsonl or --ref")
@@ -362,7 +439,23 @@ def setup_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--width", type=int, default=768)
     parser.add_argument("--height", type=int, default=1344)
-    parser.add_argument("--frame_count", type=int, default=124)
+    parser.add_argument(
+        "--frame_count",
+        type=int,
+        default=124,
+        help="pixel frame count, 17*n+5 for video; 1 enables the experimental one-frame (image) mode, which writes"
+        " a PNG and skips audio decoding",
+    )
+    parser.add_argument(
+        "--one_frame",
+        default=None,
+        metavar="target_index=N,control_index=A;B",
+        help="one-frame mode time options (requires --frame_count 1): 0-based 24 fps pixel-frame indices on the"
+        " nominal timeline, converted to RoPE times relative to the target-block cursor. target_index (default 0)"
+        " places the generated frame; control_index places the FL2VA condition frames in --first_frame/--last_frame"
+        " order and is required when conditions are present. The base model reads these as trainable time inputs;"
+        " see docs/minimax_h3_1f.md",
+    )
     parser.add_argument("--allow_experimental_duration", action="store_true")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0)
@@ -412,9 +505,15 @@ def setup_parser() -> argparse.ArgumentParser:
 
 def run_generation(args: argparse.Namespace) -> Path:
     validate_generation_args(args)
+    one_frame = args.frame_count == 1
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     decoder = PyAVH3MediaDecoder()
     record = load_generation_record(args)
+    if one_frame and any(reference.type == "audio" for reference in record.references):
+        raise ValueError(
+            "MiniMax-H3 one-frame generation does not accept standalone audio references"
+            " (their window is defined by the target duration); video references keep their embedded audio"
+        )
     raw_visuals, text_visuals = decode_generation_visuals(args, record, decoder)
     text_hidden_states, text_token_tags = _encode_text(args, record, text_visuals, device)
 
@@ -473,17 +572,23 @@ def run_generation(args: argparse.Namespace) -> Path:
     del raw_visuals, text_visuals
     clean_memory_on_device(device)
 
+    condition_roles = None
+    if args.task == "fl2va":
+        condition_roles = tuple(role for role, path in (("first", args.first_frame), ("last", args.last_frame)) if path)
     layout = build_h3_layout(
         task=args.task,
         text_length=text_hidden_states.shape[1],
         target_video=H3VideoGeometry(
-            video_latent_frames(args.frame_count),
+            ONE_FRAME_VIDEO_LATENT_FRAMES if one_frame else video_latent_frames(args.frame_count),
             args.height // VIDEO_VAE_SPATIAL_RATIO,
             args.width // VIDEO_VAE_SPATIAL_RATIO,
         ),
-        target_audio_frames=audio_latent_frames(args.frame_count),
+        target_audio_frames=ONE_FRAME_AUDIO_LATENT_FRAMES if one_frame else audio_latent_frames(args.frame_count),
         visual_conditions=visual_geometries,
         references=reference_geometries,
+        one_frame=one_frame,
+        condition_roles=condition_roles,
+        time_overrides=_one_frame_time_overrides(args),
     )
     logger.info(
         "MiniMax-H3 layout: task=%s video=%s audio_frames=%d text_rows=%d packed_rows=%d",
@@ -635,10 +740,13 @@ def run_generation(args: argparse.Namespace) -> Path:
         for index, x0_latents in trajectory:
             with torch.no_grad():
                 step_video = video_vae.decode(x0_latents.to(device=device, dtype=VIDEO_VAE_DECODE_DTYPE)).cpu()
-            step_path = trajectory_dir / (
-                f"step{index:03d}_base{trajectory_schedule.base[index]:.4f}_sigv{trajectory_schedule.video[index]:.4f}.mp4"
-            )
-            write_video_only(decoded_video_to_uint8(step_video, frame_limit=args.frame_count), step_path)
+            step_stem = f"step{index:03d}_base{trajectory_schedule.base[index]:.4f}_sigv{trajectory_schedule.video[index]:.4f}"
+            if one_frame:
+                step_path = trajectory_dir / f"{step_stem}.png"
+                write_image(decoded_video_to_uint8(step_video, frame_limit=1)[0], step_path)
+            else:
+                step_path = trajectory_dir / f"{step_stem}.mp4"
+                write_video_only(decoded_video_to_uint8(step_video, frame_limit=args.frame_count), step_path)
             del step_video
             clean_memory_on_device(device)
             logger.info("Saved MiniMax-H3 trajectory step: %s", step_path)
@@ -646,6 +754,13 @@ def run_generation(args: argparse.Namespace) -> Path:
     del video_vae, video_latents
     gc.collect()
     clean_memory_on_device(device)
+
+    if one_frame:
+        # the 2-frame audio target is a byproduct of the joint layout, not an output
+        del audio_latents
+        write_image(decoded_video_to_uint8(decoded_video, frame_limit=1)[0], args.output)
+        logger.info("Saved MiniMax-H3 output: %s", args.output)
+        return Path(args.output)
 
     logger.info("Decoding MiniMax-H3 audio")
     audio_vae = load_audio_vae(

@@ -22,7 +22,14 @@ from musubi_tuner.minimax_h3.sampling import (
     write_joint_av,
 )
 from musubi_tuner.minimax_h3.generation_inputs import load_generation_record
-from musubi_tuner.minimax_h3_generate_video import load_cached_text_conditioning, validate_generation_args
+from musubi_tuner.minimax_h3.packing import FRAME_RESCALE, H3TimeOverrides
+from musubi_tuner.minimax_h3.sampling import write_image
+from musubi_tuner.minimax_h3_generate_video import (
+    _one_frame_time_overrides,
+    _parse_one_frame_options,
+    load_cached_text_conditioning,
+    validate_generation_args,
+)
 
 
 def _layout():
@@ -294,6 +301,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "reference_jsonl": None,
         "reference_index": 0,
         "ref": None,
+        "one_frame": None,
         "width": 64,
         "height": 64,
         "frame_count": 124,
@@ -381,6 +389,92 @@ def test_load_generation_record_builds_inline_ref_records_without_a_jsonl(tmp_pa
     assert record.caption == "a cat sings"
     assert [reference.type for reference in record.references] == ["image", "image"]
     assert [reference.path for reference in record.references] == [face.resolve(), style.resolve()]
+
+
+def test_parse_one_frame_options_accepts_indices_and_rejects_malformed_specs():
+    assert _parse_one_frame_options("target_index=24,control_index=0;240") == (24, (0, 240))
+    assert _parse_one_frame_options("control_index=7") == (0, (7,))
+    assert _parse_one_frame_options("target_index=3") == (3, None)
+
+    for spec, message in (
+        ("target_index", "key=value"),
+        ("speed=2", "unknown option"),
+        ("target_index=1,target_index=2", "duplicate option"),
+        ("target_index=-1", "nonnegative"),
+        ("control_index=a", "must be an integer"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _parse_one_frame_options(spec)
+
+
+def test_one_frame_time_overrides_map_pixel_frame_indices_to_rotary_units():
+    args = SimpleNamespace(frame_count=1, one_frame="target_index=24,control_index=0;240")
+    assert _one_frame_time_overrides(args) == H3TimeOverrides(
+        condition_times=(0.0, FRAME_RESCALE * 240),
+        target_time=FRAME_RESCALE * 24,
+    )
+
+    defaults = _one_frame_time_overrides(SimpleNamespace(frame_count=1, one_frame=None))
+    assert defaults == H3TimeOverrides(condition_times=(), target_time=0.0)
+    assert _one_frame_time_overrides(SimpleNamespace(frame_count=124, one_frame=None)) is None
+
+
+def test_generation_validation_gates_the_one_frame_mode(tmp_path):
+    png = str(tmp_path / "output.png")
+    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png))
+    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame="target_index=240"))
+
+    with pytest.raises(ValueError, match="must use .png"):
+        validate_generation_args(_generation_args(tmp_path, frame_count=1))
+    with pytest.raises(ValueError, match="require --frame_count 1"):
+        validate_generation_args(_generation_args(tmp_path, one_frame="target_index=1"))
+    with pytest.raises(ValueError, match="control_index applies only to FL2VA"):
+        validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame="control_index=0"))
+
+    first = tmp_path / "first.png"
+    first.touch()
+    validate_generation_args(
+        _generation_args(
+            tmp_path,
+            task="fl2va",
+            frame_count=1,
+            output=png,
+            first_frame=str(first),
+            one_frame="target_index=24,control_index=0",
+        )
+    )
+    with pytest.raises(ValueError, match="one entry per provided frame"):
+        validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, first_frame=str(first)))
+    with pytest.raises(ValueError, match="one entry per provided frame"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                task="fl2va",
+                frame_count=1,
+                output=png,
+                first_frame=str(first),
+                one_frame="control_index=0;240",
+            )
+        )
+    with pytest.raises(ValueError, match="requires --first_frame and/or --last_frame"):
+        validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, one_frame="control_index=0"))
+
+
+def test_write_image_saves_a_single_uint8_frame(tmp_path):
+    frame = torch.zeros(4, 6, 3, dtype=torch.uint8)
+    frame[:, :, 1] = 200
+    output = tmp_path / "sub" / "image.png"
+
+    write_image(frame, output)
+
+    from PIL import Image
+
+    with Image.open(output) as image:
+        assert image.size == (6, 4)
+        assert image.getpixel((0, 0)) == (0, 200, 0)
+
+    with pytest.raises(ValueError, match=r"uint8 \[H,W,3\]"):
+        write_image(frame.float(), tmp_path / "bad.png")
 
 
 def test_cached_text_conditioning_validates_task_format_and_fingerprint(tmp_path):

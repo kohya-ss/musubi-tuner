@@ -23,6 +23,9 @@ from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 
 
 VIDEO_VAE_SPATIAL_RATIO = 16
+# with a one-frame target, reference videos keep their full released span instead of
+# being capped by the target duration
+ONE_FRAME_REFERENCE_FRAME_CAP = 15 * 24
 
 
 def dummy_record(prompt: str) -> H3Record:
@@ -77,17 +80,20 @@ def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecode
         return raw_visuals, text_visuals
     if args.task == "fl2va":
         for role, path in (("first", args.first_frame), ("last", args.last_frame)):
+            if path is None:
+                continue
             frames = load_image_frames(path, width=args.width, height=args.height)
             raw_visuals[role] = frames
             text_visuals[role] = H3TextVisual(frames)
         return raw_visuals, text_visuals
 
+    reference_frame_cap = ONE_FRAME_REFERENCE_FRAME_CAP if args.frame_count == 1 else args.frame_count
     for reference in record.references:
         if reference.type not in {"image", "video"}:
             continue
         frames = decoder.decode_reference_visual(
             reference,
-            target_frame_count=args.frame_count,
+            target_frame_count=reference_frame_cap,
             target_size=(args.width, args.height),
         )
         raw_visuals[reference.path] = frames
@@ -123,7 +129,8 @@ def encode_visual_conditions(args, record, raw_visuals, video_vae):
 
     if args.task == "fl2va":
         for role in ("first", "last"):
-            visual_geometries.append(encode_visual(raw_visuals[role]))
+            if role in raw_visuals:
+                visual_geometries.append(encode_visual(raw_visuals[role]))
     elif args.task == "ref2va":
         for index, reference in enumerate(record.references):
             if reference.type in {"image", "video"}:
@@ -143,7 +150,6 @@ def encode_audio_conditions(
     audio_device, audio_dtype = module_device_dtype(audio_vae, torch.float32)
     audio_latents = []
     reference_audio_frames = {}
-    target_audio_frames = audio_latent_frames(args.frame_count)
     for index, reference in enumerate(record.references):
         if reference.audio is None:
             continue
@@ -154,7 +160,8 @@ def encode_audio_conditions(
             frames = audio_latent_frames(frame_count)
             require_exact = True
         else:
-            frames = target_audio_frames
+            # standalone audio spans the target duration; one-frame generation rejects it upstream
+            frames = audio_latent_frames(args.frame_count)
             require_exact = False
         waveform = decoder.decode_audio(
             reference.audio,

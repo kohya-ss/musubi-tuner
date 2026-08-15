@@ -9,7 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.packing import (
+    FRAME_RESCALE,
+    ONE_FRAME_AUDIO_LATENT_FRAMES,
+    ONE_FRAME_VIDEO_LATENT_FRAMES,
     H3ReferenceGeometry,
+    H3TimeOverrides,
     H3VideoGeometry,
     build_h3_layout,
     build_position_grid,
@@ -277,6 +281,137 @@ def test_position_grid_matches_mixed_reference_cursor_order():
 
     torch.testing.assert_close(actual[0], expected)
     assert torch.all(actual[0, layout.target_audio_segment.start : layout.target_audio_segment.stop, 0] >= target_cursor)
+
+
+ONE_FRAME_TARGET = H3VideoGeometry(frames=1, height=4, width=4)
+
+
+def _one_frame_layout(task="t2va", *, conditions=(), roles=None, references=(), overrides=None):
+    return build_h3_layout(
+        task=task,
+        text_length=2,
+        target_video=ONE_FRAME_TARGET,
+        target_audio_frames=ONE_FRAME_AUDIO_LATENT_FRAMES,
+        visual_conditions=conditions,
+        condition_roles=roles,
+        references=references,
+        one_frame=True,
+        time_overrides=overrides,
+    )
+
+
+def test_one_frame_layout_accepts_a_single_latent_frame_and_two_audio_frames():
+    layout = _one_frame_layout()
+
+    assert layout.target_video.frames == ONE_FRAME_VIDEO_LATENT_FRAMES
+    assert layout.target_audio_frames == ONE_FRAME_AUDIO_LATENT_FRAMES
+    assert layout.time_overrides is None
+    assert [(segment.role, segment.row_count) for segment in layout.segments] == [
+        ("text", 2),
+        ("target_audio", 4),
+        ("target_video", 4),
+    ]
+
+
+def test_one_frame_layout_validation_rules():
+    with pytest.raises(ValueError, match="single target latent frame"):
+        build_h3_layout(task="t2va", text_length=2, target_video=TARGET_VIDEO, target_audio_frames=8, one_frame=True)
+    with pytest.raises(ValueError, match="2 target audio frames"):
+        build_h3_layout(task="t2va", text_length=2, target_video=ONE_FRAME_TARGET, target_audio_frames=8, one_frame=True)
+    with pytest.raises(ValueError, match="time overrides require a one-frame layout"):
+        build_h3_layout(
+            task="t2va",
+            text_length=2,
+            target_video=TARGET_VIDEO,
+            target_audio_frames=8,
+            time_overrides=H3TimeOverrides(condition_times=(), target_time=0.0),
+        )
+    with pytest.raises(ValueError, match="5\\*n\\+2"):
+        build_h3_layout(task="t2va", text_length=2, target_video=ONE_FRAME_TARGET, target_audio_frames=2)
+    with pytest.raises(ValueError, match="cannot carry condition times"):
+        _one_frame_layout(overrides=H3TimeOverrides(condition_times=(1.0,), target_time=0.0))
+    with pytest.raises(ValueError, match="condition roles apply only to FL2VA"):
+        _one_frame_layout(roles=("first",))
+    with pytest.raises(ValueError, match="nonnegative"):
+        H3TimeOverrides(condition_times=(-1.0,), target_time=0.0)
+
+
+def test_one_frame_fl2va_layout_supports_one_or_two_roled_conditions():
+    condition = H3VideoGeometry(1, 4, 4)
+    overrides = H3TimeOverrides(condition_times=(0.0,), target_time=FRAME_RESCALE * 24)
+
+    for role in ("first", "last"):
+        layout = _one_frame_layout("fl2va", conditions=(condition,), roles=(role,), overrides=overrides)
+        assert [segment.role for segment in layout.segments] == ["text", role, "target_audio", "target_video"]
+
+    both = H3TimeOverrides(condition_times=(0.0, FRAME_RESCALE * 240), target_time=FRAME_RESCALE * 24)
+    layout = _one_frame_layout("fl2va", conditions=(condition, condition), overrides=both)
+    assert [segment.role for segment in layout.segments] == ["text", "first", "last", "target_audio", "target_video"]
+
+    with pytest.raises(ValueError, match="one condition time override per condition"):
+        _one_frame_layout("fl2va", conditions=(condition,), roles=("first",))
+    with pytest.raises(ValueError, match="one condition time override per condition"):
+        _one_frame_layout("fl2va", conditions=(condition, condition), overrides=overrides)
+    with pytest.raises(ValueError, match="explicit condition roles"):
+        _one_frame_layout("fl2va", conditions=(condition,), overrides=overrides)
+    with pytest.raises(ValueError, match="first, last, or first\\+last"):
+        _one_frame_layout("fl2va", conditions=(condition, condition), roles=("last", "first"), overrides=both)
+    with pytest.raises(ValueError, match="one or two visual conditions"):
+        _one_frame_layout("fl2va", overrides=H3TimeOverrides(condition_times=(), target_time=0.0))
+
+
+def test_one_frame_position_grid_places_conditions_and_target_at_override_times():
+    condition = H3VideoGeometry(1, 4, 4)
+    overrides = H3TimeOverrides(
+        condition_times=(0.0, FRAME_RESCALE * 240),
+        target_time=FRAME_RESCALE * 24,
+    )
+    layout = _one_frame_layout("fl2va", conditions=(condition, condition), overrides=overrides)
+
+    positions = build_position_grid(layout)[0]
+
+    cursor = 2.0
+    frame = _frame_grid(ONE_FRAME_TARGET)
+    first = torch.column_stack((torch.full((4,), cursor), frame))
+    last = torch.column_stack((torch.full((4,), cursor + FRAME_RESCALE * 240), frame))
+    target_time = cursor + FRAME_RESCALE * 24
+    target_width = _axis(4, 4.0)
+    audio = _audio_grid(target_time, ONE_FRAME_AUDIO_LATENT_FRAMES, float(target_width[0]), float(target_width[-1]))
+    video = _video_grid(ONE_FRAME_TARGET, target_time)
+    text = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
+    torch.testing.assert_close(positions, torch.cat((text, first, last, audio, video)))
+
+
+def test_one_frame_position_grid_offsets_a_plain_target_and_defaults_to_the_cursor():
+    offset = _one_frame_layout(overrides=H3TimeOverrides(condition_times=(), target_time=FRAME_RESCALE * 240))
+    plain = _one_frame_layout()
+
+    offset_positions = build_position_grid(offset)[0]
+    plain_positions = build_position_grid(plain)[0]
+
+    target_rows = slice(offset.target_audio_segment.start, offset.row_count)
+    torch.testing.assert_close(
+        offset_positions[target_rows, 0],
+        plain_positions[target_rows, 0] + FRAME_RESCALE * 240,
+    )
+    torch.testing.assert_close(offset_positions[:2], plain_positions[:2])
+    assert float(plain_positions[plain.target_video_segment.start, 0]) == 2.0
+
+
+def test_one_frame_ref2va_layout_keeps_reference_blocks_before_the_offset_target():
+    references = (H3ReferenceGeometry("image", video=H3VideoGeometry(1, 2, 4)),)
+    layout = _one_frame_layout(
+        "ref2va",
+        references=references,
+        overrides=H3TimeOverrides(condition_times=(), target_time=FRAME_RESCALE * 24),
+    )
+
+    positions = build_position_grid(layout)[0]
+
+    image_rows = layout.segment("ref_000_image")
+    assert torch.all(positions[image_rows.row_slice, 0] == 2.0)
+    # image references advance the cursor by 1.0; the target offset applies after that
+    assert float(positions[layout.target_video_segment.start, 0]) == 3.0 + FRAME_RESCALE * 24
 
 
 def test_target_rows_round_trip_back_to_video_and_audio_latents():

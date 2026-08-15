@@ -67,6 +67,20 @@ def test_t2va_and_fl2va_presentations_are_non_chat_golden_strings(tmp_path: Path
     assert fl2va.videos == ()
 
 
+def test_fl2va_presentation_numbers_a_lone_picture_one_for_either_role(tmp_path: Path):
+    # the released builder numbers pictures over the present set: a lone last frame is
+    # still <Picture 1>, and first/last is carried only by the rotary anchor times
+    record = _record(tmp_path)
+
+    for role in ("first", "last"):
+        presentation = build_presentation(record, "fl2va", {role: _visual(1)})
+        assert presentation.text == f"<Picture 1>: {IMAGE_PLACEHOLDER}{record.caption}"
+        assert len(presentation.images) == 1
+
+    with pytest.raises(ValueError, match="at least one of the first and last"):
+        build_presentation(record, "fl2va", {})
+
+
 def test_ref2va_presentation_preserves_jsonl_order_and_timestamp_format(tmp_path: Path):
     image = tmp_path / "face.png"
     video = tmp_path / "motion.mp4"
