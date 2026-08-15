@@ -1371,6 +1371,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 f"MiniMax-H3 guidance-loss uncond cache width {uncond_hidden.shape[1]} does not match"
                 f" the text cache width {runtime.text_hidden_states.shape[2]}"
             )
+        # the probe swaps only the text rows; the one-frame times stay valid because they
+        # are relative to the target-block cursor, which moves with the text length
         uncond_layout = build_h3_layout(
             task=runtime.layout.task,
             text_length=uncond_hidden.shape[0],
@@ -1378,6 +1380,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             target_audio_frames=runtime.layout.target_audio_frames,
             visual_conditions=runtime.layout.visual_conditions,
             references=runtime.layout.references,
+            one_frame=runtime.layout.target_video.frames == ONE_FRAME_VIDEO_LATENT_FRAMES,
+            time_overrides=runtime.layout.time_overrides,
         )
         autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
         with torch.no_grad(), autocast():

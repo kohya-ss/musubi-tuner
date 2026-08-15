@@ -1528,6 +1528,31 @@ def test_guidance_loss_rewrites_both_targets_around_the_uncond_prediction(tmp_pa
     assert torch.isfinite(loss)
 
 
+def test_guidance_loss_uncond_layout_carries_the_one_frame_overrides(tmp_path, monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        one_frame=True,
+        h3_guidance_loss_scale=3.0,
+        h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path),
+    )
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer()
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    _, metrics = _one_frame_process_batch(trainer, args, _one_frame_batch(target_index=24), transformer)
+
+    # the no-grad uncond probe first, then the conditional pass, both on one-frame layouts
+    assert len(transformer.calls) == 2
+    uncond_call, cond_call = transformer.calls
+    assert uncond_call["layout"].text_length == 2
+    assert uncond_call["layout"].target_video.frames == 1
+    assert uncond_call["layout"].target_audio_frames == 2
+    assert uncond_call["layout"].time_overrides == cond_call["layout"].time_overrides
+    assert uncond_call["layout"].time_overrides.target_time == FRAME_RESCALE * 24
+    assert metrics["guidance/applied"] == 1.0
+
+
 def test_guidance_loss_audio_scale_can_differ_from_video(tmp_path, monkeypatch):
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(
