@@ -18,6 +18,7 @@ from musubi_tuner.minimax_h3.media import (
     audio_latent_frames,
     h3_records_from_datasource,
     load_h3_jsonl_records,
+    parse_inline_references,
     video_latent_frames,
     waveform_samples,
 )
@@ -107,6 +108,78 @@ def test_ref2va_jsonl_preserves_reference_order_and_canonicalizes_paths(tmp_path
     assert record.references[2].audio is not None
     assert record.references[2].audio.path == voice
     assert record_media_paths(record) == {video, image, reference_video, reference_audio, voice}
+
+
+def test_inline_references_infer_types_from_extensions_and_resolve_relative_paths(tmp_path: Path):
+    image = _touch(tmp_path / "refs" / "face.png")
+    motion = _touch(tmp_path / "refs" / "motion.mp4")
+    song = _touch(tmp_path / "refs" / "song.wav")
+    voice = _touch(tmp_path / "refs" / "voice.flac")
+    clip = _touch(tmp_path / "refs" / "clip")  # no extension -> video
+    media = {
+        motion: H3MediaInfo(has_audio=False, duration_seconds=6.0),
+        song: H3MediaInfo(has_audio=True, duration_seconds=6.0),
+        voice: H3MediaInfo(has_audio=True, duration_seconds=4.0),
+        clip: H3MediaInfo(has_audio=True, duration_seconds=3.0),
+    }
+
+    references = parse_inline_references(
+        ["refs/face.png", "refs/motion.mp4;audio=refs/song.wav", "refs/voice.flac", "refs/clip"],
+        tmp_path,
+        media.__getitem__,
+    )
+
+    assert [reference.type for reference in references] == ["image", "video", "audio", "video"]
+    assert [reference.path for reference in references] == [image, motion, voice, clip]
+    assert references[1].audio == H3AudioSource(path=song, embedded=False)
+    assert references[2].audio == H3AudioSource(path=voice, embedded=False)
+    assert references[3].audio == H3AudioSource(path=clip, embedded=True)
+
+
+def test_inline_reference_type_override_and_spec_errors(tmp_path: Path):
+    still = _touch(tmp_path / "still.png")
+    _touch(tmp_path / "voice.wav")
+
+    def probe(path):
+        del path
+        return H3MediaInfo(has_audio=False, duration_seconds=6.0)
+
+    references = parse_inline_references(["still.png;type=video"], tmp_path, probe)
+    assert references[0].type == "video"
+    assert references[0].path == still
+
+    for spec, message in (
+        ("still.png;fast", "key=value"),
+        ("still.png;size=2", "unknown inline reference option"),
+        ("still.png;type=image;type=video", "duplicate inline reference option"),
+        ("still.png;type=photo", "must be image, video, or audio"),
+        (";type=image", "must start with a path"),
+        ("still.png;audio=voice.wav", "image cannot have audio_path"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            parse_inline_references([spec], tmp_path, probe)
+
+    # the reference-count validation (at least one visual) runs before the per-item checks
+    with pytest.raises(ValueError, match="audio uses path"):
+        parse_inline_references(["still.png", "voice.wav;audio=voice.wav"], tmp_path, probe)
+
+
+def test_inline_references_share_the_jsonl_count_and_duration_rules(tmp_path: Path):
+    _touch(tmp_path / "still.png")
+    _touch(tmp_path / "voice.wav")
+    _touch(tmp_path / "long.mp4")
+
+    def probe(path):
+        return H3MediaInfo(has_audio=True, duration_seconds=30.0 if path.suffix == ".mp4" else 4.0)
+
+    with pytest.raises(ValueError, match="at most 9 image references"):
+        parse_inline_references(["still.png"] * 10, tmp_path, probe)
+    with pytest.raises(ValueError, match="at least one visual reference"):
+        parse_inline_references(["voice.wav"], tmp_path, probe)
+    with pytest.raises(ValueError, match="between 2 and 15 seconds"):
+        parse_inline_references(["long.mp4"], tmp_path, probe)
+    with pytest.raises(ValueError, match="does not exist"):
+        parse_inline_references(["missing.png"], tmp_path, probe)
 
 
 def test_records_from_jsonl_datasource_share_the_parsed_data(tmp_path: Path):

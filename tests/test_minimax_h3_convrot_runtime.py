@@ -44,6 +44,7 @@ def _load_training_module(monkeypatch):
         "musubi_tuner.minimax_h3.media",
         H3_AUDIO_SPEC=object(),
         audio_latent_frames=noop,
+        parse_inline_references=noop,
         video_latent_frames=noop,
     )
     _stub(

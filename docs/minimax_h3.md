@@ -312,6 +312,8 @@ All entries in one run use the training `--task`. T2VA JSON entries use the comm
 
 FL2VA entries additionally use `first_frame` and `last_frame`; the common `image_path` and `end_image_path` names are accepted as aliases. Ref2VA entries use `reference_jsonl`, optional `reference_index`, and an optional `prompt` override. Ref2VA keeps the same ordered JSONL schema as caching and standalone generation.
 
+Ref2VA entries may instead carry inline references with the same `--ref` spec strings as generation (see [Generation](#generation)): the `ref` key holds the ordered spec list (in `.txt` prompt files, repeat `--ref` on the line; `--rj` likewise sets `reference_jsonl` per line), the entry's prompt is the caption, and `reference_index` does not apply. `ref` and `reference_jsonl` are mutually exclusive per entry. Relative `ref` paths — and relative `reference_jsonl` paths, when the file exists there — resolve from the prompt file's directory. Because prompt lines split on ` --`, a caption containing that character sequence cannot be expressed in `.txt` prompt files (a pre-existing limitation).
+
 Sample geometry must be 32-pixel aligned. Frame counts of at least 5 are rounded down to the nearest `17*n+5` value, matching the shared training-sample convention. Released durations are 5-15 seconds; `--h3_allow_experimental_sample_duration` permits shorter smoke samples. H3 sampling does not accept negative prompts, CFG, or a per-prompt generic flow shift.
 
 ## ConvRot INT8 Quantized Base Weights
@@ -399,6 +401,15 @@ For Ref2VA, use a Ref2VA base (BF16 or ConvRot INT8) and an ordered JSONL record
 ```
 
 The Ref2VA generation JSONL intentionally uses the same validated schema as training, including target `video_path`, optional target audio, caption, and references. The target media identifies the record but is not used as a generation target. `--prompt` may override the record caption when encoding fresh text conditioning.
+
+Alternatively, inline references skip the JSONL (and its target `video_path` placeholder, which generation never reads):
+
+```text
+--task ref2va --dit /models/minimax_h3_ref2va_bf16.safetensors --prompt "A cat sings." \
+  --ref refs/cat.png --ref "refs/dance.mp4;audio=refs/song.wav" --ref refs/bgm.mp3
+```
+
+`--ref PATH[;type=image|video|audio][;audio=AUDIO_PATH]` is repeatable, and the occurrence order is the reference order. Everything after the path is strict `key=value` options separated by `;`. When `type` is omitted it is inferred from the extension — image: `.bmp` `.jpeg` `.jpg` `.png` `.webp`; audio: `.aac` `.flac` `.m4a` `.mp3` `.ogg` `.opus` `.wav`; anything else (including no extension) is video. `;audio=` attaches an external audio track to a video reference; a video's embedded audio is adopted automatically when present (suppressing embedded audio, the JSONL `"audio_path": null` form, has no inline spelling — use the JSONL). Image references cannot take `;audio=`, and a standalone audio reference puts its file in the path itself. Relative paths resolve from the current directory. Validation is exactly the JSONL `references` schema: at most 12 references, at most 9 images, 3 videos, and 3 audio-bearing references, at least one visual reference, and video references of 2-15 seconds. The caption comes from `--prompt` (required). Mutually exclusive with `--reference_jsonl`.
 
 T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. The cache must match the requested task, cache format version, and exact presentation fingerprint (which covers the prompt, frame count, and size+mtime identities of the reference media, so the cache must be used on the machine holding the original files). T2VA still requires `--prompt` so that identity can be verified; Ref2VA uses the selected record caption unless `--prompt` overrides it. FL2VA generation does not accept a dataset text cache because external first/last images cannot be proven identical to the crop presentation that produced that cache.
 

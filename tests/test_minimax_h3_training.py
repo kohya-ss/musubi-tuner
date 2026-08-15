@@ -23,9 +23,11 @@ from musubi_tuner.minimax_h3_train_network import (
     MiniMaxH3NetworkTrainer,
     _apply_timestep_focus,
     _decomposed_flow_loss,
+    _normalize_h3_sample_parameter,
     _prediction_geometry_log,
     minimax_h3_setup_parser,
 )
+from musubi_tuner.training.sampling_prompts import line_to_prompt_dict
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.training.trainer_base import DiTOutput
@@ -150,6 +152,71 @@ def _training_batch(batch_size: int = 1, *, text_length: int = 3):
         "mmh3_token_tags": [torch.tensor([1, 0, 1][:text_length], dtype=torch.int64) for _ in range(batch_size)],
         "timesteps": None,
     }
+
+
+def test_sample_prompt_line_parses_inline_refs_and_reference_jsonl():
+    line = "a cat sings --ref refs/cat.png --ref refs/dance.mp4;audio=refs/song.wav --w 640 --h 384"
+
+    prompt_dict = line_to_prompt_dict(line)
+
+    assert prompt_dict["prompt"] == "a cat sings"
+    assert prompt_dict["ref"] == ["refs/cat.png", "refs/dance.mp4;audio=refs/song.wav"]
+    assert prompt_dict["width"] == 640
+    assert prompt_dict["height"] == 384
+
+    assert line_to_prompt_dict("a cat sings --rj refs/all.jsonl")["reference_jsonl"] == "refs/all.jsonl"
+
+
+def test_h3_ref2va_sample_normalization_resolves_inline_refs_from_the_prompt_file_directory(tmp_path):
+    prompt_file = tmp_path / "prompts.txt"
+    prompt_file.touch()
+    face = tmp_path / "refs" / "face.png"
+    face.parent.mkdir()
+    face.touch()
+    args = _trainer_args(task="ref2va", sample_prompts=str(prompt_file))
+
+    sample = _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": ["refs/face.png"]})
+
+    assert sample["ref"] == ["refs/face.png"]
+    assert Path(sample["ref_base_directory"]) == tmp_path.resolve()
+    assert sample["reference_jsonl"] is None
+
+    with pytest.raises(ValueError, match="does not exist"):
+        _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": ["refs/missing.png"]})
+    with pytest.raises(ValueError, match="cannot combine"):
+        _normalize_h3_sample_parameter(
+            args, {"prompt": "a cat sings", "ref": ["refs/face.png"], "reference_jsonl": "refs/all.jsonl"}
+        )
+    with pytest.raises(ValueError, match="requires a prompt"):
+        _normalize_h3_sample_parameter(args, {"ref": ["refs/face.png"]})
+    with pytest.raises(ValueError, match="does not apply to --ref"):
+        _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": ["refs/face.png"], "reference_index": 1})
+    with pytest.raises(ValueError, match="non-empty strings"):
+        _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": " "})
+
+    for task in ("t2va", "fl2va"):
+        with pytest.raises(ValueError, match="does not accept"):
+            _normalize_h3_sample_parameter(
+                _trainer_args(task=task, sample_prompts=str(prompt_file)),
+                {"prompt": "a cat sings", "ref": ["refs/face.png"]},
+            )
+
+
+def test_h3_ref2va_sample_normalization_resolves_relative_reference_jsonl_from_the_prompt_file(tmp_path):
+    prompt_directory = tmp_path / "sub"
+    prompt_directory.mkdir()
+    prompt_file = prompt_directory / "prompts.txt"
+    prompt_file.touch()
+    jsonl = prompt_directory / "refs.jsonl"
+    jsonl.touch()
+    args = _trainer_args(task="ref2va", sample_prompts=str(prompt_file))
+
+    sample = _normalize_h3_sample_parameter(args, {"prompt": "p", "reference_jsonl": "refs.jsonl"})
+
+    assert Path(sample["reference_jsonl"]) == jsonl.resolve()
+
+    with pytest.raises(ValueError, match="does not exist"):
+        _normalize_h3_sample_parameter(args, {"prompt": "p", "reference_jsonl": "nowhere.jsonl"})
 
 
 def test_h3_parser_defaults_to_the_only_supported_training_coordinates():

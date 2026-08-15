@@ -21,6 +21,7 @@ from musubi_tuner.minimax_h3.sampling import (
     sample_joint_av,
     write_joint_av,
 )
+from musubi_tuner.minimax_h3.generation_inputs import load_generation_record
 from musubi_tuner.minimax_h3_generate_video import load_cached_text_conditioning, validate_generation_args
 
 
@@ -292,6 +293,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "last_frame": None,
         "reference_jsonl": None,
         "reference_index": 0,
+        "ref": None,
         "width": 64,
         "height": 64,
         "frame_count": 124,
@@ -332,6 +334,53 @@ def test_generation_validation_enforces_task_inputs_and_block_swap_range(tmp_pat
         validate_generation_args(_generation_args(tmp_path, task="ref2va"))
     with pytest.raises(ValueError, match="blocks_to_swap"):
         validate_generation_args(_generation_args(tmp_path, blocks_to_swap=49))
+
+
+def test_generation_validation_accepts_inline_refs_exclusively_with_reference_jsonl(tmp_path):
+    validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"]))
+
+    jsonl = tmp_path / "refs.jsonl"
+    jsonl.touch()
+    with pytest.raises(ValueError, match="exactly one of"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], reference_jsonl=str(jsonl)))
+    with pytest.raises(ValueError, match="requires --prompt"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], prompt=None))
+    with pytest.raises(ValueError, match="reference_index"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], reference_index=1))
+    with pytest.raises(ValueError, match="T2VA does not accept"):
+        validate_generation_args(_generation_args(tmp_path, task="t2va", ref=["face.png"]))
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.touch()
+    last.touch()
+    with pytest.raises(ValueError, match="FL2VA does not accept"):
+        validate_generation_args(
+            _generation_args(tmp_path, task="fl2va", first_frame=str(first), last_frame=str(last), ref=["face.png"])
+        )
+
+
+def test_load_generation_record_builds_inline_ref_records_without_a_jsonl(tmp_path):
+    refs_directory = tmp_path / "refs"
+    refs_directory.mkdir()
+    face = refs_directory / "face.png"
+    style = refs_directory / "style.webp"
+    face.touch()
+    style.touch()
+
+    record = load_generation_record(
+        SimpleNamespace(
+            task="ref2va",
+            prompt="a cat sings",
+            ref=["refs/face.png", "refs/style.webp"],
+            ref_base_directory=str(tmp_path),
+            reference_jsonl=None,
+            reference_index=0,
+        )
+    )
+
+    assert record.caption == "a cat sings"
+    assert [reference.type for reference in record.references] == ["image", "image"]
+    assert [reference.path for reference in record.references] == [face.resolve(), style.resolve()]
 
 
 def test_cached_text_conditioning_validates_task_format_and_fingerprint(tmp_path):

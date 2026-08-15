@@ -108,7 +108,7 @@ def validate_generation_args(args: argparse.Namespace) -> None:
     if args.task == "t2va":
         if not args.prompt:
             raise ValueError("MiniMax-H3 T2VA requires --prompt")
-        if args.first_frame or args.last_frame or args.reference_jsonl:
+        if args.first_frame or args.last_frame or args.reference_jsonl or args.ref:
             raise ValueError("MiniMax-H3 T2VA does not accept first/last/reference inputs")
     elif args.task == "fl2va":
         if using_text_cache:
@@ -117,14 +117,22 @@ def validate_generation_args(args: argparse.Namespace) -> None:
             raise ValueError("MiniMax-H3 FL2VA requires --prompt")
         _require_path(args.first_frame, "first_frame")
         _require_path(args.last_frame, "last_frame")
-        if args.reference_jsonl:
-            raise ValueError("MiniMax-H3 FL2VA does not accept --reference_jsonl")
+        if args.reference_jsonl or args.ref:
+            raise ValueError("MiniMax-H3 FL2VA does not accept --reference_jsonl or --ref")
     else:
-        _require_path(args.reference_jsonl, "reference_jsonl")
+        if bool(args.reference_jsonl) == bool(args.ref):
+            raise ValueError("MiniMax-H3 Ref2VA requires exactly one of --reference_jsonl or --ref")
         if args.first_frame or args.last_frame:
             raise ValueError("MiniMax-H3 Ref2VA does not accept --first_frame or --last_frame")
-        if args.reference_index < 0:
-            raise ValueError("MiniMax-H3 --reference_index must be nonnegative")
+        if args.ref:
+            if not args.prompt:
+                raise ValueError("MiniMax-H3 Ref2VA with --ref requires --prompt")
+            if args.reference_index:
+                raise ValueError("MiniMax-H3 --reference_index selects a --reference_jsonl record and does not apply to --ref")
+        else:
+            _require_path(args.reference_jsonl, "reference_jsonl")
+            if args.reference_index < 0:
+                raise ValueError("MiniMax-H3 --reference_index must be nonnegative")
 
     lora_weights = args.lora_weight or []
     for path in lora_weights:
@@ -342,6 +350,16 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--last_frame", default=None)
     parser.add_argument("--reference_jsonl", default=None)
     parser.add_argument("--reference_index", type=int, default=0)
+    parser.add_argument(
+        "--ref",
+        action="append",
+        default=None,
+        metavar="PATH[;type=image|video|audio][;audio=AUDIO_PATH]",
+        help="Ref2VA inline reference, repeatable; occurrence order is the reference order and the caption comes from"
+        " --prompt, so no JSONL (and no dummy target video_path) is needed. The type is inferred from the file"
+        " extension unless ;type= overrides it; ;audio= attaches an external audio track to a video reference."
+        " Validation matches the JSONL references schema exactly. Mutually exclusive with --reference_jsonl.",
+    )
     parser.add_argument("--width", type=int, default=768)
     parser.add_argument("--height", type=int, default=1344)
     parser.add_argument("--frame_count", type=int, default=124)

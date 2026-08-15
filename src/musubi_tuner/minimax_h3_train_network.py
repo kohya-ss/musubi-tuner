@@ -31,7 +31,7 @@ from musubi_tuner.minimax_h3.generation_inputs import (
     load_generation_record,
     module_device_dtype,
 )
-from musubi_tuner.minimax_h3.media import H3_AUDIO_SPEC, audio_latent_frames, video_latent_frames
+from musubi_tuner.minimax_h3.media import H3_AUDIO_SPEC, audio_latent_frames, parse_inline_references, video_latent_frames
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
     H3PackedLayout,
@@ -124,25 +124,48 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
     first_frame = sample.get("first_frame") or sample.get("image_path")
     last_frame = sample.get("last_frame") or sample.get("end_image_path")
     reference_jsonl = sample.get("reference_jsonl")
+    ref_specs = sample.get("ref")
     reference_index = int(sample.get("reference_index", 0))
+    if ref_specs is not None:
+        if not isinstance(ref_specs, list) or not all(isinstance(spec, str) and spec.strip() for spec in ref_specs):
+            raise ValueError("MiniMax-H3 training sample --ref entries must be non-empty strings")
     if args.task == "t2va":
         if not prompt:
             raise ValueError("MiniMax-H3 T2VA training sample requires a prompt")
-        if first_frame or last_frame or reference_jsonl:
+        if first_frame or last_frame or reference_jsonl or ref_specs:
             raise ValueError("MiniMax-H3 T2VA training sample does not accept first/last/reference inputs")
     elif args.task == "fl2va":
         if not prompt:
             raise ValueError("MiniMax-H3 FL2VA training sample requires a prompt")
+        if reference_jsonl or ref_specs:
+            raise ValueError("MiniMax-H3 FL2VA training sample does not accept reference_jsonl or --ref")
         _require_sampling_path(first_frame, "first_frame")
         _require_sampling_path(last_frame, "last_frame")
-        if reference_jsonl:
-            raise ValueError("MiniMax-H3 FL2VA training sample does not accept reference_jsonl")
     else:
-        _require_sampling_path(reference_jsonl, "reference_jsonl")
         if first_frame or last_frame:
             raise ValueError("MiniMax-H3 Ref2VA training sample does not accept first/last frames")
-        if reference_index < 0:
-            raise ValueError("MiniMax-H3 reference_index must be nonnegative")
+        prompt_directory = Path(args.sample_prompts).expanduser().resolve().parent
+        if ref_specs:
+            if reference_jsonl:
+                raise ValueError("MiniMax-H3 Ref2VA training sample cannot combine --ref with --rj/reference_jsonl")
+            if not prompt:
+                raise ValueError("MiniMax-H3 Ref2VA training sample with --ref requires a prompt")
+            if reference_index:
+                raise ValueError("MiniMax-H3 reference_index selects a reference_jsonl record and does not apply to --ref")
+            sample["ref_base_directory"] = str(prompt_directory)
+            # validate the specs (existence, probes, count limits) before the heavyweight
+            # sampling models are loaded; load_generation_record re-parses them later
+            parse_inline_references(ref_specs, prompt_directory)
+        else:
+            # relative reference_jsonl paths resolve from the prompt file's directory,
+            # falling back to the historical CWD-relative behavior
+            if reference_jsonl and not Path(reference_jsonl).expanduser().is_absolute():
+                prompt_relative = prompt_directory / Path(reference_jsonl).expanduser()
+                if prompt_relative.exists():
+                    reference_jsonl = str(prompt_relative)
+            _require_sampling_path(reference_jsonl, "reference_jsonl")
+            if reference_index < 0:
+                raise ValueError("MiniMax-H3 reference_index must be nonnegative")
 
     seed = sample.get("seed")
     sample.update(
@@ -151,6 +174,7 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
         first_frame=first_frame,
         last_frame=last_frame,
         reference_jsonl=reference_jsonl,
+        ref=ref_specs,
         reference_index=reference_index,
         width=width,
         height=height,

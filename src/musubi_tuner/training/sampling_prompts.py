@@ -93,6 +93,19 @@ def line_to_prompt_dict(line: str) -> dict:
                 prompt_dict["one_frame"] = m.group(1).strip()
                 continue
 
+            m = re.match(r"rj (.+)", parg, re.IGNORECASE)
+            if m:  # reference JSONL (MiniMax-H3 Ref2VA)
+                prompt_dict["reference_jsonl"] = m.group(1).strip()
+                continue
+
+            m = re.match(r"ref (.+)", parg, re.IGNORECASE)
+            if m:
+                # can be multiple inline references (MiniMax-H3 Ref2VA)
+                if "ref" not in prompt_dict:
+                    prompt_dict["ref"] = []
+                prompt_dict["ref"].append(m.group(1).strip())
+                continue
+
         except ValueError as ex:
             logger.error(f"Exception in parsing / 解析エラー: {parg}")
             logger.error(ex)
