@@ -334,7 +334,7 @@ def main():
 
     args = parser.parse_args()
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device if args.device is not None else "xpu" if torch.xpu.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
     # Load dataset config
@@ -381,7 +381,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument("--dataset_config", type=str, required=True, help="path to dataset config .toml file")
     parser.add_argument("--vae", type=str, required=False, default=None, help="path to vae checkpoint")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default depends on model, e.g., float16")
-    parser.add_argument("--device", type=str, default=None, help="device to use, default is cuda if available")
+    parser.add_argument("--device", type=str, default=None, help="device to use, default is xpu if available, else cuda if available, else cpu")
     parser.add_argument(
         "--batch_size", type=int, default=None, help="batch size, override dataset config if dataset batch size > this"
     )

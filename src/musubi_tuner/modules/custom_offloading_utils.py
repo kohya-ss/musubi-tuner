@@ -25,6 +25,21 @@ def _clean_memory_on_device(device: torch.device):
         torch.mps.empty_cache()
 
 
+class _SyncFuture:
+    """A Future-like object that wraps an already-completed result.
+
+    Used on XPU/non-CUDA devices where block swaps are performed synchronously
+    on the calling thread. This avoids the ThreadPoolExecutor deadlock that
+    occurs when torch.xpu.synchronize() is called from a worker thread.
+    """
+
+    def __init__(self, result):
+        self._result = result
+
+    def result(self, timeout=None):
+        return self._result
+
+
 def _synchronize_device(device: torch.device):
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -35,8 +50,13 @@ def _synchronize_device(device: torch.device):
 
 
 def swap_weight_devices_no_cuda(device: torch.device, layer_to_cpu: nn.Module, layer_to_cuda: nn.Module):
-    """
-    not tested
+    """Swap weights between two layers without CUDA streams.
+
+    On XPU/non-CUDA devices, transfers are inherently synchronous so we avoid
+    the redundant torch.xpu.synchronize() calls that the original code made
+    between the two halves of the swap.  Those per-swap synchronize calls can
+    trigger UR_RESULT_ERROR_DEVICE_LOST on Intel Arc GPUs when invoked during
+    an active autograd pass.
     """
     assert layer_to_cpu.__class__ == layer_to_cuda.__class__
 
@@ -45,17 +65,23 @@ def swap_weight_devices_no_cuda(device: torch.device, layer_to_cpu: nn.Module, l
         if hasattr(module_to_cpu, "weight") and module_to_cpu.weight is not None:
             weight_swap_jobs.append((module_to_cpu, module_to_cuda, module_to_cpu.weight.data, module_to_cuda.weight.data))
 
-    # device to cpu
-    for module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view in weight_swap_jobs:
-        module_to_cpu.weight.data = cuda_data_view.data.to("cpu", non_blocking=True)
-
-    _synchronize_device(device)
-
-    # cpu to device
-    for module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view in weight_swap_jobs:
-        cuda_data_view.copy_(module_to_cuda.weight.data, non_blocking=True)
-        module_to_cuda.weight.data = cuda_data_view
-
+    # Move each block to its target device. On non-CUDA devices these
+    # operations are synchronous, so no inter-copy barrier is required.
+    # IMPORTANT: each block keeps ITS OWN weights; only the device changes.
+    # Do NOT cross-assign the two blocks' weights (that scrambles parameters
+    # between blocks and silently corrupts training/inference).
+    for module_to_cpu, module_to_cuda, cpu_data, cuda_data in weight_swap_jobs:
+        # cpu_data  = module_to_cpu's weights  (currently on device, going to CPU)
+        # cuda_data = module_to_cuda's weights (currently on CPU,   going to device)
+        module_to_cpu.weight.data = cpu_data.to(device="cpu", non_blocking=True)
+        module_to_cuda.weight.data = cuda_data.to(device=device, non_blocking=True)
+    # One synchronize AFTER queuing all transfers. On XPU the non_blocking copies
+    # pipeline, so a single trailing sync drains them ~3x faster than blocking
+    # copies (which synchronize per tensor: ~3.3 -> ~10.6 GB/s on Arc B70).
+    # The sync is required: this synchronous path's contract is "all transfers
+    # complete before the function returns". A single synchronize on the calling
+    # (main) thread is safe -- this is NOT the per-swap mid-autograd synchronize
+    # from worker threads that triggered UR_RESULT_ERROR_DEVICE_LOST.
     _synchronize_device(device)
 
 
@@ -63,6 +89,8 @@ def weighs_to_device(layer: nn.Module, device: torch.device):
     for module in layer.modules():
         if hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear"):
             module.weight.data = module.weight.data.to(device, non_blocking=device.type != "cpu")
+            # fp8 scale_weight is kept CUDA-resident permanently (swap_weight_devices_cuda only swaps .weight).
+            # Moving scale_weight to CPU here would leave it stranded after async weight swaps during forward.
 
 
 @dataclass
@@ -181,6 +209,7 @@ class Offloader:
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
         self.futures = {}
         self.cuda_available = device.type == "cuda"
+        self.xpu_available = device.type == "xpu"
         self.stream = torch.cuda.Stream(device=device) if self.cuda_available else None
 
         # Staging buffers for cuda offloading without large pinned memory. These are pinned memory buffers to speed up the transfer between CPU and GPU
@@ -382,11 +411,34 @@ class Offloader:
         return sync_event
 
     def _submit_move_blocks(self, blocks, block_idx_to_cpu, block_idx_to_cuda):
+        block_to_cpu = blocks[block_idx_to_cpu]
+        block_to_cuda = blocks[block_idx_to_cuda]
+
+        # XPU/non-CUDA: perform synchronously on calling thread to avoid
+        # ThreadPoolExecutor deadlock (torch.xpu.synchronize is not
+        # thread-safe and the SYCL context is bound to the main thread).
+        if self.xpu_available or not self.cuda_available:
+            if self.debug:
+                start_time = time.perf_counter()
+                print(
+                    f"[{self.block_type}] Move block {block_idx_to_cpu} to CPU and block {block_idx_to_cuda} to device (synchronous)"
+                )
+
+            swap_weight_devices_no_cuda(self.device, block_to_cpu, block_to_cuda)
+
+            if self.debug:
+                print(
+                    f"[{self.block_type}] Moved blocks {block_idx_to_cpu} to CPU and {block_idx_to_cuda} to device in {time.perf_counter() - start_time:.2f}s (synchronous)"
+                )
+
+            self.futures[block_idx_to_cuda] = _SyncFuture((block_idx_to_cpu, block_idx_to_cuda, None))
+            return
+
         def move_blocks(bidx_to_cpu, block_to_cpu, bidx_to_cuda, block_to_cuda):
             if self.debug:
                 start_time = time.perf_counter()
                 print(
-                    f"[{self.block_type}] Move block {bidx_to_cpu} to CPU and block {bidx_to_cuda} to {'CUDA' if self.cuda_available else 'device'}"
+                    f"[{self.block_type}] Move block {bidx_to_cpu} to CPU and block {bidx_to_cuda} to CUDA"
                 )
 
             dev = self.device.index if self.device.index is not None else torch.cuda.current_device()
@@ -396,12 +448,9 @@ class Offloader:
 
             if self.debug:
                 print(
-                    f"[{self.block_type}] Moved blocks {bidx_to_cpu} to CPU and {bidx_to_cuda} to {'CUDA' if self.cuda_available else 'device'} in {time.perf_counter() - start_time:.2f}s"
+                    f"[{self.block_type}] Moved blocks {bidx_to_cpu} to CPU and {bidx_to_cuda} to CUDA in {time.perf_counter() - start_time:.2f}s"
                 )
             return bidx_to_cpu, bidx_to_cuda, sync_event
-
-        block_to_cpu = blocks[block_idx_to_cpu]
-        block_to_cuda = blocks[block_idx_to_cuda]
 
         self.futures[block_idx_to_cuda] = self.thread_pool.submit(
             move_blocks, block_idx_to_cpu, block_to_cpu, block_idx_to_cuda, block_to_cuda
@@ -423,6 +472,11 @@ class Offloader:
         if self.cuda_available and sync_event is not None:
             # this does not wait CPU side, so the log below should be immediate when pinned memory is used
             torch.cuda.current_stream().wait_event(sync_event)
+
+        # On XPU, swaps are already synchronous (no thread pool), so no
+        # additional synchronisation is needed.  Calling torch.xpu.synchronize()
+        # here during an active autograd pass can trigger UR_RESULT_ERROR_DEVICE_LOST
+        # on Intel Arc GPUs.
 
         if self.debug:
             print(f"[{self.block_type}] Waited for block {block_idx}: {time.perf_counter() - start_time:.2f}s")
@@ -717,6 +771,41 @@ class _StagedCopier:
             pool.shutdown(wait=False)
 
 
+class _InOrderCopier:
+    """
+    Transfer engine for ``LoRAStreamOffloader`` on devices without ``torch.cuda`` streams (e.g. Intel XPU).
+
+    Enqueues the flat H2D copy with ``non_blocking=True`` on the device's default (in-order) queue and
+    returns no events: in-order execution already guarantees that (a) the copy runs after all previously
+    enqueued compute -- a ring slot is never overwritten while compute still uses it, so ``gate_event``
+    is unnecessary -- and (b) compute enqueued after the copy sees the loaded weights, so wait-events are
+    unnecessary. Pageable ``non_blocking`` H2D copies pipeline well on XPU (measured ~10.6 GB/s on Arc
+    B70, see ``swap_weight_devices_no_cuda``); pinned staging measured slower on this stack, so none is
+    used. No true copy/compute overlap (single queue), but the D2H half of the classic swap is gone and
+    the host never blocks on the transfer.
+    """
+
+    def __init__(self, device: torch.device, debug: bool = False):
+        self.device = device
+        self.debug = debug
+
+    def submit(self, key, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event=None):
+        # gate_event is always None on non-CUDA devices (no cross-stream hazard on an in-order queue)
+        dst_flat.copy_(src_flat, non_blocking=True)
+
+    def wait(self, key):
+        return None  # in-order queue: compute enqueued after the copy sees the loaded weights
+
+    def pop_xfer_timing(self, key):
+        return None
+
+    def sync(self):
+        _synchronize_device(self.device)
+
+    def reset(self):
+        _synchronize_device(self.device)  # drain in-flight copies before ring state is rebuilt
+
+
 class LoRAStreamOffloader:
     """
     H2D-only offloader for training where the base weights are frozen (e.g. LoRA / LoHa / LoKr).
@@ -780,7 +869,14 @@ class LoRAStreamOffloader:
         self.debug = debug
         self.debug_interval = int(os.getenv("MUSUBI_TUNER_OFFLOADER_DEBUG_INTERVAL", "10"))  # steps between prints
 
-        assert device.type == "cuda", "LoRAStreamOffloader currently supports CUDA only"
+        assert device.type in ("cuda", "xpu"), "LoRAStreamOffloader supports CUDA and XPU only"
+        self.cuda_available = device.type == "cuda"
+        if not self.cuda_available and use_pinned_memory:
+            # XPU: pinned host memory measured slower than pageable non_blocking on this stack, and the
+            # CUDA-stream _DirectCopier cannot run there anyway -- force the pageable in-order path.
+            print(f"LoRAStreamOffloader[{block_type}]: ignoring use_pinned_memory on {device.type} (pageable in-order copier)")
+            use_pinned_memory = False
+            self.use_pinned_memory = False
 
         # ---- streaming placement: S evenly spaced block indices (midpoint formula -> distinct for S <= N) ----
         stream_idx = sorted({((2 * i + 1) * num_blocks) // (2 * blocks_to_swap) for i in range(blocks_to_swap)})
@@ -801,7 +897,10 @@ class LoRAStreamOffloader:
         # ---- transfer engine: owns the copy stream and all H2D primitives ----
         # pinned masters -> direct async H2D; pageable masters -> stage through a worker thread + pinned pool
         # (low "shared GPU memory" footprint, e.g. on Windows). Both expose the same submit/wait interface.
-        if use_pinned_memory:
+        # non-CUDA (XPU): in-order default-queue copier, no streams/events needed.
+        if not self.cuda_available:
+            self.copier = _InOrderCopier(device, debug=self.debug)
+        elif use_pinned_memory:
             self.copier = _DirectCopier(device, debug=self.debug)
         else:
             self.copier = _StagedCopier(device, num_staging=self.B, debug=self.debug)
@@ -854,6 +953,15 @@ class LoRAStreamOffloader:
     def _bind(self, block_idx: int, params: list[nn.Parameter]):
         for m, p in zip(self._modules(block_idx), params):
             m.weight = p
+
+    def _record_free_event(self):
+        """Event marking that compute is done with a ring slot (gates its next overwrite).
+
+        On non-CUDA devices returns None: the in-order queue already orders the next H2D copy after all
+        previously enqueued compute, so no gate is needed (and ``_InOrderCopier`` ignores gate_event)."""
+        if not self.cuda_available:
+            return None
+        return torch.cuda.current_stream().record_event()
 
     @staticmethod
     def _compute_layout(weights: list[torch.Tensor]) -> tuple[list[int], int]:
@@ -1027,7 +1135,7 @@ class LoRAStreamOffloader:
         if self.S == 0 or not self.is_stream[block_idx]:
             return
         j = self.rank[block_idx]
-        self.free_event[j % self.B] = torch.cuda.current_stream().record_event()
+        self.free_event[j % self.B] = self._record_free_event()
         if j + self.B < self.S:
             self._load(j + self.B, (j + self.B) % self.B, "fwd")  # same slot as rank j; evicts rank j
         elif self.forward_only and j == self.S - 1 and self.S > self.B:
@@ -1048,7 +1156,7 @@ class LoRAStreamOffloader:
             if prefetch:
                 # consumed block_index in backward: free its slot and prefetch B streaming-slots behind
                 j = self.rank[block_index]
-                self.free_event[j % self.B] = torch.cuda.current_stream().record_event()
+                self.free_event[j % self.B] = self._record_free_event()
                 if j - self.B >= 0:
                     self._load(j - self.B, (j - self.B) % self.B, "bwd")  # same slot as rank j; evicts rank j
             if wait_prev:
@@ -1071,7 +1179,7 @@ class LoRAStreamOffloader:
         # finalize the events accumulated for the step that just ended, then print every debug_interval steps
         if not any(self._cur[c]["waits"] or self._cur[c]["loads"] for c in ("fwd", "bwd")):
             return  # very first forward: nothing finished yet
-        torch.cuda.synchronize()  # ensure timing events are complete (debug only)
+        _synchronize_device(self.device)  # ensure timing events are complete (debug only)
         for ctx in ("fwd", "bwd"):
             c, r = self._cur[ctx], self._roll[ctx]
             r["stall_ms"] += sum(a.elapsed_time(b) for a, b in c["stall_ev"])

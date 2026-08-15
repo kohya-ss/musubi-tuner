@@ -46,7 +46,7 @@ def main():
 
     args = parser.parse_args()
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device if args.device is not None else ("xpu" if torch.xpu.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)
 
     # Load dataset config

@@ -89,7 +89,7 @@ def main():
         logger.info("Disabling cuDNN PyTorch backend.")
         torch.backends.cudnn.enabled = False
 
-    device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+    device = args.device if hasattr(args, "device") and args.device else ("xpu" if torch.xpu.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)
 
     # Load dataset config

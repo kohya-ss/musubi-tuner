@@ -9,6 +9,8 @@ def clean_memory_on_device(device: Optional[Union[str, torch.device]]):
         device = torch.device(device)
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    elif device.type == "xpu":
+        torch.xpu.empty_cache()
     elif device.type == "cpu":
         pass
     elif device.type == "mps":  # not tested

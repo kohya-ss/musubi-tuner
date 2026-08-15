@@ -857,8 +857,12 @@ class NetworkTrainer:
         # save random state to restore later
         rng_state = torch.get_rng_state()
         cuda_rng_state = None
+        xpu_rng_state = None
         try:
-            cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+            if torch.cuda.is_available():
+                cuda_rng_state = torch.cuda.get_rng_state()
+            elif torch.xpu.is_available():
+                xpu_rng_state = torch.xpu.get_rng_state()
         except Exception:
             pass
 
@@ -888,6 +892,8 @@ class NetworkTrainer:
         torch.set_rng_state(rng_state)
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state)
+        elif xpu_rng_state is not None:
+            torch.xpu.set_rng_state(xpu_rng_state)
 
         transformer.switch_block_swap_for_training()
         clean_memory_on_device(accelerator.device)
@@ -933,12 +939,18 @@ class NetworkTrainer:
         device = accelerator.device
         if seed is not None:
             torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(seed)
+            elif torch.xpu.is_available():
+                torch.xpu.manual_seed(seed)
             generator = torch.Generator(device=device).manual_seed(seed)
         else:
             # True random sample image generation
             torch.seed()
-            torch.cuda.seed()
+            if torch.cuda.is_available():
+                torch.cuda.seed()
+            elif torch.xpu.is_available():
+                torch.xpu.seed()
             generator = torch.Generator(device=device).manual_seed(torch.initial_seed())
 
         logger.info(f"prompt: {prompt}")
@@ -2152,6 +2164,10 @@ class NetworkTrainer:
                     logs.update(grad_metrics)
                     logs.update(self.extra_step_logs(args, logs))
                     accelerator.log(logs, step=global_step)
+
+                # Periodic XPU synchronization to prevent driver queue buildup / deadlocks
+                if accelerator.device.type == "xpu" and global_step > 0 and global_step % 50 == 0:
+                    torch.xpu.synchronize()
 
                 if global_step >= args.max_train_steps:
                     break
