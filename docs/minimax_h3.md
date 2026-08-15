@@ -378,6 +378,8 @@ python minimax_h3_generate_video.py \
   --output output.mp4
 ```
 
+`--seed` is optional: when omitted, each generation draws a fresh random seed and logs it (auto-named outputs embed it in the filename).
+
 Add a trained LoRA with:
 
 ```text
@@ -417,9 +419,39 @@ T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. T
 
 `--steps N` means N model evaluations, so the schedule uses N+1 grid points. The released implementations (SGLang serving and the diffusers scheduler) instead count grid points: their `num_inference_steps = N` performs N-1 evaluations. Musubi `--steps N` is therefore grid-identical to official `num_inference_steps = N+1`; to reproduce the official 50-step serving default exactly, pass `--steps 49`.
 
+`--compile` wraps the 50 DiT blocks with torch.compile using the same flags as training (`--compile_backend`, `--compile_mode`, `--compile_dynamic`, `--compile_fullgraph`, `--compile_cache_size_limit`; requires triton). The exclusions also match training: with block swap or a ConvRot INT8 base the Linear layers stay eager (the INT8 path's custom autograd + Triton kernels are not dynamo-traceable), so the speedup comes from fusing the rest of the block graph. The first sampling steps pay the compilation latency, and each new latent shape triggers a recompile — in interactive or batch sessions with varying resolutions or frame counts, pass `--compile_dynamic true` or budget one recompilation per shape.
+
 `--trajectory_dir DIR` is a diagnostic: it logs each step's base/video/audio sigma (also written to `DIR/sigma_schedule.csv`) and decodes each step's clean estimate (`x0_hat = x_t + sigma * v`, the model's current best guess of the final video) to a silent per-step MP4 in `DIR`, named with the step index and its base and video sigmas. Scrubbing through the files shows at which step composition, palette, and identity settle. The per-step latents are held on the CPU and decoded after the normal output, so peak VRAM is unchanged, but decode time grows with the step count; `--trajectory_stride N` decodes every N-th step (the last step is always included).
 
 The native sampler builds one common base grid, derives independent shifted video and audio sigma grids, and advances each modality with its own finite sigma interval. It does not apply CFG, negate the model heads, or apply ComfyUI's single-sampler audio slope adapter. Musubi also adds condition noise before packing, while ComfyUI adds it after packing; the distributions agree but RNG placement does not. These two intentional differences mean the same seed is not bitwise reproducible against ComfyUI. Video and audio are decoded sequentially, trimmed to a common duration, and muxed with PyAV as H.264 plus AAC.
+
+### Batch and interactive modes
+
+Model loading dominates single-shot latency (and `--convrot_int8` requantizes at every start), so repeated generation should use `--from_file` or `--interactive` instead of one process per prompt. Both read prompt lines of the form:
+
+```text
+A singer performs under stage lights. --w 768 --h 1344 --f 124 --d 42 --s 30
+```
+
+| Line option | Maps to |
+| --- | --- |
+| `--w`, `--h` | `--width`, `--height` |
+| `--f` | `--frame_count` (`--f 1` selects one-frame mode) |
+| `--d` | `--seed` |
+| `--s` | `--steps` |
+| `--fs`, `--fsa` | `--h3_shift_video`, `--h3_shift_audio` |
+| `--i`, `--ei` | `--first_frame`, `--last_frame` (end image) |
+| `--ref` | `--ref` (repeatable; replaces the session-level list) |
+| `--of` | `--one_frame` |
+| `--o` | output filename inside the output directory |
+
+Unspecified options inherit the command-line values, so a fixed `--ref` set with varying prompts works. A line starting with `--` carries only options and keeps the command-line `--prompt` in effect — with a session prompt, `--d 43` alone re-runs it with a new seed. The literal string `\n` in prompt text (line prompts and `--prompt` alike) becomes a newline, so the multi-line official prompt format fits on one line. `--task`, the model artifacts, and the LoRA configuration are fixed for the session, and `--text_cache` and `--trajectory_dir` are not accepted. In both modes `--output` names a directory (created if missing); files are auto-named `<timestamp>_<seed>.png/.mp4` unless a line overrides the name with `--o`, and omitting `--d` draws a fresh random seed per line.
+
+**`--from_file prompts.txt`** runs the prompts in four phases, loading each model family exactly once: condition VAE encoding for every line (lines starting with `#` and empty lines are skipped), then all text encodings, then all samplings, then all decodes. Peak VRAM therefore matches single-shot generation — the same `--blocks_to_swap`/`--text_encoder_blocks_to_swap` settings apply unchanged. Each sampled result is written to `<output>/<timestamp>_<index>_<seed>_latent.safetensors` before any decoding, so a crash never loses finished sampling work; the file is removed once its output is written and kept (with a log message) when decoding fails. A failing line is reported and skipped without aborting the rest of the batch.
+
+**`--latent_path FILE...`** decodes those intermediate latent files without loading the transformer or text encoder — only the VAEs (`--audio_vae` may be omitted when every file is a one-frame latent). Outputs go to the `--output` directory.
+
+**`--interactive`** reads prompt lines from the console and keeps every model resident for the whole session: the text encoder and the transformer stay loaded with their configured placements, and the VAEs idle on the CPU between prompts. Unlike the batch phases, both large models coexist, so VRAM-limited setups (24 GB and below) should combine a quantized transformer plus a generous `--blocks_to_swap` with `--text_encoder_blocks_to_swap 50` (and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations). The CPU-resident copies mean host RAM must hold both artifacts — 64 GB is a comfortable floor for the quantized pair. Text conditioning is cached by prompt and media fingerprints, so re-running a line with only a new seed skips the text encoder entirely. Ctrl+D (or Ctrl+Z on Windows) exits; Ctrl+C interrupts the current generation and returns to the prompt. `--bell` rings the terminal bell after each generation (in the other modes, once at the end).
 
 ## Limitations
 
