@@ -160,21 +160,23 @@ When greater than one, it maps to the same count with stream `video`, emits one
 startup deprecation warning, and applies to both multi-frame and one-frame
 batches exactly as the current branch does.
 
-Resolution rules are explicit:
+The alias is normalized at the input boundary rather than carried into runtime
+state:
 
-- the new canonical parser value defaults internally to `None`; the resolver
-  maps omission to the active legacy value or logical default `1`;
-- canonical K and a legacy value greater than one cannot be supplied together;
-- the legacy value must itself be an exact integer of at least one;
-- legacy K greater than one with canonical stream `audio` is rejected;
-- legacy K equal to one is disabled behavior and does not emit a warning.
+```text
+legacy K > 1 -> count=K, multi_frame_stream=video, warn once
+```
+
+It shares the canonical exact-integer contract. An active legacy alias with an
+explicit `audio` stream is rejected as contradictory. Legacy K equal to one is
+disabled behavior and emits no warning. After normalization, the source
+spelling is discarded, so runtime behavior and metrics cannot depend on which
+option name the user typed.
 
 `--h3_audio_best_of_k` and `--h3_image_best_of_k` were design-only proposals and
 are not introduced as aliases.
 
-The old `h3_video_best_of_k/*` metric keys are retained only when the deprecated
-alias activates search. Canonical configurations use the new keys in Section
-12. Alias removal is deferred and requires a separate compatibility decision.
+Alias removal is deferred and requires a separate compatibility decision.
 
 ### 5.3 Other validation
 
@@ -188,6 +190,17 @@ alias activates search. Canonical configurations use the new keys in Section
   Multi-frame batches take the zero-effective-audio fallback. One-frame batches
   still search video noise when `--one_frame` is enabled. Startup logging warns
   that multi-frame audio exploration will not occur.
+- With K greater than one, stream `audio`, and `--one_frame` enabled, startup
+  logging states that actual one-frame batches override the configured stream
+  and search video noise. Dataset composition is not known yet, so this is a
+  warning rather than an error.
+
+The different static-zero policies are intentional. `--video_only` is an
+explicit declaration that audio supervision and its bookkeeping are disabled,
+so requesting audio search contradicts the selected training mode.
+`--audio_loss_weight 0` is a sweepable numeric endpoint; keeping that
+configuration valid lets one config family cross zero while the exact fallback
+avoids meaningless candidate work.
 
 Validation runs before dataset, accelerator, or model allocation. Failed fresh
 or repeated validation restores base state to `(count=1, enabled=False)`.
@@ -200,20 +213,20 @@ Use one immutable configuration object:
 H3BestOfKConfig {
   count: int
   multi_frame_stream: "video" | "audio"
-  legacy_video_alias: bool
 }
 ```
 
-It is produced by one pure resolver:
+After alias normalization, it is produced by one pure resolver:
 
 ```text
 resolve_h3_best_of_k_config(args) -> H3BestOfKConfig
 ```
 
-The resolver owns exact-type/range validation, canonical/legacy conflict
-handling, common-XM rejection, the `video_only` conflict, and teacher-matching
-rejection. Hooks such as `get_best_of_k_count`, `get_best_of_k_option_name`, and
-`on_best_of_k_enabled` consume this resolver rather than copying conditions.
+The input boundary owns alias mapping and its one warning. The resolver owns
+exact-type/range validation, common-XM rejection, the `video_only` conflict,
+and teacher-matching rejection. Hooks such as `get_best_of_k_count`,
+`get_best_of_k_option_name`, and `on_best_of_k_enabled` consume this resolver
+rather than copying conditions.
 
 The base `_best_of_k_count` always equals `config.count`. It is never a routing
 maximum or boolean proxy, so existing base consumers retain one meaning.
@@ -223,49 +236,75 @@ batch behavior:
 
 ```text
 resolve_h3_best_of_k_batch(config, runtime_layout)
-  -> {kind: "image" | "video" | "audio", stream: "video" | "audio"}
+  -> "image" | "video" | "audio"
 ```
 
-- validated `F == 1`: `kind=image`, `stream=video`;
-- multi-frame with configured video stream: `kind=video`, `stream=video`;
-- multi-frame with configured audio stream: `kind=audio`, `stream=audio`.
+- validated `F == 1`: `image`;
+- multi-frame with configured video stream: `video`;
+- multi-frame with configured audio stream: `audio`.
+
+The searched stream is derived where used: only `audio` kind searches audio;
+`image` and `video` kinds search video. Returning both kind and stream would
+encode the same fact twice and create an avoidable consistency invariant.
 
 No mutable current-mode field is stored on the trainer. Alternating image and
 video batches cannot leak a stale kind or stream into the next step.
 
-## 7. Prerequisite: Existing Block-Swap Bug
+## 7. Prerequisite: Repository-Wide Block-Swap Bug
 
-The current H3 best-of-K loop performs consecutive no-grad forwards while the
-classic `ModelOffloader` remains in training mode. That offloader expects a
-backward pass before the next training forward. On current CUDA, the second
-candidate can find the first block on CPU and fail before image or audio support
-is involved.
+The base common-XM loop and the current H3 loop both perform consecutive
+no-grad forwards while classic `ModelOffloader` remains in training mode. That
+offloader expects a backward pass before the next training forward. With block
+swap active, the second candidate can therefore find the first block on CPU and
+fail before image or audio support is involved.
 
-The necessary APIs already exist:
+This is not H3-local. Every trainer dispatched through the base candidate loop
+has the same risk when its transformer enables block swap. The repository-wide
+public protocol is implemented by Flux, Flux 2, FramePack, HiDream-O1,
+HunyuanVideo, HunyuanVideo 1.5, Ideogram 4, Kandinsky 5, Krea 2, MiniMax-H3,
+Qwen-Image, Wan, and Z-Image transformers:
 
-- H3 transformer: `switch_block_swap_for_inference()` and
-  `switch_block_swap_for_training()`;
-- offloader: `set_forward_only(bool)`.
+```text
+switch_block_swap_for_inference()
+switch_block_swap_for_training()
+```
+
+The base sampling path already hand-codes this pair, but restoration is after
+the sampling body rather than in `finally`. An exception from
+`sample_image_inference` can leave the transformer in forward-only mode.
 
 Before unified H3 best-of-K implementation, land a separate correctness commit
-that adds a reentrant trainer context around no-grad candidate phases:
+that introduces one shared reentrant trainer context and uses it for both
+candidate search and sampling:
 
 ```text
 with trainer block-swap-forward-only context:
-    run all candidate and nested guidance forwards
-restore training block-swap state
-run one gradient-enabled winner forward
+    run no-grad candidates, nested guidance, or sampling
+restore training block-swap state in finally
+run the gradient-enabled winner only after candidate restoration
 ```
 
-The context must unwrap the accelerator model only at the outermost depth,
-switch once to inference/forward-only mode, restore training mode in `finally`,
-and support nested guidance probes without premature restoration. Standard XM
-and H3 candidate loops use the same context.
+The context contract is:
 
-This is an issue-wide production bugfix with its own CPU state-machine and real
-CUDA `ModelOffloader` regression tests. Port the narrow behavior directly onto
-the current upstream-based branch; do not merge unrelated `qinglong` history or
-bundle the bugfix into the unified H3 feature commit.
+- unwrap the accelerator model only at the outermost nesting depth;
+- invoke the two public transformer methods when both are callable;
+- act as a no-op when the model exposes neither method, and fail clearly if it
+  exposes only half of the protocol;
+- treat method internals as opaque rather than locating or mutating an
+  offloader directly;
+- switch once at outermost entry, restore once in `finally`, and tolerate nested
+  H3 guidance scopes without premature restoration.
+
+Calling only the public protocol matters for delegated models. HiDream-O1's
+top-level methods forward to `language_model`; the context must not assume an
+offloader is attached directly to the unwrapped top-level module.
+
+Standard XM, H3 candidate search, and `sample_images` reuse this one context.
+The separate bugfix receives CPU protocol/no-method/nesting tests, real CUDA
+`ModelOffloader` coverage, at least one non-H3 best-of-K block-swap regression,
+and a sampling-exception restoration regression. Port only this narrow behavior
+onto the current upstream-based branch; do not merge unrelated `qinglong`
+history or bundle it into the unified H3 feature commit.
 
 ## 8. Prepared-State Boundary
 
@@ -309,7 +348,8 @@ image coverage.
 For K greater than one, `process_batch_best_of_k` performs these steps:
 
 1. Prepare fixed state and candidate-zero noisy inputs once.
-2. Resolve runtime kind and selected stream from the validated layout.
+2. Resolve runtime kind from the validated layout; derive audio search only for
+   `audio` kind and video search otherwise.
 3. If a multi-frame audio selection has zero effective audio weight, take the
    fallback in Section 10 before creating a candidate generator.
 4. Choose the searched noise:
@@ -430,11 +470,13 @@ best-of-K does not replace it.
 
 ### 12.2 Metrics
 
-Metrics identify the runtime selection kind:
+Metrics identify the runtime selection kind. The already published video
+prefix remains canonical for every `video` kind run, including runs configured
+with the new option:
 
 ```text
-h3_best_of_k/video/candidate_loss_mean
-h3_best_of_k/video/selection_gain
+h3_video_best_of_k/candidate_loss_mean
+h3_video_best_of_k/selection_gain
 
 h3_best_of_k/audio/candidate_loss_mean
 h3_best_of_k/audio/selection_gain
@@ -449,9 +491,15 @@ h3_best_of_k/image/selection_gain
 winner forward.
 
 No exploration keys are emitted at K=1 or on zero-effective-audio fallback.
-Canonical H3 configurations emit no `xm/` keys. When the deprecated video alias
-activates search, the two existing `h3_video_best_of_k/*` keys are additionally
-emitted for compatibility.
+Canonical H3 configurations emit no `xm/` keys. The metric schema depends only
+on runtime kind, never on whether K came from the canonical name or deprecated
+alias. Canonical and legacy spellings of the same video run therefore emit the
+same two-key set rather than dual-writing metrics.
+
+This deliberately keeps the asymmetric published video prefix while using the
+unified prefix for new audio and image kinds. Existing one-frame runs currently
+report under the video prefix; after runtime image classification they move to
+`h3_best_of_k/image/*`. User documentation includes this one-frame rename note.
 
 ### 12.3 Metadata
 
@@ -470,14 +518,15 @@ one-frame batches. Old checkpoints have neither new key and remain loadable.
 The independent prerequisite bugfix may modify:
 
 - `src/musubi_tuner/training/trainer_base.py` for the reentrant forward-only
-  context and issue-wide candidate-loop integration;
+  context, issue-wide candidate-loop integration, and replacement of the
+  hand-written sampling switches;
 - `src/musubi_tuner/minimax_h3_train_network.py` for H3 candidate integration;
-- focused shared and H3 tests.
+- focused shared, H3, sampling, and non-H3 architecture tests.
 
 The unified H3 feature modifies:
 
 - `src/musubi_tuner/minimax_h3_train_network.py` for parser compatibility,
-  immutable config resolution, prepared-state split, stream resolution,
+  immutable config resolution, prepared-state split, runtime-kind resolution,
   candidate search, fallback, metrics, and metadata;
 - shared utilities only when a genuinely mode-neutral helper is reused;
 - `tests/test_minimax_h3_training.py` and focused shared regressions;
@@ -508,12 +557,15 @@ RNG states, and tensors required to be bitwise unchanged.
   and legacy K values before allocation.
 - Canonical K selects video or audio stream without mutual-exclusion branches.
 - Legacy video K maps to canonical video behavior, warns once only when active,
-  and conflicts with an active canonical K or audio stream.
+  conflicts with an explicit audio stream, and leaves no source-spelling field
+  in the resolved configuration.
 - Common XM greater than one remains rejected.
 - Active audio-stream search with `video_only` is rejected before allocation.
 - Teacher matching with K greater than one remains rejected.
 - Active audio stream with global audio weight zero emits the documented
   multi-frame fallback warning.
+- Active audio stream with one-frame support enabled warns that actual image
+  batches search video instead.
 - Failed fresh and repeated validation restores `(count=1, enabled=False)`.
 - `_best_of_k_count` equals the actual global K in every accepted case.
 
@@ -523,8 +575,12 @@ RNG states, and tensors required to be bitwise unchanged.
   gradients, call count, counters, and metric keys.
 - Deprecated video K greater than one searches K candidates for both existing
   multi-frame and one-frame batches, preserving current training behavior.
+- Canonical and legacy spellings of the same multi-frame video run emit exactly
+  the same published `h3_video_best_of_k/*` exploration-key set.
 - Canonical audio stream searches audio for multi-frame batches but video for a
   validated one-frame batch.
+- One-frame search emits only `h3_best_of_k/image/*`, independent of CLI
+  spelling; no runtime kind dual-writes exploration metrics.
 - Alternating one-frame/multi-frame batches use the correct runtime kind without
   mutable state leakage.
 - For multi-frame audio selection, parameterize `audio_present=0` and global
@@ -545,9 +601,9 @@ RNG states, and tensors required to be bitwise unchanged.
   retains weighted audio in the final objective.
 - One-frame selection changes video noise/input while clean/noisy silence audio,
   zero effective weight, text, target index, layout, and time override remain
-  fixed. Its selection score matches the effective objective within tolerance.
-- Winner assembly uses per-sample selected noise and the common fixed sigma;
-  code comments state that sigma is candidate-invariant.
+  fixed. For the same candidate output, `torch.equal` proves its raw video
+  selection score is the zero-audio effective per-sample objective.
+- Winner assembly uses per-sample selected noise and the common fixed sigma.
 - NaN/Inf in the selected score fails with kind/candidate/sample diagnostics.
   A non-selected candidate component is not given an extra fail-fast rule.
 - Final trainable-parameter gradients are finite and nonzero where the ordinary
@@ -558,6 +614,12 @@ RNG states, and tensors required to be bitwise unchanged.
 - Before feature work, reproduce the current classic offloader failure and
   verify the separate fix with two candidate forwards plus a final backward on
   real available CUDA. Confirm forward-only mode is restored in `finally`.
+- Cover the optional public protocol: neither method is a no-op, half a method
+  is an explicit error, and nested contexts switch and restore exactly once.
+- Exercise at least one non-H3 base-XM architecture with block swap and verify
+  consecutive candidates plus final backward.
+- Force `sample_image_inference` to raise and verify sampling still restores
+  training block-swap mode.
 - Exercise nested H3 guidance probes and assert a valid forward-only state
   sequence plus one final graph under available CUDA autocast.
 - Verify one-frame guidance carries the original layout and time override.
@@ -574,7 +636,9 @@ The revision is complete when:
 - the classic block-swap candidate bug is fixed and tested in a separate commit;
 - H3 exposes one canonical K and one multi-frame stream selector;
 - the deprecated video option preserves current multi-frame and one-frame
-  training behavior and emits its compatibility warning/metrics;
+  search behavior and emits one compatibility warning;
+- exploration metrics are determined only by runtime kind: video retains the
+  published prefix, while new audio and image kinds use the unified prefix;
 - `_best_of_k_count` retains one actual-count meaning;
 - actual validated layout, not global `--one_frame`, selects image behavior;
 - one-frame batches always search video noise at K greater than one;
@@ -586,7 +650,8 @@ The revision is complete when:
 - candidate selection validates only the selected raw component score;
 - winner recomputation optimizes the unchanged ordinary H3 objective;
 - K=1 preserves existing control flow, RNG, numerics, counters, and metrics;
-- guidance, autocast, and classic block swap preserve a valid final graph;
+- guidance, autocast, sampling exceptions, and classic block swap preserve a
+  valid final graph and restore training state;
 - user docs explain when H3 selection is objective-equivalent to Forward XM and
   when it is a modality-focused heuristic;
 - focused and full tests pass in the current environment.
