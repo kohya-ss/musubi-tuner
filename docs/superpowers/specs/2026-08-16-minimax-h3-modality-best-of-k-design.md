@@ -60,11 +60,11 @@ The design is grounded in these primary sources:
   batch into an image batch. Upstream validates the actual runtime layout and
   classifies one-frame targets from `F == 1`.
 
-Current branch behavior also matters for compatibility. After the upstream
-one-frame merge, `--one_frame --h3_video_best_of_k K` already runs video-noise
-search on one-frame batches. Replacing this with an image-only option would
-silently reduce those batches from K candidate forwards to one. The unified
-design preserves the existing behavior through a deprecated alias instead.
+An earlier unmerged branch implementation already demonstrates that video-noise
+search applies correctly to one-frame batches. This supports treating image
+search as the `F == 1` form of the same mechanism. Its experimental option and
+metric names are not a released compatibility contract and are replaced before
+merge.
 
 The paper and official XM code do not define modality-only selection for a
 joint video/audio model. H3 stream selection is objective-equivalent to Forward
@@ -80,8 +80,8 @@ XM only when the selected raw component is the complete effective objective:
 
 - Replace the proposed three-count interface with one K and one multi-frame
   stream selector.
-- Preserve existing `--h3_video_best_of_k K` training behavior as a deprecated
-  alias, including one-frame batches.
+- Remove the unmerged experimental video-only option and metric prefix rather
+  than introducing a compatibility layer for them.
 - For multi-frame batches, vary and rank the selected stream only.
 - For one-frame batches, always vary video noise and rank raw per-sample
   image/video MSE.
@@ -112,6 +112,7 @@ XM only when the selected raw component is the complete effective objective:
 - Candidate batching, chunk controls, or retaining K activation graphs.
 - Dataset, cache, VAE, scheduler, network, optimizer, or checkpoint-format
   changes.
+- Compatibility aliases for unmerged H3 best-of-K option names or metrics.
 - Quality claims for H3 LoRA training.
 - A PyTorch 2.5.1 or CUDA 12.4 compatibility matrix. Verification covers only
   the current environment and repository tests.
@@ -148,35 +149,17 @@ The final row is intentional. Searching noise for the unsupervised silence
 audio placeholder has no useful objective, so one-frame layout overrides the
 multi-frame stream selector.
 
-### 5.2 Compatibility alias
+### 5.2 Removed experimental names
 
-The existing option remains accepted:
+The unmerged experimental option `--h3_video_best_of_k` is removed rather than
+retained as an alias. The design-only `--h3_audio_best_of_k` and
+`--h3_image_best_of_k` options are never introduced. There is one supported
+count spelling and one stream selector.
 
-```text
---h3_video_best_of_k INT
-```
-
-When greater than one, it maps to the same count with stream `video`, emits one
-startup deprecation warning, and applies to both multi-frame and one-frame
-batches exactly as the current branch does.
-
-The alias is normalized at the input boundary rather than carried into runtime
-state:
-
-```text
-legacy K > 1 -> count=K, multi_frame_stream=video, warn once
-```
-
-It shares the canonical exact-integer contract. An active legacy alias with an
-explicit `audio` stream is rejected as contradictory. Legacy K equal to one is
-disabled behavior and emits no warning. After normalization, the source
-spelling is discarded, so runtime behavior and metrics cannot depend on which
-option name the user typed.
-
-`--h3_audio_best_of_k` and `--h3_image_best_of_k` were design-only proposals and
-are not introduced as aliases.
-
-Alias removal is deferred and requires a separate compatibility decision.
+CLI use of any removed name is an unknown-argument error. TOML loading must
+explicitly reject the corresponding keys before allocation rather than retain
+them on `argparse.Namespace` and silently ignore them. No deprecation warning,
+source-spelling state, compatibility metric, or migration period exists.
 
 ### 5.3 Other validation
 
@@ -216,17 +199,16 @@ H3BestOfKConfig {
 }
 ```
 
-After alias normalization, it is produced by one pure resolver:
+It is produced directly by one pure resolver:
 
 ```text
 resolve_h3_best_of_k_config(args) -> H3BestOfKConfig
 ```
 
-The input boundary owns alias mapping and its one warning. The resolver owns
-exact-type/range validation, common-XM rejection, the `video_only` conflict,
-and teacher-matching rejection. Hooks such as `get_best_of_k_count`,
-`get_best_of_k_option_name`, and `on_best_of_k_enabled` consume this resolver
-rather than copying conditions.
+The resolver owns exact-type/range validation, removed-TOML-key rejection,
+common-XM rejection, the `video_only` conflict, and teacher-matching rejection.
+Hooks such as `get_best_of_k_count`, `get_best_of_k_option_name`, and
+`on_best_of_k_enabled` consume this resolver rather than copying conditions.
 
 The base `_best_of_k_count` always equals `config.count`. It is never a routing
 maximum or boolean proxy, so existing base consumers retain one meaning.
@@ -470,13 +452,11 @@ best-of-K does not replace it.
 
 ### 12.2 Metrics
 
-Metrics identify the runtime selection kind. The already published video
-prefix remains canonical for every `video` kind run, including runs configured
-with the new option:
+Metrics use one schema keyed only by runtime selection kind:
 
 ```text
-h3_video_best_of_k/candidate_loss_mean
-h3_video_best_of_k/selection_gain
+h3_best_of_k/video/candidate_loss_mean
+h3_best_of_k/video/selection_gain
 
 h3_best_of_k/audio/candidate_loss_mean
 h3_best_of_k/audio/selection_gain
@@ -491,15 +471,9 @@ h3_best_of_k/image/selection_gain
 winner forward.
 
 No exploration keys are emitted at K=1 or on zero-effective-audio fallback.
-Canonical H3 configurations emit no `xm/` keys. The metric schema depends only
-on runtime kind, never on whether K came from the canonical name or deprecated
-alias. Canonical and legacy spellings of the same video run therefore emit the
-same two-key set rather than dual-writing metrics.
-
-This deliberately keeps the asymmetric published video prefix while using the
-unified prefix for new audio and image kinds. Existing one-frame runs currently
-report under the video prefix; after runtime image classification they move to
-`h3_best_of_k/image/*`. User documentation includes this one-frame rename note.
+H3 configurations emit no `xm/` keys and never emit the unmerged experimental
+`h3_video_best_of_k/*` prefix. There is no dual-write or rename compatibility
+path.
 
 ### 12.3 Metadata
 
@@ -525,9 +499,10 @@ The independent prerequisite bugfix may modify:
 
 The unified H3 feature modifies:
 
-- `src/musubi_tuner/minimax_h3_train_network.py` for parser compatibility,
-  immutable config resolution, prepared-state split, runtime-kind resolution,
-  candidate search, fallback, metrics, and metadata;
+- `src/musubi_tuner/minimax_h3_train_network.py` for the canonical parser,
+  removal of the experimental option, immutable config resolution,
+  prepared-state split, runtime-kind resolution, candidate search, fallback,
+  metrics, and metadata;
 - shared utilities only when a genuinely mode-neutral helper is reused;
 - `tests/test_minimax_h3_training.py` and focused shared regressions;
 - `docs/minimax_h3.md`, `docs/minimax_h3_1f.md`, and English/Japanese sections
@@ -550,15 +525,14 @@ autocast can change the last bits:
 Exact equality is reserved for indices, flags, shapes, call counts, counters,
 RNG states, and tensors required to be bitwise unchanged.
 
-### 14.1 Parser, compatibility, and validation
+### 14.1 Parser and validation
 
 - Canonical CLI/TOML resolves omitted K to 1 and stream to video.
 - Exact-int validation covers zero, float, bool, string, and negative canonical
-  and legacy K values before allocation.
+  K values before allocation.
 - Canonical K selects video or audio stream without mutual-exclusion branches.
-- Legacy video K maps to canonical video behavior, warns once only when active,
-  conflicts with an explicit audio stream, and leaves no source-spelling field
-  in the resolved configuration.
+- Removed video/audio/image count names fail as unknown CLI arguments and as
+  explicit TOML validation errors before allocation.
 - Common XM greater than one remains rejected.
 - Active audio-stream search with `video_only` is rejected before allocation.
 - Teacher matching with K greater than one remains rejected.
@@ -569,18 +543,16 @@ RNG states, and tensors required to be bitwise unchanged.
 - Failed fresh and repeated validation restores `(count=1, enabled=False)`.
 - `_best_of_k_count` equals the actual global K in every accepted case.
 
-### 14.2 Dispatch, compatibility, and fallback
+### 14.2 Dispatch and fallback
 
 - K=1 calls the existing ordinary method once and preserves RNG, loss,
   gradients, call count, counters, and metric keys.
-- Deprecated video K greater than one searches K candidates for both existing
-  multi-frame and one-frame batches, preserving current training behavior.
-- Canonical and legacy spellings of the same multi-frame video run emit exactly
-  the same published `h3_video_best_of_k/*` exploration-key set.
+- Canonical video K greater than one searches K candidates for both multi-frame
+  and one-frame batches.
 - Canonical audio stream searches audio for multi-frame batches but video for a
   validated one-frame batch.
-- One-frame search emits only `h3_best_of_k/image/*`, independent of CLI
-  spelling; no runtime kind dual-writes exploration metrics.
+- Each runtime kind emits only its two `h3_best_of_k/<kind>/*` exploration keys;
+  no old prefix or second key set is emitted.
 - Alternating one-frame/multi-frame batches use the correct runtime kind without
   mutable state leakage.
 - For multi-frame audio selection, parameterize `audio_present=0` and global
@@ -635,10 +607,9 @@ The revision is complete when:
 
 - the classic block-swap candidate bug is fixed and tested in a separate commit;
 - H3 exposes one canonical K and one multi-frame stream selector;
-- the deprecated video option preserves current multi-frame and one-frame
-  search behavior and emits one compatibility warning;
-- exploration metrics are determined only by runtime kind: video retains the
-  published prefix, while new audio and image kinds use the unified prefix;
+- removed experimental count names are rejected and have no alias state;
+- exploration metrics are determined only by runtime kind under one
+  `h3_best_of_k/<kind>/*` schema;
 - `_best_of_k_count` retains one actual-count meaning;
 - actual validated layout, not global `--one_frame`, selects image behavior;
 - one-frame batches always search video noise at K greater than one;
