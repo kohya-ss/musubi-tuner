@@ -1387,7 +1387,7 @@ class NetworkTrainer:
                             network_dtype,
                             global_step,
                         )
-                candidate_losses_f32 = candidate_losses.detach().float()
+                candidate_losses_f32 = candidate_losses.float()
                 candidate_loss_sum = candidate_loss_sum + candidate_losses_f32.sum()
                 if candidate_index == 0:
                     candidate_zero_mean = candidate_losses_f32.mean()
@@ -1431,7 +1431,7 @@ class NetworkTrainer:
         return loss, {
             **metrics,
             "xm/candidate_loss_mean": (candidate_loss_sum / (self._best_of_k_count * batch_size)).item(),
-            "xm/selection_gain": (candidate_zero_mean - best_losses.detach().float().mean()).item(),
+            "xm/selection_gain": (candidate_zero_mean - best_losses.float().mean()).item(),
         }
 
     def compute_loss(
