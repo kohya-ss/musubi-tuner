@@ -25,6 +25,7 @@ from musubi_tuner.dataset.audio_utils import decode_audio as decode_audio_wavefo
 from musubi_tuner.dataset.audio_utils import slice_audio_window
 from musubi_tuner.dataset.cache_io import (
     append_audio_present_entry,
+    append_one_frame_control_indices_entry,
     append_one_frame_target_index_entry,
     save_latent_cache_minimax_h3,
 )
@@ -272,6 +273,7 @@ def build_latent_metadata(
     audio_vae_fingerprint: str,
     media_fingerprints: Mapping[Path, str],
     one_frame_target_index: int | None = None,
+    one_frame_control_indices: Sequence[int] | None = None,
 ) -> dict[str, str]:
     metadata = {
         "task": task,
@@ -283,10 +285,12 @@ def build_latent_metadata(
         "media_fingerprints": _media_fingerprint_metadata(media_fingerprints),
     }
     if one_frame_target_index is not None:
-        # duplicated from the tensor entry so --skip_existing rebuilds when the dataset's
-        # fp_1f_target_index changes
+        # duplicated from the tensor entries so --skip_existing rebuilds when the dataset's
+        # fp_1f_target_index / fp_1f_clean_indices change (runtime reads the tensors)
         metadata["one_frame"] = "1"
         metadata["one_frame_target_index"] = str(one_frame_target_index)
+        if one_frame_control_indices is not None:
+            metadata["one_frame_control_indices"] = ";".join(str(index) for index in one_frame_control_indices)
     return metadata
 
 
@@ -429,11 +433,19 @@ def build_one_frame_latent_tensors(
     video_vae_fingerprint: str,
     audio_vae_fingerprint: str,
     media_fingerprints: Mapping[Path, str],
+    control_frames: Sequence[torch.Tensor | np.ndarray] | None = None,
+    control_indices: Sequence[int] | None = None,
 ) -> H3LatentCachePayload:
     """One-frame (image) target: a single video latent token, the silence audio placeholder,
-    and the target's 24 fps pixel-frame index as a tensor entry for the trainer's RoPE override."""
+    and the target's 24 fps pixel-frame index as a tensor entry for the trainer's RoPE override.
+
+    With control_frames/control_indices (K=1..2, fl2va editing/inbetween), each bucket-resized
+    control image becomes a condition latent under the packed (first, last) role keys, and the
+    indices ride along as an int64 tensor for the trainer's condition-time overrides."""
     if target_index < 0:
         raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
+    if (control_frames is None) != (control_indices is None):
+        raise ValueError("MiniMax-H3 one-frame control frames and control indices must be provided together")
     image_frames = torch.as_tensor(image_frames)
     if image_frames.ndim == 3:
         image_frames = image_frames.unsqueeze(0)
@@ -447,6 +459,14 @@ def build_one_frame_latent_tensors(
             f"MiniMax-H3 one-frame silence latent must be [32,2,{ONE_FRAME_AUDIO_LATENT_FRAMES}],"
             f" got {tuple(silence_audio_latent.shape)}"
         )
+    if control_frames is not None:
+        if not 1 <= len(control_frames) <= 2:
+            raise ValueError(f"MiniMax-H3 one-frame caching accepts 1 or 2 control images, got {len(control_frames)}")
+        if len(control_frames) != len(control_indices):
+            raise ValueError(
+                f"MiniMax-H3 one-frame control count {len(control_frames)} does not match"
+                f" {len(control_indices)} control indices"
+            )
 
     target_pixels = _prepare_pixels(image_frames)
     canonical_item_key = f"{item_key}#1f"
@@ -458,17 +478,32 @@ def build_one_frame_latent_tensors(
         _visual_key("", target_video): target_video,
         _audio_key("", silence_audio_latent): silence_audio_latent,
     }
+    if control_frames is not None:
+        for role, control in zip(("first", "last"), control_frames):
+            control = torch.as_tensor(control)
+            if control.ndim != 3:
+                raise ValueError(f"MiniMax-H3 one-frame control must be [H,W,C], got {tuple(control.shape)}")
+            if tuple(control.shape[:2]) != (int(height), int(width)):
+                raise ValueError(
+                    f"MiniMax-H3 one-frame control size {control.shape[1]}x{control.shape[0]} does not match"
+                    f" the target {width}x{height} (controls are resized to the bucket resolution)"
+                )
+            condition = _encode_condition_video(video_vae, _prepare_pixels(control.unsqueeze(0)))[0]
+            tensors[_visual_key(role, condition)] = condition
     append_audio_present_entry(tensors, False)
     append_one_frame_target_index_entry(tensors, target_index)
+    if control_indices is not None:
+        append_one_frame_control_indices_entry(tensors, list(control_indices))
 
     metadata = build_latent_metadata(
-        task="t2va",
+        task="t2va" if control_frames is None else "fl2va",
         crop_start_frame=0,
         cache_seed=cache_seed,
         video_vae_fingerprint=video_vae_fingerprint,
         audio_vae_fingerprint=audio_vae_fingerprint,
         media_fingerprints=media_fingerprints,
         one_frame_target_index=target_index,
+        one_frame_control_indices=control_indices,
     )
     return H3LatentCachePayload(tensors=tensors, metadata=metadata)
 
@@ -499,8 +534,10 @@ def record_media_paths(record: H3Record) -> set[Path]:
     return paths
 
 
-def validate_h3_dataset(dataset: VideoDataset) -> None:
-    if dataset.control_directory is not None or dataset.has_control:
+def validate_h3_dataset(dataset: VideoDataset | ImageDataset) -> None:
+    # image datasets use control images as time-annotated fl2va conditions (validated in the
+    # dataset layer); the shared control-VIDEO fields stay unsupported
+    if isinstance(dataset, VideoDataset) and (dataset.control_directory is not None or dataset.has_control):
         raise ValueError("MiniMax-H3 does not use the shared control-video fields")
 
 
@@ -546,7 +583,8 @@ def setup_parser() -> argparse.ArgumentParser:
         "--one_frame",
         action="store_true",
         help="experimental one-frame (image) training caches: accept image datasets whose items become single-token"
-        " video targets with a silence audio placeholder (currently --task t2va only)",
+        " video targets with a silence audio placeholder. --task t2va caches plain image targets; --task fl2va"
+        " additionally encodes 1-2 control images as time-annotated conditions (fp_1f_clean_indices)",
     )
     parser.add_argument("--cache_seed", type=int, default=0, help="seed used for reproducible target-video posterior samples")
     parser.add_argument(
@@ -570,12 +608,13 @@ def main() -> None:
     blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_MINIMAX_H3)
     dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, audio_spec=H3_AUDIO_SPEC)
     datasets = dataset_group.datasets
-    if args.one_frame and args.task != "t2va":
-        raise ValueError("MiniMax-H3 one-frame caching currently supports --task t2va only")
+    if args.one_frame and args.task == "ref2va":
+        raise ValueError("MiniMax-H3 one-frame caching supports --task t2va and fl2va only")
 
     records_by_dir: dict[str, list[H3Record]] = {}
     audio_sources_by_dir: dict[str, list] = {}
     image_dirs: set[str] = set()
+    control_paths_by_dir: dict[str, dict[str, list[str]]] = {}
     for dataset_index, dataset in enumerate(datasets):
         validate_h3_dataset(dataset)
         if int(dataset.batch_size) != 1:
@@ -589,7 +628,15 @@ def main() -> None:
         if isinstance(dataset, ImageDataset):
             if not args.one_frame:
                 raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
+            if dataset.has_control and args.task != "fl2va":
+                raise ValueError("MiniMax-H3 image datasets with control images require --task fl2va")
+            if not dataset.has_control and args.task != "t2va":
+                raise ValueError(
+                    "MiniMax-H3 --task fl2va requires image datasets with control images"
+                    " (plain image datasets cache with --task t2va)"
+                )
             image_dirs.add(key)
+            control_paths_by_dir[key] = dataset.datasource.get_control_paths()
             continue
         if not isinstance(dataset, VideoDataset):
             raise ValueError("MiniMax-H3 latent caching accepts only image and video datasets")
@@ -642,20 +689,35 @@ def main() -> None:
     presence_counts: Counter[bool] = Counter()
     one_frame_item_count = 0
 
-    def encode_one_frame(item: ItemInfo) -> None:
+    def encode_one_frame(item: ItemInfo, cache_dir_key: str) -> None:
         nonlocal one_frame_item_count
         one_frame_item_count += 1
         image_path = Path(item.item_key).resolve()
         image_fingerprints = {image_path: media_fingerprints.setdefault(image_path, fingerprint_file(image_path))}
+        control_frames = None
+        control_indices = None
+        if args.task == "fl2va":
+            control_frames = item.control_content
+            control_indices = item.fp_1f_clean_indices
+            if not control_indices or control_frames is None or len(control_frames) != len(control_indices):
+                raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control images: {item.item_key}")
+            control_indices = [int(index) for index in control_indices]
+            control_paths = control_paths_by_dir.get(cache_dir_key, {}).get(item.item_key)
+            if control_paths is None or len(control_paths) != len(control_indices):
+                raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control paths: {item.item_key}")
+            for control_path in control_paths:
+                resolved = Path(control_path).resolve()
+                image_fingerprints[resolved] = media_fingerprints.setdefault(resolved, fingerprint_file(resolved))
         target_index = 0 if item.fp_1f_target_index is None else int(item.fp_1f_target_index)
         expected_metadata = build_latent_metadata(
-            task="t2va",
+            task=args.task,
             crop_start_frame=0,
             cache_seed=args.cache_seed,
             video_vae_fingerprint=video_vae_fingerprint,
             audio_vae_fingerprint=audio_vae_fingerprint,
             media_fingerprints=image_fingerprints,
             one_frame_target_index=target_index,
+            one_frame_control_indices=control_indices,
         )
         if skip_matching_cache and Path(item.latent_cache_path).is_file():
             if cache_metadata_matches(item.latent_cache_path, expected_metadata):
@@ -672,6 +734,8 @@ def main() -> None:
             video_vae_fingerprint=video_vae_fingerprint,
             audio_vae_fingerprint=audio_vae_fingerprint,
             media_fingerprints=image_fingerprints,
+            control_frames=control_frames,
+            control_indices=control_indices,
         )
         logger.info("Saving MiniMax-H3 one-frame latent cache for %s to %s", item.item_key, item.latent_cache_path)
         save_latent_cache_minimax_h3(item, payload.tensors, payload.metadata)
@@ -680,7 +744,7 @@ def main() -> None:
         for item in batch:
             key = item_cache_dir_key(item)
             if key in image_dirs:
-                encode_one_frame(item)
+                encode_one_frame(item, key)
                 continue
             datasource_index, crop_start = item_record_inputs(item)
             record = records_by_dir[key][datasource_index]

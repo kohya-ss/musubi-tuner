@@ -324,20 +324,38 @@ class ImageDataset(BaseDataset):
         self.control_resolution = control_resolution
 
         if self.architecture == ARCHITECTURE_MINIMAX_H3:
-            # one-frame (image) training v1: plain t2va targets only. Control images (fl2va
-            # conditions) and their fp_1f_clean_indices arrive with the K=1/2 editing phase.
-            if control_directory is not None or multiple_target:
-                raise ValueError("MiniMax-H3 image datasets do not support control images or multiple targets yet")
-            if fp_1f_clean_indices is not None:
+            # one-frame (image) training: t2va targets (K=0), or fl2va editing/inbetween targets
+            # with 1..2 time-annotated control images. All times are 24 fps pixel-frame indices;
+            # whether control data is present is only known after datasource construction (JSONL
+            # control_path), so control<->indices agreement is validated there.
+            if multiple_target:
+                raise ValueError("MiniMax-H3 image datasets do not support multiple targets")
+            if no_resize_control or control_resolution is not None:
                 raise ValueError(
-                    "MiniMax-H3 image datasets do not use fp_1f_clean_indices yet;"
-                    " only fp_1f_target_index (a 24 fps pixel-frame index) is supported"
+                    "MiniMax-H3 image datasets resize control images to the bucket resolution;"
+                    " no_resize_control and control_resolution are not supported"
                 )
+            if fp_1f_clean_indices is not None:
+                if not 1 <= len(fp_1f_clean_indices) <= 2:
+                    raise ValueError(
+                        f"MiniMax-H3 fp_1f_clean_indices must have 1 or 2 entries, got {len(fp_1f_clean_indices)}"
+                    )
+                if any(index < 0 for index in fp_1f_clean_indices):
+                    raise ValueError(f"MiniMax-H3 fp_1f_clean_indices must be nonnegative, got {fp_1f_clean_indices}")
+                if fp_1f_target_index is None:
+                    # no silent default: a control index coinciding with the target trains against
+                    # the base model's verbatim anchor-copy prior, so the placement must be chosen
+                    raise ValueError("MiniMax-H3 image datasets with fp_1f_clean_indices require an explicit fp_1f_target_index")
             if fp_1f_target_index is not None and fp_1f_target_index < 0:
                 raise ValueError(f"MiniMax-H3 fp_1f_target_index must be nonnegative, got {fp_1f_target_index}")
 
         control_count_per_image: Optional[int] = 1
-        if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
+        if (
+            self.architecture == ARCHITECTURE_FRAMEPACK
+            or self.architecture == ARCHITECTURE_WAN
+            or self.architecture == ARCHITECTURE_MINIMAX_H3
+        ):
+            # time-annotated control datasets: the indices define the control count
             if fp_1f_clean_indices is not None:
                 control_count_per_image = len(fp_1f_clean_indices)
             else:
@@ -370,9 +388,15 @@ class ImageDataset(BaseDataset):
         self.batch_manager = None
         self.num_train_items = 0
         self.has_control = self.datasource.has_control
-        if self.architecture == ARCHITECTURE_MINIMAX_H3 and self.has_control:
+        if self.architecture == ARCHITECTURE_MINIMAX_H3:
             # JSONL control_path entries surface only after datasource construction
-            raise ValueError("MiniMax-H3 image datasets do not support control images yet")
+            if self.has_control and self.fp_1f_clean_indices is None:
+                raise ValueError(
+                    "MiniMax-H3 image datasets with control images require fp_1f_clean_indices"
+                    " (24 fps pixel-frame indices, one per control image)"
+                )
+            if self.fp_1f_clean_indices is not None and not self.has_control:
+                raise ValueError("MiniMax-H3 fp_1f_clean_indices requires control images (control_directory or control_path)")
 
     def get_metadata(self):
         metadata = super().get_metadata()
@@ -432,6 +456,9 @@ class ImageDataset(BaseDataset):
                             bucket_reso.append(len(self.fp_1f_clean_indices))
                             bucket_reso.append(self.fp_1f_no_post)
                         bucket_reso = tuple(bucket_reso)
+                    elif self.architecture == ARCHITECTURE_MINIMAX_H3 and self.fp_1f_clean_indices is not None:
+                        # split by the control count so K=0/1/2 items never share a batch
+                        bucket_reso = (*bucket_reso, len(self.fp_1f_clean_indices))
 
                     if controls is not None:
                         item_info.control_content = controls
@@ -561,6 +588,11 @@ class ImageDataset(BaseDataset):
                     bucket_reso.append(len(self.fp_1f_clean_indices))
                     bucket_reso.append(self.fp_1f_no_post)
                 bucket_reso = tuple(bucket_reso)
+            elif self.architecture == ARCHITECTURE_MINIMAX_H3 and self.fp_1f_clean_indices is not None:
+                # split by the control count so K=0/1/2 items never share a batch (K is uniform per
+                # dataset, so the dataset-level setting is authoritative; a stale cache with the
+                # wrong condition keys fails in the trainer with a re-cache hint)
+                bucket_reso = (*bucket_reso, len(self.fp_1f_clean_indices))
             # Split the bucket by control latents so that every item in a batch has the same number of
             # control images AND matching per-control shapes. The collator stacks latents_control_{i}
             # across the batch (see BucketBatchManager.__getitem__), so a count or shape mismatch produces

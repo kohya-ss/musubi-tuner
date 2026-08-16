@@ -57,6 +57,14 @@ class ImageDatasource(ContentDatasource):
         """
         raise NotImplementedError
 
+    def get_control_paths(self) -> dict[str, list[str]]:
+        """
+        Returns {image_path: [control paths in index order]} for cache fingerprinting.
+        Control pixels travel through ItemInfo.control_content; this accessor exists only so
+        cache scripts can fingerprint the source files behind them.
+        """
+        return {}
+
 
 class ImageDirectoryDatasource(ImageDatasource):
     def __init__(
@@ -247,6 +255,11 @@ class ImageDirectoryDatasource(ImageDatasource):
             caption = f.read().strip()
         return image_path, caption
 
+    def get_control_paths(self) -> dict[str, list[str]]:
+        if not self.has_control:
+            return {}
+        return {image_path: list(paths) for image_path, paths in self.control_paths.items()}
+
     def __iter__(self):
         self.current_idx = 0
         return self
@@ -376,6 +389,20 @@ class ImageJsonlDatasource(ImageDatasource):
         image_path = data.get("image_path", data.get("image_path_0"))
         caption = data["caption"]
         return image_path, caption
+
+    def get_control_paths(self) -> dict[str, list[str]]:
+        if not self.has_control:
+            return {}
+        control_paths: dict[str, list[str]] = {}
+        for data in self.data:
+            image_path = data.get("image_path", data.get("image_path_0"))
+            paths = []
+            for i in range(self.control_count_per_image or 1000):  # same bound rule as get_image_data
+                if f"control_path_{i}" not in data:
+                    break
+                paths.append(data[f"control_path_{i}"])
+            control_paths[image_path] = paths
+        return control_paths
 
     def __iter__(self):
         self.current_idx = 0

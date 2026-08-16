@@ -107,13 +107,14 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
     one_frame_spec = sample.get("one_frame")
     if requested_frame_count == 1:
         # experimental one-frame (image) sample: single-token target, no duration semantics
-        if args.task != "t2va":
-            raise ValueError("MiniMax-H3 one-frame training samples (--f 1) currently support --task t2va only")
+        if args.task not in {"t2va", "fl2va"}:
+            raise ValueError("MiniMax-H3 one-frame training samples (--f 1) support --task t2va and fl2va only")
         frame_count = 1
         target_index, control_indices = parse_one_frame_options(one_frame_spec) if one_frame_spec else (0, None)
-        if control_indices is not None:
+        if args.task == "t2va" and control_indices is not None:
             raise ValueError("MiniMax-H3 T2VA one-frame training sample does not accept control_index")
         sample["one_frame_target_index"] = target_index
+        sample["one_frame_control_indices"] = control_indices
     else:
         if one_frame_spec is not None:
             raise ValueError("MiniMax-H3 sample --of options require --f 1")
@@ -159,8 +160,24 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
             raise ValueError("MiniMax-H3 FL2VA training sample requires a prompt")
         if reference_jsonl or ref_specs:
             raise ValueError("MiniMax-H3 FL2VA training sample does not accept reference_jsonl or --ref")
-        _require_sampling_path(first_frame, "first_frame")
-        _require_sampling_path(last_frame, "last_frame")
+        if frame_count == 1:
+            # mirror the generation rules: any subset of first/last, one control_index per
+            # provided frame (mandatory — the placement is the training signal)
+            if not first_frame and not last_frame:
+                raise ValueError("MiniMax-H3 one-frame FL2VA training sample requires first_frame and/or last_frame")
+            provided_frames = int(bool(first_frame)) + int(bool(last_frame))
+            control_indices = sample.get("one_frame_control_indices")
+            if control_indices is None or len(control_indices) != provided_frames:
+                raise ValueError(
+                    "MiniMax-H3 one-frame FL2VA training sample requires --of control_index with one entry"
+                    " per provided frame, e.g. --of target_index=24,control_index=0"
+                )
+            for label, value in (("first_frame", first_frame), ("last_frame", last_frame)):
+                if value:
+                    _require_sampling_path(value, label)
+        else:
+            _require_sampling_path(first_frame, "first_frame")
+            _require_sampling_path(last_frame, "last_frame")
     else:
         if first_frame or last_frame:
             raise ValueError("MiniMax-H3 Ref2VA training sample does not accept first/last frames")
@@ -241,22 +258,51 @@ def _stack_single_text_rows(value, label: str) -> torch.Tensor:
     return value[0].unsqueeze(0)
 
 
+_coinciding_one_frame_indices_warned = False
+
+
+def _warn_once_coinciding_indices(control_indices: list[int], target_index: int) -> None:
+    global _coinciding_one_frame_indices_warned
+    if _coinciding_one_frame_indices_warned or target_index not in control_indices:
+        return
+    _coinciding_one_frame_indices_warned = True
+    logger.warning(
+        "MiniMax-H3 one-frame FL2VA data places a control at the target index (%d): the base model's"
+        " prior at coinciding timestamps is verbatim anchor copying, so make sure that is the intended"
+        " training signal (see docs/minimax_h3_1f.md)",
+        target_index,
+    )
+
+
 def _collect_fl_conditions(
     batch: dict[str, Any],
     batch_size: int,
     visual_conditions: list[torch.Tensor],
     condition_geometries: list[H3VideoGeometry],
-) -> None:
-    if "latents_first" not in batch or "latents_last" not in batch:
-        raise ValueError("MiniMax-H3 FL2VA batch requires both first and last conditions")
-    for role in ("latents_first", "latents_last"):
-        tensor = batch[role]
+    *,
+    allow_single_first: bool = False,
+) -> tuple[str, ...]:
+    roles = tuple(role for role in ("first", "last") if f"latents_{role}" in batch)
+    if not allow_single_first:
+        if roles != ("first", "last"):
+            raise ValueError("MiniMax-H3 FL2VA batch requires both first and last conditions")
+    elif roles not in {("first",), ("first", "last")}:
+        # a single one-frame condition is always packed as latents_first; its temporal
+        # position is carried by one_frame_control_indices, not the role name
+        raise ValueError(
+            "MiniMax-H3 one-frame FL2VA batch requires latents_first (plus optional latents_last);"
+            " re-run minimax_h3_cache_latents.py --one_frame --task fl2va"
+        )
+    for role in roles:
+        key = f"latents_{role}"
+        tensor = batch[key]
         if not isinstance(tensor, torch.Tensor) or tensor.ndim != 5 or tensor.shape[1] != 24:
-            raise ValueError(f"MiniMax-H3 {role} must be [B,24,F,H,W]")
+            raise ValueError(f"MiniMax-H3 {key} must be [B,24,F,H,W]")
         if tensor.shape[0] != batch_size:
-            raise ValueError(f"MiniMax-H3 {role} batch size does not match the targets")
+            raise ValueError(f"MiniMax-H3 {key} batch size does not match the targets")
         visual_conditions.append(tensor)
         condition_geometries.append(H3VideoGeometry(*tensor.shape[2:]))
+    return roles
 
 
 def _validate_teacher_text_rows(
@@ -323,12 +369,13 @@ def _runtime_batch_plan(
 
     is_one_frame_batch = video_latents.shape[2] == 1
     one_frame_index_value = batch.get("one_frame_target_index")
+    one_frame_control_value = batch.get("one_frame_control_indices")
     time_overrides = None
     if is_one_frame_batch:
         if not one_frame:
             raise ValueError("MiniMax-H3 batch carries a one-frame latent cache; pass --one_frame to train on image targets")
-        if has_fl_condition or reference_roles or teacher_conditions is not None:
-            raise ValueError("MiniMax-H3 one-frame training currently supports plain T2VA caches only")
+        if reference_roles or teacher_conditions is not None:
+            raise ValueError("MiniMax-H3 one-frame training currently supports plain T2VA and FL2VA caches only")
         if (
             not isinstance(one_frame_index_value, torch.Tensor)
             or one_frame_index_value.shape != (batch_size,)
@@ -341,14 +388,34 @@ def _runtime_batch_plan(
         target_index = int(one_frame_index_value.item())
         if target_index < 0:
             raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
-        time_overrides = H3TimeOverrides(condition_times=(), target_time=FRAME_RESCALE * target_index)
-    elif one_frame_index_value is not None:
-        raise ValueError("MiniMax-H3 video batch cannot carry one_frame_target_index; re-run latent caching")
+        condition_times: tuple[float, ...] = ()
+        if has_fl_condition:
+            if (
+                not isinstance(one_frame_control_value, torch.Tensor)
+                or one_frame_control_value.ndim != 2
+                or one_frame_control_value.shape[0] != batch_size
+                or one_frame_control_value.dtype != torch.int64
+            ):
+                raise ValueError(
+                    "MiniMax-H3 one-frame FL2VA batch requires an int64 one_frame_control_indices tensor;"
+                    " re-run minimax_h3_cache_latents.py --one_frame --task fl2va"
+                )
+            control_indices = [int(index) for index in one_frame_control_value[0].tolist()]
+            if any(index < 0 for index in control_indices):
+                raise ValueError(f"MiniMax-H3 one-frame control indices must be nonnegative, got {control_indices}")
+            _warn_once_coinciding_indices(control_indices, target_index)
+            condition_times = tuple(FRAME_RESCALE * index for index in control_indices)
+        elif one_frame_control_value is not None:
+            raise ValueError("MiniMax-H3 one-frame T2VA batch cannot carry one_frame_control_indices; re-run latent caching")
+        time_overrides = H3TimeOverrides(condition_times=condition_times, target_time=FRAME_RESCALE * target_index)
+    elif one_frame_index_value is not None or one_frame_control_value is not None:
+        raise ValueError("MiniMax-H3 video batch cannot carry one-frame index tensors; re-run latent caching")
 
     visual_conditions = []
     audio_conditions = []
     condition_geometries = []
     references = []
+    fl_condition_roles: tuple[str, ...] | None = None
     teacher_layout = None
     teacher_hidden_states = None
     teacher_token_tags = None
@@ -422,7 +489,9 @@ def _runtime_batch_plan(
         )
     elif has_fl_condition:
         task = "fl2va"
-        _collect_fl_conditions(batch, batch_size, visual_conditions, condition_geometries)
+        fl_condition_roles = _collect_fl_conditions(
+            batch, batch_size, visual_conditions, condition_geometries, allow_single_first=is_one_frame_batch
+        )
     elif reference_roles:
         task = "ref2va"
         if set(reference_roles) != set(range(len(reference_roles))):
@@ -462,6 +531,11 @@ def _runtime_batch_plan(
     else:
         task = "t2va"
 
+    if is_one_frame_batch and task == "fl2va" and len(condition_geometries) != len(time_overrides.condition_times):
+        raise ValueError(
+            f"MiniMax-H3 one-frame FL2VA batch has {len(condition_geometries)} condition latents for"
+            f" {len(time_overrides.condition_times)} control indices; re-run latent caching"
+        )
     layout = build_h3_layout(
         task=task,
         text_length=hidden_states.shape[1],
@@ -470,6 +544,7 @@ def _runtime_batch_plan(
         visual_conditions=tuple(condition_geometries),
         references=tuple(references),
         one_frame=is_one_frame_batch,
+        condition_roles=fl_condition_roles if is_one_frame_batch else None,
         time_overrides=time_overrides,
     )
     return _H3RuntimeBatch(
@@ -645,8 +720,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if getattr(args, "task", None) not in {"t2va", "fl2va", "ref2va"}:
             raise ValueError("MiniMax-H3 requires --task t2va, fl2va, or ref2va")
         if getattr(args, "one_frame", False):
-            if args.task != "t2va":
-                raise ValueError("MiniMax-H3 one-frame training currently requires --task t2va")
+            if args.task not in {"t2va", "fl2va"}:
+                raise ValueError("MiniMax-H3 one-frame training requires --task t2va or fl2va")
             if getattr(args, "h3_teacher_matching", False):
                 raise ValueError("--h3_teacher_matching does not support --one_frame yet")
             logger.info(
@@ -919,6 +994,22 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 else ()
             )
             one_frame_sample = parameter["frame_count"] == 1
+            condition_roles = None
+            time_overrides = None
+            if one_frame_sample:
+                # roles follow the provided frames (mirrors the generation CLI); condition
+                # times come from --of control_index, one per provided frame
+                control_indices = parameter.get("one_frame_control_indices")
+                if args.task == "fl2va":
+                    condition_roles = tuple(
+                        role for role, key in (("first", "first_frame"), ("last", "last_frame")) if parameter.get(key)
+                    )
+                time_overrides = H3TimeOverrides(
+                    condition_times=(
+                        tuple(FRAME_RESCALE * index for index in control_indices) if control_indices is not None else ()
+                    ),
+                    target_time=FRAME_RESCALE * parameter["one_frame_target_index"],
+                )
             parameter["h3_layout"] = build_h3_layout(
                 task=args.task,
                 text_length=parameter["h3_text_hidden_states"].shape[1],
@@ -933,11 +1024,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 visual_conditions=parameter["_h3_visual_geometries"],
                 references=references,
                 one_frame=one_frame_sample,
-                time_overrides=(
-                    H3TimeOverrides(condition_times=(), target_time=FRAME_RESCALE * parameter["one_frame_target_index"])
-                    if one_frame_sample
-                    else None
-                ),
+                condition_roles=condition_roles,
+                time_overrides=time_overrides,
             )
             layout = parameter["h3_layout"]
             logger.info(
@@ -1372,7 +1460,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 f" the text cache width {runtime.text_hidden_states.shape[2]}"
             )
         # the probe swaps only the text rows; the one-frame times stay valid because they
-        # are relative to the target-block cursor, which moves with the text length
+        # are relative to the target-block cursor, which moves with the text length. The
+        # condition roles are recovered from the segments so a one-frame FL2VA layout with a
+        # single condition rebuilds identically (roles are required for K=1).
+        uncond_condition_roles = tuple(
+            segment.role for segment in runtime.layout.segments if segment.kind == "visual_condition"
+        )
         uncond_layout = build_h3_layout(
             task=runtime.layout.task,
             text_length=uncond_hidden.shape[0],
@@ -1381,6 +1474,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             visual_conditions=runtime.layout.visual_conditions,
             references=runtime.layout.references,
             one_frame=runtime.layout.target_video.frames == ONE_FRAME_VIDEO_LATENT_FRAMES,
+            condition_roles=uncond_condition_roles or None,
             time_overrides=runtime.layout.time_overrides,
         )
         autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
@@ -1683,8 +1777,9 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--one_frame",
         action="store_true",
         help="experimental one-frame (image) training: accept single-token latent caches written by"
-        " minimax_h3_cache_latents.py --one_frame (currently --task t2va only; video batches are unaffected,"
-        " so image and video datasets can mix in one run)",
+        " minimax_h3_cache_latents.py --one_frame — plain image targets (t2va) or editing/inbetween targets"
+        " with 1-2 time-annotated control images (fl2va). Video batches are unaffected, so image and video"
+        " datasets can mix in one run",
     )
     add_audio_train_args(parser)
     parser.add_argument("--h3_shift_video", type=float, default=12.0, help="MiniMax-H3 target-video flow shift")

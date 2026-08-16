@@ -51,6 +51,11 @@ AUDIO_PRESENT_KEY = "audio_present_float32"
 #   loads tensors; the trainer converts it to a RoPE time override at layout-build time.
 ONE_FRAME_TARGET_INDEX_KEY = "one_frame_target_index_int64"
 
+# - ONE_FRAME_CONTROL_INDICES_KEY holds an int64 [K] tensor (K = 1..2) with the 24 fps
+#   pixel-frame indices of the one-frame visual conditions, in packed (first, last) order.
+#   Present only when the cache carries condition latents; same tensor-not-metadata rationale.
+ONE_FRAME_CONTROL_INDICES_KEY = "one_frame_control_indices_int64"
+
 
 def append_audio_present_entry(sd: dict[str, torch.Tensor], audio_present: bool):
     sd[AUDIO_PRESENT_KEY] = torch.tensor(1.0 if audio_present else 0.0, dtype=torch.float32)
@@ -60,6 +65,14 @@ def append_one_frame_target_index_entry(sd: dict[str, torch.Tensor], target_inde
     if target_index < 0:
         raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
     sd[ONE_FRAME_TARGET_INDEX_KEY] = torch.tensor(target_index, dtype=torch.int64)
+
+
+def append_one_frame_control_indices_entry(sd: dict[str, torch.Tensor], control_indices: list[int]):
+    if not 1 <= len(control_indices) <= 2:
+        raise ValueError(f"MiniMax-H3 one-frame control indices must have 1 or 2 entries, got {len(control_indices)}")
+    if any(index < 0 for index in control_indices):
+        raise ValueError(f"MiniMax-H3 one-frame control indices must be nonnegative, got {control_indices}")
+    sd[ONE_FRAME_CONTROL_INDICES_KEY] = torch.tensor(list(control_indices), dtype=torch.int64)
 
 
 def validate_audio_present_entry(sd: dict[str, torch.Tensor]) -> float:
@@ -564,6 +577,13 @@ def save_latent_cache_minimax_h3(
         if key == ONE_FRAME_TARGET_INDEX_KEY:
             if tensor.shape != torch.Size([]) or tensor.dtype != torch.int64 or tensor.item() < 0:
                 raise ValueError(f"MiniMax-H3 {ONE_FRAME_TARGET_INDEX_KEY} must be a nonnegative scalar int64 tensor")
+            normalized[key] = tensor.detach().cpu().contiguous()
+            continue
+        if key == ONE_FRAME_CONTROL_INDICES_KEY:
+            if tensor.ndim != 1 or not 1 <= tensor.shape[0] <= 2 or tensor.dtype != torch.int64 or bool((tensor < 0).any()):
+                raise ValueError(
+                    f"MiniMax-H3 {ONE_FRAME_CONTROL_INDICES_KEY} must be a nonnegative int64 [K] tensor with K in 1..2"
+                )
             normalized[key] = tensor.detach().cpu().contiguous()
             continue
 
