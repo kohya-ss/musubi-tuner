@@ -60,11 +60,18 @@ The design is grounded in these primary sources:
   batch into an image batch. Upstream validates the actual runtime layout and
   classifies one-frame targets from `F == 1`.
 
-An earlier unmerged branch implementation already demonstrates that video-noise
-search applies correctly to one-frame batches. This supports treating image
-search as the `F == 1` form of the same mechanism. Its experimental option and
-metric names are not a released compatibility contract and are replaced before
-merge.
+The unmerged candidate loop is F-agnostic by construction, so the same
+video-noise mechanism can operate on an `F == 1` latent. The one-frame plus
+best-of-K combination currently has no test coverage; Section 14.2 adds its
+first verification. The design therefore treats this as a mechanically shared
+path to test, not as an already demonstrated result.
+
+The old video-only name is nevertheless visible on the public
+`origin/qinglong` branch of this fork, together with English and Japanese user
+documentation. It is not upstream userspace and does not justify an alias, but
+users of that public fork may have working configurations. Removed-name errors
+must therefore identify the canonical replacement instead of relying on
+argparse's generic unknown-argument message.
 
 The paper and official XM code do not define modality-only selection for a
 joint video/audio model. H3 stream selection is objective-equivalent to Forward
@@ -82,6 +89,8 @@ XM only when the selected raw component is the complete effective objective:
   stream selector.
 - Remove the unmerged experimental video-only option and metric prefix rather
   than introducing a compatibility layer for them.
+- Give public-fork users an actionable canonical replacement when a removed
+  CLI or TOML name is encountered.
 - For multi-frame batches, vary and rank the selected stream only.
 - For one-frame batches, always vary video noise and rank raw per-sample
   image/video MSE.
@@ -156,10 +165,24 @@ retained as an alias. The design-only `--h3_audio_best_of_k` and
 `--h3_image_best_of_k` options are never introduced. There is one supported
 count spelling and one stream selector.
 
-CLI use of any removed name is an unknown-argument error. TOML loading must
-explicitly reject the corresponding keys before allocation rather than retain
-them on `argparse.Namespace` and silently ignore them. No deprecation warning,
-source-spelling state, compatibility metric, or migration period exists.
+All three removed CLI spellings are registered with
+`help=argparse.SUPPRESS` and a rejection action. They do not appear in `--help`,
+but using one raises an actionable migration error:
+
+```text
+--h3_video_best_of_k was removed; use --h3_best_of_k K
+  --h3_best_of_k_stream video
+--h3_audio_best_of_k was removed; use --h3_best_of_k K
+  --h3_best_of_k_stream audio
+--h3_image_best_of_k was removed; use --h3_best_of_k K;
+  one-frame batches automatically search video
+```
+
+TOML loading checks the corresponding keys before allocation and uses the same
+message source as the CLI rejection action. This prevents config keys retained
+on `argparse.Namespace` from being silently ignored. The hidden actions never
+map a count, infer a stream, emit metrics, or populate runtime configuration;
+they are errors, not aliases. No deprecation warning or migration period exists.
 
 ### 5.3 Other validation
 
@@ -209,6 +232,13 @@ The resolver owns exact-type/range validation, removed-TOML-key rejection,
 common-XM rejection, the `video_only` conflict, and teacher-matching rejection.
 Hooks such as `get_best_of_k_count`, `get_best_of_k_option_name`, and
 `on_best_of_k_enabled` consume this resolver rather than copying conditions.
+
+For H3, `get_best_of_k_count` invokes the resolver before returning to
+`NetworkTrainer._validate_and_init_best_of_k`. Invalid H3 values therefore show
+the resolver's option-specific message. The base method's generic integer/range
+guard remains intentionally reachable for architectures that use the default
+hook; it is not removed merely because it is defensive dead code after the H3
+resolver. H3 tests assert the resolver message, not the base fallback wording.
 
 The base `_best_of_k_count` always equals `config.count`. It is never a routing
 maximum or boolean proxy, so existing base consumers retain one meaning.
@@ -354,6 +384,15 @@ For K greater than one, `process_batch_best_of_k` performs these steps:
 12. Call ordinary `compute_loss` and return its loss/metrics plus the active
     runtime kind's exploration metrics.
 
+Audio-stream support has an implementation tripwire. After the Section 10
+fallback, runtime kind may affect only one selected-stream adapter: the choice
+of noise/latent/sigma used by Step 4 and the component score extracted by Step
+8. Step 10 uses the same adapter for reconstruction. RNG handling, candidate
+iteration, forward execution, winner tracking, recomputation, and final loss
+must remain one shared path. If implementation requires any further audio-only
+control flow, audio-stream selection is removed from R1 instead of gaining a
+special case.
+
 Candidate input and target remain paired. Audio search changes both noisy audio
 and the audio target. Image/video search changes both noisy video and the video
 target. The other stream remains at candidate zero.
@@ -372,6 +411,10 @@ path retains its existing non-finite behavior.
 Audio-stream selection cannot rank a multi-frame batch whose effective audio
 weight is zero. This occurs for `audio_present=0` or global audio loss weight
 zero.
+
+This scalar decision relies on H3 R1's validated `B == 1` constraint. A future
+`B > 1` implementation must define per-sample mixed-supervision behavior rather
+than inheriting an implicit `.any()` or `.all()` policy from this fallback.
 
 After one preparation reveals zero effective weight, the path:
 
@@ -477,7 +520,7 @@ path.
 
 ### 12.3 Metadata
 
-Checkpoint metadata records:
+Only an active K greater than one records:
 
 ```text
 ss_minimax_h3_best_of_k = resolved K
@@ -485,7 +528,9 @@ ss_minimax_h3_best_of_k_stream = configured multi-frame stream
 ```
 
 Existing `ss_minimax_h3_one_frame` remains the provenance flag for accepting
-one-frame batches. Old checkpoints have neither new key and remain loadable.
+one-frame batches. At K=1, both best-of-K keys are omitted because the stream is
+inert and must not be interpreted as training provenance. Old checkpoints have
+neither new key and remain loadable.
 
 ## 13. Code and Documentation Scope
 
@@ -505,8 +550,11 @@ The unified H3 feature modifies:
   metrics, and metadata;
 - shared utilities only when a genuinely mode-neutral helper is reused;
 - `tests/test_minimax_h3_training.py` and focused shared regressions;
-- `docs/minimax_h3.md`, `docs/minimax_h3_1f.md`, and English/Japanese sections
-  of `docs/explorative_modeling.md`.
+- `docs/minimax_h3.md` and both the English and Japanese sections of
+  `docs/explorative_modeling.md`, each with an explicit rename note from
+  `--h3_video_best_of_k` to the canonical count plus `video` stream;
+- `docs/minimax_h3_1f.md` for the canonical option and automatic image-kind
+  behavior.
 
 No dataset, cache-format, VAE, scheduler, network, optimizer, or checkpoint-file
 format change is required.
@@ -531,8 +579,11 @@ RNG states, and tensors required to be bitwise unchanged.
 - Exact-int validation covers zero, float, bool, string, and negative canonical
   K values before allocation.
 - Canonical K selects video or audio stream without mutual-exclusion branches.
-- Removed video/audio/image count names fail as unknown CLI arguments and as
-  explicit TOML validation errors before allocation.
+- Removed video/audio/image count names are hidden from `--help`. Each CLI and
+  TOML spelling fails before allocation with the same name-specific canonical
+  replacement, without mutating resolved configuration.
+- Invalid canonical H3 values expose the resolver's message. The shared base
+  integer/range guard remains covered for architectures using the default hook.
 - Common XM greater than one remains rejected.
 - Active audio-stream search with `video_only` is rejected before allocation.
 - Teacher matching with K greater than one remains rejected.
@@ -546,9 +597,11 @@ RNG states, and tensors required to be bitwise unchanged.
 ### 14.2 Dispatch and fallback
 
 - K=1 calls the existing ordinary method once and preserves RNG, loss,
-  gradients, call count, counters, and metric keys.
+  gradients, call count, counters, metric keys, and absence of both best-of-K
+  metadata keys.
 - Canonical video K greater than one searches K candidates for both multi-frame
-  and one-frame batches.
+  and one-frame batches. The latter is the first regression coverage for this
+  previously untested combination.
 - Canonical audio stream searches audio for multi-frame batches but video for a
   validated one-frame batch.
 - Each runtime kind emits only its two `h3_best_of_k/<kind>/*` exploration keys;
@@ -559,6 +612,8 @@ RNG states, and tensors required to be bitwise unchanged.
   audio weight zero. Assert one preparation, one grad forward, zero candidate
   forwards, no candidate seed draw, no exploration metrics, exact ordinary
   prepared-step agreement, and exactly one increment of both audio counters.
+- At K greater than one, metadata records the resolved K and configured
+  multi-frame stream; at K=1, neither key exists.
 
 ### 14.3 Candidate correctness
 
@@ -607,7 +662,8 @@ The revision is complete when:
 
 - the classic block-swap candidate bug is fixed and tested in a separate commit;
 - H3 exposes one canonical K and one multi-frame stream selector;
-- removed experimental count names are rejected and have no alias state;
+- removed experimental count names are hidden, rejected with canonical
+  migration guidance in CLI/TOML, and have no alias state;
 - exploration metrics are determined only by runtime kind under one
   `h3_best_of_k/<kind>/*` schema;
 - `_best_of_k_count` retains one actual-count meaning;
@@ -618,13 +674,18 @@ The revision is complete when:
 - teacher matching plus active best-of-K fails before allocation;
 - zero-effective multi-frame audio batches take one ordinary prepared forward
   without a seed draw, candidate metrics, duplicate RNG, or duplicate counters;
+- active metadata is emitted only for K greater than one;
+- audio-stream search shares the candidate loop after one stream-adapter choice
+  and the zero-weight fallback; needing another audio-only branch removes the
+  option from R1;
 - candidate selection validates only the selected raw component score;
 - winner recomputation optimizes the unchanged ordinary H3 objective;
 - K=1 preserves existing control flow, RNG, numerics, counters, and metrics;
 - guidance, autocast, sampling exceptions, and classic block swap preserve a
   valid final graph and restore training state;
 - user docs explain when H3 selection is objective-equivalent to Forward XM and
-  when it is a modality-focused heuristic;
+  when it is a modality-focused heuristic, and both English and Japanese docs
+  give the removed video option's canonical replacement;
 - focused and full tests pass in the current environment.
 
 ## 16. Deferred Work
