@@ -835,7 +835,50 @@ def test_block_swap_forward_only_context_is_reentrant_and_restores_after_error()
 
     assert transformer.events == ["inference", "training"]
     assert transformer.mode == "training"
-    assert accelerator.unwrap_calls == 1
+    assert accelerator.unwrap_calls == 2
+
+
+def test_block_swap_forward_only_context_rejects_nested_different_transformer_and_restores_state():
+    trainer = NetworkTrainer()
+    transformer_a = _BlockSwapProtocolTransformer()
+    transformer_b = _BlockSwapProtocolTransformer()
+    accelerator = _ToyAccelerator()
+
+    with pytest.raises(RuntimeError, match="same transformer instance"):
+        with trainer.block_swap_forward_only(accelerator, transformer_a):
+            with trainer.block_swap_forward_only(accelerator, transformer_b):
+                pass
+
+    assert transformer_a.events == ["inference", "training"]
+    assert transformer_a.mode == "training"
+    assert transformer_b.events == []
+    assert transformer_b.mode == "training"
+    assert trainer._block_swap_forward_only_depth == 0
+    assert trainer._block_swap_forward_only_transformer is None
+
+
+def test_block_swap_forward_only_context_allows_wrapped_and_unwrapped_same_transformer():
+    class _Wrapper:
+        def __init__(self, module):
+            self.module = module
+
+    class _UnwrappingAccelerator(_ToyAccelerator):
+        def unwrap_model(self, transformer):
+            self.unwrap_calls += 1
+            return getattr(transformer, "module", transformer)
+
+    trainer = NetworkTrainer()
+    transformer = _BlockSwapProtocolTransformer()
+    accelerator = _UnwrappingAccelerator()
+
+    with trainer.block_swap_forward_only(accelerator, _Wrapper(transformer)) as outer:
+        with trainer.block_swap_forward_only(accelerator, transformer) as inner:
+            assert outer is transformer
+            assert inner is transformer
+
+    assert transformer.events == ["inference", "training"]
+    assert transformer.mode == "training"
+    assert accelerator.unwrap_calls == 2
 
 
 def test_block_swap_forward_only_context_accepts_absent_protocol_and_rejects_half_protocol():
@@ -853,20 +896,39 @@ def test_block_swap_forward_only_context_accepts_absent_protocol_and_rejects_hal
             pass
 
 
-def test_sample_images_restores_block_swap_training_mode_when_sampling_raises(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")),
+    ],
+)
+def test_sample_images_restores_runtime_state_when_sampling_raises(monkeypatch, tmp_path, device):
     class _SamplingTrainer(NetworkTrainer):
-        def sample_image_inference(self, *args, **kwargs):
+        def sample_image_inference(self, accelerator, *args, **kwargs):
+            torch.rand((), device="cpu")
+            if accelerator.device.type == "cuda":
+                torch.rand((), device=accelerator.device)
             raise RuntimeError("sampling failed")
 
     monkeypatch.setattr(trainer_base_module, "should_sample_images", lambda *args: True)
     monkeypatch.setattr(trainer_base_module, "PartialState", lambda: SimpleNamespace(num_processes=1))
+    cleaned_devices = []
+    monkeypatch.setattr(trainer_base_module, "clean_memory_on_device", cleaned_devices.append)
     trainer = _SamplingTrainer()
     transformer = _BlockSwapProtocolTransformer()
+    accelerator = _ToyAccelerator(device)
     args = SimpleNamespace(sample_prompts="prompts.toml", output_dir=str(tmp_path))
+    torch.manual_seed(2026)
+    cpu_rng_state = torch.get_rng_state().clone()
+    cuda_rng_state = None
+    if accelerator.device.type == "cuda":
+        torch.cuda.manual_seed_all(2026)
+        cuda_rng_state = torch.cuda.get_rng_state(accelerator.device).clone()
 
     with pytest.raises(RuntimeError, match="sampling failed"):
         trainer.sample_images(
-            _ToyAccelerator(),
+            accelerator,
             args,
             epoch=1,
             steps=1,
@@ -878,6 +940,10 @@ def test_sample_images_restores_block_swap_training_mode_when_sampling_raises(mo
 
     assert transformer.events == ["inference", "training"]
     assert transformer.mode == "training"
+    assert torch.equal(torch.get_rng_state(), cpu_rng_state)
+    if cuda_rng_state is not None:
+        assert torch.equal(torch.cuda.get_rng_state(accelerator.device), cuda_rng_state)
+    assert cleaned_devices == [accelerator.device]
 
 
 class _ToyXMTrainer(_CompatibleTrainer):

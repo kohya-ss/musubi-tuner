@@ -1,9 +1,12 @@
 # MiniMax-H3 Unified Best-of-K Design
 
-**Status:** Approved design; implementation deferred
+**Status:** Implemented and merged into `qinglong`
 **Date:** 2026-08-16
 **Branch:** `codex/issue-1019-explorative-modeling`
-**Base:** `upstream/dev` at `ca221b10`, merged as `ce0a325`
+**Original base:** `upstream/dev` at `ca221b10`, merged as `ce0a325`
+**Implementation PR:** [sdbds/musubi-tuner#4](https://github.com/sdbds/musubi-tuner/pull/4)
+**Original integration:** `8380839`
+**Latest upstream integration:** `8ea283c` (includes `upstream/dev` at `2f7677f`)
 **Issue:** [kohya-ss/musubi-tuner#1019](https://github.com/kohya-ss/musubi-tuner/issues/1019)
 
 ## 1. Decision
@@ -56,15 +59,19 @@ The design is grounded in these primary sources:
   image batch has video latents `[B,24,1,H,W]`, a constant clean silence audio
   latent `[B,32,2,2]`, `audio_present=0`, and an H3 time override from
   `one_frame_target_index`.
+- Upstream commit `2f7677f` extends one-frame training to FL2VA editing with
+  one or two time-annotated control images. Control latents, condition roles,
+  control indices, text rows, layout, and time overrides are fixed prepared
+  state during best-of-K candidate search.
 - `--one_frame` permits image and video datasets to mix; it does not turn every
   batch into an image batch. Upstream validates the actual runtime layout and
   classifies one-frame targets from `F == 1`.
 
-The unmerged candidate loop is F-agnostic by construction, so the same
-video-noise mechanism can operate on an `F == 1` latent. The one-frame plus
-best-of-K combination currently has no test coverage; Section 14.2 adds its
-first verification. The design therefore treats this as a mechanically shared
-path to test, not as an already demonstrated result.
+The implemented candidate loop is F-agnostic by construction, so the same
+video-noise mechanism operates on an `F == 1` latent. Regression coverage now
+includes one-frame T2VA plus one-frame FL2VA with both one control and first/last
+controls. These tests hold the upstream condition layout and time semantics
+fixed across all candidates and the gradient-enabled winner recomputation.
 
 The old video-only name is nevertheless visible on the public
 `origin/qinglong` branch of this fork, together with English and Japanese user
@@ -114,7 +121,9 @@ XM only when the selected raw component is the complete effective objective:
 - Simultaneously exploring video and audio noise in one candidate.
 - Selecting multi-frame candidates by composite video-plus-audio loss.
 - Enabling common `--xm_best_of_k` for H3.
-- One-frame FL2VA or Ref2VA training, control images, or multiple image targets.
+- One-frame Ref2VA training or multiple image targets. One-frame FL2VA and its
+  control images are supplied by upstream and reuse the same prepared-state
+  best-of-K path; this feature does not define a separate control search mode.
 - Treating image best-of-K as a replacement for the guidance loss recommended
   by upstream one-frame documentation.
 - Lifting H3's current `batch_size = 1` restriction.
@@ -211,6 +220,22 @@ avoids meaningless candidate work.
 Validation runs before dataset, accelerator, or model allocation. Failed fresh
 or repeated validation restores base state to `(count=1, enabled=False)`.
 
+### 5.4 Compatibility matrix
+
+| Runtime/training mode | K=1 | K>1 behavior |
+|---|---|---|
+| one-frame T2VA | ordinary upstream step | image search over target-video noise |
+| one-frame FL2VA, one control | ordinary upstream step | image search; control latent, role, text, and time stay fixed |
+| one-frame FL2VA, first/last controls | ordinary upstream step | image search; both controls and both times stay fixed |
+| multi-frame T2VA | ordinary upstream step | configured video or audio stream search |
+| multi-frame FL2VA | ordinary upstream step | configured stream search with conditions fixed |
+| audio stream with zero effective weight | ordinary upstream step | one prepared ordinary-step fallback, without candidates |
+| `--video_only`, image/video stream | supported | supported |
+| `--video_only`, active audio stream | inert at K=1 | rejected during startup validation |
+
+One-frame Ref2VA remains unsupported. Every accepted one-frame layout uses the
+`h3_best_of_k/image/*` metric schema, including FL2VA editing batches.
+
 ## 6. Configuration and Runtime Resolution
 
 Use one immutable configuration object:
@@ -281,9 +306,11 @@ switch_block_swap_for_inference()
 switch_block_swap_for_training()
 ```
 
-The base sampling path already hand-codes this pair, but restoration is after
-the sampling body rather than in `finally`. An exception from
-`sample_image_inference` can leave the transformer in forward-only mode.
+The historical base sampling path hand-coded this pair and restored runtime
+state only after the sampling body. The implementation now covers the entire
+sampling operation with `finally`: block-swap mode, CPU RNG, active-device CUDA
+RNG, and final device cleanup are restored even when `sample_image_inference`
+raises.
 
 Before unified H3 best-of-K implementation, land a separate correctness commit
 that introduces one shared reentrant trainer context and uses it for both
@@ -298,7 +325,10 @@ run the gradient-enabled winner only after candidate restoration
 
 The context contract is:
 
-- unwrap the accelerator model only at the outermost nesting depth;
+- unwrap every requested scope so nested identity can be checked, while
+  switching mode only at the outermost nesting depth;
+- require nested scopes to resolve to the same underlying transformer object;
+  wrapped and unwrapped references to that same object remain valid;
 - invoke the two public transformer methods when both are callable;
 - act as a no-op when the model exposes neither method, and fail clearly if it
   exposes only half of the protocol;
@@ -600,8 +630,11 @@ RNG states, and tensors required to be bitwise unchanged.
   gradients, call count, counters, metric keys, and absence of both best-of-K
   metadata keys.
 - Canonical video K greater than one searches K candidates for both multi-frame
-  and one-frame batches. The latter is the first regression coverage for this
-  previously untested combination.
+  and one-frame batches.
+- One-frame FL2VA at K greater than one covers both a single control and
+  first/last controls. Candidate and winner forwards retain control latents,
+  roles, indices, text rows, layout, and time overrides bitwise or structurally
+  unchanged while only target-video noise varies.
 - Canonical audio stream searches audio for multi-frame batches but video for a
   validated one-frame batch.
 - Each runtime kind emits only its two `h3_best_of_k/<kind>/*` exploration keys;
@@ -642,11 +675,14 @@ RNG states, and tensors required to be bitwise unchanged.
   verify the separate fix with two candidate forwards plus a final backward on
   real available CUDA. Confirm forward-only mode is restored in `finally`.
 - Cover the optional public protocol: neither method is a no-op, half a method
-  is an explicit error, and nested contexts switch and restore exactly once.
+  is an explicit error, same-transformer nested contexts switch and restore
+  exactly once, wrapped/unwrapped references to the same model are accepted,
+  and a different nested transformer fails without leaking depth or mode.
 - Exercise at least one non-H3 base-XM architecture with block swap and verify
   consecutive candidates plus final backward.
-- Force `sample_image_inference` to raise and verify sampling still restores
-  training block-swap mode.
+- Force `sample_image_inference` to consume CPU and available active-device
+  CUDA randomness and then raise. Verify byte-exact RNG restoration, training
+  block-swap restoration, and final device cleanup.
 - Exercise nested H3 guidance probes and assert a valid forward-only state
   sequence plus one final graph under available CUDA autocast.
 - Verify one-frame guidance carries the original layout and time override.
@@ -682,7 +718,7 @@ The revision is complete when:
 - winner recomputation optimizes the unchanged ordinary H3 objective;
 - K=1 preserves existing control flow, RNG, numerics, counters, and metrics;
 - guidance, autocast, sampling exceptions, and classic block swap preserve a
-  valid final graph and restore training state;
+  valid final graph and restore block-swap mode, sampling RNG, and cleanup;
 - user docs explain when H3 selection is objective-equivalent to Forward XM and
   when it is a modality-focused heuristic, and both English and Japanese docs
   give the removed video option's canonical replacement;
@@ -695,7 +731,7 @@ The revision is complete when:
 - Joint video/audio exploration with a composite selection loss.
 - Mixed supervised/unsupervised search after H3 supports real `B > 1` packed
   batches.
-- One-frame FL2VA/Ref2VA or multi-target image best-of-K after upstream support.
+- One-frame Ref2VA or multi-target image best-of-K after upstream support.
 - Batched/chunked candidate execution and performance characterization.
 - A broader versioned PyTorch/CUDA compatibility matrix.
 - Empirical LoRA quality studies comparing video-stream, audio-stream, and

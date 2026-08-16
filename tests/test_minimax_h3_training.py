@@ -913,6 +913,8 @@ class _ToyH3BestOfKTrainer(MiniMaxH3NetworkTrainer):
                 "model_t_audio": state.model_t_audio.detach().clone(),
                 "visual_conditions": tuple(value.detach().clone() for value in state.visual_conditions),
                 "audio_conditions": tuple(value.detach().clone() for value in state.audio_conditions),
+                "text_hidden_states": state.runtime.text_hidden_states.detach().clone(),
+                "text_token_tags": state.runtime.text_token_tags.detach().clone(),
                 "audio_loss_weight": state.audio_loss_weight.detach().clone(),
                 "layout": state.runtime.layout,
                 "cpu_mask": cpu_mask.detach().clone(),
@@ -1247,6 +1249,64 @@ def test_h3_best_of_k_one_frame_overrides_audio_stream_and_keeps_silence_state_f
         assert all(torch.equal(record[key], records[0][key]) for record in records[1:])
     assert torch.equal(records[-1]["video_noise"], records[1]["video_noise"])
     assert torch.equal(loss, torch.tensor(1.0))
+    assert set(metrics) == {
+        "loss/video",
+        "loss/audio",
+        "h3_best_of_k/image/candidate_loss_mean",
+        "h3_best_of_k/image/selection_gain",
+    }
+
+
+@pytest.mark.parametrize(
+    ("roles", "control_indices"),
+    [
+        (("first",), [0]),
+        (("first", "last"), [0, 48]),
+    ],
+)
+def test_h3_best_of_k_one_frame_fl2va_keeps_control_layout_and_times_fixed(monkeypatch, roles, control_indices):
+    trainer = _ToyH3BestOfKTrainer()
+    args = _trainer_args(task="fl2va", one_frame=True, h3_best_of_k=2, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(args)
+    batch = _one_frame_fl_batch(target_index=24, control_indices=control_indices, roles=roles)
+    batch["timesteps"] = [0.25]
+    latents = torch.zeros(1, 24, 1, 4, 4)
+    monkeypatch.setattr(torch, "randn_like", lambda reference, *args, **kwargs: torch.zeros_like(reference))
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
+
+    _, metrics = trainer.process_batch_best_of_k(
+        args,
+        _Accelerator(),
+        None,
+        None,
+        batch,
+        latents,
+        torch.zeros_like(latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    records = trainer.best_of_k_records
+    assert [record["grad_enabled"] for record in records] == [False, False, True]
+    assert all(record["layout"].task == "fl2va" for record in records)
+    expected_condition_times = tuple(FRAME_RESCALE * index for index in control_indices)
+    assert all(record["layout"].time_overrides.condition_times == expected_condition_times for record in records)
+    assert all(record["layout"].time_overrides.target_time == FRAME_RESCALE * 24 for record in records)
+    assert all(
+        tuple(segment.role for segment in record["layout"].segments if segment.kind == "visual_condition") == roles
+        for record in records
+    )
+    assert not torch.equal(records[0]["video_noise"], records[1]["video_noise"])
+    for record in records[1:]:
+        assert len(record["visual_conditions"]) == len(roles)
+        assert all(torch.equal(left, right) for left, right in zip(record["visual_conditions"], records[0]["visual_conditions"]))
+        assert torch.equal(record["text_hidden_states"], records[0]["text_hidden_states"])
+        assert torch.equal(record["text_token_tags"], records[0]["text_token_tags"])
+        assert torch.equal(record["audio_noise"], records[0]["audio_noise"])
+        assert torch.equal(record["noisy_audio"], records[0]["noisy_audio"])
     assert set(metrics) == {
         "loss/video",
         "loss/audio",
