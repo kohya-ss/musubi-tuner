@@ -162,15 +162,102 @@ def _h3_image_dataset(tmp_path: Path, **overrides):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"control_directory": "controls"}, "control images"),
         ({"multiple_target": True}, "multiple targets"),
-        ({"fp_1f_clean_indices": [0]}, "fp_1f_clean_indices"),
+        ({"no_resize_control": True}, "no_resize_control"),
+        ({"control_resolution": (512, 512)}, "control_resolution"),
         ({"fp_1f_target_index": -1}, "nonnegative"),
+        # time-annotated control validation: indices and controls must arrive together, with an
+        # explicit target index and 1..2 nonnegative entries
+        ({"control_directory": "controls"}, "require fp_1f_clean_indices"),
+        ({"fp_1f_clean_indices": [0]}, "explicit fp_1f_target_index"),
+        ({"fp_1f_clean_indices": [0], "fp_1f_target_index": 24}, "requires control images"),
+        ({"fp_1f_clean_indices": [0, 1, 2], "fp_1f_target_index": 24}, "1 or 2 entries"),
+        ({"fp_1f_clean_indices": [-1], "fp_1f_target_index": 24}, "nonnegative"),
     ],
 )
 def test_h3_image_dataset_rejects_unsupported_one_frame_features(tmp_path: Path, overrides: dict, message: str):
     with pytest.raises(ValueError, match=message):
         _h3_image_dataset(tmp_path, **overrides)
+
+
+def test_h3_image_dataset_jsonl_control_paths_require_indices(tmp_path: Path):
+    jsonl = tmp_path / "items.jsonl"
+    jsonl.write_text('{"image_path": "target.png", "caption": "c", "control_path": "source.png"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="require fp_1f_clean_indices"):
+        _h3_image_dataset(tmp_path, image_directory=None, image_jsonl_file=str(jsonl))
+
+
+def test_h3_jsonl_datasource_exposes_control_paths_for_fingerprinting(tmp_path: Path):
+    jsonl = tmp_path / "items.jsonl"
+    jsonl.write_text(
+        '{"image_path": "a.png", "caption": "c", "control_path": "s0.png", "control_path_1": "s1.png"}\n',
+        encoding="utf-8",
+    )
+    dataset = _h3_image_dataset(
+        tmp_path,
+        image_directory=None,
+        image_jsonl_file=str(jsonl),
+        fp_1f_clean_indices=[0, 48],
+        fp_1f_target_index=24,
+    )
+
+    assert dataset.datasource.get_control_paths() == {"a.png": ["s0.png", "s1.png"]}
+
+
+def test_h3_image_dataset_with_controls_splits_buckets_and_forwards_indices(tmp_path: Path):
+    dataset = _h3_image_dataset(
+        tmp_path,
+        control_directory=str(tmp_path / "ctrl"),
+        fp_1f_clean_indices=[0],
+        fp_1f_target_index=24,
+    )
+    assert dataset.has_control
+
+    class FakeImageDatasource:
+        has_control = True
+
+        def __iter__(self):
+            from PIL import Image
+
+            image = Image.new("RGB", (64, 64))
+            control = Image.new("RGB", (128, 128))  # resized to the bucket resolution
+            yield lambda: (str(tmp_path / "target.png"), [image], "caption", [control])
+
+    dataset.datasource = FakeImageDatasource()
+
+    batches = list(dataset.retrieve_latent_cache_batches(num_workers=1))
+
+    assert len(batches) == 1
+    bucket, items = batches[0]
+    # (W, H) + control count + per-control bucket-resized shape
+    assert bucket == (64, 64, 1, 64, 64)
+    assert items[0].fp_1f_clean_indices == [0]
+    assert items[0].fp_1f_target_index == 24
+    assert len(items[0].control_content) == 1
+    assert items[0].control_content[0].shape == (64, 64, 3)
+
+
+def test_h3_image_prepare_for_training_splits_buckets_by_control_count(tmp_path: Path):
+    from safetensors.torch import save_file
+
+    for stem in ("edit", "plain"):
+        # the control-key scan reads real safetensors headers, so the caches must be well-formed
+        save_file({"latents": torch.zeros(1)}, str(tmp_path / f"{stem}_0064x0064_mmh3.safetensors"))
+        save_file({"rows": torch.zeros(1)}, str(tmp_path / f"{stem}_mmh3_te.safetensors"))
+    with_controls = _h3_image_dataset(
+        tmp_path,
+        control_directory=str(tmp_path / "ctrl"),
+        fp_1f_clean_indices=[0, 48],
+        fp_1f_target_index=24,
+    )
+    without_controls = _h3_image_dataset(tmp_path)
+
+    with_controls.prepare_for_training()
+    without_controls.prepare_for_training()
+
+    assert set(with_controls.batch_manager.buckets) == {(64, 64, 2)}
+    assert set(without_controls.batch_manager.buckets) == {(64, 64)}
 
 
 def test_h3_image_dataset_forwards_the_target_index_to_items(tmp_path: Path):

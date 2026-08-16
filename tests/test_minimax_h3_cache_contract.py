@@ -34,6 +34,7 @@ from musubi_tuner.minimax_h3_cache_latents import (
 from musubi_tuner.dataset.bucket import BucketBatchManager
 from musubi_tuner.dataset.cache_io import (
     AUDIO_PRESENT_KEY,
+    ONE_FRAME_CONTROL_INDICES_KEY,
     ONE_FRAME_TARGET_INDEX_KEY,
     save_latent_cache_minimax_h3,
     save_text_encoder_output_cache_minimax_h3,
@@ -1038,3 +1039,132 @@ def test_h3_latent_writer_rejects_invalid_one_frame_target_indices(tmp_path: Pat
     for index in invalid:
         with pytest.raises(ValueError, match=ONE_FRAME_TARGET_INDEX_KEY):
             save_latent_cache_minimax_h3(item, {**base, ONE_FRAME_TARGET_INDEX_KEY: index}, {"task": "t2va"})
+
+
+@pytest.mark.parametrize("control_indices", [[0], [0, 48]])
+def test_build_one_frame_latents_pack_controls_and_their_indices(tmp_path: Path, control_indices: list[int]):
+    image_path = _touch(tmp_path / "target.png")
+    video_vae = _FakeH3VideoVAE()
+    controls = [torch.full((64, 64, 3), 32 * (index + 1), dtype=torch.uint8) for index in range(len(control_indices))]
+
+    payload = build_one_frame_latent_tensors(
+        image_frames=torch.zeros(64, 64, 3, dtype=torch.uint8),
+        target_index=24,
+        video_vae=video_vae,
+        silence_audio_latent=torch.zeros(32, 2, 2),
+        cache_seed=123,
+        item_key=str(image_path),
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={image_path: "target-image"},
+        control_frames=controls,
+        control_indices=control_indices,
+    )
+
+    expected_roles = ("first", "last")[: len(control_indices)]
+    assert set(payload.tensors) == {
+        "latents_1x4x4_float32",
+        "latents_audio_32x2x2_float32",
+        AUDIO_PRESENT_KEY,
+        ONE_FRAME_TARGET_INDEX_KEY,
+        ONE_FRAME_CONTROL_INDICES_KEY,
+        *(f"latents_{role}_1x4x4_float32" for role in expected_roles),
+    }
+    indices = payload.tensors[ONE_FRAME_CONTROL_INDICES_KEY]
+    assert indices.dtype == torch.int64 and indices.tolist() == control_indices
+    # target encode + one condition encode per control
+    assert [call.shape for call in video_vae.calls] == [(1, 3, 1, 64, 64)] * (1 + len(control_indices))
+    assert payload.metadata["task"] == "fl2va"
+    assert payload.metadata["one_frame"] == "1"
+    assert payload.metadata["one_frame_control_indices"] == ";".join(str(index) for index in control_indices)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"control_frames": [torch.zeros(64, 64, 3, dtype=torch.uint8)]}, "together"),
+        ({"control_indices": [0]}, "together"),
+        (
+            {"control_frames": [torch.zeros(64, 64, 3, dtype=torch.uint8)] * 3, "control_indices": [0, 1, 2]},
+            "1 or 2 control images",
+        ),
+        (
+            {"control_frames": [torch.zeros(64, 64, 3, dtype=torch.uint8)], "control_indices": [0, 48]},
+            "does not match",
+        ),
+        (
+            {"control_frames": [torch.zeros(32, 32, 3, dtype=torch.uint8)], "control_indices": [0]},
+            "does not match the target",
+        ),
+        (
+            {"control_frames": [torch.zeros(64, 64, 3, dtype=torch.uint8)], "control_indices": [-1]},
+            "nonnegative",
+        ),
+    ],
+)
+def test_build_one_frame_latents_reject_invalid_controls(tmp_path: Path, overrides: dict, message: str):
+    image_path = _touch(tmp_path / "target.png")
+    inputs = dict(
+        image_frames=torch.zeros(64, 64, 3, dtype=torch.uint8),
+        target_index=24,
+        video_vae=_FakeH3VideoVAE(),
+        silence_audio_latent=torch.zeros(32, 2, 2),
+        cache_seed=0,
+        item_key=str(image_path),
+        video_vae_fingerprint="video-fingerprint",
+        audio_vae_fingerprint="audio-fingerprint",
+        media_fingerprints={image_path: "target-image"},
+    )
+    inputs.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        build_one_frame_latent_tensors(**inputs)
+
+
+def test_one_frame_control_cache_keys_round_trip_through_the_bucket_collator(tmp_path: Path):
+    item = ItemInfo("edit", "an editing caption", (64, 64), (64, 64, 1))
+    item.latent_cache_path = str(tmp_path / "edit_0064x0064_mmh3.safetensors")
+    item.text_encoder_output_cache_path = str(tmp_path / "edit_mmh3_te.safetensors")
+    latent_tensors = {
+        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
+        "latents_first_1x4x4_float32": torch.ones(24, 1, 4, 4),
+        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
+        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
+        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(24, dtype=torch.int64),
+        ONE_FRAME_CONTROL_INDICES_KEY: torch.tensor([0], dtype=torch.int64),
+    }
+    text_tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 1, 1], dtype=torch.int64),
+    }
+    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "fl2va", "one_frame": "1"})
+    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "fl2va"})
+
+    manager = BucketBatchManager({(64, 64, 1): [item]}, batch_size=1)
+    batch = manager[0]
+
+    assert batch["latents"].shape == (1, 24, 1, 4, 4)
+    assert batch["latents_first"].shape == (1, 24, 1, 4, 4)
+    torch.testing.assert_close(batch["one_frame_target_index"], torch.tensor([24], dtype=torch.int64))
+    torch.testing.assert_close(batch["one_frame_control_indices"], torch.tensor([[0]], dtype=torch.int64))
+
+
+def test_h3_latent_writer_rejects_invalid_one_frame_control_indices(tmp_path: Path):
+    item = _h3_item(tmp_path)
+    base = {
+        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
+        "latents_first_1x4x4_float32": torch.zeros(24, 1, 4, 4),
+        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
+        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
+        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(24, dtype=torch.int64),
+    }
+    invalid = (
+        torch.tensor(0, dtype=torch.int64),
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([-1], dtype=torch.int64),
+        torch.tensor([0, 1, 2], dtype=torch.int64),
+        torch.zeros(1, 1, dtype=torch.int64),
+    )
+    for indices in invalid:
+        with pytest.raises(ValueError, match=ONE_FRAME_CONTROL_INDICES_KEY):
+            save_latent_cache_minimax_h3(item, {**base, ONE_FRAME_CONTROL_INDICES_KEY: indices}, {"task": "fl2va"})

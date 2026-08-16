@@ -162,8 +162,11 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
             provided_frames = int(bool(args.first_frame)) + int(bool(args.last_frame))
             # a missing-frames error is raised by the task input checks below
             if provided_frames and (control_indices is None or len(control_indices) != provided_frames):
+                given = 0 if control_indices is None else len(control_indices)
+                provided = " and ".join(label for label in ("first_frame", "last_frame") if getattr(args, label))
                 raise ValueError(
-                    "MiniMax-H3 one-frame FL2VA requires --one_frame control_index with one entry per provided frame, "
+                    "MiniMax-H3 one-frame FL2VA requires --one_frame control_index with one entry per provided frame:"
+                    f" got {given} control_index entries for {provided_frames} condition frames ({provided}), "
                     'e.g. --one_frame "target_index=24,control_index=0" for a first frame at index 0'
                 )
         elif control_indices is not None:
@@ -1053,12 +1056,15 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
     with open(args.from_file, "r", encoding="utf-8") as handle:
         lines = handle.readlines()
     items: list[_BatchItem] = []
-    for line in lines:
+    for line_number, line in enumerate(lines, start=1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        prompt_args = apply_overrides(args, parse_prompt_line(line))
-        validate_prompt_args(prompt_args, directory_output=True)
+        try:
+            prompt_args = apply_overrides(args, parse_prompt_line(line))
+            validate_prompt_args(prompt_args, directory_output=True)
+        except ValueError as error:
+            raise ValueError(f"MiniMax-H3 --from_file line {line_number} is invalid: {error}") from error
         items.append(_BatchItem(index=len(items), args=prompt_args))
     if not items:
         logger.warning("MiniMax-H3 --from_file %s contains no prompts", args.from_file)
