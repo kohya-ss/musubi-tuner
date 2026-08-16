@@ -8,6 +8,11 @@ Branch: `codex/issue-1019-explorative-modeling`
 
 Base: `kohya-ss/musubi-tuner@ff8a5c2db832f3d1b458c898e040cfb5d19d0a3d`
 
+MiniMax-H3 extension note: the modality-specific H3 contract in this document
+is superseded by
+[`2026-08-16-minimax-h3-modality-best-of-k-design.md`](2026-08-16-minimax-h3-modality-best-of-k-design.md).
+The common Forward XM contract remains defined here.
+
 ## 1. Summary
 
 R1 adds opt-in Forward Explorative Modeling (Forward XM) to compatible
