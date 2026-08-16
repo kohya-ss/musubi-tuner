@@ -135,6 +135,13 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 minimax
   ... # remaining flags as in docs/minimax_h3.md
 ```
 
+`--h3_best_of_k K` also applies to one-frame batches when `K > 1`. Image
+batches always vary video noise, rank raw image/video MSE, and log
+`h3_best_of_k/image/*`; `--h3_best_of_k_stream` controls only multi-frame
+batches. A mixed image/video run uses the same K for both batch kinds. The
+former experimental `--h3_video_best_of_k` spelling was removed; use
+`--h3_best_of_k K --h3_best_of_k_stream video` for its multi-frame behavior.
+
 - **The guidance loss is effectively mandatory for one-frame training.** Without it, de-distillation drift surfaces within ~50 steps as structural degradation — wobbly lines and broken proportions, like low-CFG output of an undistilled model — rather than the washout seen in video training (image steps average over far fewer target rows and repeat a small dataset quickly). `--h3_guidance_loss_scale 4.0 --h3_guidance_loss_sigma_min 0.15` with an uncond cache (see `docs/minimax_h3.md`) restored clean structure in testing; a short LR warmup (e.g. 50 steps) also helps the early phase.
 - `--video_only` is recommended for image-only runs: the silence placeholders are excluded from audio supervision by presence gating either way, so the audio loss would always be 0.
 - Steps are much cheaper than video steps (a 1 MP image is a few hundred target rows); with block swap active, per-step time is dominated by weight streaming rather than compute.
@@ -147,4 +154,7 @@ Training-time samples support one-frame outputs: `--f 1` in a sample prompt line
 A watercolor lighthouse at dusk. --w 1024 --h 1024 --f 1 --s 30 --d 42
 ```
 
-The LoRA metadata records `ss_minimax_h3_one_frame` for provenance. The resulting LoRA loads into generation as usual (one-frame or video).
+The LoRA metadata records `ss_minimax_h3_one_frame` for provenance. Active
+best-of-K also records `ss_minimax_h3_best_of_k` and the configured multi-frame
+`ss_minimax_h3_best_of_k_stream`; neither best-of-K key is written at K=1. The
+resulting LoRA loads into generation as usual (one-frame or video).

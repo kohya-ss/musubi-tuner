@@ -240,37 +240,87 @@ def test_h3_parser_defaults_to_the_only_supported_training_coordinates():
     assert "--h3_video_only" not in parser.format_help()
 
 
-def test_h3_parser_exposes_separate_video_best_of_k_option(tmp_path, monkeypatch):
+def test_h3_parser_exposes_one_best_of_k_count_and_multiframe_stream(tmp_path, monkeypatch):
     parser = minimax_h3_setup_parser(argparse.ArgumentParser())
-    assert parser.parse_args(["--task", "t2va"]).h3_video_best_of_k == 1
-    assert parser.parse_args(["--task", "t2va", "--h3_video_best_of_k", "3"]).h3_video_best_of_k == 3
+    defaults = parser.parse_args(["--task", "t2va"])
+    configured = parser.parse_args(["--task", "t2va", "--h3_best_of_k", "3", "--h3_best_of_k_stream", "audio"])
+    assert (defaults.h3_best_of_k, defaults.h3_best_of_k_stream) == (1, "video")
+    assert (configured.h3_best_of_k, configured.h3_best_of_k_stream) == (3, "audio")
 
     config = tmp_path / "h3_best_of_k.toml"
-    config.write_text('task = "t2va"\nh3_video_best_of_k = 4\n', encoding="utf-8")
+    config.write_text('task = "t2va"\nh3_best_of_k = 4\nh3_best_of_k_stream = "audio"\n', encoding="utf-8")
     common_parser = minimax_h3_setup_parser(setup_parser_common())
     monkeypatch.setattr(sys, "argv", ["minimax_h3_train_network", "--config_file", str(config)])
     args = common_parser.parse_args()
-    assert read_config_from_file(args, common_parser).h3_video_best_of_k == 4
+    loaded = read_config_from_file(args, common_parser)
+    assert (loaded.h3_best_of_k, loaded.h3_best_of_k_stream) == (4, "audio")
 
 
-def test_h3_best_of_k_validation_uses_the_h3_option_and_rejects_forward_xm():
+@pytest.mark.parametrize(
+    ("option", "guidance"),
+    [
+        ("--h3_video_best_of_k", "--h3_best_of_k_stream video"),
+        ("--h3_audio_best_of_k", "--h3_best_of_k_stream audio"),
+        ("--h3_image_best_of_k", "one-frame batches automatically search video"),
+    ],
+)
+def test_removed_h3_best_of_k_cli_names_fail_with_hidden_migration_guidance(capsys, option, guidance):
+    parser = minimax_h3_setup_parser(argparse.ArgumentParser())
+
+    for removed_args in ([option], [option, "3"]):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--task", "t2va", *removed_args])
+
+        error = capsys.readouterr().err
+        assert option in error
+        assert "--h3_best_of_k" in error
+        assert guidance in error
+    assert option not in parser.format_help()
+
+
+@pytest.mark.parametrize(
+    ("key", "guidance"),
+    [
+        ("h3_video_best_of_k", "--h3_best_of_k_stream video"),
+        ("h3_audio_best_of_k", "--h3_best_of_k_stream audio"),
+        ("h3_image_best_of_k", "one-frame batches automatically search video"),
+    ],
+)
+def test_removed_h3_best_of_k_toml_names_fail_with_the_same_migration_guidance(tmp_path, monkeypatch, key, guidance):
+    config = tmp_path / "removed_h3_best_of_k.toml"
+    config.write_text(f'task = "t2va"\n{key} = 3\n', encoding="utf-8")
+    parser = minimax_h3_setup_parser(setup_parser_common())
+    monkeypatch.setattr(sys, "argv", ["minimax_h3_train_network", "--config_file", str(config)])
+    args = read_config_from_file(parser.parse_args(), parser)
+
+    with pytest.raises(ValueError) as error:
+        MiniMaxH3NetworkTrainer()._validate_and_init_best_of_k(args)
+
+    assert f"--{key}" in str(error.value)
+    assert "--h3_best_of_k" in str(error.value)
+    assert guidance in str(error.value)
+
+
+def test_h3_best_of_k_validation_uses_the_canonical_option_and_rejects_forward_xm():
     trainer = MiniMaxH3NetworkTrainer()
 
-    with pytest.raises(ValueError, match=r"--h3_video_best_of_k.*at least 1"):
-        trainer._validate_and_init_best_of_k(_trainer_args(h3_video_best_of_k=0, xm_best_of_k=1))
-    with pytest.raises(ValueError, match=r"not Forward XM.*--h3_video_best_of_k"):
-        trainer._validate_and_init_best_of_k(_trainer_args(h3_video_best_of_k=1, xm_best_of_k=2))
+    with pytest.raises(ValueError, match=r"--h3_best_of_k.*integer.*at least 1"):
+        trainer._validate_and_init_best_of_k(_trainer_args(h3_best_of_k=0, xm_best_of_k=1))
+    with pytest.raises(ValueError, match=r"--xm_best_of_k.*valid integer 1.*--h3_best_of_k"):
+        trainer._validate_and_init_best_of_k(_trainer_args(h3_best_of_k=1, xm_best_of_k=2))
 
-    trainer._validate_and_init_best_of_k(_trainer_args(h3_video_best_of_k=2, xm_best_of_k=1))
+    trainer._validate_and_init_best_of_k(_trainer_args(h3_best_of_k=2, h3_best_of_k_stream="audio", xm_best_of_k=1))
     assert trainer._best_of_k_count == 2
     assert trainer._best_of_k_enabled is True
+    assert trainer._h3_best_of_k_config.count == 2
+    assert trainer._h3_best_of_k_config.multi_frame_stream == "audio"
 
 
 def test_h3_best_of_k_rejects_teacher_matching_before_candidate_execution():
     trainer = MiniMaxH3NetworkTrainer()
 
-    with pytest.raises(ValueError, match=r"h3_teacher_matching.*candidate-selection.*h3_video_best_of_k"):
-        trainer._validate_and_init_best_of_k(_trainer_args(h3_video_best_of_k=2, h3_teacher_matching=True))
+    with pytest.raises(ValueError, match=r"h3_teacher_matching.*--h3_best_of_k"):
+        trainer._validate_and_init_best_of_k(_trainer_args(h3_best_of_k=2, h3_teacher_matching=True))
 
     assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (1, False)
 
@@ -282,10 +332,10 @@ def test_h3_best_of_k_rejects_teacher_matching_before_candidate_execution():
         ("xm_best_of_k", "1.0"),
         ("xm_best_of_k", "true"),
         ("xm_best_of_k", '"1"'),
-        ("h3_video_best_of_k", "0"),
-        ("h3_video_best_of_k", "1.0"),
-        ("h3_video_best_of_k", "true"),
-        ("h3_video_best_of_k", '"1"'),
+        ("h3_best_of_k", "0"),
+        ("h3_best_of_k", "1.0"),
+        ("h3_best_of_k", "true"),
+        ("h3_best_of_k", '"1"'),
     ],
 )
 def test_h3_best_of_k_validation_rejects_invalid_toml_types_and_zero(tmp_path, monkeypatch, option, toml_value):
@@ -302,15 +352,50 @@ def test_h3_best_of_k_validation_rejects_invalid_toml_types_and_zero(tmp_path, m
     assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (1, False)
 
 
-def test_h3_best_of_k_startup_log_names_the_distinct_objective(caplog):
+@pytest.mark.parametrize("toml_value", ['"image"', "true", "3"])
+def test_h3_best_of_k_validation_rejects_invalid_toml_stream_values(tmp_path, monkeypatch, toml_value):
+    config = tmp_path / "invalid_h3_best_of_k_stream.toml"
+    config.write_text(f'task = "t2va"\nh3_best_of_k = 2\nh3_best_of_k_stream = {toml_value}\n', encoding="utf-8")
+    parser = minimax_h3_setup_parser(setup_parser_common())
+    monkeypatch.setattr(sys, "argv", ["minimax_h3_train_network", "--config_file", str(config)])
+    args = read_config_from_file(parser.parse_args(), parser)
+    trainer = MiniMaxH3NetworkTrainer()
+
+    with pytest.raises(ValueError, match=r"--h3_best_of_k_stream.*video.*audio"):
+        trainer._validate_and_init_best_of_k(args)
+
+    assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (1, False)
+
+
+def test_h3_best_of_k_rejects_audio_stream_when_video_only_and_restores_default_state():
+    trainer = MiniMaxH3NetworkTrainer()
+    trainer._validate_and_init_best_of_k(_trainer_args(h3_best_of_k=2, h3_best_of_k_stream="video"))
+
+    with pytest.raises(ValueError, match=r"--video_only.*--h3_best_of_k_stream audio"):
+        trainer._validate_and_init_best_of_k(_trainer_args(h3_best_of_k=2, h3_best_of_k_stream="audio", video_only=True))
+
+    assert (trainer._best_of_k_count, trainer._best_of_k_enabled) == (1, False)
+    assert trainer._h3_best_of_k_config.count == 1
+    assert trainer._h3_best_of_k_config.multi_frame_stream == "video"
+
+
+def test_h3_best_of_k_startup_log_names_the_stream_and_static_fallbacks(caplog):
     caplog.set_level("INFO")
     trainer = MiniMaxH3NetworkTrainer()
-    trainer._validate_and_init_best_of_k(_trainer_args(h3_video_best_of_k=2, xm_best_of_k=1))
+    trainer._validate_and_init_best_of_k(
+        _trainer_args(
+            h3_best_of_k=2,
+            h3_best_of_k_stream="audio",
+            audio_loss_weight=0.0,
+            one_frame=True,
+            xm_best_of_k=1,
+        )
+    )
 
-    assert "video-focused best-of-K heuristic" in caplog.text
-    assert "not Forward XM" in caplog.text
-    assert "selection objective: video only" in caplog.text
-    assert "final objective: video + weighted audio" in caplog.text
+    assert "MiniMax-H3 best-of-K enabled" in caplog.text
+    assert "multi-frame stream=audio" in caplog.text
+    assert "audio_loss_weight is 0" in caplog.text
+    assert "one-frame batches override" in caplog.text
     assert "K=2" in caplog.text
     assert "1.67x" in caplog.text
     assert "Forward XM enabled for MiniMax-H3" not in caplog.text
@@ -784,7 +869,7 @@ def test_process_batch_uses_one_shared_base_time_and_independent_audio_noise(mon
     assert metrics["loss/video"] == pytest.approx(expected_video_loss.item())
     assert metrics["loss/audio"] == pytest.approx(expected_audio_loss.item())
     assert torch.equal(rng_after, rng_before)
-    assert "h3_video_best_of_k/candidate_loss_mean" not in metrics
+    assert not any(key.startswith("h3_best_of_k/") for key in metrics)
 
 
 class _ToyH3BestOfKTrainer(MiniMaxH3NetworkTrainer):
@@ -801,14 +886,13 @@ class _ToyH3BestOfKTrainer(MiniMaxH3NetworkTrainer):
         transformer,
         batch,
         latents,
-        video_noise,
-        noisy_video,
         state,
+        inputs,
         network_dtype,
         network=None,
     ):
         del args, transformer, batch, network
-        is_candidate_zero = torch.count_nonzero(video_noise).item() == 0
+        is_candidate_zero = torch.count_nonzero(inputs.video_noise).item() == 0
         video_error = 2.0 if is_candidate_zero else 1.0
         audio_error = 0.0 if is_candidate_zero else 10.0
         cpu_mask = torch.rand((), device="cpu")
@@ -818,17 +902,18 @@ class _ToyH3BestOfKTrainer(MiniMaxH3NetworkTrainer):
         self.best_of_k_records.append(
             {
                 "grad_enabled": torch.is_grad_enabled(),
-                "video_noise": video_noise.detach().clone(),
-                "noisy_video": noisy_video.detach().clone(),
+                "video_noise": inputs.video_noise.detach().clone(),
+                "noisy_video": inputs.noisy_video.detach().clone(),
                 "audio_latents": state.audio_latents.detach().clone(),
-                "audio_noise": state.audio_noise.detach().clone(),
-                "noisy_audio": state.noisy_audio.detach().clone(),
+                "audio_noise": inputs.audio_noise.detach().clone(),
+                "noisy_audio": inputs.noisy_audio.detach().clone(),
                 "base_time": state.base_time.detach().clone(),
                 "model_t_video": state.model_t_video.detach().clone(),
                 "model_t_audio": state.model_t_audio.detach().clone(),
                 "visual_conditions": tuple(value.detach().clone() for value in state.visual_conditions),
                 "audio_conditions": tuple(value.detach().clone() for value in state.audio_conditions),
                 "audio_loss_weight": state.audio_loss_weight.detach().clone(),
+                "layout": state.runtime.layout,
                 "cpu_mask": cpu_mask.detach().clone(),
                 "device_mask": device_mask.detach().cpu().clone(),
             }
@@ -847,14 +932,14 @@ class _ToyH3BestOfKTrainer(MiniMaxH3NetworkTrainer):
 
 def _run_h3_best_of_k(monkeypatch, trainer=None, device="cpu", transformer=None):
     trainer = trainer or _ToyH3BestOfKTrainer(device)
-    trainer._best_of_k_count = 2
-    trainer._best_of_k_enabled = True
     args = _trainer_args(
         task="ref2va",
         h3_visual_cond_clean=0.5,
         h3_audio_cond_clean=0.5,
-        h3_video_best_of_k=2,
+        h3_best_of_k=2,
+        h3_best_of_k_stream="video",
     )
+    trainer._validate_and_init_best_of_k(args)
     batch = _training_batch()
     batch["latents_audio"] = batch["latents_audio"].to(device)
     batch["timesteps"] = [0.25]
@@ -929,7 +1014,7 @@ def test_h3_best_of_k_rejects_zero_iteration_internal_state_before_final_forward
         task="ref2va",
         h3_visual_cond_clean=0.5,
         h3_audio_cond_clean=0.5,
-        h3_video_best_of_k=2,
+        h3_best_of_k=2,
     )
     batch = _training_batch()
     batch["timesteps"] = [0.25]
@@ -1014,13 +1099,13 @@ def test_h3_best_of_k_selects_video_only_replays_rng_and_keeps_audio_gradient(mo
     assert set(metrics) == {
         "loss/video",
         "loss/audio",
-        "h3_video_best_of_k/candidate_loss_mean",
-        "h3_video_best_of_k/selection_gain",
+        "h3_best_of_k/video/candidate_loss_mean",
+        "h3_best_of_k/video/selection_gain",
     }
     assert metrics["loss/video"].item() == pytest.approx(1.0)
     assert metrics["loss/audio"].item() == pytest.approx(100.0)
-    assert metrics["h3_video_best_of_k/candidate_loss_mean"] == pytest.approx(2.5)
-    assert metrics["h3_video_best_of_k/selection_gain"] == pytest.approx(3.0)
+    assert metrics["h3_best_of_k/video/candidate_loss_mean"] == pytest.approx(2.5)
+    assert metrics["h3_best_of_k/video/selection_gain"] == pytest.approx(3.0)
     assert not any(key.startswith("xm/") for key in metrics)
 
     torch.random.set_rng_state(captured["cpu"])
@@ -1039,6 +1124,234 @@ def test_h3_best_of_k_selects_video_only_replays_rng_and_keeps_audio_gradient(mo
     assert trainer.audio_parameter.grad.item() == pytest.approx(20.0)
 
 
+def test_h3_best_of_k_audio_search_changes_only_audio_and_ignores_the_better_composite_candidate(monkeypatch):
+    class _OpposedObjectivesTrainer(_ToyH3BestOfKTrainer):
+        def _call_training_dit(
+            self,
+            args,
+            accelerator,
+            transformer,
+            batch,
+            latents,
+            state,
+            inputs,
+            network_dtype,
+            network=None,
+        ):
+            super()._call_training_dit(
+                args,
+                accelerator,
+                transformer,
+                batch,
+                latents,
+                state,
+                inputs,
+                network_dtype,
+                network,
+            )
+            candidate_zero = torch.count_nonzero(inputs.audio_noise).item() == 0
+            video_error, audio_error = (10.0, 1.0) if candidate_zero else (0.0, 2.0)
+            return DiTOutput(
+                pred=torch.ones_like(latents) * video_error + self.video_parameter,
+                target=torch.zeros_like(latents),
+                extra={
+                    "audio_pred": torch.ones_like(state.audio_latents) * audio_error + self.audio_parameter,
+                    "audio_target": torch.zeros_like(state.audio_latents),
+                    "audio_loss_weight": state.audio_loss_weight,
+                },
+            )
+
+    trainer = _OpposedObjectivesTrainer()
+    args = _trainer_args(h3_best_of_k=2, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(args)
+    batch = _training_batch()
+    batch["timesteps"] = [0.25]
+    latents = torch.zeros(1, 24, 2, 4, 4)
+    video_noise = torch.zeros_like(latents)
+    monkeypatch.setattr(torch, "randn_like", lambda reference, *args, **kwargs: torch.zeros_like(reference))
+    drawn_shapes = []
+
+    def candidate_one(reference, generator):
+        del generator
+        drawn_shapes.append(tuple(reference.shape))
+        return torch.ones_like(reference)
+
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", candidate_one)
+
+    loss, metrics = trainer.process_batch_best_of_k(
+        args,
+        _Accelerator(),
+        None,
+        None,
+        batch,
+        latents,
+        video_noise,
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    records = trainer.best_of_k_records
+    assert [record["grad_enabled"] for record in records] == [False, False, True]
+    assert drawn_shapes == [(1, 32, 2, 8)]
+    assert all(torch.equal(record["video_noise"], video_noise) for record in records)
+    assert torch.count_nonzero(records[0]["audio_noise"]).item() == 0
+    assert torch.count_nonzero(records[1]["audio_noise"]).item() > 0
+    assert torch.equal(records[2]["audio_noise"], records[0]["audio_noise"])
+    assert all(torch.equal(record["noisy_video"], records[0]["noisy_video"]) for record in records[1:])
+    assert not torch.equal(records[0]["noisy_audio"], records[1]["noisy_audio"])
+    assert torch.equal(records[2]["noisy_audio"], records[0]["noisy_audio"])
+    assert loss.item() == pytest.approx(101.0)
+    assert set(metrics) == {
+        "loss/video",
+        "loss/audio",
+        "h3_best_of_k/audio/candidate_loss_mean",
+        "h3_best_of_k/audio/selection_gain",
+    }
+    assert metrics["h3_best_of_k/audio/candidate_loss_mean"] == pytest.approx(2.5)
+    assert metrics["h3_best_of_k/audio/selection_gain"] == pytest.approx(0.0)
+
+
+def test_h3_best_of_k_one_frame_overrides_audio_stream_and_keeps_silence_state_fixed(monkeypatch):
+    trainer = _ToyH3BestOfKTrainer()
+    args = _trainer_args(one_frame=True, h3_best_of_k=2, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(args)
+    batch = _one_frame_batch(target_index=24)
+    batch["timesteps"] = [0.25]
+    latents = torch.zeros(1, 24, 1, 4, 4)
+    monkeypatch.setattr(torch, "randn_like", lambda reference, *args, **kwargs: torch.zeros_like(reference))
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
+
+    loss, metrics = trainer.process_batch_best_of_k(
+        args,
+        _Accelerator(),
+        None,
+        None,
+        batch,
+        latents,
+        torch.zeros_like(latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    records = trainer.best_of_k_records
+    assert [record["layout"].target_video.frames for record in records] == [1, 1, 1]
+    assert all(record["layout"].time_overrides.target_time == FRAME_RESCALE * 24 for record in records)
+    for key in ("audio_noise", "noisy_audio", "audio_loss_weight"):
+        assert all(torch.equal(record[key], records[0][key]) for record in records[1:])
+    assert torch.equal(records[-1]["video_noise"], records[1]["video_noise"])
+    assert torch.equal(loss, torch.tensor(1.0))
+    assert set(metrics) == {
+        "loss/video",
+        "loss/audio",
+        "h3_best_of_k/image/candidate_loss_mean",
+        "h3_best_of_k/image/selection_gain",
+    }
+
+
+def test_h3_best_of_k_runtime_kind_does_not_leak_between_image_and_audio_batches(monkeypatch):
+    trainer = _ToyH3BestOfKTrainer()
+    args = _trainer_args(one_frame=True, h3_best_of_k=2, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(args)
+    monkeypatch.setattr(torch, "randn_like", lambda reference, *args, **kwargs: torch.zeros_like(reference))
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
+
+    metric_prefixes = []
+    for batch, latents in (
+        (_one_frame_batch(target_index=24), torch.zeros(1, 24, 1, 4, 4)),
+        (_training_batch(), torch.zeros(1, 24, 2, 4, 4)),
+        (_one_frame_batch(target_index=24), torch.zeros(1, 24, 1, 4, 4)),
+    ):
+        batch["timesteps"] = [0.25]
+        _, metrics = trainer.process_batch_best_of_k(
+            args,
+            _Accelerator(),
+            None,
+            None,
+            batch,
+            latents,
+            torch.zeros_like(latents),
+            None,
+            torch.bfloat16,
+            torch.float32,
+            None,
+            0,
+        )
+        metric_prefixes.append({key.rsplit("/", 1)[0] for key in metrics if key.startswith("h3_best_of_k/")})
+
+    assert metric_prefixes == [
+        {"h3_best_of_k/image"},
+        {"h3_best_of_k/audio"},
+        {"h3_best_of_k/image"},
+    ]
+
+
+@pytest.mark.parametrize(("audio_present", "audio_loss_weight"), [(0.0, 1.0), (1.0, 0.0)])
+def test_h3_audio_best_of_k_zero_effective_weight_matches_one_prepared_ordinary_step(monkeypatch, audio_present, audio_loss_weight):
+    args = _trainer_args(h3_best_of_k=2, h3_best_of_k_stream="audio", audio_loss_weight=audio_loss_weight)
+    batch = _training_batch()
+    batch["audio_present"] = torch.tensor([audio_present], dtype=torch.float32)
+    batch["timesteps"] = [0.25]
+    latents = torch.zeros(1, 24, 2, 4, 4)
+    video_noise = torch.zeros_like(latents)
+    monkeypatch.setattr(torch, "randn_like", lambda reference, *args, **kwargs: torch.zeros_like(reference))
+    monkeypatch.setattr(
+        h3_module,
+        "create_candidate_generator",
+        lambda reference: pytest.fail("zero-weight audio fallback must not create a candidate generator"),
+    )
+
+    trainer = _ToyH3BestOfKTrainer()
+    trainer._validate_and_init_best_of_k(args)
+    initial_rng = torch.random.get_rng_state().clone()
+    loss, metrics = trainer.process_batch_best_of_k(
+        args,
+        _Accelerator(),
+        None,
+        None,
+        batch,
+        latents,
+        video_noise,
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+    fallback_rng = torch.random.get_rng_state().clone()
+    torch.random.set_rng_state(initial_rng)
+    ordinary = _ToyH3BestOfKTrainer()
+    ordinary_loss, ordinary_metrics = ordinary.process_batch(
+        args,
+        _Accelerator(),
+        None,
+        None,
+        batch,
+        latents,
+        video_noise,
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+    ordinary_rng = torch.random.get_rng_state().clone()
+
+    assert len(trainer.best_of_k_records) == 1
+    assert trainer.best_of_k_records[0]["grad_enabled"] is True
+    assert torch.equal(loss, ordinary_loss)
+    assert metrics.keys() == ordinary_metrics.keys() == {"loss/video", "loss/audio"}
+    assert all(torch.equal(metrics[key], ordinary_metrics[key]) for key in metrics)
+    assert torch.equal(fallback_rng, ordinary_rng)
+    assert not any(key.startswith("h3_best_of_k/") for key in metrics)
+    assert (trainer._audio_items_seen, trainer._audio_supervised_seen) == (1, int(audio_present))
+
+
 def test_h3_best_of_k_rejects_nonfinite_video_candidate(monkeypatch):
     class _NaNH3Trainer(_ToyH3BestOfKTrainer):
         def __init__(self):
@@ -1054,6 +1367,91 @@ def test_h3_best_of_k_rejects_nonfinite_video_candidate(monkeypatch):
 
     with pytest.raises(ValueError, match=r"MiniMax-H3.*candidate 1.*sample indices \[0\]"):
         _run_h3_best_of_k(monkeypatch, _NaNH3Trainer())
+
+
+def test_h3_audio_best_of_k_ignores_a_nonfinite_unselected_video_component(monkeypatch):
+    class _NonfiniteVideoTrainer(_ToyH3BestOfKTrainer):
+        def __init__(self):
+            super().__init__()
+            self.component_calls = 0
+
+        def _compute_per_sample_component_losses(self, output, network_dtype):
+            video, audio = super()._compute_per_sample_component_losses(output, network_dtype)
+            if self.component_calls == 1:
+                video = torch.full_like(video, torch.nan)
+            self.component_calls += 1
+            return video, audio
+
+    trainer = _NonfiniteVideoTrainer()
+    args = _trainer_args(h3_best_of_k=2, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(args)
+    batch = _training_batch()
+    batch["timesteps"] = [0.25]
+    latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "randn_like", lambda reference, *args, **kwargs: torch.zeros_like(reference))
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
+
+    loss, metrics = trainer.process_batch_best_of_k(
+        args,
+        _Accelerator(),
+        None,
+        None,
+        batch,
+        latents,
+        torch.zeros_like(latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    assert torch.isfinite(loss)
+    assert set(metrics) == {
+        "loss/video",
+        "loss/audio",
+        "h3_best_of_k/audio/candidate_loss_mean",
+        "h3_best_of_k/audio/selection_gain",
+    }
+
+
+def test_h3_audio_best_of_k_rejects_a_nonfinite_selected_audio_component(monkeypatch):
+    class _NonfiniteAudioTrainer(_ToyH3BestOfKTrainer):
+        def __init__(self):
+            super().__init__()
+            self.component_calls = 0
+
+        def _compute_per_sample_component_losses(self, output, network_dtype):
+            video, audio = super()._compute_per_sample_component_losses(output, network_dtype)
+            if self.component_calls == 1:
+                audio = torch.full_like(audio, torch.inf)
+            self.component_calls += 1
+            return video, audio
+
+    trainer = _NonfiniteAudioTrainer()
+    args = _trainer_args(h3_best_of_k=2, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(args)
+    batch = _training_batch()
+    batch["timesteps"] = [0.25]
+    latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "randn_like", lambda reference, *args, **kwargs: torch.zeros_like(reference))
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
+
+    with pytest.raises(ValueError, match=r"MiniMax-H3 audio.*candidate 1.*sample indices \[0\]"):
+        trainer.process_batch_best_of_k(
+            args,
+            _Accelerator(),
+            None,
+            None,
+            batch,
+            latents,
+            torch.zeros_like(latents),
+            None,
+            torch.bfloat16,
+            torch.float32,
+            None,
+            0,
+        )
 
 
 class _ProductionPathAccelerator:
@@ -1114,7 +1512,8 @@ def test_h3_best_of_k_real_production_path_dispatches_pairs_targets_and_keeps_jo
         task="ref2va",
         h3_visual_cond_clean=0.5,
         h3_audio_cond_clean=0.5,
-        h3_video_best_of_k=2,
+        h3_best_of_k=2,
+        h3_best_of_k_stream="video",
         xm_best_of_k=1,
     )
     trainer._validate_and_init_best_of_k(args)
@@ -1178,10 +1577,10 @@ def test_h3_best_of_k_real_production_path_dispatches_pairs_targets_and_keeps_jo
 
     assert candidate_video_losses[1] < candidate_video_losses[0]
     torch.testing.assert_close(records[-1]["video_input"], records[1]["video_input"])
-    assert metrics["h3_video_best_of_k/candidate_loss_mean"] == pytest.approx(
+    assert metrics["h3_best_of_k/video/candidate_loss_mean"] == pytest.approx(
         torch.stack(candidate_video_losses).mean().item(), rel=1e-5, abs=1e-6
     )
-    assert metrics["h3_video_best_of_k/selection_gain"] == pytest.approx(
+    assert metrics["h3_best_of_k/video/selection_gain"] == pytest.approx(
         (candidate_video_losses[0] - candidate_video_losses[1]).item(), rel=1e-5, abs=1e-6
     )
 
@@ -1203,6 +1602,112 @@ def test_h3_best_of_k_real_production_path_dispatches_pairs_targets_and_keeps_jo
 
     final_video_target = video_latents - candidate_one
     final_audio_target = audio_latents - fixed_audio_noise
+    expected_video_loss = torch.nn.functional.mse_loss(records[-1]["video_prediction"].float(), final_video_target.float())
+    expected_audio_loss = torch.nn.functional.mse_loss(records[-1]["audio_prediction"].float(), final_audio_target.float())
+    assert metrics["loss/video"].item() == pytest.approx(expected_video_loss.item(), rel=1e-5, abs=1e-6)
+    assert metrics["loss/audio"].item() == pytest.approx(expected_audio_loss.item(), rel=1e-5, abs=1e-6)
+    assert loss.item() == pytest.approx((expected_video_loss + expected_audio_loss).item(), rel=1e-5, abs=1e-6)
+
+    loss.backward()
+    for parameter in (transformer.video_projection.weight, transformer.audio_projection.weight):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert parameter.grad.abs().sum().item() > 0.0
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")),
+    ],
+)
+def test_h3_audio_best_of_k_real_production_path_pairs_audio_targets_and_keeps_video_fixed(monkeypatch, device):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        task="ref2va",
+        h3_visual_cond_clean=0.5,
+        h3_audio_cond_clean=0.5,
+        h3_best_of_k=2,
+        h3_best_of_k_stream="audio",
+    )
+    trainer._validate_and_init_best_of_k(args)
+
+    transformer = _TinyJointH3Transformer(device)
+    batch = _training_batch()
+    batch["timesteps"] = [0.25]
+    batch["latents_ref_000_image"] = torch.zeros(1, 24, 1, 4, 4)
+    batch["latents_ref_001_audio"] = torch.zeros(1, 32, 2, 8)
+    video_latents = torch.full((1, 24, 2, 4, 4), 2.0, device=device)
+    video_noise = torch.zeros_like(video_latents)
+    fixed_audio_noise = torch.full((1, 32, 2, 8), 0.5, device=device)
+    candidate_audio_noise = torch.ones_like(fixed_audio_noise)
+    audio_noise_draws = 0
+    candidate_reference_shapes = []
+    real_randn_like = torch.randn_like
+
+    def draw_fixed_audio_noise(reference, *positional, **kwargs):
+        nonlocal audio_noise_draws
+        if tuple(reference.shape) == tuple(fixed_audio_noise.shape):
+            audio_noise_draws += 1
+            return fixed_audio_noise.to(dtype=reference.dtype, device=reference.device)
+        return real_randn_like(reference, *positional, **kwargs)
+
+    def draw_candidate(reference, generator):
+        del generator
+        candidate_reference_shapes.append(tuple(reference.shape))
+        return candidate_audio_noise.to(dtype=reference.dtype, device=reference.device)
+
+    monkeypatch.setattr(torch, "randn_like", draw_fixed_audio_noise)
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", draw_candidate)
+
+    loss, metrics = trainer._process_batch_for_training(
+        args,
+        _ProductionPathAccelerator(device),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        video_noise,
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+    records = transformer.records
+
+    assert type(trainer) is MiniMaxH3NetworkTrainer
+    assert [record["grad_enabled"] for record in records] == [False, False, True]
+    assert [record["autocast_enabled"] for record in records] == [device == "cuda"] * 3
+    assert candidate_reference_shapes == [(1, 32, 2, 8)]
+    assert audio_noise_draws == 1
+    for record in records[1:]:
+        torch.testing.assert_close(record["video_input"], records[0]["video_input"], rtol=0.0, atol=0.0)
+
+    audio_latents = batch["latents_audio"].to(device)
+    expected_noises = (fixed_audio_noise, candidate_audio_noise)
+    candidate_audio_losses = []
+    for record, expected_noise in zip(records[:2], expected_noises):
+        sigma_audio = 1.0 - record["model_t_audio"]
+        recovered_noise = (record["audio_input"] - (1.0 - sigma_audio) * audio_latents) / sigma_audio
+        torch.testing.assert_close(recovered_noise, expected_noise)
+        expected_target = audio_latents - expected_noise
+        candidate_audio_losses.append(torch.nn.functional.mse_loss(record["audio_prediction"].float(), expected_target.float()))
+
+    assert candidate_audio_losses[1] < candidate_audio_losses[0]
+    torch.testing.assert_close(records[-1]["audio_input"], records[1]["audio_input"], rtol=0.0, atol=0.0)
+    assert metrics["h3_best_of_k/audio/candidate_loss_mean"] == pytest.approx(
+        torch.stack(candidate_audio_losses).mean().item(), rel=1e-5, abs=1e-6
+    )
+    assert metrics["h3_best_of_k/audio/selection_gain"] == pytest.approx(
+        (candidate_audio_losses[0] - candidate_audio_losses[1]).item(), rel=1e-5, abs=1e-6
+    )
+    assert not any(key.startswith("h3_best_of_k/video/") for key in metrics)
+    assert not any(key.startswith("h3_video_best_of_k/") for key in metrics)
+
+    final_video_target = video_latents - video_noise
+    final_audio_target = audio_latents - candidate_audio_noise
     expected_video_loss = torch.nn.functional.mse_loss(records[-1]["video_prediction"].float(), final_video_target.float())
     expected_audio_loss = torch.nn.functional.mse_loss(records[-1]["audio_prediction"].float(), final_audio_target.float())
     assert metrics["loss/video"].item() == pytest.approx(expected_video_loss.item(), rel=1e-5, abs=1e-6)
@@ -1607,6 +2112,21 @@ def test_one_frame_training_records_provenance_metadata():
     assert "ss_minimax_h3_one_frame" not in MiniMaxH3NetworkTrainer().extra_metadata(_trainer_args())
 
 
+def test_h3_best_of_k_metadata_is_absent_at_k_one_and_records_active_configuration():
+    trainer = MiniMaxH3NetworkTrainer()
+    disabled_args = _trainer_args(h3_best_of_k=1, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(disabled_args)
+    disabled = trainer.extra_metadata(disabled_args)
+    assert "ss_minimax_h3_best_of_k" not in disabled
+    assert "ss_minimax_h3_best_of_k_stream" not in disabled
+
+    enabled_args = _trainer_args(h3_best_of_k=3, h3_best_of_k_stream="audio")
+    trainer._validate_and_init_best_of_k(enabled_args)
+    enabled = trainer.extra_metadata(enabled_args)
+    assert enabled["ss_minimax_h3_best_of_k"] == 3
+    assert enabled["ss_minimax_h3_best_of_k_stream"] == "audio"
+
+
 def test_one_frame_sample_normalization_parses_the_of_option():
     args = _trainer_args(one_frame=True)
 
@@ -1702,6 +2222,29 @@ def test_h3_component_vectors_and_combiner_define_scalar_loss():
     torch.testing.assert_close(canonical, total)
     assert torch.allclose(loss, total.mean(), rtol=1e-5, atol=1e-8)
     assert set(metrics) == {"loss/video", "loss/audio"}
+
+
+def test_h3_zero_audio_weight_makes_the_video_selection_score_the_exact_effective_objective():
+    trainer = MiniMaxH3NetworkTrainer()
+    output = DiTOutput(
+        pred=torch.tensor([[1.0, 5.0]]),
+        target=torch.tensor([[3.0, 1.0]]),
+        extra={"audio_loss_weight": torch.tensor([0.0], dtype=torch.float32)},
+    )
+
+    video, audio = trainer._compute_per_sample_component_losses(output, torch.float32)
+    effective = trainer.compute_per_sample_loss(
+        _trainer_args(),
+        output,
+        torch.tensor(0.25),
+        None,
+        torch.float32,
+        torch.float32,
+        0,
+    )
+
+    assert torch.equal(audio, torch.zeros_like(audio))
+    assert torch.equal(video, effective)
 
 
 @pytest.mark.parametrize(
