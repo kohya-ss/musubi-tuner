@@ -1463,9 +1463,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         # are relative to the target-block cursor, which moves with the text length. The
         # condition roles are recovered from the segments so a one-frame FL2VA layout with a
         # single condition rebuilds identically (roles are required for K=1).
-        uncond_condition_roles = tuple(
-            segment.role for segment in runtime.layout.segments if segment.kind == "visual_condition"
-        )
+        uncond_condition_roles = tuple(segment.role for segment in runtime.layout.segments if segment.kind == "visual_condition")
         uncond_layout = build_h3_layout(
             task=runtime.layout.task,
             text_length=uncond_hidden.shape[0],

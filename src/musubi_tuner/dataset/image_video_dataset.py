@@ -337,9 +337,7 @@ class ImageDataset(BaseDataset):
                 )
             if fp_1f_clean_indices is not None:
                 if not 1 <= len(fp_1f_clean_indices) <= 2:
-                    raise ValueError(
-                        f"MiniMax-H3 fp_1f_clean_indices must have 1 or 2 entries, got {len(fp_1f_clean_indices)}"
-                    )
+                    raise ValueError(f"MiniMax-H3 fp_1f_clean_indices must have 1 or 2 entries, got {len(fp_1f_clean_indices)}")
                 if any(index < 0 for index in fp_1f_clean_indices):
                     raise ValueError(f"MiniMax-H3 fp_1f_clean_indices must be nonnegative, got {fp_1f_clean_indices}")
                 if fp_1f_target_index is None:

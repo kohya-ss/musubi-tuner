@@ -464,8 +464,7 @@ def build_one_frame_latent_tensors(
             raise ValueError(f"MiniMax-H3 one-frame caching accepts 1 or 2 control images, got {len(control_frames)}")
         if len(control_frames) != len(control_indices):
             raise ValueError(
-                f"MiniMax-H3 one-frame control count {len(control_frames)} does not match"
-                f" {len(control_indices)} control indices"
+                f"MiniMax-H3 one-frame control count {len(control_frames)} does not match {len(control_indices)} control indices"
             )
 
     target_pixels = _prepare_pixels(image_frames)

@@ -1060,9 +1060,7 @@ def test_one_frame_fl2va_batch_builds_condition_time_overrides(monkeypatch, role
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
     transformer = _RecordingTransformer()
 
-    _one_frame_process_batch(
-        trainer, args, _one_frame_fl_batch(control_indices=control_indices, roles=roles), transformer
-    )
+    _one_frame_process_batch(trainer, args, _one_frame_fl_batch(control_indices=control_indices, roles=roles), transformer)
 
     layout = transformer.calls[0]["layout"]
     assert layout.task == "fl2va"
