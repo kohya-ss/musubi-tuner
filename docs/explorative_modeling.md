@@ -37,8 +37,8 @@ h3_best_of_k_stream = "video" # or "audio" for multi-frame batches
 accelerate launch src/musubi_tuner/minimax_h3_train_network.py --config_file h3_training.toml --h3_best_of_k 2 --h3_best_of_k_stream video
 ```
 
-The former experimental `--h3_video_best_of_k` spelling was removed before
-merge. Replace it with `--h3_best_of_k K --h3_best_of_k_stream video`.
+The former experimental `--h3_video_best_of_k` spelling was removed. Replace
+it with `--h3_best_of_k K --h3_best_of_k_stream video`.
 The similarly named audio/image count options are not aliases and are rejected
 with migration guidance.
 
@@ -207,7 +207,7 @@ h3_best_of_k_stream = "video" # multi-frame の音声探索では "audio"
 accelerate launch src/musubi_tuner/minimax_h3_train_network.py --config_file h3_training.toml --h3_best_of_k 2 --h3_best_of_k_stream video
 ```
 
-以前の experimental な `--h3_video_best_of_k` は merge 前に削除されました。
+以前の experimental な `--h3_video_best_of_k` は削除されました。
 `--h3_best_of_k K --h3_best_of_k_stream video` に置き換えてください。同様の名前の
 audio/image 用 count オプションも alias ではなく、移行方法を示して拒否されます。
 

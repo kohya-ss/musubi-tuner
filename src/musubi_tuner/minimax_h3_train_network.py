@@ -429,6 +429,11 @@ def _runtime_batch_plan(
     if is_one_frame_batch:
         if not one_frame:
             raise ValueError("MiniMax-H3 batch carries a one-frame latent cache; pass --one_frame to train on image targets")
+        if torch.count_nonzero(audio_present).item():
+            raise ValueError(
+                "MiniMax-H3 one-frame batch requires audio_present=0 for its silence placeholder; "
+                "re-run minimax_h3_cache_latents.py --one_frame"
+            )
         if has_fl_condition or reference_roles or teacher_conditions is not None:
             raise ValueError("MiniMax-H3 one-frame training currently supports plain T2VA caches only")
         if (
@@ -2115,7 +2120,7 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         parser.add_argument(
             f"--{removed_name}",
             action=_RemovedH3BestOfKAction,
-            nargs=0,
+            nargs="?",
             default=argparse.SUPPRESS,
             help=argparse.SUPPRESS,
         )

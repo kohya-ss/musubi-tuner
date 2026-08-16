@@ -267,7 +267,7 @@ def test_h3_parser_exposes_one_best_of_k_count_and_multiframe_stream(tmp_path, m
 def test_removed_h3_best_of_k_cli_names_fail_with_hidden_migration_guidance(capsys, option, guidance):
     parser = minimax_h3_setup_parser(argparse.ArgumentParser())
 
-    for removed_args in ([option], [option, "3"]):
+    for removed_args in ([option], [option, "3"], [f"{option}=3"]):
         with pytest.raises(SystemExit):
             parser.parse_args(["--task", "t2va", *removed_args])
 
@@ -2039,6 +2039,17 @@ def test_one_frame_batch_requires_the_training_flag():
         _one_frame_process_batch(trainer, args, _one_frame_batch(), _RecordingTransformer())
 
 
+def test_one_frame_batch_rejects_a_cache_that_marks_the_silence_placeholder_as_supervised():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(one_frame=True)
+    trainer.handle_model_specific_args(args)
+    batch = _one_frame_batch()
+    batch["audio_present"] = torch.ones(1, dtype=torch.float32)
+
+    with pytest.raises(ValueError, match=r"one-frame.*audio_present=0.*re-run.*--one_frame"):
+        _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
+
+
 @pytest.mark.parametrize(
     "index",
     [None, torch.tensor(24, dtype=torch.int64), torch.tensor([24], dtype=torch.int32), torch.tensor([-1], dtype=torch.int64)],
@@ -2732,12 +2743,21 @@ def test_guidance_loss_rewrites_both_targets_around_the_uncond_prediction(tmp_pa
     assert torch.isfinite(loss)
 
 
-def test_guidance_loss_uses_nested_forward_only_scope_for_uncond_probe(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")),
+    ],
+)
+def test_best_of_k_guidance_uses_nested_forward_only_scopes_and_keeps_the_final_graph(tmp_path, monkeypatch, device):
     class _BlockSwapGuidanceTransformer(_RecordingTransformer):
-        def __init__(self):
+        def __init__(self, device):
             super().__init__()
             self.mode = "training"
             self.events = []
+            self.video_parameter = torch.nn.Parameter(torch.tensor(2.0, device=device))
+            self.audio_parameter = torch.nn.Parameter(torch.tensor(-1.0, device=device))
 
         def switch_block_swap_for_inference(self):
             assert self.mode == "training"
@@ -2753,20 +2773,30 @@ def test_guidance_loss_uses_nested_forward_only_scope_for_uncond_probe(tmp_path,
             expected_mode = "training" if torch.is_grad_enabled() else "forward-only"
             assert self.mode == expected_mode
             self.events.append(f"forward:{expected_mode}")
-            return super().__call__(**kwargs)
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                video=torch.ones_like(kwargs["video_latents"]) * self.video_parameter,
+                audio=torch.ones_like(kwargs["audio_latents"]) * self.audio_parameter,
+            )
 
     trainer = MiniMaxH3NetworkTrainer()
-    args = _trainer_args(h3_guidance_loss_scale=3.0, h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path))
+    args = _trainer_args(
+        h3_best_of_k=2,
+        h3_guidance_loss_scale=3.0,
+        h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path),
+    )
     trainer.handle_model_specific_args(args)
-    transformer = _BlockSwapGuidanceTransformer()
+    trainer._validate_and_init_best_of_k(args)
+    transformer = _BlockSwapGuidanceTransformer(device)
     batch = _training_batch()
-    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    video_latents = torch.zeros(1, 24, 2, 4, 4, device=device)
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
     monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
 
-    loss, _ = trainer.process_batch(
+    loss, _ = trainer._process_batch_for_training(
         args,
-        _Accelerator(),
+        _ProductionPathAccelerator(device),
         transformer,
         None,
         batch,
@@ -2779,8 +2809,25 @@ def test_guidance_loss_uses_nested_forward_only_scope_for_uncond_probe(tmp_path,
         0,
     )
 
-    assert transformer.events == ["inference", "forward:forward-only", "training", "forward:training"]
+    assert transformer.events == [
+        "inference",
+        "forward:forward-only",
+        "forward:forward-only",
+        "forward:forward-only",
+        "forward:forward-only",
+        "training",
+        "inference",
+        "forward:forward-only",
+        "training",
+        "forward:training",
+    ]
+    assert loss.requires_grad
     assert torch.isfinite(loss)
+    loss.backward()
+    for parameter in (transformer.video_parameter, transformer.audio_parameter):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad)
+        assert parameter.grad.abs().item() > 0.0
 
 
 def test_guidance_loss_uncond_layout_carries_the_one_frame_overrides(tmp_path, monkeypatch):
