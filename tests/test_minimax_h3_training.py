@@ -845,7 +845,7 @@ class _ToyH3BestOfKTrainer(MiniMaxH3NetworkTrainer):
         )
 
 
-def _run_h3_best_of_k(monkeypatch, trainer=None, device="cpu"):
+def _run_h3_best_of_k(monkeypatch, trainer=None, device="cpu", transformer=None):
     trainer = trainer or _ToyH3BestOfKTrainer(device)
     trainer._best_of_k_count = 2
     trainer._best_of_k_enabled = True
@@ -867,7 +867,7 @@ def _run_h3_best_of_k(monkeypatch, trainer=None, device="cpu"):
     loss, metrics = trainer.process_batch_best_of_k(
         args,
         _Accelerator(device),
-        None,
+        transformer,
         None,
         batch,
         latents,
@@ -879,6 +879,46 @@ def _run_h3_best_of_k(monkeypatch, trainer=None, device="cpu"):
         0,
     )
     return trainer, loss, metrics
+
+
+def test_h3_best_of_k_uses_forward_only_for_candidates_and_training_for_winner(monkeypatch):
+    class _BlockSwapTransformer:
+        def __init__(self):
+            self.mode = "training"
+            self.events = []
+
+        def switch_block_swap_for_inference(self):
+            assert self.mode == "training"
+            self.mode = "forward-only"
+            self.events.append("inference")
+
+        def switch_block_swap_for_training(self):
+            assert self.mode == "forward-only"
+            self.mode = "training"
+            self.events.append("training")
+
+        def observe_forward(self):
+            expected_mode = "training" if torch.is_grad_enabled() else "forward-only"
+            assert self.mode == expected_mode
+            self.events.append(f"forward:{expected_mode}")
+
+    class _BlockSwapTrainer(_ToyH3BestOfKTrainer):
+        def _call_training_dit(self, *args, **kwargs):
+            transformer = args[2]
+            transformer.observe_forward()
+            return super()._call_training_dit(*args, **kwargs)
+
+    transformer = _BlockSwapTransformer()
+    _, loss, _ = _run_h3_best_of_k(monkeypatch, _BlockSwapTrainer(), transformer=transformer)
+
+    assert transformer.events == [
+        "inference",
+        "forward:forward-only",
+        "forward:forward-only",
+        "training",
+        "forward:training",
+    ]
+    loss.backward()
 
 
 def test_h3_best_of_k_rejects_zero_iteration_internal_state_before_final_forward():
@@ -2146,6 +2186,57 @@ def test_guidance_loss_rewrites_both_targets_around_the_uncond_prediction(tmp_pa
     assert metrics["guidance/base_sigma"] == pytest.approx(0.25)
     assert metrics["guidance/video_gap_rms"] == pytest.approx(2.0)
     assert metrics["guidance/audio_gap_rms"] == pytest.approx(5.0)
+    assert torch.isfinite(loss)
+
+
+def test_guidance_loss_uses_nested_forward_only_scope_for_uncond_probe(tmp_path, monkeypatch):
+    class _BlockSwapGuidanceTransformer(_RecordingTransformer):
+        def __init__(self):
+            super().__init__()
+            self.mode = "training"
+            self.events = []
+
+        def switch_block_swap_for_inference(self):
+            assert self.mode == "training"
+            self.mode = "forward-only"
+            self.events.append("inference")
+
+        def switch_block_swap_for_training(self):
+            assert self.mode == "forward-only"
+            self.mode = "training"
+            self.events.append("training")
+
+        def __call__(self, **kwargs):
+            expected_mode = "training" if torch.is_grad_enabled() else "forward-only"
+            assert self.mode == expected_mode
+            self.events.append(f"forward:{expected_mode}")
+            return super().__call__(**kwargs)
+
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_guidance_loss_scale=3.0, h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path))
+    trainer.handle_model_specific_args(args)
+    transformer = _BlockSwapGuidanceTransformer()
+    batch = _training_batch()
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    loss, _ = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    assert transformer.events == ["inference", "forward:forward-only", "training", "forward:training"]
     assert torch.isfinite(loss)
 
 

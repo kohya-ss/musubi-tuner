@@ -11,6 +11,7 @@ import ast
 import asyncio
 import importlib
 import argparse
+from contextlib import contextmanager
 import math
 import os
 import sys
@@ -117,6 +118,45 @@ class NetworkTrainer:
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
         self._best_of_k_count = 1
         self._best_of_k_enabled = False
+        self._block_swap_forward_only_depth = 0
+        self._block_swap_forward_only_transformer = None
+
+    @contextmanager
+    def block_swap_forward_only(self, accelerator: Accelerator, transformer):
+        """Temporarily enter the transformer's optional forward-only block-swap mode."""
+        if self._block_swap_forward_only_depth > 0:
+            self._block_swap_forward_only_depth += 1
+            try:
+                yield self._block_swap_forward_only_transformer
+            finally:
+                self._block_swap_forward_only_depth -= 1
+            return
+
+        unwrap_model = getattr(accelerator, "unwrap_model", None)
+        unwrapped = unwrap_model(transformer) if callable(unwrap_model) else transformer
+        switch_to_inference = getattr(unwrapped, "switch_block_swap_for_inference", None)
+        switch_to_training = getattr(unwrapped, "switch_block_swap_for_training", None)
+        has_inference = callable(switch_to_inference)
+        has_training = callable(switch_to_training)
+        if has_inference != has_training:
+            raise RuntimeError(
+                "block-swap forward-only protocol must provide both "
+                "switch_block_swap_for_inference and switch_block_swap_for_training"
+            )
+
+        self._block_swap_forward_only_depth = 1
+        self._block_swap_forward_only_transformer = unwrapped
+        try:
+            if has_inference:
+                switch_to_inference()
+            yield unwrapped
+        finally:
+            try:
+                if has_training:
+                    switch_to_training()
+            finally:
+                self._block_swap_forward_only_depth = 0
+                self._block_swap_forward_only_transformer = None
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -876,10 +916,6 @@ class NetworkTrainer:
 
         distributed_state = PartialState()  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
 
-        # Use the unwrapped model
-        transformer = accelerator.unwrap_model(transformer)
-        transformer.switch_block_swap_for_inference()
-
         # Create a directory to save the samples
         save_dir = os.path.join(args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
@@ -892,34 +928,50 @@ class NetworkTrainer:
         except Exception:
             pass
 
-        if distributed_state.num_processes <= 1:
-            # If only one device is available, just use the original prompt list. We don't need to care about the distribution of prompts.
-            with torch.no_grad(), accelerator.autocast():
-                for sample_parameter in sample_parameters:
-                    self.sample_image_inference(
-                        accelerator, args, transformer, dit_dtype, sample_resources, save_dir, sample_parameter, epoch, steps
-                    )
-                    clean_memory_on_device(accelerator.device)
-        else:
-            # Creating list with N elements, where each element is a list of prompt_dicts, and N is the number of processes available (number of devices available)
-            # prompt_dicts are assigned to lists based on order of processes, to attempt to time the image creation time to match enum order. Probably only works when steps and sampler are identical.
-            per_process_params = []  # list of lists
-            for i in range(distributed_state.num_processes):
-                per_process_params.append(sample_parameters[i :: distributed_state.num_processes])
-
-            with torch.no_grad():
-                with distributed_state.split_between_processes(per_process_params) as sample_parameter_lists:
-                    for sample_parameter in sample_parameter_lists[0]:
+        with self.block_swap_forward_only(accelerator, transformer) as inference_transformer:
+            if distributed_state.num_processes <= 1:
+                # If only one device is available, just use the original prompt list. We don't need to care about the distribution of prompts.
+                with torch.no_grad(), accelerator.autocast():
+                    for sample_parameter in sample_parameters:
                         self.sample_image_inference(
-                            accelerator, args, transformer, dit_dtype, sample_resources, save_dir, sample_parameter, epoch, steps
+                            accelerator,
+                            args,
+                            inference_transformer,
+                            dit_dtype,
+                            sample_resources,
+                            save_dir,
+                            sample_parameter,
+                            epoch,
+                            steps,
                         )
                         clean_memory_on_device(accelerator.device)
+            else:
+                # Creating list with N elements, where each element is a list of prompt_dicts, and N is the number of processes available (number of devices available)
+                # prompt_dicts are assigned to lists based on order of processes, to attempt to time the image creation time to match enum order. Probably only works when steps and sampler are identical.
+                per_process_params = []  # list of lists
+                for i in range(distributed_state.num_processes):
+                    per_process_params.append(sample_parameters[i :: distributed_state.num_processes])
+
+                with torch.no_grad():
+                    with distributed_state.split_between_processes(per_process_params) as sample_parameter_lists:
+                        for sample_parameter in sample_parameter_lists[0]:
+                            self.sample_image_inference(
+                                accelerator,
+                                args,
+                                inference_transformer,
+                                dit_dtype,
+                                sample_resources,
+                                save_dir,
+                                sample_parameter,
+                                epoch,
+                                steps,
+                            )
+                            clean_memory_on_device(accelerator.device)
 
         torch.set_rng_state(rng_state)
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state)
 
-        transformer.switch_block_swap_for_training()
         clean_memory_on_device(accelerator.device)
 
     def sample_image_inference(self, accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
@@ -1304,51 +1356,52 @@ class NetworkTrainer:
         device = torch.device(accelerator.device)
         fork_devices = [device] if device.type == "cuda" else []
 
-        for candidate_index in range(self._best_of_k_count):
-            if candidate_index == 0:
-                candidate_noise = noise
-                candidate_input = noisy_candidate_zero
-            else:
-                candidate_noise = draw_candidate_noise(noise, generator)
-                candidate_input = (1.0 - sigma) * latents + sigma * candidate_noise
+        with self.block_swap_forward_only(accelerator, transformer):
+            for candidate_index in range(self._best_of_k_count):
+                if candidate_index == 0:
+                    candidate_noise = noise
+                    candidate_input = noisy_candidate_zero
+                else:
+                    candidate_noise = draw_candidate_noise(noise, generator)
+                    candidate_input = (1.0 - sigma) * latents + sigma * candidate_noise
 
-            with torch.random.fork_rng(devices=fork_devices):
-                with torch.no_grad():
-                    output = self.call_dit(
-                        args,
-                        accelerator,
-                        transformer,
-                        latents,
-                        batch,
+                with torch.random.fork_rng(devices=fork_devices):
+                    with torch.no_grad():
+                        output = self.call_dit(
+                            args,
+                            accelerator,
+                            transformer,
+                            latents,
+                            batch,
+                            candidate_noise,
+                            candidate_input,
+                            timesteps,
+                            network_dtype,
+                        )
+                        candidate_losses = self.compute_per_sample_loss(
+                            args,
+                            output,
+                            timesteps,
+                            noise_scheduler,
+                            dit_dtype,
+                            network_dtype,
+                            global_step,
+                        )
+                candidate_losses_f32 = candidate_losses.detach().float()
+                candidate_loss_sum = candidate_loss_sum + candidate_losses_f32.sum()
+                if candidate_index == 0:
+                    candidate_zero_mean = candidate_losses_f32.mean()
+                try:
+                    best_losses, winner_noise, winner_indices = update_winners(
+                        best_losses,
+                        winner_noise,
+                        winner_indices,
+                        candidate_losses_f32,
                         candidate_noise,
-                        candidate_input,
-                        timesteps,
-                        network_dtype,
+                        candidate_index,
                     )
-                    candidate_losses = self.compute_per_sample_loss(
-                        args,
-                        output,
-                        timesteps,
-                        noise_scheduler,
-                        dit_dtype,
-                        network_dtype,
-                        global_step,
-                    )
-            candidate_losses_f32 = candidate_losses.detach().float()
-            candidate_loss_sum = candidate_loss_sum + candidate_losses_f32.sum()
-            if candidate_index == 0:
-                candidate_zero_mean = candidate_losses_f32.mean()
-            try:
-                best_losses, winner_noise, winner_indices = update_winners(
-                    best_losses,
-                    winner_noise,
-                    winner_indices,
-                    candidate_losses_f32,
-                    candidate_noise,
-                    candidate_index,
-                )
-            except ValueError as error:
-                raise ValueError(f"{self.architecture_full_name}: {error}") from error
+                except ValueError as error:
+                    raise ValueError(f"{self.architecture_full_name}: {error}") from error
 
         if candidate_zero_mean is None:
             raise RuntimeError("internal error: best-of-K candidate loop ran zero iterations")

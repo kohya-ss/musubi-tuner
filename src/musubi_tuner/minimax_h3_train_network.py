@@ -1435,20 +1435,21 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             time_overrides=runtime.layout.time_overrides,
         )
         autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
-        with torch.no_grad(), autocast():
-            uncond = transformer(
-                video_latents=noisy_model_input,
-                audio_latents=noisy_audio_input,
-                text_hidden_states=uncond_hidden.to(device=accelerator.device, dtype=network_dtype).unsqueeze(0),
-                text_token_tags=uncond_tags.to(accelerator.device).unsqueeze(0),
-                layout=uncond_layout,
-                model_t_video=model_t_video,
-                model_t_audio=model_t_audio,
-                visual_condition_latents=visual_conditions,
-                audio_condition_latents=audio_conditions,
-                visual_condition_clean=args.h3_visual_cond_clean,
-                audio_condition_clean=args.h3_audio_cond_clean,
-            )
+        with self.block_swap_forward_only(accelerator, transformer):
+            with torch.no_grad(), autocast():
+                uncond = transformer(
+                    video_latents=noisy_model_input,
+                    audio_latents=noisy_audio_input,
+                    text_hidden_states=uncond_hidden.to(device=accelerator.device, dtype=network_dtype).unsqueeze(0),
+                    text_token_tags=uncond_tags.to(accelerator.device).unsqueeze(0),
+                    layout=uncond_layout,
+                    model_t_video=model_t_video,
+                    model_t_audio=model_t_audio,
+                    visual_condition_latents=visual_conditions,
+                    audio_condition_latents=audio_conditions,
+                    visual_condition_clean=args.h3_visual_cond_clean,
+                    audio_condition_clean=args.h3_audio_cond_clean,
+                )
         uncond_video = uncond.video.detach().float()
         uncond_audio = uncond.audio.detach().float()
         video_gap = video_target.float() - uncond_video
@@ -1730,39 +1731,40 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         device = torch.device(accelerator.device)
         fork_devices = [device] if device.type == "cuda" else []
 
-        for candidate_index in range(self._best_of_k_count):
-            candidate_noise = noise if candidate_index == 0 else draw_candidate_noise(noise, generator)
-            noisy_video = (1.0 - state.sigma_video) * latents + state.sigma_video * candidate_noise
-            with torch.random.fork_rng(devices=fork_devices):
-                with torch.no_grad():
-                    output = self._call_training_dit(
-                        args,
-                        accelerator,
-                        transformer,
-                        batch,
-                        latents,
+        with self.block_swap_forward_only(accelerator, transformer):
+            for candidate_index in range(self._best_of_k_count):
+                candidate_noise = noise if candidate_index == 0 else draw_candidate_noise(noise, generator)
+                noisy_video = (1.0 - state.sigma_video) * latents + state.sigma_video * candidate_noise
+                with torch.random.fork_rng(devices=fork_devices):
+                    with torch.no_grad():
+                        output = self._call_training_dit(
+                            args,
+                            accelerator,
+                            transformer,
+                            batch,
+                            latents,
+                            candidate_noise,
+                            noisy_video,
+                            state,
+                            network_dtype,
+                            network=network,
+                        )
+                        video_losses, _ = self._compute_per_sample_component_losses(output, network_dtype)
+                video_losses_f32 = video_losses.detach().float()
+                candidate_loss_sum = candidate_loss_sum + video_losses_f32.sum()
+                if candidate_index == 0:
+                    candidate_zero_mean = video_losses_f32.mean()
+                try:
+                    best_losses, winner_noise, winner_indices = update_winners(
+                        best_losses,
+                        winner_noise,
+                        winner_indices,
+                        video_losses_f32,
                         candidate_noise,
-                        noisy_video,
-                        state,
-                        network_dtype,
-                        network=network,
+                        candidate_index,
                     )
-                    video_losses, _ = self._compute_per_sample_component_losses(output, network_dtype)
-            video_losses_f32 = video_losses.detach().float()
-            candidate_loss_sum = candidate_loss_sum + video_losses_f32.sum()
-            if candidate_index == 0:
-                candidate_zero_mean = video_losses_f32.mean()
-            try:
-                best_losses, winner_noise, winner_indices = update_winners(
-                    best_losses,
-                    winner_noise,
-                    winner_indices,
-                    video_losses_f32,
-                    candidate_noise,
-                    candidate_index,
-                )
-            except ValueError as error:
-                raise ValueError(f"MiniMax-H3: {error}") from error
+                except ValueError as error:
+                    raise ValueError(f"MiniMax-H3: {error}") from error
 
         if candidate_zero_mean is None:
             raise RuntimeError("internal error: best-of-K candidate loop ran zero iterations")

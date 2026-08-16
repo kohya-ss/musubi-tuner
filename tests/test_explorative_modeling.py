@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.flux_2_train_network_self_flow import Flux2SelfFlowNetworkTrainer
 from musubi_tuner.hidream_o1_train_network import HiDreamO1NetworkTrainer
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
 import musubi_tuner.training.trainer_base as trainer_base_module
@@ -744,11 +745,16 @@ class _ToyAccelerator:
     def __init__(self, device="cpu", autocast_dtype=None):
         self.device = torch.device(device)
         self.autocast_dtype = autocast_dtype
+        self.unwrap_calls = 0
 
     def autocast(self):
         if self.autocast_dtype is None:
             return nullcontext()
         return torch.autocast(self.device.type, dtype=self.autocast_dtype)
+
+    def unwrap_model(self, transformer):
+        self.unwrap_calls += 1
+        return transformer
 
 
 class _ToyTransformer:
@@ -762,6 +768,116 @@ class _ToyTransformer:
         self.block_swap_calls += 1
         self.checkpoint_calls += 1
         return value
+
+
+class _BlockSwapProtocolTransformer(_ToyTransformer):
+    def __init__(self):
+        super().__init__()
+        self.mode = "training"
+        self.events = []
+
+    def switch_block_swap_for_inference(self):
+        assert self.mode == "training"
+        self.mode = "forward-only"
+        self.events.append("inference")
+
+    def switch_block_swap_for_training(self):
+        assert self.mode == "forward-only"
+        self.mode = "training"
+        self.events.append("training")
+
+    def __call__(self, value):
+        expected_mode = "training" if torch.is_grad_enabled() else "forward-only"
+        assert self.mode == expected_mode
+        self.events.append(f"forward:{expected_mode}")
+        return super().__call__(value)
+
+
+class _RealCudaBlockSwapTransformer(torch.nn.Module):
+    def __init__(self, device):
+        super().__init__()
+        self.blocks = torch.nn.ModuleList([torch.nn.Linear(1, 1, bias=False) for _ in range(3)])
+        self.blocks.to(device)
+        self.offloader = create_offloader(
+            "test-xm",
+            self.blocks,
+            num_blocks=len(self.blocks),
+            blocks_to_swap=1,
+            config=BlockSwapConfig(device=torch.device(device), supports_backward=True),
+        )
+        self.offloader.prepare_block_devices_before_forward(self.blocks)
+
+    def switch_block_swap_for_inference(self):
+        self.offloader.set_forward_only(True)
+        self.offloader.prepare_block_devices_before_forward(self.blocks)
+
+    def switch_block_swap_for_training(self):
+        self.offloader.set_forward_only(False)
+        self.offloader.prepare_block_devices_before_forward(self.blocks)
+
+    def forward(self, value):
+        for index, block in enumerate(self.blocks):
+            self.offloader.wait_for_block(index)
+            value = block(value)
+            self.offloader.submit_move_blocks_forward(self.blocks, index)
+        return value
+
+
+def test_block_swap_forward_only_context_is_reentrant_and_restores_after_error():
+    trainer = NetworkTrainer()
+    transformer = _BlockSwapProtocolTransformer()
+    accelerator = _ToyAccelerator()
+
+    with pytest.raises(RuntimeError, match="candidate failed"):
+        with trainer.block_swap_forward_only(accelerator, transformer):
+            with trainer.block_swap_forward_only(accelerator, transformer):
+                raise RuntimeError("candidate failed")
+
+    assert transformer.events == ["inference", "training"]
+    assert transformer.mode == "training"
+    assert accelerator.unwrap_calls == 1
+
+
+def test_block_swap_forward_only_context_accepts_absent_protocol_and_rejects_half_protocol():
+    trainer = NetworkTrainer()
+
+    with trainer.block_swap_forward_only(_ToyAccelerator(), object()):
+        pass
+
+    class _HalfProtocol:
+        def switch_block_swap_for_inference(self):
+            return None
+
+    with pytest.raises(RuntimeError, match="must provide both"):
+        with trainer.block_swap_forward_only(_ToyAccelerator(), _HalfProtocol()):
+            pass
+
+
+def test_sample_images_restores_block_swap_training_mode_when_sampling_raises(monkeypatch, tmp_path):
+    class _SamplingTrainer(NetworkTrainer):
+        def sample_image_inference(self, *args, **kwargs):
+            raise RuntimeError("sampling failed")
+
+    monkeypatch.setattr(trainer_base_module, "should_sample_images", lambda *args: True)
+    monkeypatch.setattr(trainer_base_module, "PartialState", lambda: SimpleNamespace(num_processes=1))
+    trainer = _SamplingTrainer()
+    transformer = _BlockSwapProtocolTransformer()
+    args = SimpleNamespace(sample_prompts="prompts.toml", output_dir=str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="sampling failed"):
+        trainer.sample_images(
+            _ToyAccelerator(),
+            args,
+            epoch=1,
+            steps=1,
+            sample_resources=None,
+            transformer=transformer,
+            sample_parameters=[{}],
+            dit_dtype=torch.float32,
+        )
+
+    assert transformer.events == ["inference", "training"]
+    assert transformer.mode == "training"
 
 
 class _ToyXMTrainer(_CompatibleTrainer):
@@ -930,6 +1046,37 @@ def test_standard_xm_selects_mixed_winners_and_builds_one_gradient_graph(monkeyp
     assert trainer.scale.grad.item() == pytest.approx(2.5)
 
 
+def test_standard_xm_uses_forward_only_for_candidates_and_training_for_winner(monkeypatch):
+    _, transformer, loss, _ = _run_toy_xm(monkeypatch, transformer_factory=_BlockSwapProtocolTransformer)
+
+    assert transformer.events == [
+        "inference",
+        "forward:forward-only",
+        "forward:forward-only",
+        "training",
+        "forward:training",
+    ]
+    loss.backward()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for real ModelOffloader coverage")
+def test_standard_xm_real_cuda_model_offloader_runs_candidates_and_final_backward(monkeypatch):
+    device = torch.device("cuda:0")
+    trainer, transformer, loss, _ = _run_toy_xm(
+        monkeypatch,
+        device=device,
+        transformer_factory=lambda: _RealCudaBlockSwapTransformer(device),
+    )
+
+    loss.backward()
+    transformer.offloader.set_forward_only(False)
+
+    assert transformer.offloader.forward_only is False
+    assert trainer.scale.grad is not None
+    assert torch.isfinite(trainer.scale.grad)
+    assert trainer.scale.grad.abs().item() > 0
+
+
 def test_standard_xm_preserves_final_architecture_metrics(monkeypatch):
     class _MetricToyTrainer(_ToyXMTrainer):
         def compute_loss(self, *args, **kwargs):
@@ -1044,6 +1191,7 @@ def test_standard_xm_freezes_wan_route_and_uses_one_resident_transition(monkeypa
     swap_requests = []
     transitions = []
     forward_records = []
+    block_swap_transformer = _BlockSwapProtocolTransformer()
 
     def fake_swap_high_low_weights(args, accelerator, model):
         del args, accelerator, model
@@ -1065,7 +1213,8 @@ def test_standard_xm_freezes_wan_route_and_uses_one_resident_transition(monkeypa
         network_dtype,
         **kwargs,
     ):
-        del args, accelerator, transformer, batch, kwargs
+        del args, accelerator, batch, kwargs
+        features = transformer(noisy_model_input)
         forward_records.append(
             {
                 "resident_high_noise": trainer.resident_model_is_high_noise,
@@ -1074,7 +1223,7 @@ def test_standard_xm_freezes_wan_route_and_uses_one_resident_transition(monkeypa
             }
         )
         return DiTOutput(
-            pred=trainer.scale.to(network_dtype) * noisy_model_input.to(network_dtype),
+            pred=trainer.scale.to(network_dtype) * features.to(network_dtype),
             target=(latents - noise).to(network_dtype),
         )
 
@@ -1091,7 +1240,7 @@ def test_standard_xm_freezes_wan_route_and_uses_one_resident_transition(monkeypa
     loss, _ = trainer.process_batch_best_of_k(
         _xm_args(),
         _ToyAccelerator(),
-        None,
+        block_swap_transformer,
         None,
         {"timesteps": [0.75, 0.75], "condition": torch.ones(2, 1)},
         latents,
@@ -1110,6 +1259,13 @@ def test_standard_xm_freezes_wan_route_and_uses_one_resident_transition(monkeypa
     assert [record["resident_high_noise"] for record in forward_records] == [True, True, True]
     assert [record["grad_enabled"] for record in forward_records] == [False, False, True]
     assert all(torch.equal(record["timestep"], forward_records[0]["timestep"]) for record in forward_records[1:])
+    assert block_swap_transformer.events == [
+        "inference",
+        "forward:forward-only",
+        "forward:forward-only",
+        "training",
+        "forward:training",
+    ]
 
     loss.backward()
     assert trainer.scale.grad is not None
