@@ -158,6 +158,38 @@ def test_prompt_validation_checks_output_name_suffixes_in_directory_modes(tmp_pa
         validate_prompt_args(image_args, directory_output=True)
 
 
+def test_one_frame_fl2va_control_index_error_reports_the_counts(tmp_path):
+    first = tmp_path / "first.png"
+    first.touch()
+    args = _session_args(
+        tmp_path,
+        task="fl2va",
+        frame_count=1,
+        first_frame=str(first),
+        one_frame="target_index=6,control_index=0;123",
+        output=str(tmp_path / "out.png"),
+    )
+
+    with pytest.raises(ValueError, match=r"got 2 control_index entries for 1 condition frames \(first_frame\)"):
+        validate_prompt_args(args)
+
+
+def test_from_file_reports_the_failing_line_number(tmp_path):
+    prompts = tmp_path / "prompts.txt"
+    prompts.write_text("# comment\n\na cat sings --d 11\na dog barks --w 0\n", encoding="utf-8")
+    args = _session_args(
+        tmp_path,
+        frame_count=5,
+        allow_experimental_duration=True,
+        output=str(tmp_path / "outputs"),
+        from_file=str(prompts),
+    )
+
+    # the bad width line is file line 4; validation fails before any model loads
+    with pytest.raises(ValueError, match="--from_file line 4 is invalid.*divisible by 32"):
+        generate.process_from_file(args, torch.device("cpu"))
+
+
 def test_latent_file_roundtrip_preserves_tensors_and_rejects_missing_audio(tmp_path):
     args = _session_args(tmp_path, frame_count=39, allow_experimental_duration=True)
     video = torch.randn(1, 24, 3, 4, 4)

@@ -14,7 +14,7 @@
 - Standalone `audio` references are rejected in one-frame mode (their window is defined by the target duration, which a single frame does not have); video references keep their embedded audio.
 - The released 5-15 s duration gate does not apply; `--allow_experimental_duration` is not needed.
 
-Training on one-frame targets is available for plain image LoRA (T2VA); see [One-frame training](#one-frame-training-t2va-image-lora) below. FL2VA/Ref2VA one-frame training (editing LoRA with condition images or references) is not implemented yet.
+Training on one-frame targets is available for plain image LoRA (T2VA) and for editing/inbetween LoRA with 1-2 control images (FL2VA); see [One-frame training](#one-frame-training-t2va-image-lora) and [One-frame editing training](#one-frame-editing-training-fl2va-control-images) below. Ref2VA one-frame training (reference-driven image LoRA) is not implemented yet.
 
 ## Time semantics: `--one_frame`
 
@@ -85,7 +85,7 @@ Audio-bearing video references are accepted and keep their own duration; combini
 
 ### Dataset configuration
 
-Image datasets use the standard image keys. `fp_1f_target_index` (optional, default 0) places the target on the rotary time axis, in the same 0-based 24 fps pixel-frame indices as generation's `--one_frame target_index=N`; for plain image LoRA the default is fine. Control images, `fp_1f_clean_indices`, and `multiple_target` are not supported yet.
+Image datasets use the standard image keys. `fp_1f_target_index` (optional, default 0) places the target on the rotary time axis, in the same 0-based 24 fps pixel-frame indices as generation's `--one_frame target_index=N`; for plain image LoRA the default is fine. Control images and `fp_1f_clean_indices` belong to the FL2VA editing mode (next section); `multiple_target` is not supported.
 
 ```toml
 [general]
@@ -148,3 +148,45 @@ A watercolor lighthouse at dusk. --w 1024 --h 1024 --f 1 --s 30 --d 42
 ```
 
 The LoRA metadata records `ss_minimax_h3_one_frame` for provenance. The resulting LoRA loads into generation as usual (one-frame or video).
+
+## One-frame editing training (FL2VA, control images)
+
+> [!WARNING]
+> Experimental. This trains the base model's timed-anchor pathway directly; read the index guidance below before building a dataset.
+
+With `--task fl2va`, an image dataset pairs each target image with 1-2 **time-annotated control images**: the controls become FL2VA condition latents (and `<Picture i>` visuals in the text presentation), and their positions on the rotary time axis come from the dataset config. This trains editing LoRAs (control = source image, target = edited image) and inbetween/中割り LoRAs (controls = endpoint frames, target = an intermediate frame).
+
+### Dataset configuration
+
+```toml
+[[datasets]]
+image_directory = "/data/h3/edit/targets"
+control_directory = "/data/h3/edit/sources"
+cache_directory = "/data/h3/cache-edit"
+caption_extension = ".txt"
+fp_1f_clean_indices = [0]     # control image positions (24 fps pixel-frame indices)
+fp_1f_target_index = 24       # target position — REQUIRED when controls are present
+```
+
+- `control_directory` matches controls to targets by filename (`image.png` ↔ `image.png` / `image_0.png`), or use `image_jsonl_file` with `control_path` (or `control_path_0`/`control_path_1`) per line.
+- `fp_1f_clean_indices` gives one index per control image, in packed (first, last) order: control 0 is the "first" slot, control 1 the "last" slot. With one control only the "first" slot is used; the slot name carries no time meaning of its own — only the indices do.
+- Both `fp_1f_clean_indices` and an explicit `fp_1f_target_index` are required when controls are present; there are no defaults. Controls are resized to the target's bucket resolution.
+- Time-order is unconstrained: an anchor **after** the target (`fp_1f_clean_indices = [120]`, `fp_1f_target_index = 24`) trains an L2VA-style LoRA (generate the image that precedes an end state). Note the official pipeline stretches a lone last picture to the canvas at inference while training resizes to the bucket — a minor known divergence.
+
+### Choosing indices
+
+The base model's strongest prior is **verbatim anchor copying at coinciding timestamps**: a control whose index equals the target index is reproduced almost exactly, so such a dataset trains head-on against copying — only do this when copy-at-the-anchor is the desired behavior. The recommended starting recipe for editing is `fp_1f_clean_indices = [0]`, `fp_1f_target_index = 24` (a one-second separation); inference must then use the same relative placement (`--one_frame "target_index=24,control_index=0"`). For inbetween triplets extracted from real videos, use the real frame distances: (first@0, last@N, target@αN) → `fp_1f_clean_indices = [0, N]`, `fp_1f_target_index = round(αN)`. Since the indices live in the dataset config, one α per dataset block; several blocks can share a TOML.
+
+**Captions must follow the official alignment-line formats** (I2VA/L2VA/FL2VA opening lines from the prompt-writing guide): plain captions actively suppress the base model's continuous reading of condition times, which is exactly the pathway this training relies on.
+
+### Caching and training
+
+Same commands as plain image training with `--task fl2va` instead of `--task t2va` on both cache scripts and the trainer. The latent cache additionally holds the condition latents (`latents_first`, plus `latents_last` for two controls) and the control indices as a tensor entry; the text cache embeds the bucket-resized control images in the FL2VA presentation. Changing `fp_1f_target_index` or `fp_1f_clean_indices` re-caches latents only (`--skip_existing` detects it); changing control image files re-caches both.
+
+The guidance-loss recommendation from plain image training applies unchanged. Training-time samples mirror the generation CLI: provide the condition image(s) and the placement per prompt line:
+
+```text
+Official-format caption... --w 1024 --h 1024 --f 1 --s 30 --i source.png --of target_index=24,control_index=0
+```
+
+(`--i` is the first/only condition, `--ei` the last; `control_index` takes one `;`-separated entry per provided image, and is required.)

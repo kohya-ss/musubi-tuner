@@ -202,8 +202,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--one_frame",
         action="store_true",
-        help="experimental one-frame (image) training caches: accept image datasets, whose captions are encoded"
-        " as plain T2VA presentations (currently --task t2va only)",
+        help="experimental one-frame (image) training caches: accept image datasets. --task t2va encodes plain"
+        " caption presentations; --task fl2va embeds the bucket-resized control images as <Picture i> visuals",
     )
     parser.add_argument(
         "--teacher_conditions",
@@ -242,8 +242,8 @@ def main() -> None:
         if args.one_frame:
             raise ValueError("--teacher_conditions does not support --one_frame yet")
         teacher_conditions = normalize_teacher_conditions(args.teacher_conditions)
-    if args.one_frame and args.task != "t2va":
-        raise ValueError("MiniMax-H3 one-frame caching currently supports --task t2va only")
+    if args.one_frame and args.task == "ref2va":
+        raise ValueError("MiniMax-H3 one-frame caching supports --task t2va and fl2va only")
 
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info("Loading dataset config from %s", args.dataset_config)
@@ -255,12 +255,22 @@ def main() -> None:
     decoder = PyAVH3MediaDecoder()
     records_by_dir = {}
     image_dirs: set[str] = set()
+    control_paths_by_dir: dict[str, dict[str, list[str]]] = {}
     for dataset in datasets:
         validate_h3_dataset(dataset)
         if isinstance(dataset, ImageDataset):
             if not args.one_frame:
                 raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
-            image_dirs.add(dataset_cache_dir_key(dataset.cache_directory))
+            if dataset.has_control and args.task != "fl2va":
+                raise ValueError("MiniMax-H3 image datasets with control images require --task fl2va")
+            if not dataset.has_control and args.task != "t2va":
+                raise ValueError(
+                    "MiniMax-H3 --task fl2va requires image datasets with control images"
+                    " (plain image datasets cache with --task t2va)"
+                )
+            key = dataset_cache_dir_key(dataset.cache_directory)
+            image_dirs.add(key)
+            control_paths_by_dir[key] = dataset.datasource.get_control_paths()
             continue
         if not isinstance(dataset, VideoDataset):
             raise ValueError("MiniMax-H3 text caching accepts only image and video datasets")
@@ -276,6 +286,13 @@ def main() -> None:
         for record in records
         for path in _text_media_paths(record, args.task, teacher_conditions)
     }
+    # one-frame fl2va presentations embed the control images, so their files join the identity
+    text_paths.update(
+        Path(path).resolve()
+        for control_paths in control_paths_by_dir.values()
+        for paths in control_paths.values()
+        for path in paths
+    )
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
     logger.info("Loading MiniMax-H3 Qwen3-VL processor")
@@ -321,8 +338,9 @@ def main() -> None:
         for item in batch:
             cache_dir_key = dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))
             if cache_dir_key in image_dirs:
-                # one-frame image item: a plain T2VA presentation of the caption; the target
-                # time index lives in the latent cache, never in the text rows
+                # one-frame image item: the caption as a T2VA presentation, or an FL2VA
+                # presentation embedding the bucket-resized control images; all time indices
+                # live in the latent cache, never in the text rows
                 record = H3Record(
                     video_path=Path(item.item_key).resolve(),
                     caption=item.caption,
@@ -332,7 +350,22 @@ def main() -> None:
                 crop_start = 0
                 frame_count = 1
                 visuals = {}
-                presentation = build_presentation(record, "t2va", visuals)
+                record_media_fingerprints = {}
+                if args.task == "fl2va":
+                    controls = item.control_content
+                    control_indices = item.fp_1f_clean_indices
+                    if not control_indices or controls is None or len(controls) != len(control_indices):
+                        raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control images: {item.item_key}")
+                    for role, control in zip(("first", "last"), controls):
+                        visuals[role] = H3TextVisual(torch.as_tensor(control).unsqueeze(0))
+                    control_paths = control_paths_by_dir.get(cache_dir_key, {}).get(item.item_key)
+                    if control_paths is None or len(control_paths) != len(control_indices):
+                        raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control paths: {item.item_key}")
+                    record_media_fingerprints = {
+                        Path(control_path).resolve(): media_fingerprints[Path(control_path).resolve()]
+                        for control_path in control_paths
+                    }
+                presentation = build_presentation(record, args.task, visuals)
             else:
                 records = records_by_dir[cache_dir_key]
                 datasource_index, crop_start = item_record_inputs(item)
@@ -340,7 +373,7 @@ def main() -> None:
                 frame_count = item.frame_count
                 visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
                 presentation = build_presentation(record, args.task, visuals)
-            record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
+                record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
             presentation_identity = presentation_fingerprint(
                 presentation,
                 record_media_fingerprints,
