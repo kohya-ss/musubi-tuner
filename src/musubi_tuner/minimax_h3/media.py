@@ -94,73 +94,73 @@ def probe_h3_media(path: Path) -> H3MediaInfo:
     return H3MediaInfo(has_audio=has_audio, duration_seconds=duration_seconds)
 
 
-def _resolve_existing_path(value: object, base_directory: Path, field: str, line_number: int) -> Path:
+def _resolve_existing_path(value: object, base_directory: Path, field: str, context: str) -> Path:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"H3 JSONL line {line_number}: {field} must be a non-empty path")
+        raise ValueError(f"{context}: {field} must be a non-empty path")
     path = Path(value)
     if not path.is_absolute():
         path = base_directory / path
     path = path.resolve()
     if not path.is_file():
-        raise ValueError(f"H3 JSONL line {line_number}: {field} does not exist: {path}")
+        raise ValueError(f"{context}: {field} does not exist: {path}")
     return path
 
 
-def _probe_required_audio(path: Path, probe: H3MediaProbe, label: str, line_number: int) -> H3MediaInfo:
+def _probe_required_audio(path: Path, probe: H3MediaProbe, label: str, context: str) -> H3MediaInfo:
     try:
         info = probe(path)
     except Exception as error:
-        raise ValueError(f"H3 JSONL line {line_number}: {label} failed to decode: {error}") from error
+        raise ValueError(f"{context}: {label} failed to decode: {error}") from error
     if not info.has_audio:
-        raise ValueError(f"H3 JSONL line {line_number}: {label} contains no audio stream: {path}")
+        raise ValueError(f"{context}: {label} contains no audio stream: {path}")
     return info
 
 
-def _validate_reference_counts(references: list, line_number: int) -> None:
+def _validate_reference_counts(references: list, context: str) -> None:
     if len(references) > 12:
-        raise ValueError(f"H3 JSONL line {line_number}: Ref2VA allows at most 12 reference items")
+        raise ValueError(f"{context}: Ref2VA allows at most 12 reference items")
 
     types = [reference.get("type") if isinstance(reference, dict) else None for reference in references]
     unsupported = [reference_type for reference_type in types if reference_type not in {"image", "video", "audio"}]
     if unsupported:
-        raise ValueError(f"H3 JSONL line {line_number}: Unsupported reference type: {unsupported[0]!r}")
+        raise ValueError(f"{context}: Unsupported reference type: {unsupported[0]!r}")
     if types.count("image") > 9:
-        raise ValueError(f"H3 JSONL line {line_number}: Ref2VA allows at most 9 image references")
+        raise ValueError(f"{context}: Ref2VA allows at most 9 image references")
     if types.count("video") > 3:
-        raise ValueError(f"H3 JSONL line {line_number}: Ref2VA allows at most 3 video references")
+        raise ValueError(f"{context}: Ref2VA allows at most 3 video references")
     if types.count("audio") > 3:
-        raise ValueError(f"H3 JSONL line {line_number}: Ref2VA allows at most 3 audio-bearing references")
+        raise ValueError(f"{context}: Ref2VA allows at most 3 audio-bearing references")
     if not any(reference_type in {"image", "video"} for reference_type in types):
-        raise ValueError(f"H3 JSONL line {line_number}: Ref2VA requires at least one visual reference")
+        raise ValueError(f"{context}: Ref2VA requires at least one visual reference")
 
 
 def _parse_references(
     raw_references: object,
     base_directory: Path,
-    line_number: int,
+    context: str,
     probe: H3MediaProbe,
 ) -> tuple[H3Reference, ...]:
     if not isinstance(raw_references, list):
-        raise ValueError(f"H3 JSONL line {line_number}: references must be a list")
-    _validate_reference_counts(raw_references, line_number)
+        raise ValueError(f"{context}: references must be a list")
+    _validate_reference_counts(raw_references, context)
 
     references = []
     audio_bearing_count = 0
     for index, raw_reference in enumerate(raw_references):
         reference_type = raw_reference["type"]
         field_prefix = f"references[{index}]"
-        path = _resolve_existing_path(raw_reference.get("path"), base_directory, f"{field_prefix}.path", line_number)
+        path = _resolve_existing_path(raw_reference.get("path"), base_directory, f"{field_prefix}.path", context)
 
         if reference_type == "image":
             if "audio_path" in raw_reference:
-                raise ValueError(f"H3 JSONL line {line_number}: {field_prefix} image cannot have audio_path")
+                raise ValueError(f"{context}: {field_prefix} image cannot have audio_path")
             references.append(H3Reference(type="image", path=path))
             continue
 
         if reference_type == "audio":
             if "audio_path" in raw_reference:
-                raise ValueError(f"H3 JSONL line {line_number}: {field_prefix} audio uses path, not audio_path")
-            info = _probe_required_audio(path, probe, f"{field_prefix} audio", line_number)
+                raise ValueError(f"{context}: {field_prefix} audio uses path, not audio_path")
+            info = _probe_required_audio(path, probe, f"{field_prefix} audio", context)
             references.append(
                 H3Reference(
                     type="audio",
@@ -175,10 +175,10 @@ def _parse_references(
         try:
             video_info = probe(path)
         except Exception as error:
-            raise ValueError(f"H3 JSONL line {line_number}: {field_prefix} video failed to decode: {error}") from error
+            raise ValueError(f"{context}: {field_prefix} video failed to decode: {error}") from error
         duration = video_info.duration_seconds
         if duration is None or duration < 2.0 or duration > 15.0:
-            raise ValueError(f"H3 JSONL line {line_number}: {field_prefix} video must be between 2 and 15 seconds; got {duration}")
+            raise ValueError(f"{context}: {field_prefix} video must be between 2 and 15 seconds; got {duration}")
 
         # an explicit "audio_path": null makes the reference visual-only (e.g. a motion
         # reference), suppressing the video's embedded audio track
@@ -187,18 +187,74 @@ def _parse_references(
             if video_info.has_audio:
                 audio = H3AudioSource(path=path, embedded=True)
         elif raw_reference["audio_path"] is not None:
-            audio_path = _resolve_existing_path(
-                raw_reference["audio_path"], base_directory, f"{field_prefix}.audio_path", line_number
-            )
-            _probe_required_audio(audio_path, probe, f"Explicit {field_prefix} audio", line_number)
+            audio_path = _resolve_existing_path(raw_reference["audio_path"], base_directory, f"{field_prefix}.audio_path", context)
+            _probe_required_audio(audio_path, probe, f"Explicit {field_prefix} audio", context)
             audio = H3AudioSource(path=audio_path, embedded=False)
         if audio is not None:
             audio_bearing_count += 1
         references.append(H3Reference(type="video", path=path, audio=audio, duration_seconds=duration))
 
     if audio_bearing_count > 3:
-        raise ValueError(f"H3 JSONL line {line_number}: Ref2VA allows at most 3 audio-bearing references")
+        raise ValueError(f"{context}: Ref2VA allows at most 3 audio-bearing references")
     return tuple(references)
+
+
+INLINE_REFERENCE_IMAGE_SUFFIXES = frozenset({".bmp", ".jpeg", ".jpg", ".png", ".webp"})
+INLINE_REFERENCE_AUDIO_SUFFIXES = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"})
+
+
+def _inline_reference_data(spec: str, context: str) -> dict:
+    """Parses one inline reference spec `path[;type=...][;audio=...]` into the JSONL dict shape."""
+    parts = spec.split(";")
+    path = parts[0].strip()
+    if not path:
+        raise ValueError(f"{context}: inline reference must start with a path: {spec!r}")
+
+    options: dict[str, str] = {}
+    for part in parts[1:]:
+        key, separator, value = part.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not separator or not key or not value:
+            raise ValueError(f"{context}: inline reference options must be key=value, got {part!r} in {spec!r}")
+        if key not in {"type", "audio"}:
+            raise ValueError(f"{context}: unknown inline reference option {key!r} in {spec!r} (allowed: type, audio)")
+        if key in options:
+            raise ValueError(f"{context}: duplicate inline reference option {key!r} in {spec!r}")
+        options[key] = value
+
+    reference_type = options.get("type")
+    if reference_type is None:
+        suffix = Path(path).suffix.lower()
+        if suffix in INLINE_REFERENCE_IMAGE_SUFFIXES:
+            reference_type = "image"
+        elif suffix in INLINE_REFERENCE_AUDIO_SUFFIXES:
+            reference_type = "audio"
+        else:
+            reference_type = "video"
+    elif reference_type not in {"image", "video", "audio"}:
+        raise ValueError(f"{context}: inline reference type must be image, video, or audio, got {reference_type!r}")
+
+    data: dict = {"type": reference_type, "path": path}
+    if "audio" in options:
+        # the JSONL-shape validation rejects audio_path on image and audio references
+        data["audio_path"] = options["audio"]
+    return data
+
+
+def parse_inline_references(
+    specs: list[str] | tuple[str, ...],
+    base_directory: Path,
+    probe: H3MediaProbe = probe_h3_media,
+    context: str = "H3 --ref",
+) -> tuple[H3Reference, ...]:
+    """Parses inline `--ref` specs with exactly the JSONL `references` validation rules.
+
+    Relative paths resolve from base_directory (the caller decides: CWD for the CLI,
+    the prompt file's directory for sample-prompt lines).
+    """
+    raw_references = [_inline_reference_data(spec, f"{context}[{index}]") for index, spec in enumerate(specs)]
+    return _parse_references(raw_references, base_directory, context, probe)
 
 
 def _record_from_jsonl_data(

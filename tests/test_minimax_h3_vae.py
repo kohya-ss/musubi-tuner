@@ -121,6 +121,46 @@ def test_video_condition_uses_seed_42_and_fp16_round_trip_before_normalization()
     torch.testing.assert_close(actual, expected)
 
 
+def _decode_routing_vae():
+    vae = MiniMaxH3VideoVAE.__new__(MiniMaxH3VideoVAE)
+    nn.Module.__init__(vae)
+    vae.register_buffer("latents_mean", torch.zeros(24))
+    vae.register_buffer("latents_std", torch.full((24,), 2.0))
+    vae.register_buffer("pixel_mean", torch.zeros(1, 3, 1, 1, 1))
+    vae.register_buffer("pixel_std", torch.ones(1, 3, 1, 1, 1))
+    seen = {}
+
+    def fake_decode_video(latents):
+        seen["latents"] = latents
+        return (torch.arange(1.0, 6.0).view(1, 1, 5, 1, 1) / 10.0).expand(1, 3, 5, 2, 2)
+
+    vae._decode_video = fake_decode_video
+    return vae, seen
+
+
+def test_video_vae_decode_duplicates_a_single_token_and_keeps_pixel_frame_zero():
+    vae, seen = _decode_routing_vae()
+    latents = torch.randn(1, 24, 1, 2, 2)
+
+    pixels = vae.decode(latents)
+
+    assert seen["latents"].shape == (1, 24, 2, 2, 2)
+    torch.testing.assert_close(seen["latents"][:, :, 0], latents[:, :, 0] * 2.0)
+    torch.testing.assert_close(seen["latents"][:, :, 1], seen["latents"][:, :, 0])
+    assert pixels.shape == (1, 3, 1, 2, 2)
+    torch.testing.assert_close(pixels, torch.full((1, 3, 1, 2, 2), 0.1 * 2.0 - 1.0))
+
+
+def test_video_vae_decode_keeps_multi_token_latents_and_frames_unchanged():
+    vae, seen = _decode_routing_vae()
+    latents = torch.randn(1, 24, 2, 2, 2)
+
+    pixels = vae.decode(latents)
+
+    torch.testing.assert_close(seen["latents"], latents * 2.0)
+    assert pixels.shape == (1, 3, 5, 2, 2)
+
+
 def test_causal_conv_single_frame_truncates_temporal_kernel():
     conv = CausalConv3d(1, 1, kernel_size=3, padding=1)
     nn.init.ones_(conv.weight)

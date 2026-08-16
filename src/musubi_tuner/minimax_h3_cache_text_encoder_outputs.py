@@ -11,21 +11,27 @@ from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_minimax_h3
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import ItemInfo, VideoDataset
+from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo, VideoDataset
 from musubi_tuner.minimax_h3.text_encoder import (
-    DEFAULT_PROCESSOR_ID,
+    H3Presentation,
     H3TextVisual,
+    TEACHER_CONDITIONS_REF,
     TEXT_CACHE_FORMAT,
     build_presentation,
     encode_h3_presentation,
     load_h3_processor,
     load_h3_text_encoder,
+    normalize_teacher_conditions,
     presentation_fingerprint,
     processor_fingerprint,
+    save_h3_uncond_cache,
+    wrap_ref_teacher_caption,
 )
-from musubi_tuner.minimax_h3.media import h3_records_from_datasource
+from musubi_tuner.minimax_h3.media import H3AudioSource, H3Record, H3Reference, h3_records_from_datasource
 from musubi_tuner.minimax_h3_cache_latents import (
     PyAVH3MediaDecoder,
+    _adapt_canvas,
+    _resize_frames,
     cache_metadata_matches,
     dataset_cache_dir_key,
     fingerprint_checkpoint,
@@ -40,8 +46,9 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def _text_media_paths(record, task: str) -> set[Path]:
-    if task == "fl2va":
+def _text_media_paths(record, task: str, teacher_conditions: str | None = None) -> set[Path]:
+    if task == "fl2va" or teacher_conditions:
+        # the FL2VA (or teacher) presentation embeds the first/last frames of the target video
         return {record.video_path}
     if task == "ref2va":
         return {reference.path for reference in record.references if reference.type in {"image", "video"}}
@@ -89,6 +96,44 @@ def _build_visuals(
     return visuals
 
 
+# the same 2 fps text-visual sampling as the Ref2VA reference path (decode_generation_visuals)
+REF_TEACHER_TEXT_FRAME_STRIDE = 12
+
+
+def _ref_teacher_presentation(record, item: ItemInfo) -> H3Presentation:
+    """Ref2VA teacher presentation of the item: the training crop itself as the copy-source reference.
+
+    The visuals come from the already-decoded target crop, so the teacher sees exactly the
+    trained window (a re-decode from the file would miss the crop start). The audio track is
+    always declared: its latent condition at training time is the cached target audio, which is
+    encoded silence for audio-less items, and the audio loss stays presence-gated there.
+    """
+    target_frames = torch.as_tensor(item.content)
+    if target_frames.ndim != 4:
+        raise ValueError(f"MiniMax-H3 target frames must be [F,H,W,C], got {tuple(target_frames.shape)}")
+    reference = H3Reference(
+        type="video",
+        path=record.video_path,
+        audio=H3AudioSource(path=record.video_path, embedded=True),
+    )
+    teacher_record = H3Record(
+        video_path=record.video_path,
+        caption=wrap_ref_teacher_caption(record.caption),
+        references=(reference,),
+        jsonl_line=record.jsonl_line,
+    )
+    sampled = target_frames[::REF_TEACHER_TEXT_FRAME_STRIDE]
+    # the same downscale-only canvas cap that decode_reference_visual applies to reference
+    # videos: identity for targets within the released canvas (typical buckets), so only
+    # oversized targets are resized and normal cache fingerprints are unaffected
+    source_height, source_width = int(sampled.shape[1]), int(sampled.shape[2])
+    width, height = _adapt_canvas(source_width, source_height)
+    if source_width * source_height > width * height:
+        sampled = _resize_frames(sampled.numpy(), (width, height))
+    timestamps = tuple(index / 2.0 for index in range(sampled.shape[0]))
+    return build_presentation(teacher_record, "ref2va", {reference.path: H3TextVisual(sampled, timestamps)})
+
+
 def _text_cache_metadata(
     *,
     task: str,
@@ -97,11 +142,13 @@ def _text_cache_metadata(
     text_encoder_identity: str,
     presentation_identity: str,
     cache_dtype: str,
+    teacher_conditions: str | None = None,
+    teacher_presentation_identity: str | None = None,
 ) -> dict[str, str]:
     # cache_dtype and crop_start_frame stay so --skip_existing rebuilds when --text_cache_dtype or the
     # FL2VA crop window changes; frame_count is folded into the presentation fingerprint and the
     # behavior tags into TEXT_CACHE_FORMAT.
-    return {
+    metadata = {
         "task": task,
         "crop_start_frame": str(crop_start),
         "cache_format": TEXT_CACHE_FORMAT,
@@ -110,6 +157,10 @@ def _text_cache_metadata(
         "presentation_fingerprint": presentation_identity,
         "cache_dtype": cache_dtype,
     }
+    if teacher_conditions:
+        metadata["teacher_conditions"] = teacher_conditions
+        metadata["teacher_presentation_fingerprint"] = teacher_presentation_identity or ""
+    return metadata
 
 
 def _cache_dtype(name: str) -> torch.dtype:
@@ -147,16 +198,36 @@ def setup_parser() -> argparse.ArgumentParser:
         help="attention implementation for the text encoder (default: transformers default, sdpa)."
         " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
-    parser.add_argument(
-        "--processor",
-        type=str,
-        default=DEFAULT_PROCESSOR_ID,
-        help="Qwen3-VL-32B processor repo or local directory",
-    )
-    parser.add_argument("--processor_revision", type=str, default=None, help="optional processor revision")
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
+    parser.add_argument(
+        "--one_frame",
+        action="store_true",
+        help="experimental one-frame (image) training caches: accept image datasets, whose captions are encoded"
+        " as plain T2VA presentations (currently --task t2va only)",
+    )
+    parser.add_argument(
+        "--teacher_conditions",
+        type=str,
+        default=None,
+        help="also cache a teacher presentation for --h3_teacher_matching training (--task t2va only)."
+        " 'first,last' stores the FL2VA presentation with the crop endpoints; 'ref' stores the Ref2VA"
+        " presentation with the training crop itself (video + audio copy declaration) as the reference",
+    )
     parser.add_argument("--text_cache_dtype", choices=("bf16", "float32"), default="bf16")
     parser.add_argument("--disable_mmap", action="store_true", help="disable memory-mapped safetensors loading")
+    parser.add_argument(
+        "--uncond_output",
+        type=str,
+        default=None,
+        help="also write the guidance-loss uncond probe embedding (--uncond_text) to this safetensors path,"
+        " for --h3_guidance_loss_uncond_cache in training",
+    )
+    parser.add_argument(
+        "--uncond_text",
+        type=str,
+        default=" ",
+        help='text of the uncond probe for --uncond_output (default: a single space, the screened "space" probe)',
+    )
     return parser
 
 
@@ -164,36 +235,56 @@ def main() -> None:
     args = setup_parser().parse_args()
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
+    teacher_conditions = None
+    if args.teacher_conditions is not None:
+        if args.task != "t2va":
+            raise ValueError("--teacher_conditions requires --task t2va (teacher matching trains a T2VA student)")
+        if args.one_frame:
+            raise ValueError("--teacher_conditions does not support --one_frame yet")
+        teacher_conditions = normalize_teacher_conditions(args.teacher_conditions)
+    if args.one_frame and args.task != "t2va":
+        raise ValueError("MiniMax-H3 one-frame caching currently supports --task t2va only")
+
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info("Loading dataset config from %s", args.dataset_config)
     user_config = config_utils.load_user_config(args.dataset_config)
     blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_MINIMAX_H3)
     dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
     datasets = dataset_group.datasets
-    if not all(isinstance(dataset, VideoDataset) for dataset in datasets):
-        raise ValueError("MiniMax-H3 text caching accepts only video datasets")
 
     decoder = PyAVH3MediaDecoder()
     records_by_dir = {}
+    image_dirs: set[str] = set()
     for dataset in datasets:
         validate_h3_dataset(dataset)
+        if isinstance(dataset, ImageDataset):
+            if not args.one_frame:
+                raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
+            image_dirs.add(dataset_cache_dir_key(dataset.cache_directory))
+            continue
+        if not isinstance(dataset, VideoDataset):
+            raise ValueError("MiniMax-H3 text caching accepts only image and video datasets")
         records_by_dir[dataset_cache_dir_key(dataset.cache_directory)] = h3_records_from_datasource(dataset.datasource, args.task)
+    colliding = image_dirs & set(records_by_dir)
+    if colliding:
+        raise ValueError(f"MiniMax-H3 image and video datasets cannot share a cache_directory: {sorted(colliding)}")
 
     all_cache_files, all_cache_paths = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
     text_paths = {
-        path for records in records_by_dir.values() for record in records for path in _text_media_paths(record, args.task)
+        path
+        for records in records_by_dir.values()
+        for record in records
+        for path in _text_media_paths(record, args.task, teacher_conditions)
     }
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
-    logger.info("Loading MiniMax-H3 Qwen3-VL processor from %s", args.processor)
-    processor = load_h3_processor(args.processor, revision=args.processor_revision)
+    logger.info("Loading MiniMax-H3 Qwen3-VL processor")
+    processor = load_h3_processor()
     processor_identity = processor_fingerprint(processor)
     text_encoder_identity = fingerprint_checkpoint(args.text_encoder)
     logger.info("Loading MiniMax-H3 text encoder from %s", args.text_encoder)
     text_encoder = load_h3_text_encoder(
         args.text_encoder,
-        processor_path=args.processor,
-        revision=args.processor_revision,
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_mmap,
@@ -202,22 +293,76 @@ def main() -> None:
         attn_mode=args.text_encoder_attn_mode,
     )
 
+    if args.uncond_output:
+        presentation = H3Presentation(text=args.uncond_text, processor_text=args.uncond_text)
+        hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
+        save_h3_uncond_cache(
+            args.uncond_output,
+            hidden_states.to(_cache_dtype(args.text_cache_dtype)).cpu(),
+            token_tags.cpu(),
+            metadata={
+                "text": args.uncond_text,
+                "text_encoder_fingerprint": text_encoder_identity,
+                "processor_fingerprint": processor_identity,
+                "cache_dtype": args.text_cache_dtype,
+            },
+        )
+        logger.info(
+            "Saved MiniMax-H3 guidance-loss uncond cache (%d rows, text=%r): %s",
+            hidden_states.shape[0],
+            args.uncond_text,
+            args.uncond_output,
+        )
+
     decoded_reference_cache = {}
     skip_matching_cache = args.skip_existing
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
-            records = records_by_dir[dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))]
-            datasource_index, crop_start = item_record_inputs(item)
-            record = records[datasource_index]
-            visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
-            presentation = build_presentation(record, args.task, visuals)
+            cache_dir_key = dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))
+            if cache_dir_key in image_dirs:
+                # one-frame image item: a plain T2VA presentation of the caption; the target
+                # time index lives in the latent cache, never in the text rows
+                record = H3Record(
+                    video_path=Path(item.item_key).resolve(),
+                    caption=item.caption,
+                    references=(),
+                    jsonl_line=0,
+                )
+                crop_start = 0
+                frame_count = 1
+                visuals = {}
+                presentation = build_presentation(record, "t2va", visuals)
+            else:
+                records = records_by_dir[cache_dir_key]
+                datasource_index, crop_start = item_record_inputs(item)
+                record = records[datasource_index]
+                frame_count = item.frame_count
+                visuals = _build_visuals(record, args.task, item, decoder, decoded_reference_cache)
+                presentation = build_presentation(record, args.task, visuals)
             record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
             presentation_identity = presentation_fingerprint(
                 presentation,
                 record_media_fingerprints,
-                frame_count=item.frame_count,
+                frame_count=frame_count,
             )
+            teacher_presentation = None
+            teacher_presentation_identity = None
+            if teacher_conditions == TEACHER_CONDITIONS_REF:
+                # the student rows stay a plain T2VA presentation; the teacher rows are the
+                # Ref2VA presentation with the training crop itself as the copy-source reference
+                teacher_presentation = _ref_teacher_presentation(record, item)
+            elif teacher_conditions:
+                # the student rows stay a plain T2VA presentation; the teacher rows are the
+                # FL2VA presentation of the same record (first/last frames of the crop window)
+                teacher_visuals = _build_visuals(record, "fl2va", item, decoder, decoded_reference_cache)
+                teacher_presentation = build_presentation(record, "fl2va", teacher_visuals)
+            if teacher_presentation is not None:
+                teacher_presentation_identity = presentation_fingerprint(
+                    teacher_presentation,
+                    {record.video_path: media_fingerprints[record.video_path]},
+                    frame_count=item.frame_count,
+                )
             metadata = _text_cache_metadata(
                 task=args.task,
                 crop_start=crop_start,
@@ -225,6 +370,8 @@ def main() -> None:
                 text_encoder_identity=text_encoder_identity,
                 presentation_identity=presentation_identity,
                 cache_dtype=args.text_cache_dtype,
+                teacher_conditions=teacher_conditions,
+                teacher_presentation_identity=teacher_presentation_identity,
             )
             if skip_matching_cache and Path(item.text_encoder_output_cache_path).is_file():
                 if cache_metadata_matches(item.text_encoder_output_cache_path, metadata):
@@ -234,18 +381,29 @@ def main() -> None:
 
             hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
             hidden_states = hidden_states.to(_cache_dtype(args.text_cache_dtype))
-            payload_mib = hidden_states.numel() * hidden_states.element_size() / (1024**2)
-            logger.info(
-                "Saving MiniMax-H3 text cache for %s: rows=%d, vision_rows=%d, payload=%.1f MiB",
-                item.item_key,
-                hidden_states.shape[0],
-                int((token_tags == 0).sum().item()),
-                payload_mib,
-            )
             tensors = {
                 f"varlen_mmh3_hidden_states_{dtype_to_str(hidden_states.dtype)}": hidden_states,
                 "varlen_mmh3_token_tags_int64": token_tags,
             }
+            payload_mib = hidden_states.numel() * hidden_states.element_size() / (1024**2)
+            teacher_note = ""
+            if teacher_presentation is not None:
+                teacher_hidden, teacher_tags = encode_h3_presentation(processor, text_encoder, teacher_presentation)
+                teacher_hidden = teacher_hidden.to(_cache_dtype(args.text_cache_dtype))
+                # distinct keys per teacher kind, so the trainer hard-fails on a mode mismatch
+                key_prefix = "varlen_mmh3_teacher_ref" if teacher_conditions == TEACHER_CONDITIONS_REF else "varlen_mmh3_teacher"
+                tensors[f"{key_prefix}_hidden_states_{dtype_to_str(teacher_hidden.dtype)}"] = teacher_hidden
+                tensors[f"{key_prefix}_token_tags_int64"] = teacher_tags
+                payload_mib += teacher_hidden.numel() * teacher_hidden.element_size() / (1024**2)
+                teacher_note = f", teacher_rows={teacher_hidden.shape[0]}"
+            logger.info(
+                "Saving MiniMax-H3 text cache for %s: rows=%d, vision_rows=%d%s, payload=%.1f MiB",
+                item.item_key,
+                hidden_states.shape[0],
+                int((token_tags == 0).sum().item()),
+                teacher_note,
+                payload_mib,
+            )
             save_text_encoder_output_cache_minimax_h3(item, tensors, metadata)
 
     cache_text_encoder_outputs.process_text_encoder_batches(

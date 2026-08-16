@@ -38,12 +38,14 @@ def _load_training_module(monkeypatch):
         encode_visual_conditions=noop,
         load_generation_record=noop,
         module_device_dtype=noop,
+        parse_one_frame_options=noop,
     )
     _stub(
         monkeypatch,
         "musubi_tuner.minimax_h3.media",
         H3_AUDIO_SPEC=object(),
         audio_latent_frames=noop,
+        parse_inline_references=noop,
         video_latent_frames=noop,
     )
     _stub(
@@ -51,19 +53,23 @@ def _load_training_module(monkeypatch):
         "musubi_tuner.minimax_h3.sampling",
         augment_condition_latents=noop,
         create_sampling_generator=noop,
+        decoded_video_to_uint8=noop,
         initialize_target_latents=noop,
         sample_joint_av=noop,
         synchronize_decoded_av=noop,
+        write_image=noop,
         write_joint_av=noop,
     )
     _stub(
         monkeypatch,
         "musubi_tuner.minimax_h3.text_encoder",
-        DEFAULT_PROCESSOR_ID="fake-processor",
+        TEACHER_CONDITIONS_REF="ref",
         build_presentation=noop,
         encode_h3_presentation=noop,
         load_h3_processor=noop,
         load_h3_text_encoder=noop,
+        load_h3_uncond_cache=noop,
+        normalize_teacher_conditions=noop,
     )
     _stub(
         monkeypatch,
@@ -118,6 +124,7 @@ def _trainer_args(**overrides):
         "convrot_int8_bwd": "bf16",
         "base_weights": None,
         "disable_numpy_memmap": False,
+        "prune_adaln": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -186,6 +193,7 @@ def _load_generation_module(monkeypatch):
         encode_audio_conditions=noop,
         encode_visual_conditions=noop,
         load_generation_record=noop,
+        parse_one_frame_options=noop,
     )
     _stub(
         monkeypatch,
@@ -236,7 +244,13 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     # no LoRA: nothing happens on any route
     no_lora = SimpleNamespace(lora_weight=None, convrot_int8=False)
     assert generate._configure_lora_weights(bf16, no_lora, device, prequantized=False) == []
-    assert calls == [("merge", bf16), ("attach", int8, device)]
+    # --lora_runtime_attach overrides both merge routes with runtime branches (the merge
+    # rounds small-magnitude LoRAs -- e.g. teacher matching -- out of the BF16 weights)
+    attach_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=False, lora_runtime_attach=True)
+    assert generate._configure_lora_weights(bf16, attach_args, device, prequantized=False) is attached
+    attach_int8_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=True, lora_runtime_attach=True)
+    assert generate._configure_lora_weights(int8, attach_int8_args, device, prequantized=False) is attached
+    assert calls == [("merge", bf16), ("attach", int8, device), ("attach", bf16, device), ("attach", int8, device)]
 
 
 def _tiny_model(*, num_layers: int = 1):

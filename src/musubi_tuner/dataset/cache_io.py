@@ -46,9 +46,20 @@ logger = logging.getLogger(__name__)
 #   policy (loss weights, video-only training) is decided at training time.
 AUDIO_PRESENT_KEY = "audio_present_float32"
 
+# - ONE_FRAME_TARGET_INDEX_KEY holds a scalar int64 tensor with the one-frame target's 24 fps
+#   pixel-frame index. It travels as a tensor (not metadata) because the bucket collator only
+#   loads tensors; the trainer converts it to a RoPE time override at layout-build time.
+ONE_FRAME_TARGET_INDEX_KEY = "one_frame_target_index_int64"
+
 
 def append_audio_present_entry(sd: dict[str, torch.Tensor], audio_present: bool):
     sd[AUDIO_PRESENT_KEY] = torch.tensor(1.0 if audio_present else 0.0, dtype=torch.float32)
+
+
+def append_one_frame_target_index_entry(sd: dict[str, torch.Tensor], target_index: int):
+    if target_index < 0:
+        raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
+    sd[ONE_FRAME_TARGET_INDEX_KEY] = torch.tensor(target_index, dtype=torch.int64)
 
 
 def validate_audio_present_entry(sd: dict[str, torch.Tensor]) -> float:
@@ -550,6 +561,11 @@ def save_latent_cache_minimax_h3(
         if key == AUDIO_PRESENT_KEY:
             normalized[key] = tensor.detach().cpu().contiguous()
             continue
+        if key == ONE_FRAME_TARGET_INDEX_KEY:
+            if tensor.shape != torch.Size([]) or tensor.dtype != torch.int64 or tensor.item() < 0:
+                raise ValueError(f"MiniMax-H3 {ONE_FRAME_TARGET_INDEX_KEY} must be a nonnegative scalar int64 tensor")
+            normalized[key] = tensor.detach().cpu().contiguous()
+            continue
 
         match = target_pattern.fullmatch(key)
         if match is not None:
@@ -600,31 +616,55 @@ def save_text_encoder_output_cache_minimax_h3(
     tensors: dict[str, torch.Tensor],
     metadata: Optional[dict[str, str]] = None,
 ):
-    hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_hidden_states_")]
-    if len(hidden_keys) != 1:
-        raise ValueError(f"MiniMax-H3 text cache requires exactly one hidden-state tensor, found {len(hidden_keys)}")
-    hidden_key = hidden_keys[0]
-    hidden_states = tensors[hidden_key]
+    # the teacher prefixes must be split off before matching the student prefix, because
+    # "varlen_mmh3_teacher[_ref]_hidden_states_*" does not share the student prefix; the two
+    # teacher kinds (FL2VA "first,last" vs Ref2VA "ref") use distinct keys so the trainer can
+    # hard-fail on a cache/flag mode mismatch instead of silently misreading the rows
+    student_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_hidden_states_")]
+    teacher_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_teacher_hidden_states_")]
+    teacher_ref_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_teacher_ref_hidden_states_")]
+    if len(student_hidden_keys) != 1:
+        raise ValueError(f"MiniMax-H3 text cache requires exactly one hidden-state tensor, found {len(student_hidden_keys)}")
     tags_key = "varlen_mmh3_token_tags_int64"
-    if set(tensors) != {hidden_key, tags_key}:
-        raise ValueError(f"MiniMax-H3 text cache requires keys {hidden_key!r} and {tags_key!r}")
-    token_tags = tensors[tags_key]
+    teacher_tags_key = "varlen_mmh3_teacher_token_tags_int64"
+    teacher_ref_tags_key = "varlen_mmh3_teacher_ref_token_tags_int64"
 
-    if hidden_states.ndim != 2 or hidden_states.shape[1] != 5120:
-        raise ValueError(f"MiniMax-H3 hidden states must be [L,5120], got {tuple(hidden_states.shape)}")
-    if not _h3_dtype_matches(hidden_states, hidden_key.removeprefix("varlen_mmh3_hidden_states_")):
-        raise ValueError(f"MiniMax-H3 hidden-state key dtype does not match tensor: {hidden_key}")
-    if hidden_states.shape[0] > 32768:
-        raise ValueError(f"MiniMax-H3 text cache exceeds 32768 rows: {hidden_states.shape[0]}")
-    if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
-        raise ValueError("MiniMax-H3 token tags must be int64 [L]")
-    if not torch.all((token_tags == 0) | (token_tags == 1)):
-        raise ValueError("MiniMax-H3 token tags may contain only 0 and 1")
+    has_fl_teacher = bool(teacher_hidden_keys) or teacher_tags_key in tensors
+    has_ref_teacher = bool(teacher_ref_hidden_keys) or teacher_ref_tags_key in tensors
+    if has_fl_teacher and has_ref_teacher:
+        raise ValueError("MiniMax-H3 text cache cannot mix first,last and ref teacher rows")
 
-    normalized = {
-        hidden_key: hidden_states.detach().cpu().contiguous(),
-        tags_key: token_tags.detach().cpu().contiguous(),
-    }
+    pairs = [(student_hidden_keys[0], "varlen_mmh3_hidden_states_", tags_key)]
+    expected_keys = {student_hidden_keys[0], tags_key}
+    if has_fl_teacher:
+        if len(teacher_hidden_keys) != 1 or teacher_tags_key not in tensors:
+            raise ValueError("MiniMax-H3 teacher text rows require exactly one hidden-state tensor and its token tags")
+        pairs.append((teacher_hidden_keys[0], "varlen_mmh3_teacher_hidden_states_", teacher_tags_key))
+        expected_keys |= {teacher_hidden_keys[0], teacher_tags_key}
+    if has_ref_teacher:
+        if len(teacher_ref_hidden_keys) != 1 or teacher_ref_tags_key not in tensors:
+            raise ValueError("MiniMax-H3 teacher text rows require exactly one hidden-state tensor and its token tags")
+        pairs.append((teacher_ref_hidden_keys[0], "varlen_mmh3_teacher_ref_hidden_states_", teacher_ref_tags_key))
+        expected_keys |= {teacher_ref_hidden_keys[0], teacher_ref_tags_key}
+    if set(tensors) != expected_keys:
+        raise ValueError(f"MiniMax-H3 text cache requires exactly the keys {sorted(expected_keys)}")
+
+    normalized = {}
+    for hidden_key, hidden_prefix, pair_tags_key in pairs:
+        hidden_states = tensors[hidden_key]
+        token_tags = tensors[pair_tags_key]
+        if hidden_states.ndim != 2 or hidden_states.shape[1] != 5120:
+            raise ValueError(f"MiniMax-H3 hidden states must be [L,5120], got {tuple(hidden_states.shape)}")
+        if not _h3_dtype_matches(hidden_states, hidden_key.removeprefix(hidden_prefix)):
+            raise ValueError(f"MiniMax-H3 hidden-state key dtype does not match tensor: {hidden_key}")
+        if hidden_states.shape[0] > 32768:
+            raise ValueError(f"MiniMax-H3 text cache exceeds 32768 rows: {hidden_states.shape[0]}")
+        if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
+            raise ValueError("MiniMax-H3 token tags must be int64 [L]")
+        if not torch.all((token_tags == 0) | (token_tags == 1)):
+            raise ValueError("MiniMax-H3 token tags may contain only 0 and 1")
+        normalized[hidden_key] = hidden_states.detach().cpu().contiguous()
+        normalized[pair_tags_key] = token_tags.detach().cpu().contiguous()
     save_text_encoder_output_cache_common(
         item_info,
         normalized,

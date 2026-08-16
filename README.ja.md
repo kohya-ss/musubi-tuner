@@ -58,6 +58,15 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/08/14
+    - MiniMax-H3の教師マッチング学習（`--h3_teacher_matching`）を実験的に追加しました。T2VA LoRAは、特権的条件付け――クリップの最初/最後のフレーム、またはコピーソース参照としての学習クリップ自体（`--h3_teacher_conditions ref`）――の下で凍結されたベースモデルの予測に対して学習され、単純なフローターゲットの脱蒸留ドリフトを構造的に回避します。ベースシグマ保持アンカー、分解されたアンチウォッシュアウト損失、タイムステップフォーカス（`--h3_timestep_focus_*`、任意のH3学習で使用可能）、および `--lora_runtime_attach` / `--trajectory_dir` 生成オプションが含まれます。[PR #1047](https://github.com/kohya-ss/musubi-tuner/pull/1047) 詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。
+
+- 2026/08/08
+    - MiniMax-H3 ConvRot INT8のLoRA学習と生成への対応を追加しました。BF16チェックポイントは、`--convrot_int8`でロード時に量子化され、リリースされた完全およびプルーニング済みのConvRot INT8トランスフォーマーとConvRot INT8 Qwen3-VL-32Bテキストエンコーダーが自動的に検出されます。生成では、LoRAが事前量子化されたベースにランタイムブランチとしてアタッチされます。sdbds氏に感謝します。[PR #1024](https://github.com/kohya-ss/musubi-tuner/pull/1024) 詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。
+
+- 2026/08/03
+    - 実験的なMiniMax-H3のR1対応を追加しました。T2VA、FL2VA、Ref2VAのLoRA学習に加え、独立したトレーニング時のビデオ/オーディオの共同生成とスケジュールされた生成をサポートします。R1は、公開されたBF16トランスフォーマー、デュアルVAE、Qwen3-VL-32B条件付け、およびブロックスワップをサポートします。詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) sdbds氏に感謝します。
+
 - 2026/07/14
     - 勾配ノルムの診断メトリクス（`grad/norm`, `grad/mean_norm`, `grad/max`、勾配クリッピング前の値）をトラッカーに出力する `--log_grad_metrics` オプションを追加しました。[PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988) rockerBOO氏に感謝します。
         - 勾配の爆発・消失の診断や、適切な `--max_grad_norm` の値を決める際に役立ちます。デフォルトでは無効です。詳細は[高度な設定のドキュメント](./docs/advanced_config.md#log-gradient-metrics--勾配メトリクスのログ出力)を参照してください。

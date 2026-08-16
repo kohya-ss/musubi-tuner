@@ -88,6 +88,27 @@ class H3ReferenceGeometry:
 
 
 @dataclass(frozen=True)
+class H3TimeOverrides:
+    """Explicit RoPE times for a one-frame layout, in rotary units (1 unit = 1/40 s).
+
+    Times are relative to the target-block cursor (text end for fl2va, after the
+    reference blocks for ref2va); only relative placement carries meaning. A 24 fps
+    pixel-frame index maps to FRAME_RESCALE * index units.
+    """
+
+    condition_times: tuple[float, ...]
+    target_time: float
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            *((f"condition time {i}", t) for i, t in enumerate(self.condition_times)),
+            ("target time", self.target_time),
+        ):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"MiniMax-H3 {label} must be finite and nonnegative, got {value}")
+
+
+@dataclass(frozen=True)
 class H3RowSegment:
     role: str
     kind: H3SegmentKind
@@ -117,6 +138,9 @@ class H3PackedLayout:
     references: tuple[H3ReferenceGeometry, ...]
     segments: tuple[H3RowSegment, ...]
     row_count: int
+    # part of the frozen layout value so the transformer's layout-keyed rotary cache
+    # cannot serve a grid built for different times
+    time_overrides: H3TimeOverrides | None = None
 
     def segment(self, role: str) -> H3RowSegment:
         matches = [segment for segment in self.segments if segment.role == role]
@@ -208,6 +232,10 @@ def pack_audio_rows(latents: torch.Tensor) -> torch.Tensor:
     return rows[0] if unbatched else rows
 
 
+ONE_FRAME_VIDEO_LATENT_FRAMES = 1
+ONE_FRAME_AUDIO_LATENT_FRAMES = 2  # (10 * 1 pixel frame + 3) // 6
+
+
 def build_h3_layout(
     *,
     task: H3Task,
@@ -216,19 +244,33 @@ def build_h3_layout(
     target_audio_frames: int,
     visual_conditions: Sequence[H3VideoGeometry | Sequence[int]] = (),
     references: Sequence[H3ReferenceGeometry] = (),
+    one_frame: bool = False,
+    condition_roles: Sequence[str] | None = None,
+    time_overrides: H3TimeOverrides | None = None,
 ) -> H3PackedLayout:
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
     if text_length <= 0:
         raise ValueError(f"MiniMax-H3 text length must be positive, got {text_length}")
     target_video = _coerce_video_geometry(target_video, "target video")
-    _validate_video_latent_frames(target_video.frames, "target video")
-    expected_audio_frames = _expected_audio_frames(target_video.frames)
-    if target_audio_frames != expected_audio_frames:
-        raise ValueError(
-            f"MiniMax-H3 target audio has {target_audio_frames} frames, expected {expected_audio_frames} "
-            f"for {target_video.frames} video latent frames"
-        )
+    if one_frame:
+        if target_video.frames != ONE_FRAME_VIDEO_LATENT_FRAMES:
+            raise ValueError(f"MiniMax-H3 one-frame layout requires a single target latent frame, got {target_video.frames}")
+        if target_audio_frames != ONE_FRAME_AUDIO_LATENT_FRAMES:
+            raise ValueError(
+                f"MiniMax-H3 one-frame layout requires {ONE_FRAME_AUDIO_LATENT_FRAMES} target audio frames, "
+                f"got {target_audio_frames}"
+            )
+    else:
+        if time_overrides is not None:
+            raise ValueError("MiniMax-H3 time overrides require a one-frame layout")
+        _validate_video_latent_frames(target_video.frames, "target video")
+        expected_audio_frames = _expected_audio_frames(target_video.frames)
+        if target_audio_frames != expected_audio_frames:
+            raise ValueError(
+                f"MiniMax-H3 target audio has {target_audio_frames} frames, expected {expected_audio_frames} "
+                f"for {target_video.frames} video latent frames"
+            )
 
     visual_conditions = tuple(
         _coerce_video_geometry(condition, f"visual condition {index}") for index, condition in enumerate(visual_conditions)
@@ -237,16 +279,29 @@ def build_h3_layout(
     if task == "t2va" and (visual_conditions or references):
         raise ValueError("MiniMax-H3 T2VA layout does not accept condition rows")
     if task == "fl2va":
-        if references or len(visual_conditions) != 2:
+        if references:
             raise ValueError("MiniMax-H3 FL2VA layout requires exactly first and last visual conditions")
-        for role, condition in zip(("first", "last"), visual_conditions):
+        if one_frame:
+            if not 1 <= len(visual_conditions) <= 2:
+                raise ValueError("MiniMax-H3 one-frame FL2VA layout requires one or two visual conditions")
+            if time_overrides is None or len(time_overrides.condition_times) != len(visual_conditions):
+                raise ValueError("MiniMax-H3 one-frame FL2VA layout requires one condition time override per condition")
+        elif len(visual_conditions) != 2:
+            raise ValueError("MiniMax-H3 FL2VA layout requires exactly first and last visual conditions")
+        roles = _fl_condition_roles(condition_roles, len(visual_conditions))
+        for role, condition in zip(roles, visual_conditions):
             if condition != H3VideoGeometry(1, target_video.height, target_video.width):
                 raise ValueError(f"MiniMax-H3 FL2VA {role} condition must be one target-sized latent frame, got {condition}")
+    else:
+        if condition_roles is not None:
+            raise ValueError("MiniMax-H3 condition roles apply only to FL2VA layouts")
     if task == "ref2va":
         if visual_conditions or not references:
             raise ValueError("MiniMax-H3 Ref2VA layout requires ordered references and no FL2VA conditions")
         if not any(reference.kind in {"image", "video"} for reference in references):
             raise ValueError("MiniMax-H3 Ref2VA layout requires at least one visual reference")
+    if time_overrides is not None and task != "fl2va" and time_overrides.condition_times:
+        raise ValueError(f"MiniMax-H3 {task} time overrides cannot carry condition times")
 
     segments = []
     row = 0
@@ -258,8 +313,8 @@ def build_h3_layout(
 
     append("text", "text", text_length)
     if task == "fl2va":
-        append("first", "visual_condition", visual_conditions[0].row_count)
-        append("last", "visual_condition", visual_conditions[1].row_count)
+        for role, condition in zip(roles, visual_conditions):
+            append(role, "visual_condition", condition.row_count)
     elif task == "ref2va":
         for index, reference in enumerate(references):
             prefix = f"ref_{index:03d}"
@@ -283,7 +338,21 @@ def build_h3_layout(
         references=references,
         segments=tuple(segments),
         row_count=row,
+        time_overrides=time_overrides,
     )
+
+
+def _fl_condition_roles(condition_roles: Sequence[str] | None, condition_count: int) -> tuple[str, ...]:
+    if condition_roles is None:
+        if condition_count != 2:
+            raise ValueError("MiniMax-H3 FL2VA layout with a single condition requires explicit condition roles")
+        return ("first", "last")
+    roles = tuple(condition_roles)
+    if roles not in {("first",), ("last",), ("first", "last")}:
+        raise ValueError(f"MiniMax-H3 FL2VA condition roles must be first, last, or first+last in order, got {roles}")
+    if len(roles) != condition_count:
+        raise ValueError(f"MiniMax-H3 FL2VA layout has {condition_count} conditions for {len(roles)} roles")
+    return roles
 
 
 def _axis_from_sqrt_area(dimension: int, sqrt_area: float) -> torch.Tensor:
@@ -333,13 +402,15 @@ def build_position_grid(layout: H3PackedLayout, *, device: torch.device | str | 
     cursor = float(layout.text_length)
 
     if layout.task == "fl2va":
-        first = layout.segment("first")
-        positions[first.row_slice, 0] = cursor
-        positions[first.row_slice, 1:] = target_frame
-        last = layout.segment("last")
-        last_time = cursor + sum(_video_t_spans(layout.target_video.frames)) - FRAME_RESCALE
-        positions[last.row_slice, 0] = last_time
-        positions[last.row_slice, 1:] = target_frame
+        condition_segments = tuple(segment for segment in layout.segments if segment.kind == "visual_condition")
+        if layout.time_overrides is not None:
+            condition_times = [cursor + time for time in layout.time_overrides.condition_times]
+        else:
+            last_time = cursor + sum(_video_t_spans(layout.target_video.frames)) - FRAME_RESCALE
+            condition_times = [cursor if segment.role == "first" else last_time for segment in condition_segments]
+        for segment, time in zip(condition_segments, condition_times):
+            positions[segment.row_slice, 0] = time
+            positions[segment.row_slice, 1:] = target_frame
     elif layout.task == "ref2va":
         for index, reference in enumerate(layout.references):
             prefix = f"ref_{index:03d}"
@@ -367,6 +438,8 @@ def build_position_grid(layout: H3PackedLayout, *, device: torch.device | str | 
                 positions[video.row_slice] = _video_grid(reference.video, cursor)
                 cursor += max(float(reference.audio_frames), sum(_video_t_spans(reference.video.frames)))
 
+    if layout.time_overrides is not None:
+        cursor += layout.time_overrides.target_time
     target_audio = layout.target_audio_segment
     positions[target_audio.row_slice] = _audio_grid(
         cursor,

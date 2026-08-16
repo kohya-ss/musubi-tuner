@@ -63,11 +63,14 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- August 14, 2026
+    - Added experimental MiniMax-H3 teacher-matching training (`--h3_teacher_matching`): a T2VA LoRA is trained against the frozen base model's predictions under privileged conditioning — the clip's first/last frames, or the training clip itself as a copy-source reference (`--h3_teacher_conditions ref`) — structurally avoiding the de-distillation drift of plain flow targets. Includes a base-sigma preservation anchor, a decomposed anti-washout loss, timestep focus (`--h3_timestep_focus_*`, usable in any H3 training), and the `--lora_runtime_attach` / `--trajectory_dir` generation options. [PR #1047](https://github.com/kohya-ss/musubi-tuner/pull/1047). See the [MiniMax-H3 documentation](./docs/minimax_h3.md) for details.
+
 - August 8, 2026
     - Added MiniMax-H3 ConvRot INT8 support for LoRA training and generation: BF16 checkpoints quantize at load time with `--convrot_int8`, and the released full and pruned ConvRot INT8 transformers and the ConvRot INT8 Qwen3-VL-32B text encoder are detected automatically. Generation attaches LoRAs to pre-quantized bases as runtime branches. Thank you sdbds [PR #1024](https://github.com/kohya-ss/musubi-tuner/pull/1024). See the [MiniMax-H3 documentation](./docs/minimax_h3.md) for details.
 
 - August 3, 2026
-    - Added experimental MiniMax-H3 R1 support for T2VA, FL2VA, and Ref2VA LoRA training plus standalone and scheduled training-time joint video/audio generation. R1 supports the published BF16 transformers, dual VAEs, Qwen3-VL-32B conditioning, and block swap. See the [MiniMax-H3 documentation](./docs/minimax_h3.md) for dataset, cache, training, generation, and R2 deferral details.
+    - Added experimental MiniMax-H3 R1 support for T2VA, FL2VA, and Ref2VA LoRA training plus standalone and scheduled training-time joint video/audio generation. R1 supports the published BF16 transformers, dual VAEs, Qwen3-VL-32B conditioning, and block swap. See the [MiniMax-H3 documentation](./docs/minimax_h3.md) for dataset, cache, training, generation, and R2 deferral details. [PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) Thank you sdbds for the contribution.
 
 - July 14, 2026
     - Added the `--log_grad_metrics` option to log gradient norm diagnostics (`grad/norm`, `grad/mean_norm`, `grad/max`, measured before gradient clipping) to the tracker. Thank you rockerBOO [PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988).

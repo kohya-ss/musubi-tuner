@@ -21,7 +21,17 @@ from musubi_tuner.minimax_h3.sampling import (
     sample_joint_av,
     write_joint_av,
 )
-from musubi_tuner.minimax_h3_generate_video import load_cached_text_conditioning, validate_generation_args
+from musubi_tuner.minimax_h3.generation_inputs import load_generation_record, parse_one_frame_options
+from musubi_tuner.minimax_h3.packing import FRAME_RESCALE, H3TimeOverrides
+from musubi_tuner.minimax_h3.sampling import write_image
+from musubi_tuner.minimax_h3_generate_video import (
+    _one_frame_time_overrides,
+    load_cached_text_conditioning,
+    validate_generation_args,
+)
+
+# the parser moved to generation_inputs so the trainer's sample prompts share it
+_parse_one_frame_options = parse_one_frame_options
 
 
 def _layout():
@@ -70,7 +80,7 @@ def test_target_initialization_draws_video_then_audio_from_one_request_generator
     assert torch.equal(audio, expected_audio)
 
 
-def test_condition_augmentation_consumes_one_request_stream_in_role_order():
+def test_condition_augmentation_draws_visuals_then_audio_from_the_same_request_stream():
     visuals = (torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4))
     audios = (torch.zeros(1, 32, 2, 8),)
 
@@ -84,26 +94,72 @@ def test_condition_augmentation_consumes_one_request_stream_in_role_order():
         device=torch.device("cpu"),
     )
 
-    expected_generator = create_sampling_generator(456)
-    expected_visual_0 = 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected_generator)
-    expected_visual_1 = 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected_generator)
-    expected_audio = 0.5 * _cpu_noise((1, 32, 2, 8), expected_generator)
-    assert torch.equal(augmented_visuals[0], expected_visual_0)
-    assert torch.equal(augmented_visuals[1], expected_visual_1)
+    # sequential draws from the one request stream: each condition tensor gets its own noise, and
+    # the conditions are zeros here, so clean*x + (1-clean)*eps collapses to the scaled draw
+    expected = torch.Generator(device="cpu").manual_seed(456)
+    assert torch.equal(augmented_visuals[0], 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected))
+    assert torch.equal(augmented_visuals[1], 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected))
+    assert torch.equal(augmented_audios[0], 0.5 * _cpu_noise((1, 32, 2, 8), expected))
     assert not torch.equal(augmented_visuals[0], augmented_visuals[1])
-    assert torch.equal(augmented_audios[0], expected_audio)
 
-    changed_generator = create_sampling_generator(457)
-    changed_visuals, changed_audios = augment_condition_latents(
-        visuals,
-        audios,
-        generator=changed_generator,
-        visual_clean=0.5,
-        audio_clean=0.5,
-        device=torch.device("cpu"),
-    )
-    assert not torch.equal(changed_visuals[0], augmented_visuals[0])
-    assert not torch.equal(changed_audios[0], augmented_audios[0])
+
+def test_condition_noise_does_not_alias_across_consecutive_request_seeds():
+    # per-role seed offsets (visuals from seed, audio from seed + 1) made one request's audio noise
+    # the next request's visual noise; the shared per-request stream removes that alias
+    def augmented(seed: int):
+        return augment_condition_latents(
+            (torch.zeros(1, 32, 2, 8),),
+            (torch.zeros(1, 32, 2, 8),),
+            generator=create_sampling_generator(seed),
+            visual_clean=0.5,
+            audio_clean=0.5,
+            device=torch.device("cpu"),
+        )
+
+    visuals, audios = augmented(456)
+    next_visuals, next_audios = augmented(457)
+
+    assert not torch.equal(audios[0], next_visuals[0])
+    assert not torch.equal(visuals[0], next_visuals[0])
+    assert not torch.equal(audios[0], next_audios[0])
+
+
+def test_one_request_generator_feeds_target_noise_then_condition_noise_in_call_order():
+    def request(seed: int):
+        generator = create_sampling_generator(seed)
+        video, audio = initialize_target_latents(
+            video_shape=(1, 24, 2, 4, 4),
+            audio_shape=(1, 32, 2, 8),
+            generator=generator,
+            device=torch.device("cpu"),
+            video_dtype=torch.float32,
+            audio_dtype=torch.float32,
+        )
+        conditions = augment_condition_latents(
+            (torch.zeros(1, 24, 1, 4, 4),),
+            (torch.zeros(1, 32, 2, 8),),
+            generator=generator,
+            visual_clean=0.5,
+            audio_clean=0.5,
+            device=torch.device("cpu"),
+        )
+        return video, audio, conditions
+
+    expected = torch.Generator(device="cpu").manual_seed(789)
+    video, audio, (visuals, audios) = request(789)
+
+    assert torch.equal(video, _cpu_noise((1, 24, 2, 4, 4), expected))
+    assert torch.equal(audio, _cpu_noise((1, 32, 2, 8), expected))
+    assert torch.equal(visuals[0], 0.5 * _cpu_noise((1, 24, 1, 4, 4), expected))
+    assert torch.equal(audios[0], 0.5 * _cpu_noise((1, 32, 2, 8), expected))
+    # the same seed replays the whole request, and a different one changes every tensor
+    replayed_video, replayed_audio, (replayed_visuals, _) = request(789)
+    other_video, _, (other_visuals, _) = request(790)
+    assert torch.equal(video, replayed_video)
+    assert torch.equal(audio, replayed_audio)
+    assert torch.equal(visuals[0], replayed_visuals[0])
+    assert not torch.equal(video, other_video)
+    assert not torch.equal(visuals[0], other_visuals[0])
 
 
 def test_request_generator_does_not_advance_the_global_rng():
@@ -173,6 +229,35 @@ def test_joint_sampler_uses_native_dataward_predictions_and_each_sigma_delta():
     torch.testing.assert_close(result.audio, initial_audio + 3.0)
 
 
+def test_joint_sampler_reports_the_per_step_clean_estimate():
+    class Transformer:
+        def __call__(self, **kwargs):
+            return SimpleNamespace(
+                video=torch.full_like(kwargs["video_latents"], 2.0),
+                audio=torch.full_like(kwargs["audio_latents"], 3.0),
+            )
+
+    captured = []
+    result = sample_joint_av(
+        Transformer(),
+        layout=_layout(),
+        text_hidden_states=torch.zeros(1, 3, 12),
+        text_token_tags=torch.tensor([[1, 0, 1]]),
+        initial_video=torch.full((1, 24, 2, 4, 4), 5.0),
+        initial_audio=torch.full((1, 32, 2, 8), 7.0),
+        steps=2,
+        video_shift=12.0,
+        audio_shift=3.0,
+        x0_callback=lambda index, video, audio: captured.append((index, video, audio)),
+    )
+
+    assert [index for index, _, _ in captured] == [0, 1]
+    # under a constant velocity, x0_hat = x_t + sigma * v equals the trajectory endpoint at every step
+    for _, video, audio in captured:
+        torch.testing.assert_close(video, result.video)
+        torch.testing.assert_close(audio, result.audio)
+
+
 def test_joint_decode_trims_video_and_audio_to_one_planned_duration():
     class VideoVAE:
         def decode(self, latents):
@@ -237,11 +322,12 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "task": task,
         "prompt": "a test prompt",
         "text_cache": None,
-        "processor": "Qwen/Qwen3-VL-32B-Instruct",
         "first_frame": None,
         "last_frame": None,
         "reference_jsonl": None,
         "reference_index": 0,
+        "ref": None,
+        "one_frame": None,
         "width": 64,
         "height": 64,
         "frame_count": 124,
@@ -257,6 +343,9 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "lora_weight": None,
         "lora_multiplier": None,
         "convrot_int8": False,
+        "prune_adaln": False,
+        "trajectory_dir": None,
+        "trajectory_stride": 1,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -279,6 +368,155 @@ def test_generation_validation_enforces_task_inputs_and_block_swap_range(tmp_pat
         validate_generation_args(_generation_args(tmp_path, task="ref2va"))
     with pytest.raises(ValueError, match="blocks_to_swap"):
         validate_generation_args(_generation_args(tmp_path, blocks_to_swap=49))
+
+
+def test_generation_validation_accepts_inline_refs_exclusively_with_reference_jsonl(tmp_path):
+    validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"]))
+
+    jsonl = tmp_path / "refs.jsonl"
+    jsonl.touch()
+    with pytest.raises(ValueError, match="exactly one of"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], reference_jsonl=str(jsonl)))
+    with pytest.raises(ValueError, match="requires --prompt"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], prompt=None))
+    with pytest.raises(ValueError, match="reference_index"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], reference_index=1))
+    with pytest.raises(ValueError, match="T2VA does not accept"):
+        validate_generation_args(_generation_args(tmp_path, task="t2va", ref=["face.png"]))
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.touch()
+    last.touch()
+    with pytest.raises(ValueError, match="FL2VA does not accept"):
+        validate_generation_args(
+            _generation_args(tmp_path, task="fl2va", first_frame=str(first), last_frame=str(last), ref=["face.png"])
+        )
+
+
+def test_load_generation_record_builds_inline_ref_records_without_a_jsonl(tmp_path):
+    refs_directory = tmp_path / "refs"
+    refs_directory.mkdir()
+    face = refs_directory / "face.png"
+    style = refs_directory / "style.webp"
+    face.touch()
+    style.touch()
+
+    record = load_generation_record(
+        SimpleNamespace(
+            task="ref2va",
+            prompt="a cat sings",
+            ref=["refs/face.png", "refs/style.webp"],
+            ref_base_directory=str(tmp_path),
+            reference_jsonl=None,
+            reference_index=0,
+        )
+    )
+
+    assert record.caption == "a cat sings"
+    assert [reference.type for reference in record.references] == ["image", "image"]
+    assert [reference.path for reference in record.references] == [face.resolve(), style.resolve()]
+
+
+def test_parse_one_frame_options_accepts_indices_and_rejects_malformed_specs():
+    assert _parse_one_frame_options("target_index=24,control_index=0;240") == (24, (0, 240))
+    assert _parse_one_frame_options("control_index=7") == (0, (7,))
+    assert _parse_one_frame_options("target_index=3") == (3, None)
+
+    for spec, message in (
+        ("target_index", "key=value"),
+        ("speed=2", "unknown option"),
+        ("target_index=1,target_index=2", "duplicate option"),
+        ("target_index=-1", "nonnegative"),
+        ("control_index=a", "must be an integer"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _parse_one_frame_options(spec)
+
+
+def test_one_frame_time_overrides_map_pixel_frame_indices_to_rotary_units():
+    args = SimpleNamespace(frame_count=1, one_frame="target_index=24,control_index=0;240")
+    assert _one_frame_time_overrides(args) == H3TimeOverrides(
+        condition_times=(0.0, FRAME_RESCALE * 240),
+        target_time=FRAME_RESCALE * 24,
+    )
+
+    defaults = _one_frame_time_overrides(SimpleNamespace(frame_count=1, one_frame=None))
+    assert defaults == H3TimeOverrides(condition_times=(), target_time=0.0)
+    assert _one_frame_time_overrides(SimpleNamespace(frame_count=124, one_frame=None)) is None
+
+
+def test_generation_validation_gates_the_one_frame_mode(tmp_path):
+    png = str(tmp_path / "output.png")
+    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png))
+    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame="target_index=240"))
+
+    with pytest.raises(ValueError, match="must use .png"):
+        validate_generation_args(_generation_args(tmp_path, frame_count=1))
+    with pytest.raises(ValueError, match="require --frame_count 1"):
+        validate_generation_args(_generation_args(tmp_path, one_frame="target_index=1"))
+    with pytest.raises(ValueError, match="control_index applies only to FL2VA"):
+        validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame="control_index=0"))
+
+    first = tmp_path / "first.png"
+    first.touch()
+    validate_generation_args(
+        _generation_args(
+            tmp_path,
+            task="fl2va",
+            frame_count=1,
+            output=png,
+            first_frame=str(first),
+            one_frame="target_index=24,control_index=0",
+        )
+    )
+    with pytest.raises(ValueError, match="one entry per provided frame"):
+        validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, first_frame=str(first)))
+    with pytest.raises(ValueError, match="one entry per provided frame"):
+        validate_generation_args(
+            _generation_args(
+                tmp_path,
+                task="fl2va",
+                frame_count=1,
+                output=png,
+                first_frame=str(first),
+                one_frame="control_index=0;240",
+            )
+        )
+    with pytest.raises(ValueError, match="requires --first_frame and/or --last_frame"):
+        validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, one_frame="control_index=0"))
+
+
+def test_mux_encodes_above_the_1mbps_pyav_default(tmp_path):
+    # regression: without an explicit CRF, PyAV's libx264 default is ~1 Mbps ABR, which crushes
+    # fine detail in evaluation outputs. Noise frames at CRF 16 must blow far past that cap.
+    from musubi_tuner.minimax_h3.sampling import mux_audio_video
+
+    generator = torch.Generator().manual_seed(0)
+    video = torch.randint(0, 256, (12, 256, 256, 3), generator=generator, dtype=torch.uint8)
+    audio = torch.zeros(2, 16000)
+    output = tmp_path / "noise.mp4"
+
+    mux_audio_video(video, audio, output, fps=24, sample_rate=32000)
+
+    bits_per_second = output.stat().st_size * 8 / (12 / 24)
+    assert bits_per_second > 3_000_000
+
+
+def test_write_image_saves_a_single_uint8_frame(tmp_path):
+    frame = torch.zeros(4, 6, 3, dtype=torch.uint8)
+    frame[:, :, 1] = 200
+    output = tmp_path / "sub" / "image.png"
+
+    write_image(frame, output)
+
+    from PIL import Image
+
+    with Image.open(output) as image:
+        assert image.size == (6, 4)
+        assert image.getpixel((0, 0)) == (0, 200, 0)
+
+    with pytest.raises(ValueError, match=r"uint8 \[H,W,3\]"):
+        write_image(frame.float(), tmp_path / "bad.png")
 
 
 def test_cached_text_conditioning_validates_task_format_and_fingerprint(tmp_path):
@@ -373,7 +611,6 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         include_patterns=None,
         exclude_patterns=None,
         disable_numpy_memmap=False,
-        processor_revision=None,
     )
     # the pre-quantization probe reads the DiT file headers; the stub DiT here is not
     # a real safetensors file, so report an ordinary (non-pre-quantized) checkpoint
@@ -447,4 +684,77 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     assert next(event for event in events if event[0] == "load_video_vae")[2] is torch.float16
     assert captured["decoded"].video.shape == (5, 4, 4, 3)
     assert captured["decoded"].audio.shape == (2, 6667)
-    assert captured["output"] == args.output
+    assert captured["output"] == Path(args.output)
+
+
+def test_generation_trajectory_dump_writes_sigma_schedule_and_per_step_videos(tmp_path, monkeypatch):
+    import musubi_tuner.minimax_h3_generate_video as generate
+
+    args = _generation_args(
+        tmp_path,
+        frame_count=5,
+        allow_experimental_duration=True,
+        output=str(tmp_path / "result.mp4"),
+        device="cpu",
+        attn_mode="torch",
+        split_attn=False,
+        use_pinned_memory_for_block_swap=False,
+        include_patterns=None,
+        exclude_patterns=None,
+        disable_numpy_memmap=False,
+        trajectory_dir=str(tmp_path / "trajectory"),
+    )
+    monkeypatch.setattr(generate, "resolve_safetensors_files", lambda path: [path])
+    monkeypatch.setattr(generate, "has_comfy_quant_tensors", lambda files, **kwargs: False)
+
+    class Transformer:
+        offloader = None
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+        def requires_grad_(self, value):
+            return self
+
+        def __call__(self, **kwargs):
+            return SimpleNamespace(
+                video=torch.zeros_like(kwargs["video_latents"]),
+                audio=torch.zeros_like(kwargs["audio_latents"]),
+            )
+
+    decode_calls = []
+
+    class VideoVAE:
+        def decode(self, latents):
+            decode_calls.append(tuple(latents.shape))
+            return torch.zeros(1, 3, 5, 32, 32)
+
+    class AudioVAE:
+        def decode(self, latents):
+            return torch.zeros(1, 2, 6667)
+
+    monkeypatch.setattr(
+        generate,
+        "_encode_text",
+        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(3, dtype=torch.int64)),
+    )
+    monkeypatch.setattr(generate, "load_h3_transformer", lambda *unused, **kwargs: Transformer())
+    monkeypatch.setattr(generate, "load_video_vae", lambda *unused, **kwargs: VideoVAE())
+    monkeypatch.setattr(generate, "load_audio_vae", lambda *unused, **kwargs: AudioVAE())
+    monkeypatch.setattr(generate, "write_joint_av", lambda decoded, output: None)
+
+    generate.run_generation(args)
+
+    trajectory_dir = tmp_path / "trajectory"
+    schedule_lines = (trajectory_dir / "sigma_schedule.csv").read_text(encoding="utf-8").splitlines()
+    assert schedule_lines[0] == "step,base_sigma,sigma_video,sigma_audio"
+    assert schedule_lines[1] == "0,1.000000,1.000000,1.000000"
+    assert schedule_lines[2] == "1,0.500000,0.923077,0.750000"
+    assert len(schedule_lines) == 1 + args.steps
+    step_files = sorted(path.name for path in trajectory_dir.glob("*.mp4"))
+    assert step_files == ["step000_base1.0000_sigv1.0000.mp4", "step001_base0.5000_sigv0.9231.mp4"]
+    # the final output decode plus one decode per dumped step
+    assert len(decode_calls) == 1 + args.steps

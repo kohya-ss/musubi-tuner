@@ -46,7 +46,14 @@ IMAGE_TOKEN_ID = 151655
 VIDEO_TOKEN_ID = 151656
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 VIDEO_PLACEHOLDER = "<|vision_start|><|video_pad|><|vision_end|>"
-DEFAULT_PROCESSOR_ID = "Qwen/Qwen3-VL-32B-Instruct"
+# the H3 encoder is Qwen3-VL-32B, but the released repository ships its own processor and config:
+# the tokenizer adds <d>, </d>, <|cutoff|>, <|lyrics_start|>, <|lyrics_end|>, <|caption_start|> and
+# <|caption_end|> as special tokens (ids 151669-151675), which Qwen/Qwen3-VL-32B-Instruct splits into
+# ordinary tokens instead. The released prompt format writes dialogue and lyrics as <d>[Language] ...</d>,
+# so the H3 files are required, not interchangeable with the upstream Qwen ones.
+H3_REPO_ID = "MiniMaxAI/MiniMax-H3"
+PROCESSOR_SUBFOLDER = "processor"
+TEXT_ENCODER_CONFIG_SUBFOLDER = "text_encoder"
 
 
 @dataclass(frozen=True)
@@ -94,8 +101,14 @@ def build_presentation(
     images = []
     videos = []
     if task == "fl2va":
-        for index, key in enumerate(("first", "last"), start=1):
-            visual = _require_visual(visuals, key, f"FL2VA {key}")
+        # the released builder numbers <Picture i> over the pictures that are present,
+        # in packed (first, last) order: a lone last frame is still <Picture 1>, and the
+        # first/last distinction is carried only by the rotary anchor times
+        present_keys = [key for key in ("first", "last") if key in visuals]
+        if not present_keys:
+            raise ValueError("MiniMax-H3 FL2VA presentation requires at least one of the first and last visuals")
+        for index, key in enumerate(present_keys, start=1):
+            visual = visuals[key]
             if visual.frames.shape[0] != 1:
                 raise ValueError(f"MiniMax-H3 FL2VA {key} visual must contain exactly one frame")
             part = f"<Picture {index}>: {IMAGE_PLACEHOLDER}"
@@ -230,17 +243,17 @@ def normalize_h3_text_encoder_key(key: str) -> str:
     return key
 
 
-def load_h3_processor(path: str = DEFAULT_PROCESSOR_ID, *, revision: str | None = None):
-    from transformers import AutoProcessor
+def load_h3_processor():
+    # the concrete class, not AutoProcessor: the auto class resolves the processor type from the
+    # repository root, where the H3 release keeps a diffusers model_index.json instead of a config
+    from transformers import Qwen3VLProcessor
 
-    return AutoProcessor.from_pretrained(path, revision=revision)
+    return Qwen3VLProcessor.from_pretrained(H3_REPO_ID, subfolder=PROCESSOR_SUBFOLDER)
 
 
 def load_h3_text_encoder(
     checkpoint_path: str | Path,
     *,
-    processor_path: str = DEFAULT_PROCESSOR_ID,
-    revision: str | None = None,
     device: str | torch.device,
     dtype: torch.dtype = torch.bfloat16,
     disable_mmap: bool = False,
@@ -256,7 +269,7 @@ def load_h3_text_encoder(
             "--text_encoder_blocks_to_swap requires a CUDA device. / --text_encoder_blocks_to_swap には CUDA デバイスが必要です。"
         )
 
-    config = Qwen3VLConfig.from_pretrained(processor_path, revision=revision)
+    config = Qwen3VLConfig.from_pretrained(H3_REPO_ID, subfolder=TEXT_ENCODER_CONFIG_SUBFOLDER)
     if config.text_config.hidden_size != TEXT_WIDTH:
         raise ValueError(f"MiniMax-H3 Qwen3-VL hidden size must be {TEXT_WIDTH}, got {config.text_config.hidden_size}")
     config.text_config.num_hidden_layers = LAYER_50_HIDDEN_STATE_INDEX
@@ -477,6 +490,60 @@ def encode_h3_presentation(processor, model, presentation: H3Presentation) -> tu
     return hidden_states, token_tags
 
 
+# The guidance-loss uncond cache: one text-only probe embedding (layer-50 hidden rows +
+# token tags), shared between the cache script that writes it and the trainer that reads
+# it. The format id matches the uncond-probe screening harness so screened probes load
+# directly. Bump on any semantic change so stale caches are rejected.
+UNCOND_CACHE_FORMAT = "h3-uncond-probe-v1"
+
+
+def _validate_uncond_cache_tensors(hidden_states: torch.Tensor, token_tags: torch.Tensor, label: str) -> None:
+    if hidden_states.ndim != 2 or hidden_states.shape[0] < 1:
+        raise ValueError(f"MiniMax-H3 uncond cache {label} hidden states must be [L>=1,width], got {tuple(hidden_states.shape)}")
+    if hidden_states.shape[0] > MAX_TEXT_ROWS:
+        raise _text_size_error(hidden_states.shape[0], token_tags)
+    if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
+        raise ValueError(f"MiniMax-H3 uncond cache {label} token tags must be int64 [L]")
+    if not torch.all((token_tags == 0) | (token_tags == 1)):
+        raise ValueError(f"MiniMax-H3 uncond cache {label} token tags may contain only 0 and 1")
+
+
+def save_h3_uncond_cache(
+    path: str | Path,
+    hidden_states: torch.Tensor,
+    token_tags: torch.Tensor,
+    *,
+    metadata: Mapping[str, str] | None = None,
+) -> None:
+    from safetensors.torch import save_file
+
+    _validate_uncond_cache_tensors(hidden_states, token_tags, str(path))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file(
+        {"hidden_states": hidden_states.contiguous(), "token_tags": token_tags.contiguous()},
+        str(path),
+        metadata={"cache_format": UNCOND_CACHE_FORMAT, **dict(metadata or {})},
+    )
+
+
+def load_h3_uncond_cache(path: str | Path) -> tuple[torch.Tensor, torch.Tensor, dict[str, str]]:
+    from safetensors import safe_open
+
+    path = Path(path)
+    with safe_open(str(path), framework="pt", device="cpu") as handle:
+        metadata = dict(handle.metadata() or {})
+        cached_format = metadata.get("cache_format")
+        if cached_format != UNCOND_CACHE_FORMAT:
+            raise ValueError(f"MiniMax-H3 uncond cache format must be {UNCOND_CACHE_FORMAT!r}, got {cached_format!r}: {path}")
+        if set(handle.keys()) != {"hidden_states", "token_tags"}:
+            raise ValueError(f"MiniMax-H3 uncond cache has an invalid tensor-key set: {path}")
+        hidden_states = handle.get_tensor("hidden_states")
+        token_tags = handle.get_tensor("token_tags")
+    _validate_uncond_cache_tensors(hidden_states, token_tags, str(path))
+    return hidden_states, token_tags, metadata
+
+
 def processor_fingerprint(processor) -> str:
     tokenizer = getattr(processor, "tokenizer", None)
     payload = {
@@ -495,6 +562,53 @@ def processor_fingerprint(processor) -> str:
 # Bump whenever the cached hidden-state semantics change (hidden-state convention, token-tag
 # algorithm, text layout constants, or the fingerprint formats) so stale caches are rebuilt/rejected.
 TEXT_CACHE_FORMAT = "minimax-h3-text-v2"
+
+# Teacher-matching condition seam. "first,last" conditions the FL2VA teacher on both endpoints
+# (full training videos always provide them, and the FL2VA base is most in-distribution with
+# both anchors). "ref" conditions the teacher on the training clip itself through the Ref2VA
+# layout (reference video plus its audio track), giving the teacher complete information at
+# every sigma. The value is validated through this seam so further variants (single-sided,
+# anchored, segmented teachers) can slot in later without changing the cache or trainer
+# interfaces.
+TEACHER_CONDITIONS_FIRST_LAST = "first,last"
+TEACHER_CONDITIONS_REF = "ref"
+
+
+def normalize_teacher_conditions(value: str) -> str:
+    parts = [part.strip() for part in str(value).split(",")]
+    if parts == ["first", "last"]:
+        return TEACHER_CONDITIONS_FIRST_LAST
+    if parts == [TEACHER_CONDITIONS_REF]:
+        return TEACHER_CONDITIONS_REF
+    raise ValueError(
+        f"MiniMax-H3 teacher matching supports only teacher conditions "
+        f"'{TEACHER_CONDITIONS_FIRST_LAST}' or '{TEACHER_CONDITIONS_REF}', got {value!r}"
+    )
+
+
+# The ref-teacher caption wrap: the official editing-prompt declaration blocks that make the
+# base model treat the reference as a 1:1 copy source. subject_definitions / summary /
+# retention_analysis are content-independent boilerplate, so the cache script wraps the user
+# caption automatically, like the FL2VA Picture prefix. Probe-validated on the released FL2VA
+# weights: the video copy semantics saturate even without any declaration, but the
+# `<Audio 1>: fully_copy` declaration is what opens audio education across the teaching band.
+REF_TEACHER_CAPTION_HEADER = """subject_definitions:
+<Video 1> is the source video for the target video edit.
+<Audio 1> is the synchronized audio track of <Video 1> and is reused in the target video.
+
+summary:
+[video editing + audio reuse] The target video is an edited version of <Video 1> with no changes; all shots, subjects, camera movement, and sound are preserved as they are.
+
+retention_analysis:
+<Video 1> (all shots): fully_preserved - every shot, subject, action, and camera movement of the source video is retained without modification.
+<Audio 1>: fully_copy - <Audio 1> is reused 1:1 as the target video's complete final audio track.
+
+detailed_description:
+"""
+
+
+def wrap_ref_teacher_caption(caption: str) -> str:
+    return REF_TEACHER_CAPTION_HEADER + caption
 
 
 def presentation_fingerprint(
