@@ -1,9 +1,9 @@
 # MiniMax-H3 Audio Best-of-K Design
 
-**Status:** Draft for user review  
-**Date:** 2026-08-13  
-**Branch:** `codex/h3-audio-best-of-k`  
-**Base:** `qinglong` at `57e2307`  
+**Status:** Draft for user review
+**Date:** 2026-08-13
+**Branch:** `codex/h3-audio-best-of-k`
+**Base:** `qinglong` at `57e2307`
 **Issue:** [kohya-ss/musubi-tuner#1019](https://github.com/kohya-ss/musubi-tuner/issues/1019)
 
 ## 1. Scope
