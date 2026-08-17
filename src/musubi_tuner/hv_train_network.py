@@ -26,6 +26,7 @@ from musubi_tuner.training.trainer_base import (
     SS_METADATA_KEY_NETWORK_ALPHA,
     SS_METADATA_KEY_NETWORK_ARGS,
     SS_METADATA_MINIMUM_KEYS,
+    reduce_loss,
 )
 from musubi_tuner.training.accelerator_setup import (
     clean_memory_on_device,
@@ -79,6 +80,7 @@ __all__ = [
     "SS_METADATA_KEY_NETWORK_ALPHA",
     "SS_METADATA_KEY_NETWORK_ARGS",
     "SS_METADATA_MINIMUM_KEYS",
+    "reduce_loss",
     # accelerator_setup
     "clean_memory_on_device",
     "collator_class",

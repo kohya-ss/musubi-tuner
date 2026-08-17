@@ -126,6 +126,11 @@ def _load_training_module(monkeypatch):
         DiTOutput=SimpleNamespace,
         NetworkTrainer=NetworkTrainer,
         wandb_tracker_and_module=noop,
+        # mirror trainer_base's loss-weighting helpers for a batch without a watermark mask
+        apply_loss_weights=lambda loss, weights: (
+            loss.mean() if weights is None else (loss * weights).sum() / weights.expand_as(loss).sum()
+        ),
+        watermark_mask_weights=lambda reference, batch=None: None,
     )
     _stub(monkeypatch, "musubi_tuner.utils.device_utils", clean_memory_on_device=noop, synchronize_device=noop)
     model_utils = _stub(monkeypatch, "musubi_tuner.utils.model_utils", compile_transformer=noop)

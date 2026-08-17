@@ -8,6 +8,7 @@ This document provides documentation for utility tools available in this project
 
 - [LoRA Post-Hoc EMA merging / LoRAのPost-Hoc EMAマージ](#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)
 - [Image Captioning with Qwen2.5-VL / Qwen2.5-VLによる画像キャプション生成](#image-captioning-with-qwen25-vl--qwen25-vlによる画像キャプション生成)
+- [Static Watermark Mask Detection / 静的ウォーターマークのマスク検出](#static-watermark-mask-detection--静的ウォーターマークのマスク検出)
 
 ## LoRA Post-Hoc EMA merging / LoRAのPost-Hoc EMAマージ
 
@@ -404,3 +405,31 @@ python src/musubi_tuner/caption_images_by_qwen_vl.py \
   --max_size 1024 \
   --prompt "A detailed and descriptive caption for this image is:\n"
 ```
+
+## Static Watermark Mask Detection / 静的ウォーターマークのマスク検出
+
+`detect_watermark_mask.py` scans a directory of videos for a burned-in static watermark and writes a per-video loss mask next to each file. During training the masked region is excluded from the loss, so the model does not learn the watermark while the frame is still trained at full size.
+
+Detection compares frames sampled evenly across the video: a static watermark has a near-zero temporal standard deviation, while the content underneath it changes. Semi-transparent watermarks keep varying with the content and are invisible to that test, so a second pass looks at the temporal median of the image gradient, where the content cancels out and the watermark does not. Only `opencv-python` and `numpy` are required.
+
+### Usage
+
+```bash
+python src/musubi_tuner/detect_watermark_mask.py --video_dir /path/to/video_dir --corner_only
+```
+
+This writes `{video_stem}_wmask.png` (white = train, black = ignore) next to each video, which the dataset picks up automatically. The watermark does not have to be on screen the whole time — up to `--frame_tolerance` of the sampled frames (10% by default) may be without it. Only *moving* watermarks are unsupported, since a single mask cannot describe them; those clips should be dropped from the dataset.
+
+See the [static watermark masking documentation](./watermark_mask.md) for the full option list, the dataset configuration, and how the mask is applied to the loss.
+
+<details>
+<summary>日本語</summary>
+
+`detect_watermark_mask.py` は、ディレクトリ内の動画から焼き込まれた静的なウォーターマークを検出し、各動画の隣に損失用のマスクを書き出します。学習時にはマスクされた領域が損失から除外されるため、フレームはフルサイズで学習しつつ、モデルがウォーターマークを学習することを防げます。
+
+検出は、動画から均等にサンプリングしたフレームを比較して行います。静的なウォーターマークは時間方向の標準偏差がほぼゼロですが、その下のコンテンツは変化します。半透明のウォーターマークはコンテンツに応じて変化し続けるためこの方法では検出できないので、2つ目のパスとして画像の勾配の時間方向の中央値を見ます。コンテンツの勾配は相殺されますが、ウォーターマークの勾配は残ります。必要なのは `opencv-python` と `numpy` だけです。
+
+上記のコマンドで、各動画の隣に `{動画名}_wmask.png`（白＝学習する、黒＝無視する）が書き出され、データセットが自動的に読み込みます。ウォーターマークは常に画面に表示されている必要はありません。サンプリングされたフレームのうち `--frame_tolerance` の割合（デフォルトは10%）までは、表示されていなくても構いません。単一のマスクで表現できない**移動する**ウォーターマークのみが非対応です。そのようなクリップはデータセットから除外してください。
+
+オプションの一覧、データセットの設定、損失への適用方法については、[静的ウォーターマークのマスクのドキュメント](./watermark_mask.md)を参照してください。
+</details>
