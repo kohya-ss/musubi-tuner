@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import math
 import random
 from typing import Any, Optional, Tuple, TYPE_CHECKING
@@ -26,7 +27,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_WAN,
     ARCHITECTURE_Z_IMAGE,
 )
-from musubi_tuner.dataset.media_utils import divisible_by
+from musubi_tuner.dataset.media_utils import divisible_by, load_watermark_mask
 from musubi_tuner.utils.model_utils import remove_dtype_suffix
 
 if TYPE_CHECKING:
@@ -165,6 +166,16 @@ class BucketSelector:
         return bucket_width, bucket_height
 
 
+@functools.lru_cache(maxsize=64)
+def _cached_watermark_mask(mask_path: str, bucket_width: int, bucket_height: int) -> torch.Tensor:
+    """Decode + resize a watermark mask once and reuse it across steps.
+
+    The returned tensor is shared between callers, so it must not be modified in place.
+    """
+    mask = load_watermark_mask(mask_path, (bucket_width, bucket_height))
+    return torch.from_numpy(mask)
+
+
 class BucketBatchManager:
     def __init__(
         self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
@@ -244,7 +255,13 @@ class BucketBatchManager:
 
         batch_tensor_data = {}
         varlen_keys = set()
+        watermark_masks: list[Optional[torch.Tensor]] = []
         for item_info in bucket[start:end]:
+            watermark_masks.append(
+                _cached_watermark_mask(item_info.watermark_mask_path, bucket_reso[0], bucket_reso[1])
+                if item_info.watermark_mask_path is not None
+                else None
+            )
             sd_latent = load_file(item_info.latent_cache_path)
             sd_te = load_file(item_info.text_encoder_output_cache_path)
             sd = {**sd_latent, **sd_te}
@@ -274,6 +291,13 @@ class BucketBatchManager:
         for key in batch_tensor_data.keys():
             if key not in varlen_keys:
                 batch_tensor_data[key] = torch.stack(batch_tensor_data[key])
+
+        if any(mask is not None for mask in watermark_masks):
+            # (B, H, W) in [0, 1]: 1 = train on this pixel, 0 = ignore it. Items without a mask
+            # are trained on in full. The key is omitted entirely when no item in the batch has a
+            # mask, so the loss stays a plain mean in that case.
+            ones = torch.ones(bucket_reso[1], bucket_reso[0], dtype=torch.float32)
+            batch_tensor_data["watermark_mask"] = torch.stack([ones if mask is None else mask for mask in watermark_masks])
 
         if self.timestep_pool is not None:
             batch_tensor_data["timesteps"] = self.timestep_pool[idx][: end - start]  # use the pre-generated timesteps

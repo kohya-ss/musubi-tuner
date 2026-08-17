@@ -99,6 +99,48 @@ class DiTOutput:
     extra: dict = field(default_factory=dict)
 
 
+_warned_watermark_mask_unsupported = False
+
+
+def reduce_loss(loss: torch.Tensor, batch: Optional[dict[str, torch.Tensor]] = None) -> torch.Tensor:
+    """Reduce a per-element loss to a scalar, honouring an optional watermark loss mask.
+
+    Without a mask (the default) this is a plain ``loss.mean()``. When the batch carries a
+    ``watermark_mask`` — a ``(H, W)`` or ``(B, H, W)`` tensor in [0, 1] where 0 marks the
+    watermark — the masked-out pixels are excluded from the loss, and therefore from the
+    gradients, while the frame itself is trained at full size. See ``docs/watermark_mask.md``.
+
+    The mask is in pixel space, so it is area-downsampled to the spatial size of the loss
+    (i.e. the latent resolution) and broadcast over channels and frames. The result is
+    normalized by the mask weight so its scale stays comparable to the unmasked mean.
+    """
+    mask = None if batch is None else batch.get("watermark_mask")
+    if mask is None:
+        return loss.mean()
+
+    if loss.ndim not in (4, 5):
+        # Patchified/sequence-shaped losses (most image DiTs) have no spatial layout to mask.
+        global _warned_watermark_mask_unsupported
+        if not _warned_watermark_mask_unsupported:
+            _warned_watermark_mask_unsupported = True
+            logger.warning(
+                f"watermark_mask is ignored: loss has shape {tuple(loss.shape)}, which is not a spatial"
+                " (B, C, H, W) or (B, C, T, H, W) layout"
+            )
+        return loss.mean()
+
+    mask = mask.to(device=loss.device, dtype=loss.dtype)
+    mask = mask.reshape(-1, 1, *mask.shape[-2:])  # (H, W) or (B, H, W) -> (B or 1, 1, H, W)
+    mask = torch.nn.functional.interpolate(mask, size=loss.shape[-2:], mode="area")
+    if loss.ndim == 5:
+        mask = mask.unsqueeze(2)  # (B, 1, H, W) -> (B, 1, 1, H, W), broadcast over frames
+
+    masked_loss = loss * mask
+    # Denominator counts the mask weight per loss element, so a fully-open mask reproduces mean().
+    denominator = mask.expand_as(loss).sum()
+    return masked_loss.sum() / denominator.clamp(min=1e-8)
+
+
 class NetworkTrainer:
     def __init__(self):
         self.blocks_to_swap = None
@@ -1172,7 +1214,7 @@ class NetworkTrainer:
         )
 
         output = self.call_dit(args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype)
-        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step, batch)
 
     def compute_loss(
         self,
@@ -1183,6 +1225,7 @@ class NetworkTrainer:
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
         global_step: int,
+        batch: Optional[dict[str, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
@@ -1198,12 +1241,17 @@ class NetworkTrainer:
         auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
         populate with named scalars for loss-decomposition logging
         (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
+
+        ``batch`` is the raw dataset batch; the default implementation only reads
+        the optional ``watermark_mask`` from it (see ``reduce_loss``). Overrides
+        that reduce the loss themselves should go through ``reduce_loss`` too, so
+        the mask keeps working.
         """
         weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
         loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
             loss = loss * weighting
-        return loss.mean(), {}
+        return reduce_loss(loss, batch), {}
 
     def on_transformer_loaded(
         self,
