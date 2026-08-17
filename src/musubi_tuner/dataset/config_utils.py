@@ -40,6 +40,7 @@ class BaseDatasetParams:
     cache_directory: Optional[str] = None
     debug_dataset: bool = False
     architecture: str = "no_default"  # short style like "hv" or "wan"
+    watermark_mask_suffix: Optional[str] = "_wmask.png"  # static watermark loss mask, see docs/watermark_mask.md
 
 
 @dataclass
@@ -116,6 +117,7 @@ class ConfigSanitizer:
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "enable_bucket": bool,
         "bucket_no_upscale": bool,
+        "watermark_mask_suffix": str,
     }
     IMAGE_DATASET_DISTINCT_SCHEMA = {
         "image_directory": str,
@@ -307,6 +309,7 @@ def generate_dataset_group_by_blueprint(
         bucket_no_upscale: {dataset.bucket_no_upscale}
         cache_directory: "{dataset.cache_directory}"
         debug_dataset: {dataset.debug_dataset}
+        watermark_mask_suffix: "{dataset.watermark_mask_suffix}"
     """
         )
 

@@ -853,8 +853,9 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
         global_step: int,
+        batch: Optional[dict[str, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        loss, metrics = super().compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        loss, metrics = super().compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step, batch)
         loss, dino_logs = self.apply_dino_loss(args, loss, output.pred, output.target, output.extra["pixel_grid_hw"], global_step)
         if dino_logs:
             metrics = {**metrics, **dino_logs}

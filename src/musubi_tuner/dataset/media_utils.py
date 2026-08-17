@@ -137,6 +137,23 @@ def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: t
     return image
 
 
+def load_watermark_mask(mask_path: str, bucket_reso: tuple[int, int]) -> np.ndarray:
+    """
+    Load a watermark loss mask and align it with the training frames.
+
+    The mask is a grayscale image where 255 means "train on this pixel" and 0 means "ignore
+    this pixel". It goes through exactly the same resize/crop as the video frames
+    (`resize_image_to_bucket`), so the mask stays aligned with the cached latents.
+
+    bucket_reso: **(width, height)**
+
+    Returns a float32 `(height, width)` array in [0, 1].
+    """
+    image = Image.open(mask_path).convert("L")
+    mask = resize_image_to_bucket(image, bucket_reso)
+    return np.clip(mask.astype(np.float32) / 255.0, 0.0, 1.0)
+
+
 def load_video(
     video_path: str,
     start_frame: Optional[int] = None,

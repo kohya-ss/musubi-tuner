@@ -658,6 +658,7 @@ batch_size = 1 # optional, default is 1. This is the default batch size for all 
 num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset. Useful to balance the multiple datasets with different sizes.
 enable_bucket = true # optional, default is false. Enable bucketing for datasets
 bucket_no_upscale = false # optional, default is false. Disable upscaling for bucketing. Ignored if enable_bucket is false
+watermark_mask_suffix = "_wmask.png" # optional, default is "_wmask.png". Suffix of the static watermark loss mask placed next to each image/video. See docs/watermark_mask.md
 
 ### Image Dataset
 

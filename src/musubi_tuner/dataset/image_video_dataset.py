@@ -61,6 +61,9 @@ class ItemInfo:
         self.latent_cache_path = latent_cache_path
         self.text_encoder_output_cache_path: Optional[str] = None
 
+        # static watermark loss mask, next to the source image/video (see `watermark_mask_suffix`)
+        self.watermark_mask_path: Optional[str] = None
+
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
 
@@ -115,6 +118,7 @@ class BaseDataset(torch.utils.data.Dataset):
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        watermark_mask_suffix: Optional[str] = "_wmask.png",
     ):
         self.resolution = resolution
         self.caption_extension = caption_extension
@@ -125,6 +129,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.cache_directory = cache_directory
         self.debug_dataset = debug_dataset
         self.architecture = architecture
+        self.watermark_mask_suffix = watermark_mask_suffix
         self.seed = None
         self.current_epoch = 0
         self.shared_epoch = None
@@ -140,8 +145,29 @@ class BaseDataset(torch.utils.data.Dataset):
             "num_repeats": self.num_repeats,
             "enable_bucket": bool(self.enable_bucket),
             "bucket_no_upscale": bool(self.bucket_no_upscale),
+            "watermark_mask_suffix": self.watermark_mask_suffix,
         }
         return metadata
+
+    def find_watermark_mask_path(self, item_key: str, source_directory: Optional[str]) -> Optional[str]:
+        """Locate the static watermark loss mask for an item, or return None if there is none.
+
+        The mask is looked up as `{item_key}{watermark_mask_suffix}` next to the source
+        image/video first, then in the cache directory (which is the source directory unless
+        `cache_directory` is set). Masks are entirely optional: a missing mask simply means the
+        whole frame is trained on.
+        """
+        if not self.watermark_mask_suffix:
+            return None
+
+        basename = os.path.splitext(os.path.basename(item_key))[0] + self.watermark_mask_suffix
+        for directory in [source_directory, self.cache_directory]:
+            if directory is None:
+                continue
+            mask_path = os.path.join(directory, basename)
+            if os.path.exists(mask_path):
+                return mask_path
+        return None
 
     def get_all_latent_cache_files(self):
         return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
@@ -287,6 +313,7 @@ class ImageDataset(BaseDataset):
         control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        watermark_mask_suffix: Optional[str] = "_wmask.png",
     ):
         super(ImageDataset, self).__init__(
             resolution,
@@ -298,6 +325,7 @@ class ImageDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            watermark_mask_suffix,
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
@@ -510,6 +538,7 @@ class ImageDataset(BaseDataset):
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
+        num_watermark_masks = 0
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
 
@@ -548,11 +577,16 @@ class ImageDataset(BaseDataset):
 
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
+            item_info.watermark_mask_path = self.find_watermark_mask_path(item_key, self.image_directory)
+            num_watermark_masks += item_info.watermark_mask_path is not None
 
             bucket = bucketed_item_info.get(bucket_reso, [])
             for _ in range(self.num_repeats):
                 bucket.append(item_info)
             bucketed_item_info[bucket_reso] = bucket
+
+        if num_watermark_masks > 0:
+            logger.info(f"found {num_watermark_masks} watermark mask(s) with suffix {self.watermark_mask_suffix}")
 
         # prepare batch manager
         self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
@@ -603,6 +637,7 @@ class VideoDataset(BaseDataset):
         fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        watermark_mask_suffix: Optional[str] = "_wmask.png",
     ):
         super(VideoDataset, self).__init__(
             resolution,
@@ -614,6 +649,7 @@ class VideoDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            watermark_mask_suffix,
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
@@ -862,6 +898,7 @@ class VideoDataset(BaseDataset):
 
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
+        num_watermark_masks = 0
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
 
@@ -882,11 +919,16 @@ class VideoDataset(BaseDataset):
             bucket_reso = (*bucket_reso, frame_count)
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, frame_count=frame_count, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
+            item_info.watermark_mask_path = self.find_watermark_mask_path(item_key, self.video_directory)
+            num_watermark_masks += item_info.watermark_mask_path is not None
 
             bucket = bucketed_item_info.get(bucket_reso, [])
             for _ in range(self.num_repeats):
                 bucket.append(item_info)
             bucketed_item_info[bucket_reso] = bucket
+
+        if num_watermark_masks > 0:
+            logger.info(f"found {num_watermark_masks} watermark mask(s) with suffix {self.watermark_mask_suffix}")
 
         # prepare batch manager
         self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)

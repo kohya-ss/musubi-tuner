@@ -164,6 +164,7 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 - [データセット設定](./docs/dataset_config.md)
 - [高度な設定](./docs/advanced_config.md)
 - [学習中のサンプル生成](./docs/sampling_during_training.md)
+- [静的ウォーターマークのマスク](./docs/watermark_mask.md)
 - [ブロックスワップ（省メモリのためのCPUオフロード）](./docs/block_swap.md)
 - [ツールとユーティリティ](./docs/tools.md)
 - [torch.compileの使用方法](./docs/torch_compile.md)
