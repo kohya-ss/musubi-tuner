@@ -57,6 +57,7 @@ from musubi_tuner.training.accelerator_setup import (
     collator_class,
     prepare_accelerator,
 )
+from musubi_tuner.training.loss import LossContext, normalize_loss_output, resolve_loss_fn
 from musubi_tuner.training.sampling_prompts import should_sample_images
 from musubi_tuner.training.timesteps import (
     compute_density_for_timestep_sampling,
@@ -74,6 +75,8 @@ SS_METADATA_KEY_NETWORK_MODULE = "ss_network_module"
 SS_METADATA_KEY_NETWORK_DIM = "ss_network_dim"
 SS_METADATA_KEY_NETWORK_ALPHA = "ss_network_alpha"
 SS_METADATA_KEY_NETWORK_ARGS = "ss_network_args"
+SS_METADATA_KEY_LOSS_FN = "ss_loss_fn"
+SS_METADATA_KEY_LOSS_FN_ARGS = "ss_loss_fn_args"
 
 SS_METADATA_MINIMUM_KEYS = [
     SS_METADATA_KEY_BASE_MODEL_VERSION,
@@ -106,6 +109,7 @@ class NetworkTrainer:
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
+        self._resolved_loss_fn = None  # resolved --loss_fn callable, set at startup
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1186,24 +1190,39 @@ class NetworkTrainer:
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
-        Default implementation: weighted MSE between ``output.pred`` and
-        ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
-        then ``.mean()``. Override to swap the loss formulation entirely
-        (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary terms
-        (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses are
-        responsible for whatever weighting/reduction they need — this hook owns
-        the full loss computation, not just the per-element MSE.
+        Default implementation: delegates to the callable resolved from
+        ``--loss_fn`` (invoked with a single ``LossContext`` carrying these
+        same parameters), default ``"mse"``: weighted MSE between
+        ``output.pred`` and ``output.target`` with the SD3-style
+        ``args.weighting_scheme`` applied, then ``.mean()``. Override to swap
+        the loss formulation entirely (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary
+        terms (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses
+        are responsible for whatever weighting/reduction they need — this hook
+        owns the full loss computation, not just the per-element MSE.
 
         ``global_step`` is provided for step-gated terms (e.g. computing an
         auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
         populate with named scalars for loss-decomposition logging
         (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
-        weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
-        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
-        if weighting is not None:
-            loss = loss * weighting
-        return loss.mean(), {}
+        if self._resolved_loss_fn is None:
+            # defensive fallback for direct calls (unit tests); real runs resolve
+            # eagerly in _validate_args_and_init so bad --loss_fn fails at startup
+            self._resolved_loss_fn = resolve_loss_fn(args.loss_fn, args.loss_fn_args)
+        if isinstance(self._resolved_loss_fn, torch.nn.Module):
+            # one-time device move for losses with buffers/submodules; no-op afterwards
+            self._resolved_loss_fn.to(output.pred.device)
+        ctx = LossContext(
+            args=args,
+            output=output,
+            timesteps=timesteps,
+            noise_scheduler=noise_scheduler,
+            dit_dtype=dit_dtype,
+            network_dtype=network_dtype,
+            global_step=global_step,
+        )
+        result = self._resolved_loss_fn(ctx)
+        return normalize_loss_output(result)
 
     def on_transformer_loaded(
         self,
@@ -1396,6 +1415,22 @@ class NetworkTrainer:
             network_dtype,
         )
 
+    def _resolve_loss_fn_from_args(self, args) -> None:
+        """Resolve ``args.loss_fn``/``args.loss_fn_args`` and cache on ``self``.
+
+        Called eagerly from ``_validate_args_and_init`` so a bad ``--loss_fn``
+        config fails fast at startup, before models load. Also warns if a
+        non-default ``--loss_fn`` was requested on a subclass that overrides
+        ``compute_loss``, since such overrides may never invoke the resolved plugin.
+        """
+        self._resolved_loss_fn = resolve_loss_fn(args.loss_fn, args.loss_fn_args)
+        if args.loss_fn != "mse" and type(self).compute_loss is not NetworkTrainer.compute_loss:
+            logger.warning(
+                f"--loss_fn {args.loss_fn!r} was requested, but {type(self).__name__} overrides compute_loss;"
+                " the custom loss is only used if that override routes through the default loss path"
+                " (e.g. via super().compute_loss)"
+            )
+
     def _validate_args_and_init(self, args) -> bool:
         """Validate required args, configure CUDA flags, handle `--show_timesteps`.
 
@@ -1416,6 +1451,9 @@ class NetworkTrainer:
         if args.dit is None:
             raise ValueError("path to DiT model is required / DiTモデルのパスが必要です")
         assert not args.fp8_scaled or args.fp8_base, "fp8_scaled requires fp8_base / fp8_scaledはfp8_baseが必要です"
+
+        # resolve --loss_fn eagerly so bad config fails before models load
+        self._resolve_loss_fn_from_args(args)
 
         if args.sage_attn:
             raise ValueError(
@@ -1893,6 +1931,10 @@ class NetworkTrainer:
         if args.network_args:
             # metadata["ss_network_args"] = json.dumps(net_kwargs)
             metadata[SS_METADATA_KEY_NETWORK_ARGS] = json.dumps(net_kwargs)
+
+        metadata[SS_METADATA_KEY_LOSS_FN] = args.loss_fn
+        if args.loss_fn_args:
+            metadata[SS_METADATA_KEY_LOSS_FN_ARGS] = json.dumps(args.loss_fn_args)
 
         # model name and hash
         # calculate hash takes time, so we omit it for now
