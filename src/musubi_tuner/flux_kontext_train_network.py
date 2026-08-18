@@ -1,25 +1,22 @@
 import argparse
+import logging
 from typing import Optional
 
-
-from einops import rearrange
 import torch
-from tqdm import tqdm
 from accelerate import Accelerator
+from einops import rearrange
+from tqdm import tqdm
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_KONTEXT, ARCHITECTURE_FLUX_KONTEXT_FULL
 from musubi_tuner.flux import flux_models, flux_utils
 from musubi_tuner.hv_train_network import (
     DiTOutput,
     NetworkTrainer,
-    load_prompts,
     clean_memory_on_device,
-    setup_parser_common,
+    load_prompts,
     read_config_from_file,
+    setup_parser_common,
 )
-
-import logging
-
 from musubi_tuner.utils import model_utils
 
 logger = logging.getLogger(__name__)
@@ -79,7 +76,7 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
 
                 t5_tokens = tokenizer1(
                     prompt,
-                    max_length=flux_models.T5XXL_MAX_LENGTH,
+                    max_length=args.t5_tokenizer_max_length or flux_models.T5XXL_MAX_LENGTH,
                     padding="max_length",
                     return_length=False,
                     return_overflowing_tokens=False,
@@ -379,6 +376,7 @@ def flux_kontext_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argum
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder1", type=str, default=None, help="text encoder (T5) checkpoint path")
     parser.add_argument("--fp8_t5", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--t5_tokenizer_max_length", type=int, default=None, help="maximum length for T5XXL text embeddings")
     parser.add_argument(
         "--text_encoder2",
         type=str,
