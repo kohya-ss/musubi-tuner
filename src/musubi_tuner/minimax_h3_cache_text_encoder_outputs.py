@@ -357,7 +357,9 @@ def main() -> None:
                     if not control_indices or controls is None or len(controls) != len(control_indices):
                         raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control images: {item.item_key}")
                     for role, control in zip(("first", "last"), controls):
-                        visuals[role] = H3TextVisual(torch.as_tensor(control).unsqueeze(0))
+                        # the dataset keeps RGBA controls as-is; drop alpha the same way the
+                        # latent path does (_prepare_pixels), the processor accepts only RGB
+                        visuals[role] = H3TextVisual(torch.as_tensor(control)[..., :3].unsqueeze(0))
                     control_paths = control_paths_by_dir.get(cache_dir_key, {}).get(item.item_key)
                     if control_paths is None or len(control_paths) != len(control_indices):
                         raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control paths: {item.item_key}")
