@@ -171,6 +171,7 @@ fp_1f_target_index = 24       # target position — REQUIRED when controls are p
 - `control_directory` matches controls to targets by filename (`image.png` ↔ `image.png` / `image_0.png`), or use `image_jsonl_file` with `control_path` (or `control_path_0`/`control_path_1`) per line.
 - `fp_1f_clean_indices` gives one index per control image, in packed (first, last) order: control 0 is the "first" slot, control 1 the "last" slot. With one control only the "first" slot is used; the slot name carries no time meaning of its own — only the indices do.
 - Both `fp_1f_clean_indices` and an explicit `fp_1f_target_index` are required when controls are present; there are no defaults. Controls are resized to the target's bucket resolution.
+- The alpha channel of RGBA control images is ignored (dropped before both VAE and text-encoder processing) — unlike FramePack one-frame training, it does not act as a mask.
 - Time-order is unconstrained: an anchor **after** the target (`fp_1f_clean_indices = [120]`, `fp_1f_target_index = 24`) trains an L2VA-style LoRA (generate the image that precedes an end state). Note the official pipeline stretches a lone last picture to the canvas at inference while training resizes to the bucket — a minor known divergence.
 
 ### Choosing indices
