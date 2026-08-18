@@ -1136,6 +1136,8 @@ class FineTuningTrainer:
                     optimizer_train_fn()
 
                 current_loss = loss.detach().item()
+                if accelerator.sync_gradients and global_step == 1:
+                    train_utils.reset_progress_bar_timing(progress_bar)
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
