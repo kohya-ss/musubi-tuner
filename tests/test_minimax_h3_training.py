@@ -2072,6 +2072,22 @@ def test_compute_loss_keeps_full_dc_and_applies_the_preservation_weight_on_ancho
     assert loss.item() == pytest.approx(5.0)
 
 
+def test_compute_loss_keeps_the_full_magnitude_term_on_anchor_steps():
+    # regression for a one-frame teacher-matching A/B finding: an ungated magnitude down-weight
+    # also weakened the anchor's norm-restoring pull and worsened de-amplification at high sigma
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_loss_mag_weight=0.0)
+
+    # anchor step: mag_weight is ignored, the loss keeps the full MSE value
+    _, anchor_logs = trainer.compute_loss(args, _dc_split_output(conditioned=0.0), None, None, torch.bfloat16, torch.float32, 0)
+    assert anchor_logs["loss/video"].item() == pytest.approx(2.5)
+
+    # conditioned step: mag_weight 0 drops the magnitude term (the fixture residual is a
+    # target of zeros, so the direction term vanishes too and only the magnitude term remains)
+    _, edu_logs = trainer.compute_loss(args, _dc_split_output(conditioned=1.0), None, None, torch.bfloat16, torch.float32, 0)
+    assert edu_logs["loss/video"].item() == pytest.approx(0.0, abs=1e-6)
+
+
 def test_preservation_density_compensation_restores_the_anchor_share_under_focus():
     from musubi_tuner.minimax_h3_train_network import _preservation_density_compensation
 
