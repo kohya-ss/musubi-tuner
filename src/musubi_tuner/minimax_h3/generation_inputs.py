@@ -193,8 +193,9 @@ def encode_audio_conditions(
             frames = audio_latent_frames(frame_count)
             require_exact = True
         else:
-            # standalone audio spans the target duration; one-frame generation rejects it upstream
-            frames = audio_latent_frames(args.frame_count)
+            # standalone audio spans the target duration (stretched when --output_fps lowers the
+            # sampling rate); one-frame generation rejects it upstream
+            frames = audio_latent_frames(args.frame_count, output_fps=getattr(args, "output_fps", 24))
             require_exact = False
         waveform = decoder.decode_audio(
             reference.audio,
