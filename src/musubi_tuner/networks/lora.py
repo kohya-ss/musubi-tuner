@@ -89,7 +89,7 @@ class LoRAModule(torch.nn.Module):
                 torch.nn.init.zeros_(lora_up.weight)
 
         if type(alpha) == torch.Tensor:
-            alpha = alpha.detach().float().numpy()  # without casting, bf16 causes error
+            alpha = alpha.detach().float().cpu().item()  # without casting, bf16 causes error
         alpha = self.lora_dim if alpha is None or alpha == 0 else alpha
         self.scale = alpha / self.lora_dim
         self.register_buffer("alpha", torch.tensor(alpha))  # for save/load
