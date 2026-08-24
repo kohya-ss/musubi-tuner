@@ -94,23 +94,34 @@ class LoKrModule(torch.nn.Module):
             out_dim = org_module.out_features
 
         factor = int(factor)
-        self.use_w2 = False
 
-        # Factorize dimensions
-        in_m, in_n = factorization(in_dim, factor)
-        out_l, out_k = factorization(out_dim, factor)
+        # From a checkpoint (create_network_from_weights): use the exact split
+        # already recorded in the saved shapes instead of re-guessing via factor.
+        lokr_shapes = kwargs.pop("lokr_shapes", None)
+        hint = lokr_shapes.get(lora_name) if lokr_shapes else None
+        if hint is not None and "w1_shape" in hint and "use_w2" in hint:
+            out_l, in_m = hint["w1_shape"]
+            out_k = out_dim // out_l
+            in_n = in_dim // in_m
+            use_w2 = hint["use_w2"]
+        else:
+            # Factorize dimensions
+            in_m, in_n = factorization(in_dim, factor)
+            out_l, out_k = factorization(out_dim, factor)
+            use_w2 = lora_dim >= max(out_k, in_n) / 2
+
+        self.use_w2 = use_w2
 
         # w1 is always a full matrix (the "scale" factor, small)
         self.lokr_w1 = nn.Parameter(torch.empty(out_l, in_m))
 
         # w2: low-rank decomposition if rank is small enough, otherwise full matrix
-        if lora_dim < max(out_k, in_n) / 2:
+        if not use_w2:
             self.lokr_w2_a = nn.Parameter(torch.empty(out_k, lora_dim))
             self.lokr_w2_b = nn.Parameter(torch.empty(lora_dim, in_n))
         else:
-            self.use_w2 = True
             self.lokr_w2 = nn.Parameter(torch.empty(out_k, in_n))
-            if lora_dim >= max(out_k, in_n) / 2:
+            if hint is None:
                 logger.warning(
                     f"LoKr: lora_dim {lora_dim} is large for dim={max(in_dim, out_dim)} "
                     f"and factor={factor}, using full matrix mode."
@@ -188,9 +199,10 @@ class LoKrInfModule(LoKrModule):
         alpha=1,
         **kwargs,
     ):
-        # no dropout for inference; pass factor from kwargs if present
+        # no dropout for inference; pass factor and lokr_shapes from kwargs if present
         factor = kwargs.pop("factor", -1)
-        super().__init__(lora_name, org_module, multiplier, lora_dim, alpha, factor=factor)
+        lokr_shapes = kwargs.pop("lokr_shapes", None)
+        super().__init__(lora_name, org_module, multiplier, lora_dim, alpha, factor=factor, lokr_shapes=lokr_shapes)
 
         self.org_module_ref = [org_module]
         self.enabled = True
@@ -308,6 +320,8 @@ def create_network_from_weights(
     """Create LoKr network from saved weights (internal)."""
     modules_dim = {}
     modules_alpha = {}
+    # Per-module w1 shape / w2 mode, read from the checkpoint (see LoKrModule).
+    lokr_shapes: Dict[str, Dict[str, object]] = {}
     for key, value in weights_sd.items():
         if "." not in key:
             continue
@@ -315,20 +329,24 @@ def create_network_from_weights(
         lora_name = key.split(".")[0]
         if "alpha" in key:
             modules_alpha[lora_name] = value
+        elif "lokr_w1" in key:
+            lokr_shapes.setdefault(lora_name, {})["w1_shape"] = tuple(value.shape)
         elif "lokr_w2_a" in key:
             # low-rank mode: dim = w2_a.shape[1]
             dim = value.shape[1]
             modules_dim[lora_name] = dim
+            lokr_shapes.setdefault(lora_name, {})["use_w2"] = False
         elif "lokr_w2" in key and "lokr_w2_a" not in key and "lokr_w2_b" not in key:
             # full matrix mode: set dim large enough to trigger full-matrix path
             if lora_name not in modules_dim:
                 modules_dim[lora_name] = max(value.shape)
+            lokr_shapes.setdefault(lora_name, {})["use_w2"] = True
 
-    # extract factor for LoKr (user must specify via --network_args factor=N if different from default)
+    # fallback only; every module above should already have a shape hint
     factor = int(kwargs.pop("factor", -1))
 
     module_class = LoKrInfModule if for_inference else LoKrModule
-    module_kwargs = {"factor": factor}
+    module_kwargs = {"factor": factor, "lokr_shapes": lokr_shapes}
 
     network = lora_module.LoRANetwork(
         target_replace_modules,
