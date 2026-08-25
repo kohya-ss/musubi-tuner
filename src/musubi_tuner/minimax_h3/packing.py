@@ -148,6 +148,13 @@ class H3PackedLayout:
     # spans; the target audio frame count must cover the stretched real duration.
     # Also frozen here so the rotary cache keys on it.
     temporal_stretch: float = 1.0
+    # with a stretch, rotate this many leading (highest-frequency) temporal RoPE bands
+    # by the UNSTRETCHED grid instead. Those bands have periods at or below the latent
+    # token spacing, so they cannot encode time between tokens -- they carry a per-token
+    # lattice phase that training bakes in against the native (1,4,4,4,4)-span grid;
+    # stretching scrambles it with the 17-pixel-frame group period (fading/stripes).
+    # ~3 is the sub-lattice band count for the released 16-band spectrum.
+    temporal_fine_bands: int = 0
 
     def segment(self, role: str) -> H3RowSegment:
         matches = [segment for segment in self.segments if segment.role == role]
@@ -260,6 +267,7 @@ def build_h3_layout(
     condition_roles: Sequence[str] | None = None,
     time_overrides: H3TimeOverrides | None = None,
     temporal_stretch: float = 1.0,
+    temporal_fine_bands: int = 0,
 ) -> H3PackedLayout:
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
@@ -270,6 +278,11 @@ def build_h3_layout(
         raise ValueError(f"MiniMax-H3 temporal stretch must be finite and positive, got {temporal_stretch}")
     if one_frame and temporal_stretch != 1.0:
         raise ValueError("MiniMax-H3 one-frame layouts do not support temporal stretch")
+    temporal_fine_bands = int(temporal_fine_bands)
+    if temporal_fine_bands < 0:
+        raise ValueError(f"MiniMax-H3 temporal fine bands must be nonnegative, got {temporal_fine_bands}")
+    if temporal_fine_bands and temporal_stretch == 1.0:
+        raise ValueError("MiniMax-H3 temporal fine bands require an active temporal stretch")
     target_video = _coerce_video_geometry(target_video, "target video")
     if one_frame:
         if target_video.frames != ONE_FRAME_VIDEO_LATENT_FRAMES:
@@ -358,6 +371,7 @@ def build_h3_layout(
         row_count=row,
         time_overrides=time_overrides,
         temporal_stretch=temporal_stretch,
+        temporal_fine_bands=temporal_fine_bands,
     )
 
 

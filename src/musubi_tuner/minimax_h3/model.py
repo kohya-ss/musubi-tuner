@@ -812,12 +812,32 @@ class MiniMaxH3Model(nn.Module):
             if not matches(buffer.device):
                 raise RuntimeError(f"MiniMax-H3 block {index} buffer {name} is on {buffer.device}, expected {expected} after wait")
 
-    def _rotation_table(self, position_ids: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    def _rotation_table(
+        self,
+        position_ids: torch.Tensor,
+        dtype: torch.dtype,
+        *,
+        fine_position_ids: torch.Tensor | None = None,
+        fine_bands: int = 0,
+    ) -> torch.Tensor:
         positions = position_ids.to(device=self.rope.inv_freq.device, dtype=torch.float32)
         if positions.ndim != 3 or positions.shape[-1] != 3:
             raise ValueError("MiniMax-H3 position ids must be [B,S,3]")
         per_axis = positions.unsqueeze(-1) * self.rope.inv_freq.reshape(1, 1, 1, -1)
         temporal, height, width = per_axis.unbind(dim=2)
+        if fine_position_ids is not None and fine_bands:
+            # temporal-stretch experiment: the leading (sub-lattice) bands rotate by the
+            # unstretched grid so the per-token lattice phase stays as trained, while the
+            # remaining bands carry the stretched physical timeline
+            if fine_bands > self.rope.inv_freq.shape[0]:
+                raise ValueError(
+                    f"MiniMax-H3 temporal fine bands {fine_bands} exceed the {self.rope.inv_freq.shape[0]}-band rotary spectrum"
+                )
+            fine_positions = fine_position_ids.to(device=self.rope.inv_freq.device, dtype=torch.float32)
+            if fine_positions.shape != positions.shape:
+                raise ValueError("MiniMax-H3 fine position ids must match the stretched grid shape")
+            fine_temporal = fine_positions[..., 0].unsqueeze(-1) * self.rope.inv_freq.reshape(1, 1, -1)
+            temporal = torch.cat((fine_temporal[..., :fine_bands], temporal[..., fine_bands:]), dim=-1)
         half = torch.cat((temporal, height, width), dim=-1)
         angles = torch.cat((half, half), dim=-1)
         pair_count = angles.shape[-1] // 2
@@ -849,7 +869,12 @@ class MiniMaxH3Model(nn.Module):
             self._rotary_cache.move_to_end(key)
             return cached
         position_ids = build_position_grid(layout, device=device)
-        rotation_table = self._rotation_table(position_ids, dtype)
+        fine_position_ids = None
+        if layout.temporal_fine_bands and layout.temporal_stretch != 1.0:
+            fine_position_ids = build_position_grid(replace(layout, temporal_stretch=1.0, temporal_fine_bands=0), device=device)
+        rotation_table = self._rotation_table(
+            position_ids, dtype, fine_position_ids=fine_position_ids, fine_bands=layout.temporal_fine_bands
+        )
         self._rotary_cache[key] = rotation_table
         while len(self._rotary_cache) > _ROTARY_CACHE_SIZE:
             self._rotary_cache.popitem(last=False)

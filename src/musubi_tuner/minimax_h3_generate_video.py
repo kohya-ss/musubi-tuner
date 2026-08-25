@@ -160,6 +160,10 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
         raise ValueError(f"MiniMax-H3 --output_fps must be in [1,120], got {args.output_fps}")
     if one_frame and args.output_fps != 24:
         raise ValueError("MiniMax-H3 one-frame generation has no timeline to stretch; --output_fps must stay 24")
+    if not 0 <= args.stretch_keep_bands <= 16:
+        raise ValueError(f"MiniMax-H3 --stretch_keep_bands must be in [0,16], got {args.stretch_keep_bands}")
+    if args.stretch_keep_bands and args.output_fps == 24:
+        raise ValueError("MiniMax-H3 --stretch_keep_bands requires an --output_fps below or above 24")
     if one_frame:
         _, control_indices = parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
         if args.task == "fl2va":
@@ -675,15 +679,17 @@ def _build_layout(args: argparse.Namespace, text_length: int, visual_geometries,
         condition_roles=condition_roles,
         time_overrides=_one_frame_time_overrides(args),
         temporal_stretch=24.0 / args.output_fps,
+        temporal_fine_bands=args.stretch_keep_bands,
     )
     logger.info(
-        "MiniMax-H3 layout: task=%s video=%s audio_frames=%d text_rows=%d packed_rows=%d temporal_stretch=%.4f",
+        "MiniMax-H3 layout: task=%s video=%s audio_frames=%d text_rows=%d packed_rows=%d temporal_stretch=%.4f fine_bands=%d",
         args.task,
         layout.target_video,
         layout.target_audio_frames,
         layout.text_length,
         layout.row_count,
         layout.temporal_stretch,
+        layout.temporal_fine_bands,
     )
     return layout
 
@@ -1354,6 +1360,16 @@ def setup_parser() -> argparse.ArgumentParser:
         " the audio track covers the stretched duration, and the output container is written at this rate."
         " The model was trained at 24 fps only, so lower rates trade temporal resolution (and possibly"
         " quality) for compute; see docs. 24 disables the stretch",
+    )
+    parser.add_argument(
+        "--stretch_keep_bands",
+        type=int,
+        default=0,
+        help="with --output_fps below 24: rotate this many leading (highest-frequency) temporal RoPE bands"
+        " by the unstretched grid. Those bands have periods at or below the latent token spacing and carry"
+        " a per-token lattice phase rather than time; stretching them scrambles that phase with the"
+        " 17-pixel-frame VAE group period (periodic fading/stripes). 3 covers the sub-lattice bands of the"
+        " released 16-band spectrum. 0 stretches all bands (default)",
     )
     parser.add_argument("--allow_experimental_duration", action="store_true")
     parser.add_argument("--steps", type=int, default=30)
