@@ -10,6 +10,7 @@ import torch
 
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode
 from musubi_tuner.minimax_h3.media import (
+    TARGET_FPS,
     H3Record,
     audio_latent_frames,
     load_h3_jsonl_records,
@@ -25,7 +26,7 @@ from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 VIDEO_VAE_SPATIAL_RATIO = 16
 # with a one-frame target, reference videos keep their full released span instead of
 # being capped by the target duration
-ONE_FRAME_REFERENCE_FRAME_CAP = 15 * 24
+ONE_FRAME_REFERENCE_FRAME_CAP = 15 * TARGET_FPS
 
 
 def parse_one_frame_options(spec: str) -> tuple[int, tuple[int, ...] | None]:
@@ -120,7 +121,12 @@ def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecode
             text_visuals[role] = H3TextVisual(frames)
         return raw_visuals, text_visuals
 
-    reference_frame_cap = ONE_FRAME_REFERENCE_FRAME_CAP if args.frame_count == 1 else args.frame_count
+    if args.frame_count == 1:
+        reference_frame_cap = ONE_FRAME_REFERENCE_FRAME_CAP
+    else:
+        # cap reference videos by the real target duration in native 24 fps frames; a
+        # temporal stretch makes that duration exceed frame_count generated frames
+        reference_frame_cap = args.frame_count * TARGET_FPS // getattr(args, "output_fps", TARGET_FPS)
     for reference in record.references:
         if reference.type not in {"image", "video"}:
             continue
@@ -195,7 +201,7 @@ def encode_audio_conditions(
         else:
             # standalone audio spans the target duration (stretched when --output_fps lowers the
             # sampling rate); one-frame generation rejects it upstream
-            frames = audio_latent_frames(args.frame_count, output_fps=getattr(args, "output_fps", 24))
+            frames = audio_latent_frames(args.frame_count, output_fps=getattr(args, "output_fps", TARGET_FPS))
             require_exact = False
         waveform = decoder.decode_audio(
             reference.audio,

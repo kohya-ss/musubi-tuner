@@ -35,6 +35,7 @@ from musubi_tuner.minimax_h3.checkpoint import (
     load_safetensors_metadata,
     resolve_safetensors_files,
 )
+from musubi_tuner.minimax_h3.media import TARGET_FPS
 from musubi_tuner.minimax_h3.packing import (
     AUDIO_CHANNELS,
     VIDEO_CHANNELS,
@@ -829,9 +830,10 @@ class MiniMaxH3Model(nn.Module):
             # temporal-stretch experiment: the leading (sub-lattice) bands rotate by the
             # unstretched grid so the per-token lattice phase stays as trained, while the
             # remaining bands carry the stretched physical timeline
-            if fine_bands > self.rope.inv_freq.shape[0]:
+            if fine_bands >= self.rope.inv_freq.shape[0]:
                 raise ValueError(
-                    f"MiniMax-H3 temporal fine bands {fine_bands} exceed the {self.rope.inv_freq.shape[0]}-band rotary spectrum"
+                    f"MiniMax-H3 temporal fine bands {fine_bands} must leave at least one of the"
+                    f" {self.rope.inv_freq.shape[0]} rotary bands on the stretched clock"
                 )
             fine_positions = fine_position_ids.to(device=self.rope.inv_freq.device, dtype=torch.float32)
             if fine_positions.shape != positions.shape:
@@ -870,8 +872,8 @@ class MiniMaxH3Model(nn.Module):
             return cached
         position_ids = build_position_grid(layout, device=device)
         fine_position_ids = None
-        if layout.temporal_fine_bands and layout.temporal_stretch != 1.0:
-            fine_position_ids = build_position_grid(replace(layout, temporal_stretch=1.0, temporal_fine_bands=0), device=device)
+        if layout.temporal_fine_bands and layout.output_fps != TARGET_FPS:
+            fine_position_ids = build_position_grid(replace(layout, output_fps=TARGET_FPS, temporal_fine_bands=0), device=device)
         rotation_table = self._rotation_table(
             position_ids, dtype, fine_position_ids=fine_position_ids, fine_bands=layout.temporal_fine_bands
         )

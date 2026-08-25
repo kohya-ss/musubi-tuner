@@ -427,7 +427,7 @@ The native sampler builds one common base grid, derives independent shifted vide
 
 ### Temporal stretch (experimental)
 
-`--output_fps N` (default 24) samples the generated timeline at N fps instead of the trained 24. `--frame_count` still counts generated pixel frames, so the clip covers `frame_count / N` seconds: the target video's rotary time spans scale by `24/N` (the H3 time axis is real-time, 1 unit = 1/40 s), the audio track keeps its native 40 Hz latent rate over the stretched real duration, and the output container, trajectory dumps, and intermediate latent files all carry the requested rate. The released 5-15 s duration gate applies to the real (stretched) duration. References, FL2VA conditions, and one-frame mode keep native 24 fps spans (one-frame mode rejects a stretch).
+`--output_fps N` (default 24, accepted range 1-24; rates above the native 24 are rejected until the squeeze direction is validated) samples the generated timeline at N fps instead of the trained 24. `--frame_count` still counts generated pixel frames, so the clip covers `frame_count / N` seconds: the target video's rotary time spans scale by `24/N` (the H3 time axis is real-time, 1 unit = 1/40 s), the audio track keeps its native 40 Hz latent rate over the stretched real duration, and the output container, trajectory dumps, and intermediate latent files all carry the requested rate. The released 5-15 s duration gate applies to the real (stretched) duration. References, FL2VA conditions, and one-frame mode keep native 24 fps spans (one-frame mode rejects a stretch).
 
 Two ways to use it: keeping `--frame_count` fixed doubles the clip length at 12 fps for nearly the same compute (only the audio rows grow), while generating the same real duration with proportionally fewer frames cuts the packed sequence roughly in half at 12 fps (about a quarter of the video-video attention cost; 124 frames at 12 fps measured ~2.1x faster than the equal-duration 243 frames at 24 fps).
 
@@ -450,7 +450,7 @@ A singer performs under stage lights. --w 768 --h 1344 --f 124 --d 42 --s 30
 | `--d` | `--seed` |
 | `--s` | `--steps` |
 | `--fs`, `--fsa` | `--h3_shift_video`, `--h3_shift_audio` |
-| `--ofps` | `--output_fps` |
+| `--ofps`, `--skb` | `--output_fps`, `--stretch_keep_bands` |
 | `--i`, `--ei` | `--first_frame`, `--last_frame` (end image) |
 | `--ref` | `--ref` (repeatable; replaces the session-level list) |
 | `--of` | `--one_frame` |

@@ -22,12 +22,11 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Literal
 
 import torch
 
-from musubi_tuner.minimax_h3.media import H3Task
+from musubi_tuner.minimax_h3.media import TARGET_FPS, H3Task, audio_latent_frames
 
 VIDEO_CHANNELS = 24
 AUDIO_CHANNELS = 32
@@ -142,12 +141,12 @@ class H3PackedLayout:
     # part of the frozen layout value so the transformer's layout-keyed rotary cache
     # cannot serve a grid built for different times
     time_overrides: H3TimeOverrides | None = None
-    # experimental target-timeline stretch: each generated pixel frame advances
-    # temporal_stretch / 24 s on the rotary clock (an effective 24/temporal_stretch fps
-    # sampling of the timeline). References and conditions keep their native 24 fps
-    # spans; the target audio frame count must cover the stretched real duration.
-    # Also frozen here so the rotary cache keys on it.
-    temporal_stretch: float = 1.0
+    # experimental target-timeline stretch: generated pixel frames sample the timeline at
+    # output_fps instead of the native 24 fps, so each frame spans 24/output_fps native
+    # rotary steps and the clip covers frame_count/output_fps real seconds. References and
+    # conditions keep their native 24 fps spans; the target audio frame count must cover
+    # the stretched real duration. Frozen here so the rotary cache keys on it.
+    output_fps: int = TARGET_FPS
     # with a stretch, rotate this many leading (highest-frequency) temporal RoPE bands
     # by the UNSTRETCHED grid instead. Those bands have periods at or below the latent
     # token spacing, so they cannot encode time between tokens -- they carry a per-token
@@ -161,6 +160,10 @@ class H3PackedLayout:
         if len(matches) != 1:
             raise KeyError(f"MiniMax-H3 layout expected exactly one {role!r} segment, found {len(matches)}")
         return matches[0]
+
+    @property
+    def temporal_stretch(self) -> float:
+        return TARGET_FPS / self.output_fps
 
     @property
     def target_video_segment(self) -> H3RowSegment:
@@ -196,16 +199,11 @@ def _validate_video_latent_frames(frames: int, label: str) -> None:
         raise ValueError(f"MiniMax-H3 {label} latent frames must be 5*n+2, got {frames}")
 
 
-def _expected_audio_frames(video_latent_frames: int, temporal_stretch: float = 1.0) -> int:
+def _expected_audio_frames(video_latent_frames: int, output_fps: int = TARGET_FPS) -> int:
     _validate_video_latent_frames(video_latent_frames, "target video")
     n = (video_latent_frames - 2) // 5
     pixel_frames = 17 * n + 5
-    if temporal_stretch == 1.0:
-        return (10 * pixel_frames + 3) // 6
-    # exact rational arithmetic so stretched counts agree bit-for-bit with
-    # media.audio_latent_frames for any stretch of the form 24/fps with integer fps
-    stretch = Fraction(temporal_stretch).limit_denominator(240)
-    return int((10 * pixel_frames * stretch + 3) // 6)
+    return audio_latent_frames(pixel_frames, output_fps=output_fps)
 
 
 def pack_video_rows(latents: torch.Tensor) -> torch.Tensor:
@@ -266,22 +264,21 @@ def build_h3_layout(
     one_frame: bool = False,
     condition_roles: Sequence[str] | None = None,
     time_overrides: H3TimeOverrides | None = None,
-    temporal_stretch: float = 1.0,
+    output_fps: int = TARGET_FPS,
     temporal_fine_bands: int = 0,
 ) -> H3PackedLayout:
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
     if text_length <= 0:
         raise ValueError(f"MiniMax-H3 text length must be positive, got {text_length}")
-    temporal_stretch = float(temporal_stretch)
-    if not math.isfinite(temporal_stretch) or temporal_stretch <= 0.0:
-        raise ValueError(f"MiniMax-H3 temporal stretch must be finite and positive, got {temporal_stretch}")
-    if one_frame and temporal_stretch != 1.0:
+    if isinstance(output_fps, bool) or not isinstance(output_fps, int) or output_fps <= 0:
+        raise ValueError(f"MiniMax-H3 output fps must be a positive integer, got {output_fps!r}")
+    if one_frame and output_fps != TARGET_FPS:
         raise ValueError("MiniMax-H3 one-frame layouts do not support temporal stretch")
     temporal_fine_bands = int(temporal_fine_bands)
     if temporal_fine_bands < 0:
         raise ValueError(f"MiniMax-H3 temporal fine bands must be nonnegative, got {temporal_fine_bands}")
-    if temporal_fine_bands and temporal_stretch == 1.0:
+    if temporal_fine_bands and output_fps == TARGET_FPS:
         raise ValueError("MiniMax-H3 temporal fine bands require an active temporal stretch")
     target_video = _coerce_video_geometry(target_video, "target video")
     if one_frame:
@@ -296,11 +293,11 @@ def build_h3_layout(
         if time_overrides is not None:
             raise ValueError("MiniMax-H3 time overrides require a one-frame layout")
         _validate_video_latent_frames(target_video.frames, "target video")
-        expected_audio_frames = _expected_audio_frames(target_video.frames, temporal_stretch)
+        expected_audio_frames = _expected_audio_frames(target_video.frames, output_fps)
         if target_audio_frames != expected_audio_frames:
             raise ValueError(
                 f"MiniMax-H3 target audio has {target_audio_frames} frames, expected {expected_audio_frames} "
-                f"for {target_video.frames} video latent frames at temporal stretch {temporal_stretch}"
+                f"for {target_video.frames} video latent frames at {output_fps} fps"
             )
 
     visual_conditions = tuple(
@@ -370,7 +367,7 @@ def build_h3_layout(
         segments=tuple(segments),
         row_count=row,
         time_overrides=time_overrides,
-        temporal_stretch=temporal_stretch,
+        output_fps=output_fps,
         temporal_fine_bands=temporal_fine_bands,
     )
 
