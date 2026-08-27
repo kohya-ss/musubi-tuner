@@ -140,6 +140,11 @@ def convert_to_diffusers(prefix, diffusers_prefix, weights_sd):
                     module_name = module_name.replace("img.", "img_")  # fix img
                     module_name = module_name.replace("txt.", "txt_")  # fix txt
                     module_name = module_name.replace("attn.", "attn_")  # fix attn
+                elif ".attn.qkv.proj" in module_name or ".attn.out.proj" in module_name or ".adaln.proj" in module_name:
+                    # MiniMax-H3 lora name to module name: ugly but works
+                    module_name = module_name.replace("qkv.proj", "qkv_proj")  # fix qkv proj
+                    module_name = module_name.replace("out.proj", "out_proj")  # fix out proj
+                    module_name = module_name.replace("adaln.proj", "adaln_proj")  # fix adaln proj
 
             dim = None  # None means LoHa or LoKr, otherwise it's LoRA with alpha and dim is used for scaling
             if "lora_down" in key:
