@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,8 @@ def _session_args(tmp_path, *, task="t2va", **overrides):
         "width": 64,
         "height": 64,
         "frame_count": 124,
+        "output_fps": 24,
+        "stretch_keep_bands": 0,
         "allow_experimental_duration": False,
         "steps": 2,
         "seed": 1,
@@ -174,20 +177,21 @@ def test_one_frame_fl2va_control_index_error_reports_the_counts(tmp_path):
         validate_prompt_args(args)
 
 
-def test_from_file_reports_the_failing_line_number(tmp_path):
-    prompts = tmp_path / "prompts.txt"
-    prompts.write_text("# comment\n\na cat sings --d 11\na dog barks --w 0\n", encoding="utf-8")
-    args = _session_args(
-        tmp_path,
-        frame_count=5,
-        allow_experimental_duration=True,
-        output=str(tmp_path / "outputs"),
-        from_file=str(prompts),
-    )
+def test_from_file_records_invalid_lines_without_aborting_the_batch(tmp_path, monkeypatch, caplog):
+    counters = {"text": 0, "transformer": 0, "video_vae": 0, "audio_vae": 0}
+    _stub_generation_models(monkeypatch, counters)
+    written = []
+    monkeypatch.setattr(generate, "write_joint_av", lambda decoded, output: written.append(Path(output)))
 
-    # the bad width line is file line 4; validation fails before any model loads
-    with pytest.raises(ValueError, match="--from_file line 4 is invalid.*divisible by 32"):
+    args = _batch_args(tmp_path, ["# comment", "", "a cat sings --d 11", "a dog barks --w 0"])
+    with caplog.at_level(logging.ERROR, logger=generate.logger.name):
         generate.process_from_file(args, torch.device("cpu"))
+
+    # the bad width line is file line 4; it is recorded as a failed item while the valid prompt still runs
+    assert len(written) == 1
+    assert written[0].name.endswith("_11.mp4")
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("line 4 validation" in message and "divisible by 32" in message for message in messages)
 
 
 def test_latent_file_roundtrip_preserves_tensors_and_rejects_missing_audio(tmp_path):

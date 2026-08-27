@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 import json
 from pathlib import Path
 from typing import Callable, Literal, Optional
@@ -53,9 +54,15 @@ def video_latent_frames(frame_count: int) -> int:
     return 5 * ((frame_count - 5) // 17) + 2
 
 
-def audio_latent_frames(frame_count: int) -> int:
+def audio_latent_frames(frame_count: int, *, output_fps: int = TARGET_FPS) -> int:
     _validate_frame_count(frame_count)
-    return (10 * frame_count + 3) // 6
+    if isinstance(output_fps, bool) or not isinstance(output_fps, int) or output_fps <= 0:
+        raise ValueError(f"MiniMax-H3 output fps must be a positive integer, got {output_fps!r}")
+    if output_fps == TARGET_FPS:
+        return (10 * frame_count + 3) // 6
+    # 40 Hz audio latents over the real duration frame_count/output_fps seconds;
+    # reduces to the released (10*f+3)//6 mapping at 24 fps
+    return int((Fraction(10 * frame_count * TARGET_FPS, output_fps) + 3) // 6)
 
 
 def waveform_samples(audio_frames: int) -> int:

@@ -26,7 +26,7 @@ from typing import Literal
 
 import torch
 
-from musubi_tuner.minimax_h3.media import H3Task
+from musubi_tuner.minimax_h3.media import TARGET_FPS, H3Task, audio_latent_frames
 
 VIDEO_CHANNELS = 24
 AUDIO_CHANNELS = 32
@@ -141,12 +141,29 @@ class H3PackedLayout:
     # part of the frozen layout value so the transformer's layout-keyed rotary cache
     # cannot serve a grid built for different times
     time_overrides: H3TimeOverrides | None = None
+    # experimental target-timeline stretch: generated pixel frames sample the timeline at
+    # output_fps instead of the native 24 fps, so each frame spans 24/output_fps native
+    # rotary steps and the clip covers frame_count/output_fps real seconds. References and
+    # conditions keep their native 24 fps spans; the target audio frame count must cover
+    # the stretched real duration. Frozen here so the rotary cache keys on it.
+    output_fps: int = TARGET_FPS
+    # with a stretch, rotate this many leading (highest-frequency) temporal RoPE bands
+    # by the UNSTRETCHED grid instead. Those bands have periods at or below the latent
+    # token spacing, so they cannot encode time between tokens -- they carry a per-token
+    # lattice phase that training bakes in against the native (1,4,4,4,4)-span grid;
+    # stretching scrambles it with the 17-pixel-frame group period (fading/stripes).
+    # ~3 is the sub-lattice band count for the released 16-band spectrum.
+    temporal_fine_bands: int = 0
 
     def segment(self, role: str) -> H3RowSegment:
         matches = [segment for segment in self.segments if segment.role == role]
         if len(matches) != 1:
             raise KeyError(f"MiniMax-H3 layout expected exactly one {role!r} segment, found {len(matches)}")
         return matches[0]
+
+    @property
+    def temporal_stretch(self) -> float:
+        return TARGET_FPS / self.output_fps
 
     @property
     def target_video_segment(self) -> H3RowSegment:
@@ -182,11 +199,11 @@ def _validate_video_latent_frames(frames: int, label: str) -> None:
         raise ValueError(f"MiniMax-H3 {label} latent frames must be 5*n+2, got {frames}")
 
 
-def _expected_audio_frames(video_latent_frames: int) -> int:
+def _expected_audio_frames(video_latent_frames: int, output_fps: int = TARGET_FPS) -> int:
     _validate_video_latent_frames(video_latent_frames, "target video")
     n = (video_latent_frames - 2) // 5
     pixel_frames = 17 * n + 5
-    return (10 * pixel_frames + 3) // 6
+    return audio_latent_frames(pixel_frames, output_fps=output_fps)
 
 
 def pack_video_rows(latents: torch.Tensor) -> torch.Tensor:
@@ -247,11 +264,22 @@ def build_h3_layout(
     one_frame: bool = False,
     condition_roles: Sequence[str] | None = None,
     time_overrides: H3TimeOverrides | None = None,
+    output_fps: int = TARGET_FPS,
+    temporal_fine_bands: int = 0,
 ) -> H3PackedLayout:
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
     if text_length <= 0:
         raise ValueError(f"MiniMax-H3 text length must be positive, got {text_length}")
+    if isinstance(output_fps, bool) or not isinstance(output_fps, int) or output_fps <= 0:
+        raise ValueError(f"MiniMax-H3 output fps must be a positive integer, got {output_fps!r}")
+    if one_frame and output_fps != TARGET_FPS:
+        raise ValueError("MiniMax-H3 one-frame layouts do not support temporal stretch")
+    temporal_fine_bands = int(temporal_fine_bands)
+    if temporal_fine_bands < 0:
+        raise ValueError(f"MiniMax-H3 temporal fine bands must be nonnegative, got {temporal_fine_bands}")
+    if temporal_fine_bands and output_fps == TARGET_FPS:
+        raise ValueError("MiniMax-H3 temporal fine bands require an active temporal stretch")
     target_video = _coerce_video_geometry(target_video, "target video")
     if one_frame:
         if target_video.frames != ONE_FRAME_VIDEO_LATENT_FRAMES:
@@ -265,11 +293,11 @@ def build_h3_layout(
         if time_overrides is not None:
             raise ValueError("MiniMax-H3 time overrides require a one-frame layout")
         _validate_video_latent_frames(target_video.frames, "target video")
-        expected_audio_frames = _expected_audio_frames(target_video.frames)
+        expected_audio_frames = _expected_audio_frames(target_video.frames, output_fps)
         if target_audio_frames != expected_audio_frames:
             raise ValueError(
                 f"MiniMax-H3 target audio has {target_audio_frames} frames, expected {expected_audio_frames} "
-                f"for {target_video.frames} video latent frames"
+                f"for {target_video.frames} video latent frames at {output_fps} fps"
             )
 
     visual_conditions = tuple(
@@ -339,6 +367,8 @@ def build_h3_layout(
         segments=tuple(segments),
         row_count=row,
         time_overrides=time_overrides,
+        output_fps=output_fps,
+        temporal_fine_bands=temporal_fine_bands,
     )
 
 
@@ -369,12 +399,12 @@ def _frame_grid(video: H3VideoGeometry) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.stack((height.reshape(-1), width.reshape(-1)), dim=-1), width_axis
 
 
-def _video_t_spans(frames: int) -> list[float]:
-    return [FRAME_RESCALE * FRAME_PER_TOKEN[index % len(FRAME_PER_TOKEN)] for index in range(frames)]
+def _video_t_spans(frames: int, temporal_stretch: float = 1.0) -> list[float]:
+    return [temporal_stretch * FRAME_RESCALE * FRAME_PER_TOKEN[index % len(FRAME_PER_TOKEN)] for index in range(frames)]
 
 
-def _video_grid(video: H3VideoGeometry, cursor: float) -> torch.Tensor:
-    spans = torch.tensor(_video_t_spans(video.frames), dtype=torch.float64)
+def _video_grid(video: H3VideoGeometry, cursor: float, temporal_stretch: float = 1.0) -> torch.Tensor:
+    spans = torch.tensor(_video_t_spans(video.frames, temporal_stretch), dtype=torch.float64)
     times = cursor + torch.cat((torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)))
     frame, _ = _frame_grid(video)
     grid = torch.empty(video.frames, frame.shape[0], 3, dtype=torch.float64)
@@ -406,7 +436,10 @@ def build_position_grid(layout: H3PackedLayout, *, device: torch.device | str | 
         if layout.time_overrides is not None:
             condition_times = [cursor + time for time in layout.time_overrides.condition_times]
         else:
-            last_time = cursor + sum(_video_t_spans(layout.target_video.frames)) - FRAME_RESCALE
+            # the last-frame anchor sits on the final pixel frame of the target timeline,
+            # so both the total span and the one-frame back-off scale with the stretch
+            last_time = cursor + sum(_video_t_spans(layout.target_video.frames, layout.temporal_stretch))
+            last_time -= FRAME_RESCALE * layout.temporal_stretch
             condition_times = [cursor if segment.role == "first" else last_time for segment in condition_segments]
         for segment, time in zip(condition_segments, condition_times):
             positions[segment.row_slice, 0] = time
@@ -447,7 +480,7 @@ def build_position_grid(layout: H3PackedLayout, *, device: torch.device | str | 
         *target_width_endpoints,
     )
     target_video = layout.target_video_segment
-    positions[target_video.row_slice] = _video_grid(layout.target_video, cursor)
+    positions[target_video.row_slice] = _video_grid(layout.target_video, cursor, layout.temporal_stretch)
     positions = positions.unsqueeze(0)
     return positions.to(device=device) if device is not None else positions
 

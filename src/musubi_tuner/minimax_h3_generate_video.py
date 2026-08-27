@@ -27,13 +27,14 @@ from musubi_tuner.minimax_h3.generation_inputs import (
     parse_one_frame_options,
 )
 from musubi_tuner.minimax_h3.media import (
+    TARGET_FPS,
     H3Record,
     audio_latent_frames,
     video_latent_frames,
 )
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
-from musubi_tuner.minimax_h3.model import load_h3_transformer
+from musubi_tuner.minimax_h3.model import MiniMaxH3Config, load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
     FRAME_RESCALE,
     ONE_FRAME_AUDIO_LATENT_FRAMES,
@@ -156,6 +157,20 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
     if args.width <= 0 or args.height <= 0 or args.width % 32 or args.height % 32:
         raise ValueError(f"MiniMax-H3 width and height must be positive and divisible by 32, got {args.width}x{args.height}")
     one_frame = args.frame_count == 1
+    # fps above the native rate would let the duration gate admit packed sequences far past
+    # the released maximum (and desynchronize the floored audio count), so the squeeze
+    # direction stays closed until it is validated
+    if not 1 <= args.output_fps <= TARGET_FPS:
+        raise ValueError(f"MiniMax-H3 --output_fps must be in [1,{TARGET_FPS}], got {args.output_fps}")
+    if one_frame and args.output_fps != TARGET_FPS:
+        raise ValueError(f"MiniMax-H3 one-frame generation has no timeline to stretch; --output_fps must stay {TARGET_FPS}")
+    # at least one band must stay on the stretched clock, or the video RoPE silently reverts
+    # to the native timeline while the audio still covers the stretched duration
+    max_keep_bands = MiniMaxH3Config.rope_inv_freq_len - 1
+    if not 0 <= args.stretch_keep_bands <= max_keep_bands:
+        raise ValueError(f"MiniMax-H3 --stretch_keep_bands must be in [0,{max_keep_bands}], got {args.stretch_keep_bands}")
+    if args.stretch_keep_bands and args.output_fps == TARGET_FPS:
+        raise ValueError(f"MiniMax-H3 --stretch_keep_bands requires an --output_fps below {TARGET_FPS}")
     if one_frame:
         _, control_indices = parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
         if args.task == "fl2va":
@@ -175,7 +190,9 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
         if args.one_frame is not None:
             raise ValueError("MiniMax-H3 --one_frame options require --frame_count 1")
         video_latent_frames(args.frame_count)
-        duration = args.frame_count / 24.0
+        # with a temporal stretch the rotary timeline spans the real (stretched) duration,
+        # so that is the quantity to hold inside the released range
+        duration = args.frame_count / args.output_fps
         if not args.allow_experimental_duration and not 5.0 <= duration <= 15.0:
             raise ValueError(
                 f"MiniMax-H3 duration {duration:.3f}s is outside the released 5-15s range; "
@@ -660,20 +677,26 @@ def _build_layout(args: argparse.Namespace, text_length: int, visual_geometries,
             args.height // VIDEO_VAE_SPATIAL_RATIO,
             args.width // VIDEO_VAE_SPATIAL_RATIO,
         ),
-        target_audio_frames=ONE_FRAME_AUDIO_LATENT_FRAMES if one_frame else audio_latent_frames(args.frame_count),
+        target_audio_frames=(
+            ONE_FRAME_AUDIO_LATENT_FRAMES if one_frame else audio_latent_frames(args.frame_count, output_fps=args.output_fps)
+        ),
         visual_conditions=visual_geometries,
         references=reference_geometries,
         one_frame=one_frame,
         condition_roles=condition_roles,
         time_overrides=_one_frame_time_overrides(args),
+        output_fps=args.output_fps,
+        temporal_fine_bands=args.stretch_keep_bands,
     )
     logger.info(
-        "MiniMax-H3 layout: task=%s video=%s audio_frames=%d text_rows=%d packed_rows=%d",
+        "MiniMax-H3 layout: task=%s video=%s audio_frames=%d text_rows=%d packed_rows=%d temporal_stretch=%.4f fine_bands=%d",
         args.task,
         layout.target_video,
         layout.target_audio_frames,
         layout.text_length,
         layout.row_count,
+        layout.temporal_stretch,
+        layout.temporal_fine_bands,
     )
     return layout
 
@@ -810,7 +833,9 @@ def _decode_and_save(
                     write_image(decoded_video_to_uint8(step_video, frame_limit=1)[0], step_path)
                 else:
                     step_path = trajectory_dir / f"{step_stem}.mp4"
-                    write_video_only(decoded_video_to_uint8(step_video, frame_limit=args.frame_count), step_path)
+                    write_video_only(
+                        decoded_video_to_uint8(step_video, frame_limit=args.frame_count), step_path, fps=args.output_fps
+                    )
                 del step_video
                 clean_memory_on_device(device)
                 logger.info("Saved MiniMax-H3 trajectory step: %s", step_path)
@@ -838,6 +863,7 @@ def _decode_and_save(
         decoded_video,
         decoded_audio,
         frame_count=args.frame_count,
+        fps=args.output_fps,
     )
     write_joint_av(decoded, output_path)
     logger.info("Saved MiniMax-H3 output: %s", output_path)
@@ -878,6 +904,7 @@ def _save_latent_file(
         "width": str(args.width),
         "height": str(args.height),
         "frame_count": str(args.frame_count),
+        "output_fps": str(args.output_fps),
         "steps": str(args.steps),
         "h3_shift_video": str(args.h3_shift_video),
         "h3_shift_audio": str(args.h3_shift_audio),
@@ -911,7 +938,7 @@ def parse_prompt_line(line: str) -> dict:
     """Parse an interactive/from-file prompt line into argument overrides.
 
     Format: "prompt text --w 768 --h 1344 --f 1 --d 42 --s 30 --fs 12.0 --fsa 3.0
-    --i first.png --ei last.png --ref face.png --of target_index=24 --o name.png".
+    --ofps 12 --skb 3 --i first.png --ei last.png --ref face.png --of target_index=24 --o name.png".
     --ref is repeatable and replaces any session-level --ref list. A line starting
     with "--" carries only options; without prompt text the command-line --prompt
     (when given) stays in effect. The literal string "\\n" in the prompt text becomes
@@ -935,6 +962,10 @@ def parse_prompt_line(line: str) -> dict:
             overrides["height"] = int(value)
         elif option == "f":
             overrides["frame_count"] = int(value)
+        elif option == "ofps":
+            overrides["output_fps"] = int(value)
+        elif option == "skb":
+            overrides["stretch_keep_bands"] = int(value)
         elif option == "d":
             overrides["seed"] = int(value)
         elif option == "s":
@@ -1064,7 +1095,12 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
             prompt_args = apply_overrides(args, parse_prompt_line(line))
             validate_prompt_args(prompt_args, directory_output=True)
         except ValueError as error:
-            raise ValueError(f"MiniMax-H3 --from_file line {line_number} is invalid: {error}") from error
+            # an invalid line must not abort the batch: record it as a failed item so the
+            # remaining prompts still run and the summary reports it
+            failed = _BatchItem(index=len(items), args=copy.deepcopy(args))
+            _mark_failed(failed, f"line {line_number} validation", error)
+            items.append(failed)
+            continue
         items.append(_BatchItem(index=len(items), args=prompt_args))
     if not items:
         logger.warning("MiniMax-H3 --from_file %s contains no prompts", args.from_file)
@@ -1211,6 +1247,26 @@ def process_interactive(args: argparse.Namespace, device: torch.device) -> None:
         print("\nExiting interactive mode")
 
 
+def _parse_output_fps_metadata(source: Path, metadata: dict, requested_fps: int) -> int:
+    """The stored rate is authoritative: the latents were sampled on its rotary timeline,
+    so decoding at any other rate would desynchronize audio and video."""
+    raw = metadata.get("output_fps", str(TARGET_FPS))
+    try:
+        output_fps = int(raw)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"MiniMax-H3 latent file {source} has invalid output_fps metadata {raw!r}") from error
+    if not 1 <= output_fps <= TARGET_FPS:
+        raise ValueError(f"MiniMax-H3 latent file {source} output_fps metadata {output_fps} is outside [1,{TARGET_FPS}]")
+    if requested_fps not in (TARGET_FPS, output_fps):
+        logger.warning(
+            "MiniMax-H3 latent file %s was sampled at %d fps; decoding at that rate and ignoring --output_fps %d",
+            source,
+            output_fps,
+            requested_fps,
+        )
+    return output_fps
+
+
 def process_latent_decode(args: argparse.Namespace, device: torch.device) -> None:
     """Decode-only mode for --from_file intermediate latents; only the VAEs are loaded."""
     output_dir = Path(args.output).expanduser()
@@ -1224,12 +1280,16 @@ def process_latent_decode(args: argparse.Namespace, device: torch.device) -> Non
     shared = H3SharedModels(device=device)
     for source, video_latents, audio_latents, frame_count, metadata in loaded:
         logger.info("Decoding MiniMax-H3 latents from %s", source)
-        item_args = copy.deepcopy(args)
-        item_args.frame_count = frame_count
-        seed = metadata.get("seeds", "0")
-        suffix = ".png" if frame_count == 1 else ".mp4"
-        output_path = output_dir / f"{_time_flag()}_{seed}_{source.stem}{suffix}"
-        _decode_and_save(item_args, video_latents, audio_latents, output_path, device, shared)
+        try:
+            item_args = copy.deepcopy(args)
+            item_args.frame_count = frame_count
+            item_args.output_fps = _parse_output_fps_metadata(source, metadata, args.output_fps)
+            seed = metadata.get("seeds", "0")
+            suffix = ".png" if frame_count == 1 else ".mp4"
+            output_path = output_dir / f"{_time_flag()}_{seed}_{source.stem}{suffix}"
+            _decode_and_save(item_args, video_latents, audio_latents, output_path, device, shared)
+        except Exception as error:
+            logger.error("MiniMax-H3 latent decode failed for %s: %s", source, error, exc_info=True)
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -1328,6 +1388,28 @@ def setup_parser() -> argparse.ArgumentParser:
         " order and is required when conditions are present. The base model reads these as trainable time inputs;"
         " see docs/minimax_h3_1f.md",
     )
+    parser.add_argument(
+        "--output_fps",
+        type=int,
+        default=TARGET_FPS,
+        help="experimental temporal stretch: sample the generated timeline at this rate (1-24) instead of"
+        " 24 fps. The --frame_count frames then cover frame_count/fps seconds -- target RoPE spans scale"
+        " by 24/fps, the audio track covers the stretched duration, and the output container is written"
+        " at this rate. The model was trained at 24 fps only, so lower rates trade temporal resolution"
+        " (and possibly quality) for compute; pair with --stretch_keep_bands, see docs. 24 disables the"
+        " stretch",
+    )
+    parser.add_argument(
+        "--stretch_keep_bands",
+        type=int,
+        default=0,
+        help="with --output_fps below 24: rotate this many leading (highest-frequency) temporal RoPE bands"
+        " by the unstretched grid. Those bands have periods at or below the latent token spacing and carry"
+        " a per-token lattice phase rather than time; stretching them scrambles that phase with the"
+        " 17-pixel-frame VAE group period (periodic fading/stripes). Recommended: 3-4 at 12 fps, 2 at"
+        " 16 fps, 1 at 20 fps (at most 15 -- at least one band must stay on the stretched clock)."
+        " 0 stretches all bands (default)",
+    )
     parser.add_argument("--allow_experimental_duration", action="store_true")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=None, help="random when omitted")
@@ -1340,7 +1422,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--from_file",
         default=None,
-        help="batch mode: read prompt lines (with inline --w/--h/--f/--d/--s/--fs/--fsa/--i/--ei/--ref/--of/--o"
+        help="batch mode: read prompt lines (with inline --w/--h/--f/--d/--s/--fs/--fsa/--ofps/--skb/--i/--ei/--ref/--of/--o"
         " options) from a file and run them in phases, loading each model family once. Sampled latents are saved"
         " to the --output directory before decoding so a crash loses nothing; the files are removed after their"
         " output is written. See docs/minimax_h3.md",

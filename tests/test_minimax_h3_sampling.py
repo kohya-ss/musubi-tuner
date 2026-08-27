@@ -307,6 +307,8 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "width": 64,
         "height": 64,
         "frame_count": 124,
+        "output_fps": 24,
+        "stretch_keep_bands": 0,
         "allow_experimental_duration": False,
         "steps": 2,
         "seed": 1,

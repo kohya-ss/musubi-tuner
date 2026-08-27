@@ -425,6 +425,16 @@ T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. T
 
 The native sampler builds one common base grid, derives independent shifted video and audio sigma grids, and advances each modality with its own finite sigma interval. It does not apply CFG, negate the model heads, or apply ComfyUI's single-sampler audio slope adapter. Musubi also adds condition noise before packing, while ComfyUI adds it after packing; the distributions agree but RNG placement does not. These two intentional differences mean the same seed is not bitwise reproducible against ComfyUI. Video and audio are decoded sequentially, trimmed to a common duration, and muxed with PyAV as H.264 plus AAC.
 
+### Temporal stretch (experimental)
+
+`--output_fps N` (default 24, accepted range 1-24; rates above the native 24 are rejected until the squeeze direction is validated) samples the generated timeline at N fps instead of the trained 24. `--frame_count` still counts generated pixel frames, so the clip covers `frame_count / N` seconds: the target video's rotary time spans scale by `24/N` (the H3 time axis is real-time, 1 unit = 1/40 s), the audio track keeps its native 40 Hz latent rate over the stretched real duration, and the output container, trajectory dumps, and intermediate latent files all carry the requested rate. The released 5-15 s duration gate applies to the real (stretched) duration. References, FL2VA conditions, and one-frame mode keep native 24 fps spans (one-frame mode rejects a stretch).
+
+Two ways to use it: keeping `--frame_count` fixed doubles the clip length at 12 fps for nearly the same compute (only the audio rows grow), while generating the same real duration with proportionally fewer frames cuts the packed sequence roughly in half at 12 fps (about a quarter of the video-video attention cost; 124 frames at 12 fps measured ~2.1x faster than the equal-duration 243 frames at 24 fps).
+
+The model was trained at 24 fps only, so a plain stretch produces periodic artifacts with a 17-pixel-frame period: the leading (highest-frequency) temporal RoPE bands have periods at or below the latent token spacing and carry a per-token lattice phase rather than time, and stretching re-dials that phase against the `(1,4,4,4,4)` VAE token grouping. `--stretch_keep_bands K` rotates the K leading temporal bands by the unstretched grid instead, which restores the trained lattice phase while the remaining bands carry the stretched clock. Recommended values: `3` at 12 fps (where `4` also removes the last residual glitches), `2` at 16 fps, `1` at 20 fps — the count of bands whose per-token rotation changes regime at that stretch.
+
+Temporal resolution is the real cost: 12 fps halves it. This interacts with a model habit that is unrelated to the stretch: anime-style outputs animate characters on twos (a learned production convention, bound to the token grid and present at native 24 fps), so at 12 fps character motion drops to an effective 6 fps while backgrounds and camera moves stay per-frame. 16 fps with `--stretch_keep_bands 2` is often the better compromise for animated styles; the cadence itself follows the style stated in the prompt (live-action and game-engine styles animate per frame).
+
 ### Batch and interactive modes
 
 Model loading dominates single-shot latency (and `--convrot_int8` requantizes at every start), so repeated generation should use `--from_file` or `--interactive` instead of one process per prompt. Both read prompt lines of the form:
@@ -440,6 +450,7 @@ A singer performs under stage lights. --w 768 --h 1344 --f 124 --d 42 --s 30
 | `--d` | `--seed` |
 | `--s` | `--steps` |
 | `--fs`, `--fsa` | `--h3_shift_video`, `--h3_shift_audio` |
+| `--ofps`, `--skb` | `--output_fps`, `--stretch_keep_bands` |
 | `--i`, `--ei` | `--first_frame`, `--last_frame` (end image) |
 | `--ref` | `--ref` (repeatable; replaces the session-level list) |
 | `--of` | `--one_frame` |
