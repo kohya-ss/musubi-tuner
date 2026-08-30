@@ -1461,9 +1461,16 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             )
         # the probe swaps only the text rows; the one-frame times stay valid because they
         # are relative to the target-block cursor, which moves with the text length. The
-        # condition roles are recovered from the segments so a one-frame FL2VA layout with a
-        # single condition rebuilds identically (roles are required for K=1).
-        uncond_condition_roles = tuple(segment.role for segment in runtime.layout.segments if segment.kind == "visual_condition")
+        # FL2VA condition roles are recovered from the segments so a one-frame FL2VA layout
+        # with a single condition rebuilds identically (roles are required for K=1). Ref2VA
+        # reference blocks share the "visual_condition" segment kind but their segments are
+        # regenerated from `references`, and build_h3_layout rejects condition_roles for
+        # non-FL2VA tasks — so roles are harvested for FL2VA layouts only.
+        uncond_condition_roles = (
+            tuple(segment.role for segment in runtime.layout.segments if segment.kind == "visual_condition")
+            if runtime.layout.task == "fl2va"
+            else None
+        )
         uncond_layout = build_h3_layout(
             task=runtime.layout.task,
             text_length=uncond_hidden.shape[0],
