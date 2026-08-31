@@ -521,6 +521,16 @@ class ImageDataset(BaseDataset):
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
+        empty_te_cache_path = None
+        if self.caption_dropout_rate > 0:
+            empty_te_cache_path = self.get_empty_text_encoder_output_cache_path()
+            if not os.path.exists(empty_te_cache_path):
+                raise FileNotFoundError(
+                    f"caption_dropout_rate is set to {self.caption_dropout_rate} but the empty-caption cache file "
+                    f"was not found: {empty_te_cache_path}. Re-run the *_cache_text_encoder_outputs.py script for "
+                    f"this dataset with caption_dropout_rate set in the dataset config to generate it."
+                )
+
         # glob cache files
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
@@ -565,6 +575,9 @@ class ImageDataset(BaseDataset):
 
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
+            if empty_te_cache_path is not None:
+                item_info.caption_dropout_rate = self.caption_dropout_rate
+                item_info.empty_text_encoder_output_cache_path = empty_te_cache_path
 
             bucket = bucketed_item_info.get(bucket_reso, [])
             for _ in range(self.num_repeats):
@@ -876,6 +889,16 @@ class VideoDataset(BaseDataset):
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
+        empty_te_cache_path = None
+        if self.caption_dropout_rate > 0:
+            empty_te_cache_path = self.get_empty_text_encoder_output_cache_path()
+            if not os.path.exists(empty_te_cache_path):
+                raise FileNotFoundError(
+                    f"caption_dropout_rate is set to {self.caption_dropout_rate} but the empty-caption cache file "
+                    f"was not found: {empty_te_cache_path}. Re-run the *_cache_text_encoder_outputs.py script for "
+                    f"this dataset with caption_dropout_rate set in the dataset config to generate it."
+                )
+
         # glob cache files
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
@@ -901,6 +924,9 @@ class VideoDataset(BaseDataset):
             bucket_reso = (*bucket_reso, frame_count)
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, frame_count=frame_count, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
+            if empty_te_cache_path is not None:
+                item_info.caption_dropout_rate = self.caption_dropout_rate
+                item_info.empty_text_encoder_output_cache_path = empty_te_cache_path
 
             bucket = bucketed_item_info.get(bucket_reso, [])
             for _ in range(self.num_repeats):
