@@ -96,3 +96,48 @@ def test_prepare_for_training_leaves_dropout_fields_default_when_rate_zero(tmp_p
     bucket = next(iter(dataset.batch_manager.buckets.values()))
     assert bucket[0].caption_dropout_rate == 0.0
     assert bucket[0].empty_text_encoder_output_cache_path is None
+
+
+from unittest.mock import patch
+
+from musubi_tuner.dataset.bucket import BucketBatchManager
+
+
+def _item_with_dropout(tmp_path, rate, real_value, empty_value):
+    real_path = tmp_path / "real_wan_te.safetensors"
+    empty_path = tmp_path / "empty_wan_te.safetensors"
+    save_file({"varlen_t5_float32": torch.full((1, 4), real_value)}, str(real_path))
+    save_file({"varlen_t5_float32": torch.full((1, 4), empty_value)}, str(empty_path))
+
+    latent_path = tmp_path / "real_0064x0064_wan.safetensors"
+    save_file({"latents_1x8x8_fp32": torch.zeros(16, 1, 8, 8)}, str(latent_path))
+
+    item = ItemInfo("real", "a caption", (64, 64), (64, 64), latent_cache_path=str(latent_path))
+    item.text_encoder_output_cache_path = str(real_path)
+    item.caption_dropout_rate = rate
+    item.empty_text_encoder_output_cache_path = str(empty_path)
+    return item
+
+
+def test_bucket_batch_manager_uses_empty_cache_when_dropout_fires(tmp_path):
+    item = _item_with_dropout(tmp_path, rate=0.5, real_value=1.0, empty_value=0.0)
+    manager = BucketBatchManager({(64, 64): [item]}, batch_size=1)
+    with patch("musubi_tuner.dataset.bucket.random.random", return_value=0.1):  # < 0.5 -> dropout fires
+        batch = manager[0]
+    assert torch.all(batch["t5"][0] == 0.0)
+
+
+def test_bucket_batch_manager_uses_real_cache_when_dropout_does_not_fire(tmp_path):
+    item = _item_with_dropout(tmp_path, rate=0.5, real_value=1.0, empty_value=0.0)
+    manager = BucketBatchManager({(64, 64): [item]}, batch_size=1)
+    with patch("musubi_tuner.dataset.bucket.random.random", return_value=0.9):  # >= 0.5 -> no dropout
+        batch = manager[0]
+    assert torch.all(batch["t5"][0] == 1.0)
+
+
+def test_bucket_batch_manager_no_dropout_when_rate_zero(tmp_path):
+    item = _item_with_dropout(tmp_path, rate=0.0, real_value=1.0, empty_value=0.0)
+    manager = BucketBatchManager({(64, 64): [item]}, batch_size=1)
+    with patch("musubi_tuner.dataset.bucket.random.random", return_value=0.0):  # would fire if rate were > 0
+        batch = manager[0]
+    assert torch.all(batch["t5"][0] == 1.0)

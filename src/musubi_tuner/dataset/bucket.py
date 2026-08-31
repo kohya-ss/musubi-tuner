@@ -246,7 +246,10 @@ class BucketBatchManager:
         varlen_keys = set()
         for item_info in bucket[start:end]:
             sd_latent = load_file(item_info.latent_cache_path)
-            sd_te = load_file(item_info.text_encoder_output_cache_path)
+            te_cache_path = item_info.text_encoder_output_cache_path
+            if item_info.caption_dropout_rate > 0 and random.random() < item_info.caption_dropout_rate:
+                te_cache_path = item_info.empty_text_encoder_output_cache_path
+            sd_te = load_file(te_cache_path)
             sd = {**sd_latent, **sd_te}
 
             # TODO refactor this
