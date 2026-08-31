@@ -380,6 +380,18 @@ python minimax_h3_generate_video.py \
 
 `--seed` is optional: when omitted, each generation draws a fresh random seed and logs it (auto-named outputs embed it in the filename).
 
+`--output` accepts either a file name or a directory: an existing directory, a trailing path separator, or an extension-free path selects auto-naming (`<timestamp>_<seed>` plus the output type's extension) inside that directory, while any other unrecognized extension stays an error (a directory name containing a dot needs the trailing-separator spelling, e.g. `some.dir/`). An existing output is never overwritten — the new file is renamed with a `-1`, `-2`, ... suffix and a warning is logged — so re-running an edited command line without changing `--output` cannot destroy earlier results.
+
+`--output_type {video,latent,both,images,latent_images}` (default `video`) selects what is saved:
+
+- `video` — the muxed video (or the one-frame PNG), as above.
+- `latent` — only the sampled video+audio latents, as a safetensors file (a `.safetensors` output name, or auto-named `<timestamp>_<seed>_latent.safetensors`); VAE decoding is skipped and `--latent_path` turns the file into a video later. `--trajectory_dir` requires decoding and is rejected.
+- `both` — the video plus the latents as `<name>_latent.safetensors` next to it.
+- `images` — the decoded frames as `00000.png`-numbered files plus the decoded audio as `audio.wav`, written into an auto-named `<timestamp>_<seed>/` directory under `--output` (which always names a directory for the image types, so two runs never mix their frames).
+- `latent_images` — `images` plus `latent.safetensors` inside the same directory.
+
+In `--from_file` mode the latent-bearing types simply keep the intermediate latent files (with their `<timestamp>_<index>_<seed>_latent.safetensors` names) instead of removing them, and `--output_type latent` skips the decode phase entirely; `--latent_path` decoding accepts `video` and `images`.
+
 Add a trained LoRA with:
 
 ```text
@@ -396,7 +408,7 @@ For FL2VA, keep the FL2VA base and replace the task inputs:
 --task fl2va --prompt "..." --first_frame first.png --last_frame last.png
 ```
 
-For Ref2VA, use a Ref2VA base (BF16 or ConvRot INT8) and an ordered JSONL record:
+The official prompt guide treats I2VA (first frame only) and L2VA (last frame only) as FL2VA variants, and the released FL2VA base supports both: pass only `--first_frame` to develop forward from the image, or only `--last_frame` to converge onto it. The lone picture is `<Picture 1>` in either case — the released prompt builder numbers the pictures that are present — and the first/last distinction is carried by the rotary anchor times (a lone last frame keeps its end-of-video anchor), so the prompt should use the matching official instruction line: the I2VA "at 0.00 seconds ... fully referenced" form, or the L2VA alignment form anchoring `<Picture 1>` at the final second mark. (BF16 or ConvRot INT8) and an ordered JSONL record:
 
 ```text
 --task ref2va --dit /models/minimax_h3_ref2va_bf16.safetensors --reference_jsonl /data/h3/ref2va.jsonl --reference_index 0
@@ -456,9 +468,9 @@ A singer performs under stage lights. --w 768 --h 1344 --f 124 --d 42 --s 30
 | `--of` | `--one_frame` |
 | `--o` | output filename inside the output directory |
 
-Unspecified options inherit the command-line values, so a fixed `--ref` set with varying prompts works. A line starting with `--` carries only options and keeps the command-line `--prompt` in effect — with a session prompt, `--d 43` alone re-runs it with a new seed. The literal string `\n` in prompt text (line prompts and `--prompt` alike) becomes a newline, so the multi-line official prompt format fits on one line. `--task`, the model artifacts, and the LoRA configuration are fixed for the session, and `--text_cache` and `--trajectory_dir` are not accepted. In both modes `--output` names a directory (created if missing); files are auto-named `<timestamp>_<seed>.png/.mp4` unless a line overrides the name with `--o`, and omitting `--d` draws a fresh random seed per line.
+Unspecified options inherit the command-line values, so a fixed `--ref` set with varying prompts works. A line starting with `--` carries only options and keeps the command-line `--prompt` in effect — with a session prompt, `--d 43` alone re-runs it with a new seed. The literal string `\n` in prompt text (line prompts and `--prompt` alike) becomes a newline, so the multi-line official prompt format fits on one line. `--task`, the model artifacts, and the LoRA configuration are fixed for the session, and `--text_cache` and `--trajectory_dir` are not accepted. In both modes `--output` names a directory (created if missing); files are auto-named `<timestamp>_<seed>` with the output type's extension (a per-generation directory for the image types) unless a line overrides the name with `--o`, and omitting `--d` draws a fresh random seed per line.
 
-**`--from_file prompts.txt`** runs the prompts in four phases, loading each model family exactly once: condition VAE encoding for every line (lines starting with `#` and empty lines are skipped), then all text encodings, then all samplings, then all decodes. Peak VRAM therefore matches single-shot generation — the same `--blocks_to_swap`/`--text_encoder_blocks_to_swap` settings apply unchanged. Each sampled result is written to `<output>/<timestamp>_<index>_<seed>_latent.safetensors` before any decoding, so a crash never loses finished sampling work; the file is removed once its output is written and kept (with a log message) when decoding fails. A failing line is reported and skipped without aborting the rest of the batch.
+**`--from_file prompts.txt`** runs the prompts in four phases, loading each model family exactly once: condition VAE encoding for every line (lines starting with `#` and empty lines are skipped), then all text encodings, then all samplings, then all decodes. Peak VRAM therefore matches single-shot generation — the same `--blocks_to_swap`/`--text_encoder_blocks_to_swap` settings apply unchanged. Each sampled result is written to `<output>/<timestamp>_<index>_<seed>_latent.safetensors` before any decoding, so a crash never loses finished sampling work; the file is removed once its output is written (unless `--output_type` keeps latents) and kept (with a log message) when decoding fails. A failing line is reported and skipped without aborting the rest of the batch.
 
 **`--latent_path FILE...`** decodes those intermediate latent files without loading the transformer or text encoder — only the VAEs (`--audio_vae` may be omitted when every file is a one-frame latent). Outputs go to the `--output` directory.
 

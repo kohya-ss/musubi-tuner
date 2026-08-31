@@ -314,8 +314,8 @@ def build_h3_layout(
                 raise ValueError("MiniMax-H3 one-frame FL2VA layout requires one or two visual conditions")
             if time_overrides is None or len(time_overrides.condition_times) != len(visual_conditions):
                 raise ValueError("MiniMax-H3 one-frame FL2VA layout requires one condition time override per condition")
-        elif len(visual_conditions) != 2:
-            raise ValueError("MiniMax-H3 FL2VA layout requires exactly first and last visual conditions")
+        elif not 1 <= len(visual_conditions) <= 2:
+            raise ValueError("MiniMax-H3 FL2VA layout requires one or two visual conditions (first and/or last)")
         roles = _fl_condition_roles(condition_roles, len(visual_conditions))
         for role, condition in zip(roles, visual_conditions):
             if condition != H3VideoGeometry(1, target_video.height, target_video.width):

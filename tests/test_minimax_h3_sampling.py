@@ -313,6 +313,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "steps": 2,
         "seed": 1,
         "output": str(tmp_path / "output.mp4"),
+        "output_type": "video",
         "blocks_to_swap": 0,
         "h3_shift_video": 12.0,
         "h3_shift_audio": 3.0,

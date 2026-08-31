@@ -230,6 +230,39 @@ def test_position_grid_matches_full_fl2va_clock_and_does_not_advance_target_curs
     torch.testing.assert_close(actual[0], expected)
 
 
+def test_full_fl2va_layout_accepts_a_single_roled_condition_and_keeps_its_anchor_time():
+    condition = H3VideoGeometry(1, 4, 4)
+    # the lone-last anchor must equal the last-frame time of the two-condition layout
+    last_time = 2.0 + (5.0 / 3.0 + 20.0 / 3.0) - 5.0 / 3.0
+    for role, expected_time in (("first", 2.0), ("last", last_time)):
+        layout = build_h3_layout(
+            task="fl2va",
+            text_length=2,
+            target_video=TARGET_VIDEO,
+            target_audio_frames=8,
+            visual_conditions=(condition,),
+            condition_roles=(role,),
+        )
+        assert [(segment.role, segment.kind) for segment in layout.segments][:2] == [("text", "text"), (role, "visual_condition")]
+        positions = build_position_grid(layout)
+        segment = layout.segment(role)
+        torch.testing.assert_close(
+            positions[0, segment.start : segment.stop, 0],
+            torch.full((segment.row_count,), expected_time, dtype=torch.float64),
+        )
+
+    with pytest.raises(ValueError, match="requires explicit condition roles"):
+        build_h3_layout(
+            task="fl2va",
+            text_length=2,
+            target_video=TARGET_VIDEO,
+            target_audio_frames=8,
+            visual_conditions=(condition,),
+        )
+    with pytest.raises(ValueError, match="one or two visual conditions"):
+        build_h3_layout(task="fl2va", text_length=2, target_video=TARGET_VIDEO, target_audio_frames=8)
+
+
 def test_position_grid_uses_the_full_five_frame_temporal_cycle():
     target = H3VideoGeometry(7, 2, 2)
     layout = build_h3_layout(
