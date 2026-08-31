@@ -722,3 +722,27 @@ resolution = [960, 544] # required if general resolution is not set
 -->
 
 The metadata with .json file will be supported in the near future.
+
+## Caption Dropout
+
+`caption_dropout_rate` is an optional float (default `0.0`), settable in `[general]` or per-`[[datasets]]`, following the same fallback rule as `caption_extension`/`batch_size`/etc. At training time, for each item read, with probability `caption_dropout_rate` the real caption's cached text-encoder embedding is swapped for a pre-cached **empty-caption** embedding instead. This is the standard trick used to make classifier-free guidance work well and to reduce caption overfitting during LoRA training.
+
+```toml
+[general]
+caption_dropout_rate = 0.1  # 10% of reads use the empty-caption embedding instead of the real one
+```
+
+Because training reads pre-cached text-encoder outputs rather than encoding captions live, the empty-caption embedding must also be pre-cached. Simply re-run the architecture's `*_cache_text_encoder_outputs.py` script (e.g. `wan_cache_text_encoder_outputs.py`) after setting `caption_dropout_rate` in the dataset config — it will generate one additional cache file per dataset cache directory (shared across all items in that dataset, since the empty string always encodes to the same embedding) alongside the per-item cache files it already creates. If training is started with `caption_dropout_rate > 0` and this file is missing, it fails fast with a clear error telling you to re-run the cache script.
+
+`caption_dropout_rate` is **not supported** for text-encoder caching modes that condition the text embedding on image content — currently Qwen-Image's `--is_edit` mode and HiDream-O1's control-image mode. The empty-caption embedding would depend on the image too in those modes, so a single dataset-wide cache entry isn't valid; the cache script raises a clear error if you set `caption_dropout_rate > 0` on a dataset used with either of those.
+
+<details>
+<summary>日本語</summary>
+
+`caption_dropout_rate` はオプションのfloat値（デフォルトは`0.0`）で、`caption_extension`や`batch_size`などと同様に`[general]`または各`[[datasets]]`に設定できます。学習時、読み込みごとに`caption_dropout_rate`の確率で、実際のキャプションのキャッシュされたテキストエンコーダ埋め込みの代わりに、事前にキャッシュされた**空キャプション**の埋め込みが使用されます。これは、Classifier-Free Guidanceの効果を高め、LoRA学習時のキャプションへの過学習を減らすための一般的な手法です。
+
+学習時には事前にキャッシュされたテキストエンコーダの出力を読み込むだけで、キャプションをその場でエンコードしないため、空キャプションの埋め込みも事前にキャッシュしておく必要があります。データセット設定で`caption_dropout_rate`を設定した後、該当アーキテクチャの`*_cache_text_encoder_outputs.py`スクリプト（例：`wan_cache_text_encoder_outputs.py`）を再実行してください。これにより、既存の項目ごとのキャッシュファイルに加えて、データセットのキャッシュディレクトリごとに1つの追加キャッシュファイルが生成されます（空文字列は常に同じ埋め込みにエンコードされるため、そのデータセット内の全項目で共有されます）。このファイルが存在しない状態で`caption_dropout_rate > 0`のまま学習を開始すると、キャッシュスクリプトの再実行を促す明確なエラーで即座に失敗します。
+
+`caption_dropout_rate`は、テキスト埋め込みが画像コンテンツに依存するテキストエンコーダキャッシュモード（現時点ではQwen-Imageの`--is_edit`モードとHiDream-O1のcontrol画像モード）では**サポートされていません**。これらのモードでは空キャプションの埋め込みも画像に依存するため、データセット全体で共有される単一のキャッシュエントリは正しくありません。これらのいずれかを使用するデータセットで`caption_dropout_rate > 0`を設定すると、キャッシュスクリプトが明確なエラーを発生させます。
+
+</details>
