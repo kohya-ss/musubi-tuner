@@ -46,6 +46,7 @@ def _session_args(tmp_path, *, task="t2va", **overrides):
         "steps": 2,
         "seed": 1,
         "output": str(tmp_path / "output.mp4"),
+        "output_type": "video",
         "output_name": None,
         "blocks_to_swap": 0,
         "h3_shift_video": 12.0,
@@ -134,10 +135,12 @@ def test_session_validation_enforces_mode_exclusivity_and_multi_prompt_restricti
     validate_session_args(_session_args(tmp_path, interactive=True))
     validate_session_args(_session_args(tmp_path, from_file=str(prompts)))
 
-    # decode-only mode needs just the latents and the video VAE
+    # decode-only mode needs just the latents and the video VAE, and only decoding output types
     validate_session_args(_session_args(tmp_path, latent_path=[str(latents)], task=None, dit=None, text_encoder=None))
     with pytest.raises(ValueError, match="requires --video_vae"):
         validate_session_args(_session_args(tmp_path, latent_path=[str(latents)], video_vae=None))
+    with pytest.raises(ValueError, match="video or images only"):
+        validate_session_args(_session_args(tmp_path, latent_path=[str(latents)], output_type="latent"))
 
     with pytest.raises(ValueError, match="requires --task"):
         validate_session_args(_session_args(tmp_path, task=None))
@@ -159,6 +162,67 @@ def test_prompt_validation_checks_output_name_suffixes_in_directory_modes(tmp_pa
     image_args.output_name = "image.mp4"
     with pytest.raises(ValueError, match="must use .png"):
         validate_prompt_args(image_args, directory_output=True)
+
+
+def test_fl2va_accepts_single_anchor_frames(tmp_path):
+    first = tmp_path / "first.png"
+    first.touch()
+    last = tmp_path / "last.png"
+    last.touch()
+    base = {"task": "fl2va", "output": str(tmp_path / "out.mp4")}
+    validate_prompt_args(_session_args(tmp_path, **base, first_frame=str(first)))
+    validate_prompt_args(_session_args(tmp_path, **base, last_frame=str(last)))
+    validate_prompt_args(_session_args(tmp_path, **base, first_frame=str(first), last_frame=str(last)))
+    with pytest.raises(ValueError, match="first only = I2VA"):
+        validate_prompt_args(_session_args(tmp_path, **base))
+
+
+def test_output_validation_covers_output_types_and_directory_interpretation(tmp_path):
+    # latent-only output names must be .safetensors
+    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.safetensors"), output_type="latent"))
+    with pytest.raises(ValueError, match=r"must use \.safetensors"):
+        validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.mp4"), output_type="latent"))
+
+    # image-sequence outputs are directories, so a media-file --output is rejected
+    with pytest.raises(ValueError, match="must not name a media file"):
+        validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.mp4"), output_type="images"))
+    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "frames"), output_type="images"))
+
+    # an existing directory, a trailing separator, or an extension-free path selects auto-naming
+    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path)))
+    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "newdir") + "/"))
+    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "newdir")))
+    with pytest.raises(ValueError, match=r"must use \.mp4"):
+        validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.mp3")))
+
+    # the per-step trajectory diagnostic requires decoding
+    with pytest.raises(ValueError, match="cannot combine with --output_type latent"):
+        validate_prompt_args(
+            _session_args(tmp_path, output=str(tmp_path / "out.safetensors"), output_type="latent", trajectory_dir=str(tmp_path))
+        )
+
+
+def test_resolve_output_path_auto_names_directories_and_never_overwrites(tmp_path):
+    existing = tmp_path / "clip.mp4"
+    existing.touch()
+    resolved = generate._resolve_output_path(_session_args(tmp_path, output=str(existing)), 7, directory_mode=False)
+    assert resolved == tmp_path / "clip-1.mp4"
+
+    resolved = generate._resolve_output_path(_session_args(tmp_path, output=str(tmp_path / "outdir")), 7, directory_mode=False)
+    assert resolved.parent == tmp_path / "outdir" and resolved.parent.is_dir()
+    assert resolved.name.endswith("_7.mp4")
+
+    latent_args = _session_args(tmp_path, output=str(tmp_path / "outdir"), output_type="latent")
+    resolved = generate._resolve_output_path(latent_args, 7, directory_mode=False)
+    assert resolved.name.endswith("_7_latent.safetensors")
+
+    image_args = _session_args(tmp_path, output=str(tmp_path / "frames"), output_type="images")
+    resolved = generate._resolve_output_path(image_args, 7, directory_mode=False)
+    assert resolved.parent == tmp_path / "frames" and resolved.suffix == ""
+
+    both_args = _session_args(tmp_path, output=str(tmp_path / "clip2.mp4"), output_type="both")
+    output_path = generate._resolve_output_path(both_args, 7, directory_mode=False)
+    assert generate._resolve_latent_path(both_args, output_path) == tmp_path / "clip2_latent.safetensors"
 
 
 def test_one_frame_fl2va_control_index_error_reports_the_counts(tmp_path):
@@ -339,6 +403,75 @@ def test_from_file_batch_keeps_the_latents_of_a_failed_decode(tmp_path, monkeypa
     assert audio_latents is not None
     assert frame_count == 5
     assert metadata["seeds"] == "11"
+
+
+def test_from_file_batch_with_latent_output_type_keeps_latents_and_skips_decoding(tmp_path, monkeypatch):
+    counters = {"text": 0, "transformer": 0, "video_vae": 0, "audio_vae": 0}
+    _stub_generation_models(monkeypatch, counters)
+
+    args = _batch_args(tmp_path, ["a cat sings --d 11"])
+    args.output_type = "latent"
+    generate.process_from_file(args, torch.device("cpu"))
+
+    # the decode phase is skipped entirely, so no VAE is ever loaded for a T2VA batch
+    assert counters["video_vae"] == 0 and counters["audio_vae"] == 0
+    kept = list((tmp_path / "outputs").glob("*_latent.safetensors"))
+    assert len(kept) == 1
+    _, audio_latents, frame_count, metadata = generate._load_latent_file(kept[0])
+    assert audio_latents is not None and frame_count == 5 and metadata["seeds"] == "11"
+
+
+def test_run_generation_latent_only_saves_a_decodable_file_without_vaes(tmp_path, monkeypatch):
+    counters = {"text": 0, "transformer": 0, "video_vae": 0, "audio_vae": 0}
+    _stub_generation_models(monkeypatch, counters)
+
+    args = _session_args(
+        tmp_path,
+        frame_count=5,
+        allow_experimental_duration=True,
+        output=str(tmp_path / "out.safetensors"),
+        output_type="latent",
+        device="cpu",
+        attn_mode="torch",
+        split_attn=False,
+        use_pinned_memory_for_block_swap=False,
+        include_patterns=None,
+        exclude_patterns=None,
+        disable_numpy_memmap=False,
+    )
+    result = generate.run_generation(args, torch.device("cpu"))
+
+    assert result == tmp_path / "out.safetensors"
+    _, audio_latents, frame_count, _ = generate._load_latent_file(result)
+    assert audio_latents is not None and frame_count == 5
+    assert counters["video_vae"] == 0 and counters["audio_vae"] == 0
+
+
+def test_run_generation_writes_an_image_sequence_with_audio_and_latents(tmp_path, monkeypatch):
+    counters = {"text": 0, "transformer": 0, "video_vae": 0, "audio_vae": 0}
+    _stub_generation_models(monkeypatch, counters)
+
+    args = _session_args(
+        tmp_path,
+        frame_count=5,
+        allow_experimental_duration=True,
+        output=str(tmp_path / "frames"),
+        output_type="latent_images",
+        device="cpu",
+        attn_mode="torch",
+        split_attn=False,
+        use_pinned_memory_for_block_swap=False,
+        include_patterns=None,
+        exclude_patterns=None,
+        disable_numpy_memmap=False,
+    )
+    result = generate.run_generation(args, torch.device("cpu"))
+
+    assert result.parent == tmp_path / "frames"
+    assert sorted(path.name for path in result.glob("*.png")) == [f"{index:05d}.png" for index in range(5)]
+    assert (result / "audio.wav").stat().st_size > 0
+    _, audio_latents, frame_count, _ = generate._load_latent_file(result / "latent.safetensors")
+    assert audio_latents is not None and frame_count == 5
 
 
 def test_compile_wraps_the_dit_once_with_training_parity_exclusions(tmp_path, monkeypatch):

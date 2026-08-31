@@ -298,6 +298,38 @@ def write_image(frame: torch.Tensor, output_path: str | Path) -> None:
     Image.fromarray(frame.cpu().numpy()).save(output_path)
 
 
+def write_image_sequence(video: torch.Tensor, output_dir: str | Path) -> None:
+    """Write uint8 [F,H,W,3] frames as zero-padded numbered PNGs into a directory."""
+    if video.ndim != 4 or video.shape[-1] != 3 or video.dtype != torch.uint8:
+        raise ValueError(f"MiniMax-H3 image-sequence write needs uint8 [F,H,W,3], got {tuple(video.shape)} {video.dtype}")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for index, frame in enumerate(video):
+        Image.fromarray(frame.cpu().numpy()).save(output_dir / f"{index:05d}.png")
+
+
+def write_audio_wav(audio: torch.Tensor, output_path: str | Path, *, sample_rate: int) -> None:
+    """Write stereo [-1,1] float [2,L] audio as a 16-bit PCM WAV; the audio track of image-sequence outputs."""
+    if audio.ndim != 2 or audio.shape[0] != 2:
+        raise ValueError(f"MiniMax-H3 WAV write needs stereo [2,L], got {tuple(audio.shape)}")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    interleaved = (audio.detach().cpu().float().clamp(-1.0, 1.0) * 32767.0).round().to(torch.int16).t().contiguous()
+    with av.open(str(output_path), mode="w") as container:
+        audio_stream = container.add_stream("pcm_s16le", rate=sample_rate)
+        audio_stream.layout = "stereo"
+        for start in range(0, interleaved.shape[0], 1024):
+            chunk = interleaved[start : start + 1024]
+            frame = av.AudioFrame.from_ndarray(chunk.reshape(1, -1).numpy(), format="s16", layout="stereo")
+            frame.sample_rate = sample_rate
+            frame.pts = start
+            frame.time_base = Fraction(1, sample_rate)
+            for packet in audio_stream.encode(frame):
+                container.mux(packet)
+        for packet in audio_stream.encode():
+            container.mux(packet)
+
+
 # Without an explicit rate control, PyAV encodes libx264 at its ~1 Mbps ABR default — far too
 # low for 1 MP/24 fps outputs and enough to masquerade as generation artifacts (mushy lines).
 # CRF keeps quality resolution- and content-independent; 16 is evaluation-grade.
