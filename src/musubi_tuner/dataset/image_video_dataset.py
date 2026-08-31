@@ -707,6 +707,7 @@ class VideoDataset(BaseDataset):
 
         self.batch_manager = None
         self.num_train_items = 0
+        self.has_control = self.datasource.has_control
 
     def get_empty_caption_item_info(self) -> ItemInfo:
         # Override base implementation to mark this as a video item (frame_count > 1), so that
@@ -715,7 +716,6 @@ class VideoDataset(BaseDataset):
         item_info = super().get_empty_caption_item_info()
         item_info.frame_count = 2
         return item_info
-        self.has_control = self.datasource.has_control
 
     def get_metadata(self):
         metadata = super().get_metadata()

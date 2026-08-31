@@ -81,6 +81,14 @@ def test_get_empty_caption_item_info(tmp_path):
     assert item.frame_count is None
 
 
+def test_video_dataset_sets_has_control_attribute(tmp_path):
+    # Regression test: VideoDataset.__init__ must still set self.has_control (used by
+    # get_metadata()) after the get_empty_caption_item_info() override was added.
+    dataset = _make_video_dataset(tmp_path)
+    assert dataset.has_control is False
+    assert dataset.get_metadata()["has_control"] is False
+
+
 def test_video_dataset_get_empty_caption_item_info_sets_frame_count(tmp_path):
     dataset = _make_video_dataset(tmp_path)
     item = dataset.get_empty_caption_item_info()
