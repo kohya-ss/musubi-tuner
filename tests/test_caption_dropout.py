@@ -1,5 +1,8 @@
 """Tests for caption dropout: config parsing, cache-path helpers, dropout selection at load time."""
 
+import glob
+import os
+
 import pytest
 
 from musubi_tuner.dataset.config_utils import BaseDatasetParams
@@ -141,3 +144,96 @@ def test_bucket_batch_manager_no_dropout_when_rate_zero(tmp_path):
     with patch("musubi_tuner.dataset.bucket.random.random", return_value=0.0):  # would fire if rate were > 0
         batch = manager[0]
     assert torch.all(batch["t5"][0] == 1.0)
+
+
+from musubi_tuner import cache_text_encoder_outputs as cte
+
+
+class _FakeDataset:
+    """Minimal stand-in for BaseDataset, just enough for process_text_encoder_batches
+    and prepare_cache_files_and_paths (which calls get_all_text_encoder_output_cache_files)."""
+
+    def __init__(self, tmp_path, caption_dropout_rate, items):
+        self.cache_directory = str(tmp_path)
+        self.architecture = "wan"
+        self.caption_dropout_rate = caption_dropout_rate
+        self._items = items
+
+    def get_all_text_encoder_output_cache_files(self):
+        return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}_te.safetensors"))
+
+    def retrieve_text_encoder_output_cache_batches(self, num_workers):
+        yield self._items
+
+    def get_empty_caption_item_info(self):
+        item = ItemInfo(EMPTY_CAPTION_CACHE_KEY, "", (0, 0), (0, 0))
+        item.text_encoder_output_cache_path = os.path.join(self.cache_directory, f"{EMPTY_CAPTION_CACHE_KEY}_wan_te.safetensors")
+        return item
+
+
+def _make_real_item(tmp_path):
+    item = ItemInfo("real", "a caption", (64, 64))
+    item.text_encoder_output_cache_path = str(tmp_path / "real_wan_te.safetensors")
+    return item
+
+
+def test_process_text_encoder_batches_encodes_empty_caption_when_dropout_enabled(tmp_path):
+    dataset = _FakeDataset(tmp_path, caption_dropout_rate=0.1, items=[_make_real_item(tmp_path)])
+    all_cache_files, all_cache_paths = cte.prepare_cache_files_and_paths([dataset])
+    encoded_captions = []
+
+    def fake_encode(batch):
+        encoded_captions.extend(item.caption for item in batch)
+
+    cte.process_text_encoder_batches(
+        num_workers=1,
+        skip_existing=False,
+        batch_size=8,
+        datasets=[dataset],
+        all_cache_files_for_dataset=all_cache_files,
+        all_cache_paths_for_dataset=all_cache_paths,
+        encode=fake_encode,
+    )
+
+    assert "a caption" in encoded_captions
+    assert "" in encoded_captions  # empty-caption item was encoded
+    empty_path = os.path.normpath(dataset.get_empty_caption_item_info().text_encoder_output_cache_path)
+    assert empty_path in all_cache_paths[0]
+
+
+def test_process_text_encoder_batches_no_empty_caption_when_dropout_disabled(tmp_path):
+    dataset = _FakeDataset(tmp_path, caption_dropout_rate=0.0, items=[_make_real_item(tmp_path)])
+    all_cache_files, all_cache_paths = cte.prepare_cache_files_and_paths([dataset])
+    encoded_captions = []
+
+    def fake_encode(batch):
+        encoded_captions.extend(item.caption for item in batch)
+
+    cte.process_text_encoder_batches(
+        num_workers=1,
+        skip_existing=False,
+        batch_size=8,
+        datasets=[dataset],
+        all_cache_files_for_dataset=all_cache_files,
+        all_cache_paths_for_dataset=all_cache_paths,
+        encode=fake_encode,
+    )
+
+    assert encoded_captions == ["a caption"]
+
+
+def test_process_text_encoder_batches_raises_when_dropout_and_requires_content(tmp_path):
+    dataset = _FakeDataset(tmp_path, caption_dropout_rate=0.1, items=[_make_real_item(tmp_path)])
+    all_cache_files, all_cache_paths = cte.prepare_cache_files_and_paths([dataset])
+
+    with pytest.raises(ValueError):
+        cte.process_text_encoder_batches(
+            num_workers=1,
+            skip_existing=False,
+            batch_size=8,
+            datasets=[dataset],
+            all_cache_files_for_dataset=all_cache_files,
+            all_cache_paths_for_dataset=all_cache_paths,
+            encode=lambda batch: None,
+            requires_content=True,
+        )
