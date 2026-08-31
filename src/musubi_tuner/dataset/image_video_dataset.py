@@ -23,6 +23,8 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+EMPTY_CAPTION_CACHE_KEY = "___empty_caption_dropout___"
+
 from musubi_tuner.dataset.architectures import *  # noqa: F401,F403
 from musubi_tuner.dataset.architectures import (  # explicit imports for local use
     ARCHITECTURE_FLUX_2_DEV,
@@ -60,6 +62,8 @@ class ItemInfo:
         self.content = content
         self.latent_cache_path = latent_cache_path
         self.text_encoder_output_cache_path: Optional[str] = None
+        self.caption_dropout_rate: float = 0.0
+        self.empty_text_encoder_output_cache_path: Optional[str] = None
 
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
@@ -115,6 +119,7 @@ class BaseDataset(torch.utils.data.Dataset):
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        caption_dropout_rate: float = 0.0,
     ):
         self.resolution = resolution
         self.caption_extension = caption_extension
@@ -125,6 +130,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.cache_directory = cache_directory
         self.debug_dataset = debug_dataset
         self.architecture = architecture
+        self.caption_dropout_rate = caption_dropout_rate
         self.seed = None
         self.current_epoch = 0
         self.shared_epoch = None
@@ -169,6 +175,15 @@ class BaseDataset(torch.utils.data.Dataset):
         basename = os.path.splitext(os.path.basename(item_info.item_key))[0]
         assert self.cache_directory is not None, "cache_directory is required / cache_directoryは必須です"
         return os.path.join(self.cache_directory, f"{basename}_{self.architecture}_te.safetensors")
+
+    def get_empty_text_encoder_output_cache_path(self) -> str:
+        assert self.cache_directory is not None, "cache_directory is required / cache_directoryは必須です"
+        return os.path.join(self.cache_directory, f"{EMPTY_CAPTION_CACHE_KEY}_{self.architecture}_te.safetensors")
+
+    def get_empty_caption_item_info(self) -> ItemInfo:
+        item_info = ItemInfo(EMPTY_CAPTION_CACHE_KEY, "", (0, 0), (0, 0))
+        item_info.text_encoder_output_cache_path = self.get_empty_text_encoder_output_cache_path()
+        return item_info
 
     def retrieve_latent_cache_batches(self, num_workers: int):
         raise NotImplementedError
@@ -287,6 +302,7 @@ class ImageDataset(BaseDataset):
         control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        caption_dropout_rate: float = 0.0,
     ):
         super(ImageDataset, self).__init__(
             resolution,
@@ -298,6 +314,7 @@ class ImageDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            caption_dropout_rate,
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
@@ -603,6 +620,7 @@ class VideoDataset(BaseDataset):
         fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        caption_dropout_rate: float = 0.0,
     ):
         super(VideoDataset, self).__init__(
             resolution,
@@ -614,6 +632,7 @@ class VideoDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            caption_dropout_rate,
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
