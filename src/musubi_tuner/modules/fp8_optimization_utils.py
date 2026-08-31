@@ -427,6 +427,7 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
             dequantized_weight = dequantized_weight.view(self.weight.shape)
 
         # Perform linear transformation
+        dequantized_weight = dequantized_weight.to(x.dtype)
         if self.bias is not None:
             output = F.linear(x, dequantized_weight, self.bias)
         else:
