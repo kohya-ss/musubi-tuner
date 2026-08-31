@@ -7,7 +7,12 @@ import torch
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_IDEOGRAM4, ItemInfo, save_text_encoder_output_cache_ideogram4
+from musubi_tuner.dataset.image_video_dataset import (
+    ARCHITECTURE_IDEOGRAM4,
+    EMPTY_CAPTION_CACHE_KEY,
+    ItemInfo,
+    save_text_encoder_output_cache_ideogram4,
+)
 from musubi_tuner.ideogram4 import ideogram4_utils
 
 logger = logging.getLogger(__name__)
@@ -35,7 +40,9 @@ def encode_and_save_batch(
 ):
     cache_dtype = _resolve_cache_dtype(cache_dtype_name)
     for item in batch:
-        if validate_caption_structure:
+        if validate_caption_structure and item.item_key != EMPTY_CAPTION_CACHE_KEY:
+            # The synthetic empty-caption item (used for caption_dropout_rate) has caption="" by design,
+            # which is not valid structured JSON; skip structural validation for it.
             ideogram4_utils.validate_prompt(item.caption, warn_only=warn_only)
         with torch.no_grad():
             features = ideogram4_utils.encode_prompt_to_features(tokenizer, text_encoder, item.caption, device)

@@ -85,19 +85,25 @@ def process_text_encoder_batches(
     """
 
     num_workers = num_workers if num_workers is not None else max(1, os.cpu_count() - 1)
-    for i, dataset in enumerate(datasets):
-        logger.info(f"Encoding dataset [{i}]")
-        all_cache_files = all_cache_files_for_dataset[i]
-        all_cache_paths = all_cache_paths_for_dataset[i]
+
+    # Fail fast: validate all datasets before any encoding happens, so an invalid dataset later in the list
+    # doesn't let earlier datasets get fully (and expensively) encoded before the error is raised.
+    if requires_content:
+        for dataset_index, dataset in enumerate(datasets):
+            if getattr(dataset, "caption_dropout_rate", 0.0) > 0:
+                raise ValueError(
+                    "caption_dropout_rate is not supported for datasets whose text-encoder caching requires image "
+                    "content (e.g. Qwen-Image --is_edit, HiDream-O1 control mode): the empty-caption embedding would "
+                    "need to depend on the image, so it can't be cached once per dataset. Disable caption_dropout_rate "
+                    "for this dataset."
+                )
+
+    for dataset_index, dataset in enumerate(datasets):
+        logger.info(f"Encoding dataset [{dataset_index}]")
+        all_cache_files = all_cache_files_for_dataset[dataset_index]
+        all_cache_paths = all_cache_paths_for_dataset[dataset_index]
 
         caption_dropout_rate = getattr(dataset, "caption_dropout_rate", 0.0)
-        if caption_dropout_rate > 0 and requires_content:
-            raise ValueError(
-                "caption_dropout_rate is not supported for datasets whose text-encoder caching requires image "
-                "content (e.g. Qwen-Image --is_edit, HiDream-O1 control mode): the empty-caption embedding would "
-                "need to depend on the image, so it can't be cached once per dataset. Disable caption_dropout_rate "
-                "for this dataset."
-            )
 
         if not requires_content:
             batches = dataset.retrieve_text_encoder_output_cache_batches(num_workers)  # return captions only
@@ -129,7 +135,9 @@ def process_text_encoder_batches(
             empty_cache_path = os.path.normpath(empty_item.text_encoder_output_cache_path)
             all_cache_paths.add(empty_cache_path)
             if not (skip_existing and empty_cache_path in all_cache_files):
-                logger.info(f"Encoding empty caption for dataset [{i}] (caption_dropout_rate={caption_dropout_rate})")
+                logger.info(
+                    f"Encoding empty caption for dataset [{dataset_index}] (caption_dropout_rate={caption_dropout_rate})"
+                )
                 encode([empty_item])
 
 

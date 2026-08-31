@@ -18,7 +18,7 @@ def test_base_dataset_params_accepts_caption_dropout_rate():
     assert params.caption_dropout_rate == 0.1
 
 
-from musubi_tuner.dataset.image_video_dataset import EMPTY_CAPTION_CACHE_KEY, ImageDataset, ItemInfo
+from musubi_tuner.dataset.image_video_dataset import EMPTY_CAPTION_CACHE_KEY, ImageDataset, ItemInfo, VideoDataset
 
 
 def _make_image_dataset(tmp_path, caption_dropout_rate=0.0):
@@ -33,6 +33,23 @@ def _make_image_dataset(tmp_path, caption_dropout_rate=0.0):
         debug_dataset=False,
         architecture="wan",
         image_directory=str(tmp_path),
+        caption_dropout_rate=caption_dropout_rate,
+    )
+
+
+def _make_video_dataset(tmp_path, caption_dropout_rate=0.0):
+    return VideoDataset(
+        resolution=(64, 64),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        target_frames=[1],
+        video_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        debug_dataset=False,
+        architecture="wan",
         caption_dropout_rate=caption_dropout_rate,
     )
 
@@ -60,6 +77,20 @@ def test_get_empty_caption_item_info(tmp_path):
     assert item.item_key == EMPTY_CAPTION_CACHE_KEY
     assert item.caption == ""
     assert item.text_encoder_output_cache_path == dataset.get_empty_text_encoder_output_cache_path()
+    # ImageDataset should not mark the empty-caption item as video content.
+    assert item.frame_count is None
+
+
+def test_video_dataset_get_empty_caption_item_info_sets_frame_count(tmp_path):
+    dataset = _make_video_dataset(tmp_path)
+    item = dataset.get_empty_caption_item_info()
+    assert item.item_key == EMPTY_CAPTION_CACHE_KEY
+    assert item.caption == ""
+    assert item.text_encoder_output_cache_path == dataset.get_empty_text_encoder_output_cache_path()
+    # VideoDataset must mark the empty-caption item as video content (frame_count > 1) so that
+    # architecture-specific consumers (e.g. Kandinsky5) pick the correct content-type template.
+    assert item.frame_count is not None
+    assert item.frame_count > 1
 
 
 import torch
@@ -237,3 +268,29 @@ def test_process_text_encoder_batches_raises_when_dropout_and_requires_content(t
             encode=lambda batch: None,
             requires_content=True,
         )
+
+
+def test_process_text_encoder_batches_validates_all_datasets_before_encoding(tmp_path):
+    """Fail-fast guard: with [valid_dataset, invalid_dataset] the ValueError must be raised before any
+    dataset's encode() is called, not just before the invalid dataset's own encode() call."""
+
+    valid_dataset = _FakeDataset(tmp_path, caption_dropout_rate=0.0, items=[_make_real_item(tmp_path)])
+    invalid_dataset = _FakeDataset(tmp_path, caption_dropout_rate=0.1, items=[_make_real_item(tmp_path)])
+    all_cache_files, all_cache_paths = cte.prepare_cache_files_and_paths([valid_dataset, invalid_dataset])
+
+    encoded_batches = []
+
+    with pytest.raises(ValueError):
+        cte.process_text_encoder_batches(
+            num_workers=1,
+            skip_existing=False,
+            batch_size=8,
+            datasets=[valid_dataset, invalid_dataset],
+            all_cache_files_for_dataset=all_cache_files,
+            all_cache_paths_for_dataset=all_cache_paths,
+            encode=lambda batch: encoded_batches.append(batch),
+            requires_content=True,
+        )
+
+    # The valid dataset must not have been encoded: validation happens up-front for all datasets.
+    assert encoded_batches == []

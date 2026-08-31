@@ -707,6 +707,14 @@ class VideoDataset(BaseDataset):
 
         self.batch_manager = None
         self.num_train_items = 0
+
+    def get_empty_caption_item_info(self) -> ItemInfo:
+        # Override base implementation to mark this as a video item (frame_count > 1), so that
+        # architecture-specific consumers (e.g. Kandinsky5's content-type template selection) treat
+        # the empty-caption embedding as belonging to a video dataset, not an image dataset.
+        item_info = super().get_empty_caption_item_info()
+        item_info.frame_count = 2
+        return item_info
         self.has_control = self.datasource.has_control
 
     def get_metadata(self):
