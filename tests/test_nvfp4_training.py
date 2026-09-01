@@ -11,6 +11,7 @@ import torch
 from musubi_tuner.modules.nvfp4_utils import (
     NVFP4_BLOCK_SIZE,
     _quantize_nvfp4_2d,
+    _roundup,
     dequantize_nvfp4,
     nvfp4_scaled_mm_available,
     quantize_nvfp4_weight_columnwise,
@@ -69,6 +70,24 @@ def test_quantize_nvfp4_weight_columnwise_rejects_non_multiple_of_block_size():
     _w, packed, block_scale, tensor_scale = _make_quantized_weight(64, k)
     with pytest.raises(ValueError, match="out_features"):
         quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (50, k))
+
+
+def test_quantize_nvfp4_2d_chunked_matches_unchunked():
+    from musubi_tuner.modules.nvfp4_utils import _quantize_nvfp4_2d_chunked
+
+    torch.manual_seed(1)
+    # rows deliberately not a multiple of chunk_rows, to exercise the padded tail chunk
+    x = torch.randn(550, 64) * 0.03
+
+    packed_ref, scale_ref, tensor_scale_ref, orig_rows_ref = _quantize_nvfp4_2d(x)
+    packed_chunked, scale_chunked, tensor_scale_chunked, orig_rows_chunked = _quantize_nvfp4_2d_chunked(
+        x, chunk_rows=128
+    )
+
+    assert orig_rows_chunked == orig_rows_ref == 550
+    assert torch.equal(tensor_scale_chunked, tensor_scale_ref)
+    assert torch.equal(packed_chunked, packed_ref)
+    assert torch.equal(scale_chunked, scale_ref)
 
 
 def _make_linear_fixture(n, k, m, device, bias=False, seed=0):
@@ -276,3 +295,38 @@ def test_training_patch_calc_device_computes_on_gpu_but_result_stays_on_original
     assert model.proj.nvfp4_weight_t.device.type == "cpu"
     assert model.proj.nvfp4_block_scale_t.device.type == "cpu"
     assert model.proj.nvfp4_scale_t.device.type == "cpu"
+
+
+@requires_nvfp4_scaled_mm
+def test_quantize_nvfp4_weight_columnwise_chunked_bounds_transient_peak():
+    """Reviewer measured ~4.9GB transient peak for a single unchunked call on Krea2's largest
+    Linear (24576x6144 mlp gate/up, 151M elements, 72MB packed). This asserts the chunked
+    default keeps the delta under 1GB for a comparable synthetic weight, and that the old
+    unchunked call (still reachable via _quantize_nvfp4_2d_chunked with a huge chunk_rows, i.e.
+    effectively one chunk) exceeds that bound -- documenting the bug the same way
+    tests/test_nvfp4_block_swap.py documents the block-swap selector bug."""
+    device = torch.device("cuda")
+    n, k = 4096, 8192  # ~33M elements, ~16MB packed; weight_t is [8192, 4096], gets chunked at 4096 rows
+    w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
+    packed, block_scale, tensor_scale = packed.to(device), block_scale.to(device), tensor_scale.to(device)
+
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)
+    quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (n, k), chunk_rows=4096)
+    torch.cuda.synchronize()
+    chunked_peak_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+
+    # chunk_rows >= k (weight_t's row count, [K, N]) makes _quantize_nvfp4_2d_chunked process
+    # the whole transposed weight in a single chunk -- equivalent to the old unchunked path.
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)
+    quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (n, k), chunk_rows=_roundup(k, 128))
+    torch.cuda.synchronize()
+    unchunked_peak_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+
+    assert chunked_peak_mb < 1500, f"chunked columnwise requant peaked at {chunked_peak_mb:.0f}MiB, expected < 1500MiB"
+    assert unchunked_peak_mb > chunked_peak_mb * 1.3, (
+        f"expected unchunked (chunk_rows>=k, i.e. one chunk covering the whole weight) to peak"
+        f" well above chunked ({chunked_peak_mb:.0f}MiB), got {unchunked_peak_mb:.0f}MiB"
+    )

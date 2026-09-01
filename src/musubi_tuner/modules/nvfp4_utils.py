@@ -201,7 +201,7 @@ def pack_uint4(codes: torch.Tensor) -> torch.Tensor:
     return (codes[::2] << 4 | codes[1::2]).view(*shape[:-1], shape[-1] // 2)
 
 
-def _quantize_nvfp4_2d(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+def _quantize_nvfp4_2d(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Quantize a 2D tensor to NVFP4, grouping blocks along the last axis.
 
     Returns (packed uint8 [Mp, K/2], swizzled block scales F8_E4M3, per-tensor scale F32,
@@ -209,6 +209,11 @@ def _quantize_nvfp4_2d(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, tor
     ``quantize_nvfp4_activation`` (grouping activations along their feature axis) and
     ``quantize_nvfp4_weight_columnwise`` (re-grouping a frozen weight along its out_features
     axis for the backward GEMM).
+
+    ``per_tensor_scale``, when given, is used instead of computing ``amax(x)`` internally --
+    lets a caller quantize row-chunks of a larger tensor against one shared, tensor-wide scale
+    (see ``_quantize_nvfp4_2d_chunked``), which keeps the chunked result numerically identical
+    to calling this function once on the whole tensor.
     """
     orig_rows, cols = x.shape
     if cols % NVFP4_BLOCK_SIZE != 0:
@@ -217,7 +222,8 @@ def _quantize_nvfp4_2d(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, tor
     if padded_rows != orig_rows:
         x = F.pad(x, (0, 0, 0, padded_rows - orig_rows))
 
-    per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
+    if per_tensor_scale is None:
+        per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
 
     blocks = x.reshape(padded_rows, -1, NVFP4_BLOCK_SIZE)
     block_scale = torch.amax(blocks.abs(), dim=-1).float() / F4_E2M1_MAX
@@ -234,6 +240,42 @@ def _quantize_nvfp4_2d(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, tor
     return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
 
 
+def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 4096) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Row-chunked ``_quantize_nvfp4_2d`` for large 2D tensors.
+
+    ``_f32_to_e2m1_unpacked`` allocates roughly ten full-size fp32/int32/bool temporaries, so
+    quantizing a large weight (e.g. Krea2's 24576x6144 mlp gate/up) in one call transiently
+    peaks around 5GB for a 72MB packed result. Chunking the pack step over row groups bounds
+    the transient peak to a few hundred MB regardless of input size.
+
+    Correctness requires two things this function gets right where a naive "call
+    _quantize_nvfp4_2d per chunk independently" would not:
+      - the per-tensor scale must be shared across all chunks (computed once, up front, as a
+        single cheap global reduction) -- otherwise each chunk would get its own local
+        amax-based scale and the result would not match a single unchunked call;
+      - ``chunk_rows`` must be a multiple of 128 (the cuBLAS block-scale tile height used by
+        ``to_blocked``) so no chunk boundary falls inside a scale tile except possibly at the
+        very last chunk, which is padded identically to how the unchunked path pads the
+        tensor's own tail.
+
+    Returns the same 4-tuple as ``_quantize_nvfp4_2d`` and is numerically bit-identical to it.
+    """
+    if chunk_rows % 128 != 0:
+        raise ValueError(f"chunk_rows must be a multiple of 128 (cuBLAS block-scale tile height), got {chunk_rows}")
+    orig_rows, _cols = x.shape
+    per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
+
+    packed_chunks = []
+    scale_chunks = []
+    for start in range(0, orig_rows, chunk_rows):
+        chunk = x[start : start + chunk_rows]
+        packed, block_scale, _chunk_scale, _chunk_orig_rows = _quantize_nvfp4_2d(chunk, per_tensor_scale=per_tensor_scale)
+        packed_chunks.append(packed)
+        scale_chunks.append(block_scale)
+
+    return torch.cat(packed_chunks, dim=0), torch.cat(scale_chunks, dim=0), per_tensor_scale, orig_rows
+
+
 def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Quantize a 2D activation to NVFP4 for scaled_mm. See ``_quantize_nvfp4_2d``."""
     return _quantize_nvfp4_2d(x)
@@ -244,6 +286,7 @@ def quantize_nvfp4_weight_columnwise(
     block_scale: torch.Tensor,
     per_tensor_scale: torch.Tensor,
     orig_shape: Tuple[int, int],
+    chunk_rows: int = 4096,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Re-quantize a K-grouped (row-wise) NVFP4 weight along its N axis (out_features).
 
@@ -254,6 +297,10 @@ def quantize_nvfp4_weight_columnwise(
     would pair up the wrong elements. This produces a second, independently computed NVFP4
     quantization grouped along N (mirrors Transformer Engine's rowwise/columnwise tensor
     pattern). Call once per frozen weight at load time; the result never changes afterward.
+
+    Quantizes in ``chunk_rows``-sized row chunks of the transposed weight (see
+    ``_quantize_nvfp4_2d_chunked``) to bound the transient GPU memory peak instead of
+    materializing all of ``_f32_to_e2m1_unpacked``'s temporaries for the full weight at once.
     """
     n, k = orig_shape
     if n % NVFP4_BLOCK_SIZE != 0:
@@ -262,7 +309,7 @@ def quantize_nvfp4_weight_columnwise(
         )
     weight_bf16 = dequantize_nvfp4(weight_packed, block_scale, per_tensor_scale, orig_shape, torch.bfloat16)
     weight_t = weight_bf16.t().contiguous()  # [K, N]
-    packed_t, block_scale_t, tensor_scale_t, _ = _quantize_nvfp4_2d(weight_t)
+    packed_t, block_scale_t, tensor_scale_t, _ = _quantize_nvfp4_2d_chunked(weight_t, chunk_rows=chunk_rows)
     return packed_t, block_scale_t, tensor_scale_t
 
 
