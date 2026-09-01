@@ -69,3 +69,52 @@ def test_quantize_nvfp4_weight_columnwise_rejects_non_multiple_of_block_size():
     _w, packed, block_scale, tensor_scale = _make_quantized_weight(64, k)
     with pytest.raises(ValueError, match="out_features"):
         quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (50, k))
+
+
+def _make_linear_fixture(n, k, m, device, bias=False, seed=0):
+    torch.manual_seed(seed)
+    w = (torch.randn(n, k, device=device) * 0.02).to(torch.bfloat16)
+    x = (torch.randn(m, k, device=device) * 0.5).to(torch.bfloat16)
+    b = (torch.randn(n, device=device) * 0.1).to(torch.bfloat16) if bias else None
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(w.float())
+    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (n, k))
+    return w, x, b, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t
+
+
+@requires_nvfp4_scaled_mm
+def test_nvfp4_linear_fn_forward_matches_scaled_mm_reference():
+    from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn, nvfp4_scaled_mm_linear
+
+    n, k, m = 64, 32, 8
+    device = "cuda"
+    w, x, b, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t = _make_linear_fixture(
+        n, k, m, device, bias=True
+    )
+
+    out = NvFp4LinearFn.apply(x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, b, n)
+    expected = nvfp4_scaled_mm_linear(x, packed, block_scale, tensor_scale, b, n)
+
+    assert torch.equal(out, expected)
+
+
+@requires_nvfp4_scaled_mm
+def test_nvfp4_linear_fn_backward_grad_x_matches_bf16_dequant_reference():
+    from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn, dequantize_nvfp4
+
+    n, k, m = 64, 32, 8
+    device = "cuda"
+    w, x, b, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t = _make_linear_fixture(
+        n, k, m, device, bias=False
+    )
+    x_fp4 = x.clone().requires_grad_(True)
+    x_ref = x.clone().requires_grad_(True)
+
+    out = NvFp4LinearFn.apply(x_fp4, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n)
+    out.sum().backward()
+
+    w_deq = dequantize_nvfp4(packed, block_scale, tensor_scale, (n, k), torch.bfloat16)
+    ref_out = torch.nn.functional.linear(x_ref, w_deq)
+    ref_out.sum().backward()
+
+    rel_err = (x_fp4.grad.float() - x_ref.grad.float()).norm() / x_ref.grad.float().norm()
+    assert rel_err < 0.3  # two independently FP4-quantized paths (fwd weight vs bwd weight), not exact

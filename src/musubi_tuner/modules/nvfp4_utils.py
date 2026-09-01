@@ -297,6 +297,48 @@ def nvfp4_scaled_mm_linear(
     return result[:orig_rows, :orig_out_features]
 
 
+class NvFp4LinearFn(torch.autograd.Function):
+    """True FP4x4 tensor-core Linear for a frozen, pre-quantized NVFP4 weight.
+
+    Forward uses the row-wise (K-grouped) weight via ``nvfp4_scaled_mm_linear``. Backward
+    computes only ``grad_x`` (the base is frozen, never ``grad_weight``) using the columnwise
+    (N-grouped) weight copy -- see ``quantize_nvfp4_weight_columnwise`` for why a second
+    quantization, not a transpose, is required. Structurally mirrors ``ConvRotInt8LinearFn``.
+    """
+
+    @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
+    def forward(ctx, x, weight_packed, block_scale, tensor_scale, weight_t_packed, block_scale_t, tensor_scale_t, bias, orig_out_features):
+        if torch.is_autocast_enabled(x.device.type):
+            cast_dtype = torch.get_autocast_dtype(x.device.type)
+            x = x.to(cast_dtype)
+            if bias is not None:
+                bias = bias.to(cast_dtype)
+        x_2d = x.reshape(-1, x.shape[-1])
+        out = nvfp4_scaled_mm_linear(x_2d, weight_packed, block_scale, tensor_scale, bias, orig_out_features)
+        ctx.save_for_backward(weight_t_packed, block_scale_t, tensor_scale_t)
+        ctx.in_features = x.shape[-1]
+        ctx.bias_needs_grad = bias is not None and bias.requires_grad
+        return out.reshape(*x.shape[:-1], out.shape[-1])
+
+    @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
+    def backward(ctx, grad_out):
+        weight_t_packed, block_scale_t, tensor_scale_t = ctx.saved_tensors
+        g2d = grad_out.reshape(-1, grad_out.shape[-1])  # [M, N]
+
+        grad_x = None
+        if ctx.needs_input_grad[0]:
+            # grad_x = grad_out @ W, computed as the "linear" from N -> K using the
+            # columnwise-quantized weight (packed as [K, N/2], i.e. a virtual Linear with
+            # in_features=N, out_features=K).
+            gx = nvfp4_scaled_mm_linear(g2d, weight_t_packed, block_scale_t, tensor_scale_t, None, weight_t_packed.shape[0])
+            grad_x = gx.reshape(*grad_out.shape[:-1], ctx.in_features)
+
+        grad_bias = g2d.sum(dim=0) if ctx.bias_needs_grad else None
+        return grad_x, None, None, None, None, None, None, grad_bias, None
+
+
 # endregion
 
 
