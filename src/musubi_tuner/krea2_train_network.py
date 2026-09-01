@@ -99,10 +99,10 @@ class Krea2NetworkTrainer(NetworkTrainer):
                 " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
                 " or omit --blocks_to_swap if the model fits without it."
             )
-        if args.nvfp4 and args.nvfp4_columnwise_chunk_rows % 128 != 0:
+        if args.nvfp4 and (args.nvfp4_columnwise_chunk_rows <= 0 or args.nvfp4_columnwise_chunk_rows % 128 != 0):
             raise ValueError(
-                f"--nvfp4_columnwise_chunk_rows must be a multiple of 128 (cuBLAS block-scale tile height),"
-                f" got {args.nvfp4_columnwise_chunk_rows}"
+                f"--nvfp4_columnwise_chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile"
+                f" height), got {args.nvfp4_columnwise_chunk_rows}"
             )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
@@ -554,12 +554,13 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     parser.add_argument(
         "--nvfp4_columnwise_chunk_rows",
         type=int,
-        default=4096,
+        default=1024,
         help="Row-chunk size for --nvfp4's columnwise (N-grouped) backward-weight requantization at "
-        "load time. Must be a multiple of 128. Smaller values bound the transient GPU memory peak more "
-        "tightly (fewer per-element quantization temporaries alive at once) at the cost of more "
-        "quantization passes at load time (a one-time cost); the default (4096) can still peak several "
-        "GB for Linears with very large out_features -- lower this (e.g. 512-1024) if NVFP4 loading OOMs.",
+        "load time. Must be a positive multiple of 128. Smaller values bound the transient GPU memory "
+        "peak more tightly (fewer per-element quantization temporaries alive at once) at the cost of "
+        "more quantization passes at load time (a one-time cost); the default (1024, ~1.3GB measured on "
+        "Krea2's largest Linear) is a comfortable fixed value, not a computed bound -- lower this (e.g. "
+        "256-512) if NVFP4 loading still OOMs on an unusually large model.",
     )
     parser.add_argument(
         "--text_encoder",

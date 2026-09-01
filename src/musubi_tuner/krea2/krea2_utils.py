@@ -62,7 +62,7 @@ def load_krea2_dit(
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
     nvfp4: bool = False,
-    nvfp4_columnwise_chunk_rows: int = 4096,
+    nvfp4_columnwise_chunk_rows: int = 1024,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights (assign=True).
 

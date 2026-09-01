@@ -240,7 +240,7 @@ def _quantize_nvfp4_2d(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor]
     return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
 
 
-def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 4096) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 1024) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Row-chunked ``_quantize_nvfp4_2d`` for large 2D tensors.
 
     ``_f32_to_e2m1_unpacked`` allocates roughly ten full-size fp32/int32/bool temporaries, so
@@ -260,8 +260,8 @@ def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 4096) -> Tuple
 
     Returns the same 4-tuple as ``_quantize_nvfp4_2d`` and is numerically bit-identical to it.
     """
-    if chunk_rows % 128 != 0:
-        raise ValueError(f"chunk_rows must be a multiple of 128 (cuBLAS block-scale tile height), got {chunk_rows}")
+    if chunk_rows <= 0 or chunk_rows % 128 != 0:
+        raise ValueError(f"chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile height), got {chunk_rows}")
     orig_rows, _cols = x.shape
     per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
 
@@ -286,7 +286,7 @@ def quantize_nvfp4_weight_columnwise(
     block_scale: torch.Tensor,
     per_tensor_scale: torch.Tensor,
     orig_shape: Tuple[int, int],
-    chunk_rows: int = 4096,
+    chunk_rows: int = 1024,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Re-quantize a K-grouped (row-wise) NVFP4 weight along its N axis (out_features).
 
@@ -630,7 +630,7 @@ def apply_nvfp4_monkey_patch(
     embedding_dtype: torch.dtype = torch.bfloat16,
     training: bool = False,
     calc_device: Optional[Union[str, torch.device]] = None,
-    columnwise_chunk_rows: int = 4096,
+    columnwise_chunk_rows: int = 1024,
 ) -> nn.Module:
     """Patch NVFP4 Linear and INT8 embedding modules so a strict assign load can follow.
 
@@ -653,11 +653,12 @@ def apply_nvfp4_monkey_patch(
 
     ``columnwise_chunk_rows`` is forwarded to ``quantize_nvfp4_weight_columnwise`` (see there for
     the numerical-equivalence contract) and bounds that call's transient GPU memory peak. The
-    default (4096) meaningfully reduces the peak versus an unchunked call but does not guarantee
-    a small absolute bound for every weight shape -- for a Linear with very large out_features
-    (e.g. 24576) the peak can still be several GB at the default. Lower this (e.g. 512-1024) for
-    tighter bounds on memory-constrained GPUs, at the cost of more quantization passes at load
-    time (a one-time cost, not a per-step training cost).
+    default (1024) is a comfortable value for typical shapes (~1.3GB measured on Krea2's largest
+    real Linear, 24576 out_features) -- it is a plain fixed row count, not a computed bound, so an
+    unusually large out_features could still push the peak higher. Lower this via
+    ``--nvfp4_columnwise_chunk_rows`` for tighter control on memory-constrained GPUs or unusually
+    large models, at the cost of more quantization passes at load time (a one-time cost, not a
+    per-step training cost).
     """
     if use_scaled_mm and not nvfp4_scaled_mm_available():
         raise ValueError(
@@ -668,6 +669,11 @@ def apply_nvfp4_monkey_patch(
     if training and not use_scaled_mm:
         raise ValueError(
             "NVFP4 training requires use_scaled_mm=True (the dequantize fallback forward has no backward)."
+        )
+    if columnwise_chunk_rows <= 0 or columnwise_chunk_rows % 128 != 0:
+        raise ValueError(
+            f"columnwise_chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile height),"
+            f" got {columnwise_chunk_rows}"
         )
 
     modules_by_name = dict(model.named_modules())
