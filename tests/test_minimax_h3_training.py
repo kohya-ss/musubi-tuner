@@ -1723,6 +1723,53 @@ def test_guidance_loss_uncond_layout_carries_one_frame_fl_condition_roles(tmp_pa
     assert metrics["guidance/applied"] == 1.0
 
 
+def test_guidance_loss_uncond_layout_supports_ref2va_references(tmp_path, monkeypatch):
+    # ref2va reference blocks share the "visual_condition" segment kind; harvesting their
+    # roles into condition_roles made the uncond rebuild fail with "condition roles apply
+    # only to FL2VA layouts" — roles are FL2VA-only, references rebuild from the layout itself
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        task="ref2va",
+        h3_guidance_loss_scale=3.0,
+        h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path),
+    )
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer()
+    batch = _training_batch()
+    batch["latents_ref_000_image"] = torch.zeros(1, 24, 1, 4, 4)
+    video_latents = torch.zeros(1, 24, 2, 4, 4)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    _, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    # the no-grad uncond probe first, then the conditional pass, both on ref2va layouts
+    assert len(transformer.calls) == 2
+    uncond_call, cond_call = transformer.calls
+    for call in (uncond_call, cond_call):
+        assert call["layout"].task == "ref2va"
+        assert tuple(
+            segment.role for segment in call["layout"].segments if segment.kind == "visual_condition"
+        ) == ("ref_000_image",)
+    assert uncond_call["layout"].text_length == 2
+    # the reference conditions are shared with the conditional pass, only the text is swapped
+    assert torch.equal(uncond_call["visual_condition_latents"][0], cond_call["visual_condition_latents"][0])
+    assert metrics["guidance/applied"] == 1.0
+
+
 def test_guidance_loss_audio_scale_can_differ_from_video(tmp_path, monkeypatch):
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(
