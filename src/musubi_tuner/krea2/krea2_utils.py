@@ -63,6 +63,7 @@ def load_krea2_dit(
     convrot_int8_bwd: str = "bf16",
     nvfp4: bool = False,
     nvfp4_columnwise_chunk_rows: int = 1024,
+    training: bool = True,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights (assign=True).
 
@@ -76,13 +77,21 @@ def load_krea2_dit(
     target/exclude scope applies. Mutually exclusive with ``fp8_scaled``.
 
     ``nvfp4`` loads a ComfyUI pre-quantized NVFP4 DiT checkpoint (per-block Linears already
-    stored as packed FP4 + block/tensor scales) and trains against it with true FP4x4
-    tensor-core forward/backward (``NvFp4LinearFn``) -- no dynamic quantization, the file
-    dictates which layers are NVFP4. Mutually exclusive with ``fp8_scaled``/``convrot_int8``.
-    Cannot be combined with ``lora_weights`` (pre-quantized NVFP4 cannot be merged; attach
-    LoRA as a separate trainable module instead). ``dtype`` is ignored for NVFP4-quantized
-    layers, same as ``fp8_scaled``/``convrot_int8`` -- non-target weights keep their checkpoint
-    dtype.
+    stored as packed FP4 + block/tensor scales) and, when ``training=True`` (the default),
+    trains against it with true FP4x4 tensor-core forward/backward (``NvFp4LinearFn``) --
+    no dynamic quantization, the file dictates which layers are NVFP4. Mutually exclusive
+    with ``fp8_scaled``/``convrot_int8``. Cannot be combined with ``lora_weights``
+    (pre-quantized NVFP4 cannot be merged at load time). ``dtype`` is ignored for
+    NVFP4-quantized layers, same as ``fp8_scaled``/``convrot_int8`` -- non-target weights
+    keep their checkpoint dtype.
+
+    ``training`` (only meaningful when ``nvfp4`` is set) selects between the autograd
+    training forward (default, ``True`` -- also builds the extra columnwise backward
+    buffers ``nvfp4_weight_t``/``nvfp4_block_scale_t``/``nvfp4_scale_t``) and the
+    non-autograd inference forward (``False`` -- no backward buffers built, pure memory
+    savings since there is no backward pass to feed). Generic name (not NVFP4-specific):
+    ``fp8_scaled``/``convrot_int8`` don't have this distinction today, but a future scheme
+    that does can reuse this same parameter instead of adding another one-off flag.
 
     ``nvfp4_columnwise_chunk_rows`` (only used when ``nvfp4`` is set) is forwarded to
     ``apply_nvfp4_monkey_patch``'s ``columnwise_chunk_rows`` -- see there for what it controls.
@@ -99,9 +108,9 @@ def load_krea2_dit(
     """
     assert sum([fp8_scaled, convrot_int8, nvfp4]) <= 1, "fp8_scaled, convrot_int8, and nvfp4 are mutually exclusive"
     assert not (nvfp4 and lora_weights), (
-        "nvfp4 cannot be combined with lora_weights (pre-quantized NVFP4 "
-        "cannot be merged at load time; attach LoRA as a separate "
-        "trainable network via --network_module instead)."
+        "nvfp4 cannot be combined with lora_weights: pre-quantized NVFP4 weights cannot be "
+        "merged at load time. Requantizing after a merge is possible in principle but is not "
+        "implemented; use the original BF16 weights with LoRA instead."
     )
     device = torch.device(device)
     loading_device = device if loading_device is None else torch.device(loading_device)
@@ -156,7 +165,7 @@ def load_krea2_dit(
                 quantizer.nvfp4_module_shapes,
                 quantizer.int8_embedding_modules,
                 use_scaled_mm=True,
-                training=True,
+                training=training,
                 calc_device=device,
                 columnwise_chunk_rows=nvfp4_columnwise_chunk_rows,
             )

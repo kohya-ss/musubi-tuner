@@ -20,6 +20,81 @@ def test_load_krea2_dit_rejects_nvfp4_with_lora_weights():
         load_krea2_dit("unused.safetensors", nvfp4=True, lora_weights=[{}])
 
 
+class _StopAfterPatchCall(Exception):
+    """Raised by the fake patch fn below to short-circuit load_krea2_dit before load_state_dict,
+    which would otherwise need a full, correctly-shaped state dict to succeed."""
+
+
+def _make_tiny_nvfp4_artifact(tmp_path):
+    """A single quantized Linear ('proj') in ComfyUI NVFP4 format -- enough for
+    load_safetensors_with_lora_and_fp8 + NvFp4Quantizer to succeed before load_krea2_dit
+    ever reaches dit.load_state_dict (which we short-circuit before, via a fake patch fn)."""
+    import torch
+    from safetensors.torch import save_file
+
+    from musubi_tuner.modules.nvfp4_utils import _quantize_nvfp4_2d
+
+    torch.manual_seed(0)
+    weight = torch.randn(64, 32) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+    payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+    path = tmp_path / "artifact.safetensors"
+    save_file(
+        {
+            "proj.weight": packed,
+            "proj.weight_scale": block_scale,
+            "proj.weight_scale_2": tensor_scale,
+            "proj.comfy_quant": payload,
+        },
+        str(path),
+    )
+    return str(path)
+
+
+def test_load_krea2_dit_threads_training_false_into_nvfp4_patch(monkeypatch, tmp_path):
+    from musubi_tuner.krea2 import krea2_utils
+
+    path = _make_tiny_nvfp4_artifact(tmp_path)
+    captured = {}
+
+    def fake_patch(model, sd, shapes, int8_mods, use_scaled_mm=False, training=False, calc_device=None, columnwise_chunk_rows=1024):
+        captured["training"] = training
+        raise _StopAfterPatchCall()
+
+    monkeypatch.setattr(krea2_utils, "apply_nvfp4_monkey_patch", fake_patch)
+
+    with pytest.raises(_StopAfterPatchCall):
+        krea2_utils.load_krea2_dit(path, nvfp4=True, training=False, device="cpu", loading_device="cpu")
+
+    assert captured["training"] is False
+
+
+def test_load_krea2_dit_defaults_training_true_into_nvfp4_patch(monkeypatch, tmp_path):
+    from musubi_tuner.krea2 import krea2_utils
+
+    path = _make_tiny_nvfp4_artifact(tmp_path)
+    captured = {}
+
+    def fake_patch(model, sd, shapes, int8_mods, use_scaled_mm=False, training=False, calc_device=None, columnwise_chunk_rows=1024):
+        captured["training"] = training
+        raise _StopAfterPatchCall()
+
+    monkeypatch.setattr(krea2_utils, "apply_nvfp4_monkey_patch", fake_patch)
+
+    with pytest.raises(_StopAfterPatchCall):
+        krea2_utils.load_krea2_dit(path, nvfp4=True, device="cpu", loading_device="cpu")  # training= omitted
+
+    assert captured["training"] is True
+
+
+def test_load_krea2_dit_nvfp4_lora_rejection_message_has_no_network_module_suggestion():
+    """The trainer-oriented '--network_module' workaround phrasing doesn't apply to a
+    trainer-less inference script; the message must not suggest it."""
+    with pytest.raises(AssertionError) as exc_info:
+        load_krea2_dit("unused.safetensors", nvfp4=True, lora_weights=[{}])
+    assert "--network_module" not in str(exc_info.value)
+
+
 import argparse
 
 from musubi_tuner.krea2_train_network import Krea2NetworkTrainer, krea2_setup_parser
