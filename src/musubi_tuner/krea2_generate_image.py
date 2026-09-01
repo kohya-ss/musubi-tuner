@@ -39,7 +39,7 @@ import os
 import random
 import time
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 from safetensors.torch import load_file
@@ -48,6 +48,7 @@ from musubi_tuner.krea2 import krea2_utils
 from musubi_tuner.krea2.krea2_sampling import encode_prompts, sample
 from musubi_tuner.krea2.krea2_utils import single_mmdit_large_wide
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
+from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_available
 from musubi_tuner.qwen_image import qwen_image_utils
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,10 @@ def build_pipeline(
     attn_mode: str = "torch",
     split_attn: bool = False,
     fp8_scaled: bool = False,
+    convrot_int8: bool = False,
+    convrot_int8_bwd: str = "bf16",
+    nvfp4: bool = False,
+    nvfp4_columnwise_chunk_rows: int = 1024,
     blocks_to_swap: int = 0,
     swap_config=None,
 ):
@@ -128,6 +133,11 @@ def build_pipeline(
         split_attn=split_attn,
         lora_weights=lora_sds,
         lora_multipliers=lora_multipliers,
+        convrot_int8=convrot_int8,
+        convrot_int8_bwd=convrot_int8_bwd,
+        nvfp4=nvfp4,
+        nvfp4_columnwise_chunk_rows=nvfp4_columnwise_chunk_rows,
+        training=False,
     )
 
     # Freeze BEFORE enabling block swap: the H2D-only offloader (LoRAStreamOffloader) asserts the
@@ -245,8 +255,10 @@ def apply_overrides(args: argparse.Namespace, overrides: Dict[str, Any]) -> argp
     return args_copy
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate images with Krea 2 (K2).")
+def parse_args_setup(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Register all krea2_generate_image CLI arguments onto ``parser``. Split out from
+    parse_args() so tests can build a parser and inspect defaults without going through
+    sys.argv parsing."""
     parser.add_argument("prompt", type=str, nargs="?", default=None, help="Prompt for image generation (single-prompt mode)")
     parser.add_argument("--dit", type=str, required=True, help="Path to the MMDiT checkpoint (.safetensors)")
     parser.add_argument("--vae", type=str, required=True, help="Path to the Qwen-Image VAE checkpoint (.safetensors)")
@@ -294,6 +306,37 @@ def parse_args() -> argparse.Namespace:
         "K2 supports only scaled fp8 (plain fp8 would cast norms and break).",
     )
     parser.add_argument(
+        "--convrot_int8",
+        action="store_true",
+        help="use ConvRot int8 for the DiT base weights (alternative to fp8; cannot be combined with "
+        "--fp8_scaled/--nvfp4). Quantizes per-block Linears at load time with Hadamard rotation + int8; "
+        "forward runs fused Triton int8 GEMM (requires triton, falls back to slower dequantized bf16 "
+        "matmul without it).",
+    )
+    parser.add_argument(
+        "--convrot_int8_bwd",
+        type=str,
+        default="bf16",
+        choices=["bf16", "int8"],
+        help="backward mode for --convrot_int8 (unused at inference; kept for parity with the trainer's "
+        "flag shape). bf16 (default): transient dequantized matmul, most accurate.",
+    )
+    parser.add_argument(
+        "--nvfp4",
+        action="store_true",
+        help="load a ComfyUI pre-quantized NVFP4 DiT checkpoint and run inference against it with true "
+        "FP4x4 tensor-core forward (requires PyTorch 2.10+ scaled_mm and a Blackwell GPU). Cannot be "
+        "combined with --fp8_scaled/--convrot_int8, or with --lora_weight (pre-quantized NVFP4 cannot be "
+        "merged at load time).",
+    )
+    parser.add_argument(
+        "--nvfp4_columnwise_chunk_rows",
+        type=int,
+        default=1024,
+        help="Row-chunk size for --nvfp4's columnwise backward-weight requantization. Inert at inference "
+        "(no columnwise buffers are built); kept for parity with the trainer's flag shape.",
+    )
+    parser.add_argument(
         "--blocks_to_swap",
         type=int,
         default=0,
@@ -309,7 +352,9 @@ def parse_args() -> argparse.Namespace:
         "--block_swap_h2d_only",
         action="store_true",
         help="H2D-only block swap: keep a CPU master of streamed blocks and copy Host->Device only "
-        "(no device->host copy). The DiT base weights are frozen at inference, so this is always safe here.",
+        "(no device->host copy). The DiT base weights are frozen at inference, so this is always safe here "
+        "and generally recommended when using --blocks_to_swap at inference, regardless of quantization "
+        "scheme (fp8/ConvRot-int8/NVFP4 or none) -- frozen weights never need the D2H half of a swap.",
     )
     parser.add_argument(
         "--block_swap_ring_size",
@@ -340,6 +385,12 @@ def parse_args() -> argparse.Namespace:
         help="Ring the terminal bell after each prompt (interactive) or at the end (other modes)",
     )
 
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate images with Krea 2 (K2).")
+    parser = parse_args_setup(parser)
     args = parser.parse_args()
 
     # Validate input mode: exactly one of {prompt, --from_file, --interactive}.
@@ -370,11 +421,34 @@ def save_images(images, save_path: str, base_seed: int):
         logger.info(f"saved {out}")
 
 
-def main():
-    args = parse_args()
+def main(args: Optional[argparse.Namespace] = None):
+    if args is None:
+        args = parse_args()
     dtype = torch.bfloat16
     device = args.device
     te_device = "cpu" if args.text_encoder_cpu else device
+
+    device_capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+    krea2_utils.validate_krea2_quantization_args(
+        fp8_scaled=args.fp8_scaled,
+        convrot_int8=args.convrot_int8,
+        convrot_int8_bwd=args.convrot_int8_bwd,
+        nvfp4=args.nvfp4,
+        nvfp4_columnwise_chunk_rows=args.nvfp4_columnwise_chunk_rows,
+        turbo_dit=None,
+        scaled_mm_available=nvfp4_scaled_mm_available(),
+        cuda_available=torch.cuda.is_available(),
+        device_capability=device_capability,
+        blocks_to_swap=args.blocks_to_swap,
+        block_swap_h2d_only=getattr(args, "block_swap_h2d_only", False),
+        require_block_swap_h2d_only_with_nvfp4=False,
+    )
+    if args.nvfp4 and args.lora_weight:
+        raise ValueError(
+            "--nvfp4 cannot be combined with --lora_weight: pre-quantized NVFP4 weights cannot be merged "
+            "at load time. Use the original BF16 (or --fp8_scaled/--convrot_int8) weights with --lora_weight "
+            "instead."
+        )
 
     # Load all three models up front and keep them: the encoder and VAE live on CPU, the DiT
     # lives on the GPU (with block swap as needed). Encoder/VAE shuttle to the GPU per prompt.
@@ -395,6 +469,10 @@ def main():
         attn_mode=args.attn_mode,
         split_attn=args.split_attn,
         fp8_scaled=args.fp8_scaled,
+        convrot_int8=args.convrot_int8,
+        convrot_int8_bwd=args.convrot_int8_bwd,
+        nvfp4=args.nvfp4,
+        nvfp4_columnwise_chunk_rows=args.nvfp4_columnwise_chunk_rows,
         blocks_to_swap=args.blocks_to_swap,
         swap_config=swap_config,
     )
