@@ -91,6 +91,14 @@ class Krea2NetworkTrainer(NetworkTrainer):
             raise ValueError(
                 "--nvfp4 requires PyTorch 2.10+ with torch.float4_e2m1fn_x2/torch.nn.functional.scaled_mm support."
             )
+        if args.nvfp4 and args.blocks_to_swap and not getattr(args, "block_swap_h2d_only", False):
+            raise ValueError(
+                "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. The default block-swap"
+                " offloader (ModelOffloader) does not know about NVFP4's extra columnwise backward buffers"
+                " (nvfp4_weight_t/nvfp4_block_scale_t/nvfp4_scale_t) and would leave them GPU-resident for"
+                " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
+                " or omit --blocks_to_swap if the model fits without it."
+            )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
         # generation during training swap the base weights to Turbo (LoRA, hooked on the live

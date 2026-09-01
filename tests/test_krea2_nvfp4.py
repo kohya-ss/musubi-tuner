@@ -33,6 +33,7 @@ def _base_args(**overrides):
     defaults = dict(
         fp8_base=False, fp8_scaled=False, convrot_int8=False, convrot_int8_bwd="bf16",
         nvfp4=False, turbo_dit=False, turbo_dit_cache=False, blocks_to_swap=0,
+        block_swap_h2d_only=False,
     )
     for key, value in defaults.items():
         setattr(args, key, value)
@@ -67,3 +68,27 @@ def test_handle_model_specific_args_rejects_nvfp4_with_turbo_dit():
     args = _base_args(nvfp4=True, turbo_dit=True)
     with pytest.raises(ValueError, match="turbo_dit"):
         trainer.handle_model_specific_args(args)
+
+
+from musubi_tuner import krea2_train_network
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_block_swap_without_h2d_only():
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=4, block_swap_h2d_only=False)
+    with pytest.raises(ValueError, match="block_swap_h2d_only"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_allows_nvfp4_with_block_swap_h2d_only(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=4, block_swap_h2d_only=True)
+    trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_handle_model_specific_args_allows_nvfp4_without_block_swap(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=0, block_swap_h2d_only=False)
+    trainer.handle_model_specific_args(args)  # must not raise
