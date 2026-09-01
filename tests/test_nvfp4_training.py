@@ -431,3 +431,31 @@ def test_apply_nvfp4_monkey_patch_rejects_non_positive_columnwise_chunk_rows(tmp
             model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
             columnwise_chunk_rows=0,
         )
+
+
+@requires_nvfp4_scaled_mm
+def test_nvfp4_scaled_mm_linear_uses_custom_activation_quantize_fn():
+    """nvfp4_scaled_mm_linear must dispatch through activation_quantize_fn when given one
+    (needed so NvFp4LinearFn.backward can route grad_out through stochastic rounding), not
+    hardcode quantize_nvfp4_activation."""
+    from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_linear, quantize_nvfp4_activation
+
+    if not (torch.cuda.is_available() and nvfp4_scaled_mm_available()):
+        pytest.skip("CUDA + torch 2.10+ scaled_mm required")
+
+    torch.manual_seed(0)
+    n, k, m = 32, 32, 16
+    w = torch.randn(n, k, device="cuda") * 0.02
+    _w_packed, w_block_scale, w_tensor_scale, _ = _quantize_nvfp4_2d(w)
+    x = torch.randn(m, k, device="cuda")
+
+    calls = []
+
+    def spy(x_arg):
+        calls.append(x_arg)
+        return quantize_nvfp4_activation(x_arg)
+
+    nvfp4_scaled_mm_linear(x, _w_packed, w_block_scale, w_tensor_scale, None, n, activation_quantize_fn=spy)
+
+    assert len(calls) == 1
+    assert calls[0] is x

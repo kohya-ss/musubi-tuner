@@ -32,7 +32,7 @@ lower-quality model than ConvRot INT8.
 """
 
 import os
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -392,11 +392,19 @@ def nvfp4_scaled_mm_linear(
     weight_scale: torch.Tensor,
     bias: Optional[torch.Tensor],
     orig_out_features: int,
+    activation_quantize_fn: Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = quantize_nvfp4_activation,
 ) -> torch.Tensor:
-    """W4A4 linear via torch.nn.functional.scaled_mm (torch 2.10+, Blackwell)."""
+    """W4A4 linear via torch.nn.functional.scaled_mm (torch 2.10+, Blackwell).
+
+    activation_quantize_fn quantizes x to NVFP4 -- defaults to the deterministic
+    quantize_nvfp4_activation (the forward path, NvFp4LinearFn.forward). NvFp4LinearFn.backward
+    passes quantize_nvfp4_activation_stochastic instead for its grad_out quantization, per
+    arXiv:2509.25149's finding that gradient tensors need stochastic rounding to avoid the
+    directional bias deterministic rounding introduces.
+    """
     from torch.nn.functional import ScalingType, SwizzleType
 
-    x_packed, x_block_scale, x_scale, orig_rows = quantize_nvfp4_activation(x)
+    x_packed, x_block_scale, x_scale, orig_rows = activation_quantize_fn(x)
     result = torch.nn.functional.scaled_mm(
         x_packed.view(torch.float4_e2m1fn_x2),
         weight_packed.view(torch.float4_e2m1fn_x2).t(),
