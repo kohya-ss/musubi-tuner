@@ -73,7 +73,8 @@ def test_handle_model_specific_args_rejects_nvfp4_with_turbo_dit():
 from musubi_tuner import krea2_train_network
 
 
-def test_handle_model_specific_args_rejects_nvfp4_with_block_swap_without_h2d_only():
+def test_handle_model_specific_args_rejects_nvfp4_with_block_swap_without_h2d_only(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
     trainer = Krea2NetworkTrainer()
     args = _base_args(nvfp4=True, blocks_to_swap=4, block_swap_h2d_only=False)
     with pytest.raises(ValueError, match="block_swap_h2d_only"):
