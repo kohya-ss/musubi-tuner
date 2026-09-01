@@ -495,6 +495,22 @@ class NvFp4LinearFn(torch.autograd.Function):
         return grad_x, None, None, None, None, None, None, grad_bias, None, None
 
 
+# Canonical superset of every buffer name a stream-quant offloader selector might need to
+# follow a Linear's ``weight`` (Krea2 NVFP4 training's columnwise backward buffers, MiniMax-H3's
+# forward-only TE streaming buffers, and AWQ-style pre-quant scales). Both call sites gate
+# membership with ``if name in module._buffers``, so listing every name here is safe even
+# though no single module type carries all of them at once.
+NVFP4_STREAM_QUANT_BUFFER_NAMES = (
+    "scale_weight",
+    "nvfp4_block_scale",
+    "nvfp4_scale",
+    "pre_quant_scale",
+    "nvfp4_weight_t",
+    "nvfp4_block_scale_t",
+    "nvfp4_scale_t",
+)
+
+
 def nvfp4_swap_tensor_selector(block: nn.Module) -> List[Tuple[nn.Module, str]]:
     """Block-swap tensor selector for blocks containing NVFP4-patched Linears.
 
@@ -513,7 +529,7 @@ def nvfp4_swap_tensor_selector(block: nn.Module) -> List[Tuple[nn.Module, str]]:
         if not (hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear")):
             continue
         jobs.append((module, "weight"))
-        for name in ("nvfp4_block_scale", "nvfp4_scale", "nvfp4_weight_t", "nvfp4_block_scale_t", "nvfp4_scale_t"):
+        for name in NVFP4_STREAM_QUANT_BUFFER_NAMES:
             if name in module._buffers:
                 jobs.append((module, name))
     return jobs

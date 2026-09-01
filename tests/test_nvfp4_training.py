@@ -508,7 +508,7 @@ def test_nvfp4_linear_fn_backward_uses_orig_in_features_not_padded_weight_t_shap
     x = (torch.randn(m, real_k, device=device) * 0.5).to(torch.bfloat16).requires_grad_(True)
     packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(w.float())
 
-    # weight_t_packed constructed directly with 64 rows (independent of real_k=48), so
+    # weight_t_packed constructed directly with 64 rows (independent of real_k=32), so
     # weight_t_packed.shape[0] == 64 != real_k.
     w_t = (torch.randn(64, n, device=device) * 0.02).to(torch.bfloat16)
     packed_t, block_scale_t, tensor_scale_t, chunked_orig_rows = _quantize_nvfp4_2d(w_t.float())
@@ -521,3 +521,17 @@ def test_nvfp4_linear_fn_backward_uses_orig_in_features_not_padded_weight_t_shap
     assert x.grad is not None
     assert x.grad.shape == x.shape
     assert torch.isfinite(x.grad).all()
+
+
+def test_nvfp4_stream_quant_buffer_names_is_a_superset_of_both_call_sites():
+    from musubi_tuner.minimax_h3.text_encoder import _TE_STREAM_QUANT_BUFFER_NAMES
+    from musubi_tuner.modules.nvfp4_utils import NVFP4_STREAM_QUANT_BUFFER_NAMES
+
+    assert set(_TE_STREAM_QUANT_BUFFER_NAMES) <= set(NVFP4_STREAM_QUANT_BUFFER_NAMES)
+    # Krea2's original inline list (pre-unification), preserved here as the other half of the
+    # superset check so a future edit can't silently drop one side's buffer names.
+    krea2_names = {"nvfp4_block_scale", "nvfp4_scale", "nvfp4_weight_t", "nvfp4_block_scale_t", "nvfp4_scale_t"}
+    assert krea2_names <= set(NVFP4_STREAM_QUANT_BUFFER_NAMES)
+    # Both call sites must import the SAME object (identity, not just equal contents) --
+    # otherwise a future edit to one list silently doesn't propagate to the other.
+    assert _TE_STREAM_QUANT_BUFFER_NAMES is NVFP4_STREAM_QUANT_BUFFER_NAMES
