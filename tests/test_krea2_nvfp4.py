@@ -123,3 +123,33 @@ def test_handle_model_specific_args_rejects_non_positive_chunk_rows(monkeypatch)
     args = _base_args(nvfp4=True, blocks_to_swap=0, nvfp4_columnwise_chunk_rows=0)
     with pytest.raises(ValueError, match="nvfp4_columnwise_chunk_rows"):
         trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_rejects_nvfp4_on_non_blackwell_gpu(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "get_device_capability", lambda: (8, 9))
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    with pytest.raises(ValueError, match="Blackwell"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_allows_nvfp4_on_blackwell_gpu(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "get_device_capability", lambda: (10, 0))
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_handle_model_specific_args_allows_nvfp4_when_cuda_not_yet_available(monkeypatch):
+    # CLI validation can run before accelerate has placed the process on a GPU (e.g. a
+    # multi-process launch's early arg-parsing phase) -- must not hard-fail just because CUDA
+    # isn't visible yet at this point.
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "is_available", lambda: False)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    trainer.handle_model_specific_args(args)  # must not raise

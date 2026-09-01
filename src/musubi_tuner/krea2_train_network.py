@@ -91,6 +91,13 @@ class Krea2NetworkTrainer(NetworkTrainer):
             raise ValueError(
                 "--nvfp4 requires PyTorch 2.10+ with torch.float4_e2m1fn_x2/torch.nn.functional.scaled_mm support."
             )
+        if args.nvfp4 and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 10:
+            major, minor = torch.cuda.get_device_capability()
+            raise ValueError(
+                f"--nvfp4 requires a Blackwell GPU (compute capability 10.0+) for real FP4x4"
+                f" tensor-core scaled_mm; detected compute capability {major}.{minor}. Use"
+                f" --convrot_int8 or --fp8_scaled instead on this GPU."
+            )
         if args.nvfp4 and args.blocks_to_swap and not getattr(args, "block_swap_h2d_only", False):
             raise ValueError(
                 "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. The default block-swap"
