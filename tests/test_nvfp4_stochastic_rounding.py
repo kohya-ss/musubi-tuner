@@ -5,7 +5,7 @@ per docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md.
 import pytest
 import torch
 
-from musubi_tuner.modules.nvfp4_utils import F4_E2M1_MAX, _e2m1_stochastic_code
+from musubi_tuner.modules.nvfp4_utils import F4_E2M1_MAX, _e2m1_stochastic_code, _quantize_nvfp4_2d, quantize_nvfp4_activation_stochastic
 
 
 def test_stochastic_code_always_produces_valid_e2m1_codes():
@@ -56,3 +56,38 @@ def test_stochastic_code_matches_sign_convention():
     codes = _e2m1_stochastic_code(x)
     assert codes[0].item() == 3   # positive 1.5 -> code 3
     assert codes[1].item() == 11  # negative 1.5 -> code 3 | 8 = 11
+
+
+def test_quantize_nvfp4_activation_stochastic_output_shapes():
+    torch.manual_seed(0)
+    x = torch.randn(32, 64)
+    packed, block_scale, per_tensor_scale, orig_rows = quantize_nvfp4_activation_stochastic(x)
+
+    assert packed.dtype == torch.uint8
+    assert packed.shape == (32, 32)  # [rows, K/2]
+    assert block_scale.dtype == torch.float8_e4m3fn
+    assert per_tensor_scale.dtype == torch.float32
+    assert per_tensor_scale.ndim == 0
+    assert orig_rows == 32
+
+
+def test_quantize_nvfp4_activation_stochastic_block_scale_matches_deterministic():
+    # The block-scale computation is shared (_quantize_nvfp4_2d_prepare) and deterministic in
+    # both paths -- only the E2M1 magnitude conversion differs. Scales must match exactly.
+    torch.manual_seed(0)
+    x = torch.randn(32, 64)
+    _packed_ref, block_scale_ref, tensor_scale_ref, _ = _quantize_nvfp4_2d(x)
+    _packed_stoch, block_scale_stoch, tensor_scale_stoch, _ = quantize_nvfp4_activation_stochastic(x)
+
+    assert torch.equal(block_scale_stoch.view(torch.uint8), block_scale_ref.view(torch.uint8))
+    assert torch.equal(tensor_scale_stoch, tensor_scale_ref)
+
+
+def test_quantize_nvfp4_activation_stochastic_is_random_across_calls():
+    # Sanity check that this path is actually stochastic (not accidentally deterministic due
+    # to a bug reusing the same RNG state / always landing in the degenerate branch).
+    torch.manual_seed(0)
+    x = torch.full((16, 32), 0.3)  # a value strictly between two representable magnitudes
+    packed_a, _, _, _ = quantize_nvfp4_activation_stochastic(x)
+    packed_b, _, _, _ = quantize_nvfp4_activation_stochastic(x)
+    assert not torch.equal(packed_a, packed_b)

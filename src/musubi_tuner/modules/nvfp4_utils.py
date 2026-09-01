@@ -332,6 +332,23 @@ def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tens
     return _quantize_nvfp4_2d(x)
 
 
+def quantize_nvfp4_activation_stochastic(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Quantize a 2D tensor to NVFP4 using stochastic rounding for the E2M1 magnitude
+    conversion. Block-scale computation and the F8_E4M3 scale cast are identical to, and stay
+    deterministic like, quantize_nvfp4_activation -- only the final magnitude conversion
+    differs (see _e2m1_stochastic_code).
+
+    Used exclusively by NvFp4LinearFn.backward for grad_out, per arXiv:2509.25149's finding
+    that stochastic rounding is needed for gradient tensors specifically (to avoid the
+    directional bias deterministic rounding introduces) but is detrimental for forward-pass
+    tensors and unnecessary for weights -- do not use this for forward activations
+    (quantize_nvfp4_activation) or weight quantization (quantize_nvfp4_weight_columnwise).
+    """
+    data, scaled_f8, per_tensor_scale, orig_rows = _quantize_nvfp4_2d_prepare(x)
+    packed = pack_uint4(_e2m1_stochastic_code(data))
+    return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
+
+
 def quantize_nvfp4_weight_columnwise(
     weight_packed: torch.Tensor,
     block_scale: torch.Tensor,
