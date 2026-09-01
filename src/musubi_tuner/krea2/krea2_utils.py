@@ -149,8 +149,13 @@ def load_krea2_dit(
             dit.requires_grad_(False)
         elif nvfp4:
             apply_nvfp4_monkey_patch(
-                dit, sd, quantizer.nvfp4_module_shapes, quantizer.int8_embedding_modules,
-                use_scaled_mm=True, training=True, calc_device=device,
+                dit,
+                sd,
+                quantizer.nvfp4_module_shapes,
+                quantizer.int8_embedding_modules,
+                use_scaled_mm=True,
+                training=True,
+                calc_device=device,
                 columnwise_chunk_rows=nvfp4_columnwise_chunk_rows,
             )
             # Same requires_grad concern as ConvRot above: NVFP4 weights are uint8 (packed

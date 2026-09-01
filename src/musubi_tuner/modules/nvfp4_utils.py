@@ -246,7 +246,9 @@ def pack_uint4(codes: torch.Tensor) -> torch.Tensor:
     return (codes[::2] << 4 | codes[1::2]).view(*shape[:-1], shape[-1] // 2)
 
 
-def _quantize_nvfp4_2d_prepare(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+def _quantize_nvfp4_2d_prepare(
+    x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Shared block-scale computation and normalize/clamp step for NVFP4 quantization, used by
     both the deterministic (_quantize_nvfp4_2d) and stochastic-rounding
     (quantize_nvfp4_activation_stochastic) E2M1 conversion paths -- everything through this
@@ -284,7 +286,9 @@ def _quantize_nvfp4_2d_prepare(x: torch.Tensor, per_tensor_scale: Optional[torch
     return data, scaled_f8, per_tensor_scale, orig_rows
 
 
-def _quantize_nvfp4_2d(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+def _quantize_nvfp4_2d(
+    x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Quantize a 2D tensor to NVFP4, grouping blocks along the last axis.
 
     Returns (packed uint8 [Mp, K/2], swizzled block scales F8_E4M3, per-tensor scale F32,
@@ -399,9 +403,7 @@ def quantize_nvfp4_weight_columnwise(
     """
     n, k = orig_shape
     if n % NVFP4_BLOCK_SIZE != 0:
-        raise ValueError(
-            f"NVFP4 columnwise requant needs out_features {n} to be a multiple of {NVFP4_BLOCK_SIZE}, got {n}"
-        )
+        raise ValueError(f"NVFP4 columnwise requant needs out_features {n} to be a multiple of {NVFP4_BLOCK_SIZE}, got {n}")
     weight_bf16 = dequantize_nvfp4(weight_packed, block_scale, per_tensor_scale, orig_shape, torch.bfloat16)
     weight_t = weight_bf16.t().contiguous()  # [K, N]
     packed_t, block_scale_t, tensor_scale_t, _ = _quantize_nvfp4_2d_chunked(weight_t, chunk_rows=chunk_rows)
@@ -419,7 +421,9 @@ def nvfp4_scaled_mm_linear(
     weight_scale: torch.Tensor,
     bias: Optional[torch.Tensor],
     orig_out_features: int,
-    activation_quantize_fn: Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = quantize_nvfp4_activation,
+    activation_quantize_fn: Callable[
+        [torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]
+    ] = quantize_nvfp4_activation,
 ) -> torch.Tensor:
     """W4A4 linear via torch.nn.functional.scaled_mm (torch 2.10+, Blackwell).
 
@@ -458,7 +462,19 @@ class NvFp4LinearFn(torch.autograd.Function):
 
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
-    def forward(ctx, x, weight_packed, block_scale, tensor_scale, weight_t_packed, block_scale_t, tensor_scale_t, bias, orig_out_features, orig_in_features):
+    def forward(
+        ctx,
+        x,
+        weight_packed,
+        block_scale,
+        tensor_scale,
+        weight_t_packed,
+        block_scale_t,
+        tensor_scale_t,
+        bias,
+        orig_out_features,
+        orig_in_features,
+    ):
         if torch.is_autocast_enabled(x.device.type):
             cast_dtype = torch.get_autocast_dtype(x.device.type)
             x = x.to(cast_dtype)
@@ -486,7 +502,12 @@ class NvFp4LinearFn(torch.autograd.Function):
             # 16, so ctx.orig_in_features (the real K) must be passed explicitly here rather
             # than read off weight_t_packed.shape[0].
             gx = nvfp4_scaled_mm_linear(
-                g2d, weight_t_packed, block_scale_t, tensor_scale_t, None, ctx.orig_in_features,
+                g2d,
+                weight_t_packed,
+                block_scale_t,
+                tensor_scale_t,
+                None,
+                ctx.orig_in_features,
                 activation_quantize_fn=quantize_nvfp4_activation_stochastic,
             )
             grad_x = gx.reshape(*grad_out.shape[:-1], ctx.in_features)
@@ -793,9 +814,7 @@ def apply_nvfp4_monkey_patch(
             " / NVFP4 scaled_mm には PyTorch 2.10 以降が必要です。scaled_mm オプションを外すと dequantize フォールバックで動作します。"
         )
     if training and not use_scaled_mm:
-        raise ValueError(
-            "NVFP4 training requires use_scaled_mm=True (the dequantize fallback forward has no backward)."
-        )
+        raise ValueError("NVFP4 training requires use_scaled_mm=True (the dequantize fallback forward has no backward).")
     if columnwise_chunk_rows <= 0 or columnwise_chunk_rows % 128 != 0:
         raise ValueError(
             f"columnwise_chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile height),"

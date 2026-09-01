@@ -88,9 +88,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
         if args.nvfp4 and args.turbo_dit:
             raise ValueError("--nvfp4 is not supported together with --turbo_dit yet; omit one of them.")
         if args.nvfp4 and not nvfp4_scaled_mm_available():
-            raise ValueError(
-                "--nvfp4 requires PyTorch 2.10+ with torch.float4_e2m1fn_x2/torch.nn.functional.scaled_mm support."
-            )
+            raise ValueError("--nvfp4 requires PyTorch 2.10+ with torch.float4_e2m1fn_x2/torch.nn.functional.scaled_mm support.")
         if args.nvfp4 and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 10:
             major, minor = torch.cuda.get_device_capability()
             raise ValueError(
