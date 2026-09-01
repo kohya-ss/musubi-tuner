@@ -60,8 +60,8 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
             raise ValueError("--blocks_to_swap for Ideogram 4 must be <= 33")
         if args.sample_prompts and (args.text_encoder is None or args.vae is None):
             raise ValueError("--sample_prompts for Ideogram 4 requires --text_encoder and --vae")
-        # compute_loss() uses a plain mean MSE and intentionally ignores the SD3 timestep
-        # weighting, so reject a non-default --weighting_scheme rather than silently dropping it.
+        # The canonical per-sample loss is an unweighted MSE, so reject a
+        # non-default --weighting_scheme rather than silently dropping it.
         if args.weighting_scheme != "none":
             raise ValueError("Ideogram 4 currently supports --weighting_scheme none only.")
 
@@ -321,6 +321,36 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         target = latents - noise
         return DiTOutput(pred=model_pred, target=target)
 
+    def compute_per_sample_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> torch.Tensor:
+        """Return the unweighted Ideogram 4 velocity MSE for each batch sample."""
+        del args, timesteps, noise_scheduler, dit_dtype, global_step
+        if output.pred.ndim < 1 or output.target.ndim < 1:
+            raise ValueError("per-sample loss requires a leading batch axis")
+        batch_size = output.pred.shape[0]
+        if output.target.shape[0] != batch_size:
+            raise ValueError("prediction and target batch sizes differ")
+        if output.pred.shape != output.target.shape:
+            raise ValueError("prediction and target shapes must match")
+        if output.pred.device != output.target.device:
+            raise ValueError("prediction and target devices must match")
+        if batch_size == 0:
+            raise ValueError("per-sample loss requires a non-empty batch")
+        if output.pred.numel() // batch_size == 0:
+            raise ValueError("per-sample loss requires at least one element per batch sample")
+
+        pred = output.pred.to(network_dtype)
+        target = output.target.to(network_dtype)
+        return torch.nn.functional.mse_loss(pred, target, reduction="none").reshape(batch_size, -1).mean(dim=1)
+
     def compute_loss(
         self,
         args: argparse.Namespace,
@@ -331,13 +361,11 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        # Plain mean MSE in flow-matching velocity space. Ideogram 4 does not use the
-        # SD3 weighting_scheme, so this owns the full loss formulation rather than
-        # augmenting super().compute_loss (which would apply that weighting).
-        del noise_scheduler, dit_dtype, global_step
+        # Ideogram 4 uses an unweighted velocity MSE selection primitive; the
+        # scalar wrapper retains its existing optional diagnostic metrics.
+        loss = self.compute_per_sample_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step).mean()
         pred = output.pred.to(network_dtype)
         target = output.target.to(network_dtype)
-        loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
 
         loss_metrics = {}
         if getattr(args, "log_loss_stats", False):

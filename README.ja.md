@@ -168,8 +168,10 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 - [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
 - [Kandinsky 5](./docs/kandinsky5.md)
 - [FLUX.2](./docs/flux_2.md)
+- [MiniMax-H3](./docs/minimax_h3.md)
 
 **共通設定・その他:**
+- [探索的モデリングとForward XM](./docs/explorative_modeling.md)
 - [データセット設定](./docs/dataset_config.md)
 - [高度な設定](./docs/advanced_config.md)
 - [学習中のサンプル生成](./docs/sampling_during_training.md)

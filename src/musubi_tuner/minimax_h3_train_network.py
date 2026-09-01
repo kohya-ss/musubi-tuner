@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -66,6 +66,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
+from musubi_tuner.training.explorative import create_candidate_generator, draw_candidate_noise, update_winners
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
@@ -76,6 +77,22 @@ logger = logging.getLogger(__name__)
 
 
 _RUNTIME_REF_KEY = re.compile(r"^latents_ref_(\d{3})_(image|video|audio)$")
+_REMOVED_H3_BEST_OF_K_OPTIONS = {
+    "h3_video_best_of_k": "use --h3_best_of_k K --h3_best_of_k_stream video",
+    "h3_audio_best_of_k": "use --h3_best_of_k K --h3_best_of_k_stream audio",
+    "h3_image_best_of_k": "use --h3_best_of_k K; one-frame batches automatically search video",
+}
+
+
+def _removed_h3_best_of_k_message(option_name: str) -> str:
+    guidance = _REMOVED_H3_BEST_OF_K_OPTIONS[option_name.removeprefix("--")]
+    return f"{option_name} was removed; {guidance}"
+
+
+class _RemovedH3BestOfKAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        del namespace, values
+        parser.error(_removed_h3_best_of_k_message(option_string or f"--{self.dest}"))
 
 
 def _require_sampling_path(value: str | None, label: str) -> Path:
@@ -231,6 +248,37 @@ def _validate_audio_present(value: Any, batch_size: int) -> torch.Tensor:
 
 
 @dataclass(frozen=True)
+class _H3BestOfKConfig:
+    count: int = 1
+    multi_frame_stream: str = "video"
+
+
+def _resolve_h3_best_of_k_config(args: argparse.Namespace) -> _H3BestOfKConfig:
+    for removed_name in _REMOVED_H3_BEST_OF_K_OPTIONS:
+        if hasattr(args, removed_name):
+            raise ValueError(_removed_h3_best_of_k_message(f"--{removed_name}"))
+
+    xm_count = args.xm_best_of_k
+    if type(xm_count) is not int or xm_count != 1:
+        raise ValueError(f"--xm_best_of_k must be the valid integer 1 for MiniMax-H3, got {xm_count!r}; use --h3_best_of_k")
+
+    count = args.h3_best_of_k
+    if type(count) is not int or count < 1:
+        raise ValueError(f"--h3_best_of_k must be an integer of at least 1, got {count!r}")
+    stream = args.h3_best_of_k_stream
+    if type(stream) is not str or stream not in {"video", "audio"}:
+        raise ValueError(f"--h3_best_of_k_stream must be 'video' or 'audio', got {stream!r}")
+    if count > 1 and stream == "audio" and args.video_only:
+        raise ValueError("--video_only cannot be combined with --h3_best_of_k_stream audio when --h3_best_of_k > 1")
+    if count > 1 and getattr(args, "h3_teacher_matching", False):
+        raise ValueError(
+            "--h3_teacher_matching uses a teacher-conditioned decomposed loss whose candidate-selection "
+            "contract has not been defined for --h3_best_of_k"
+        )
+    return _H3BestOfKConfig(count=count, multi_frame_stream=stream)
+
+
+@dataclass(frozen=True)
 class _H3RuntimeBatch:
     layout: H3PackedLayout
     text_hidden_states: torch.Tensor
@@ -246,6 +294,60 @@ class _H3RuntimeBatch:
     teacher_text_token_tags: torch.Tensor | None = None
     teacher_visual_conditions: tuple[torch.Tensor, ...] = ()
     teacher_audio_conditions: tuple[torch.Tensor, ...] = ()
+
+
+@dataclass(frozen=True)
+class _H3TrainingState:
+    runtime: _H3RuntimeBatch
+    audio_latents: torch.Tensor
+    base_time: torch.Tensor
+    sigma_video: torch.Tensor
+    sigma_audio: torch.Tensor
+    model_t_video: torch.Tensor
+    model_t_audio: torch.Tensor
+    visual_conditions: tuple[torch.Tensor, ...]
+    audio_conditions: tuple[torch.Tensor, ...]
+    teacher_visual_conditions: tuple[torch.Tensor, ...]
+    teacher_audio_conditions: tuple[torch.Tensor, ...]
+    audio_loss_weight: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _H3NoisyInputs:
+    video_noise: torch.Tensor
+    noisy_video: torch.Tensor
+    audio_noise: torch.Tensor
+    noisy_audio: torch.Tensor
+
+
+def _resolve_h3_best_of_k_batch(config: _H3BestOfKConfig, runtime: _H3RuntimeBatch) -> str:
+    if runtime.layout.target_video.frames == 1:
+        return "image"
+    return config.multi_frame_stream
+
+
+@dataclass(frozen=True)
+class _H3BestOfKSelection:
+    kind: str
+
+    def noise(self, inputs: _H3NoisyInputs) -> torch.Tensor:
+        return inputs.audio_noise if self.kind == "audio" else inputs.video_noise
+
+    def with_noise(
+        self,
+        state: _H3TrainingState,
+        inputs: _H3NoisyInputs,
+        video_latents: torch.Tensor,
+        noise: torch.Tensor,
+    ) -> _H3NoisyInputs:
+        if self.kind == "audio":
+            noisy_audio = (1.0 - state.sigma_audio) * state.audio_latents + state.sigma_audio * noise
+            return replace(inputs, audio_noise=noise, noisy_audio=noisy_audio)
+        noisy_video = (1.0 - state.sigma_video) * video_latents + state.sigma_video * noise
+        return replace(inputs, video_noise=noise, noisy_video=noisy_video)
+
+    def score(self, video_losses: torch.Tensor, audio_losses: torch.Tensor) -> torch.Tensor:
+        return audio_losses if self.kind == "audio" else video_losses
 
 
 def _stack_single_text_rows(value, label: str) -> torch.Tensor:
@@ -374,6 +476,11 @@ def _runtime_batch_plan(
     if is_one_frame_batch:
         if not one_frame:
             raise ValueError("MiniMax-H3 batch carries a one-frame latent cache; pass --one_frame to train on image targets")
+        if torch.count_nonzero(audio_present).item():
+            raise ValueError(
+                "MiniMax-H3 one-frame batch requires audio_present=0 for its silence placeholder; "
+                "re-run minimax_h3_cache_latents.py --one_frame"
+            )
         if reference_roles or teacher_conditions is not None:
             raise ValueError("MiniMax-H3 one-frame training currently supports plain T2VA and FL2VA caches only")
         if (
@@ -695,6 +802,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
 
     def __init__(self):
         super().__init__()
+        self._h3_best_of_k_config = _H3BestOfKConfig()
         # per-rank audio-supervision accounting, fed by process_batch; drives the
         # first-epoch warning and the observed fraction saved in metadata
         self._audio_items_seen = 0
@@ -710,6 +818,44 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
     @property
     def architecture_full_name(self) -> str:
         return ARCHITECTURE_MINIMAX_H3_FULL
+
+    def get_best_of_k_count(self, args: argparse.Namespace) -> int:
+        return _resolve_h3_best_of_k_config(args).count
+
+    def get_best_of_k_option_name(self, args: argparse.Namespace) -> str:
+        del args
+        return "--h3_best_of_k"
+
+    def get_best_of_k_incompatibility_reason(self, args: argparse.Namespace) -> str | None:
+        del args
+        return None
+
+    def _validate_and_init_best_of_k(self, args: argparse.Namespace) -> None:
+        self._best_of_k_count = 1
+        self._best_of_k_enabled = False
+        self._h3_best_of_k_config = _H3BestOfKConfig()
+        try:
+            self._h3_best_of_k_config = _resolve_h3_best_of_k_config(args)
+            super()._validate_and_init_best_of_k(args)
+        except Exception:
+            self._h3_best_of_k_config = _H3BestOfKConfig()
+            raise
+
+    def on_best_of_k_enabled(self, args: argparse.Namespace) -> None:
+        logger.info(
+            "MiniMax-H3 best-of-K enabled: K=%d, multi-frame stream=%s, "
+            "sequential memory-saving mode, approximate operation-count multiplier %.2fx",
+            self._best_of_k_count,
+            self._h3_best_of_k_config.multi_frame_stream,
+            (self._best_of_k_count + 3) / 3,
+        )
+        if self._h3_best_of_k_config.multi_frame_stream == "audio" and float(args.audio_loss_weight) == 0.0:
+            logger.warning(
+                "MiniMax-H3 best-of-K multi-frame stream is audio but --audio_loss_weight is 0; "
+                "those batches fall back to one ordinary prepared forward"
+            )
+        if self._h3_best_of_k_config.multi_frame_stream == "audio" and getattr(args, "one_frame", False):
+            logger.warning("MiniMax-H3 one-frame batches override --h3_best_of_k_stream audio and always search video")
 
     def handle_model_specific_args(self, args: argparse.Namespace):
         self.dit_dtype = torch.bfloat16
@@ -1236,6 +1382,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         }
         if getattr(args, "one_frame", False):
             metadata["ss_minimax_h3_one_frame"] = True
+        if self._h3_best_of_k_config.count > 1:
+            metadata["ss_minimax_h3_best_of_k"] = self._h3_best_of_k_config.count
+            metadata["ss_minimax_h3_best_of_k_stream"] = self._h3_best_of_k_config.multi_frame_stream
         if float(args.h3_guidance_loss_scale) > 0.0:
             metadata["ss_minimax_h3_guidance_loss_scale"] = args.h3_guidance_loss_scale
             metadata["ss_minimax_h3_guidance_loss_scale_audio"] = self._guidance_audio_scale(args)
@@ -1476,20 +1625,21 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             time_overrides=runtime.layout.time_overrides,
         )
         autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
-        with torch.no_grad(), autocast():
-            uncond = transformer(
-                video_latents=noisy_model_input,
-                audio_latents=noisy_audio_input,
-                text_hidden_states=uncond_hidden.to(device=accelerator.device, dtype=network_dtype).unsqueeze(0),
-                text_token_tags=uncond_tags.to(accelerator.device).unsqueeze(0),
-                layout=uncond_layout,
-                model_t_video=model_t_video,
-                model_t_audio=model_t_audio,
-                visual_condition_latents=visual_conditions,
-                audio_condition_latents=audio_conditions,
-                visual_condition_clean=args.h3_visual_cond_clean,
-                audio_condition_clean=args.h3_audio_cond_clean,
-            )
+        with self.block_swap_forward_only(accelerator, transformer):
+            with torch.no_grad(), autocast():
+                uncond = transformer(
+                    video_latents=noisy_model_input,
+                    audio_latents=noisy_audio_input,
+                    text_hidden_states=uncond_hidden.to(device=accelerator.device, dtype=network_dtype).unsqueeze(0),
+                    text_token_tags=uncond_tags.to(accelerator.device).unsqueeze(0),
+                    layout=uncond_layout,
+                    model_t_video=model_t_video,
+                    model_t_audio=model_t_audio,
+                    visual_condition_latents=visual_conditions,
+                    audio_condition_latents=audio_conditions,
+                    visual_condition_clean=args.h3_visual_cond_clean,
+                    audio_condition_clean=args.h3_audio_cond_clean,
+                )
         uncond_video = uncond.video.detach().float()
         uncond_audio = uncond.audio.detach().float()
         video_gap = video_target.float() - uncond_video
@@ -1608,22 +1758,13 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         }
         return teacher_video, teacher_audio, teacher_log
 
-    def process_batch(
+    def _prepare_training_state(
         self,
         args: argparse.Namespace,
-        accelerator: Accelerator,
-        transformer,
-        network,
-        batch: dict[str, torch.Tensor],
+        batch: dict[str, Any],
         latents: torch.Tensor,
-        noise: torch.Tensor,
-        noise_scheduler,
-        dit_dtype: torch.dtype,
-        network_dtype: torch.dtype,
-        sample_resources,
-        global_step: int,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        del sample_resources
+        video_noise: torch.Tensor,
+    ) -> tuple[_H3TrainingState, _H3NoisyInputs]:
         teacher_conditions = (
             normalize_teacher_conditions(args.h3_teacher_conditions) if getattr(args, "h3_teacher_matching", False) else None
         )
@@ -1655,46 +1796,311 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         sigma_audio = _shift_noise_amount(base, args.h3_shift_audio)
         model_t_video = 1.0 - sigma_video
         model_t_audio = 1.0 - sigma_audio
-        noisy_video = (1.0 - sigma_video) * latents + sigma_video * noise
-        noisy_audio = (1.0 - sigma_audio) * audio_latents + sigma_audio * audio_noise
-
         visual_conditions = _augment_conditions(
             tuple(tensor.to(device) for tensor in runtime.visual_conditions), args.h3_visual_cond_clean
         )
         audio_conditions = _augment_conditions(
             tuple(tensor.to(device) for tensor in runtime.audio_conditions), args.h3_audio_cond_clean
         )
-        # the teacher's conditions get the same per-step augmentation as FL2VA/Ref2VA training
+        # Teacher conditions use the same per-step augmentation as the student conditions.
         teacher_visual_conditions = _augment_conditions(
             tuple(tensor.to(device) for tensor in runtime.teacher_visual_conditions), args.h3_visual_cond_clean
         )
         teacher_audio_conditions = _augment_conditions(
             tuple(tensor.to(device) for tensor in runtime.teacher_audio_conditions), args.h3_audio_cond_clean
         )
-        output = self.call_dit(
+        state = _H3TrainingState(
+            runtime=runtime,
+            audio_latents=audio_latents,
+            base_time=base,
+            sigma_video=sigma_video,
+            sigma_audio=sigma_audio,
+            model_t_video=model_t_video,
+            model_t_audio=model_t_audio,
+            visual_conditions=visual_conditions,
+            audio_conditions=audio_conditions,
+            teacher_visual_conditions=teacher_visual_conditions,
+            teacher_audio_conditions=teacher_audio_conditions,
+            audio_loss_weight=effective_audio_loss_weights(runtime.audio_present, args),
+        )
+        inputs = _H3NoisyInputs(
+            video_noise=video_noise,
+            noisy_video=(1.0 - sigma_video) * latents + sigma_video * video_noise,
+            audio_noise=audio_noise,
+            noisy_audio=(1.0 - sigma_audio) * audio_latents + sigma_audio * audio_noise,
+        )
+        return state, inputs
+
+    def _call_training_dit(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, Any],
+        latents: torch.Tensor,
+        state: _H3TrainingState,
+        inputs: _H3NoisyInputs,
+        network_dtype: torch.dtype,
+        network=None,
+    ) -> DiTOutput:
+        return self.call_dit(
             args,
             accelerator,
             transformer,
             latents,
             batch,
-            noise,
-            noisy_video,
-            base,
+            inputs.video_noise,
+            inputs.noisy_video,
+            state.base_time,
             network_dtype,
-            audio_latents=audio_latents,
-            audio_noise=audio_noise,
-            noisy_audio_input=noisy_audio,
-            runtime=runtime,
-            model_t_video=model_t_video,
-            model_t_audio=model_t_audio,
-            visual_conditions=visual_conditions,
-            audio_conditions=audio_conditions,
-            audio_loss_weight=effective_audio_loss_weights(runtime.audio_present, args),
+            audio_latents=state.audio_latents,
+            audio_noise=inputs.audio_noise,
+            noisy_audio_input=inputs.noisy_audio,
+            runtime=state.runtime,
+            model_t_video=state.model_t_video,
+            model_t_audio=state.model_t_audio,
+            visual_conditions=state.visual_conditions,
+            audio_conditions=state.audio_conditions,
+            audio_loss_weight=state.audio_loss_weight,
             network=network,
-            teacher_visual_conditions=teacher_visual_conditions,
-            teacher_audio_conditions=teacher_audio_conditions,
+            teacher_visual_conditions=state.teacher_visual_conditions,
+            teacher_audio_conditions=state.teacher_audio_conditions,
         )
-        return self.compute_loss(args, output, base, noise_scheduler, dit_dtype, network_dtype, global_step)
+
+    def process_batch(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        network,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        sample_resources,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        del sample_resources
+        state, inputs = self._prepare_training_state(args, batch, latents, noise)
+        output = self._call_training_dit(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            latents,
+            state,
+            inputs,
+            network_dtype,
+            network=network,
+        )
+        return self.compute_loss(args, output, state.base_time, noise_scheduler, dit_dtype, network_dtype, global_step)
+
+    def process_batch_best_of_k(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        network,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        sample_resources,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        del sample_resources
+        state, initial_inputs = self._prepare_training_state(args, batch, latents, noise)
+        kind = _resolve_h3_best_of_k_batch(self._h3_best_of_k_config, state.runtime)
+        if kind == "audio" and state.audio_loss_weight.item() == 0.0:
+            output = self._call_training_dit(
+                args,
+                accelerator,
+                transformer,
+                batch,
+                latents,
+                state,
+                initial_inputs,
+                network_dtype,
+                network=network,
+            )
+            return self.compute_loss(
+                args,
+                output,
+                state.base_time,
+                noise_scheduler,
+                dit_dtype,
+                network_dtype,
+                global_step,
+            )
+
+        selection = _H3BestOfKSelection(kind)
+        reference_noise = selection.noise(initial_inputs)
+        generator = create_candidate_generator(reference_noise)
+        batch_size = latents.shape[0]
+        best_losses = torch.full((batch_size,), torch.inf, device=latents.device, dtype=torch.float32)
+        winner_noise = torch.empty_like(reference_noise)
+        winner_indices = torch.full((batch_size,), -1, device=latents.device, dtype=torch.long)
+        candidate_loss_sum = torch.zeros((), device=latents.device, dtype=torch.float32)
+        candidate_zero_mean = None
+        device = torch.device(accelerator.device)
+        fork_devices = [device] if device.type == "cuda" else []
+
+        with self.block_swap_forward_only(accelerator, transformer):
+            for candidate_index in range(self._best_of_k_count):
+                candidate_noise = reference_noise if candidate_index == 0 else draw_candidate_noise(reference_noise, generator)
+                candidate_inputs = selection.with_noise(state, initial_inputs, latents, candidate_noise)
+                with torch.random.fork_rng(devices=fork_devices):
+                    with torch.no_grad():
+                        output = self._call_training_dit(
+                            args,
+                            accelerator,
+                            transformer,
+                            batch,
+                            latents,
+                            state,
+                            candidate_inputs,
+                            network_dtype,
+                            network=network,
+                        )
+                        video_losses, audio_losses = self._compute_per_sample_component_losses(output, network_dtype)
+                candidate_losses_f32 = selection.score(video_losses, audio_losses).float()
+                candidate_loss_sum = candidate_loss_sum + candidate_losses_f32.sum()
+                if candidate_index == 0:
+                    candidate_zero_mean = candidate_losses_f32.mean()
+                try:
+                    best_losses, winner_noise, winner_indices = update_winners(
+                        best_losses,
+                        winner_noise,
+                        winner_indices,
+                        candidate_losses_f32,
+                        candidate_noise,
+                        candidate_index,
+                    )
+                except ValueError as error:
+                    raise ValueError(f"MiniMax-H3 {kind}: {error}") from error
+
+        if candidate_zero_mean is None:
+            raise RuntimeError("internal error: best-of-K candidate loop ran zero iterations")
+
+        # The selected stream's sigma is fixed across candidates, so the assembled
+        # winner noise can be rebuilt once without mixing noising schedules.
+        winner_inputs = selection.with_noise(state, initial_inputs, latents, winner_noise)
+        output = self._call_training_dit(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            latents,
+            state,
+            winner_inputs,
+            network_dtype,
+            network=network,
+        )
+        loss, metrics = self.compute_loss(
+            args,
+            output,
+            state.base_time,
+            noise_scheduler,
+            dit_dtype,
+            network_dtype,
+            global_step,
+        )
+        return loss, {
+            **metrics,
+            f"h3_best_of_k/{kind}/candidate_loss_mean": (candidate_loss_sum / (self._best_of_k_count * batch_size)).item(),
+            f"h3_best_of_k/{kind}/selection_gain": (candidate_zero_mean - best_losses.float().mean()).item(),
+        }
+
+    def _compute_per_sample_component_losses(
+        self,
+        output: DiTOutput,
+        network_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pred = output.pred
+        target = output.target
+        if not isinstance(pred, torch.Tensor) or not isinstance(target, torch.Tensor) or pred.ndim < 1 or target.ndim < 1:
+            raise ValueError("MiniMax-H3 component losses require a leading batch axis")
+        if pred.shape != target.shape:
+            raise ValueError("MiniMax-H3 video prediction and target shapes must match")
+        if pred.device != target.device:
+            raise ValueError("MiniMax-H3 video prediction and target devices must match")
+        batch_size = pred.shape[0]
+        if batch_size == 0:
+            raise ValueError("MiniMax-H3 component losses require a non-empty batch")
+        if pred.numel() // batch_size == 0:
+            raise ValueError("MiniMax-H3 video loss requires at least one element per batch sample")
+
+        video = (
+            torch.nn.functional.mse_loss(pred.to(network_dtype), target.to(network_dtype), reduction="none")
+            .reshape(batch_size, -1)
+            .mean(dim=1)
+        )
+        audio_loss_weight = output.extra.get("audio_loss_weight")
+        if (
+            not isinstance(audio_loss_weight, torch.Tensor)
+            or audio_loss_weight.shape != (1,)
+            or audio_loss_weight.dtype != torch.float32
+            or not torch.isfinite(audio_loss_weight).all().item()
+            or audio_loss_weight.item() < 0.0
+        ):
+            raise ValueError("MiniMax-H3 audio loss weight must be a finite nonnegative float32 tensor with shape [1]")
+        if audio_loss_weight.item() == 0.0:
+            return video, video.detach().new_zeros(video.shape)
+
+        audio_pred = output.extra.get("audio_pred")
+        audio_target = output.extra.get("audio_target")
+        if not isinstance(audio_pred, torch.Tensor) or not isinstance(audio_target, torch.Tensor):
+            raise ValueError("MiniMax-H3 audio loss requires prediction and target tensors")
+        if audio_pred.ndim < 1 or audio_target.ndim < 1:
+            raise ValueError("MiniMax-H3 audio loss requires a leading batch axis")
+        if audio_pred.shape != audio_target.shape:
+            raise ValueError("MiniMax-H3 audio prediction and target shapes must match")
+        if audio_pred.device != audio_target.device or audio_pred.device != pred.device:
+            raise ValueError("MiniMax-H3 audio and video prediction and target devices must match")
+        if audio_pred.shape[0] != batch_size:
+            raise ValueError("MiniMax-H3 audio loss requires the same leading batch axis as video")
+        if audio_pred.numel() // batch_size == 0:
+            raise ValueError("MiniMax-H3 audio loss requires at least one element per batch sample")
+        audio = (
+            torch.nn.functional.mse_loss(
+                audio_pred.to(network_dtype),
+                audio_target.to(network_dtype),
+                reduction="none",
+            )
+            .reshape(batch_size, -1)
+            .mean(dim=1)
+        )
+        return video, audio
+
+    def _combine_per_sample_losses(
+        self,
+        video: torch.Tensor,
+        audio: torch.Tensor,
+        audio_loss_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        if video.ndim != 1 or video.shape != audio.shape:
+            raise ValueError("MiniMax-H3 video and audio per-sample losses must have matching [B] shapes")
+        if video.device != audio.device:
+            raise ValueError("MiniMax-H3 video and audio per-sample losses must share a device")
+        return video + audio_loss_weight.to(device=video.device, dtype=video.dtype) * audio
+
+    def compute_per_sample_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> torch.Tensor:
+        del args, timesteps, noise_scheduler, dit_dtype, global_step
+        video, audio = self._compute_per_sample_component_losses(output, network_dtype)
+        return self._combine_per_sample_losses(video, audio, output.extra["audio_loss_weight"])
 
     def compute_loss(
         self,
@@ -1709,14 +2115,22 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         del timesteps, noise_scheduler, dit_dtype, global_step
         teacher_matching = bool(getattr(args, "h3_teacher_matching", False))
         guidance_log = output.extra.get("guidance_log") or {}
+        if not teacher_matching:
+            video, audio = self._compute_per_sample_component_losses(output, network_dtype)
+            total = self._combine_per_sample_losses(video, audio, output.extra["audio_loss_weight"])
+            logs = {
+                "loss/video": video.detach().mean(),
+                "loss/audio": audio.detach().mean(),
+            }
+            logs.update(guidance_log)
+            return total.mean(), logs
+
         conditioned_flag = guidance_log.get("teacher/conditioned")
         conditioned = bool(conditioned_flag.item() > 0.5) if isinstance(conditioned_flag, torch.Tensor) else True
         dc_weight = float(getattr(args, "h3_teacher_loss_dc_weight", 1.0))
         mag_weight = float(getattr(args, "h3_teacher_loss_mag_weight", 1.0))
 
         def flow_loss(pred: torch.Tensor, target: torch.Tensor, *, attenuate_dc: bool) -> torch.Tensor:
-            if not teacher_matching:
-                return torch.nn.functional.mse_loss(pred, target, reduction="mean")
             # the DC attenuation applies only to conditioned teaching steps: on preservation
             # steps the DC penalty is exactly what pulls palette drift back to the base
             if attenuate_dc and conditioned and dc_weight != 1.0:
@@ -1732,6 +2146,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if (
             not isinstance(audio_loss_weight, torch.Tensor)
             or audio_loss_weight.shape != (1,)
+            or audio_loss_weight.dtype != torch.float32
             or not torch.isfinite(audio_loss_weight).all().item()
             or audio_loss_weight.item() < 0.0
         ):
@@ -1785,6 +2200,26 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     add_audio_train_args(parser)
     parser.add_argument("--h3_shift_video", type=float, default=12.0, help="MiniMax-H3 target-video flow shift")
     parser.add_argument("--h3_shift_audio", type=float, default=3.0, help="MiniMax-H3 target-audio flow shift")
+    parser.add_argument(
+        "--h3_best_of_k",
+        type=int,
+        default=1,
+        help="Number of sequential MiniMax-H3 noise candidates; 1 disables best-of-K selection",
+    )
+    parser.add_argument(
+        "--h3_best_of_k_stream",
+        choices=("video", "audio"),
+        default="video",
+        help="Target stream searched for multi-frame MiniMax-H3 batches; one-frame batches always search video",
+    )
+    for removed_name in _REMOVED_H3_BEST_OF_K_OPTIONS:
+        parser.add_argument(
+            f"--{removed_name}",
+            action=_RemovedH3BestOfKAction,
+            nargs="?",
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
     parser.add_argument(
         "--h3_visual_cond_clean",
         type=float,

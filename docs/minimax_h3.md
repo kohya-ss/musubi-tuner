@@ -182,6 +182,22 @@ The latent caching script logs the supervised fraction as `supervised_audio_frac
 
 `--min_timestep` and `--max_timestep` clip the shared base variable, in base units where 1000 is pure noise, before the two per-stream shifts are applied. Clipping in base space keeps the video and audio streams consistent; the bounds are not sigma values of either stream. For example `--max_timestep 900` removes the highest-noise 10% of the base range, which corresponds to `sigma_video > 0.9908` (shift 12) and `sigma_audio > 0.9643` (shift 3).
 
+`--h3_best_of_k K` enables MiniMax-H3 best-of-K when `K > 1`.
+`--h3_best_of_k_stream video` (the default) varies and ranks video noise by
+video MSE on multi-frame batches; `audio` varies and ranks audio noise by audio
+MSE. One-frame image batches always search video noise. The selected update
+still optimizes video loss plus weighted audio loss, so a stream-focused winner
+need not minimize that joint objective. An audio-search batch with zero
+effective audio weight falls back to one ordinary forward; `--video_only` with
+active audio search is rejected. MiniMax-H3 rejects the common
+`--xm_best_of_k` option for `K > 1`.
+
+The former experimental `--h3_video_best_of_k K` spelling is not an alias;
+replace it with `--h3_best_of_k K --h3_best_of_k_stream video`. See
+[Explorative Modeling and Forward XM](./explorative_modeling.md) for semantics,
+cost, runtime-kind metrics, compatibility, and the strict selected-score
+non-finite policy.
+
 Zero audio loss does not preserve the base model's audio behavior. H3 is single-stream, and these LoRA targets modify the same attention and MLP weights used by video and audio tokens. A `--video_only` or low-`supervised_audio_fraction` LoRA can therefore produce audio worse than the base model; the risk generally increases with adapter capacity/strength and training exposure, although degradation is not guaranteed to be monotonic. Treat audio from a fully video-only LoRA as unconstrained output.
 
 Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is also supported for frozen-base LoRA training and requires `--gradient_checkpointing`.

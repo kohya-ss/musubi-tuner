@@ -176,6 +176,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [MiniMax-H3](./docs/minimax_h3.md)
 
 **Common Configuration & Usage:**
+- [Explorative Modeling and Forward XM](./docs/explorative_modeling.md)
 - [Dataset Configuration](./docs/dataset_config.md)
 - [Advanced Configuration](./docs/advanced_config.md)
 - [Sampling during Training](./docs/sampling_during_training.md)

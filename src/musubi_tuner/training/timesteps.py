@@ -75,6 +75,39 @@ def get_sigmas(noise_scheduler, timesteps, device, n_dim=4, dtype=torch.float32)
     return sigma
 
 
+BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS = frozenset(
+    {
+        "uniform",
+        "sigmoid",
+        "shift",
+        "flux_shift",
+        "flux2_shift",
+        "ideogram4_shift",
+        "qwen_shift",
+        "krea2_shift",
+        "logsnr",
+        "qinglong_flux",
+        "qinglong_qwen",
+    }
+)
+
+
+def get_noise_coefficients_from_timesteps(
+    timestep_sampling: str,
+    noise_scheduler,
+    timesteps: torch.Tensor,
+    device: torch.device,
+    n_dim: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if timestep_sampling in BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+        sigma = ((timesteps.to(device=device, dtype=dtype) - 1.0) / 1000.0).clamp_(0.0, 1.0)
+        while sigma.ndim < n_dim:
+            sigma = sigma.unsqueeze(-1)
+        return sigma
+    return get_sigmas(noise_scheduler, timesteps, device, n_dim=n_dim, dtype=dtype)
+
+
 def compute_loss_weighting_for_sd3(weighting_scheme: str, noise_scheduler, timesteps, device, dtype):
     """Computes loss weighting scheme for SD3 training.
 

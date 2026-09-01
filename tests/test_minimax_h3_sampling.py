@@ -63,10 +63,11 @@ def test_shifted_schedule_rejects_out_of_contract_shifts(shift):
 
 
 def test_target_initialization_draws_video_then_audio_from_one_request_generator():
+    generator = create_sampling_generator(123)
     video, audio = initialize_target_latents(
         video_shape=(1, 24, 2, 4, 4),
         audio_shape=(1, 32, 2, 8),
-        generator=create_sampling_generator(123),
+        generator=generator,
         device=torch.device("cpu"),
         video_dtype=torch.float16,
         audio_dtype=torch.float32,
@@ -83,10 +84,11 @@ def test_condition_augmentation_draws_visuals_then_audio_from_the_same_request_s
     visuals = (torch.zeros(1, 24, 1, 4, 4), torch.zeros(1, 24, 1, 4, 4))
     audios = (torch.zeros(1, 32, 2, 8),)
 
+    generator = create_sampling_generator(456)
     augmented_visuals, augmented_audios = augment_condition_latents(
         visuals,
         audios,
-        generator=create_sampling_generator(456),
+        generator=generator,
         visual_clean=0.5,
         audio_clean=0.5,
         device=torch.device("cpu"),
@@ -158,6 +160,28 @@ def test_one_request_generator_feeds_target_noise_then_condition_noise_in_call_o
     assert torch.equal(visuals[0], replayed_visuals[0])
     assert not torch.equal(video, other_video)
     assert not torch.equal(visuals[0], other_visuals[0])
+
+
+def test_request_generator_does_not_advance_the_global_rng():
+    global_state = torch.random.get_rng_state().clone()
+    generator = create_sampling_generator(789)
+    initialize_target_latents(
+        video_shape=(1, 24, 2, 4, 4),
+        audio_shape=(1, 32, 2, 8),
+        generator=generator,
+        device=torch.device("cpu"),
+        video_dtype=torch.float32,
+        audio_dtype=torch.float32,
+    )
+    augment_condition_latents(
+        (torch.zeros(1, 24, 1, 4, 4),),
+        (torch.zeros(1, 32, 2, 8),),
+        generator=generator,
+        visual_clean=0.5,
+        audio_clean=0.5,
+        device=torch.device("cpu"),
+    )
+    assert torch.equal(torch.random.get_rng_state(), global_state)
 
 
 def test_joint_sampler_uses_native_dataward_predictions_and_each_sigma_delta():

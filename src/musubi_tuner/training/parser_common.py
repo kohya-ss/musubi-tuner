@@ -461,6 +461,12 @@ def _add_timestep_args(parser: argparse.ArgumentParser) -> None:
         " / タイムステップをサンプリングする方法：sigma、random uniform、random normalのsigmoid、sigmoidのシフト、flux shift。",
     )
     parser.add_argument(
+        "--xm_best_of_k",
+        type=int,
+        default=1,
+        help="Number of sequential Forward XM noise candidates; 1 disables XM. / 逐次Forward XMノイズ候補数。1でXMを無効化します。",
+    )
+    parser.add_argument(
         "--discrete_flow_shift",
         type=float,
         default=1.0,
