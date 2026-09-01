@@ -19,6 +19,8 @@ from musubi_tuner.modules.nvfp4_utils import (
     _roundup,
     apply_nvfp4_monkey_patch,
     dequantize_nvfp4,
+    nvfp4_linear_forward_patch,
+    nvfp4_linear_forward_patch_autograd,
     nvfp4_scaled_mm_available,
     nvfp4_scaled_mm_linear,
     quantize_nvfp4_activation,
@@ -545,3 +547,56 @@ def test_nvfp4_stream_quant_buffer_names_is_a_superset_of_both_call_sites():
     # Both call sites must import the SAME object (identity, not just equal contents) --
     # otherwise a future edit to one list silently doesn't propagate to the other.
     assert _TE_STREAM_QUANT_BUFFER_NAMES is NVFP4_STREAM_QUANT_BUFFER_NAMES
+
+
+def _build_patched_model_for_training_flag(tmp_path, training: bool, n=64, k=32):
+    from safetensors.torch import save_file
+
+    torch.manual_seed(0)
+    weight = torch.randn(n, k) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+    payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+    tensors = {
+        "proj.weight": packed,
+        "proj.weight_scale": block_scale,
+        "proj.weight_scale_2": tensor_scale,
+        "proj.comfy_quant": payload,
+    }
+    path = tmp_path / "artifact.safetensors"
+    save_file(tensors, str(path))
+
+    quantizer = NvFp4Quantizer()
+    state_dict = quantizer.load_and_quantize([str(path)], None)
+    model = _TinyDiTBlock()
+    apply_nvfp4_monkey_patch(
+        model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=training, training=training,
+    )
+    model.requires_grad_(False)
+    model.load_state_dict(state_dict, strict=True, assign=True)
+    return model
+
+
+def test_apply_nvfp4_monkey_patch_training_false_registers_no_backward_buffers():
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        model = _build_patched_model_for_training_flag(Path(tmp_path_str), training=False)
+
+    assert "nvfp4_weight_t" not in model.proj._buffers
+    assert "nvfp4_block_scale_t" not in model.proj._buffers
+    assert "nvfp4_scale_t" not in model.proj._buffers
+    assert model.proj.forward.__func__ is nvfp4_linear_forward_patch
+
+
+def test_apply_nvfp4_monkey_patch_training_true_registers_backward_buffers_and_autograd_forward():
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        model = _build_patched_model_for_training_flag(Path(tmp_path_str), training=True)
+
+    assert "nvfp4_weight_t" in model.proj._buffers
+    assert "nvfp4_block_scale_t" in model.proj._buffers
+    assert "nvfp4_scale_t" in model.proj._buffers
+    assert model.proj.forward.__func__ is nvfp4_linear_forward_patch_autograd
