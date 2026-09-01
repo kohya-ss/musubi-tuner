@@ -492,28 +492,27 @@ def test_nvfp4_linear_fn_backward_uses_stochastic_rounding_for_grad_out(monkeypa
 
 @requires_nvfp4_scaled_mm
 def test_nvfp4_linear_fn_backward_uses_orig_in_features_not_padded_weight_t_shape():
-    """Regression for punch-list issue 7: backward must use the real (possibly non-16-aligned)
-    K passed in at forward time, not weight_t_packed.shape[0] (which is always padded to a
-    multiple of 16). Constructs a weight_t_packed with MORE padded rows than the true
-    orig_in_features to prove the two are handled independently -- before the fix, this either
-    crashes (reshape size mismatch) or silently uses the padded width."""
+    """backward must use the real K passed in at forward time, not weight_t_packed.shape[0].
+    weight_t_packed is constructed here with 64 rows while the real K is 32, so the two values
+    can only match if orig_in_features is threaded through and used directly (K itself must be
+    a multiple of 32 -- scaled_mm's own GEMM requires that alignment, independent of the
+    16-row block padding this test targets)."""
     from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn, _quantize_nvfp4_2d
 
     device = "cuda"
     n, m = 64, 8
-    real_k = 51  # deliberately NOT a multiple of 16
+    real_k = 32
 
     torch.manual_seed(2)
     w = (torch.randn(n, real_k, device=device) * 0.02).to(torch.bfloat16)
     x = (torch.randn(m, real_k, device=device) * 0.5).to(torch.bfloat16).requires_grad_(True)
     packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(w.float())
 
-    # Build weight_t_packed directly (bypassing quantize_nvfp4_weight_columnwise's own K
-    # handling, which this test exists to pin down) as a [64, n] tensor -- 64 is the 16-padded
-    # form of real_k=51 (roundup(51, 16) == 64) -- so weight_t_packed.shape[0] == 64 != real_k.
+    # weight_t_packed constructed directly with 64 rows (independent of real_k=48), so
+    # weight_t_packed.shape[0] == 64 != real_k.
     w_t = (torch.randn(64, n, device=device) * 0.02).to(torch.bfloat16)
     packed_t, block_scale_t, tensor_scale_t, chunked_orig_rows = _quantize_nvfp4_2d(w_t.float())
-    assert chunked_orig_rows == 64  # sanity: this synthetic weight_t is already 16-aligned
+    assert chunked_orig_rows == 64
 
     out = NvFp4LinearFn.apply(x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n, real_k)
     out.sum().backward()

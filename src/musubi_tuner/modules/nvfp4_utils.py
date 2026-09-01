@@ -482,10 +482,9 @@ class NvFp4LinearFn(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             # grad_x = grad_out @ W, computed as the "linear" from N -> K using the
             # columnwise-quantized weight (packed as [K, N/2], i.e. a virtual Linear with
-            # in_features=N, out_features=K). ctx.orig_in_features is the real, unpadded K
-            # (threaded from the module's known _nvfp4_orig_shape at forward time) -- reading
-            # weight_t_packed.shape[0] instead would silently use the 16-row-padded K whenever
-            # K is not already a multiple of 16, producing a wrong-width grad_x.
+            # in_features=N, out_features=K). weight_t_packed is row-padded to a multiple of
+            # 16, so ctx.orig_in_features (the real K) must be passed explicitly here rather
+            # than read off weight_t_packed.shape[0].
             gx = nvfp4_scaled_mm_linear(
                 g2d, weight_t_packed, block_scale_t, tensor_scale_t, None, ctx.orig_in_features,
                 activation_quantize_fn=quantize_nvfp4_activation_stochastic,
