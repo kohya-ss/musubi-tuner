@@ -85,9 +85,13 @@ def test_quantize_nvfp4_activation_stochastic_block_scale_matches_deterministic(
 
 def test_quantize_nvfp4_activation_stochastic_is_random_across_calls():
     # Sanity check that this path is actually stochastic (not accidentally deterministic due
-    # to a bug reusing the same RNG state / always landing in the degenerate branch).
+    # to a bug reusing the same RNG state / always landing in the degenerate branch). Uses
+    # varied random magnitudes (not a uniform fill) so most elements land strictly between two
+    # representable E2M1 values after block/tensor-scale normalization -- a uniform fill
+    # normalizes every element to exactly the max representable magnitude (6.0), which is the
+    # degenerate branch and rounds deterministically.
     torch.manual_seed(0)
-    x = torch.full((16, 32), 0.3)  # a value strictly between two representable magnitudes
+    x = torch.rand(16, 32) * 0.3
     packed_a, _, _, _ = quantize_nvfp4_activation_stochastic(x)
     packed_b, _, _, _ = quantize_nvfp4_activation_stochastic(x)
     assert not torch.equal(packed_a, packed_b)
