@@ -1,10 +1,9 @@
 """Shared, architecture-agnostic quantization-scheme validation.
 
 fp8_scaled/convrot_int8/nvfp4 live in modules/ (not any one architecture's subpackage)
-because the schemes themselves are architecture-agnostic. Only Krea2 has adopted
-convrot_int8/nvfp4 so far, but the checks here have no Krea2-specific knowledge, so any
-future architecture wiring these schemes can call them directly instead of re-deriving
-the same mutual-exclusivity / runtime-requirement logic.
+because the schemes themselves are architecture-agnostic: the checks here have no
+architecture-specific knowledge, so any architecture wiring these schemes can call them
+directly instead of re-deriving the same mutual-exclusivity / runtime-requirement logic.
 
 Both functions are pure: they take already-computed primitives (booleans, a capability
 tuple) rather than calling torch.cuda or nvfp4_scaled_mm_available themselves. Callers

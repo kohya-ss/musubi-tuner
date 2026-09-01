@@ -31,15 +31,13 @@ calibration data, and dynamically quantizing BF16 weights would silently produce
 lower-quality model than ConvRot INT8.
 """
 
+import logging
 import os
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
-import logging
-
+from torch import nn
 from tqdm import tqdm
 
 from musubi_tuner.modules.comfy_quant_utils import (
@@ -341,10 +339,10 @@ def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 1024) -> Tuple
 def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Quantize a 2D activation to NVFP4 for scaled_mm.
 
-    Dispatches to the fused Triton kernel (nvfp4_kernels.triton_quantize_nvfp4) when available --
-    bit-exact with, and substantially faster per call than, the eager _quantize_nvfp4_2d path this
-    falls back to otherwise. See docs/superpowers/plans/2026-09-01-nvfp4-activation-quant-benchmark.md
-    and docs/superpowers/plans/2026-09-01-nvfp4-fused-activation-quant-kernel.md.
+    Dispatches to the fused Triton kernel (nvfp4_kernels.triton_quantize_nvfp4) when running on
+    CUDA with Triton available -- matches, and substantially faster per call than, the eager
+    _quantize_nvfp4_2d path this falls back to otherwise (CPU, or CUDA without Triton). See
+    nvfp4_kernels.py's module docstring for the fused kernel's accuracy guarantee.
     """
     from musubi_tuner.modules import nvfp4_kernels
 

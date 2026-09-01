@@ -1,13 +1,26 @@
 """Fused Triton kernel for NVFP4 activation quantization.
 
-Collapses nvfp4_utils._quantize_nvfp4_2d's five separate eager passes (per-block amax,
-F8_E4M3 scale cast, elementwise normalize+clamp, E2M1 bit conversion, nibble packing) plus
-the to_blocked swizzle permute into a single kernel launch, one Triton program per row. See
-docs/superpowers/specs/2026-09-01-nvfp4-fused-activation-quant-kernel-design.md.
+quantize_nvfp4_activation (nvfp4_utils.py) is called on both the forward path's `x` and the
+backward path's `grad_out` for every quantized Linear -- 224 Linears (8 per block x 28 blocks)
+in both directions for Krea2 -- so it dominates --nvfp4's per-step cost. The unfused, pure-
+PyTorch pipeline it replaces runs five separate eager passes over the input (per-block amax,
+F8_E4M3 scale cast, elementwise normalize+clamp, E2M1 bit conversion, nibble packing) plus a
+to_blocked permute for the cuBLAS swizzled scale layout -- each allocating its own full-size
+temporaries. This module fuses all of that into a single Triton kernel launch (one program per
+row), mirroring how convrot_int8_kernels.py's triton_quantize_rowwise fuses row-wise amax +
+INT8 quantize into one kernel. If Triton isn't importable (HAS_TRITON is False), callers fall
+back to nvfp4_utils._quantize_nvfp4_2d's original unfused implementation -- this module never
+changes quantize_nvfp4_activation's signature or return contract, only its internal dispatch.
 
 The E2M1 bit-conversion constants below are ported from nvfp4_utils._f32_to_e2m1_unpacked
-with ebits=2, mbits=1 fixed (E2M1 is the only format this kernel handles), verified
-bit-exact against that function by test_nvfp4_kernels.py::test_e2m1_code_matches_reference.
+with ebits=2, mbits=1 fixed (E2M1 is the only format this kernel handles). Verified against
+that reference by tests/test_nvfp4_kernels.py: bit-exact for small/edge-case inputs, and at
+real Krea2 tensor sizes matching to within a documented, bounded rounding-tie tolerance (an
+input value a few ULPs from an exact rounding boundary can land on opposite sides of it
+between Triton's in-kernel fp32 arithmetic and PyTorch/ATen's eager ops -- an unavoidable
+floating-point divergence between two independently-ordered implementations, not a logic
+bug; see the test file's _compare helper for the adjacency check that distinguishes this
+from an actual decoding error).
 """
 
 import struct
@@ -36,8 +49,9 @@ _E2M1_DENORM_MASK_F32 = struct.unpack("f", struct.pack("i", _E2M1_DENORM_MASK_IN
 if HAS_TRITON:
 
     @triton.jit
-    def _e2m1_magnitude_code(x_pos, DENORM_MASK_F32: tl.constexpr, DENORM_MASK_INT: tl.constexpr,
-                              ADDER_CONST: tl.constexpr, MAX_INT: tl.constexpr):
+    def _e2m1_magnitude_code(
+        x_pos, DENORM_MASK_F32: tl.constexpr, DENORM_MASK_INT: tl.constexpr, ADDER_CONST: tl.constexpr, MAX_INT: tl.constexpr
+    ):
         """x_pos: non-negative fp32 tensor. Returns uint8 magnitude code 0..7."""
         saturate_mask = x_pos >= 6.0
         denormal_mask = (~saturate_mask) & (x_pos < 1.0)
@@ -57,8 +71,14 @@ if HAS_TRITON:
         return result
 
     @triton.jit
-    def _e2m1_code(x, DENORM_MASK_F32: tl.constexpr, DENORM_MASK_INT: tl.constexpr,
-                    ADDER_CONST: tl.constexpr, MAX_INT: tl.constexpr, SIGN_SHIFT: tl.constexpr):
+    def _e2m1_code(
+        x,
+        DENORM_MASK_F32: tl.constexpr,
+        DENORM_MASK_INT: tl.constexpr,
+        ADDER_CONST: tl.constexpr,
+        MAX_INT: tl.constexpr,
+        SIGN_SHIFT: tl.constexpr,
+    ):
         """x: signed fp32 tensor. Returns uint8 E2M1 code 0..15 (sign in bit 3)."""
         x_bits = x.to(tl.int32, bitcast=True)
         sign_bit = x_bits & tl.full(x_bits.shape, -2147483648, tl.int32)
@@ -127,10 +147,15 @@ if HAS_TRITON:
         packed_col = group2 * 8 + pair2
         tl.store(packed_row_ptr + packed_col, packed_byte, mask=mask2)
 
-        # Swizzled (cuBLAS 128x4 tiled) scale write: closed-form index derived from
-        # nvfp4_utils.to_blocked's view/permute/reshape chain, verified in
-        # test_nvfp4_swizzle_index.py. Writing here directly avoids a separate to_blocked
-        # permute pass over the scale tensor.
+        # Swizzled (cuBLAS 128x4 tiled) scale write, computed in closed form instead of via a
+        # separate to_blocked permute pass. The scale tensor is tiled into 128-row x 4-col
+        # blocks, each tile flattened to 512 contiguous elements: row_block/col_block pick the
+        # tile; within it, r_in_tile (0..127) splits into a 32-row sub-block index `a` (0..3)
+        # and a row-within-sub-block `b` (0..31), c_in_tile (0..3) is the column within the
+        # tile, `n` is the tile's linear index among all tiles, and `d = a*4 + c_in_tile`
+        # combines the sub-block and column into the tile's inner 16-wide axis -- so
+        # flat = n*512 + b*16 + d lands each (row, col) scale at the same offset
+        # nvfp4_utils.to_blocked's view/permute/reshape chain would produce.
         row_block = (row // 128).to(tl.int32)
         r_in_tile = (row % 128).to(tl.int32)
         a = r_in_tile // 32
@@ -148,8 +173,9 @@ if HAS_TRITON:
 def triton_quantize_nvfp4(x: torch.Tensor, per_tensor_scale: torch.Tensor):
     """Fused NVFP4 quantize for a row-padded 2D fp32 tensor.
 
-    Bit-exact with nvfp4_utils._quantize_nvfp4_2d for the same (x, per_tensor_scale) --
-    see test_nvfp4_kernels.py.
+    Matches nvfp4_utils._quantize_nvfp4_2d for the same (x, per_tensor_scale) to within a
+    bounded rounding-tie tolerance at scale (bit-exact for small/edge-case inputs) -- see
+    test_nvfp4_kernels.py.
 
     Args:
         x: fp32 [rows, K]. rows must already be a multiple of 16 and K a multiple of 16
