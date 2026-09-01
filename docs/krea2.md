@@ -241,15 +241,15 @@ loss curveはfp8/bf16基準とほぼ一致します（backward両モードとも
 
 ### NVFP4 / NVFP4
 
-`--nvfp4` loads a ComfyUI pre-quantized NVFP4 (4-bit floating point, E2M1) DiT checkpoint and trains against it with true FP4x4 tensor-core GEMMs in both forward and backward (`torch.nn.functional.scaled_mm`). This is **not** a dynamic quantizer like `--fp8_scaled`/`--convrot_int8` — the checkpoint file dictates which Linears are NVFP4; there is no `--nvfp4` equivalent of ConvRot's target/exclude scope, and `dtype` is ignored for the quantized layers (same as `fp8_scaled`/`convrot_int8` — non-target weights keep their checkpoint dtype).
+`--nvfp4` loads a ComfyUI pre-quantized NVFP4 (4-bit floating point, E2M1) DiT checkpoint and trains against it with true FP4x4 tensor-core GEMMs in both forward and backward. Unlike `--fp8_scaled`/`--convrot_int8`, this isn't a dynamic quantizer — the checkpoint file decides which Linears are NVFP4 (no target/exclude scope like ConvRot's), and `dtype` is ignored for those layers (non-target weights keep their checkpoint dtype, same as the other schemes).
 
 Requirements and constraints:
-- **Hardware:** a Blackwell GPU (compute capability 10.0+). Older GPUs get a clear startup error rather than a cryptic `scaled_mm` failure mid-training.
-- **PyTorch:** 2.10+ (needs `torch.float4_e2m1fn_x2` and `torch.nn.functional.scaled_mm`).
+- **Hardware:** a Blackwell GPU (compute capability 10.0+). Older GPUs get a clear error at startup instead of failing mid-training.
+- **PyTorch:** 2.10+.
 - **Mutually exclusive** with `--fp8_base`/`--fp8_scaled`/`--convrot_int8` (choose one quantization scheme) and with `--turbo_dit` (not yet supported together).
-- **Cannot combine with `lora_weights`** (load-time LoRA merge) — pre-quantized NVFP4 weights cannot be merged into; attach LoRA as a separate trainable network via `--network_module` instead, same as this repo's normal LoRA training flow.
-- **Block swap requires `--block_swap_h2d_only`.** NVFP4 training keeps an extra columnwise (N-grouped) copy of each frozen weight for the backward pass; the default block-swap offloader doesn't know about it and would leave it GPU-resident for every block, defeating most of the memory savings. `--nvfp4 --blocks_to_swap N` without `--block_swap_h2d_only` is rejected at startup.
-- **`--nvfp4_columnwise_chunk_rows`** (default `1024`) bounds the transient GPU memory used while computing that columnwise copy at load time. The default is comfortable for typical Linear shapes; if NVFP4 loading OOMs on an unusually large model, lower this (e.g. to `256`-`512`).
+- **No LoRA merge at load time** — pre-quantized NVFP4 weights can't be merged into. Attach LoRA as a separate trainable network via `--network_module` instead, same as the repo's normal LoRA training flow.
+- **Requires `--block_swap_h2d_only` when using `--blocks_to_swap`.** NVFP4 training keeps an extra backward-only copy of each frozen weight that the default block-swap offloader can't handle correctly; `--nvfp4 --blocks_to_swap N` without `--block_swap_h2d_only` is rejected at startup.
+- **`--nvfp4_columnwise_chunk_rows`** (default `1024`) bounds the memory used to build that extra copy at load time. Lower it (e.g. `256`-`512`) if loading OOMs on an unusually large model.
 
 **Standalone inference is supported.** `krea2_generate_image.py` accepts `--nvfp4` (and `--convrot_int8`) to load a pre-quantized checkpoint directly for sampling, without going through the trainer's sample-image loop. See the `--nvfp4` / `--convrot_int8` flags documented in the [Inference](#inference--推論) section below.
 
@@ -258,15 +258,15 @@ Requirements and constraints:
 <details>
 <summary>日本語</summary>
 
-`--nvfp4`は、ComfyUIで事前量子化されたNVFP4（4-bit浮動小数点、E2M1）のDiTチェックポイントを読み込み、forward・backwardともに真のFP4x4 Tensor Core GEMM（`torch.nn.functional.scaled_mm`）で学習します。`--fp8_scaled`/`--convrot_int8`のような動的量子化ではありません——どのLinearをNVFP4にするかはチェックポイントファイル側が決めており、ConvRotのようなtarget/excludeスコープの指定はありません。量子化対象レイヤーでは`dtype`は無視されます（`fp8_scaled`/`convrot_int8`と同様、対象外の重みはチェックポイントのdtypeのまま保持されます）。
+`--nvfp4`は、ComfyUIで事前量子化されたNVFP4（4-bit浮動小数点、E2M1）のDiTチェックポイントを読み込み、forward・backwardともに真のFP4x4 Tensor Core GEMMで学習します。`--fp8_scaled`/`--convrot_int8`のような動的量子化ではありません——どのLinearをNVFP4にするかはチェックポイントファイル側が決めており、ConvRotのようなtarget/excludeスコープの指定はありません。量子化対象レイヤーでは`dtype`は無視されます（対象外の重みはチェックポイントのdtypeのまま保持されます。他の方式と同様です）。
 
 要件と制約:
-- **ハードウェア:** Blackwell GPU（compute capability 10.0以上）が必要です。古いGPUでは、学習途中の分かりにくい`scaled_mm`エラーではなく、起動時に明確なエラーが表示されます。
-- **PyTorch:** 2.10以降が必要です（`torch.float4_e2m1fn_x2`と`torch.nn.functional.scaled_mm`を使用）。
+- **ハードウェア:** Blackwell GPU（compute capability 10.0以上）が必要です。古いGPUでは、学習途中で失敗する代わりに起動時に明確なエラーが表示されます。
+- **PyTorch:** 2.10以降が必要です。
 - `--fp8_base`/`--fp8_scaled`/`--convrot_int8`とは**併用できません**（量子化方式は一つだけ選択してください）。`--turbo_dit`とも現時点では併用できません。
-- **`lora_weights`（ロード時LoRAマージ）とは併用できません**——事前量子化されたNVFP4の重みにはマージできないため、通常のLoRA学習フローと同様に`--network_module`で別の学習可能ネットワークとしてLoRAをアタッチしてください。
-- **block swapには`--block_swap_h2d_only`が必要です。** NVFP4学習では、backward用に各frozen重みのcolumnwise（N軸でグループ化）コピーを追加で保持します。デフォルトのblock-swapオフローダーはこれを認識しないため、各ブロックでGPU上に残ってしまい、メモリ削減効果のほとんどが失われます。`--block_swap_h2d_only`を指定しない`--nvfp4 --blocks_to_swap N`は起動時に拒否されます。
-- **`--nvfp4_columnwise_chunk_rows`**（デフォルト`1024`）は、ロード時にこのcolumnwiseコピーを計算する際の一時的なGPUメモリ使用量を制限します。デフォルト値は一般的なLinear形状であれば十分ですが、異常に大きなモデルでNVFP4のロードがOOMする場合は、値を下げてください（例：`256`〜`512`）。
+- **ロード時のLoRAマージはできません**——事前量子化されたNVFP4の重みにはマージできないため、`--network_module`で別の学習可能ネットワークとしてLoRAをアタッチしてください（通常のLoRA学習フローと同様）。
+- **`--blocks_to_swap`使用時は`--block_swap_h2d_only`が必要です。** NVFP4学習では各frozen重みのbackward専用コピーを追加で保持しており、デフォルトのblock-swapオフローダーはこれを正しく扱えません。`--block_swap_h2d_only`を指定しない`--nvfp4 --blocks_to_swap N`は起動時に拒否されます。
+- **`--nvfp4_columnwise_chunk_rows`**（デフォルト`1024`）は、ロード時にこの追加コピーを構築する際のメモリ使用量を制限します。異常に大きなモデルでロードがOOMする場合は値を下げてください（例：`256`〜`512`）。
 
 **単体推論に対応しています。** `krea2_generate_image.py`は`--nvfp4`（および`--convrot_int8`）を受け付け、学習中のサンプル画像生成ループを経由せずに、事前量子化されたチェックポイントを直接読み込んでサンプリングできます。詳細は下記の[推論](#inference--推論)セクションの`--nvfp4` / `--convrot_int8`フラグの説明を参照してください。
 
