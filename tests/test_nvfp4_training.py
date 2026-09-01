@@ -73,6 +73,31 @@ def test_quantize_nvfp4_weight_columnwise_roundtrip_matches_rowwise():
     assert rel_err_between < 0.3
 
 
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        pytest.param(1536, 6144, id="N<K-krea2-attn-wk-wv-shape"),
+        pytest.param(6144, 1536, id="N>K"),
+        pytest.param(2048, 2048, id="N==K"),
+        pytest.param(48, 80, id="non-power-of-two-16-multiples"),
+    ],
+)
+def test_quantize_nvfp4_weight_columnwise_roundtrip_matches_rowwise_across_shapes(n, k):
+    w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
+
+    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(
+        packed, block_scale, tensor_scale, (n, k)
+    )
+
+    w_deq = dequantize_nvfp4(packed, block_scale, tensor_scale, (n, k), torch.float32)
+    w_t_deq = dequantize_nvfp4(packed_t, block_scale_t, tensor_scale_t, (k, n), torch.float32).t()
+
+    rel_err_to_original = (w_deq - w).norm() / w.norm()
+    rel_err_between = (w_deq - w_t_deq).norm() / w_deq.norm()
+    assert rel_err_to_original < 0.2
+    assert rel_err_between < 0.3
+
+
 def test_quantize_nvfp4_weight_columnwise_rejects_non_multiple_of_block_size():
     bad_n, k = 50, 32  # bad_n=50 is NOT a multiple of 16 -- this is what triggers the check
     _w, packed, block_scale, tensor_scale = _make_quantized_weight(64, k)
