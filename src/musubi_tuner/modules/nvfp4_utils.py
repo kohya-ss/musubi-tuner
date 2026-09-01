@@ -239,6 +239,33 @@ def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tens
     return _quantize_nvfp4_2d(x)
 
 
+def quantize_nvfp4_weight_columnwise(
+    weight_packed: torch.Tensor,
+    block_scale: torch.Tensor,
+    per_tensor_scale: torch.Tensor,
+    orig_shape: Tuple[int, int],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Re-quantize a K-grouped (row-wise) NVFP4 weight along its N axis (out_features).
+
+    NVFP4 block scales are computed along the forward contraction axis (K); the backward
+    GEMM (``grad_x = grad_out @ W``) contracts over N instead, so the existing block scale
+    cannot be reused via a plain transpose the way ConvRot INT8's single-byte-per-element
+    weight can (``wq.t().contiguous()``) -- a transposed *view* of nibble-packed FP4 data
+    would pair up the wrong elements. This produces a second, independently computed NVFP4
+    quantization grouped along N (mirrors Transformer Engine's rowwise/columnwise tensor
+    pattern). Call once per frozen weight at load time; the result never changes afterward.
+    """
+    n, k = orig_shape
+    if n % NVFP4_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"NVFP4 columnwise requant needs out_features {n} to be a multiple of {NVFP4_BLOCK_SIZE}, got {n}"
+        )
+    weight_bf16 = dequantize_nvfp4(weight_packed, block_scale, per_tensor_scale, orig_shape, torch.bfloat16)
+    weight_t = weight_bf16.t().contiguous()  # [K, N]
+    packed_t, block_scale_t, tensor_scale_t, _ = _quantize_nvfp4_2d(weight_t)
+    return packed_t, block_scale_t, tensor_scale_t
+
+
 def nvfp4_scaled_mm_available() -> bool:
     return hasattr(torch, "float4_e2m1fn_x2") and hasattr(torch.nn.functional, "scaled_mm")
 
