@@ -5,9 +5,12 @@ checkpoint, Qwen-Image VAE, and Qwen3-VL text encoder are passed via argparse, a
 the model code lives under `musubi_tuner.krea2`.
 
 Memory-efficient inference is supported for the DiT: dynamic scaled fp8
-(`--fp8_scaled`) and block swap (`--blocks_to_swap`, CPU offloading of the main
-SingleStreamBlocks). Trained LoRA(s) are merged into the base weights at load time
-(the only correct route under fp8).
+(`--fp8_scaled`), ConvRot int8 (`--convrot_int8`), pre-quantized NVFP4
+(`--nvfp4`), and block swap (`--blocks_to_swap`, CPU offloading of the main
+SingleStreamBlocks). Trained LoRA(s) are merged into the base weights at load
+time under fp8/ConvRot-int8 (the only correct route for those schemes); NVFP4
+cannot be combined with `--lora_weight` since pre-quantized NVFP4 weights
+cannot be merged into.
 
 Memory model: the DiT stays resident on the GPU (with block swap as needed), while the
 Text Encoder and VAE shuttle between CPU and GPU. The encoder is kept on CPU and moved
@@ -104,11 +107,13 @@ def build_pipeline(
 ):
     """Build the autoencoder and MMDiT and load weights (the text encoder is loaded separately).
 
-    The DiT is loaded with optional scaled fp8 and/or block swap and stays resident on the
-    device. Trained LoRA(s) are merged into the base weights inside the loader (works for fp8
-    too). The VAE is kept on CPU here and moved to the device for decoding by ``sample`` (then
-    back to CPU). When ``blocks_to_swap > 0`` a prebuilt ``swap_config`` (BlockSwapConfig)
-    selects the offloader policy (pinned memory, H2D-only, etc.).
+    The DiT is loaded with optional scaled fp8, ConvRot int8, or pre-quantized NVFP4, and/or
+    block swap, and stays resident on the device. Under fp8/ConvRot-int8, trained LoRA(s) are
+    merged into the base weights inside the loader; under NVFP4 this loader does not accept
+    ``lora_weights`` at all, since pre-quantized NVFP4 weights cannot be merged into. The VAE is
+    kept on CPU here and moved to the device for decoding by ``sample`` (then back to CPU). When
+    ``blocks_to_swap > 0`` a prebuilt ``swap_config`` (BlockSwapConfig) selects the offloader
+    policy (pinned memory, H2D-only, etc.).
     """
     dev = torch.device(device)
 

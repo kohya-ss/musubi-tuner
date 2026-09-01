@@ -709,11 +709,11 @@ def test_lora_gradient_flows_through_nvfp4_linear_end_to_end():
 
 
 def test_nvfp4_swap_tensor_selector_follows_only_forward_buffers_under_training_false():
-    """krea2_mmdit.SingleStreamDiT.enable_block_swap auto-substitutes
-    nvfp4_swap_tensor_selector whenever any Linear in the block list is NVFP4-patched
-    (block_has_nvfp4_patched_linear), regardless of training flag. Under training=False the
-    selector must follow only the forward buffers (nvfp4_block_scale/nvfp4_scale) -- the
-    training-only columnwise ones were never registered, so there's nothing stale to select."""
+    """Covers block_has_nvfp4_patched_linear and nvfp4_swap_tensor_selector directly (not
+    krea2_mmdit.SingleStreamDiT.enable_block_swap's substitution wiring) against a model built
+    with training=False. Under training=False the selector must follow only the forward buffers
+    (nvfp4_block_scale/nvfp4_scale) -- the training-only columnwise ones were never registered,
+    so there's nothing stale to select."""
     import tempfile
     from pathlib import Path
 

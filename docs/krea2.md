@@ -251,7 +251,7 @@ Requirements and constraints:
 - **Block swap requires `--block_swap_h2d_only`.** NVFP4 training keeps an extra columnwise (N-grouped) copy of each frozen weight for the backward pass; the default block-swap offloader doesn't know about it and would leave it GPU-resident for every block, defeating most of the memory savings. `--nvfp4 --blocks_to_swap N` without `--block_swap_h2d_only` is rejected at startup.
 - **`--nvfp4_columnwise_chunk_rows`** (default `1024`) bounds the transient GPU memory used while computing that columnwise copy at load time. The default is comfortable for typical Linear shapes; if NVFP4 loading OOMs on an unusually large model, lower this (e.g. to `256`-`512`).
 
-**Standalone inference is not supported.** `krea2_generate_image.py` does not accept `nvfp4=`; NVFP4-trained LoRAs can only be sampled during training via the trainer's own sample-image loop. This is a deliberate scope decision (inference was out of scope for the original NVFP4 training feature), not a bug — revisit if standalone sampling against an NVFP4 base becomes needed.
+**Standalone inference is supported.** `krea2_generate_image.py` accepts `--nvfp4` (and `--convrot_int8`) to load a pre-quantized checkpoint directly for sampling, without going through the trainer's sample-image loop. See the `--nvfp4` / `--convrot_int8` flags documented in the [Inference](#inference--推論) section below.
 
 **Performance note:** NVFP4's activation quantizer now dispatches to a fused Triton kernel (falling back to a slower pure-PyTorch path when Triton/CUDA isn't available), which closed an earlier gap where NVFP4 measured slower than `--convrot_int8` despite its half bit-width. On real Krea2 Linear shapes, NVFP4 now beats `--convrot_int8` on both per-call time and peak memory. See `docs/superpowers/plans/2026-09-01-nvfp4-activation-quant-benchmark.md` for the investigation.
 
@@ -268,7 +268,7 @@ Requirements and constraints:
 - **block swapには`--block_swap_h2d_only`が必要です。** NVFP4学習では、backward用に各frozen重みのcolumnwise（N軸でグループ化）コピーを追加で保持します。デフォルトのblock-swapオフローダーはこれを認識しないため、各ブロックでGPU上に残ってしまい、メモリ削減効果のほとんどが失われます。`--block_swap_h2d_only`を指定しない`--nvfp4 --blocks_to_swap N`は起動時に拒否されます。
 - **`--nvfp4_columnwise_chunk_rows`**（デフォルト`1024`）は、ロード時にこのcolumnwiseコピーを計算する際の一時的なGPUメモリ使用量を制限します。デフォルト値は一般的なLinear形状であれば十分ですが、異常に大きなモデルでNVFP4のロードがOOMする場合は、値を下げてください（例：`256`〜`512`）。
 
-**単体推論は非対応です。** `krea2_generate_image.py`は`nvfp4=`引数を受け付けません。NVFP4で学習したLoRAは、学習中のサンプル画像生成ループでのみサンプリングできます。これはバグではなく意図的なスコープ決定です（元のNVFP4学習機能の設計時点で推論は対象外とされました）——単体でのNVFP4ベースサンプリングが必要になった場合は再検討してください。
+**単体推論に対応しています。** `krea2_generate_image.py`は`--nvfp4`（および`--convrot_int8`）を受け付け、学習中のサンプル画像生成ループを経由せずに、事前量子化されたチェックポイントを直接読み込んでサンプリングできます。詳細は下記の[推論](#inference--推論)セクションの`--nvfp4` / `--convrot_int8`フラグの説明を参照してください。
 
 **パフォーマンスに関する注記:** NVFP4のactivation量子化処理は現在、融合Tritonカーネルにディスパッチされます（Triton/CUDAが利用できない環境では、より低速な純粋PyTorch経路にフォールバックします）。これにより、以前はビット幅が半分にもかかわらず`--convrot_int8`より遅かったギャップが解消されました。実際のKrea2 Linear形状では、NVFP4は1回あたりの処理時間・ピークメモリの両方で`--convrot_int8`を上回ります。詳細は`docs/superpowers/plans/2026-09-01-nvfp4-activation-quant-benchmark.md`の調査を参照してください。
 
@@ -389,12 +389,14 @@ python src/musubi_tuner/krea2_generate_image.py \
 - `--width` / `--height` default to 1024. `--num-images` generates multiple images (image *i* uses `--seed` + *i*).
 - `--save_path` is a **directory** (required, created if missing); file names are auto-generated as `<timestamp>_<seed>.png`.
 - `--seed` is the base seed; image *i* uses `--seed` + *i*. **If omitted, a random seed is used** (logged, and reflected in the file name). In `--from_file` / `--interactive`, prompts without a per-line `--d` each draw a fresh random seed.
-- LoRA loading: `--lora_weight` (one or more) and `--lora_multiplier`. LoRA is merged into the base DiT weights at load time (the only correct route under fp8).
+- LoRA loading: `--lora_weight` (one or more) and `--lora_multiplier`. LoRA is merged into the base DiT weights at load time (the only correct route under fp8/ConvRot-int8). **Not supported with `--nvfp4`** — pre-quantized NVFP4 weights cannot be merged into; use the original BF16 (or `--fp8_scaled`/`--convrot_int8`) weights with `--lora_weight` instead.
 - **Memory-efficient inference (fits a 24GB card):**
   - `--fp8_scaled` quantizes the 28 main blocks to dynamic scaled fp8 at load time (K2 supports only scaled fp8; the text-fusion transformer stays bf16). Roughly halves DiT weight memory.
-  - `--blocks_to_swap N` offloads `N` of the main blocks to CPU (max **26** = 28 − 2), trading speed for VRAM. Composes with `--fp8_scaled`.
+  - `--convrot_int8` is an alternative to fp8 for the DiT base weights (cannot be combined with `--fp8_scaled`/`--nvfp4`). Quantizes per-block Linears at load time with Hadamard rotation + int8; forward runs a fused Triton int8 GEMM (requires `triton`, falls back to a slower dequantized bf16 matmul without it). `--convrot_int8_bwd` (`bf16` default or `int8`) is unused at inference — it only affects backward-pass behavior during training — and is kept purely for parity with the trainer's flag shape.
+  - `--nvfp4` loads a ComfyUI pre-quantized NVFP4 (4-bit floating point, E2M1) DiT checkpoint and runs inference against it with true FP4x4 tensor-core forward (`torch.nn.functional.scaled_mm`); requires PyTorch 2.10+ and a Blackwell GPU (compute capability 10.0+). Cannot be combined with `--fp8_scaled`/`--convrot_int8`, or with `--lora_weight`. `--nvfp4_columnwise_chunk_rows` (default `1024`) is inert at inference — no columnwise buffers are built there, since that copy only exists to support the training backward pass — and is kept for parity with the trainer's flag shape.
+  - `--blocks_to_swap N` offloads `N` of the main blocks to CPU (max **26** = 28 − 2), trading speed for VRAM. Composes with `--fp8_scaled`/`--convrot_int8`/`--nvfp4`.
   - `--use_pinned_memory_for_block_swap` uses pinned host memory for faster H2D copies (more host RAM).
-  - `--block_swap_h2d_only` streams blocks Host→Device only (keeping a CPU master, no device→host copy), which is always safe at inference since the base weights are frozen. `--block_swap_ring_size N` sets the number of GPU ring buffers (2 = transfer/compute overlap, 1 = minimal memory).
+  - `--block_swap_h2d_only` streams blocks Host→Device only (keeping a CPU master, no device→host copy). The DiT base weights are always frozen at inference, so this is always safe here and is generally recommended whenever using `--blocks_to_swap` at inference, regardless of quantization scheme (fp8/ConvRot-int8/NVFP4 or none) — frozen weights never need the D2H half of a swap. It is a recommendation, not a requirement: unlike training, standalone inference does not enforce `--block_swap_h2d_only` when `--blocks_to_swap` is set. `--block_swap_ring_size N` sets the number of GPU ring buffers (2 = transfer/compute overlap, 1 = minimal memory).
   - **Memory model:** the DiT stays resident on the GPU (with block swap as needed) for the whole run, while the text encoder (Qwen3-VL-4B, ~8GB) and the VAE shuttle between CPU and GPU. The encoder is kept on CPU and moved to the GPU only to encode each prompt; the VAE is kept on CPU and moved to the GPU only to decode, then moved back. So the headroom for encoding/decoding comes from running the DiT under `--fp8_scaled` and/or `--blocks_to_swap` — not from evacuating the ~24GB DiT to host RAM. (Block swap and/or fp8 is therefore effectively required to fit a 24GB card; without it the DiT alone leaves no room for the decode.)
   - `--text_encoder_cpu` encodes prompts on CPU instead of moving the encoder to the GPU. Use it when the encoder (on the GPU, alongside the resident DiT) does not fit; it is slower but keeps the encode off the GPU.
 
@@ -413,12 +415,14 @@ python src/musubi_tuner/krea2_generate_image.py \
 - `--width` / `--height`のデフォルトは1024です。`--num-images`で複数画像を生成します（画像 *i* は`--seed` + *i* を使用）。
 - `--save_path`は保存先の**ディレクトリ**です（必須、なければ作成）。ファイル名は`<タイムスタンプ>_<seed>.png`の形式で自動生成されます。
 - `--seed`はベースシードで、画像 *i* は`--seed` + *i* を使用します。**省略した場合はランダムなシードが使われます**（ログに出力され、ファイル名にも反映されます）。`--from_file` / `--interactive`では、行ごとの`--d`がないプロンプトはそれぞれ新しいランダムシードを引きます。
-- LoRAの読み込み: `--lora_weight`（1つ以上）と`--lora_multiplier`。LoRAは読み込み時にベースのDiT重みにマージされます（fp8でも正しく動作する唯一の方法）。
+- LoRAの読み込み: `--lora_weight`（1つ以上）と`--lora_multiplier`。LoRAは読み込み時にベースのDiT重みにマージされます（fp8/ConvRot-int8でも正しく動作する唯一の方法）。**`--nvfp4`とは併用できません**——事前量子化されたNVFP4の重みにはマージできないため、`--lora_weight`を使う場合は元のBF16（または`--fp8_scaled`/`--convrot_int8`）の重みを使用してください。
 - **省メモリ推論（24GBに収まります）:**
   - `--fp8_scaled`で28個のメインブロックを読み込み時に動的スケールfp8に量子化します（K2はscaled fp8のみ対応。text-fusion transformerはbf16のまま）。DiTの重みメモリがおよそ半減します。
-  - `--blocks_to_swap N`で`N`個のメインブロックをCPUにオフロードします（最大 **26** = 28 − 2）。速度と引き換えにVRAMを削減します。`--fp8_scaled`と併用できます。
+  - `--convrot_int8`はDiTベース重みに対するfp8の代替手段です（`--fp8_scaled`/`--nvfp4`とは併用できません）。読み込み時にHadamard回転+int8で各ブロックのLinearを量子化し、forwardは融合Triton int8 GEMMで実行します（`triton`が必要。ない場合はより低速な逆量子化bf16 matmulにフォールバック）。`--convrot_int8_bwd`（デフォルト`bf16`または`int8`）は推論では使用されません——学習時のbackward挙動にのみ影響します——トレーナーのフラグ形状に合わせるためだけに存在します。
+  - `--nvfp4`はComfyUIで事前量子化されたNVFP4（4-bit浮動小数点、E2M1）のDiTチェックポイントを読み込み、真のFP4x4 Tensor Core forward（`torch.nn.functional.scaled_mm`）で推論します。PyTorch 2.10以降とBlackwell GPU（compute capability 10.0以上）が必要です。`--fp8_scaled`/`--convrot_int8`、および`--lora_weight`とは併用できません。`--nvfp4_columnwise_chunk_rows`（デフォルト`1024`）は推論では無効です——このコピーは学習時のbackwardパスのためだけに存在し、推論ではcolumnwiseバッファは構築されません——トレーナーのフラグ形状に合わせるためだけに存在します。
+  - `--blocks_to_swap N`で`N`個のメインブロックをCPUにオフロードします（最大 **26** = 28 − 2）。速度と引き換えにVRAMを削減します。`--fp8_scaled`/`--convrot_int8`/`--nvfp4`と併用できます。
   - `--use_pinned_memory_for_block_swap`でpinnedホストメモリを使い、H2Dコピーを高速化します（ホストRAMを多く使用）。
-  - `--block_swap_h2d_only`はブロックをHost→Deviceのみでストリーミングします（CPUマスターを保持し、device→hostコピーを行わない）。推論ではベース重みが凍結されているため常に安全です。`--block_swap_ring_size N`でGPUリングバッファ数を設定します（2で転送と計算をオーバーラップ、1で最小メモリ）。
+  - `--block_swap_h2d_only`はブロックをHost→Deviceのみでストリーミングします（CPUマスターを保持し、device→hostコピーを行わない）。推論ではベース重みが常に凍結されているため常に安全であり、量子化方式（fp8/ConvRot-int8/NVFP4、またはなし）にかかわらず`--blocks_to_swap`使用時には一般的に推奨されます——凍結された重みはswapのD2H側を必要としないためです。これは推奨であり必須ではありません。学習時とは異なり、単体推論では`--blocks_to_swap`指定時に`--block_swap_h2d_only`は強制されません。`--block_swap_ring_size N`でGPUリングバッファ数を設定します（2で転送と計算をオーバーラップ、1で最小メモリ）。
   - **メモリモデル:** DiTは実行中ずっとGPUに常駐させ（必要に応じてblock swap）、テキストエンコーダ（Qwen3-VL-4B、約8GB）とVAEがCPUとGPUを行き来します。エンコーダはCPUに置き、各プロンプトのエンコード時のみGPUへ移動します。VAEもCPUに置き、デコード時のみGPUへ移動してから戻します。したがってエンコード/デコードのためのVRAMの余裕は、`--fp8_scaled`や`--blocks_to_swap`でDiTを動かすことから生まれます（約24GBのDiTをホストRAMへ退避させるのではありません）。このため24GBに収めるにはblock swapおよび/またはfp8が実質必須です（使わない場合、DiTだけでデコードの余地が残りません）。
   - `--text_encoder_cpu`はエンコーダをGPUに移動せずCPUでエンコードします。常駐DiTと並んでエンコーダがGPUに載りきらない場合に使用します。低速ですがエンコードをGPUの外に出せます。
 

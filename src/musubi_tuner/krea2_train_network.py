@@ -79,13 +79,11 @@ class Krea2NetworkTrainer(NetworkTrainer):
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,
             nvfp4=args.nvfp4,
-            # getattr, not args.nvfp4_columnwise_chunk_rows directly: the original code only
-            # touched this attribute inside `if args.nvfp4 and (...)`, so Python's `and`
-            # short-circuit meant it was never accessed when nvfp4=False. This call evaluates
-            # all arguments eagerly, so a bare SimpleNamespace test fixture without this attr
-            # set (tests/test_krea2_convrot_int8.py's _trainer_args, used for convrot-only
-            # cases) would otherwise raise AttributeError. Matches the existing defensive
-            # getattr(args, "block_swap_h2d_only", False) pattern just below.
+            # getattr, not args.nvfp4_columnwise_chunk_rows directly: this call evaluates all
+            # arguments eagerly regardless of nvfp4's value, but test fixtures (bare
+            # SimpleNamespace, e.g. tests/test_krea2_convrot_int8.py's _trainer_args for
+            # convrot-only cases) may omit this attribute, so default it. Matches the existing
+            # defensive getattr(args, "block_swap_h2d_only", False) pattern just below.
             nvfp4_columnwise_chunk_rows=getattr(args, "nvfp4_columnwise_chunk_rows", 1024),
             turbo_dit=args.turbo_dit,
             scaled_mm_available=nvfp4_scaled_mm_available(),

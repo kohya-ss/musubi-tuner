@@ -3,6 +3,7 @@
 import argparse
 
 import pytest
+import torch
 
 from musubi_tuner import krea2_generate_image
 from musubi_tuner.krea2 import krea2_utils
@@ -10,7 +11,7 @@ from musubi_tuner.krea2 import krea2_utils
 
 def _parser():
     parser = argparse.ArgumentParser()
-    return krea2_generate_image.parse_args_setup(parser)  # see Step 3 for this helper's introduction
+    return krea2_generate_image.parse_args_setup(parser)
 
 
 def test_parser_has_nvfp4_and_convrot_int8_flags():
@@ -35,8 +36,7 @@ def test_parser_has_nvfp4_and_convrot_int8_flags():
     assert args.nvfp4_columnwise_chunk_rows == 1024
 
 
-def test_validate_rejects_nvfp4_and_convrot_together(monkeypatch):
-    monkeypatch.setattr(krea2_generate_image, "nvfp4_scaled_mm_available", lambda: True)
+def test_validate_rejects_nvfp4_and_convrot_together():
     with pytest.raises(ValueError, match="mutually exclusive"):
         krea2_utils.validate_krea2_quantization_args(
             fp8_scaled=False,
@@ -73,6 +73,10 @@ def test_validate_allows_nvfp4_with_block_swap_and_no_h2d_only_at_inference():
 
 def test_main_rejects_nvfp4_with_lora_weight(monkeypatch, tmp_path):
     monkeypatch.setattr(krea2_generate_image, "nvfp4_scaled_mm_available", lambda: True)
+    # Force device_capability to None regardless of the actual GPU present on the machine running
+    # this test, so the NVFP4 Blackwell-hardware check is a no-op and the --lora_weight rejection
+    # (which validate_nvfp4_requirements runs before) is what actually gets exercised.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     save_path = tmp_path / "out"
     lora_path = tmp_path / "lora.safetensors"
     lora_path.write_bytes(b"")  # existence only, never opened -- rejected before load
@@ -102,4 +106,4 @@ def test_main_rejects_nvfp4_with_lora_weight(monkeypatch, tmp_path):
         bell=False,
     )
     with pytest.raises(ValueError, match="--lora_weight"):
-        krea2_generate_image.main(args)  # see Step 3: main() accepts a pre-built args for testability
+        krea2_generate_image.main(args)  # main() accepts a pre-built args namespace for testability
