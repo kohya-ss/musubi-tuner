@@ -7,10 +7,9 @@ requiring real FP4 tensor-core execution are marked ``requires_nvfp4_scaled_mm``
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from musubi_tuner.modules.nvfp4_utils import (
-    NVFP4_BLOCK_SIZE,
     NVFP4_STREAM_QUANT_BUFFER_NAMES,
     NvFp4LinearFn,
     NvFp4Quantizer,
@@ -18,11 +17,13 @@ from musubi_tuner.modules.nvfp4_utils import (
     _quantize_nvfp4_2d_chunked,
     _roundup,
     apply_nvfp4_monkey_patch,
+    block_has_nvfp4_patched_linear,
     dequantize_nvfp4,
     nvfp4_linear_forward_patch,
     nvfp4_linear_forward_patch_autograd,
     nvfp4_scaled_mm_available,
     nvfp4_scaled_mm_linear,
+    nvfp4_swap_tensor_selector,
     quantize_nvfp4_activation,
     quantize_nvfp4_weight_columnwise,
 )
@@ -44,9 +45,7 @@ def test_quantize_nvfp4_weight_columnwise_shapes():
     n, k = 64, 32
     _w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
 
-    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(
-        packed, block_scale, tensor_scale, (n, k)
-    )
+    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (n, k))
 
     assert packed_t.dtype is torch.uint8
     assert packed_t.shape == (k, n // 2)
@@ -59,9 +58,7 @@ def test_quantize_nvfp4_weight_columnwise_roundtrip_matches_rowwise():
     n, k = 64, 32
     w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
 
-    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(
-        packed, block_scale, tensor_scale, (n, k)
-    )
+    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (n, k))
 
     w_deq = dequantize_nvfp4(packed, block_scale, tensor_scale, (n, k), torch.float32)
     w_t_deq = dequantize_nvfp4(packed_t, block_scale_t, tensor_scale_t, (k, n), torch.float32).t()
@@ -87,9 +84,7 @@ def test_quantize_nvfp4_weight_columnwise_roundtrip_matches_rowwise():
 def test_quantize_nvfp4_weight_columnwise_roundtrip_matches_rowwise_across_shapes(n, k):
     w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
 
-    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(
-        packed, block_scale, tensor_scale, (n, k)
-    )
+    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (n, k))
 
     w_deq = dequantize_nvfp4(packed, block_scale, tensor_scale, (n, k), torch.float32)
     w_t_deq = dequantize_nvfp4(packed_t, block_scale_t, tensor_scale_t, (k, n), torch.float32).t()
@@ -113,9 +108,7 @@ def test_quantize_nvfp4_2d_chunked_matches_unchunked():
     x = torch.randn(550, 64) * 0.03
 
     packed_ref, scale_ref, tensor_scale_ref, orig_rows_ref = _quantize_nvfp4_2d(x)
-    packed_chunked, scale_chunked, tensor_scale_chunked, orig_rows_chunked = _quantize_nvfp4_2d_chunked(
-        x, chunk_rows=128
-    )
+    packed_chunked, scale_chunked, tensor_scale_chunked, orig_rows_chunked = _quantize_nvfp4_2d_chunked(x, chunk_rows=128)
 
     assert orig_rows_chunked == orig_rows_ref == 550
     assert torch.equal(tensor_scale_chunked, tensor_scale_ref)
@@ -205,7 +198,12 @@ def _build_training_patched_model(tmp_path, n=64, k=32):
     state_dict = quantizer.load_and_quantize([str(path)], None)
     model = _TinyDiTBlock()
     apply_nvfp4_monkey_patch(
-        model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+        model,
+        state_dict,
+        quantizer.nvfp4_module_shapes,
+        [],
+        use_scaled_mm=True,
+        training=True,
     )
     model.requires_grad_(False)
     model.load_state_dict(state_dict, strict=True, assign=True)
@@ -254,7 +252,12 @@ def test_training_patch_requires_scaled_mm():
 
         with pytest.raises(ValueError, match="use_scaled_mm=True"):
             apply_nvfp4_monkey_patch(
-                model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=False, training=True,
+                model,
+                state_dict,
+                quantizer.nvfp4_module_shapes,
+                [],
+                use_scaled_mm=False,
+                training=True,
             )
 
 
@@ -310,7 +313,12 @@ def test_training_patch_calc_device_computes_on_gpu_but_result_stays_on_original
 
         model = _TinyDiTBlock()
         apply_nvfp4_monkey_patch(
-            model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+            model,
+            state_dict,
+            quantizer.nvfp4_module_shapes,
+            [],
+            use_scaled_mm=True,
+            training=True,
             calc_device="cuda",
         )
         model.requires_grad_(False)
@@ -413,7 +421,12 @@ def test_apply_nvfp4_monkey_patch_forwards_columnwise_chunk_rows(monkeypatch, tm
 
     monkeypatch.setattr(nvfp4_utils, "quantize_nvfp4_weight_columnwise", spy)
     apply_nvfp4_monkey_patch(
-        model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+        model,
+        state_dict,
+        quantizer.nvfp4_module_shapes,
+        [],
+        use_scaled_mm=True,
+        training=True,
         columnwise_chunk_rows=128,
     )
 
@@ -444,7 +457,12 @@ def test_apply_nvfp4_monkey_patch_rejects_non_positive_columnwise_chunk_rows(tmp
 
     with pytest.raises(ValueError, match="columnwise_chunk_rows"):
         apply_nvfp4_monkey_patch(
-            model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+            model,
+            state_dict,
+            quantizer.nvfp4_module_shapes,
+            [],
+            use_scaled_mm=True,
+            training=True,
             columnwise_chunk_rows=0,
         )
 
@@ -569,7 +587,12 @@ def _build_patched_model_for_training_flag(tmp_path, training: bool, n=64, k=32)
     state_dict = quantizer.load_and_quantize([str(path)], None)
     model = _TinyDiTBlock()
     apply_nvfp4_monkey_patch(
-        model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=training, training=training,
+        model,
+        state_dict,
+        quantizer.nvfp4_module_shapes,
+        [],
+        use_scaled_mm=training,
+        training=training,
     )
     model.requires_grad_(False)
     model.load_state_dict(state_dict, strict=True, assign=True)
@@ -636,7 +659,12 @@ def test_apply_nvfp4_monkey_patch_state_dict_keys_available_before_loading_devic
         state_dict = quantizer.load_and_quantize([str(path)], None)  # loads to CPU
         model = _TinyDiTBlock()
         apply_nvfp4_monkey_patch(
-            model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+            model,
+            state_dict,
+            quantizer.nvfp4_module_shapes,
+            [],
+            use_scaled_mm=True,
+            training=True,
             calc_device="cuda",
         )
 
@@ -678,3 +706,27 @@ def test_lora_gradient_flows_through_nvfp4_linear_end_to_end():
     # The frozen NVFP4 packed weight never requires grad -- accumulating one would mean the
     # base was accidentally left trainable instead of frozen-with-a-LoRA-adapter.
     assert model.proj.weight.grad is None
+
+
+def test_nvfp4_swap_tensor_selector_follows_only_forward_buffers_under_training_false():
+    """krea2_mmdit.SingleStreamDiT.enable_block_swap auto-substitutes
+    nvfp4_swap_tensor_selector whenever any Linear in the block list is NVFP4-patched
+    (block_has_nvfp4_patched_linear), regardless of training flag. Under training=False the
+    selector must follow only the forward buffers (nvfp4_block_scale/nvfp4_scale) -- the
+    training-only columnwise ones were never registered, so there's nothing stale to select."""
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        model = _build_patched_model_for_training_flag(Path(tmp_path_str), training=False)
+
+    assert block_has_nvfp4_patched_linear(model) is True
+
+    jobs = nvfp4_swap_tensor_selector(model)
+    job_names = {name for _module, name in jobs}
+    assert "weight" in job_names
+    assert "nvfp4_block_scale" in job_names
+    assert "nvfp4_scale" in job_names
+    assert "nvfp4_weight_t" not in job_names
+    assert "nvfp4_block_scale_t" not in job_names
+    assert "nvfp4_scale_t" not in job_names
