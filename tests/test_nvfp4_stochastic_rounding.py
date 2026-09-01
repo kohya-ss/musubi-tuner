@@ -103,6 +103,12 @@ def test_quantize_nvfp4_activation_stochastic_unbiased_end_to_end():
     # does block-scale normalization before the E2M1 conversion). A bug in the shared
     # _quantize_nvfp4_2d_prepare/pack path that skewed the distribution after normalization would have
     # passed every other test in this file.
+    #
+    # A uniform-fill input is vacuous here: every element's own value equals the block's amax, so
+    # every element normalizes to exactly F4_E2M1_MAX (6.0) -- the degenerate, deterministic branch
+    # (same pitfall as an earlier Task 3 test bug in this plan). Instead, one column is set higher
+    # than the rest so the *other* columns normalize to a genuine non-degenerate, off-grid value
+    # under test.
     torch.manual_seed(0)
     from musubi_tuner.modules.nvfp4_utils import NVFP4_BLOCK_SIZE
 
@@ -112,6 +118,7 @@ def test_quantize_nvfp4_activation_stochastic_unbiased_end_to_end():
     means = []
     for _ in range(200):
         x = torch.full((16, NVFP4_BLOCK_SIZE), target_value)
+        x[:, 0] = 0.24  # sets this block's amax so target_value normalizes off-grid, not to 6.0
         packed, block_scale, per_tensor_scale, orig_rows = quantize_nvfp4_activation_stochastic(x)
         codes = packed.view(-1, 1).bitwise_and(0x0F)
         codes_hi = packed.view(-1, 1).bitwise_right_shift(4).bitwise_and(0x0F)
@@ -122,7 +129,14 @@ def test_quantize_nvfp4_activation_stochastic_unbiased_end_to_end():
         decoded_signed = torch.where(neg, -decoded_magnitude, decoded_magnitude)
         total_scale = per_tensor_scale * block_scale.view(-1)[0].float()
         decoded_value = decoded_signed.float() * total_scale
-        means.append(decoded_value.mean().item())
+
+        # Exclude the deliberately-different first column of each 16-wide row-block -- only the
+        # target_value=0.1 elements are under test for unbiasedness.
+        decoded_reshaped = decoded_value.view(16, NVFP4_BLOCK_SIZE)
+        target_cells = decoded_reshaped[:, 1:]
+        means.append(target_cells.mean().item())
 
     grand_mean = sum(means) / len(means)
+    stdev = (sum((m - grand_mean) ** 2 for m in means) / len(means)) ** 0.5
+    assert stdev > 0.0, "means across trials should not be identical -- indicates degenerate/deterministic rounding"
     assert grand_mean == pytest.approx(target_value, abs=0.02)
