@@ -454,8 +454,14 @@ class NvFp4LinearFn(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             # grad_x = grad_out @ W, computed as the "linear" from N -> K using the
             # columnwise-quantized weight (packed as [K, N/2], i.e. a virtual Linear with
-            # in_features=N, out_features=K).
-            gx = nvfp4_scaled_mm_linear(g2d, weight_t_packed, block_scale_t, tensor_scale_t, None, weight_t_packed.shape[0])
+            # in_features=N, out_features=K). grad_out is quantized with stochastic rounding
+            # (not the deterministic quantize_nvfp4_activation used in forward), per
+            # arXiv:2509.25149's finding that deterministic rounding introduces a directional
+            # bias specifically in gradient tensors.
+            gx = nvfp4_scaled_mm_linear(
+                g2d, weight_t_packed, block_scale_t, tensor_scale_t, None, weight_t_packed.shape[0],
+                activation_quantize_fn=quantize_nvfp4_activation_stochastic,
+            )
             grad_x = gx.reshape(*grad_out.shape[:-1], ctx.in_features)
 
         grad_bias = g2d.sum(dim=0) if ctx.bias_needs_grad else None

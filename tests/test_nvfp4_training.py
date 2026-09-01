@@ -459,3 +459,37 @@ def test_nvfp4_scaled_mm_linear_uses_custom_activation_quantize_fn():
 
     assert len(calls) == 1
     assert calls[0] is x
+
+
+def test_nvfp4_linear_fn_backward_uses_stochastic_rounding_for_grad_out(monkeypatch):
+    """NvFp4LinearFn.backward must quantize grad_out via quantize_nvfp4_activation_stochastic,
+    not the deterministic quantize_nvfp4_activation -- per
+    docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md."""
+    from musubi_tuner.modules import nvfp4_utils
+    from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn
+
+    if not (torch.cuda.is_available() and nvfp4_scaled_mm_available()):
+        pytest.skip("CUDA + torch 2.10+ scaled_mm required")
+
+    torch.manual_seed(0)
+    n, k = 32, 32
+    w = torch.randn(n, k, device="cuda") * 0.02
+    w_packed, w_block_scale, w_tensor_scale, _ = _quantize_nvfp4_2d(w)
+    w_t_packed, w_t_block_scale, w_t_tensor_scale = quantize_nvfp4_weight_columnwise(
+        w_packed, w_block_scale, w_tensor_scale, (n, k)
+    )
+
+    calls = []
+    original_fn = nvfp4_utils.quantize_nvfp4_activation_stochastic
+
+    def spy(x_arg):
+        calls.append(x_arg)
+        return original_fn(x_arg)
+
+    monkeypatch.setattr(nvfp4_utils, "quantize_nvfp4_activation_stochastic", spy)
+
+    x = torch.randn(8, k, device="cuda", requires_grad=True)
+    out = NvFp4LinearFn.apply(x, w_packed, w_block_scale, w_tensor_scale, w_t_packed, w_t_block_scale, w_t_tensor_scale, None, n)
+    out.sum().backward()
+
+    assert len(calls) == 1, "NvFp4LinearFn.backward did not dispatch grad_out through stochastic rounding"
