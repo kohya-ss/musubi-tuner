@@ -440,9 +440,6 @@ def test_nvfp4_scaled_mm_linear_uses_custom_activation_quantize_fn():
     hardcode quantize_nvfp4_activation."""
     from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_linear, quantize_nvfp4_activation
 
-    if not (torch.cuda.is_available() and nvfp4_scaled_mm_available()):
-        pytest.skip("CUDA + torch 2.10+ scaled_mm required")
-
     torch.manual_seed(0)
     n, k, m = 32, 32, 16
     w = torch.randn(n, k, device="cuda") * 0.02
@@ -461,15 +458,13 @@ def test_nvfp4_scaled_mm_linear_uses_custom_activation_quantize_fn():
     assert calls[0] is x
 
 
+@requires_nvfp4_scaled_mm
 def test_nvfp4_linear_fn_backward_uses_stochastic_rounding_for_grad_out(monkeypatch):
     """NvFp4LinearFn.backward must quantize grad_out via quantize_nvfp4_activation_stochastic,
     not the deterministic quantize_nvfp4_activation -- per
     docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md."""
     from musubi_tuner.modules import nvfp4_utils
     from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn
-
-    if not (torch.cuda.is_available() and nvfp4_scaled_mm_available()):
-        pytest.skip("CUDA + torch 2.10+ scaled_mm required")
 
     torch.manual_seed(0)
     n, k = 32, 32

@@ -95,3 +95,34 @@ def test_quantize_nvfp4_activation_stochastic_is_random_across_calls():
     packed_a, _, _, _ = quantize_nvfp4_activation_stochastic(x)
     packed_b, _, _, _ = quantize_nvfp4_activation_stochastic(x)
     assert not torch.equal(packed_a, packed_b)
+
+
+def test_quantize_nvfp4_activation_stochastic_unbiased_end_to_end():
+    # Task-6-review finding: earlier tests only checked _e2m1_stochastic_code's unbiasedness in
+    # isolation, never through the full quantize_nvfp4_activation_stochastic path (which additionally
+    # does block-scale normalization before the E2M1 conversion). A bug in the shared
+    # _quantize_nvfp4_2d_prepare/pack path that skewed the distribution after normalization would have
+    # passed every other test in this file.
+    torch.manual_seed(0)
+    from musubi_tuner.modules.nvfp4_utils import NVFP4_BLOCK_SIZE
+
+    magnitude_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+    target_value = 0.1
+
+    means = []
+    for _ in range(200):
+        x = torch.full((16, NVFP4_BLOCK_SIZE), target_value)
+        packed, block_scale, per_tensor_scale, orig_rows = quantize_nvfp4_activation_stochastic(x)
+        codes = packed.view(-1, 1).bitwise_and(0x0F)
+        codes_hi = packed.view(-1, 1).bitwise_right_shift(4).bitwise_and(0x0F)
+        all_codes = torch.stack([codes, codes_hi], dim=-1).flatten()
+        neg = (all_codes & 8).bool()
+        mag_codes = (all_codes & 7).long()
+        decoded_magnitude = magnitude_table[mag_codes]
+        decoded_signed = torch.where(neg, -decoded_magnitude, decoded_magnitude)
+        total_scale = per_tensor_scale * block_scale.view(-1)[0].float()
+        decoded_value = decoded_signed.float() * total_scale
+        means.append(decoded_value.mean().item())
+
+    grand_mean = sum(means) / len(means)
+    assert grand_mean == pytest.approx(target_value, abs=0.02)

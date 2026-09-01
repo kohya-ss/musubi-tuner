@@ -200,8 +200,15 @@ def _e2m1_stochastic_magnitude_code(x_pos: torch.Tensor) -> torch.Tensor:
     """x_pos: non-negative fp32 tensor, values in [0, F4_E2M1_MAX]. Returns uint8 magnitude
     code 0..7, stochastically rounded to one of the two nearest representable E2M1 magnitudes
     with probability proportional to inverse distance (unbiased in expectation:
-    E[decoded] == x_pos). Degenerate cases (x_pos exactly representable, including the 0 and
-    6.0 endpoints) fall out naturally as p_up == 0 -- no special-casing needed.
+    E[decoded] == x_pos). Degenerate cases all resolve to p_up == 0 (round down, exactly onto
+    the representable value), but via two different mechanisms: for x_pos exactly equal to an
+    interior representable value (including 0.0), lo_idx == hi_idx - 1 with lo == x_pos, so the
+    ordinary interpolation formula (x_pos - lo) / span evaluates to 0 on its own; for x_pos ==
+    6.0 (F4_E2M1_MAX), searchsorted's right=True returns an index past the table's last entry,
+    so after clamping, lo_idx == hi_idx == n - 1 (both point at 6.0) and span == hi - lo == 0,
+    which is instead caught by the explicit span == 0 guard (avoiding a 0/0 division) rather
+    than falling out of the interpolation formula itself. Either way no special-casing of the
+    caller is needed.
     """
     table = torch.tensor(_E2M1_MAGNITUDE_TABLE, dtype=torch.float32, device=x_pos.device)
     n = table.numel()
