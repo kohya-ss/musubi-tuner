@@ -650,3 +650,31 @@ def test_apply_nvfp4_monkey_patch_state_dict_keys_available_before_loading_devic
     assert state_dict["proj.nvfp4_weight_t"].device.type == "cuda"
     assert state_dict["proj.nvfp4_block_scale_t"].device.type == "cuda"
     assert state_dict["proj.nvfp4_scale_t"].device.type == "cuda"
+
+
+@requires_nvfp4_scaled_mm
+def test_lora_gradient_flows_through_nvfp4_linear_end_to_end():
+    import tempfile
+    from pathlib import Path
+
+    from musubi_tuner.networks.lora import LoRAModule
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        model, _weight = _build_training_patched_model(Path(tmp_path_str))
+    model = model.cuda()
+
+    lora = LoRAModule("lora_proj", model.proj, multiplier=1.0, lora_dim=4, alpha=4).cuda()
+    lora.apply_to()
+
+    x = (torch.randn(4, 32, device="cuda") * 0.5).to(torch.bfloat16).requires_grad_(True)
+    out = model(x)
+    out.sum().backward()
+
+    assert torch.isfinite(out).all()
+    assert lora.lora_down.weight.grad is not None
+    assert torch.isfinite(lora.lora_down.weight.grad).all()
+    assert lora.lora_up.weight.grad is not None
+    assert torch.isfinite(lora.lora_up.weight.grad).all()
+    # The frozen NVFP4 packed weight never requires grad -- accumulating one would mean the
+    # base was accidentally left trainable instead of frozen-with-a-LoRA-adapter.
+    assert model.proj.weight.grad is None
