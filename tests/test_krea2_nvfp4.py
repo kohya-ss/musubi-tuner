@@ -152,3 +152,11 @@ def test_handle_model_specific_args_allows_nvfp4_when_cuda_not_yet_available(mon
     trainer = Krea2NetworkTrainer()
     args = _base_args(nvfp4=True)
     trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_handle_model_specific_args_rejects_nvfp4_without_scaled_mm_support(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: False)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    with pytest.raises(ValueError, match="PyTorch 2.10"):
+        trainer.handle_model_specific_args(args)
