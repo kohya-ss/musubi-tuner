@@ -193,6 +193,44 @@ def _f32_to_e2m1_unpacked(x: torch.Tensor) -> torch.Tensor:
     return result | sign_lp
 
 
+_E2M1_MAGNITUDE_TABLE = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _e2m1_stochastic_magnitude_code(x_pos: torch.Tensor) -> torch.Tensor:
+    """x_pos: non-negative fp32 tensor, values in [0, F4_E2M1_MAX]. Returns uint8 magnitude
+    code 0..7, stochastically rounded to one of the two nearest representable E2M1 magnitudes
+    with probability proportional to inverse distance (unbiased in expectation:
+    E[decoded] == x_pos). Degenerate cases (x_pos exactly representable, including the 0 and
+    6.0 endpoints) fall out naturally as p_up == 0 -- no special-casing needed.
+    """
+    table = torch.tensor(_E2M1_MAGNITUDE_TABLE, dtype=torch.float32, device=x_pos.device)
+    n = table.numel()
+    raw_hi_idx = torch.searchsorted(table, x_pos, right=True)
+    hi_idx = torch.clamp(raw_hi_idx, max=n - 1)
+    lo_idx = torch.clamp(raw_hi_idx - 1, min=0, max=n - 1)
+
+    lo = table[lo_idx]
+    hi = table[hi_idx]
+    span = hi - lo
+    span_safe = torch.where(span == 0, torch.ones_like(span), span)
+    p_up = torch.where(span == 0, torch.zeros_like(span), (x_pos - lo) / span_safe)
+
+    r = torch.rand_like(x_pos)
+    round_up = r < p_up
+    return torch.where(round_up, hi_idx, lo_idx).to(torch.uint8)
+
+
+def _e2m1_stochastic_code(x: torch.Tensor) -> torch.Tensor:
+    """x: signed fp32 tensor, values already clamped to [-F4_E2M1_MAX, F4_E2M1_MAX] by the
+    caller (see _quantize_nvfp4_2d_prepare). Returns uint8 E2M1 code 0..15, stochastically
+    rounded, sign in bit 3 (same encoding as _f32_to_e2m1_unpacked: codes 0-7 positive, 8-15
+    negative, negative code = positive code | 8).
+    """
+    neg = x < 0
+    mag_code = _e2m1_stochastic_magnitude_code(x.abs())
+    return torch.where(neg, mag_code | 8, mag_code)
+
+
 def pack_uint4(codes: torch.Tensor) -> torch.Tensor:
     """Pack pairs of 4-bit codes (one per byte) into bytes, element 0 in the HIGH nibble."""
     shape = codes.shape
