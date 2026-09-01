@@ -253,7 +253,7 @@ Requirements and constraints:
 
 **Standalone inference is supported.** `krea2_generate_image.py` accepts `--nvfp4` (and `--convrot_int8`) to load a pre-quantized checkpoint directly for sampling, without going through the trainer's sample-image loop. See the `--nvfp4` / `--convrot_int8` flags documented in the [Inference](#inference--推論) section below.
 
-**Performance note:** NVFP4's activation quantizer now dispatches to a fused Triton kernel (falling back to a slower pure-PyTorch path when Triton/CUDA isn't available), which closed an earlier gap where NVFP4 measured slower than `--convrot_int8` despite its half bit-width. On real Krea2 Linear shapes, NVFP4 now beats `--convrot_int8` on both per-call time and peak memory. See `docs/superpowers/plans/2026-09-01-nvfp4-activation-quant-benchmark.md` for the investigation.
+**Performance note:** NVFP4's activation quantizer now dispatches to a fused Triton kernel (`modules/nvfp4_kernels.py`, falling back to a slower pure-PyTorch path when Triton/CUDA isn't available), which closed an earlier gap where NVFP4 measured slower than `--convrot_int8` despite its half bit-width. On real Krea2 Linear shapes, NVFP4 now beats `--convrot_int8` on both per-call time and peak memory.
 
 <details>
 <summary>日本語</summary>
@@ -270,7 +270,7 @@ Requirements and constraints:
 
 **単体推論に対応しています。** `krea2_generate_image.py`は`--nvfp4`（および`--convrot_int8`）を受け付け、学習中のサンプル画像生成ループを経由せずに、事前量子化されたチェックポイントを直接読み込んでサンプリングできます。詳細は下記の[推論](#inference--推論)セクションの`--nvfp4` / `--convrot_int8`フラグの説明を参照してください。
 
-**パフォーマンスに関する注記:** NVFP4のactivation量子化処理は現在、融合Tritonカーネルにディスパッチされます（Triton/CUDAが利用できない環境では、より低速な純粋PyTorch経路にフォールバックします）。これにより、以前はビット幅が半分にもかかわらず`--convrot_int8`より遅かったギャップが解消されました。実際のKrea2 Linear形状では、NVFP4は1回あたりの処理時間・ピークメモリの両方で`--convrot_int8`を上回ります。詳細は`docs/superpowers/plans/2026-09-01-nvfp4-activation-quant-benchmark.md`の調査を参照してください。
+**パフォーマンスに関する注記:** NVFP4のactivation量子化処理は現在、融合Tritonカーネル（`modules/nvfp4_kernels.py`）にディスパッチされます（Triton/CUDAが利用できない環境では、より低速な純粋PyTorch経路にフォールバックします）。これにより、以前はビット幅が半分にもかかわらず`--convrot_int8`より遅かったギャップが解消されました。実際のKrea2 Linear形状では、NVFP4は1回あたりの処理時間・ピークメモリの両方で`--convrot_int8`を上回ります。
 
 </details>
 
