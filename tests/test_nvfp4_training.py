@@ -346,9 +346,9 @@ def test_quantize_nvfp4_weight_columnwise_chunked_bounds_transient_peak():
 
 @requires_nvfp4_scaled_mm
 def test_quantize_nvfp4_weight_columnwise_smaller_chunk_rows_tightens_peak():
-    """A configured chunk_rows well below k (e.g. 512, vs k=6144) reaches a materially tighter
-    peak on Krea2's largest Linear shape than the default 4096 (see the sibling test) -- this is
-    what --nvfp4_columnwise_chunk_rows exists to let a memory-constrained GPU opt into."""
+    """A configured chunk_rows well below k (e.g. 512, vs k=6144) reaches a tighter peak on
+    Krea2's largest Linear shape than the default 1024 (see the sibling test) -- this is what
+    --nvfp4_columnwise_chunk_rows exists to let a memory-constrained GPU opt into."""
     device = torch.device("cuda")
     n, k = 24576, 6144
     w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
