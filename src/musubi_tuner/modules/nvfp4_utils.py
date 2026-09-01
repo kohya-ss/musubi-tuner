@@ -458,7 +458,7 @@ class NvFp4LinearFn(torch.autograd.Function):
 
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
-    def forward(ctx, x, weight_packed, block_scale, tensor_scale, weight_t_packed, block_scale_t, tensor_scale_t, bias, orig_out_features):
+    def forward(ctx, x, weight_packed, block_scale, tensor_scale, weight_t_packed, block_scale_t, tensor_scale_t, bias, orig_out_features, orig_in_features):
         if torch.is_autocast_enabled(x.device.type):
             cast_dtype = torch.get_autocast_dtype(x.device.type)
             x = x.to(cast_dtype)
@@ -468,6 +468,7 @@ class NvFp4LinearFn(torch.autograd.Function):
         out = nvfp4_scaled_mm_linear(x_2d, weight_packed, block_scale, tensor_scale, bias, orig_out_features)
         ctx.save_for_backward(weight_t_packed, block_scale_t, tensor_scale_t)
         ctx.in_features = x.shape[-1]
+        ctx.orig_in_features = orig_in_features
         ctx.bias_needs_grad = bias is not None and bias.requires_grad
         return out.reshape(*x.shape[:-1], out.shape[-1])
 
@@ -481,18 +482,18 @@ class NvFp4LinearFn(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             # grad_x = grad_out @ W, computed as the "linear" from N -> K using the
             # columnwise-quantized weight (packed as [K, N/2], i.e. a virtual Linear with
-            # in_features=N, out_features=K). grad_out is quantized with stochastic rounding
-            # (not the deterministic quantize_nvfp4_activation used in forward), per
-            # arXiv:2509.25149's finding that deterministic rounding introduces a directional
-            # bias specifically in gradient tensors.
+            # in_features=N, out_features=K). ctx.orig_in_features is the real, unpadded K
+            # (threaded from the module's known _nvfp4_orig_shape at forward time) -- reading
+            # weight_t_packed.shape[0] instead would silently use the 16-row-padded K whenever
+            # K is not already a multiple of 16, producing a wrong-width grad_x.
             gx = nvfp4_scaled_mm_linear(
-                g2d, weight_t_packed, block_scale_t, tensor_scale_t, None, weight_t_packed.shape[0],
+                g2d, weight_t_packed, block_scale_t, tensor_scale_t, None, ctx.orig_in_features,
                 activation_quantize_fn=quantize_nvfp4_activation_stochastic,
             )
             grad_x = gx.reshape(*grad_out.shape[:-1], ctx.in_features)
 
         grad_bias = g2d.sum(dim=0) if ctx.bias_needs_grad else None
-        return grad_x, None, None, None, None, None, None, grad_bias, None
+        return grad_x, None, None, None, None, None, None, grad_bias, None, None
 
 
 def nvfp4_swap_tensor_selector(block: nn.Module) -> List[Tuple[nn.Module, str]]:
@@ -722,6 +723,7 @@ def nvfp4_linear_forward_patch_autograd(self: nn.Linear, x: torch.Tensor) -> tor
         self.nvfp4_scale_t,
         self.bias,
         self._nvfp4_orig_shape[0],
+        self._nvfp4_orig_shape[1],
     )
 
 
