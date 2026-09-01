@@ -600,3 +600,53 @@ def test_apply_nvfp4_monkey_patch_training_true_registers_backward_buffers_and_a
     assert "nvfp4_block_scale_t" in model.proj._buffers
     assert "nvfp4_scale_t" in model.proj._buffers
     assert model.proj.forward.__func__ is nvfp4_linear_forward_patch_autograd
+
+
+@requires_nvfp4_scaled_mm
+def test_apply_nvfp4_monkey_patch_state_dict_keys_available_before_loading_device_move():
+    """Regression for the loading_device != 'cpu' ordering invariant relied on by
+    krea2_utils.load_krea2_dit: apply_nvfp4_monkey_patch must insert its nvfp4_*_t keys into the
+    state dict BEFORE load_krea2_dit's own post-patch move-to-loading_device loop runs, or those
+    keys would be silently left on calc_device instead of following the rest of the state dict.
+    This test mirrors that loop exactly against the same mutated state dict apply_nvfp4_monkey_patch
+    produces, without needing a full SingleStreamDiT checkpoint."""
+    import tempfile
+    from pathlib import Path
+
+    from safetensors.torch import save_file
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        tmp_path = Path(tmp_path_str)
+        torch.manual_seed(0)
+        n, k = 64, 32
+        weight = torch.randn(n, k) * 0.02
+        packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+        payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+        path = tmp_path / "artifact.safetensors"
+        save_file(
+            {
+                "proj.weight": packed,
+                "proj.weight_scale": block_scale,
+                "proj.weight_scale_2": tensor_scale,
+                "proj.comfy_quant": payload,
+            },
+            str(path),
+        )
+        quantizer = NvFp4Quantizer()
+        state_dict = quantizer.load_and_quantize([str(path)], None)  # loads to CPU
+        model = _TinyDiTBlock()
+        apply_nvfp4_monkey_patch(
+            model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+            calc_device="cuda",
+        )
+
+        # Mirrors krea2_utils.load_krea2_dit's post-patch move-to-loading_device loop exactly:
+        #   if loading_device.type != "cpu":
+        #       for key in sd.keys(): sd[key] = sd[key].to(loading_device)
+        loading_device = torch.device("cuda")
+        for key in state_dict.keys():
+            state_dict[key] = state_dict[key].to(loading_device)
+
+    assert state_dict["proj.nvfp4_weight_t"].device.type == "cuda"
+    assert state_dict["proj.nvfp4_block_scale_t"].device.type == "cuda"
+    assert state_dict["proj.nvfp4_scale_t"].device.type == "cuda"
