@@ -819,10 +819,6 @@ def apply_nvfp4_monkey_patch(
         if pre_quant_key in optimized_state_dict:
             module.register_buffer("pre_quant_scale", torch.empty_like(optimized_state_dict[pre_quant_key], device="meta"))
         if training:
-            if not use_scaled_mm:
-                raise ValueError(
-                    "NVFP4 training requires use_scaled_mm=True (the dequantize fallback forward has no backward)."
-                )
             orig_weight_device = optimized_state_dict[weight_key].device
             if calc_device is not None:
                 weight_for_calc = optimized_state_dict[weight_key].to(calc_device)
