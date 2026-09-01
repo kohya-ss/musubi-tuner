@@ -523,6 +523,23 @@ def nvfp4_linear_forward_patch(self: nn.Linear, x: torch.Tensor) -> torch.Tensor
     return F.linear(x, weight, self.bias)
 
 
+def nvfp4_linear_forward_patch_autograd(self: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+    pre_quant_scale = getattr(self, "pre_quant_scale", None)
+    if pre_quant_scale is not None:
+        x = x * pre_quant_scale
+    return NvFp4LinearFn.apply(
+        x,
+        self.weight,
+        self.nvfp4_block_scale,
+        self.nvfp4_scale,
+        self.nvfp4_weight_t,
+        self.nvfp4_block_scale_t,
+        self.nvfp4_scale_t,
+        self.bias,
+        self._nvfp4_orig_shape[0],
+    )
+
+
 def int8_embedding_forward_patch(self: nn.Embedding, input: torch.Tensor) -> torch.Tensor:
     rows = self.weight[input]  # index_select works on int8; padding_idx etc. only affect training
     return (rows.float() * self.scale_weight[input]).to(self._int8_dequant_dtype)
@@ -535,6 +552,7 @@ def apply_nvfp4_monkey_patch(
     int8_embedding_modules: List[str],
     use_scaled_mm: bool = False,
     embedding_dtype: torch.dtype = torch.bfloat16,
+    training: bool = False,
 ) -> nn.Module:
     """Patch NVFP4 Linear and INT8 embedding modules so a strict assign load can follow.
 
@@ -542,12 +560,21 @@ def apply_nvfp4_monkey_patch(
     dtypes (on the meta device); ``model.load_state_dict(state_dict, strict=True,
     assign=True)`` then installs the real tensors. Modules stay ``nn.Linear`` /
     ``nn.Embedding`` (patched forward), mirroring the ConvRot INT8 approach.
+
+    ``training=True`` additionally computes and caches a columnwise (N-grouped) NVFP4
+    requantization of each weight (see ``quantize_nvfp4_weight_columnwise``) and routes the
+    forward through ``NvFp4LinearFn`` for a real backward. Requires ``use_scaled_mm=True`` --
+    the dequantize-fallback forward has no matching backward.
     """
     if use_scaled_mm and not nvfp4_scaled_mm_available():
         raise ValueError(
             "NVFP4 scaled_mm requires PyTorch 2.10+ (torch.float4_e2m1fn_x2 and torch.nn.functional.scaled_mm)."
             " Omit the scaled_mm option to use the dequantize fallback."
             " / NVFP4 scaled_mm には PyTorch 2.10 以降が必要です。scaled_mm オプションを外すと dequantize フォールバックで動作します。"
+        )
+    if training and not use_scaled_mm:
+        raise ValueError(
+            "NVFP4 training requires use_scaled_mm=True (the dequantize fallback forward has no backward)."
         )
 
     modules_by_name = dict(model.named_modules())
@@ -566,9 +593,27 @@ def apply_nvfp4_monkey_patch(
         pre_quant_key = name + COMFY_PRE_QUANT_SCALE_SUFFIX
         if pre_quant_key in optimized_state_dict:
             module.register_buffer("pre_quant_scale", torch.empty_like(optimized_state_dict[pre_quant_key], device="meta"))
+        if training:
+            if not use_scaled_mm:
+                raise ValueError(
+                    "NVFP4 training requires use_scaled_mm=True (the dequantize fallback forward has no backward)."
+                )
+            weight_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(
+                optimized_state_dict[weight_key],
+                optimized_state_dict[name + ".nvfp4_block_scale"],
+                optimized_state_dict[name + ".nvfp4_scale"],
+                (out_features, in_features),
+            )
+            optimized_state_dict[name + ".nvfp4_weight_t"] = weight_t
+            optimized_state_dict[name + ".nvfp4_block_scale_t"] = block_scale_t
+            optimized_state_dict[name + ".nvfp4_scale_t"] = tensor_scale_t
+            module.register_buffer("nvfp4_weight_t", torch.empty_like(weight_t, device="meta"))
+            module.register_buffer("nvfp4_block_scale_t", torch.empty_like(block_scale_t, device="meta"))
+            module.register_buffer("nvfp4_scale_t", torch.empty((), dtype=torch.float32, device="meta"))
         module._nvfp4_orig_shape = (out_features, in_features)
         module._nvfp4_use_scaled_mm = use_scaled_mm
-        module.forward = nvfp4_linear_forward_patch.__get__(module, type(module))
+        forward_fn = nvfp4_linear_forward_patch_autograd if training else nvfp4_linear_forward_patch
+        module.forward = forward_fn.__get__(module, type(module))
         patched_count += 1
 
     for name in int8_embedding_modules:

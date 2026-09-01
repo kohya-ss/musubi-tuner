@@ -118,3 +118,114 @@ def test_nvfp4_linear_fn_backward_grad_x_matches_bf16_dequant_reference():
 
     rel_err = (x_fp4.grad.float() - x_ref.grad.float()).norm() / x_ref.grad.float().norm()
     assert rel_err < 0.3  # two independently FP4-quantized paths (fwd weight vs bwd weight), not exact
+
+
+import torch.nn as nn
+
+from musubi_tuner.modules.nvfp4_utils import (
+    NvFp4Quantizer,
+    apply_nvfp4_monkey_patch,
+    dequantize_nvfp4,
+)
+
+
+class _TinyDiTBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(32, 64, bias=False)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+def _build_training_patched_model(tmp_path, n=64, k=32):
+    from safetensors.torch import save_file
+
+    torch.manual_seed(0)
+    weight = torch.randn(n, k) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+    payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+    tensors = {
+        "proj.weight": packed,
+        "proj.weight_scale": block_scale,
+        "proj.weight_scale_2": tensor_scale,
+        "proj.comfy_quant": payload,
+    }
+    path = tmp_path / "artifact.safetensors"
+    save_file(tensors, str(path))
+
+    quantizer = NvFp4Quantizer()
+    state_dict = quantizer.load_and_quantize([str(path)], None)
+    model = _TinyDiTBlock()
+    apply_nvfp4_monkey_patch(
+        model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+    )
+    model.requires_grad_(False)
+    model.load_state_dict(state_dict, strict=True, assign=True)
+    return model, weight
+
+
+def test_training_patch_registers_columnwise_buffers():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        from pathlib import Path
+
+        model, _weight = _build_training_patched_model(Path(tmp_path_str))
+
+    assert model.proj.nvfp4_weight_t.dtype is torch.uint8
+    assert model.proj.nvfp4_weight_t.shape == (32, 32)  # [K, N/2]
+    assert model.proj.nvfp4_block_scale_t.dtype is torch.float8_e4m3fn
+    assert model.proj.nvfp4_scale_t.dtype is torch.float32
+
+
+def test_training_patch_requires_scaled_mm():
+    import tempfile
+    from pathlib import Path
+
+    from safetensors.torch import save_file
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        tmp_path = Path(tmp_path_str)
+        torch.manual_seed(0)
+        weight = torch.randn(64, 32) * 0.02
+        packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+        payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+        path = tmp_path / "artifact.safetensors"
+        save_file(
+            {
+                "proj.weight": packed,
+                "proj.weight_scale": block_scale,
+                "proj.weight_scale_2": tensor_scale,
+                "proj.comfy_quant": payload,
+            },
+            str(path),
+        )
+        quantizer = NvFp4Quantizer()
+        state_dict = quantizer.load_and_quantize([str(path)], None)
+        model = _TinyDiTBlock()
+
+        with pytest.raises(ValueError, match="use_scaled_mm=True"):
+            apply_nvfp4_monkey_patch(
+                model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=False, training=True,
+            )
+
+
+@requires_nvfp4_scaled_mm
+def test_training_patched_forward_and_backward_run_end_to_end():
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        model, _weight = _build_training_patched_model(Path(tmp_path_str))
+    model = model.cuda()
+    for name, buf in model.named_buffers():
+        pass  # buffers already on the right device via .cuda() above
+
+    x = (torch.randn(4, 32, device="cuda") * 0.5).to(torch.bfloat16).requires_grad_(True)
+    out = model(x)
+    out.sum().backward()
+
+    assert torch.isfinite(out).all()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
