@@ -335,8 +335,28 @@ def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 1024) -> Tuple
 
 
 def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Quantize a 2D activation to NVFP4 for scaled_mm. See ``_quantize_nvfp4_2d``."""
-    return _quantize_nvfp4_2d(x)
+    """Quantize a 2D activation to NVFP4 for scaled_mm.
+
+    Dispatches to the fused Triton kernel (nvfp4_kernels.triton_quantize_nvfp4) when available --
+    bit-exact with, and substantially faster per call than, the eager _quantize_nvfp4_2d path this
+    falls back to otherwise. See docs/superpowers/plans/2026-09-01-nvfp4-activation-quant-benchmark.md
+    and docs/superpowers/plans/2026-09-01-nvfp4-fused-activation-quant-kernel.md.
+    """
+    from musubi_tuner.modules import nvfp4_kernels
+
+    if not (x.is_cuda and nvfp4_kernels.HAS_TRITON):
+        return _quantize_nvfp4_2d(x)
+
+    orig_rows, cols = x.shape
+    if cols % NVFP4_BLOCK_SIZE != 0:
+        raise ValueError(f"NVFP4 quantization width must be a multiple of {NVFP4_BLOCK_SIZE}, got {cols}")
+    padded_rows = _roundup(orig_rows, 16)
+    if padded_rows != orig_rows:
+        x = F.pad(x, (0, 0, 0, padded_rows - orig_rows))
+
+    per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
+    packed, block_scale = nvfp4_kernels.triton_quantize_nvfp4(x, per_tensor_scale)
+    return packed, block_scale, per_tensor_scale, orig_rows
 
 
 def quantize_nvfp4_activation_stochastic(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
