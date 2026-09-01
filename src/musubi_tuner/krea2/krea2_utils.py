@@ -80,7 +80,9 @@ def load_krea2_dit(
     tensor-core forward/backward (``NvFp4LinearFn``) -- no dynamic quantization, the file
     dictates which layers are NVFP4. Mutually exclusive with ``fp8_scaled``/``convrot_int8``.
     Cannot be combined with ``lora_weights`` (pre-quantized NVFP4 cannot be merged; attach
-    LoRA as a separate trainable module instead).
+    LoRA as a separate trainable module instead). ``dtype`` is ignored for NVFP4-quantized
+    layers, same as ``fp8_scaled``/``convrot_int8`` -- non-target weights keep their checkpoint
+    dtype.
 
     ``nvfp4_columnwise_chunk_rows`` (only used when ``nvfp4`` is set) is forwarded to
     ``apply_nvfp4_monkey_patch``'s ``columnwise_chunk_rows`` -- see there for what it controls.
