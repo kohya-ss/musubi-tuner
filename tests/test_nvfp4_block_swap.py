@@ -106,3 +106,33 @@ def test_nvfp4_swap_tensor_selector_keeps_non_resident_columnwise_buffers_on_cpu
 
     devices = [b.proj.nvfp4_weight_t.device.type for b in blocks]
     assert devices.count("cpu") >= 1, f"expected at least one streaming block's columnwise buffer to stay on CPU, got {devices}"
+
+
+@requires_cuda
+def test_model_offloader_ignores_swap_tensor_selector_h2d_only_false(tmp_path):
+    """Documents the gap issue 1 in the NVFP4 punch list left open: create_offloader only
+    forwards swap_tensor_selector on the h2d_only branch (LoRAStreamOffloader). The default
+    ModelOffloader path (h2d_only=False) silently drops it, so even a caller that supplies
+    nvfp4_swap_tensor_selector still leaks the full columnwise buffer GPU-resident for every
+    block. Krea2NetworkTrainer.handle_model_specific_args now rejects this combination at the
+    CLI level (see tests/test_krea2_nvfp4.py), but ModelOffloader/create_offloader remain
+    reachable directly, so this guards the underlying limitation until punch-list option (a)
+    (teaching ModelOffloader to honor the selector) is implemented."""
+    blocks = _build_patched_blocks(tmp_path, num_blocks=4)
+    device = torch.device("cuda")
+    config = BlockSwapConfig(
+        device=device,
+        supports_backward=True,
+        use_pinned_memory=True,
+        h2d_only=False,
+        swap_tensor_selector=nvfp4_swap_tensor_selector,
+    )
+    offloader = create_offloader("test", list(blocks), 4, 2, config)
+    offloader.prepare_block_devices_before_forward(list(blocks))
+
+    assert all(b.proj.nvfp4_weight_t.device.type == "cuda" for b in blocks), (
+        "expected the still-unfixed ModelOffloader path to leave every block's columnwise buffer"
+        " GPU-resident (swap_tensor_selector ignored) -- if this now fails, ModelOffloader has"
+        " started honoring swap_tensor_selector and this test (and its docstring) should be updated"
+        " to assert the fixed behavior instead."
+    )
