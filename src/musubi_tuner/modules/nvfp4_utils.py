@@ -201,14 +201,15 @@ def pack_uint4(codes: torch.Tensor) -> torch.Tensor:
     return (codes[::2] << 4 | codes[1::2]).view(*shape[:-1], shape[-1] // 2)
 
 
-def _quantize_nvfp4_2d(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Quantize a 2D tensor to NVFP4, grouping blocks along the last axis.
+def _quantize_nvfp4_2d_prepare(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Shared block-scale computation and normalize/clamp step for NVFP4 quantization, used by
+    both the deterministic (_quantize_nvfp4_2d) and stochastic-rounding
+    (quantize_nvfp4_activation_stochastic) E2M1 conversion paths -- everything through this
+    point is identical between the two; only the final magnitude-conversion step differs.
 
-    Returns (packed uint8 [Mp, K/2], swizzled block scales F8_E4M3, per-tensor scale F32,
-    original row count). Rows are padded to a multiple of 16 as scaled_mm requires. Shared by
-    ``quantize_nvfp4_activation`` (grouping activations along their feature axis) and
-    ``quantize_nvfp4_weight_columnwise`` (re-grouping a frozen weight along its out_features
-    axis for the backward GEMM).
+    Returns (data, scaled_f8, per_tensor_scale, orig_rows): ``data`` is the row-padded,
+    normalized, [-F4_E2M1_MAX, F4_E2M1_MAX]-clamped fp32 tensor [Mp, K] ready for E2M1
+    conversion; ``scaled_f8`` is the not-yet-swizzled per-block F8_E4M3 scale [Mp, K/16].
 
     ``per_tensor_scale``, when given, is used instead of computing ``amax(x)`` internally --
     lets a caller quantize row-chunks of a larger tensor against one shared, tensor-wide scale
@@ -235,7 +236,19 @@ def _quantize_nvfp4_2d(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor]
     data = blocks.float() / total_safe.unsqueeze(-1)
     data = torch.where((total == 0).unsqueeze(-1), torch.zeros_like(data), data)
     data = torch.clamp(data, -F4_E2M1_MAX, F4_E2M1_MAX).reshape(padded_rows, cols)
+    return data, scaled_f8, per_tensor_scale, orig_rows
 
+
+def _quantize_nvfp4_2d(x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Quantize a 2D tensor to NVFP4, grouping blocks along the last axis.
+
+    Returns (packed uint8 [Mp, K/2], swizzled block scales F8_E4M3, per-tensor scale F32,
+    original row count). Rows are padded to a multiple of 16 as scaled_mm requires. Shared by
+    ``quantize_nvfp4_activation`` (grouping activations along their feature axis) and
+    ``quantize_nvfp4_weight_columnwise`` (re-grouping a frozen weight along its out_features
+    axis for the backward GEMM).
+    """
+    data, scaled_f8, per_tensor_scale, orig_rows = _quantize_nvfp4_2d_prepare(x, per_tensor_scale)
     packed = pack_uint4(_f32_to_e2m1_unpacked(data))
     return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
 
