@@ -14,6 +14,7 @@ from musubi_tuner.krea2.krea2_encoder import (
 from musubi_tuner.krea2.krea2_mmdit import SingleMMDiTConfig, SingleStreamDiT
 from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer, apply_nvfp4_monkey_patch
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.safetensors_utils import load_safetensors
 
@@ -60,6 +61,7 @@ def load_krea2_dit(
     lora_multipliers: Optional[list] = None,
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
+    nvfp4: bool = False,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights (assign=True).
 
@@ -72,6 +74,13 @@ def load_krea2_dit(
     fused Triton forward, custom backward for LoRA training) instead of fp8; the same
     target/exclude scope applies. Mutually exclusive with ``fp8_scaled``.
 
+    ``nvfp4`` loads a ComfyUI pre-quantized NVFP4 DiT checkpoint (per-block Linears already
+    stored as packed FP4 + block/tensor scales) and trains against it with true FP4x4
+    tensor-core forward/backward (``NvFp4LinearFn``) -- no dynamic quantization, the file
+    dictates which layers are NVFP4. Mutually exclusive with ``fp8_scaled``/``convrot_int8``.
+    Cannot be combined with ``lora_weights`` (pre-quantized NVFP4 cannot be merged; attach
+    LoRA as a separate trainable module instead).
+
     ``lora_weights`` (a list of loaded LoRA state dicts, with optional ``lora_multipliers``)
     are merged into the base weights at load time. This is the only correct route under fp8
     (fp8-quantized weights cannot be post-hoc merged), and it also keeps loading uniform for
@@ -82,7 +91,7 @@ def load_krea2_dit(
     is then False) and the caller's ``enable_block_swap`` / ``move_to_device_except_swap_blocks``
     places the resident blocks on ``device`` and keeps the swap blocks on CPU.
     """
-    assert not (fp8_scaled and convrot_int8), "fp8_scaled and convrot_int8 are mutually exclusive"
+    assert sum([fp8_scaled, convrot_int8, nvfp4]) <= 1, "fp8_scaled, convrot_int8, and nvfp4 are mutually exclusive"
     device = torch.device(device)
     loading_device = device if loading_device is None else torch.device(loading_device)
     has_lora = lora_weights is not None and len(lora_weights) > 0
@@ -91,20 +100,23 @@ def load_krea2_dit(
         f"Loading Krea 2 DiT weights from {dit_path}"
         + (" (fp8 scaled)" if fp8_scaled else "")
         + (" (convrot int8)" if convrot_int8 else "")
+        + (" (nvfp4)" if nvfp4 else "")
         + (f" (+{len(lora_weights)} LoRA merged)" if has_lora else "")
     )
     with torch.device("meta"):
         dit = SingleStreamDiT(config, attn_mode=attn_mode, split_attn=split_attn)
 
-    quantized = fp8_scaled or convrot_int8
+    quantized = fp8_scaled or convrot_int8 or nvfp4
     if quantized or has_lora:
         # Single load path that merges LoRA (if any) into the base weights and optionally
         # quantizes the per-block Linears (scaled fp8 or ConvRot int8). Targets/excludes only
         # apply when quantizing; without quantization the weights are merged and cast to
         # ``dtype`` as-is.
-        quantizer = (
-            ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS) if convrot_int8 else None
-        )
+        quantizer = None
+        if convrot_int8:
+            quantizer = ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS)
+        elif nvfp4:
+            quantizer = NvFp4Quantizer()
         sd = load_safetensors_with_lora_and_fp8(
             model_files=dit_path,
             lora_weights_list=lora_weights,
@@ -125,6 +137,14 @@ def load_krea2_dit(
             # floating dtypes can require grad), and load_state_dict(assign=True) re-wraps
             # incoming tensors with the meta params' requires_grad (default True). The base
             # is frozen right after load anyway, so drop requires_grad first.
+            dit.requires_grad_(False)
+        elif nvfp4:
+            apply_nvfp4_monkey_patch(
+                dit, sd, quantizer.nvfp4_module_shapes, quantizer.int8_embedding_modules,
+                use_scaled_mm=True, training=True,
+            )
+            # Same requires_grad concern as ConvRot above: NVFP4 weights are uint8 (packed
+            # nibbles), not a floating dtype.
             dit.requires_grad_(False)
         if loading_device.type != "cpu":
             for key in sd.keys():
