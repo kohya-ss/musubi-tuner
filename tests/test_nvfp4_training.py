@@ -229,3 +229,50 @@ def test_training_patched_forward_and_backward_run_end_to_end():
     assert torch.isfinite(out).all()
     assert x.grad is not None
     assert torch.isfinite(x.grad).all()
+
+
+@requires_nvfp4_scaled_mm
+def test_training_patch_calc_device_computes_on_gpu_but_result_stays_on_original_device():
+    """Simulates block swap: the state dict lives on CPU (loading_device="cpu"), but the
+    columnwise requant should run on ``calc_device`` (GPU) rather than CPU -- CPU is
+    dequant/bit-pack-heavy and impractically slow across a full DiT's worth of modules.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from safetensors.torch import save_file
+
+    with tempfile.TemporaryDirectory() as tmp_path_str:
+        tmp_path = Path(tmp_path_str)
+        n, k = 64, 32
+        torch.manual_seed(0)
+        weight = torch.randn(n, k) * 0.02
+        packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+        payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+        path = tmp_path / "artifact.safetensors"
+        save_file(
+            {
+                "proj.weight": packed,
+                "proj.weight_scale": block_scale,
+                "proj.weight_scale_2": tensor_scale,
+                "proj.comfy_quant": payload,
+            },
+            str(path),
+        )
+        quantizer = NvFp4Quantizer()
+        state_dict = quantizer.load_and_quantize([str(path)], None)  # stays on CPU
+        assert state_dict["proj.weight"].device.type == "cpu"
+
+        model = _TinyDiTBlock()
+        apply_nvfp4_monkey_patch(
+            model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+            calc_device="cuda",
+        )
+        model.requires_grad_(False)
+        model.load_state_dict(state_dict, strict=True, assign=True)
+
+    # The computed columnwise buffers must land back on the row-wise weight's original device
+    # (CPU), matching block swap's expectation that the resident state dict stays off-GPU.
+    assert model.proj.nvfp4_weight_t.device.type == "cpu"
+    assert model.proj.nvfp4_block_scale_t.device.type == "cpu"
+    assert model.proj.nvfp4_scale_t.device.type == "cpu"

@@ -553,6 +553,7 @@ def apply_nvfp4_monkey_patch(
     use_scaled_mm: bool = False,
     embedding_dtype: torch.dtype = torch.bfloat16,
     training: bool = False,
+    calc_device: Optional[Union[str, torch.device]] = None,
 ) -> nn.Module:
     """Patch NVFP4 Linear and INT8 embedding modules so a strict assign load can follow.
 
@@ -565,6 +566,13 @@ def apply_nvfp4_monkey_patch(
     requantization of each weight (see ``quantize_nvfp4_weight_columnwise``) and routes the
     forward through ``NvFp4LinearFn`` for a real backward. Requires ``use_scaled_mm=True`` --
     the dequantize-fallback forward has no matching backward.
+
+    ``calc_device``, when set, is where that columnwise requantization actually runs: each
+    weight is moved there before quantizing and the result is moved back to the weight's own
+    device afterward. This matters when ``optimized_state_dict`` lives on CPU (e.g. block swap
+    keeps the whole state dict off-GPU), since the requant math is dequant/bit-pack heavy and
+    slow on CPU across the full block count -- pass the accelerator's GPU device here to make
+    it fast while leaving the resulting tensors on CPU for the block-swap offloader.
     """
     if use_scaled_mm and not nvfp4_scaled_mm_available():
         raise ValueError(
@@ -598,12 +606,25 @@ def apply_nvfp4_monkey_patch(
                 raise ValueError(
                     "NVFP4 training requires use_scaled_mm=True (the dequantize fallback forward has no backward)."
                 )
+            orig_weight_device = optimized_state_dict[weight_key].device
+            if calc_device is not None:
+                weight_for_calc = optimized_state_dict[weight_key].to(calc_device)
+                block_scale_for_calc = optimized_state_dict[name + ".nvfp4_block_scale"].to(calc_device)
+                tensor_scale_for_calc = optimized_state_dict[name + ".nvfp4_scale"].to(calc_device)
+            else:
+                weight_for_calc = optimized_state_dict[weight_key]
+                block_scale_for_calc = optimized_state_dict[name + ".nvfp4_block_scale"]
+                tensor_scale_for_calc = optimized_state_dict[name + ".nvfp4_scale"]
             weight_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(
-                optimized_state_dict[weight_key],
-                optimized_state_dict[name + ".nvfp4_block_scale"],
-                optimized_state_dict[name + ".nvfp4_scale"],
+                weight_for_calc,
+                block_scale_for_calc,
+                tensor_scale_for_calc,
                 (out_features, in_features),
             )
+            if calc_device is not None:
+                weight_t = weight_t.to(orig_weight_device)
+                block_scale_t = block_scale_t.to(orig_weight_device)
+                tensor_scale_t = tensor_scale_t.to(orig_weight_device)
             optimized_state_dict[name + ".nvfp4_weight_t"] = weight_t
             optimized_state_dict[name + ".nvfp4_block_scale_t"] = block_scale_t
             optimized_state_dict[name + ".nvfp4_scale_t"] = tensor_scale_t
