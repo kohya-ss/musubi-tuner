@@ -18,3 +18,52 @@ def test_load_krea2_dit_rejects_convrot_and_nvfp4_together():
 def test_load_krea2_dit_rejects_nvfp4_with_lora_weights():
     with pytest.raises(AssertionError, match="lora_weights"):
         load_krea2_dit("unused.safetensors", nvfp4=True, lora_weights=[{}])
+
+
+import argparse
+from types import SimpleNamespace
+
+from musubi_tuner.krea2_train_network import Krea2NetworkTrainer, krea2_setup_parser
+
+
+def _base_args(**overrides):
+    parser = argparse.ArgumentParser()
+    krea2_setup_parser(parser)
+    args = parser.parse_args([])
+    defaults = dict(
+        fp8_base=False, fp8_scaled=False, convrot_int8=False, convrot_int8_bwd="bf16",
+        nvfp4=False, turbo_dit=False, turbo_dit_cache=False, blocks_to_swap=0,
+    )
+    for key, value in defaults.items():
+        setattr(args, key, value)
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def test_parser_has_nvfp4_flag():
+    parser = argparse.ArgumentParser()
+    krea2_setup_parser(parser)
+    args = parser.parse_args(["--nvfp4"])
+    assert args.nvfp4 is True
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_fp8():
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, fp8_base=True, fp8_scaled=True)
+    with pytest.raises(ValueError, match="--nvfp4"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_convrot():
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, convrot_int8=True)
+    with pytest.raises(ValueError, match="--nvfp4"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_turbo_dit():
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, turbo_dit=True)
+    with pytest.raises(ValueError, match="turbo_dit"):
+        trainer.handle_model_specific_args(args)

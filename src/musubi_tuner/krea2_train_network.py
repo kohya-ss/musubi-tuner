@@ -32,6 +32,7 @@ from musubi_tuner.hv_train_network import (
 )
 from musubi_tuner.krea2 import krea2_utils
 from musubi_tuner.krea2 import krea2_sampling
+from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_available
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
 
@@ -82,6 +83,14 @@ class Krea2NetworkTrainer(NetworkTrainer):
             raise ValueError("--convrot_int8 is not supported together with --turbo_dit yet; omit one of them.")
         if args.convrot_int8_bwd == "int8" and not args.convrot_int8:
             raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
+        if args.nvfp4 and (args.fp8_base or args.fp8_scaled or args.convrot_int8):
+            raise ValueError("--nvfp4 cannot be combined with --fp8_base/--fp8_scaled/--convrot_int8: choose one quantization.")
+        if args.nvfp4 and args.turbo_dit:
+            raise ValueError("--nvfp4 is not supported together with --turbo_dit yet; omit one of them.")
+        if args.nvfp4 and not nvfp4_scaled_mm_available():
+            raise ValueError(
+                "--nvfp4 requires PyTorch 2.10+ with torch.float4_e2m1fn_x2/torch.nn.functional.scaled_mm support."
+            )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
         # generation during training swap the base weights to Turbo (LoRA, hooked on the live
@@ -408,6 +417,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
             split_attn=split_attn,
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,
+            nvfp4=args.nvfp4,
         )
         return model
 
@@ -418,7 +428,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # When block swap is on, exclude the swap blocks' Linears from compile (cf. zimage/qwen_image).
         # ConvRot int8 Linears are also excluded: the custom autograd.Function + autotuned Triton
         # kernels are not dynamo-traceable.
-        disable_linear = self.blocks_to_swap > 0 or args.convrot_int8
+        disable_linear = self.blocks_to_swap > 0 or args.convrot_int8 or args.nvfp4
         return model_utils.compile_transformer(args, model, [model.blocks], disable_linear=disable_linear)
 
     def scale_shift_latents(self, latents):
@@ -519,6 +529,13 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         choices=["bf16", "int8"],
         help="backward mode for --convrot_int8. bf16 (default): transient dequantized matmul, most accurate. "
         "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton).",
+    )
+    parser.add_argument(
+        "--nvfp4",
+        action="store_true",
+        help="load a ComfyUI pre-quantized NVFP4 DiT checkpoint and train against it with true "
+        "FP4x4 tensor-core forward/backward (requires PyTorch 2.10+ scaled_mm and a Blackwell GPU). "
+        "Cannot be combined with --fp8_base/--fp8_scaled/--convrot_int8: choose one quantization.",
     )
     parser.add_argument(
         "--text_encoder",
