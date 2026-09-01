@@ -92,6 +92,11 @@ def load_krea2_dit(
     places the resident blocks on ``device`` and keeps the swap blocks on CPU.
     """
     assert sum([fp8_scaled, convrot_int8, nvfp4]) <= 1, "fp8_scaled, convrot_int8, and nvfp4 are mutually exclusive"
+    assert not (nvfp4 and lora_weights), (
+        "nvfp4 cannot be combined with lora_weights (pre-quantized NVFP4 "
+        "cannot be merged at load time; attach LoRA as a separate "
+        "trainable network via --network_module instead)."
+    )
     device = torch.device(device)
     loading_device = device if loading_device is None else torch.device(loading_device)
     has_lora = lora_weights is not None and len(lora_weights) > 0
