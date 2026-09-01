@@ -15,6 +15,7 @@ from musubi_tuner.krea2.krea2_mmdit import SingleMMDiTConfig, SingleStreamDiT
 from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer, apply_nvfp4_monkey_patch
+from musubi_tuner.modules.quantization_utils import validate_nvfp4_requirements, validate_quantization_scheme
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.safetensors_utils import load_safetensors
 
@@ -184,6 +185,61 @@ def load_krea2_dit(
         dit.load_state_dict(sd, strict=True, assign=True)
 
     return dit
+
+
+def validate_krea2_quantization_args(
+    fp8_scaled: bool,
+    convrot_int8: bool,
+    convrot_int8_bwd: str,
+    nvfp4: bool,
+    nvfp4_columnwise_chunk_rows: int,
+    turbo_dit: Optional[str],
+    scaled_mm_available: bool,
+    cuda_available: bool,
+    device_capability: Optional[tuple],
+    blocks_to_swap: int = 0,
+    block_swap_h2d_only: bool = False,
+    require_block_swap_h2d_only_with_nvfp4: bool = True,
+) -> None:
+    """Validate Krea2's quantization-scheme CLI args; shared by the trainer and standalone
+    inference so there is exactly one copy of this logic.
+
+    Composes the generic checks in ``modules.quantization_utils`` (mutual exclusivity,
+    NVFP4 runtime requirements) with the Krea2-specific ones (``turbo_dit`` incompatibility,
+    ``convrot_int8_bwd`` requiring ``convrot_int8``, the chunk-rows multiple-of-128 rule).
+
+    ``require_block_swap_h2d_only_with_nvfp4`` defaults to True (the trainer's requirement:
+    the default block-swap offloader doesn't know about NVFP4's training-only columnwise
+    backward buffers). Standalone inference passes False -- under ``training=False`` those
+    buffers are never built (see ``apply_nvfp4_monkey_patch``), so the default offloader has
+    nothing to be unaware of.
+
+    Callers (not this function) compute ``scaled_mm_available``/``cuda_available``/
+    ``device_capability`` via ``nvfp4_scaled_mm_available()``/``torch.cuda.*`` themselves --
+    keeps this function pure and keeps existing tests' monkeypatching of the *caller's*
+    module-level references working.
+    """
+    validate_quantization_scheme(fp8_scaled, convrot_int8, nvfp4)
+    if convrot_int8 and turbo_dit:
+        raise ValueError("--convrot_int8 is not supported together with --turbo_dit yet; omit one of them.")
+    if convrot_int8_bwd == "int8" and not convrot_int8:
+        raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
+    if nvfp4 and turbo_dit:
+        raise ValueError("--nvfp4 is not supported together with --turbo_dit yet; omit one of them.")
+    validate_nvfp4_requirements(nvfp4, scaled_mm_available, cuda_available, device_capability)
+    if nvfp4 and blocks_to_swap and require_block_swap_h2d_only_with_nvfp4 and not block_swap_h2d_only:
+        raise ValueError(
+            "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. The default block-swap"
+            " offloader (ModelOffloader) does not know about NVFP4's extra columnwise backward buffers"
+            " (nvfp4_weight_t/nvfp4_block_scale_t/nvfp4_scale_t) and would leave them GPU-resident for"
+            " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
+            " or omit --blocks_to_swap if the model fits without it."
+        )
+    if nvfp4 and (nvfp4_columnwise_chunk_rows <= 0 or nvfp4_columnwise_chunk_rows % 128 != 0):
+        raise ValueError(
+            f"--nvfp4_columnwise_chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile"
+            f" height), got {nvfp4_columnwise_chunk_rows}"
+        )
 
 
 def load_krea2_dit_state_dict(

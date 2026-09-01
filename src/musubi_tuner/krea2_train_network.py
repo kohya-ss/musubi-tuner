@@ -13,13 +13,14 @@ blocks (--compile).
 import argparse
 import gc
 import itertools
+import logging
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from tqdm import tqdm
 from einops import rearrange, repeat
+from tqdm import tqdm
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_KREA2, ARCHITECTURE_KREA2_FULL
 from musubi_tuner.hv_train_network import (
@@ -27,16 +28,13 @@ from musubi_tuner.hv_train_network import (
     NetworkTrainer,
     clean_memory_on_device,
     load_prompts,
-    setup_parser_common,
     read_config_from_file,
+    setup_parser_common,
 )
-from musubi_tuner.krea2 import krea2_utils
-from musubi_tuner.krea2 import krea2_sampling
+from musubi_tuner.krea2 import krea2_sampling, krea2_utils
 from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_available
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
-
-import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -75,40 +73,28 @@ class Krea2NetworkTrainer(NetworkTrainer):
         if args.fp8_base and not args.fp8_scaled:
             raise ValueError("Krea 2 fp8 supports only scaled fp8: pass --fp8_scaled together with --fp8_base.")
         # ConvRot int8 is an alternative base-weight quantization; one quantization at a time.
-        if args.convrot_int8 and (args.fp8_base or args.fp8_scaled):
-            raise ValueError("--convrot_int8 cannot be combined with --fp8_base/--fp8_scaled: choose one quantization.")
-        # Turbo sampling would need the ConvRot quantizer threaded through the Turbo/RAW weight
-        # stashes (load_krea2_dit_state_dict); not wired up yet.
-        if args.convrot_int8 and args.turbo_dit:
-            raise ValueError("--convrot_int8 is not supported together with --turbo_dit yet; omit one of them.")
-        if args.convrot_int8_bwd == "int8" and not args.convrot_int8:
-            raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
-        if args.nvfp4 and (args.fp8_base or args.fp8_scaled or args.convrot_int8):
-            raise ValueError("--nvfp4 cannot be combined with --fp8_base/--fp8_scaled/--convrot_int8: choose one quantization.")
-        if args.nvfp4 and args.turbo_dit:
-            raise ValueError("--nvfp4 is not supported together with --turbo_dit yet; omit one of them.")
-        if args.nvfp4 and not nvfp4_scaled_mm_available():
-            raise ValueError("--nvfp4 requires PyTorch 2.10+ with torch.float4_e2m1fn_x2/torch.nn.functional.scaled_mm support.")
-        if args.nvfp4 and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 10:
-            major, minor = torch.cuda.get_device_capability()
-            raise ValueError(
-                f"--nvfp4 requires a Blackwell GPU (compute capability 10.0+) for real FP4x4"
-                f" tensor-core scaled_mm; detected compute capability {major}.{minor}. Use"
-                f" --convrot_int8 or --fp8_scaled instead on this GPU."
-            )
-        if args.nvfp4 and args.blocks_to_swap and not getattr(args, "block_swap_h2d_only", False):
-            raise ValueError(
-                "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. The default block-swap"
-                " offloader (ModelOffloader) does not know about NVFP4's extra columnwise backward buffers"
-                " (nvfp4_weight_t/nvfp4_block_scale_t/nvfp4_scale_t) and would leave them GPU-resident for"
-                " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
-                " or omit --blocks_to_swap if the model fits without it."
-            )
-        if args.nvfp4 and (args.nvfp4_columnwise_chunk_rows <= 0 or args.nvfp4_columnwise_chunk_rows % 128 != 0):
-            raise ValueError(
-                f"--nvfp4_columnwise_chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile"
-                f" height), got {args.nvfp4_columnwise_chunk_rows}"
-            )
+        device_capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+        krea2_utils.validate_krea2_quantization_args(
+            fp8_scaled=args.fp8_scaled,
+            convrot_int8=args.convrot_int8,
+            convrot_int8_bwd=args.convrot_int8_bwd,
+            nvfp4=args.nvfp4,
+            # getattr, not args.nvfp4_columnwise_chunk_rows directly: the original code only
+            # touched this attribute inside `if args.nvfp4 and (...)`, so Python's `and`
+            # short-circuit meant it was never accessed when nvfp4=False. This call evaluates
+            # all arguments eagerly, so a bare SimpleNamespace test fixture without this attr
+            # set (tests/test_krea2_convrot_int8.py's _trainer_args, used for convrot-only
+            # cases) would otherwise raise AttributeError. Matches the existing defensive
+            # getattr(args, "block_swap_h2d_only", False) pattern just below.
+            nvfp4_columnwise_chunk_rows=getattr(args, "nvfp4_columnwise_chunk_rows", 1024),
+            turbo_dit=args.turbo_dit,
+            scaled_mm_available=nvfp4_scaled_mm_available(),
+            cuda_available=torch.cuda.is_available(),
+            device_capability=device_capability,
+            blocks_to_swap=args.blocks_to_swap,
+            block_swap_h2d_only=getattr(args, "block_swap_h2d_only", False),
+            require_block_swap_h2d_only_with_nvfp4=True,
+        )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
         # generation during training swap the base weights to Turbo (LoRA, hooked on the live
