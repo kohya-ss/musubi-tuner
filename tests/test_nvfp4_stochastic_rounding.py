@@ -122,7 +122,7 @@ def test_quantize_nvfp4_activation_stochastic_unbiased_end_to_end():
         packed, block_scale, per_tensor_scale, orig_rows = quantize_nvfp4_activation_stochastic(x)
         codes = packed.view(-1, 1).bitwise_and(0x0F)
         codes_hi = packed.view(-1, 1).bitwise_right_shift(4).bitwise_and(0x0F)
-        all_codes = torch.stack([codes, codes_hi], dim=-1).flatten()
+        all_codes = torch.stack([codes_hi, codes], dim=-1).flatten()
         neg = (all_codes & 8).bool()
         mag_codes = (all_codes & 7).long()
         decoded_magnitude = magnitude_table[mag_codes]
@@ -139,4 +139,4 @@ def test_quantize_nvfp4_activation_stochastic_unbiased_end_to_end():
     grand_mean = sum(means) / len(means)
     stdev = (sum((m - grand_mean) ** 2 for m in means) / len(means)) ** 0.5
     assert stdev > 0.0, "means across trials should not be identical -- indicates degenerate/deterministic rounding"
-    assert grand_mean == pytest.approx(target_value, abs=0.02)
+    assert grand_mean == pytest.approx(target_value, abs=0.005)
