@@ -339,6 +339,35 @@ class NvFp4LinearFn(torch.autograd.Function):
         return grad_x, None, None, None, None, None, None, grad_bias, None
 
 
+def nvfp4_swap_tensor_selector(block: nn.Module) -> List[Tuple[nn.Module, str]]:
+    """Block-swap tensor selector for blocks containing NVFP4-patched Linears.
+
+    The offloader's default selector only tracks each Linear's ``weight``. An NVFP4-patched
+    Linear also carries ``nvfp4_block_scale``/``nvfp4_scale`` (forward) and, under
+    ``training=True``, ``nvfp4_weight_t``/``nvfp4_block_scale_t``/``nvfp4_scale_t`` (backward) --
+    the columnwise copy is a second full-size weight matrix, so leaving it out of the selector
+    does not just skip a small scale vector: the offloader's per-block ``.to(device)`` call still
+    drags it onto the device once and, since it is never part of the ring/master swap machinery,
+    it never comes back off -- every block ends up pinning its full columnwise copy resident,
+    silently defeating block swap's memory savings. Pass this selector (instead of the default)
+    whenever any Linear in the block list has been NVFP4-patched.
+    """
+    jobs = []
+    for _, module in block.named_modules():
+        if not (hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear")):
+            continue
+        jobs.append((module, "weight"))
+        for name in ("nvfp4_block_scale", "nvfp4_scale", "nvfp4_weight_t", "nvfp4_block_scale_t", "nvfp4_scale_t"):
+            if name in module._buffers:
+                jobs.append((module, name))
+    return jobs
+
+
+def block_has_nvfp4_patched_linear(block: nn.Module) -> bool:
+    """True if any Linear in ``block`` was patched by ``apply_nvfp4_monkey_patch``."""
+    return any("nvfp4_block_scale" in module._buffers for module in block.modules())
+
+
 # endregion
 
 
