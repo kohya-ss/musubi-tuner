@@ -201,15 +201,18 @@ def pack_uint4(codes: torch.Tensor) -> torch.Tensor:
     return (codes[::2] << 4 | codes[1::2]).view(*shape[:-1], shape[-1] // 2)
 
 
-def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Quantize a 2D activation to NVFP4 for scaled_mm.
+def _quantize_nvfp4_2d(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Quantize a 2D tensor to NVFP4, grouping blocks along the last axis.
 
     Returns (packed uint8 [Mp, K/2], swizzled block scales F8_E4M3, per-tensor scale F32,
-    original row count). Rows are padded to a multiple of 16 as scaled_mm requires.
+    original row count). Rows are padded to a multiple of 16 as scaled_mm requires. Shared by
+    ``quantize_nvfp4_activation`` (grouping activations along their feature axis) and
+    ``quantize_nvfp4_weight_columnwise`` (re-grouping a frozen weight along its out_features
+    axis for the backward GEMM).
     """
     orig_rows, cols = x.shape
     if cols % NVFP4_BLOCK_SIZE != 0:
-        raise ValueError(f"NVFP4 activation width must be a multiple of {NVFP4_BLOCK_SIZE}, got {cols}")
+        raise ValueError(f"NVFP4 quantization width must be a multiple of {NVFP4_BLOCK_SIZE}, got {cols}")
     padded_rows = _roundup(orig_rows, 16)
     if padded_rows != orig_rows:
         x = F.pad(x, (0, 0, 0, padded_rows - orig_rows))
@@ -229,6 +232,11 @@ def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tens
 
     packed = pack_uint4(_f32_to_e2m1_unpacked(data))
     return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
+
+
+def quantize_nvfp4_activation(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Quantize a 2D activation to NVFP4 for scaled_mm. See ``_quantize_nvfp4_2d``."""
+    return _quantize_nvfp4_2d(x)
 
 
 def nvfp4_scaled_mm_available() -> bool:
