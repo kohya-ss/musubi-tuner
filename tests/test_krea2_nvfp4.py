@@ -93,3 +93,25 @@ def test_handle_model_specific_args_allows_nvfp4_without_block_swap(monkeypatch)
     trainer = Krea2NetworkTrainer()
     args = _base_args(nvfp4=True, blocks_to_swap=0, block_swap_h2d_only=False)
     trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_parser_has_nvfp4_columnwise_chunk_rows_flag():
+    parser = argparse.ArgumentParser()
+    krea2_setup_parser(parser)
+    args = parser.parse_args([])
+    assert args.nvfp4_columnwise_chunk_rows == 4096
+
+
+def test_handle_model_specific_args_rejects_non_128_multiple_chunk_rows(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=0, nvfp4_columnwise_chunk_rows=1000)
+    with pytest.raises(ValueError, match="nvfp4_columnwise_chunk_rows"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_allows_128_multiple_chunk_rows(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=0, nvfp4_columnwise_chunk_rows=512)
+    trainer.handle_model_specific_args(args)  # must not raise

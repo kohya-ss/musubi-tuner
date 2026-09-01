@@ -630,6 +630,7 @@ def apply_nvfp4_monkey_patch(
     embedding_dtype: torch.dtype = torch.bfloat16,
     training: bool = False,
     calc_device: Optional[Union[str, torch.device]] = None,
+    columnwise_chunk_rows: int = 4096,
 ) -> nn.Module:
     """Patch NVFP4 Linear and INT8 embedding modules so a strict assign load can follow.
 
@@ -649,6 +650,14 @@ def apply_nvfp4_monkey_patch(
     keeps the whole state dict off-GPU), since the requant math is dequant/bit-pack heavy and
     slow on CPU across the full block count -- pass the accelerator's GPU device here to make
     it fast while leaving the resulting tensors on CPU for the block-swap offloader.
+
+    ``columnwise_chunk_rows`` is forwarded to ``quantize_nvfp4_weight_columnwise`` (see there for
+    the numerical-equivalence contract) and bounds that call's transient GPU memory peak. The
+    default (4096) meaningfully reduces the peak versus an unchunked call but does not guarantee
+    a small absolute bound for every weight shape -- for a Linear with very large out_features
+    (e.g. 24576) the peak can still be several GB at the default. Lower this (e.g. 512-1024) for
+    tighter bounds on memory-constrained GPUs, at the cost of more quantization passes at load
+    time (a one-time cost, not a per-step training cost).
     """
     if use_scaled_mm and not nvfp4_scaled_mm_available():
         raise ValueError(
@@ -696,6 +705,7 @@ def apply_nvfp4_monkey_patch(
                 block_scale_for_calc,
                 tensor_scale_for_calc,
                 (out_features, in_features),
+                chunk_rows=columnwise_chunk_rows,
             )
             if calc_device is not None:
                 weight_t = weight_t.to(orig_weight_device)

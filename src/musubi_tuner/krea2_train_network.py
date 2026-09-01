@@ -99,6 +99,11 @@ class Krea2NetworkTrainer(NetworkTrainer):
                 " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
                 " or omit --blocks_to_swap if the model fits without it."
             )
+        if args.nvfp4 and args.nvfp4_columnwise_chunk_rows % 128 != 0:
+            raise ValueError(
+                f"--nvfp4_columnwise_chunk_rows must be a multiple of 128 (cuBLAS block-scale tile height),"
+                f" got {args.nvfp4_columnwise_chunk_rows}"
+            )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
         # generation during training swap the base weights to Turbo (LoRA, hooked on the live
@@ -426,6 +431,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,
             nvfp4=args.nvfp4,
+            nvfp4_columnwise_chunk_rows=args.nvfp4_columnwise_chunk_rows,
         )
         return model
 
@@ -544,6 +550,16 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         help="load a ComfyUI pre-quantized NVFP4 DiT checkpoint and train against it with true "
         "FP4x4 tensor-core forward/backward (requires PyTorch 2.10+ scaled_mm and a Blackwell GPU). "
         "Cannot be combined with --fp8_base/--fp8_scaled/--convrot_int8: choose one quantization.",
+    )
+    parser.add_argument(
+        "--nvfp4_columnwise_chunk_rows",
+        type=int,
+        default=4096,
+        help="Row-chunk size for --nvfp4's columnwise (N-grouped) backward-weight requantization at "
+        "load time. Must be a multiple of 128. Smaller values bound the transient GPU memory peak more "
+        "tightly (fewer per-element quantization temporaries alive at once) at the cost of more "
+        "quantization passes at load time (a one-time cost); the default (4096) can still peak several "
+        "GB for Linears with very large out_features -- lower this (e.g. 512-1024) if NVFP4 loading OOMs.",
     )
     parser.add_argument(
         "--text_encoder",

@@ -62,6 +62,7 @@ def load_krea2_dit(
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
     nvfp4: bool = False,
+    nvfp4_columnwise_chunk_rows: int = 4096,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights (assign=True).
 
@@ -80,6 +81,9 @@ def load_krea2_dit(
     dictates which layers are NVFP4. Mutually exclusive with ``fp8_scaled``/``convrot_int8``.
     Cannot be combined with ``lora_weights`` (pre-quantized NVFP4 cannot be merged; attach
     LoRA as a separate trainable module instead).
+
+    ``nvfp4_columnwise_chunk_rows`` (only used when ``nvfp4`` is set) is forwarded to
+    ``apply_nvfp4_monkey_patch``'s ``columnwise_chunk_rows`` -- see there for what it controls.
 
     ``lora_weights`` (a list of loaded LoRA state dicts, with optional ``lora_multipliers``)
     are merged into the base weights at load time. This is the only correct route under fp8
@@ -147,6 +151,7 @@ def load_krea2_dit(
             apply_nvfp4_monkey_patch(
                 dit, sd, quantizer.nvfp4_module_shapes, quantizer.int8_embedding_modules,
                 use_scaled_mm=True, training=True, calc_device=device,
+                columnwise_chunk_rows=nvfp4_columnwise_chunk_rows,
             )
             # Same requires_grad concern as ConvRot above: NVFP4 weights are uint8 (packed
             # nibbles), not a floating dtype.

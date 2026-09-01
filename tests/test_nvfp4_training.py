@@ -300,13 +300,14 @@ def test_training_patch_calc_device_computes_on_gpu_but_result_stays_on_original
 @requires_nvfp4_scaled_mm
 def test_quantize_nvfp4_weight_columnwise_chunked_bounds_transient_peak():
     """Reviewer measured ~4.9GB transient peak for a single unchunked call on Krea2's largest
-    Linear (24576x6144 mlp gate/up, 151M elements, 72MB packed). This asserts the chunked
-    default keeps the delta under 1GB for a comparable synthetic weight, and that the old
-    unchunked call (still reachable via _quantize_nvfp4_2d_chunked with a huge chunk_rows, i.e.
-    effectively one chunk) exceeds that bound -- documenting the bug the same way
-    tests/test_nvfp4_block_swap.py documents the block-swap selector bug."""
+    Linear (24576x6144 mlp gate/up, 151M elements, 72MB packed). The default chunk_rows=4096
+    meaningfully reduces that (measured ~3.5GB on this shape, since chunk_rows=4096 is still a
+    majority of k=6144's rows) but does not reach a small absolute bound for this particular
+    shape -- see test_quantize_nvfp4_weight_columnwise_smaller_chunk_rows_tightens_peak for how a
+    smaller configured chunk_rows (exposed end-to-end via --nvfp4_columnwise_chunk_rows) achieves
+    a much tighter bound on memory-constrained GPUs."""
     device = torch.device("cuda")
-    n, k = 4096, 8192  # ~33M elements, ~16MB packed; weight_t is [8192, 4096], gets chunked at 4096 rows
+    n, k = 24576, 6144
     w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
     packed, block_scale, tensor_scale = packed.to(device), block_scale.to(device), tensor_scale.to(device)
 
@@ -325,8 +326,68 @@ def test_quantize_nvfp4_weight_columnwise_chunked_bounds_transient_peak():
     torch.cuda.synchronize()
     unchunked_peak_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
 
-    assert chunked_peak_mb < 1500, f"chunked columnwise requant peaked at {chunked_peak_mb:.0f}MiB, expected < 1500MiB"
+    assert chunked_peak_mb < 4000, f"chunked columnwise requant peaked at {chunked_peak_mb:.0f}MiB, expected < 4000MiB"
     assert unchunked_peak_mb > chunked_peak_mb * 1.3, (
         f"expected unchunked (chunk_rows>=k, i.e. one chunk covering the whole weight) to peak"
         f" well above chunked ({chunked_peak_mb:.0f}MiB), got {unchunked_peak_mb:.0f}MiB"
     )
+
+
+@requires_nvfp4_scaled_mm
+def test_quantize_nvfp4_weight_columnwise_smaller_chunk_rows_tightens_peak():
+    """A configured chunk_rows well below k (e.g. 512, vs k=6144) reaches a materially tighter
+    peak on Krea2's largest Linear shape than the default 4096 (see the sibling test) -- this is
+    what --nvfp4_columnwise_chunk_rows exists to let a memory-constrained GPU opt into."""
+    device = torch.device("cuda")
+    n, k = 24576, 6144
+    w, packed, block_scale, tensor_scale = _make_quantized_weight(n, k)
+    packed, block_scale, tensor_scale = packed.to(device), block_scale.to(device), tensor_scale.to(device)
+
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)
+    quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (n, k), chunk_rows=512)
+    torch.cuda.synchronize()
+    tight_peak_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+
+    assert tight_peak_mb < 1300, f"chunk_rows=512 columnwise requant peaked at {tight_peak_mb:.0f}MiB, expected < 1300MiB"
+
+
+def test_apply_nvfp4_monkey_patch_forwards_columnwise_chunk_rows(monkeypatch, tmp_path):
+    from safetensors.torch import save_file
+
+    from musubi_tuner.modules import nvfp4_utils
+
+    torch.manual_seed(0)
+    n, k = 64, 32
+    weight = torch.randn(n, k) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+    payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+    path = tmp_path / "artifact.safetensors"
+    save_file(
+        {
+            "proj.weight": packed,
+            "proj.weight_scale": block_scale,
+            "proj.weight_scale_2": tensor_scale,
+            "proj.comfy_quant": payload,
+        },
+        str(path),
+    )
+    quantizer = NvFp4Quantizer()
+    state_dict = quantizer.load_and_quantize([str(path)], None)
+    model = _TinyDiTBlock()
+
+    seen_chunk_rows = []
+    original = nvfp4_utils.quantize_nvfp4_weight_columnwise
+
+    def spy(*args, **kwargs):
+        seen_chunk_rows.append(kwargs.get("chunk_rows"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(nvfp4_utils, "quantize_nvfp4_weight_columnwise", spy)
+    apply_nvfp4_monkey_patch(
+        model, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+        columnwise_chunk_rows=128,
+    )
+
+    assert seen_chunk_rows == [128]
