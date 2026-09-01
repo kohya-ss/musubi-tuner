@@ -7,13 +7,21 @@ requiring real FP4 tensor-core execution are marked ``requires_nvfp4_scaled_mm``
 
 import pytest
 import torch
+import torch.nn as nn
 
 from musubi_tuner.modules.nvfp4_utils import (
     NVFP4_BLOCK_SIZE,
+    NVFP4_STREAM_QUANT_BUFFER_NAMES,
+    NvFp4LinearFn,
+    NvFp4Quantizer,
     _quantize_nvfp4_2d,
+    _quantize_nvfp4_2d_chunked,
     _roundup,
+    apply_nvfp4_monkey_patch,
     dequantize_nvfp4,
     nvfp4_scaled_mm_available,
+    nvfp4_scaled_mm_linear,
+    quantize_nvfp4_activation,
     quantize_nvfp4_weight_columnwise,
 )
 
@@ -66,15 +74,13 @@ def test_quantize_nvfp4_weight_columnwise_roundtrip_matches_rowwise():
 
 
 def test_quantize_nvfp4_weight_columnwise_rejects_non_multiple_of_block_size():
-    n, k = 48, 32  # n=48 is a multiple of 16, use a bad n to trigger the check
+    bad_n, k = 50, 32  # bad_n=50 is NOT a multiple of 16 -- this is what triggers the check
     _w, packed, block_scale, tensor_scale = _make_quantized_weight(64, k)
     with pytest.raises(ValueError, match="out_features"):
-        quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (50, k))
+        quantize_nvfp4_weight_columnwise(packed, block_scale, tensor_scale, (bad_n, k))
 
 
 def test_quantize_nvfp4_2d_chunked_matches_unchunked():
-    from musubi_tuner.modules.nvfp4_utils import _quantize_nvfp4_2d_chunked
-
     torch.manual_seed(1)
     # rows deliberately not a multiple of chunk_rows, to exercise the padded tail chunk
     x = torch.randn(550, 64) * 0.03
@@ -91,8 +97,6 @@ def test_quantize_nvfp4_2d_chunked_matches_unchunked():
 
 
 def test_quantize_nvfp4_2d_chunked_rejects_non_positive_chunk_rows():
-    from musubi_tuner.modules.nvfp4_utils import _quantize_nvfp4_2d_chunked
-
     x = torch.randn(32, 64)
     with pytest.raises(ValueError, match="positive multiple of 128"):
         _quantize_nvfp4_2d_chunked(x, chunk_rows=0)
@@ -112,8 +116,6 @@ def _make_linear_fixture(n, k, m, device, bias=False, seed=0):
 
 @requires_nvfp4_scaled_mm
 def test_nvfp4_linear_fn_forward_matches_scaled_mm_reference():
-    from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn, nvfp4_scaled_mm_linear
-
     n, k, m = 64, 32, 8
     device = "cuda"
     w, x, b, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t = _make_linear_fixture(
@@ -128,8 +130,6 @@ def test_nvfp4_linear_fn_forward_matches_scaled_mm_reference():
 
 @requires_nvfp4_scaled_mm
 def test_nvfp4_linear_fn_backward_grad_x_matches_bf16_dequant_reference():
-    from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn, dequantize_nvfp4
-
     n, k, m = 64, 32, 8
     device = "cuda"
     w, x, b, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t = _make_linear_fixture(
@@ -147,15 +147,6 @@ def test_nvfp4_linear_fn_backward_grad_x_matches_bf16_dequant_reference():
 
     rel_err = (x_fp4.grad.float() - x_ref.grad.float()).norm() / x_ref.grad.float().norm()
     assert rel_err < 0.3  # two independently FP4-quantized paths (fwd weight vs bwd weight), not exact
-
-
-import torch.nn as nn
-
-from musubi_tuner.modules.nvfp4_utils import (
-    NvFp4Quantizer,
-    apply_nvfp4_monkey_patch,
-    dequantize_nvfp4,
-)
 
 
 class _TinyDiTBlock(nn.Module):
@@ -248,8 +239,6 @@ def test_training_patched_forward_and_backward_run_end_to_end():
     with tempfile.TemporaryDirectory() as tmp_path_str:
         model, _weight = _build_training_patched_model(Path(tmp_path_str))
     model = model.cuda()
-    for name, buf in model.named_buffers():
-        pass  # buffers already on the right device via .cuda() above
 
     x = (torch.randn(4, 32, device="cuda") * 0.5).to(torch.bfloat16).requires_grad_(True)
     out = model(x)
@@ -438,7 +427,6 @@ def test_nvfp4_scaled_mm_linear_uses_custom_activation_quantize_fn():
     """nvfp4_scaled_mm_linear must dispatch through activation_quantize_fn when given one
     (needed so NvFp4LinearFn.backward can route grad_out through stochastic rounding), not
     hardcode quantize_nvfp4_activation."""
-    from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_linear, quantize_nvfp4_activation
 
     torch.manual_seed(0)
     n, k, m = 32, 32, 16
@@ -464,7 +452,6 @@ def test_nvfp4_linear_fn_backward_uses_stochastic_rounding_for_grad_out(monkeypa
     not the deterministic quantize_nvfp4_activation -- per
     docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md."""
     from musubi_tuner.modules import nvfp4_utils
-    from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn
 
     torch.manual_seed(0)
     n, k = 32, 32
@@ -497,7 +484,6 @@ def test_nvfp4_linear_fn_backward_uses_orig_in_features_not_padded_weight_t_shap
     can only match if orig_in_features is threaded through and used directly (K itself must be
     a multiple of 32 -- scaled_mm's own GEMM requires that alignment, independent of the
     16-row block padding this test targets)."""
-    from musubi_tuner.modules.nvfp4_utils import NvFp4LinearFn, _quantize_nvfp4_2d
 
     device = "cuda"
     n, m = 64, 8
@@ -525,7 +511,6 @@ def test_nvfp4_linear_fn_backward_uses_orig_in_features_not_padded_weight_t_shap
 
 def test_nvfp4_stream_quant_buffer_names_is_a_superset_of_both_call_sites():
     from musubi_tuner.minimax_h3.text_encoder import _TE_STREAM_QUANT_BUFFER_NAMES
-    from musubi_tuner.modules.nvfp4_utils import NVFP4_STREAM_QUANT_BUFFER_NAMES
 
     assert set(_TE_STREAM_QUANT_BUFFER_NAMES) <= set(NVFP4_STREAM_QUANT_BUFFER_NAMES)
     # Krea2's original inline list (pre-unification), preserved here as the other half of the

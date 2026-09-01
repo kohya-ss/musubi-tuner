@@ -21,7 +21,6 @@ def test_load_krea2_dit_rejects_nvfp4_with_lora_weights():
 
 
 import argparse
-from types import SimpleNamespace
 
 from musubi_tuner.krea2_train_network import Krea2NetworkTrainer, krea2_setup_parser
 
@@ -32,7 +31,7 @@ def _base_args(**overrides):
     args = parser.parse_args([])
     defaults = dict(
         fp8_base=False, fp8_scaled=False, convrot_int8=False, convrot_int8_bwd="bf16",
-        nvfp4=False, turbo_dit=False, turbo_dit_cache=False, blocks_to_swap=0,
+        nvfp4=False, turbo_dit=None, turbo_dit_cache=False, blocks_to_swap=0,
         block_swap_h2d_only=False,
     )
     for key, value in defaults.items():
