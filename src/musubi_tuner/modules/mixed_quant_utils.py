@@ -1,27 +1,19 @@
 """A generic composer for per-scheme prequantized-checkpoint loaders.
 
-Some source checkpoints declare different quantization schemes on different modules
-*within the same file* (e.g. NVFP4 MLP Linears + ConvRot INT8 attention Linears in one
-Krea 2 DiT -- see `notes/nvfp4-convrot-mixed-checkpoint-assessment.md`). Musubi's
-per-scheme loaders (`NvFp4Quantizer`, `ConvRotInt8Quantizer`, and any future one) each
-convert their own scheme's tensors into Musubi's own internal layout as soon as they
-read them -- the source checkpoint's on-disk convention (today, ComfyUI's `.comfy_quant`
-spec tensors) never survives past that conversion step. Each loader raises the instant
-it sees a module declared under a scheme it doesn't own, *unless* constructed with
-`foreign_formats` naming the scheme(s) owned by its peers -- in which case it silently
-skips those modules instead.
+Some checkpoints declare different quantization schemes on different modules within the
+same file (e.g. NVFP4 on some Linears, ConvRot INT8 on others). Musubi's per-scheme
+loaders (`NvFp4Quantizer`, `ConvRotInt8Quantizer`, and any future one) each convert their
+own scheme's tensors into Musubi's internal layout as soon as they read them, and raise
+on any module declared under a scheme they don't own -- unless constructed with
+`foreign_formats` naming the scheme(s) owned by their peers, in which case they silently
+skip those modules instead.
 
-`MixedQuantizer` itself has no awareness of ComfyUI, NVFP4, ConvRot, or any other
-specific scheme or source format -- it just runs each already-configured sub-loader over
-the same files and merges their output state dicts (already in Musubi's own layout).
-Every declared module ends up converted by exactly the sub-loader that owns it, and
-passthrough tensors (biases, norms, un-specced weights) come out identical from every
-pass and merge losslessly. Adding a new co-resident scheme (MXFP4, a future pre-scaled
-FP8 loader -- see `notes/fp8-prescaled-comfy-loading-followup.md` -- an MLX-targeted
-quantizer, or a scheme with no ComfyUI/on-disk-spec input at all, e.g. self-quantized at
-load time, ...) means constructing its own loader with `foreign_formats` covering its
-peers and adding one more entry to the dict passed into this class; this class itself
-does not change.
+`MixedQuantizer` has no awareness of any specific scheme or source format: it just runs
+each already-configured sub-loader over the same files and merges their output state
+dicts. Every module is converted by exactly the sub-loader that owns it, so the merge is
+lossless. Adding a new co-resident scheme means constructing its own loader with
+`foreign_formats` covering its peers and adding one entry to the dict passed into this
+class -- the class itself never changes.
 """
 
 from typing import Dict, List, Optional, Union

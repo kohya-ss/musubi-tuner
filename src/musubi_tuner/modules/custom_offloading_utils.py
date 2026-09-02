@@ -854,13 +854,10 @@ class LoRAStreamOffloader:
 
         self._job_cache = {}  # block_idx -> [(module, attr_name, is_param) per swap tensor]
 
-        # ---- streaming eligibility: a block can only ever be streamed if its swap tensors share the
-        # same (name, dtype, shape) signature as the rest -- the ring/master machinery below assumes a
-        # single flat layout shared by every streamed block. A checkpoint that leaves some blocks
-        # structurally different (e.g. plain bf16 leading blocks in an otherwise pre-quantized DiT --
-        # see notes/nvfp4-convrot-mixed-checkpoint-assessment.md) must never have those blocks selected,
-        # regardless of which quantization scheme (if any) is in play -- this check is purely a tensor
-        # shape/dtype comparison, with no scheme-specific knowledge.
+        # ---- streaming eligibility: only blocks whose swap tensors share one (name, dtype, shape)
+        # signature can share the ring/master buffers below. A checkpoint that leaves some blocks
+        # structurally different (e.g. unquantized blocks alongside quantized ones) must exclude
+        # those from streaming -- a plain tensor shape/dtype comparison, no scheme-specific knowledge.
         def _signature(block_idx: int) -> tuple:
             return tuple((name, getattr(m, name).dtype, tuple(getattr(m, name).shape)) for m, name, _ in self._jobs(block_idx))
 
