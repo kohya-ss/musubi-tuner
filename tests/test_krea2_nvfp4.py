@@ -1,0 +1,237 @@
+"""Tests for wiring NVFP4 pre-quantized loading into load_krea2_dit."""
+
+import pytest
+
+from musubi_tuner.krea2.krea2_utils import load_krea2_dit
+
+
+def test_load_krea2_dit_rejects_multiple_quantizations():
+    with pytest.raises(AssertionError, match="mutually exclusive"):
+        load_krea2_dit("unused.safetensors", fp8_scaled=True, nvfp4=True)
+
+
+def test_load_krea2_dit_rejects_convrot_and_nvfp4_together():
+    with pytest.raises(AssertionError, match="mutually exclusive"):
+        load_krea2_dit("unused.safetensors", convrot_int8=True, nvfp4=True)
+
+
+def test_load_krea2_dit_rejects_nvfp4_with_lora_weights():
+    with pytest.raises(AssertionError, match="lora_weights"):
+        load_krea2_dit("unused.safetensors", nvfp4=True, lora_weights=[{}])
+
+
+class _StopAfterPatchCall(Exception):
+    """Raised by the fake patch fn below to short-circuit load_krea2_dit before load_state_dict,
+    which would otherwise need a full, correctly-shaped state dict to succeed."""
+
+
+def _make_tiny_nvfp4_artifact(tmp_path):
+    """A single quantized Linear ('proj') in ComfyUI NVFP4 format -- enough for
+    load_safetensors_with_lora_and_fp8 + NvFp4Quantizer to succeed before load_krea2_dit
+    ever reaches dit.load_state_dict (which we short-circuit before, via a fake patch fn)."""
+    import torch
+    from safetensors.torch import save_file
+
+    from musubi_tuner.modules.nvfp4_utils import _quantize_nvfp4_2d
+
+    torch.manual_seed(0)
+    weight = torch.randn(64, 32) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+    payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+    path = tmp_path / "artifact.safetensors"
+    save_file(
+        {
+            "proj.weight": packed,
+            "proj.weight_scale": block_scale,
+            "proj.weight_scale_2": tensor_scale,
+            "proj.comfy_quant": payload,
+        },
+        str(path),
+    )
+    return str(path)
+
+
+def test_load_krea2_dit_threads_training_false_into_nvfp4_patch(monkeypatch, tmp_path):
+    from musubi_tuner.krea2 import krea2_utils
+
+    path = _make_tiny_nvfp4_artifact(tmp_path)
+    captured = {}
+
+    def fake_patch(model, sd, shapes, int8_mods, use_scaled_mm=False, training=False, calc_device=None, columnwise_chunk_rows=1024):
+        captured["training"] = training
+        raise _StopAfterPatchCall()
+
+    monkeypatch.setattr(krea2_utils, "apply_nvfp4_monkey_patch", fake_patch)
+
+    with pytest.raises(_StopAfterPatchCall):
+        krea2_utils.load_krea2_dit(path, nvfp4=True, training=False, device="cpu", loading_device="cpu")
+
+    assert captured["training"] is False
+
+
+def test_load_krea2_dit_defaults_training_true_into_nvfp4_patch(monkeypatch, tmp_path):
+    from musubi_tuner.krea2 import krea2_utils
+
+    path = _make_tiny_nvfp4_artifact(tmp_path)
+    captured = {}
+
+    def fake_patch(model, sd, shapes, int8_mods, use_scaled_mm=False, training=False, calc_device=None, columnwise_chunk_rows=1024):
+        captured["training"] = training
+        raise _StopAfterPatchCall()
+
+    monkeypatch.setattr(krea2_utils, "apply_nvfp4_monkey_patch", fake_patch)
+
+    with pytest.raises(_StopAfterPatchCall):
+        krea2_utils.load_krea2_dit(path, nvfp4=True, device="cpu", loading_device="cpu")  # training= omitted
+
+    assert captured["training"] is True
+
+
+def test_load_krea2_dit_nvfp4_lora_rejection_message_has_no_network_module_suggestion():
+    """The trainer-oriented '--network_module' workaround phrasing doesn't apply to a
+    trainer-less inference script; the message must not suggest it."""
+    with pytest.raises(AssertionError) as exc_info:
+        load_krea2_dit("unused.safetensors", nvfp4=True, lora_weights=[{}])
+    assert "--network_module" not in str(exc_info.value)
+
+
+import argparse
+
+from musubi_tuner.krea2_train_network import Krea2NetworkTrainer, krea2_setup_parser
+
+
+def _base_args(**overrides):
+    parser = argparse.ArgumentParser()
+    krea2_setup_parser(parser)
+    args = parser.parse_args([])
+    defaults = dict(
+        fp8_base=False, fp8_scaled=False, convrot_int8=False, convrot_int8_bwd="bf16",
+        nvfp4=False, turbo_dit=None, turbo_dit_cache=False, blocks_to_swap=0,
+        block_swap_h2d_only=False,
+    )
+    for key, value in defaults.items():
+        setattr(args, key, value)
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def test_parser_has_nvfp4_flag():
+    parser = argparse.ArgumentParser()
+    krea2_setup_parser(parser)
+    args = parser.parse_args(["--nvfp4"])
+    assert args.nvfp4 is True
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_fp8():
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, fp8_base=True, fp8_scaled=True)
+    with pytest.raises(ValueError, match="--nvfp4"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_convrot():
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, convrot_int8=True)
+    with pytest.raises(ValueError, match="--nvfp4"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_turbo_dit():
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, turbo_dit=True)
+    with pytest.raises(ValueError, match="turbo_dit"):
+        trainer.handle_model_specific_args(args)
+
+
+from musubi_tuner import krea2_train_network
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_block_swap_without_h2d_only(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=4, block_swap_h2d_only=False)
+    with pytest.raises(ValueError, match="block_swap_h2d_only"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_allows_nvfp4_with_block_swap_h2d_only(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=4, block_swap_h2d_only=True)
+    trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_handle_model_specific_args_allows_nvfp4_without_block_swap(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=0, block_swap_h2d_only=False)
+    trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_parser_has_nvfp4_columnwise_chunk_rows_flag():
+    parser = argparse.ArgumentParser()
+    krea2_setup_parser(parser)
+    args = parser.parse_args([])
+    assert args.nvfp4_columnwise_chunk_rows == 1024
+
+
+def test_handle_model_specific_args_rejects_non_128_multiple_chunk_rows(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=0, nvfp4_columnwise_chunk_rows=1000)
+    with pytest.raises(ValueError, match="nvfp4_columnwise_chunk_rows"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_allows_128_multiple_chunk_rows(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=0, nvfp4_columnwise_chunk_rows=512)
+    trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_handle_model_specific_args_rejects_non_positive_chunk_rows(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, blocks_to_swap=0, nvfp4_columnwise_chunk_rows=0)
+    with pytest.raises(ValueError, match="nvfp4_columnwise_chunk_rows"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_rejects_nvfp4_on_non_blackwell_gpu(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "get_device_capability", lambda: (8, 9))
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    with pytest.raises(ValueError, match="Blackwell"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_allows_nvfp4_on_blackwell_gpu(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "get_device_capability", lambda: (10, 0))
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_handle_model_specific_args_allows_nvfp4_when_cuda_not_yet_available(monkeypatch):
+    # CLI validation can run before accelerate has placed the process on a GPU (e.g. a
+    # multi-process launch's early arg-parsing phase) -- must not hard-fail just because CUDA
+    # isn't visible yet at this point.
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "is_available", lambda: False)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    trainer.handle_model_specific_args(args)  # must not raise
+
+
+def test_handle_model_specific_args_rejects_nvfp4_without_scaled_mm_support(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: False)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True)
+    with pytest.raises(ValueError, match="PyTorch 2.10"):
+        trainer.handle_model_specific_args(args)

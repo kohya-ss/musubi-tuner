@@ -13,13 +13,14 @@ blocks (--compile).
 import argparse
 import gc
 import itertools
+import logging
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from tqdm import tqdm
 from einops import rearrange, repeat
+from tqdm import tqdm
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_KREA2, ARCHITECTURE_KREA2_FULL
 from musubi_tuner.hv_train_network import (
@@ -27,15 +28,13 @@ from musubi_tuner.hv_train_network import (
     NetworkTrainer,
     clean_memory_on_device,
     load_prompts,
-    setup_parser_common,
     read_config_from_file,
+    setup_parser_common,
 )
-from musubi_tuner.krea2 import krea2_utils
-from musubi_tuner.krea2 import krea2_sampling
+from musubi_tuner.krea2 import krea2_sampling, krea2_utils
+from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_available
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
-
-import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -74,14 +73,26 @@ class Krea2NetworkTrainer(NetworkTrainer):
         if args.fp8_base and not args.fp8_scaled:
             raise ValueError("Krea 2 fp8 supports only scaled fp8: pass --fp8_scaled together with --fp8_base.")
         # ConvRot int8 is an alternative base-weight quantization; one quantization at a time.
-        if args.convrot_int8 and (args.fp8_base or args.fp8_scaled):
-            raise ValueError("--convrot_int8 cannot be combined with --fp8_base/--fp8_scaled: choose one quantization.")
-        # Turbo sampling would need the ConvRot quantizer threaded through the Turbo/RAW weight
-        # stashes (load_krea2_dit_state_dict); not wired up yet.
-        if args.convrot_int8 and args.turbo_dit:
-            raise ValueError("--convrot_int8 is not supported together with --turbo_dit yet; omit one of them.")
-        if args.convrot_int8_bwd == "int8" and not args.convrot_int8:
-            raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
+        device_capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+        krea2_utils.validate_krea2_quantization_args(
+            fp8_scaled=args.fp8_scaled,
+            convrot_int8=args.convrot_int8,
+            convrot_int8_bwd=args.convrot_int8_bwd,
+            nvfp4=args.nvfp4,
+            # getattr, not args.nvfp4_columnwise_chunk_rows directly: this call evaluates all
+            # arguments eagerly regardless of nvfp4's value, but test fixtures (bare
+            # SimpleNamespace, e.g. tests/test_krea2_convrot_int8.py's _trainer_args for
+            # convrot-only cases) may omit this attribute, so default it. Matches the existing
+            # defensive getattr(args, "block_swap_h2d_only", False) pattern just below.
+            nvfp4_columnwise_chunk_rows=getattr(args, "nvfp4_columnwise_chunk_rows", 1024),
+            turbo_dit=args.turbo_dit,
+            scaled_mm_available=nvfp4_scaled_mm_available(),
+            cuda_available=torch.cuda.is_available(),
+            device_capability=device_capability,
+            blocks_to_swap=args.blocks_to_swap,
+            block_swap_h2d_only=getattr(args, "block_swap_h2d_only", False),
+            require_block_swap_h2d_only_with_nvfp4=True,
+        )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
         # generation during training swap the base weights to Turbo (LoRA, hooked on the live
@@ -408,6 +419,8 @@ class Krea2NetworkTrainer(NetworkTrainer):
             split_attn=split_attn,
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,
+            nvfp4=args.nvfp4,
+            nvfp4_columnwise_chunk_rows=args.nvfp4_columnwise_chunk_rows,
         )
         return model
 
@@ -418,7 +431,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # When block swap is on, exclude the swap blocks' Linears from compile (cf. zimage/qwen_image).
         # ConvRot int8 Linears are also excluded: the custom autograd.Function + autotuned Triton
         # kernels are not dynamo-traceable.
-        disable_linear = self.blocks_to_swap > 0 or args.convrot_int8
+        disable_linear = self.blocks_to_swap > 0 or args.convrot_int8 or args.nvfp4
         return model_utils.compile_transformer(args, model, [model.blocks], disable_linear=disable_linear)
 
     def scale_shift_latents(self, latents):
@@ -519,6 +532,24 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         choices=["bf16", "int8"],
         help="backward mode for --convrot_int8. bf16 (default): transient dequantized matmul, most accurate. "
         "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton).",
+    )
+    parser.add_argument(
+        "--nvfp4",
+        action="store_true",
+        help="load a ComfyUI pre-quantized NVFP4 DiT checkpoint and train against it with true "
+        "FP4x4 tensor-core forward/backward (requires PyTorch 2.10+ scaled_mm and a Blackwell GPU). "
+        "Cannot be combined with --fp8_base/--fp8_scaled/--convrot_int8: choose one quantization.",
+    )
+    parser.add_argument(
+        "--nvfp4_columnwise_chunk_rows",
+        type=int,
+        default=1024,
+        help="Row-chunk size for --nvfp4's columnwise (N-grouped) backward-weight requantization at "
+        "load time. Must be a positive multiple of 128. Smaller values bound the transient GPU memory "
+        "peak more tightly (fewer per-element quantization temporaries alive at once) at the cost of "
+        "more quantization passes at load time (a one-time cost); the default (1024, ~1.3GB measured on "
+        "Krea2's largest Linear) is a comfortable fixed value, not a computed bound -- lower this (e.g. "
+        "256-512) if NVFP4 loading still OOMs on an unusually large model.",
     )
     parser.add_argument(
         "--text_encoder",

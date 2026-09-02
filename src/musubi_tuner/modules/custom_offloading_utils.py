@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import gc
 import time
-from typing import Optional
+from typing import Callable, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
@@ -124,6 +124,12 @@ class BlockSwapConfig:
     h2d_only: bool = False  # frozen-base (LoRA / LoHa / LoKr) only: H2D-only streaming, no device->host copy
     ring_size: int = 2  # (h2d_only) number of GPU ring buffers for streamed blocks; 2 = double buffering
     debug: bool = False
+    # (h2d_only) overrides default_swap_tensor_selector -- required whenever a quantization scheme hangs
+    # a *second full-size* tensor off the module (e.g. NVFP4's columnwise backward copy): the default
+    # selector only tracks `.weight`, so any such extra buffer is dragged onto the device once (by the
+    # per-block `.to(device)` call the offloader itself issues) and never swapped back, silently pinning
+    # it resident for every block instead of only the streaming ring's worth.
+    swap_tensor_selector: Optional[Callable[[nn.Module], List[Tuple[nn.Module, str]]]] = None
 
     @classmethod
     def from_args(cls, args, device: torch.device, supports_backward: bool) -> "BlockSwapConfig":
@@ -176,6 +182,7 @@ def create_offloader(block_type: str, blocks: list[nn.Module], num_blocks: int, 
             ring_size=config.ring_size,
             use_pinned_memory=config.use_pinned_memory,
             debug=config.debug,
+            swap_tensor_selector=config.swap_tensor_selector,
         )
     return ModelOffloader(
         block_type,
