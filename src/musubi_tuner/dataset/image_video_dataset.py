@@ -23,7 +23,7 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-EMPTY_CAPTION_CACHE_KEY = "___empty_caption_dropout___"
+EMPTY_CAPTION_CACHE_KEY = "___empty_caption___"
 
 from musubi_tuner.dataset.architectures import *  # noqa: F401,F403
 from musubi_tuner.dataset.architectures import (  # explicit imports for local use
