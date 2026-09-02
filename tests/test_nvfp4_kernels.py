@@ -163,3 +163,90 @@ def test_quantize_nvfp4_activation_falls_back_to_eager_reference_on_cpu():
     torch.manual_seed(3)
     x = torch.randn(32, 32).float()
     _compare(x)
+
+
+@requires_triton_cuda
+def test_e2m1_stochastic_code_exact_values_are_deterministic():
+    """Values exactly on a representable E2M1 magnitude (including 0.0 and 6.0, the degenerate
+    span==0 cases) must decode to themselves with probability 1 -- no random draw should ever
+    move them, matching test_nvfp4_stochastic_rounding.py's eager-path equivalent."""
+    import triton
+    import triton.language as tl
+
+    from musubi_tuner.modules.nvfp4_kernels import _e2m1_stochastic_code
+
+    @triton.jit
+    def _kernel(x_ptr, y_ptr, seed, n, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        mask = offs < n
+        x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+        r = tl.rand(seed, offs)
+        code = _e2m1_stochastic_code(x, r)
+        tl.store(y_ptr + offs, code, mask=mask)
+
+    exact_values = torch.tensor([0.0, -0.0, 0.5, -0.5, 1.0, 2.0, 3.0, 4.0, 6.0, -6.0])
+    expected_codes = torch.tensor([0, 0, 1, 9, 2, 4, 5, 6, 7, 15], dtype=torch.uint8)
+    x = exact_values.repeat(1000).cuda()
+    n = x.numel()
+    y = torch.empty(n, device="cuda", dtype=torch.uint8)
+    _kernel[(1,)](x, y, 12345, n, BLOCK=triton.next_power_of_2(n))
+
+    assert torch.equal(y.cpu(), expected_codes.repeat(1000))
+
+
+@requires_triton_cuda
+def test_e2m1_stochastic_code_unbiased_in_expectation_midpoint():
+    """3.5 is exactly the midpoint between representable values 3.0 (code 5) and 4.0 (code 6);
+    unbiased rounding should land on each with ~50% probability, averaging back to 3.5. Mirrors
+    test_nvfp4_stochastic_rounding.py::test_stochastic_code_unbiased_in_expectation_midpoint."""
+    import triton
+    import triton.language as tl
+
+    from musubi_tuner.modules.nvfp4_kernels import _e2m1_stochastic_code
+
+    @triton.jit
+    def _kernel(x_ptr, y_ptr, seed, n, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        mask = offs < n
+        x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+        r = tl.rand(seed, offs)
+        code = _e2m1_stochastic_code(x, r)
+        tl.store(y_ptr + offs, code, mask=mask)
+
+    n = 100000
+    x = torch.full((n,), 3.5, device="cuda")
+    y = torch.empty(n, device="cuda", dtype=torch.uint8)
+    _kernel[(1,)](x, y, 777, n, BLOCK=triton.next_power_of_2(n))
+
+    magnitude_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda")
+    decoded = magnitude_table[(y & 7).long()]
+    assert decoded.mean().item() == pytest.approx(3.5, abs=0.05)
+
+
+@requires_triton_cuda
+def test_e2m1_stochastic_code_unbiased_in_expectation_near_zero_end():
+    """0.1 is close to 0.0 (code 0) and far from 0.5 (code 1); expected decode should be close to
+    0.1, not exactly 0 or 0.5 -- checks the inverse-distance weighting, not just a coin flip.
+    Mirrors test_nvfp4_stochastic_rounding.py::test_stochastic_code_unbiased_in_expectation_near_zero_end."""
+    import triton
+    import triton.language as tl
+
+    from musubi_tuner.modules.nvfp4_kernels import _e2m1_stochastic_code
+
+    @triton.jit
+    def _kernel(x_ptr, y_ptr, seed, n, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        mask = offs < n
+        x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+        r = tl.rand(seed, offs)
+        code = _e2m1_stochastic_code(x, r)
+        tl.store(y_ptr + offs, code, mask=mask)
+
+    n = 100000
+    x = torch.full((n,), 0.1, device="cuda")
+    y = torch.empty(n, device="cuda", dtype=torch.uint8)
+    _kernel[(1,)](x, y, 42, n, BLOCK=triton.next_power_of_2(n))
+
+    magnitude_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda")
+    decoded = magnitude_table[(y & 7).long()]
+    assert decoded.mean().item() == pytest.approx(0.1, abs=0.02)

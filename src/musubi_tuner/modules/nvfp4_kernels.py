@@ -89,6 +89,60 @@ if HAS_TRITON:
         return mag_code | sign_code
 
     @triton.jit
+    def _e2m1_stochastic_magnitude_code(x_pos, r):
+        """x_pos: non-negative fp32 tensor, values in [0, 6.0]. r: uniform [0, 1) fp32 tensor of
+        the same shape (caller-supplied via tl.rand so the same random stream can be reused for
+        the sign-independent magnitude draw). Returns uint8 magnitude code 0..7, stochastically
+        rounded to one of the two nearest representable E2M1 magnitudes with probability
+        proportional to inverse distance -- mirrors nvfp4_utils._e2m1_stochastic_magnitude_code's
+        searchsorted-based bracket selection via a chained comparison (equivalent for this fixed,
+        monotonically increasing 8-entry table): the bracket [lo, hi) chosen this way exactly
+        reproduces searchsorted(table, x_pos, right=True)'s index for every x_pos, including the
+        exact-table-value and saturating (x_pos==6.0) degenerate cases (both resolve to lo==hi,
+        i.e. span==0, forcing a deterministic round to that value).
+        """
+        lo = tl.where(x_pos >= 0.5, 0.5, 0.0)
+        lo = tl.where(x_pos >= 1.0, 1.0, lo)
+        lo = tl.where(x_pos >= 1.5, 1.5, lo)
+        lo = tl.where(x_pos >= 2.0, 2.0, lo)
+        lo = tl.where(x_pos >= 3.0, 3.0, lo)
+        lo = tl.where(x_pos >= 4.0, 4.0, lo)
+        lo = tl.where(x_pos >= 6.0, 6.0, lo)
+
+        lo_idx = tl.where(x_pos >= 0.5, 1, 0)
+        lo_idx = tl.where(x_pos >= 1.0, 2, lo_idx)
+        lo_idx = tl.where(x_pos >= 1.5, 3, lo_idx)
+        lo_idx = tl.where(x_pos >= 2.0, 4, lo_idx)
+        lo_idx = tl.where(x_pos >= 3.0, 5, lo_idx)
+        lo_idx = tl.where(x_pos >= 4.0, 6, lo_idx)
+        lo_idx = tl.where(x_pos >= 6.0, 7, lo_idx)
+        hi_idx = tl.minimum(lo_idx + 1, 7)
+
+        hi = tl.where(hi_idx == 0, 0.0, 6.0)
+        hi = tl.where(hi_idx == 1, 0.5, hi)
+        hi = tl.where(hi_idx == 2, 1.0, hi)
+        hi = tl.where(hi_idx == 3, 1.5, hi)
+        hi = tl.where(hi_idx == 4, 2.0, hi)
+        hi = tl.where(hi_idx == 5, 3.0, hi)
+        hi = tl.where(hi_idx == 6, 4.0, hi)
+
+        span = hi - lo
+        span_is_zero = span == 0.0
+        span_safe = tl.where(span_is_zero, 1.0, span)
+        p_up = tl.where(span_is_zero, 0.0, (x_pos - lo) / span_safe)
+
+        round_up = r < p_up
+        return tl.where(round_up, hi_idx, lo_idx).to(tl.uint8)
+
+    @triton.jit
+    def _e2m1_stochastic_code(x, r):
+        """x: signed fp32 tensor. r: uniform [0, 1) fp32 tensor, same shape as x. Returns uint8
+        E2M1 code 0..15, stochastically rounded, sign in bit 3 (same encoding as _e2m1_code)."""
+        neg = x < 0.0
+        mag_code = _e2m1_stochastic_magnitude_code(tl.abs(x), r)
+        return tl.where(neg, mag_code | 8, mag_code)
+
+    @triton.jit
     def _quantize_nvfp4_row_kernel(
         x_ptr,
         packed_ptr,
