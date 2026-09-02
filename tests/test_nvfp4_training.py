@@ -142,7 +142,7 @@ def test_nvfp4_linear_fn_forward_matches_scaled_mm_reference():
         n, k, m, device, bias=True
     )
 
-    out = NvFp4LinearFn.apply(x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, b, n, k)
+    out = NvFp4LinearFn.apply(x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, b, n, k, 1024)
     expected = nvfp4_scaled_mm_linear(x, packed, block_scale, tensor_scale, b, n)
 
     assert torch.equal(out, expected)
@@ -158,7 +158,7 @@ def test_nvfp4_linear_fn_backward_grad_x_matches_bf16_dequant_reference():
     x_fp4 = x.clone().requires_grad_(True)
     x_ref = x.clone().requires_grad_(True)
 
-    out = NvFp4LinearFn.apply(x_fp4, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n, k)
+    out = NvFp4LinearFn.apply(x_fp4, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n, k, 1024)
     out.sum().backward()
 
     w_deq = dequantize_nvfp4(packed, block_scale, tensor_scale, (n, k), torch.bfloat16)
@@ -493,8 +493,10 @@ def test_nvfp4_scaled_mm_linear_uses_custom_activation_quantize_fn():
 
 @requires_nvfp4_scaled_mm
 def test_nvfp4_linear_fn_backward_uses_stochastic_rounding_for_grad_out(monkeypatch):
-    """NvFp4LinearFn.backward must quantize grad_out via quantize_nvfp4_activation_stochastic,
-    not the deterministic quantize_nvfp4_activation -- per
+    """NvFp4LinearFn.backward must quantize grad_out via
+    quantize_nvfp4_activation_stochastic_chunked (the row-chunked stochastic path, which bounds
+    the transient memory peak the unchunked quantize_nvfp4_activation_stochastic doesn't), not
+    the deterministic quantize_nvfp4_activation -- per
     docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md."""
     from musubi_tuner.modules import nvfp4_utils
 
@@ -507,19 +509,21 @@ def test_nvfp4_linear_fn_backward_uses_stochastic_rounding_for_grad_out(monkeypa
     )
 
     calls = []
-    original_fn = nvfp4_utils.quantize_nvfp4_activation_stochastic
+    original_fn = nvfp4_utils.quantize_nvfp4_activation_stochastic_chunked
 
-    def spy(x_arg):
+    def spy(x_arg, chunk_rows=1024):
         calls.append(x_arg)
-        return original_fn(x_arg)
+        return original_fn(x_arg, chunk_rows=chunk_rows)
 
-    monkeypatch.setattr(nvfp4_utils, "quantize_nvfp4_activation_stochastic", spy)
+    monkeypatch.setattr(nvfp4_utils, "quantize_nvfp4_activation_stochastic_chunked", spy)
 
     x = torch.randn(8, k, device="cuda", requires_grad=True)
-    out = NvFp4LinearFn.apply(x, w_packed, w_block_scale, w_tensor_scale, w_t_packed, w_t_block_scale, w_t_tensor_scale, None, n, k)
+    out = NvFp4LinearFn.apply(
+        x, w_packed, w_block_scale, w_tensor_scale, w_t_packed, w_t_block_scale, w_t_tensor_scale, None, n, k, 1024
+    )
     out.sum().backward()
 
-    assert len(calls) == 1, "NvFp4LinearFn.backward did not dispatch grad_out through stochastic rounding"
+    assert len(calls) == 1, "NvFp4LinearFn.backward did not dispatch grad_out through chunked stochastic rounding"
 
 
 @requires_nvfp4_scaled_mm
@@ -545,7 +549,9 @@ def test_nvfp4_linear_fn_backward_uses_orig_in_features_not_padded_weight_t_shap
     packed_t, block_scale_t, tensor_scale_t, chunked_orig_rows = _quantize_nvfp4_2d(w_t.float())
     assert chunked_orig_rows == 64
 
-    out = NvFp4LinearFn.apply(x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n, real_k)
+    out = NvFp4LinearFn.apply(
+        x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n, real_k, 1024
+    )
     out.sum().backward()
 
     assert torch.isfinite(out).all()

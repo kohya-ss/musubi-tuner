@@ -33,6 +33,7 @@ lower-quality model than ConvRot INT8.
 
 import logging
 import os
+from functools import partial
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -285,7 +286,9 @@ def _quantize_nvfp4_2d_prepare(
 
 
 def _quantize_nvfp4_2d(
-    x: torch.Tensor, per_tensor_scale: Optional[torch.Tensor] = None
+    x: torch.Tensor,
+    per_tensor_scale: Optional[torch.Tensor] = None,
+    magnitude_code_fn: Callable[[torch.Tensor], torch.Tensor] = _f32_to_e2m1_unpacked,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Quantize a 2D tensor to NVFP4, grouping blocks along the last axis.
 
@@ -294,19 +297,28 @@ def _quantize_nvfp4_2d(
     ``quantize_nvfp4_activation`` (grouping activations along their feature axis) and
     ``quantize_nvfp4_weight_columnwise`` (re-grouping a frozen weight along its out_features
     axis for the backward GEMM).
+
+    ``magnitude_code_fn`` performs the final E2M1 magnitude conversion -- defaults to the
+    deterministic ``_f32_to_e2m1_unpacked``; pass ``_e2m1_stochastic_code`` for the stochastic-
+    rounding path (see ``quantize_nvfp4_activation_stochastic``).
     """
     data, scaled_f8, per_tensor_scale, orig_rows = _quantize_nvfp4_2d_prepare(x, per_tensor_scale)
-    packed = pack_uint4(_f32_to_e2m1_unpacked(data))
+    packed = pack_uint4(magnitude_code_fn(data))
     return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
 
 
-def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 1024) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+def _quantize_nvfp4_2d_chunked(
+    x: torch.Tensor,
+    chunk_rows: int = 1024,
+    magnitude_code_fn: Callable[[torch.Tensor], torch.Tensor] = _f32_to_e2m1_unpacked,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Row-chunked ``_quantize_nvfp4_2d`` for large 2D tensors.
 
-    ``_f32_to_e2m1_unpacked`` allocates roughly ten full-size fp32/int32/bool temporaries, so
-    quantizing a large weight (e.g. Krea2's 24576x6144 mlp gate/up) in one call transiently
-    peaks around 5GB for a 72MB packed result. Chunking the pack step over row groups bounds
-    the transient peak to a few hundred MB regardless of input size.
+    ``_f32_to_e2m1_unpacked`` (and, similarly, ``_e2m1_stochastic_code``) allocates roughly ten
+    full-size fp32/int32/bool temporaries, so quantizing a large weight (e.g. Krea2's 24576x6144
+    mlp gate/up) or a large activation/grad_out batch in one call transiently peaks around 5GB
+    for a 72MB packed result. Chunking the pack step over row groups bounds the transient peak
+    to a few hundred MB regardless of input size.
 
     Correctness requires two things this function gets right where a naive "call
     _quantize_nvfp4_2d per chunk independently" would not:
@@ -318,7 +330,12 @@ def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 1024) -> Tuple
         very last chunk, which is padded identically to how the unchunked path pads the
         tensor's own tail.
 
-    Returns the same 4-tuple as ``_quantize_nvfp4_2d`` and is numerically bit-identical to it.
+    Returns the same 4-tuple as ``_quantize_nvfp4_2d``. With the default (deterministic)
+    ``magnitude_code_fn`` this is numerically bit-identical to an unchunked call. With
+    ``_e2m1_stochastic_code`` it is not bit-identical (each chunk draws its own random numbers)
+    but stays unbiased in expectation the same way the unchunked stochastic path is -- the
+    block-scale computation chunking relies on (amax per 16-wide block, independent of row
+    chunking) is identical either way.
     """
     if chunk_rows <= 0 or chunk_rows % 128 != 0:
         raise ValueError(f"chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile height), got {chunk_rows}")
@@ -329,7 +346,9 @@ def _quantize_nvfp4_2d_chunked(x: torch.Tensor, chunk_rows: int = 1024) -> Tuple
     scale_chunks = []
     for start in range(0, orig_rows, chunk_rows):
         chunk = x[start : start + chunk_rows]
-        packed, block_scale, _chunk_scale, _chunk_orig_rows = _quantize_nvfp4_2d(chunk, per_tensor_scale=per_tensor_scale)
+        packed, block_scale, _chunk_scale, _chunk_orig_rows = _quantize_nvfp4_2d(
+            chunk, per_tensor_scale=per_tensor_scale, magnitude_code_fn=magnitude_code_fn
+        )
         packed_chunks.append(packed)
         scale_chunks.append(block_scale)
 
@@ -376,6 +395,18 @@ def quantize_nvfp4_activation_stochastic(x: torch.Tensor) -> Tuple[torch.Tensor,
     data, scaled_f8, per_tensor_scale, orig_rows = _quantize_nvfp4_2d_prepare(x)
     packed = pack_uint4(_e2m1_stochastic_code(data))
     return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
+
+
+def quantize_nvfp4_activation_stochastic_chunked(
+    x: torch.Tensor, chunk_rows: int = 1024
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Row-chunked ``quantize_nvfp4_activation_stochastic`` (see ``_quantize_nvfp4_2d_chunked``
+    for why: the unchunked stochastic path's temporaries can transiently spike memory for a
+    large ``grad_out`` batch, which is what ``NvFp4LinearFn.backward`` quantizes with this path.
+    Unlike ``quantize_nvfp4_activation``'s forward path, there is no fused Triton kernel for
+    stochastic rounding yet, so this eager row-chunked path is the only memory-bounded option.
+    """
+    return _quantize_nvfp4_2d_chunked(x, chunk_rows=chunk_rows, magnitude_code_fn=_e2m1_stochastic_code)
 
 
 def quantize_nvfp4_weight_columnwise(
@@ -472,6 +503,7 @@ class NvFp4LinearFn(torch.autograd.Function):
         bias,
         orig_out_features,
         orig_in_features,
+        grad_chunk_rows,
     ):
         if torch.is_autocast_enabled(x.device.type):
             cast_dtype = torch.get_autocast_dtype(x.device.type)
@@ -484,6 +516,7 @@ class NvFp4LinearFn(torch.autograd.Function):
         ctx.in_features = x.shape[-1]
         ctx.orig_in_features = orig_in_features
         ctx.bias_needs_grad = bias is not None and bias.requires_grad
+        ctx.grad_chunk_rows = grad_chunk_rows
         return out.reshape(*x.shape[:-1], out.shape[-1])
 
     @staticmethod
@@ -506,12 +539,14 @@ class NvFp4LinearFn(torch.autograd.Function):
                 tensor_scale_t,
                 None,
                 ctx.orig_in_features,
-                activation_quantize_fn=quantize_nvfp4_activation_stochastic,
+                activation_quantize_fn=partial(
+                    quantize_nvfp4_activation_stochastic_chunked, chunk_rows=ctx.grad_chunk_rows
+                ),
             )
             grad_x = gx.reshape(*grad_out.shape[:-1], ctx.in_features)
 
         grad_bias = g2d.sum(dim=0) if ctx.bias_needs_grad else None
-        return grad_x, None, None, None, None, None, None, grad_bias, None, None
+        return grad_x, None, None, None, None, None, None, grad_bias, None, None, None
 
 
 # Canonical superset of every buffer name a stream-quant offloader selector might need to
@@ -758,6 +793,7 @@ def nvfp4_linear_forward_patch_autograd(self: nn.Linear, x: torch.Tensor) -> tor
         self.bias,
         self._nvfp4_orig_shape[0],
         self._nvfp4_orig_shape[1],
+        self._nvfp4_grad_chunk_rows,
     )
 
 
@@ -804,6 +840,12 @@ def apply_nvfp4_monkey_patch(
     ``--nvfp4_columnwise_chunk_rows`` for tighter control on memory-constrained GPUs or unusually
     large models, at the cost of more quantization passes at load time (a one-time cost, not a
     per-step training cost).
+
+    When ``training=True``, the same value is also stashed per-module as ``_nvfp4_grad_chunk_rows``
+    and threaded through ``NvFp4LinearFn`` to bound ``quantize_nvfp4_activation_stochastic_chunked``'s
+    transient peak when quantizing ``grad_out`` every backward step -- unlike the one-time weight
+    columnwise requant, this runs on every step, so an OOM here (observed transiently spiking to
+    ~10x grad_out's size) is a per-step training-time cost, not a load-time one.
     """
     if use_scaled_mm and not nvfp4_scaled_mm_available():
         raise ValueError(
@@ -864,6 +906,7 @@ def apply_nvfp4_monkey_patch(
             module.register_buffer("nvfp4_scale_t", torch.empty((), dtype=torch.float32, device="meta"))
         module._nvfp4_orig_shape = (out_features, in_features)
         module._nvfp4_use_scaled_mm = use_scaled_mm
+        module._nvfp4_grad_chunk_rows = columnwise_chunk_rows
         forward_fn = nvfp4_linear_forward_patch_autograd if training else nvfp4_linear_forward_patch
         module.forward = forward_fn.__get__(module, type(module))
         patched_count += 1
