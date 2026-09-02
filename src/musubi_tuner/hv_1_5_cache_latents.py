@@ -76,7 +76,12 @@ def encode_and_save_batch(
                 cond_latents_list.append(cond_latents[0])  # remove batch dim
 
             # extract vision feature from first frame
-            first_frame_np = batch[i].content[0]  # H, W, C, uint8
+            # An image dataset sets content to a bare (H, W, C) frame, so an
+            # unconditional [0] slices a single row and fails the ndim check in
+            # hf_clip_vision_encode. Only video (F, H, W, C) and multiple_target
+            # (list) need indexing. Same guard as ideogram4_cache_latents.py.
+            content = batch[i].content
+            first_frame_np = content[0] if isinstance(content, list) or content.ndim == 4 else content  # H, W, C, uint8
             feature_extractor, image_encoder = image_encoder_assets
             with torch.no_grad():
                 vision_feature = hf_clip_vision_encode(first_frame_np, feature_extractor, image_encoder)
