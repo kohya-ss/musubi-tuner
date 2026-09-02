@@ -33,7 +33,7 @@ lower-quality model than ConvRot INT8.
 
 import logging
 import os
-from functools import partial
+import random
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -391,22 +391,33 @@ def quantize_nvfp4_activation_stochastic(x: torch.Tensor) -> Tuple[torch.Tensor,
     directional bias deterministic rounding introduces) but is detrimental for forward-pass
     tensors and unnecessary for weights -- do not use this for forward activations
     (quantize_nvfp4_activation) or weight quantization (quantize_nvfp4_weight_columnwise).
-    """
-    data, scaled_f8, per_tensor_scale, orig_rows = _quantize_nvfp4_2d_prepare(x)
-    packed = pack_uint4(_e2m1_stochastic_code(data))
-    return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
 
-
-def quantize_nvfp4_activation_stochastic_chunked(
-    x: torch.Tensor, chunk_rows: int = 1024
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Row-chunked ``quantize_nvfp4_activation_stochastic`` (see ``_quantize_nvfp4_2d_chunked``
-    for why: the unchunked stochastic path's temporaries can transiently spike memory for a
-    large ``grad_out`` batch, which is what ``NvFp4LinearFn.backward`` quantizes with this path.
-    Unlike ``quantize_nvfp4_activation``'s forward path, there is no fused Triton kernel for
-    stochastic rounding yet, so this eager row-chunked path is the only memory-bounded option.
+    Dispatches to the fused Triton kernel (nvfp4_kernels.triton_quantize_nvfp4_stochastic) when
+    available, mirroring quantize_nvfp4_activation's dispatch -- unlike the unchunked eager
+    fallback below, the kernel never materializes _e2m1_stochastic_code's full-size temporaries,
+    which is what made the eager path OOM-prone for a large grad_out batch (see
+    docs/superpowers/plans/2026-09-02-nvfp4-stochastic-backward-kernel.md). Falls back to the
+    eager path (unchunked, matching quantize_nvfp4_activation's own Triton-unavailable fallback)
+    when Triton is not importable.
     """
-    return _quantize_nvfp4_2d_chunked(x, chunk_rows=chunk_rows, magnitude_code_fn=_e2m1_stochastic_code)
+    from musubi_tuner.modules import nvfp4_kernels
+
+    if not (x.is_cuda and nvfp4_kernels.HAS_TRITON):
+        data, scaled_f8, per_tensor_scale, orig_rows = _quantize_nvfp4_2d_prepare(x)
+        packed = pack_uint4(_e2m1_stochastic_code(data))
+        return packed, to_blocked(scaled_f8), per_tensor_scale, orig_rows
+
+    orig_rows, cols = x.shape
+    if cols % NVFP4_BLOCK_SIZE != 0:
+        raise ValueError(f"NVFP4 quantization width must be a multiple of {NVFP4_BLOCK_SIZE}, got {cols}")
+    padded_rows = _roundup(orig_rows, 16)
+    if padded_rows != orig_rows:
+        x = F.pad(x, (0, 0, 0, padded_rows - orig_rows))
+
+    per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
+    seed = random.getrandbits(31)
+    packed, block_scale = nvfp4_kernels.triton_quantize_nvfp4_stochastic(x, per_tensor_scale, seed)
+    return packed, block_scale, per_tensor_scale, orig_rows
 
 
 def quantize_nvfp4_weight_columnwise(
@@ -503,7 +514,6 @@ class NvFp4LinearFn(torch.autograd.Function):
         bias,
         orig_out_features,
         orig_in_features,
-        grad_chunk_rows,
     ):
         if torch.is_autocast_enabled(x.device.type):
             cast_dtype = torch.get_autocast_dtype(x.device.type)
@@ -516,7 +526,6 @@ class NvFp4LinearFn(torch.autograd.Function):
         ctx.in_features = x.shape[-1]
         ctx.orig_in_features = orig_in_features
         ctx.bias_needs_grad = bias is not None and bias.requires_grad
-        ctx.grad_chunk_rows = grad_chunk_rows
         return out.reshape(*x.shape[:-1], out.shape[-1])
 
     @staticmethod
@@ -539,14 +548,12 @@ class NvFp4LinearFn(torch.autograd.Function):
                 tensor_scale_t,
                 None,
                 ctx.orig_in_features,
-                activation_quantize_fn=partial(
-                    quantize_nvfp4_activation_stochastic_chunked, chunk_rows=ctx.grad_chunk_rows
-                ),
+                activation_quantize_fn=quantize_nvfp4_activation_stochastic,
             )
             grad_x = gx.reshape(*grad_out.shape[:-1], ctx.in_features)
 
         grad_bias = g2d.sum(dim=0) if ctx.bias_needs_grad else None
-        return grad_x, None, None, None, None, None, None, grad_bias, None, None, None
+        return grad_x, None, None, None, None, None, None, grad_bias, None, None
 
 
 # Canonical superset of every buffer name a stream-quant offloader selector might need to
@@ -793,7 +800,6 @@ def nvfp4_linear_forward_patch_autograd(self: nn.Linear, x: torch.Tensor) -> tor
         self.bias,
         self._nvfp4_orig_shape[0],
         self._nvfp4_orig_shape[1],
-        self._nvfp4_grad_chunk_rows,
     )
 
 
@@ -840,12 +846,6 @@ def apply_nvfp4_monkey_patch(
     ``--nvfp4_columnwise_chunk_rows`` for tighter control on memory-constrained GPUs or unusually
     large models, at the cost of more quantization passes at load time (a one-time cost, not a
     per-step training cost).
-
-    When ``training=True``, the same value is also stashed per-module as ``_nvfp4_grad_chunk_rows``
-    and threaded through ``NvFp4LinearFn`` to bound ``quantize_nvfp4_activation_stochastic_chunked``'s
-    transient peak when quantizing ``grad_out`` every backward step -- unlike the one-time weight
-    columnwise requant, this runs on every step, so an OOM here (observed transiently spiking to
-    ~10x grad_out's size) is a per-step training-time cost, not a load-time one.
     """
     if use_scaled_mm and not nvfp4_scaled_mm_available():
         raise ValueError(
@@ -906,7 +906,6 @@ def apply_nvfp4_monkey_patch(
             module.register_buffer("nvfp4_scale_t", torch.empty((), dtype=torch.float32, device="meta"))
         module._nvfp4_orig_shape = (out_features, in_features)
         module._nvfp4_use_scaled_mm = use_scaled_mm
-        module._nvfp4_grad_chunk_rows = columnwise_chunk_rows
         forward_fn = nvfp4_linear_forward_patch_autograd if training else nvfp4_linear_forward_patch
         module.forward = forward_fn.__get__(module, type(module))
         patched_count += 1
