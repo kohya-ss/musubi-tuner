@@ -169,6 +169,32 @@ def test_conversion_rejects_lora_merge_into_prequantized_weights(tmp_path):
         _load_prequantized(path, weight_hook=lambda key, value, keep_on_calc_device=False: value)
 
 
+def test_foreign_format_module_is_skipped_not_raised(tmp_path):
+    from musubi_tuner.modules.comfy_quant_utils import FORMAT_NVFP4
+
+    tensors = _triple("convrot_proj", groupsize=4, in_features=16, out_features=8)
+    nvfp4_payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+    tensors.update(
+        {
+            "nvfp4_proj.weight": torch.zeros(8, 8, dtype=torch.uint8),
+            "nvfp4_proj.weight_scale": torch.zeros(4, dtype=torch.float8_e4m3fn),
+            "nvfp4_proj.weight_scale_2": torch.tensor(1.0, dtype=torch.float32),
+            "nvfp4_proj.comfy_quant": nvfp4_payload,
+        }
+    )
+    path = _save(tmp_path / "mixed.safetensors", tensors)
+
+    quantizer = ConvRotInt8Quantizer(target_layer_keys=[], foreign_formats={FORMAT_NVFP4})
+    state_dict = quantizer.load_and_quantize([str(path)], None)
+
+    assert state_dict["convrot_proj.weight"].dtype is torch.int8
+    assert state_dict["convrot_proj.scale_weight"].shape == (8, 1)
+    assert quantizer.module_groupsizes == {"convrot_proj": 4}
+    assert "nvfp4_proj.weight" not in state_dict
+    assert "nvfp4_proj.weight_scale" not in state_dict
+    assert "nvfp4_proj.comfy_quant" not in state_dict
+
+
 def test_canonicalize_maps_comfy_scale_suffix_only():
     assert canonicalize_convrot_int8_key("linear.weight_scale") == "linear.scale_weight"
     assert canonicalize_convrot_int8_key("linear.weight") == "linear.weight"

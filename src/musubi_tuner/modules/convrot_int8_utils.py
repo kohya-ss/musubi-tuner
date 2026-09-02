@@ -19,7 +19,7 @@ import math
 import os
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Set, Union
 
 import torch
 import torch.nn as nn
@@ -32,6 +32,7 @@ from tqdm import tqdm
 from musubi_tuner.modules.comfy_quant_utils import (
     COMFY_QUANT_SUFFIX,
     COMFY_WEIGHT_SCALE_SUFFIX,
+    classify_comfy_quant_spec,
     decode_comfy_quant_spec,
 )
 from musubi_tuner.modules.convrot_int8_kernels import (
@@ -159,6 +160,7 @@ class ConvRotInt8Quantizer:
         target_layer_keys: Optional[List[str]] = None,
         exclude_layer_keys: Optional[List[str]] = None,
         allowed_groupsizes: Sequence[int] = (CONVROT_GROUPSIZE,),
+        foreign_formats: Optional[Set[str]] = None,
     ):
         for groupsize in allowed_groupsizes:
             if not _is_power_of_4(groupsize):
@@ -167,6 +169,8 @@ class ConvRotInt8Quantizer:
         self.exclude_layer_keys = exclude_layer_keys
         self.allowed_groupsizes = tuple(allowed_groupsizes)
         self.module_groupsizes: Dict[str, int] = {}
+        self.foreign_formats = foreign_formats or set()
+        self._foreign_module_paths: Set[str] = set()
 
     def is_target_key(self, key: str) -> bool:
         is_target = (self.target_layer_keys is None or any(pattern in key for pattern in self.target_layer_keys)) and key.endswith(
@@ -206,6 +210,10 @@ class ConvRotInt8Quantizer:
                 for key in keys:
                     if key.endswith(COMFY_QUANT_SUFFIX):
                         module_path = key[: -len(COMFY_QUANT_SUFFIX)]
+                        spec_format = classify_comfy_quant_spec(decode_comfy_quant_spec(key, f.get_tensor(key)))
+                        if spec_format in self.foreign_formats:
+                            self._foreign_module_paths.add(module_path)
+                            continue
                         spec = parse_comfy_quant_spec(key, f.get_tensor(key))
                         prequantized_groupsizes[module_path] = spec["convrot_groupsize"]
                 if prequantized_groupsizes and weight_hook is not None:
@@ -226,6 +234,8 @@ class ConvRotInt8Quantizer:
 
                     if key.endswith(COMFY_WEIGHT_SCALE_SUFFIX):
                         module_path = key[: -len(COMFY_WEIGHT_SCALE_SUFFIX)]
+                        if module_path in self._foreign_module_paths:
+                            continue
                         if module_path not in prequantized_groupsizes:
                             raise ValueError(f"Found {key} without a matching {module_path}{COMFY_QUANT_SUFFIX} spec")
                         if value.dtype is not torch.float32:
@@ -235,6 +245,8 @@ class ConvRotInt8Quantizer:
                         continue
 
                     module_path = key[: -len(".weight")] if key.endswith(".weight") else None
+                    if module_path is not None and module_path in self._foreign_module_paths:
+                        continue
                     if module_path is not None and module_path in prequantized_groupsizes:
                         if value.dtype != torch.int8:
                             raise ValueError(f"Pre-quantized ConvRot layer {key} must be int8, got {value.dtype}")
