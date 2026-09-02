@@ -39,13 +39,16 @@ from musubi_tuner.minimax_h3.media import (
     AUDIO_SAMPLE_RATE,
     AUDIO_TERMINAL_TOLERANCE_SAMPLES,
     H3_AUDIO_SPEC,
+    ONE_FRAME_REFERENCE_FRAME_CAP,
     H3AudioSource,
     H3Record,
     H3Reference,
     H3Task,
     TARGET_FPS,
     audio_latent_frames,
+    h3_image_records_from_datasource,
     h3_records_from_datasource,
+    reject_one_frame_audio_references,
     video_latent_frames,
     waveform_samples,
 )
@@ -369,36 +372,16 @@ def build_latent_tensors(
             condition = _encode_condition_video(video_vae, _prepare_pixels(frame))[0]
             tensors[_visual_key(role, condition)] = condition
     elif task == "ref2va":
-        for index, reference in enumerate(record.references):
-            role_prefix = f"ref_{index:03d}"
-            visual_frames = None
-            if reference.type in {"image", "video"}:
-                visual_frames = media_decoder.decode_reference_visual(
-                    reference,
-                    target_frame_count=frame_count,
-                    target_size=(width, height),
-                )
-                if reference.type == "video":
-                    video_latent_frames(visual_frames.shape[0])
-                condition = _encode_condition_video(video_vae, _prepare_pixels(visual_frames))[0]
-                tensors[_visual_key(f"{role_prefix}_{reference.type}", condition)] = condition
-
-            if reference.audio is not None:
-                if reference.type == "video":
-                    reference_audio_frames = audio_latent_frames(visual_frames.shape[0])
-                    reference_samples = waveform_samples(reference_audio_frames)
-                    require_exact = True
-                else:
-                    reference_samples = target_samples
-                    require_exact = False
-                waveform = media_decoder.decode_audio(
-                    reference.audio,
-                    start_sample=0,
-                    sample_count=reference_samples,
-                    require_exact=require_exact,
-                )
-                audio_latent = _encode_audio(audio_vae, waveform)[0]
-                tensors[_audio_key(f"{role_prefix}_audio", audio_latent)] = audio_latent
+        _encode_reference_conditions(
+            tensors,
+            record=record,
+            reference_frame_cap=frame_count,
+            target_size=(width, height),
+            target_samples=target_samples,
+            video_vae=video_vae,
+            audio_vae=audio_vae,
+            media_decoder=media_decoder,
+        )
 
     metadata = build_latent_metadata(
         task=task,
@@ -409,6 +392,58 @@ def build_latent_tensors(
         media_fingerprints=media_fingerprints,
     )
     return H3LatentCachePayload(tensors=tensors, metadata=metadata)
+
+
+def _encode_reference_conditions(
+    tensors: dict[str, torch.Tensor],
+    *,
+    record: H3Record,
+    reference_frame_cap: int,
+    target_size: tuple[int, int],
+    target_samples: int | None,
+    video_vae,
+    audio_vae,
+    media_decoder: H3MediaDecoder,
+) -> None:
+    """Encodes the record's ordered references under the numbered ``ref_{i:03d}_{type}`` roles.
+
+    Reference videos are capped at ``reference_frame_cap`` pixel frames (the target duration for
+    video targets, the released 15 s span for one-frame targets) and keep their own audio
+    duration; standalone audio references take the target's window (``target_samples``), which
+    one-frame targets do not have (callers reject them first).
+    """
+    for index, reference in enumerate(record.references):
+        role_prefix = f"ref_{index:03d}"
+        visual_frames = None
+        if reference.type in {"image", "video"}:
+            visual_frames = media_decoder.decode_reference_visual(
+                reference,
+                target_frame_count=reference_frame_cap,
+                target_size=target_size,
+            )
+            if reference.type == "video":
+                video_latent_frames(visual_frames.shape[0])
+            condition = _encode_condition_video(video_vae, _prepare_pixels(visual_frames))[0]
+            tensors[_visual_key(f"{role_prefix}_{reference.type}", condition)] = condition
+
+        if reference.audio is not None:
+            if reference.type == "video":
+                reference_audio_frames = audio_latent_frames(visual_frames.shape[0])
+                reference_samples = waveform_samples(reference_audio_frames)
+                require_exact = True
+            else:
+                if target_samples is None:
+                    raise ValueError("MiniMax-H3 standalone audio references require a target audio window")
+                reference_samples = target_samples
+                require_exact = False
+            waveform = media_decoder.decode_audio(
+                reference.audio,
+                start_sample=0,
+                sample_count=reference_samples,
+                require_exact=require_exact,
+            )
+            audio_latent = _encode_audio(audio_vae, waveform)[0]
+            tensors[_audio_key(f"{role_prefix}_audio", audio_latent)] = audio_latent
 
 
 def encode_one_frame_silence_latent(audio_vae) -> torch.Tensor:
@@ -435,17 +470,35 @@ def build_one_frame_latent_tensors(
     media_fingerprints: Mapping[Path, str],
     control_frames: Sequence[torch.Tensor | np.ndarray] | None = None,
     control_indices: Sequence[int] | None = None,
+    record: H3Record | None = None,
+    audio_vae=None,
+    media_decoder: H3MediaDecoder | None = None,
 ) -> H3LatentCachePayload:
     """One-frame (image) target: a single video latent token, the silence audio placeholder,
     and the target's 24 fps pixel-frame index as a tensor entry for the trainer's RoPE override.
 
     With control_frames/control_indices (K=1..2, fl2va editing/inbetween), each bucket-resized
     control image becomes a condition latent under the packed (first, last) role keys, and the
-    indices ride along as an int64 tensor for the trainer's condition-time overrides."""
+    indices ride along as an int64 tensor for the trainer's condition-time overrides.
+
+    With a record carrying references (ref2va), the ordered references become numbered
+    ``ref_{i:03d}`` condition latents exactly like video Ref2VA caches (image references are
+    canvas-capped to the target area, video references keep their released span and audio);
+    references are untimed, only the target index enters the time overrides."""
     if target_index < 0:
         raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
     if (control_frames is None) != (control_indices is None):
         raise ValueError("MiniMax-H3 one-frame control frames and control indices must be provided together")
+    references = () if record is None else record.references
+    if references:
+        if control_frames is not None:
+            raise ValueError("MiniMax-H3 one-frame caching cannot combine control images with references")
+        if media_decoder is None:
+            raise ValueError("MiniMax-H3 one-frame references require a media decoder")
+        _validate_task_record(record, "ref2va")
+        reject_one_frame_audio_references(record)
+        if audio_vae is None and any(reference.audio is not None for reference in references):
+            raise ValueError("MiniMax-H3 one-frame audio-bearing references require the audio VAE")
     image_frames = torch.as_tensor(image_frames)
     if image_frames.ndim == 3:
         image_frames = image_frames.unsqueeze(0)
@@ -489,13 +542,30 @@ def build_one_frame_latent_tensors(
                 )
             condition = _encode_condition_video(video_vae, _prepare_pixels(control.unsqueeze(0)))[0]
             tensors[_visual_key(role, condition)] = condition
+    if references:
+        _encode_reference_conditions(
+            tensors,
+            record=record,
+            reference_frame_cap=ONE_FRAME_REFERENCE_FRAME_CAP,
+            target_size=(int(width), int(height)),
+            target_samples=None,
+            video_vae=video_vae,
+            audio_vae=audio_vae,
+            media_decoder=media_decoder,
+        )
     append_audio_present_entry(tensors, False)
     append_one_frame_target_index_entry(tensors, target_index)
     if control_indices is not None:
         append_one_frame_control_indices_entry(tensors, list(control_indices))
 
+    if references:
+        task: H3Task = "ref2va"
+    elif control_frames is not None:
+        task = "fl2va"
+    else:
+        task = "t2va"
     metadata = build_latent_metadata(
-        task="t2va" if control_frames is None else "fl2va",
+        task=task,
         crop_start_frame=0,
         cache_seed=cache_seed,
         video_vae_fingerprint=video_vae_fingerprint,
@@ -538,6 +608,20 @@ def validate_h3_dataset(dataset: VideoDataset | ImageDataset) -> None:
     # dataset layer); the shared control-VIDEO fields stay unsupported
     if isinstance(dataset, VideoDataset) and (dataset.control_directory is not None or dataset.has_control):
         raise ValueError("MiniMax-H3 does not use the shared control-video fields")
+
+
+def validate_h3_image_dataset_task(dataset: ImageDataset, task: H3Task, one_frame: bool) -> None:
+    """The one-frame task matrix, shared by both cache scripts: plain images cache as t2va,
+    control images (time-annotated) require fl2va, and ref2va takes a control-free image
+    JSONL dataset whose records carry references (checked when the records are built)."""
+    if not one_frame:
+        raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
+    if dataset.has_control and task != "fl2va":
+        raise ValueError("MiniMax-H3 image datasets with control images require --task fl2va")
+    if not dataset.has_control and task == "fl2va":
+        raise ValueError(
+            "MiniMax-H3 --task fl2va requires image datasets with control images (plain image datasets cache with --task t2va)"
+        )
 
 
 def dataset_cache_dir_key(cache_directory: str) -> str:
@@ -583,7 +667,8 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="experimental one-frame (image) training caches: accept image datasets whose items become single-token"
         " video targets with a silence audio placeholder. --task t2va caches plain image targets; --task fl2va"
-        " additionally encodes 1-2 control images as time-annotated conditions (fp_1f_clean_indices)",
+        " additionally encodes 1-2 control images as time-annotated conditions (fp_1f_clean_indices); --task ref2va"
+        " encodes the per-item references of an image_jsonl_file dataset as untimed Ref2VA conditions",
     )
     parser.add_argument("--cache_seed", type=int, default=0, help="seed used for reproducible target-video posterior samples")
     parser.add_argument(
@@ -607,12 +692,11 @@ def main() -> None:
     blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_MINIMAX_H3)
     dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, audio_spec=H3_AUDIO_SPEC)
     datasets = dataset_group.datasets
-    if args.one_frame and args.task == "ref2va":
-        raise ValueError("MiniMax-H3 one-frame caching supports --task t2va and fl2va only")
 
     records_by_dir: dict[str, list[H3Record]] = {}
     audio_sources_by_dir: dict[str, list] = {}
     image_dirs: set[str] = set()
+    image_records_by_dir: dict[str, dict[str, H3Record]] = {}
     control_paths_by_dir: dict[str, dict[str, list[str]]] = {}
     for dataset_index, dataset in enumerate(datasets):
         validate_h3_dataset(dataset)
@@ -625,17 +709,10 @@ def main() -> None:
             )
         key = dataset_cache_dir_key(dataset.cache_directory)
         if isinstance(dataset, ImageDataset):
-            if not args.one_frame:
-                raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
-            if dataset.has_control and args.task != "fl2va":
-                raise ValueError("MiniMax-H3 image datasets with control images require --task fl2va")
-            if not dataset.has_control and args.task != "t2va":
-                raise ValueError(
-                    "MiniMax-H3 --task fl2va requires image datasets with control images"
-                    " (plain image datasets cache with --task t2va)"
-                )
+            validate_h3_image_dataset_task(dataset, args.task, args.one_frame)
             image_dirs.add(key)
             control_paths_by_dir[key] = dataset.datasource.get_control_paths()
+            image_records_by_dir[key] = h3_image_records_from_datasource(dataset.datasource, args.task)
             continue
         if not isinstance(dataset, VideoDataset):
             raise ValueError("MiniMax-H3 latent caching accepts only image and video datasets")
@@ -666,6 +743,10 @@ def main() -> None:
         for source in audio_sources_by_dir[key]:
             if source is not None:
                 media_fingerprints[source.path] = fingerprint_file(source.path)
+    for image_records in image_records_by_dir.values():
+        for record in image_records.values():
+            for path in record_media_paths(record):
+                media_fingerprints[path] = fingerprint_file(path)
 
     logger.info("Loading MiniMax-H3 video VAE from %s", args.video_vae)
     video_vae = load_video_vae(
@@ -695,7 +776,15 @@ def main() -> None:
         image_fingerprints = {image_path: media_fingerprints.setdefault(image_path, fingerprint_file(image_path))}
         control_frames = None
         control_indices = None
-        if args.task == "fl2va":
+        record = None
+        if args.task == "ref2va":
+            record = image_records_by_dir.get(cache_dir_key, {}).get(item.item_key)
+            if record is None:
+                raise ValueError(f"MiniMax-H3 ref2va one-frame item has no JSONL record: {item.item_key}")
+            # the references are what the cache encodes, so their files join the identity
+            for path in record_media_paths(record):
+                image_fingerprints[path] = media_fingerprints[path]
+        elif args.task == "fl2va":
             control_frames = item.control_content
             control_indices = item.fp_1f_clean_indices
             if not control_indices or control_frames is None or len(control_frames) != len(control_indices):
@@ -735,6 +824,9 @@ def main() -> None:
             media_fingerprints=image_fingerprints,
             control_frames=control_frames,
             control_indices=control_indices,
+            record=record,
+            audio_vae=audio_vae,
+            media_decoder=decoder,
         )
         logger.info("Saving MiniMax-H3 one-frame latent cache for %s to %s", item.item_key, item.latent_cache_path)
         save_latent_cache_minimax_h3(item, payload.tensors, payload.metadata)

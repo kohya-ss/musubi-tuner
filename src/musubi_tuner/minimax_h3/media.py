@@ -10,7 +10,7 @@ import av
 
 from musubi_tuner.dataset.audio_utils import AudioSource as H3AudioSource
 from musubi_tuner.dataset.audio_utils import AudioSpec
-from musubi_tuner.dataset.datasources import VideoDatasource, VideoJsonlDatasource
+from musubi_tuner.dataset.datasources import ImageDatasource, ImageJsonlDatasource, VideoDatasource, VideoJsonlDatasource
 
 
 H3Task = Literal["t2va", "fl2va", "ref2va"]
@@ -20,6 +20,9 @@ H3MediaProbe = Callable[[Path], "H3MediaInfo"]
 TARGET_FPS = 24
 AUDIO_SAMPLE_RATE = 32000
 AUDIO_TERMINAL_TOLERANCE_SAMPLES = 800
+# with a one-frame (image) target, reference videos keep their full released span instead of
+# being capped by the target duration (shared by generation and the one-frame caches)
+ONE_FRAME_REFERENCE_FRAME_CAP = 15 * TARGET_FPS
 
 
 @dataclass(frozen=True)
@@ -264,6 +267,17 @@ def parse_inline_references(
     return _parse_references(raw_references, base_directory, context, probe)
 
 
+def reject_one_frame_audio_references(record: H3Record) -> None:
+    """Standalone audio references have no window with a one-frame target (it is defined by the
+    target duration); video references keep their embedded audio. Shared by generation, the
+    one-frame caches, and training-time samples."""
+    if any(reference.type == "audio" for reference in record.references):
+        raise ValueError(
+            "MiniMax-H3 one-frame targets do not accept standalone audio references"
+            " (their window is defined by the target duration); video references keep their embedded audio"
+        )
+
+
 def _record_from_jsonl_data(
     data: object,
     base_directory: Path,
@@ -353,4 +367,54 @@ def h3_records_from_datasource(
         if not isinstance(caption, str):
             raise ValueError("MiniMax-H3 directory caption must be a string")
         records.append(H3Record(video_path=video_path, caption=caption, references=(), jsonl_line=0))
+    return records
+
+
+def h3_image_records_from_datasource(
+    datasource: ImageDatasource,
+    task: H3Task,
+    probe: H3MediaProbe = probe_h3_media,
+) -> dict[str, H3Record]:
+    """Builds one-frame (image target) Ref2VA records from an image datasource's parsed data.
+
+    Only ``image_jsonl_file`` datasets can carry ``references`` (the same schema as the
+    Ref2VA video JSONL, resolved from the JSONL directory), so Ref2VA requires one. The result
+    is keyed by the JSONL ``image_path`` string exactly as the dataset layer stores it in
+    ``ItemInfo.item_key`` (image items carry no datasource index); the record's target path
+    is that image path resolved the way the dataset layer opens it. For the other tasks the
+    JSONL is only checked for stray ``references`` and no records are built.
+    """
+    if task not in {"t2va", "fl2va", "ref2va"}:
+        raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
+    if not isinstance(datasource, ImageJsonlDatasource):
+        if task == "ref2va":
+            raise ValueError("MiniMax-H3 one-frame Ref2VA requires image_jsonl_file with per-item references")
+        return {}
+
+    base_directory = Path(datasource.image_jsonl_file).resolve().parent
+    records: dict[str, H3Record] = {}
+    for index, data in enumerate(datasource.data):
+        line_number = index + 1
+        if not isinstance(data, dict):
+            raise ValueError(f"H3 JSONL line {line_number}: each record must be an object")
+        raw_references = data.get("references", [])
+        if task != "ref2va":
+            if raw_references:
+                raise ValueError(f"H3 JSONL line {line_number}: references require task ref2va")
+            continue
+        item_key = data.get("image_path")
+        if not isinstance(item_key, str) or not item_key.strip():
+            raise ValueError(f"H3 JSONL line {line_number}: image_path must be a non-empty path")
+        target = Path(item_key).expanduser().resolve()
+        if not target.is_file():
+            raise ValueError(f"H3 JSONL line {line_number}: image_path does not exist: {target}")
+        caption = data.get("caption")
+        if not isinstance(caption, str):
+            raise ValueError(f"H3 JSONL line {line_number}: caption must be a string")
+        if item_key in records:
+            raise ValueError(f"H3 JSONL line {line_number}: duplicate image_path {item_key!r}")
+        references = _parse_references(raw_references, base_directory, line_number, probe)
+        records[item_key] = H3Record(video_path=target, caption=caption, references=references, jsonl_line=line_number)
+    if task == "ref2va" and not records:
+        raise ValueError(f"MiniMax-H3 JSONL contains no records: {datasource.image_jsonl_file}")
     return records

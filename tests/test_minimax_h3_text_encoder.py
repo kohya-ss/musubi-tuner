@@ -28,9 +28,14 @@ from musubi_tuner.minimax_h3.text_encoder import (
 )
 
 try:
-    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _ref_teacher_presentation, _text_cache_metadata
+    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import (
+        _ref_teacher_presentation,
+        _reference_visuals,
+        _text_cache_metadata,
+    )
 except ImportError as error:
     _ref_teacher_presentation = None
+    _reference_visuals = None
     _text_cache_metadata = None
     _text_cache_import_error = str(error)
 else:
@@ -175,6 +180,46 @@ def test_ref_teacher_presentation_wraps_the_caption_and_samples_the_target_crop(
     assert presentation.processor_text == f"<Audio 1>: <Video 1>: {VIDEO_PLACEHOLDER}{wrapped}"
     assert presentation.images == ()
     assert [tuple(video_block.shape) for video_block in presentation.videos] == [(3, 32, 32, 3)]
+
+
+@pytest.mark.skipif(_reference_visuals is None, reason="cache script import failed")
+def test_reference_visuals_follow_the_one_frame_reference_policy(tmp_path: Path):
+    # one-frame Ref2VA text caches decode references with the generation policy: images as a
+    # single frame capped to the target area, videos capped to the released span and sampled
+    # at 2 fps, both through the shared decoder cache keyed by that policy
+    image = tmp_path / "face.png"
+    video = tmp_path / "motion.mp4"
+    record = _record(
+        tmp_path,
+        (
+            H3Reference(type="image", path=image),
+            H3Reference(type="video", path=video, audio=None, duration_seconds=2.0),
+        ),
+    )
+
+    class FakeDecoder:
+        def __init__(self):
+            self.calls = []
+
+        def decode_reference_visual(self, reference, *, target_frame_count, target_size):
+            self.calls.append((reference.path, target_frame_count, target_size))
+            frames = 1 if reference.type == "image" else 29
+            return torch.zeros(frames, 32, 32, 3)
+
+    decoder = FakeDecoder()
+    cache = {}
+
+    visuals = _reference_visuals(record, 360, (64, 96), decoder, cache)
+    presentation = build_presentation(record, "ref2va", visuals)
+
+    assert decoder.calls == [(image, 360, (64, 96)), (video, 360, (64, 96))]
+    assert visuals[image].frames.shape == (1, 32, 32, 3)
+    assert visuals[video].frames.shape == (3, 32, 32, 3)
+    assert visuals[video].timestamps == (0.0, 0.5, 1.0)
+    assert presentation.text.startswith(f"<Picture 1>: {IMAGE_PLACEHOLDER}<Video 1>: <0.2 seconds>")
+    # a second item sharing the references reuses the decoded frames
+    _reference_visuals(record, 360, (64, 96), decoder, cache)
+    assert len(decoder.calls) == 2
 
 
 def test_token_tags_cover_expanded_vision_rows_and_both_flanking_tokens():

@@ -32,7 +32,13 @@ from musubi_tuner.minimax_h3.generation_inputs import (
     module_device_dtype,
     parse_one_frame_options,
 )
-from musubi_tuner.minimax_h3.media import H3_AUDIO_SPEC, audio_latent_frames, parse_inline_references, video_latent_frames
+from musubi_tuner.minimax_h3.media import (
+    H3_AUDIO_SPEC,
+    audio_latent_frames,
+    parse_inline_references,
+    reject_one_frame_audio_references,
+    video_latent_frames,
+)
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
     FRAME_RESCALE,
@@ -107,12 +113,10 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
     one_frame_spec = sample.get("one_frame")
     if requested_frame_count == 1:
         # experimental one-frame (image) sample: single-token target, no duration semantics
-        if args.task not in {"t2va", "fl2va"}:
-            raise ValueError("MiniMax-H3 one-frame training samples (--f 1) support --task t2va and fl2va only")
         frame_count = 1
         target_index, control_indices = parse_one_frame_options(one_frame_spec) if one_frame_spec else (0, None)
-        if args.task == "t2va" and control_indices is not None:
-            raise ValueError("MiniMax-H3 T2VA one-frame training sample does not accept control_index")
+        if args.task != "fl2va" and control_indices is not None:
+            raise ValueError(f"MiniMax-H3 {args.task.upper()} one-frame training sample does not accept control_index")
         sample["one_frame_target_index"] = target_index
         sample["one_frame_control_indices"] = control_indices
     else:
@@ -374,8 +378,8 @@ def _runtime_batch_plan(
     if is_one_frame_batch:
         if not one_frame:
             raise ValueError("MiniMax-H3 batch carries a one-frame latent cache; pass --one_frame to train on image targets")
-        if reference_roles or teacher_conditions is not None:
-            raise ValueError("MiniMax-H3 one-frame training currently supports plain T2VA and FL2VA caches only")
+        if teacher_conditions is not None:
+            raise ValueError("MiniMax-H3 one-frame training does not support teacher matching yet")
         if (
             not isinstance(one_frame_index_value, torch.Tensor)
             or one_frame_index_value.shape != (batch_size,)
@@ -406,7 +410,8 @@ def _runtime_batch_plan(
             _warn_once_coinciding_indices(control_indices, target_index)
             condition_times = tuple(FRAME_RESCALE * index for index in control_indices)
         elif one_frame_control_value is not None:
-            raise ValueError("MiniMax-H3 one-frame T2VA batch cannot carry one_frame_control_indices; re-run latent caching")
+            # references are untimed: only FL2VA controls carry condition indices
+            raise ValueError("MiniMax-H3 one-frame T2VA/Ref2VA batch cannot carry one_frame_control_indices; re-run latent caching")
         time_overrides = H3TimeOverrides(condition_times=condition_times, target_time=FRAME_RESCALE * target_index)
     elif one_frame_index_value is not None or one_frame_control_value is not None:
         raise ValueError("MiniMax-H3 video batch cannot carry one-frame index tensors; re-run latent caching")
@@ -720,8 +725,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if getattr(args, "task", None) not in {"t2va", "fl2va", "ref2va"}:
             raise ValueError("MiniMax-H3 requires --task t2va, fl2va, or ref2va")
         if getattr(args, "one_frame", False):
-            if args.task not in {"t2va", "fl2va"}:
-                raise ValueError("MiniMax-H3 one-frame training requires --task t2va or fl2va")
             if getattr(args, "h3_teacher_matching", False):
                 raise ValueError("--h3_teacher_matching does not support --one_frame yet")
             logger.info(
@@ -894,6 +897,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             for parameter in parameters:
                 request = SimpleNamespace(**parameter)
                 record = load_generation_record(request)
+                if parameter["frame_count"] == 1:
+                    reject_one_frame_audio_references(record)
                 raw_visuals, text_visuals = decode_generation_visuals(request, record, decoder)
                 presentation = build_presentation(record, args.task, text_visuals)
                 hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
@@ -1461,9 +1466,14 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             )
         # the probe swaps only the text rows; the one-frame times stay valid because they
         # are relative to the target-block cursor, which moves with the text length. The
-        # condition roles are recovered from the segments so a one-frame FL2VA layout with a
-        # single condition rebuilds identically (roles are required for K=1).
-        uncond_condition_roles = tuple(segment.role for segment in runtime.layout.segments if segment.kind == "visual_condition")
+        # FL2VA condition roles are recovered from the segments so a one-frame FL2VA layout
+        # with a single condition rebuilds identically (roles are required for K=1); Ref2VA
+        # reference blocks share the segment kind but are addressed by the references tuple
+        uncond_condition_roles = ()
+        if runtime.layout.task == "fl2va":
+            uncond_condition_roles = tuple(
+                segment.role for segment in runtime.layout.segments if segment.kind == "visual_condition"
+            )
         uncond_layout = build_h3_layout(
             task=runtime.layout.task,
             text_length=uncond_hidden.shape[0],
@@ -1778,9 +1788,9 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--one_frame",
         action="store_true",
         help="experimental one-frame (image) training: accept single-token latent caches written by"
-        " minimax_h3_cache_latents.py --one_frame — plain image targets (t2va) or editing/inbetween targets"
-        " with 1-2 time-annotated control images (fl2va). Video batches are unaffected, so image and video"
-        " datasets can mix in one run",
+        " minimax_h3_cache_latents.py --one_frame — plain image targets (t2va), editing/inbetween targets"
+        " with 1-2 time-annotated control images (fl2va), or reference-conditioned targets (ref2va)."
+        " Video batches are unaffected, so image and video datasets can mix in one run",
     )
     add_audio_train_args(parser)
     parser.add_argument("--h3_shift_video", type=float, default=12.0, help="MiniMax-H3 target-video flow shift")

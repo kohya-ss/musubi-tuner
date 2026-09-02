@@ -46,6 +46,7 @@ def _load_training_module(monkeypatch):
         H3_AUDIO_SPEC=object(),
         audio_latent_frames=noop,
         parse_inline_references=noop,
+        reject_one_frame_audio_references=noop,
         video_latent_frames=noop,
     )
     _stub(
