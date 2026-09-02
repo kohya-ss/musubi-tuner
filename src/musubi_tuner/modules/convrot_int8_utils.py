@@ -242,8 +242,6 @@ class ConvRotInt8Quantizer:
 
                     if key.endswith(COMFY_WEIGHT_SCALE_SUFFIX):
                         module_path = key[: -len(COMFY_WEIGHT_SCALE_SUFFIX)]
-                        if module_path in self._foreign_module_paths:
-                            continue
                         if module_path not in prequantized_groupsizes:
                             raise ValueError(f"Found {key} without a matching {module_path}{COMFY_QUANT_SUFFIX} spec")
                         if value.dtype is not torch.float32:
@@ -253,8 +251,6 @@ class ConvRotInt8Quantizer:
                         continue
 
                     module_path = key[: -len(".weight")] if key.endswith(".weight") else None
-                    if module_path is not None and module_path in self._foreign_module_paths:
-                        continue
                     if module_path is not None and module_path in prequantized_groupsizes:
                         if value.dtype != torch.int8:
                             raise ValueError(f"Pre-quantized ConvRot layer {key} must be int8, got {value.dtype}")
@@ -442,14 +438,15 @@ def apply_convrot_int8_monkey_patch(
     """
     _validate_convrot_bwd_mode(bwd_mode)
 
-    scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
+    if groupsize_map is not None:
+        patched_module_paths = set(groupsize_map)
+    else:
+        scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
+        patched_module_paths = {scale_key.rsplit(".scale_weight", 1)[0] for scale_key in scale_keys}
 
-    patched_module_paths = set()
-    scale_shape_info = {}
-    for scale_key in scale_keys:
-        module_path = scale_key.rsplit(".scale_weight", 1)[0]
-        patched_module_paths.add(module_path)
-        scale_shape_info[module_path] = optimized_state_dict[scale_key].shape
+    scale_shape_info = {
+        module_path: optimized_state_dict[f"{module_path}.scale_weight"].shape for module_path in patched_module_paths
+    }
 
     patched_paths = set()
     for name, module in model.named_modules():

@@ -298,3 +298,88 @@ def test_load_krea2_dit_applies_both_patches_for_mixed_nvfp4_convrot(monkeypatch
 
     assert captured["nvfp4_shapes"] == {"mlp_proj": (64, 32)}
     assert captured["groupsize_map"] == {"attn_proj": 256}
+
+
+def _make_mixed_artifact_with_nvfp4_int8_embedding(tmp_path):
+    """One ConvRot INT8 Linear ('attn_proj') + one NVFP4-owned int8_tensorwise embedding
+    ('embed', no 'convrot' flag in its spec). Both formats emit a Musubi-layout
+    '<module>.scale_weight' key, which is the collision apply_convrot_int8_monkey_patch
+    must not mistake for its own when the caller passes groupsize_map (see the finding
+    this test guards: scanning ALL '.scale_weight' keys in the merged mixed state dict
+    would misclassify the NVFP4 embedding's scale as a ConvRot target)."""
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+
+    from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight, quantize_int8_rowwise
+
+    torch.manual_seed(0)
+    convrot_weight = torch.randn(64, 256) * 0.02
+    q_weight, q_scale = quantize_int8_convrot_weight(convrot_weight, 256)
+    convrot_spec = json.dumps({"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}).encode("utf-8")
+    convrot_payload = torch.tensor(list(convrot_spec), dtype=torch.uint8)
+
+    embed_weight_f32 = torch.randn(16, 8) * 0.02
+    embed_q, embed_scale = quantize_int8_rowwise(embed_weight_f32)
+    embed_spec = json.dumps({"format": "int8_tensorwise"}).encode("utf-8")
+    embed_payload = torch.tensor(list(embed_spec), dtype=torch.uint8)
+
+    path = tmp_path / "mixed_with_int8_embedding.safetensors"
+    save_file(
+        {
+            "attn_proj.weight": q_weight,
+            "attn_proj.weight_scale": q_scale,
+            "attn_proj.comfy_quant": convrot_payload,
+            "embed.weight": embed_q,
+            "embed.weight_scale": embed_scale,
+            "embed.comfy_quant": embed_payload,
+        },
+        str(path),
+    )
+    return str(path)
+
+
+def test_apply_convrot_int8_monkey_patch_ignores_nvfp4_owned_scale_weight_in_merged_state_dict(tmp_path):
+    """Regression test: apply_convrot_int8_monkey_patch must not scan the full merged
+    mixed-mode state dict for '.scale_weight' keys -- it must restrict discovery to
+    groupsize_map when the caller passes one (every real call site does), so an NVFP4
+    int8_tensorwise embedding's '<module>.scale_weight' key (same Musubi naming
+    convention) in the merged dict is not misclassified as a ConvRot target."""
+    from torch import nn
+
+    from musubi_tuner.modules.comfy_quant_utils import FORMAT_CONVROT_INT8, FORMAT_INT8_TENSORWISE, FORMAT_NVFP4
+    from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
+    from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer
+
+    path = _make_mixed_artifact_with_nvfp4_int8_embedding(tmp_path)
+
+    convrot_quantizer = ConvRotInt8Quantizer(
+        target_layer_keys=[],  # prequantized-only, mirrors krea2_utils's mixed-mode wiring
+        foreign_formats={FORMAT_NVFP4, FORMAT_INT8_TENSORWISE},
+    )
+    convrot_sd = convrot_quantizer.load_and_quantize([path], calc_device="cpu")
+
+    nvfp4_quantizer = NvFp4Quantizer(foreign_formats={FORMAT_CONVROT_INT8})
+    nvfp4_sd = nvfp4_quantizer.load_and_quantize([path], calc_device="cpu")
+
+    # Same merge order MixedQuantizer uses (dict.update per sub-quantizer): nvfp4 first,
+    # then convrot_int8, so the merged dict contains both formats' Musubi-layout keys.
+    merged_sd = {}
+    merged_sd.update(nvfp4_sd)
+    merged_sd.update(convrot_sd)
+    assert "embed.scale_weight" in merged_sd  # NVFP4's renamed int8_tensorwise scale
+    assert "attn_proj.scale_weight" in merged_sd  # ConvRot's scale
+
+    class TinyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn_proj = nn.Linear(256, 64, bias=False)
+            self.embed = nn.Embedding(16, 8)
+
+    model = TinyModel()
+
+    apply_convrot_int8_monkey_patch(model, merged_sd, groupsize_map=convrot_quantizer.module_groupsizes)
+
+    assert model.convrot_int8_layer_count == 1
+    assert not hasattr(model.embed, "_convrot_groupsize")

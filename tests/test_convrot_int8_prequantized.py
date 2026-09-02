@@ -251,8 +251,28 @@ def test_apply_patch_rejects_a_scale_for_a_missing_module():
     state_dict = _quantized_state(model, (("a", 4),))
     state_dict["ghost.scale_weight"] = torch.ones(8, 1, dtype=torch.float32)
 
+    # "ghost" must be declared via groupsize_map to be considered a ConvRot target at all
+    # (discovery is scoped to groupsize_map's keys, not a scan of every ".scale_weight" in
+    # the state dict -- a merged mixed-format state dict may carry other quantizers'
+    # same-suffix scale keys that ConvRot must not treat as its own).
     with pytest.raises(ValueError, match="missing module ghost"):
-        apply_convrot_int8_monkey_patch(model, state_dict, groupsize_map={"a": 4})
+        apply_convrot_int8_monkey_patch(model, state_dict, groupsize_map={"a": 4, "ghost": 4})
+
+
+def test_apply_patch_ignores_scale_weight_keys_outside_groupsize_map():
+    """A merged mixed-format state dict may contain another quantizer's own
+    '<module>.scale_weight' key (same Musubi naming convention). When groupsize_map is
+    given, apply_convrot_int8_monkey_patch must restrict discovery to its keys and ignore
+    unrelated scale keys rather than raising or mis-patching."""
+    model = _TinyModel()
+    state_dict = _quantized_state(model, (("a", 4),))
+    # Simulates another format's module landing in the merged dict under the same suffix.
+    state_dict["foreign.scale_weight"] = torch.ones(8, 1, dtype=torch.float32)
+
+    apply_convrot_int8_monkey_patch(model, state_dict, groupsize_map={"a": 4})
+
+    assert model.convrot_int8_layer_count == 1
+    assert not hasattr(model.nested.b, "_convrot_groupsize")
 
 
 def test_int8_backward_on_cpu_raises_a_clear_cuda_error(monkeypatch):
