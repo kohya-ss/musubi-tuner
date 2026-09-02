@@ -756,3 +756,45 @@ def test_nvfp4_swap_tensor_selector_follows_only_forward_buffers_under_training_
     assert "nvfp4_weight_t" not in job_names
     assert "nvfp4_block_scale_t" not in job_names
     assert "nvfp4_scale_t" not in job_names
+
+
+def test_foreign_format_module_is_skipped_not_raised(tmp_path):
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+
+    from musubi_tuner.modules.comfy_quant_utils import FORMAT_CONVROT_INT8
+    from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer, _quantize_nvfp4_2d
+
+    torch.manual_seed(0)
+    nvfp4_weight = torch.randn(64, 32) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(nvfp4_weight)
+    nvfp4_payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+
+    convrot_spec = json.dumps({"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}).encode("utf-8")
+    convrot_payload = torch.tensor(list(convrot_spec), dtype=torch.uint8)
+
+    path = tmp_path / "mixed.safetensors"
+    save_file(
+        {
+            "nvfp4_proj.weight": packed,
+            "nvfp4_proj.weight_scale": block_scale,
+            "nvfp4_proj.weight_scale_2": tensor_scale,
+            "nvfp4_proj.comfy_quant": nvfp4_payload,
+            "convrot_proj.weight": torch.zeros(64, 256, dtype=torch.int8),
+            "convrot_proj.weight_scale": torch.ones(64, 1, dtype=torch.float32),
+            "convrot_proj.comfy_quant": convrot_payload,
+        },
+        str(path),
+    )
+
+    quantizer = NvFp4Quantizer(foreign_formats={FORMAT_CONVROT_INT8})
+    state_dict = quantizer.load_and_quantize([str(path)], None)
+
+    assert "nvfp4_proj.weight" in state_dict
+    assert "nvfp4_proj.nvfp4_block_scale" in state_dict
+    assert quantizer.nvfp4_module_shapes == {"nvfp4_proj": (64, 32)}
+    assert "convrot_proj.weight" not in state_dict
+    assert "convrot_proj.weight_scale" not in state_dict
+    assert "convrot_proj.comfy_quant" not in state_dict

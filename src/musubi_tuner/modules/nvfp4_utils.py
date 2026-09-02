@@ -34,7 +34,7 @@ lower-quality model than ConvRot INT8.
 import logging
 import os
 import random
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -618,9 +618,11 @@ class NvFp4Quantizer:
     per-row INT8 modules (embeddings). Pass both to ``apply_nvfp4_monkey_patch``.
     """
 
-    def __init__(self):
+    def __init__(self, foreign_formats: Optional[Set[str]] = None):
         self.nvfp4_module_shapes: Dict[str, Tuple[int, int]] = {}
         self.int8_embedding_modules: List[str] = []
+        self.foreign_formats = foreign_formats or set()
+        self._foreign_module_paths: Set[str] = set()
 
     def load_and_quantize(
         self,
@@ -645,6 +647,9 @@ class NvFp4Quantizer:
                     if key.endswith(COMFY_QUANT_SUFFIX):
                         module_path = key[: -len(COMFY_QUANT_SUFFIX)]
                         spec_format = classify_comfy_quant_spec(decode_comfy_quant_spec(key, f.get_tensor(key)))
+                        if spec_format in self.foreign_formats:
+                            self._foreign_module_paths.add(module_path)
+                            continue
                         if spec_format not in (FORMAT_NVFP4, FORMAT_INT8_TENSORWISE):
                             raise ValueError(
                                 f"Unsupported comfy_quant format for {key}: {spec_format}. The NVFP4 loader supports"
@@ -668,6 +673,8 @@ class NvFp4Quantizer:
                     original_device = value.device  # usually cpu
                     passthrough_device = calc_device if (calc_device is not None and move_to_device) else original_device
                     converted_key = self._convert_key(key, value, module_formats)
+                    if converted_key is None:
+                        continue  # belongs to a foreign format's quantizer, not ours
                     state_dict[converted_key] = value.to(passthrough_device)
 
         self._validate_completeness(state_dict, module_formats)
@@ -677,14 +684,20 @@ class NvFp4Quantizer:
         )
         return state_dict
 
-    def _convert_key(self, key: str, value: torch.Tensor, module_formats: Dict[str, str]) -> str:
-        """Validate a tensor against its module's declared format and return the Musubi key."""
+    def _convert_key(self, key: str, value: torch.Tensor, module_formats: Dict[str, str]) -> Optional[str]:
+        """Validate a tensor against its module's declared format and return the Musubi key.
+
+        Returns None if the tensor belongs to a module declared under a `foreign_formats`
+        entry -- some other quantizer owns converting it.
+        """
         for suffix in (COMFY_WEIGHT_SCALE_SUFFIX, COMFY_WEIGHT_SCALE_2_SUFFIX, COMFY_PRE_QUANT_SCALE_SUFFIX, ".weight"):
             if key.endswith(suffix):
                 module_path = key[: -len(suffix)]
                 break
         else:
             return key  # bias, norm, etc.: passthrough
+        if module_path in self._foreign_module_paths:
+            return None
         spec_format = module_formats.get(module_path)
         if spec_format is None:
             if key.endswith(".weight") and value.dtype.itemsize == 1:
