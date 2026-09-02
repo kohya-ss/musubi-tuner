@@ -135,9 +135,7 @@ def process_text_encoder_batches(
             empty_cache_path = os.path.normpath(empty_item.text_encoder_output_cache_path)
             all_cache_paths.add(empty_cache_path)
             if not (skip_existing and empty_cache_path in all_cache_files):
-                logger.info(
-                    f"Encoding empty caption for dataset [{dataset_index}] (caption_dropout_rate={caption_dropout_rate})"
-                )
+                logger.info(f"Encoding empty caption for dataset [{dataset_index}] (caption_dropout_rate={caption_dropout_rate})")
                 encode([empty_item])
 
 
