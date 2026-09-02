@@ -58,7 +58,12 @@ def _build_patched_blocks(tmp_path: Path, num_blocks=4, n=64, k=64):
     state_dict = quantizer.load_and_quantize([str(path)], None)  # stays on CPU
     blocks = nn.ModuleList([_TinyBlock(n, k) for _ in range(num_blocks)])
     apply_nvfp4_monkey_patch(
-        blocks, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+        blocks,
+        state_dict,
+        quantizer.nvfp4_module_shapes,
+        [],
+        use_scaled_mm=True,
+        training=True,
     )
     blocks.requires_grad_(False)
     blocks.load_state_dict(state_dict, strict=True, assign=True)
@@ -78,7 +83,11 @@ def test_default_selector_leaves_nvfp4_weight_t_gpu_resident_for_every_block(tmp
     blocks = _build_patched_blocks(tmp_path, num_blocks=4)
     device = torch.device("cuda")
     config = BlockSwapConfig(
-        device=device, supports_backward=True, use_pinned_memory=True, h2d_only=True, ring_size=1,
+        device=device,
+        supports_backward=True,
+        use_pinned_memory=True,
+        h2d_only=True,
+        ring_size=1,
     )  # swap_tensor_selector left at its default (None) -- reproduces the bug
     offloader = create_offloader("test", list(blocks), 4, 2, config)
     offloader.prepare_block_devices_before_forward(list(blocks))
@@ -156,7 +165,11 @@ def test_lora_stream_offloader_excludes_structurally_different_leading_blocks(tm
     blocks = _build_mixed_blocks(tmp_path, num_plain=2, num_quantized=4)
     device = torch.device("cuda")
     config = BlockSwapConfig(
-        device=device, supports_backward=True, use_pinned_memory=True, h2d_only=True, ring_size=2,
+        device=device,
+        supports_backward=True,
+        use_pinned_memory=True,
+        h2d_only=True,
+        ring_size=2,
         swap_tensor_selector=nvfp4_swap_tensor_selector,
     )
     with pytest.raises(ValueError, match="eligible") as exc_info:
@@ -188,7 +201,11 @@ def test_lora_stream_offloader_streams_only_eligible_blocks_when_request_fits(tm
     blocks = _build_mixed_blocks(tmp_path, num_plain=2, num_quantized=4)
     device = torch.device("cuda")
     config = BlockSwapConfig(
-        device=device, supports_backward=True, use_pinned_memory=True, h2d_only=True, ring_size=2,
+        device=device,
+        supports_backward=True,
+        use_pinned_memory=True,
+        h2d_only=True,
+        ring_size=2,
         swap_tensor_selector=nvfp4_swap_tensor_selector,
     )
     offloader = create_offloader("test", blocks, 6, 4, config)
