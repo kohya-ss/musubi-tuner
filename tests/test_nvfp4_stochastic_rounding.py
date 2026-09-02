@@ -5,7 +5,12 @@ per docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md.
 import pytest
 import torch
 
-from musubi_tuner.modules.nvfp4_utils import F4_E2M1_MAX, _e2m1_stochastic_code, _quantize_nvfp4_2d, quantize_nvfp4_activation_stochastic
+from musubi_tuner.modules.nvfp4_utils import (
+    F4_E2M1_MAX,
+    _e2m1_stochastic_code,
+    _quantize_nvfp4_2d,
+    quantize_nvfp4_activation_stochastic,
+)
 
 
 def test_stochastic_code_always_produces_valid_e2m1_codes():
@@ -54,7 +59,7 @@ def test_stochastic_code_exact_table_values_are_deterministic():
 def test_stochastic_code_matches_sign_convention():
     x = torch.tensor([1.5, -1.5])
     codes = _e2m1_stochastic_code(x)
-    assert codes[0].item() == 3   # positive 1.5 -> code 3
+    assert codes[0].item() == 3  # positive 1.5 -> code 3
     assert codes[1].item() == 11  # negative 1.5 -> code 3 | 8 = 11
 
 
