@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -835,8 +835,31 @@ class LoRAStreamOffloader:
 
         assert device.type == "cuda", "LoRAStreamOffloader currently supports CUDA only"
 
-        # ---- streaming placement: S evenly spaced block indices (midpoint formula -> distinct for S <= N) ----
-        stream_idx = sorted({((2 * i + 1) * num_blocks) // (2 * blocks_to_swap) for i in range(blocks_to_swap)})
+        self._job_cache = {}  # block_idx -> [(module, attr_name, is_param) per swap tensor]
+
+        # ---- streaming eligibility: a block can only ever be streamed if its swap tensors share the
+        # same (name, dtype, shape) signature as the rest -- the ring/master machinery below assumes a
+        # single flat layout shared by every streamed block. A checkpoint that leaves some blocks
+        # structurally different (e.g. plain bf16 leading blocks in an otherwise pre-quantized DiT --
+        # see notes/nvfp4-convrot-mixed-checkpoint-assessment.md) must never have those blocks selected,
+        # regardless of which quantization scheme (if any) is in play -- this check is purely a tensor
+        # shape/dtype comparison, with no scheme-specific knowledge.
+        def _signature(block_idx: int) -> tuple:
+            return tuple((name, getattr(m, name).dtype, tuple(getattr(m, name).shape)) for m, name, _ in self._jobs(block_idx))
+
+        signatures = {b: _signature(b) for b in range(num_blocks)}
+        majority_signature = Counter(signatures.values()).most_common(1)[0][0]
+        eligible = sorted(b for b in range(num_blocks) if signatures[b] == majority_signature)
+        if blocks_to_swap > len(eligible):
+            raise ValueError(
+                f"Requested blocks_to_swap={blocks_to_swap}, but only {len(eligible)} of {num_blocks} blocks"
+                " share a uniform swap-tensor layout and are eligible to be streamed (the rest differ -- e.g."
+                " unquantized vs. pre-quantized blocks in a partially pre-quantized checkpoint). Reduce"
+                f" --blocks_to_swap to at most {len(eligible)}."
+            )
+
+        # ---- streaming placement: S evenly spaced indices from the eligible pool (midpoint formula) ----
+        stream_idx = sorted({eligible[((2 * i + 1) * len(eligible)) // (2 * blocks_to_swap)] for i in range(blocks_to_swap)})
         self.stream_idx = stream_idx
         self.S = len(stream_idx)  # actual streaming count (>=1; dedup is a no-op unless S is close to N)
         self.rank = {b: k for k, b in enumerate(stream_idx)}  # block_idx -> position in stream_idx
@@ -844,7 +867,6 @@ class LoRAStreamOffloader:
         self.B = min(ring_size, self.S)  # clamp ring to number of streaming blocks
 
         # ---- finetuning guard: H2D-only must never lose weight updates ----
-        self._job_cache = {}  # block_idx -> [(module, attr_name, is_param) per swap tensor]
         for b in stream_idx:
             for m, name, is_param in self._jobs(b):
                 assert not (is_param and getattr(m, name).requires_grad), (
