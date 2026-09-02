@@ -360,6 +360,7 @@ def triton_quantize_nvfp4_stochastic(x: torch.Tensor, per_tensor_scale: torch.Te
     Returns:
         (packed uint8 [rows, K/2], swizzled block scale float8_e4m3fn).
     """
+    x = x.contiguous()  # kernel indexes x_ptr + row * K + col, which assumes row-major layout
     rows, k = x.shape
     n_groups = k // NVFP4_BLOCK_SIZE
     n_col_blocks = -(-n_groups // 4)
