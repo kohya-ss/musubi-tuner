@@ -232,6 +232,14 @@ class ConvRotInt8Quantizer:
                     original_device = value.device  # usually cpu
                     passthrough_device = calc_device if (calc_device is not None and move_to_device) else original_device
 
+                    # Any tensor belonging to a module owned by a foreign quantizer format is skipped
+                    # outright, regardless of suffix (e.g. NVFP4's .weight_scale_2, .pre_quant_scale).
+                    # This must run before the specific suffix checks below so foreign tensors under
+                    # suffixes ConvRot doesn't otherwise recognize don't fall through to passthrough.
+                    module_path_generic = key.rsplit(".", 1)[0] if "." in key else key
+                    if module_path_generic in self._foreign_module_paths:
+                        continue
+
                     if key.endswith(COMFY_WEIGHT_SCALE_SUFFIX):
                         module_path = key[: -len(COMFY_WEIGHT_SCALE_SUFFIX)]
                         if module_path in self._foreign_module_paths:

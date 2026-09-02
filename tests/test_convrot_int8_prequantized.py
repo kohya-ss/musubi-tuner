@@ -179,6 +179,7 @@ def test_foreign_format_module_is_skipped_not_raised(tmp_path):
             "nvfp4_proj.weight": torch.zeros(8, 8, dtype=torch.uint8),
             "nvfp4_proj.weight_scale": torch.zeros(4, dtype=torch.float8_e4m3fn),
             "nvfp4_proj.weight_scale_2": torch.tensor(1.0, dtype=torch.float32),
+            "nvfp4_proj.pre_quant_scale": torch.ones(8, dtype=torch.float32),
             "nvfp4_proj.comfy_quant": nvfp4_payload,
         }
     )
@@ -192,6 +193,8 @@ def test_foreign_format_module_is_skipped_not_raised(tmp_path):
     assert quantizer.module_groupsizes == {"convrot_proj": 4}
     assert "nvfp4_proj.weight" not in state_dict
     assert "nvfp4_proj.weight_scale" not in state_dict
+    assert "nvfp4_proj.weight_scale_2" not in state_dict
+    assert "nvfp4_proj.pre_quant_scale" not in state_dict
     assert "nvfp4_proj.comfy_quant" not in state_dict
 
 
