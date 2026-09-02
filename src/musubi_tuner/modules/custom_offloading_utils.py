@@ -875,8 +875,7 @@ class LoRAStreamOffloader:
                 " unquantized vs. pre-quantized blocks in a partially pre-quantized checkpoint)."
                 f" Eligible (majority layout): blocks {_format_block_ranges(eligible)}."
                 f" Ineligible (different layout, always GPU-resident): blocks {_format_block_ranges(ineligible)}."
-                f" Reduce --blocks_to_swap to at most {len(eligible)}, or pass a swap_tensor_selector that"
-                " normalizes the mismatch."
+                f" Set --blocks_to_swap to at most {len(eligible)}."
             )
 
         # ---- streaming placement: S evenly spaced indices from the eligible pool (midpoint formula) ----
