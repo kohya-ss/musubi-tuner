@@ -105,8 +105,14 @@ def _base_args(**overrides):
     krea2_setup_parser(parser)
     args = parser.parse_args([])
     defaults = dict(
-        fp8_base=False, fp8_scaled=False, convrot_int8=False, convrot_int8_bwd="bf16",
-        nvfp4=False, turbo_dit=None, turbo_dit_cache=False, blocks_to_swap=0,
+        fp8_base=False,
+        fp8_scaled=False,
+        convrot_int8=False,
+        convrot_int8_bwd="bf16",
+        nvfp4=False,
+        turbo_dit=None,
+        turbo_dit_cache=False,
+        blocks_to_swap=0,
         block_swap_h2d_only=False,
     )
     for key, value in defaults.items():
@@ -282,7 +288,9 @@ def test_load_krea2_dit_applies_both_patches_for_mixed_nvfp4_convrot(monkeypatch
     path = _make_tiny_mixed_artifact(tmp_path)
     captured = {}
 
-    def fake_nvfp4_patch(model, sd, shapes, int8_mods, use_scaled_mm=False, training=False, calc_device=None, columnwise_chunk_rows=1024):
+    def fake_nvfp4_patch(
+        model, sd, shapes, int8_mods, use_scaled_mm=False, training=False, calc_device=None, columnwise_chunk_rows=1024
+    ):
         captured["nvfp4_shapes"] = dict(shapes)
         return model
 

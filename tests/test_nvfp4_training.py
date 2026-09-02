@@ -569,9 +569,7 @@ def test_nvfp4_linear_fn_backward_uses_orig_in_features_not_padded_weight_t_shap
     packed_t, block_scale_t, tensor_scale_t, chunked_orig_rows = _quantize_nvfp4_2d(w_t.float())
     assert chunked_orig_rows == 64
 
-    out = NvFp4LinearFn.apply(
-        x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n, real_k
-    )
+    out = NvFp4LinearFn.apply(x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, None, n, real_k)
     out.sum().backward()
 
     assert torch.isfinite(out).all()
