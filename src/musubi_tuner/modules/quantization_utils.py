@@ -16,9 +16,18 @@ from __future__ import annotations
 
 
 def validate_quantization_scheme(fp8_scaled: bool, convrot_int8: bool, nvfp4: bool) -> None:
-    """Raise ValueError if more than one quantization scheme is selected."""
-    if sum([fp8_scaled, convrot_int8, nvfp4]) > 1:
-        raise ValueError("--fp8_scaled, --convrot_int8, and --nvfp4 are mutually exclusive: choose at most one.")
+    """Raise ValueError if the selected schemes are incompatible.
+
+    ``fp8_scaled`` is exclusive of the other two. ``convrot_int8`` and ``nvfp4`` may be
+    combined -- together they select mixed-format prequantized loading (each Linear's
+    format is declared per-module in the checkpoint via its ``.comfy_quant`` spec; see
+    ``MixedQuantizer``).
+    """
+    if fp8_scaled and (convrot_int8 or nvfp4):
+        raise ValueError(
+            "--fp8_scaled is exclusive of --convrot_int8 and --nvfp4: choose --fp8_scaled alone, or"
+            " --convrot_int8 and/or --nvfp4 (both together loads a mixed-format prequantized checkpoint)."
+        )
 
 
 def validate_nvfp4_requirements(

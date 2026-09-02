@@ -523,7 +523,8 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         help="use ConvRot int8 for the DiT base weights (alternative to fp8; cannot be combined with "
         "--fp8_base/--fp8_scaled). Quantizes per-block Linears at load time with Hadamard rotation + int8; "
         "forward runs fused Triton int8 GEMM (requires triton / triton-windows; falls back to slower "
-        "dequantized bf16 matmul without it).",
+        "dequantized bf16 matmul without it). Combine with --nvfp4 to load a checkpoint whose Linears mix "
+        "both formats (each module's format is declared in the checkpoint).",
     )
     parser.add_argument(
         "--convrot_int8_bwd",
@@ -538,7 +539,8 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         action="store_true",
         help="load a ComfyUI pre-quantized NVFP4 DiT checkpoint and train against it with true "
         "FP4x4 tensor-core forward/backward (requires PyTorch 2.10+ scaled_mm and a Blackwell GPU). "
-        "Cannot be combined with --fp8_base/--fp8_scaled/--convrot_int8: choose one quantization.",
+        "Cannot be combined with --fp8_base/--fp8_scaled. Combine with --convrot_int8 to load a "
+        "checkpoint whose Linears mix both formats (each module's format is declared in the checkpoint).",
     )
     parser.add_argument(
         "--nvfp4_columnwise_chunk_rows",

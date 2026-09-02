@@ -6,13 +6,13 @@ from musubi_tuner.krea2.krea2_utils import load_krea2_dit
 
 
 def test_load_krea2_dit_rejects_multiple_quantizations():
-    with pytest.raises(AssertionError, match="mutually exclusive"):
+    with pytest.raises(AssertionError, match="exclusive"):
         load_krea2_dit("unused.safetensors", fp8_scaled=True, nvfp4=True)
 
 
-def test_load_krea2_dit_rejects_convrot_and_nvfp4_together():
-    with pytest.raises(AssertionError, match="mutually exclusive"):
-        load_krea2_dit("unused.safetensors", convrot_int8=True, nvfp4=True)
+def test_load_krea2_dit_rejects_fp8_scaled_with_convrot_or_nvfp4():
+    with pytest.raises(AssertionError, match="exclusive"):
+        load_krea2_dit("unused.safetensors", fp8_scaled=True, convrot_int8=True)
 
 
 def test_load_krea2_dit_rejects_nvfp4_with_lora_weights():
@@ -130,11 +130,14 @@ def test_handle_model_specific_args_rejects_nvfp4_with_fp8():
         trainer.handle_model_specific_args(args)
 
 
-def test_handle_model_specific_args_rejects_nvfp4_with_convrot():
+def test_handle_model_specific_args_allows_nvfp4_with_convrot(monkeypatch):
+    # nvfp4 + convrot_int8 together select mixed-format prequantized loading; must not raise.
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(krea2_train_network.torch.cuda, "get_device_capability", lambda: (10, 0))
     trainer = Krea2NetworkTrainer()
     args = _base_args(nvfp4=True, convrot_int8=True)
-    with pytest.raises(ValueError, match="--nvfp4"):
-        trainer.handle_model_specific_args(args)
+    trainer.handle_model_specific_args(args)  # must not raise
 
 
 def test_handle_model_specific_args_rejects_nvfp4_with_turbo_dit():
@@ -235,3 +238,63 @@ def test_handle_model_specific_args_rejects_nvfp4_without_scaled_mm_support(monk
     args = _base_args(nvfp4=True)
     with pytest.raises(ValueError, match="PyTorch 2.10"):
         trainer.handle_model_specific_args(args)
+
+
+def _make_tiny_mixed_artifact(tmp_path):
+    """One NVFP4 Linear ('mlp_proj') + one prequantized ConvRot INT8 Linear ('attn_proj')."""
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+
+    from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
+    from musubi_tuner.modules.nvfp4_utils import _quantize_nvfp4_2d
+
+    torch.manual_seed(0)
+    nvfp4_weight = torch.randn(64, 32) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(nvfp4_weight)
+    nvfp4_payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+
+    convrot_weight = torch.randn(64, 256) * 0.02
+    q_weight, q_scale = quantize_int8_convrot_weight(convrot_weight, 256)
+    convrot_spec = json.dumps({"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}).encode("utf-8")
+    convrot_payload = torch.tensor(list(convrot_spec), dtype=torch.uint8)
+
+    path = tmp_path / "mixed.safetensors"
+    save_file(
+        {
+            "mlp_proj.weight": packed,
+            "mlp_proj.weight_scale": block_scale,
+            "mlp_proj.weight_scale_2": tensor_scale,
+            "mlp_proj.comfy_quant": nvfp4_payload,
+            "attn_proj.weight": q_weight,
+            "attn_proj.weight_scale": q_scale,
+            "attn_proj.comfy_quant": convrot_payload,
+        },
+        str(path),
+    )
+    return str(path)
+
+
+def test_load_krea2_dit_applies_both_patches_for_mixed_nvfp4_convrot(monkeypatch, tmp_path):
+    from musubi_tuner.krea2 import krea2_utils
+
+    path = _make_tiny_mixed_artifact(tmp_path)
+    captured = {}
+
+    def fake_nvfp4_patch(model, sd, shapes, int8_mods, use_scaled_mm=False, training=False, calc_device=None, columnwise_chunk_rows=1024):
+        captured["nvfp4_shapes"] = dict(shapes)
+        return model
+
+    def fake_convrot_patch(model, sd, bwd_mode="bf16", groupsize=256, groupsize_map=None):
+        captured["groupsize_map"] = dict(groupsize_map) if groupsize_map else groupsize_map
+        raise _StopAfterPatchCall()
+
+    monkeypatch.setattr(krea2_utils, "apply_nvfp4_monkey_patch", fake_nvfp4_patch)
+    monkeypatch.setattr(krea2_utils, "apply_convrot_int8_monkey_patch", fake_convrot_patch)
+
+    with pytest.raises(_StopAfterPatchCall):
+        krea2_utils.load_krea2_dit(path, nvfp4=True, convrot_int8=True, device="cpu", loading_device="cpu")
+
+    assert captured["nvfp4_shapes"] == {"mlp_proj": (64, 32)}
+    assert captured["groupsize_map"] == {"attn_proj": 256}
