@@ -80,6 +80,23 @@ def default_swap_tensor_selector(block: nn.Module) -> list[tuple[nn.Module, str]
     return jobs
 
 
+def _format_block_ranges(indices) -> str:
+    """Compact 'a-b, c, e-f' rendering of a sorted, possibly-noncontiguous block-index list."""
+    indices = sorted(indices)
+    if not indices:
+        return "(none)"
+    ranges = []
+    start = prev = indices[0]
+    for idx in indices[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+        start = prev = idx
+    ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+    return ", ".join(ranges)
+
+
 def attach_forward_streaming_hooks(offloader, blocks: list[nn.Module]) -> list:
     """Drive a block-swap offloader from forward hooks.
 
@@ -851,11 +868,15 @@ class LoRAStreamOffloader:
         majority_signature = Counter(signatures.values()).most_common(1)[0][0]
         eligible = sorted(b for b in range(num_blocks) if signatures[b] == majority_signature)
         if blocks_to_swap > len(eligible):
+            ineligible = sorted(b for b in range(num_blocks) if signatures[b] != majority_signature)
             raise ValueError(
                 f"Requested blocks_to_swap={blocks_to_swap}, but only {len(eligible)} of {num_blocks} blocks"
                 " share a uniform swap-tensor layout and are eligible to be streamed (the rest differ -- e.g."
-                " unquantized vs. pre-quantized blocks in a partially pre-quantized checkpoint). Reduce"
-                f" --blocks_to_swap to at most {len(eligible)}."
+                " unquantized vs. pre-quantized blocks in a partially pre-quantized checkpoint)."
+                f" Eligible (majority layout): blocks {_format_block_ranges(eligible)}."
+                f" Ineligible (different layout, always GPU-resident): blocks {_format_block_ranges(ineligible)}."
+                f" Reduce --blocks_to_swap to at most {len(eligible)}, or pass a swap_tensor_selector that"
+                " normalizes the mismatch."
             )
 
         # ---- streaming placement: S evenly spaced indices from the eligible pool (midpoint formula) ----

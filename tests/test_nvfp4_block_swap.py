@@ -159,8 +159,24 @@ def test_lora_stream_offloader_excludes_structurally_different_leading_blocks(tm
         device=device, supports_backward=True, use_pinned_memory=True, h2d_only=True, ring_size=2,
         swap_tensor_selector=nvfp4_swap_tensor_selector,
     )
-    with pytest.raises(ValueError, match="eligible"):
+    with pytest.raises(ValueError, match="eligible") as exc_info:
         create_offloader("test", blocks, 6, 5, config)
+    message = str(exc_info.value)
+    assert "Eligible (majority layout): blocks 2-5" in message
+    assert "Ineligible (different layout, always GPU-resident): blocks 0-1" in message
+
+
+def test_format_block_ranges_handles_interleaved_indices():
+    """Covers the user-raised concern: eligibility isn't always a clean leading/trailing split --
+    if quantized/unquantized blocks alternate, the error message must still be legible rather than
+    implying a simple prefix/suffix pattern."""
+    from musubi_tuner.modules.custom_offloading_utils import _format_block_ranges
+
+    assert _format_block_ranges([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]) == "2-25"
+    assert _format_block_ranges([0, 1, 26, 27]) == "0-1, 26-27"
+    assert _format_block_ranges([0, 2, 4, 6]) == "0, 2, 4, 6"  # fully interleaved: no ranges to collapse
+    assert _format_block_ranges([]) == "(none)"
+    assert _format_block_ranges([5]) == "5"
 
 
 @requires_cuda
