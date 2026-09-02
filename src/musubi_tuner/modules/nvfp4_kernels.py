@@ -223,6 +223,83 @@ if HAS_TRITON:
         scale_bits = scaled_f8.to(tl.uint8, bitcast=True)  # [BLOCK_GROUPS]
         tl.store(scale_ptr + flat, scale_bits, mask=group_mask)
 
+    @triton.jit
+    def _quantize_nvfp4_row_kernel_stochastic(
+        x_ptr,
+        packed_ptr,
+        scale_ptr,
+        per_tensor_scale_ptr,
+        seed,
+        K: tl.constexpr,
+        n_groups: tl.constexpr,
+        n_col_blocks: tl.constexpr,
+        BLOCK_GROUPS: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        per_tensor_scale = tl.load(per_tensor_scale_ptr)
+
+        group_idx = tl.arange(0, BLOCK_GROUPS)  # [BLOCK_GROUPS]
+        group_mask = group_idx < n_groups
+        pair_idx = tl.arange(0, 8)  # [8]
+        group2 = group_idx[:, None]
+        pair2 = pair_idx[None, :]
+        mask2 = group_mask[:, None]
+
+        high_col = group2 * 16 + pair2 * 2
+        low_col = high_col + 1
+
+        row_ptr = x_ptr + row * K
+        x_high = tl.load(row_ptr + high_col, mask=mask2, other=0.0)  # [BLOCK_GROUPS, 8]
+        x_low = tl.load(row_ptr + low_col, mask=mask2, other=0.0)  # [BLOCK_GROUPS, 8]
+
+        block_amax = tl.max(tl.maximum(tl.abs(x_high), tl.abs(x_low)), axis=1)  # [BLOCK_GROUPS]
+        block_scale = block_amax / 6.0  # F4_E2M1_MAX
+
+        denom = tl.maximum(per_tensor_scale, 1.1754943508222875e-38)
+        scaled = tl.minimum(block_scale / denom, 448.0)  # F8_E4M3_MAX
+        scaled_f8 = scaled.to(tl.float8e4nv)
+        scaled_f8_f32 = scaled_f8.to(tl.float32)
+
+        total = per_tensor_scale * scaled_f8_f32  # [BLOCK_GROUPS]
+        total_is_zero = total == 0.0
+        total_safe = tl.where(total_is_zero, 1.0, total)
+        total_safe_2d = total_safe[:, None]
+
+        data_high = tl.where(total_is_zero[:, None], 0.0, x_high / total_safe_2d)
+        data_low = tl.where(total_is_zero[:, None], 0.0, x_low / total_safe_2d)
+        data_high = tl.clamp(data_high, -6.0, 6.0)
+        data_low = tl.clamp(data_low, -6.0, 6.0)
+
+        # Global per-element offsets so every element in this launch draws from an independent
+        # Philox stream, regardless of program (row) id -- offset = flat element index.
+        offs_high = row * K + high_col
+        offs_low = row * K + low_col
+        r_high = tl.rand(seed, offs_high)
+        r_low = tl.rand(seed, offs_low)
+
+        code_high = _e2m1_stochastic_code(data_high, r_high)
+        code_low = _e2m1_stochastic_code(data_low, r_low)
+        packed_byte = (code_high << 4) | code_low  # [BLOCK_GROUPS, 8] uint8, element 0 = high nibble
+
+        packed_row_ptr = packed_ptr + row * (n_groups * 8)
+        packed_col = group2 * 8 + pair2
+        tl.store(packed_row_ptr + packed_col, packed_byte, mask=mask2)
+
+        # Swizzled (cuBLAS 128x4 tiled) scale write -- identical to _quantize_nvfp4_row_kernel's,
+        # since block-scale computation doesn't depend on the magnitude-rounding mode.
+        row_block = (row // 128).to(tl.int32)
+        r_in_tile = (row % 128).to(tl.int32)
+        a = r_in_tile // 32
+        b = r_in_tile % 32
+        col_block = group_idx // 4
+        c_in_tile = group_idx % 4
+        n = row_block * n_col_blocks + col_block
+        d = a * 4 + c_in_tile
+        flat = n * 512 + b * 16 + d
+
+        scale_bits = scaled_f8.to(tl.uint8, bitcast=True)  # [BLOCK_GROUPS]
+        tl.store(scale_ptr + flat, scale_bits, mask=group_mask)
+
 
 def triton_quantize_nvfp4(x: torch.Tensor, per_tensor_scale: torch.Tensor):
     """Fused NVFP4 quantize for a row-padded 2D fp32 tensor.
@@ -259,6 +336,46 @@ def triton_quantize_nvfp4(x: torch.Tensor, per_tensor_scale: torch.Tensor):
         ADDER_CONST=_E2M1_ADDER_CONST,
         MAX_INT=_E2M1_MAX_INT,
         SIGN_SHIFT=_E2M1_SIGN_SHIFT,
+        K=k,
+        n_groups=n_groups,
+        n_col_blocks=n_col_blocks,
+        BLOCK_GROUPS=block_groups,
+    )
+    return packed, scale_bytes.view(torch.float8_e4m3fn)
+
+
+def triton_quantize_nvfp4_stochastic(x: torch.Tensor, per_tensor_scale: torch.Tensor, seed: int):
+    """Fused NVFP4 quantize with stochastic-rounding E2M1 conversion for a row-padded 2D fp32
+    tensor. Statistically unbiased vs. nvfp4_utils._quantize_nvfp4_2d(magnitude_code_fn=
+    _e2m1_stochastic_code) for the same (x, per_tensor_scale) -- not bit-exact by design (both
+    draw independent randomness) -- see test_nvfp4_kernels.py.
+
+    Args:
+        x: fp32 [rows, K]. rows must already be a multiple of 16 and K a multiple of 16
+            (both invariants are enforced by the caller, quantize_nvfp4_activation_stochastic).
+        per_tensor_scale: 0-dim fp32 tensor (already computed via torch.amax upstream).
+        seed: int, varies per call so consecutive quantizations (e.g. consecutive backward
+            steps) don't reuse the same random draws.
+
+    Returns:
+        (packed uint8 [rows, K/2], swizzled block scale float8_e4m3fn).
+    """
+    rows, k = x.shape
+    n_groups = k // NVFP4_BLOCK_SIZE
+    n_col_blocks = -(-n_groups // 4)
+    n_row_blocks = -(-rows // 128)
+    block_groups = triton.next_power_of_2(n_groups)
+
+    packed = torch.empty((rows, n_groups * 8), device=x.device, dtype=torch.uint8)
+    scale_bytes = torch.zeros((n_row_blocks * 128, n_col_blocks * 4), device=x.device, dtype=torch.uint8)
+
+    grid = (rows,)
+    _quantize_nvfp4_row_kernel_stochastic[grid](
+        x,
+        packed,
+        scale_bytes,
+        per_tensor_scale,
+        seed,
         K=k,
         n_groups=n_groups,
         n_col_blocks=n_col_blocks,

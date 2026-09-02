@@ -250,3 +250,78 @@ def test_e2m1_stochastic_code_unbiased_in_expectation_near_zero_end():
     magnitude_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda")
     decoded = magnitude_table[(y & 7).long()]
     assert decoded.mean().item() == pytest.approx(0.1, abs=0.02)
+
+
+@requires_triton_cuda
+def test_triton_quantize_nvfp4_stochastic_block_scale_matches_deterministic():
+    """Block-scale computation is shared with the deterministic kernel and must match exactly --
+    only the final magnitude conversion differs. Mirrors
+    test_nvfp4_stochastic_rounding.py::test_quantize_nvfp4_activation_stochastic_block_scale_matches_deterministic."""
+    from musubi_tuner.modules.nvfp4_kernels import triton_quantize_nvfp4, triton_quantize_nvfp4_stochastic
+    from musubi_tuner.modules.nvfp4_utils import F4_E2M1_MAX, F8_E4M3_MAX
+
+    torch.manual_seed(0)
+    x = (torch.randn(32, 64, device="cuda") * 0.5).float()
+    per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
+
+    _packed_det, scale_det = triton_quantize_nvfp4(x, per_tensor_scale)
+    _packed_stoch, scale_stoch = triton_quantize_nvfp4_stochastic(x, per_tensor_scale, seed=123)
+
+    assert torch.equal(scale_stoch.view(torch.uint8), scale_det.view(torch.uint8))
+
+
+@requires_triton_cuda
+def test_triton_quantize_nvfp4_stochastic_is_random_across_calls():
+    """Sanity check the kernel is actually stochastic, not accidentally deterministic (e.g. a bug
+    reusing offset 0 for every element). Uses varied random magnitudes, not a uniform fill --
+    see test_nvfp4_stochastic_rounding.py's eager equivalent for why a uniform fill is vacuous."""
+    from musubi_tuner.modules.nvfp4_kernels import triton_quantize_nvfp4_stochastic
+    from musubi_tuner.modules.nvfp4_utils import F4_E2M1_MAX, F8_E4M3_MAX
+
+    torch.manual_seed(0)
+    x = (torch.rand(16, 32, device="cuda") * 0.3).float()
+    per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
+
+    packed_a, _ = triton_quantize_nvfp4_stochastic(x, per_tensor_scale, seed=1)
+    packed_b, _ = triton_quantize_nvfp4_stochastic(x, per_tensor_scale, seed=2)
+
+    assert not torch.equal(packed_a, packed_b)
+
+
+@requires_triton_cuda
+def test_triton_quantize_nvfp4_stochastic_unbiased_end_to_end():
+    """Full-path unbiasedness check (block-scale normalization + stochastic E2M1 conversion),
+    at a real Krea2-sized shape. Mirrors
+    test_nvfp4_stochastic_rounding.py::test_quantize_nvfp4_activation_stochastic_unbiased_end_to_end."""
+    from musubi_tuner.modules.nvfp4_kernels import triton_quantize_nvfp4_stochastic
+    from musubi_tuner.modules.nvfp4_utils import F4_E2M1_MAX, F8_E4M3_MAX, NVFP4_BLOCK_SIZE
+
+    torch.manual_seed(0)
+    magnitude_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda")
+    target_value = 0.1
+
+    means = []
+    for trial in range(200):
+        x = torch.full((16, NVFP4_BLOCK_SIZE), target_value, device="cuda")
+        x[:, 0] = 0.24  # sets this block's amax so target_value normalizes off-grid, not to 6.0
+        per_tensor_scale = (torch.amax(x.abs()).float() / (F8_E4M3_MAX * F4_E2M1_MAX)).reshape(())
+        packed, block_scale = triton_quantize_nvfp4_stochastic(x, per_tensor_scale, seed=trial)
+
+        codes = packed.view(-1, 1).bitwise_and(0x0F)
+        codes_hi = packed.view(-1, 1).bitwise_right_shift(4).bitwise_and(0x0F)
+        all_codes = torch.stack([codes_hi, codes], dim=-1).flatten()
+        neg = (all_codes & 8).bool()
+        mag_codes = (all_codes & 7).long()
+        decoded_magnitude = magnitude_table[mag_codes]
+        decoded_signed = torch.where(neg, -decoded_magnitude, decoded_magnitude)
+        total_scale = per_tensor_scale * block_scale.view(-1)[0].float()
+        decoded_value = decoded_signed.float() * total_scale
+
+        decoded_reshaped = decoded_value.view(16, NVFP4_BLOCK_SIZE)
+        target_cells = decoded_reshaped[:, 1:]
+        means.append(target_cells.mean().item())
+
+    grand_mean = sum(means) / len(means)
+    stdev = (sum((m - grand_mean) ** 2 for m in means) / len(means)) ** 0.5
+    assert stdev > 0.0, "means across trials should not be identical -- indicates degenerate/deterministic rounding"
+    assert grand_mean == pytest.approx(target_value, abs=0.005)
