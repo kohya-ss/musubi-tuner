@@ -544,7 +544,6 @@ def main() -> None:
                 tensors[f"{key_prefix}_token_tags_int64"] = teacher_tags
                 payload_mib += teacher_hidden.numel() * teacher_hidden.element_size() / (1024**2)
                 teacher_note = f", teacher_rows={teacher_hidden.shape[0]}"
-                print(tensors.keys())
             logger.info(
                 "Saving MiniMax-H3 text cache for %s: rows=%d, vision_rows=%d%s, payload=%.1f MiB",
                 item.item_key,

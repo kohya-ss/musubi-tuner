@@ -83,6 +83,10 @@ logger = logging.getLogger(__name__)
 
 
 _RUNTIME_REF_KEY = re.compile(r"^latents_ref_(\d{3})_(image|video|audio)$")
+# validated --h3_teacher_condition_sigma_max for the endpoint (first,last) and clip (ref) teachers:
+# above it the conditioned content is unpredictable from the text (and the FL2VA weights stop
+# aligning a reference near ~0.85), so the band is better spent as a base-preservation anchor
+SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION = 0.75
 
 
 def _require_sampling_path(value: str | None, label: str) -> Path:
@@ -147,6 +151,11 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
         raise ValueError("MiniMax-H3 sample_steps must be positive")
 
     prompt = sample.get("prompt")
+    if isinstance(prompt, str):
+        # same rule as minimax_h3_generate_video.py: the literal "\n" becomes a newline so a
+        # one-line prompt file can carry the multi-line official caption format
+        prompt = prompt.replace("\\n", "\n")
+        sample["prompt"] = prompt
     first_frame = sample.get("first_frame") or sample.get("image_path")
     last_frame = sample.get("last_frame") or sample.get("end_image_path")
     reference_jsonl = sample.get("reference_jsonl")
@@ -882,6 +891,26 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     " pictures for base sigma in [%s, %s] (base-preservation anchor outside)",
                     sigma_min,
                     sigma_max,
+                )
+                if sigma_max < 1.0:
+                    logger.warning(
+                        "MiniMax-H3 subject_ref teacher: --h3_teacher_condition_sigma_max %s anchors base sigma > %s to"
+                        " the text-only base, but the identity decisions (hair shape, eye color) are made at base sigma"
+                        " 0.92-1.0 and this teacher keeps its amplification there; the validated recipe is 1.0 (the"
+                        " default). Expect the student to learn composition but not identity below ~0.95",
+                        sigma_max,
+                        sigma_max,
+                    )
+            elif sigma_max > SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION:
+                logger.warning(
+                    "MiniMax-H3 %s teacher: --h3_teacher_condition_sigma_max %s teaches above base sigma %s, where the"
+                    " conditioned content is unpredictable from the text and the teaching overwrites the base"
+                    " composition prior (for ref the FL2VA weights also fail to align the reference above ~0.85);"
+                    " the validated recipe for this teacher is %s",
+                    conditions,
+                    sigma_max,
+                    SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION,
+                    SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION,
                 )
             elif conditions == TEACHER_CONDITIONS_REF:
                 logger.info(
@@ -2002,14 +2031,14 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument(
         "--h3_teacher_condition_sigma_max",
         type=float,
-        default=0.75,
+        default=1.0,
         help="teacher matching only: above this drawn base sigma (pre-shift, 1 = pure noise) the teacher drops its"
         " conditions and runs on the student's own text, turning the target into a pure base-preservation"
-        " anchor. Near pure noise the conditioned content is unpredictable from the text, so unrestricted teaching"
-        " there rapidly overwrites the base composition prior; for the ref teacher the same band is also where the"
-        " FL2VA weights fail to align the reference against a footing-less x_t. The identity-decision band was"
-        " measured at base sigma 0.6-0.75 on diverse character data, so the default keeps it in the teaching band;"
-        " lower toward 0.4-0.5 for low-diversity data (1.0 = always conditioned, unprotected)",
+        " anchor (1.0 = always conditioned). Recommended per teacher: 1.0 (the default) for subject_ref, whose"
+        " teacher keeps the base's amplification at every sigma and whose identity decisions live at base sigma"
+        " 0.92-1.0; 0.75 for first,last and ref, where near pure noise the conditioned content is unpredictable"
+        " from the text and unrestricted teaching overwrites the base composition prior (for ref the FL2VA weights"
+        " also fail to align the reference above base sigma ~0.85). Lower toward 0.4-0.5 for low-diversity data",
     )
     parser.add_argument(
         "--h3_teacher_loss_dc_weight",

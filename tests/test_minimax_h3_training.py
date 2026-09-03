@@ -168,6 +168,14 @@ def test_sample_prompt_line_parses_inline_refs_and_reference_jsonl():
     assert line_to_prompt_dict("a cat sings --rj refs/all.jsonl")["reference_jsonl"] == "refs/all.jsonl"
 
 
+def test_h3_sample_normalization_unescapes_newlines_like_the_generation_script(tmp_path):
+    args = _trainer_args(task="t2va", sample_prompts=str(tmp_path / "prompts.txt"))
+
+    sample = _normalize_h3_sample_parameter(args, {"prompt": "summary:\\n[Shot 1] a cat\\n\\ndetail"})
+
+    assert sample["prompt"] == "summary:\n[Shot 1] a cat\n\ndetail"
+
+
 def test_h3_ref2va_sample_normalization_resolves_inline_refs_from_the_prompt_file_directory(tmp_path):
     prompt_file = tmp_path / "prompts.txt"
     prompt_file.touch()
@@ -2012,8 +2020,27 @@ def test_h3_parser_defaults_leave_teacher_matching_off():
 
     assert args.h3_teacher_matching is False
     assert args.h3_teacher_conditions == "first,last"
-    # the identity-decision band was measured at base sigma 0.6-0.75, so the default anchor starts at 0.75
-    assert args.h3_teacher_condition_sigma_max == 0.75
+    # 1.0 = the subject_ref recipe (identity decisions at base sigma 0.92-1.0); the endpoint and
+    # clip teachers want 0.75 and get a warning otherwise
+    assert args.h3_teacher_condition_sigma_max == 1.0
+
+
+@pytest.mark.parametrize(
+    "overrides, warns",
+    [
+        ({"h3_teacher_conditions": "first,last", "h3_teacher_condition_sigma_max": 1.0}, True),
+        ({"h3_teacher_conditions": "first,last", "h3_teacher_condition_sigma_max": 0.75}, False),
+        ({"h3_teacher_conditions": "ref", "h3_teacher_condition_sigma_max": 0.85}, True),
+        ({"h3_teacher_conditions": "subject_ref", "h3_teacher_condition_sigma_max": 0.75}, True),
+        ({"h3_teacher_conditions": "subject_ref", "h3_teacher_condition_sigma_max": 1.0}, False),
+    ],
+)
+def test_h3_teacher_condition_sigma_max_warns_when_off_the_teacher_recipe(overrides, warns, caplog):
+    with caplog.at_level(logging.WARNING, logger="musubi_tuner.minimax_h3_train_network"):
+        MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(h3_teacher_matching=True, **overrides))
+
+    messages = [record.getMessage() for record in caplog.records if "h3_teacher_condition_sigma_max" in record.getMessage()]
+    assert bool(messages) is warns
 
 
 @pytest.mark.parametrize(
@@ -2683,7 +2710,9 @@ def test_teacher_condition_sigma_min_validation_and_metadata():
     for sigma_min in (-0.1, 0.8):
         with pytest.raises(ValueError, match="h3_teacher_condition_sigma_min"):
             MiniMaxH3NetworkTrainer().handle_model_specific_args(
-                _trainer_args(h3_teacher_matching=True, h3_teacher_condition_sigma_min=sigma_min)
+                _trainer_args(
+                    h3_teacher_matching=True, h3_teacher_condition_sigma_max=0.75, h3_teacher_condition_sigma_min=sigma_min
+                )
             )
 
 
