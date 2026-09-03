@@ -722,3 +722,51 @@ resolution = [960, 544] # required if general resolution is not set
 -->
 
 The metadata with .json file will be supported in the near future.
+
+## Skipping Corrupted Cache Files
+
+`skip_corrupted_cache` is an optional bool (default `false`), settable in `[general]` or per-`[[datasets]]`, following the same fallback rule as `batch_size`/`enable_bucket`/etc. By default, if a cached latent or text-encoder `.safetensors` file is corrupted (e.g. truncated by a disk-full write or interrupted transfer), training either fails at dataset setup with a clear error naming the file, or — if the corruption is only in the tensor data and not the header — the failure surfaces as a clear `RuntimeError` naming the file when the item is read by a DataLoader worker during training. Setting `skip_corrupted_cache = true` instead validates every cache file up front (once, at dataset setup) and silently drops any item whose cache is unreadable, logging a warning with the file path.
+
+```toml
+[general]
+skip_corrupted_cache = true
+```
+
+This adds a one-time cost at dataset setup (every cache file is opened once to validate it), so it's off by default. Use `verify_cache_files.py` (see below) to find and clean up corrupted cache files ahead of time instead, if you'd rather not pay this cost on every training start.
+
+<details>
+<summary>日本語</summary>
+
+`skip_corrupted_cache`はオプションのbool値（デフォルトは`false`）で、`batch_size`や`enable_bucket`などと同様に`[general]`または各`[[datasets]]`に設定できます。デフォルトでは、キャッシュされた潜在変数やテキストエンコーダの`.safetensors`ファイルが破損している場合（ディスクフルや転送中断による切り詰めなど）、データセットのセットアップ時にファイル名を明示したエラーで学習が失敗するか、ヘッダーではなくテンソルデータ部分のみが破損している場合は、学習中にDataLoaderワーカーがその項目を読み込む際に、ファイル名を明示した`RuntimeError`として失敗が表面化します。`skip_corrupted_cache = true`を設定すると、データセットのセットアップ時に一度だけ全キャッシュファイルを事前に検証し、読み込めない項目は警告ログを出力してサイレントにスキップします。
+
+```toml
+[general]
+skip_corrupted_cache = true
+```
+
+これはデータセットのセットアップ時に一度だけコストがかかるため（全キャッシュファイルを一度開いて検証するため）、デフォルトでは無効です。毎回の学習開始時にこのコストを払いたくない場合は、代わりに`verify_cache_files.py`（後述）を使って事前に破損キャッシュファイルを見つけて整理してください。
+
+</details>
+
+## Verifying Cache Files
+
+`verify_cache_files.py` scans every cached latent and text-encoder `.safetensors` file referenced by a dataset config and reports any that fail to load (corrupted or truncated). It doesn't modify anything unless `--delete_corrupted` is passed.
+
+```bash
+python src/musubi_tuner/verify_cache_files.py --dataset_config path/to/toml --architecture wan
+```
+
+`--architecture` is the short or full architecture name used when caching (e.g. `wan`, `hv`, `qi`, `flux_kontext`). `--num_workers` controls read parallelism (default: cpu count - 1). Pass `--delete_corrupted` to remove the corrupted files it finds after reporting them (irreversible — re-run the architecture's cache scripts afterward to regenerate them).
+
+<details>
+<summary>日本語</summary>
+
+`verify_cache_files.py`は、データセット設定が参照する全てのキャッシュ済み潜在変数・テキストエンコーダ`.safetensors`ファイルをスキャンし、読み込みに失敗するもの（破損または切り詰められたもの）を報告します。`--delete_corrupted`を指定しない限り、何も変更しません。
+
+```bash
+python src/musubi_tuner/verify_cache_files.py --dataset_config path/to/toml --architecture wan
+```
+
+`--architecture`はキャッシュ作成時に使用したアーキテクチャの短縮名またはフル名です（例：`wan`、`hv`、`qi`、`flux_kontext`）。`--num_workers`は読み込みの並列数を制御します（デフォルト：CPU数-1）。`--delete_corrupted`を指定すると、報告後に見つかった破損ファイルを削除します（元に戻せません。削除後は該当アーキテクチャのキャッシュスクリプトを再実行して再生成してください）。
+
+</details>
