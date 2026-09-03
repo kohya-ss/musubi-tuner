@@ -40,6 +40,7 @@ class BaseDatasetParams:
     cache_directory: Optional[str] = None
     debug_dataset: bool = False
     architecture: str = "no_default"  # short style like "hv" or "wan"
+    skip_corrupted_cache: bool = False
 
 
 @dataclass
@@ -116,6 +117,7 @@ class ConfigSanitizer:
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "enable_bucket": bool,
         "bucket_no_upscale": bool,
+        "skip_corrupted_cache": bool,
     }
     IMAGE_DATASET_DISTINCT_SCHEMA = {
         "image_directory": str,
