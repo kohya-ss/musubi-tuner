@@ -568,6 +568,46 @@ def test_h3_ref_teacher_text_rows_round_trip_through_the_bucket_collator(tmp_pat
     torch.testing.assert_close(batch["mmh3_teacher_ref_token_tags"][0], torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64))
 
 
+def test_h3_subject_ref_teacher_text_keys_round_trip_through_the_bucket_collator(tmp_path: Path):
+    # the subject-reference teacher rows live next to a one-frame ref2va latent cache; the writer
+    # must accept the third teacher kind (smoke S1 regression: it only knew first,last and ref)
+    item = ItemInfo("view", "sks girl", (64, 64), (64, 64))
+    item.latent_cache_path = str(tmp_path / "view_0064x0064_mmh3.safetensors")
+    item.text_encoder_output_cache_path = str(tmp_path / "view_mmh3_te.safetensors")
+    latent_tensors = {
+        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
+        "latents_ref_000_image_1x4x4_float32": torch.ones(24, 1, 4, 4),
+        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
+        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
+        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(0, dtype=torch.int64),
+    }
+    text_tensors = {
+        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_token_tags_int64": torch.tensor([1, 1, 1], dtype=torch.int64),
+        "varlen_mmh3_teacher_subject_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
+        "varlen_mmh3_teacher_subject_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
+    }
+    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "ref2va", "one_frame": "1"})
+    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va", "teacher_conditions": "subject_ref"})
+
+    batch = BucketBatchManager({(64, 64): [item]}, batch_size=1)[0]
+
+    assert batch["latents_ref_000_image"].shape == (1, 24, 1, 4, 4)
+    assert "mmh3_teacher_hidden_states" not in batch and "mmh3_teacher_ref_hidden_states" not in batch
+    assert batch["mmh3_teacher_subject_ref_hidden_states"][0].shape == (5, 5120)
+    torch.testing.assert_close(batch["mmh3_teacher_subject_ref_token_tags"][0], torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64))
+
+    with pytest.raises(ValueError, match="mix"):
+        save_text_encoder_output_cache_minimax_h3(
+            item,
+            {
+                **text_tensors,
+                "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
+                "varlen_mmh3_teacher_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
+            },
+        )
+
+
 def test_h3_text_writer_rejects_a_one_sided_ref_teacher_pair_and_mixed_teacher_kinds(tmp_path: Path):
     item = _h3_item(tmp_path)
     student = {
