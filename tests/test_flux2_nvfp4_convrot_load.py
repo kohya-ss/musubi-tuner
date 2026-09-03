@@ -6,9 +6,30 @@ prequantized artifact then short-circuits load_flow_model via a fake patch fn be
 load_state_dict (which would otherwise need a full, correctly-shaped state dict).
 """
 
+import inspect
+
 import pytest
 
 from musubi_tuner.flux_2 import flux2_utils
+
+
+def test_load_flow_model_new_quantization_params_are_keyword_only():
+    """The 5 params added for NVFP4/ConvRot support were inserted before
+    lora_weights_list/lora_multipliers/disable_numpy_memmap, which shifts
+    flux_2_generate_image.py's historical positional call site's argument binding
+    (see flux_2_generate_image.py's load_flow_model call). They must be keyword-only
+    so a positional caller fails loudly (TypeError) instead of silently mis-binding
+    lora_weights_list -> convrot_int8, lora_multipliers -> convrot_int8_bwd, etc.
+    """
+    params = inspect.signature(flux2_utils.load_flow_model).parameters
+    for name in (
+        "convrot_int8",
+        "convrot_int8_bwd",
+        "nvfp4",
+        "nvfp4_columnwise_chunk_rows",
+        "training",
+    ):
+        assert params[name].kind == inspect.Parameter.KEYWORD_ONLY, f"{name} must be keyword-only"
 
 
 def test_load_flow_model_rejects_fp8_scaled_with_nvfp4():

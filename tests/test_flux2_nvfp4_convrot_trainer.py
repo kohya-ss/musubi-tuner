@@ -122,6 +122,101 @@ def test_handle_model_specific_args_rejects_nvfp4_without_scaled_mm_support(monk
         _handle_args(_trainer_args(nvfp4=True))
 
 
+def test_handle_model_specific_args_rejects_fp8_base_with_convrot_int8(monkeypatch):
+    monkeypatch.setattr(flux_2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    with pytest.raises(ValueError, match="fp8_base"):
+        _handle_args(_trainer_args(fp8_base=True, convrot_int8=True))
+
+
+def test_handle_model_specific_args_rejects_fp8_base_with_nvfp4(monkeypatch):
+    monkeypatch.setattr(flux_2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    monkeypatch.setattr(flux_2_train_network.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(flux_2_train_network.torch.cuda, "get_device_capability", lambda: (10, 0))
+    with pytest.raises(ValueError, match="fp8_base"):
+        _handle_args(_trainer_args(fp8_base=True, nvfp4=True))
+
+
+def test_handle_model_specific_args_allows_fp8_base_alone():
+    _handle_args(_trainer_args(fp8_base=True))  # must not raise
+
+
+def test_handle_model_specific_args_allows_convrot_int8_alone(monkeypatch):
+    monkeypatch.setattr(flux_2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    _handle_args(_trainer_args(convrot_int8=True))  # must not raise
+
+
+def _load_transformer_args(**overrides):
+    return _trainer_args(
+        dit=None,
+        attn_mode="torch",
+        blocks_to_swap=0,
+        disable_numpy_memmap=False,
+        **overrides,
+    )
+
+
+def test_load_transformer_coerces_dit_weight_dtype_to_none_for_convrot_int8(monkeypatch):
+    import torch
+
+    from musubi_tuner.flux_2 import flux2_utils
+
+    captured = {}
+
+    def fake_load_flow_model(device, **kwargs):
+        captured["dit_weight_dtype"] = kwargs.get("dit_weight_dtype")
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(flux2_utils, "load_flow_model", fake_load_flow_model)
+
+    trainer = Flux2NetworkTrainer()
+    trainer.model_version_info = object()
+    args = _load_transformer_args(convrot_int8=True, nvfp4=False)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        trainer.load_transformer(
+            accelerator=SimpleNamespace(device="cpu"),
+            args=args,
+            dit_path="unused.safetensors",
+            attn_mode="torch",
+            split_attn=False,
+            loading_device="cpu",
+            dit_weight_dtype=torch.bfloat16,
+        )
+
+    assert captured["dit_weight_dtype"] is None
+
+
+def test_load_transformer_coerces_dit_weight_dtype_to_none_for_nvfp4(monkeypatch):
+    import torch
+
+    from musubi_tuner.flux_2 import flux2_utils
+
+    captured = {}
+
+    def fake_load_flow_model(device, **kwargs):
+        captured["dit_weight_dtype"] = kwargs.get("dit_weight_dtype")
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(flux2_utils, "load_flow_model", fake_load_flow_model)
+
+    trainer = Flux2NetworkTrainer()
+    trainer.model_version_info = object()
+    args = _load_transformer_args(convrot_int8=False, nvfp4=True)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        trainer.load_transformer(
+            accelerator=SimpleNamespace(device="cpu"),
+            args=args,
+            dit_path="unused.safetensors",
+            attn_mode="torch",
+            split_attn=False,
+            loading_device="cpu",
+            dit_weight_dtype=torch.bfloat16,
+        )
+
+    assert captured["dit_weight_dtype"] is None
+
+
 def test_compile_transformer_disables_linear_for_convrot(monkeypatch):
     from musubi_tuner.utils import model_utils
 

@@ -49,6 +49,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
         self.default_guidance_scale = 4.0  # CFG scale for inference for base models
         self.default_discrete_flow_shift = None  # Use FLUX.2 shift as default
         device_capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+        if args.fp8_base and (args.convrot_int8 or args.nvfp4):
+            raise ValueError("--fp8_base is not supported together with --convrot_int8/--nvfp4; omit --fp8_base.")
         validate_quantization_scheme_args(
             fp8_scaled=args.fp8_scaled,
             convrot_int8=args.convrot_int8,
@@ -250,6 +252,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
+        # dit_weight_dtype must be None for any quantized load (mirrors fp8_scaled's existing
+        # None convention from trainer_base) -- ConvRot/NVFP4 weights carry their own dtype
+        # and load_flow_model asserts dit_weight_dtype is None whenever quantized is True.
+        resolved_dit_weight_dtype = None if (args.convrot_int8 or args.nvfp4) else dit_weight_dtype
         model = flux2_utils.load_flow_model(
             accelerator.device,
             model_version_info=self.model_version_info,
@@ -257,7 +263,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             attn_mode=attn_mode,
             split_attn=split_attn,
             loading_device=loading_device,
-            dit_weight_dtype=dit_weight_dtype,
+            dit_weight_dtype=resolved_dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,

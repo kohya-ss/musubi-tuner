@@ -315,17 +315,17 @@ def load_dit_model(
 
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
     model = flux2_utils.load_flow_model(
-        device,
-        model_version_info,
-        args.dit,
-        args.attn_mode,
-        False,
-        loading_device,
-        loading_weight_dtype,
-        args.fp8_scaled and not args.lycoris,
-        lora_weights_list,
-        args.lora_multiplier,
-        args.disable_numpy_memmap,
+        device=device,
+        model_version_info=model_version_info,
+        dit_path=args.dit,
+        attn_mode=args.attn_mode,
+        split_attn=False,
+        loading_device=loading_device,
+        dit_weight_dtype=loading_weight_dtype,
+        fp8_scaled=args.fp8_scaled and not args.lycoris,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=args.lora_multiplier,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
 
     # merge LoRA weights

@@ -451,6 +451,7 @@ def load_flow_model(
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype] = None,
     fp8_scaled: bool = False,
+    *,
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
     nvfp4: bool = False,
