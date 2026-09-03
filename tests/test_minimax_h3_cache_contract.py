@@ -1320,6 +1320,46 @@ def test_h3_image_records_come_from_the_image_jsonl_keyed_by_item_key(tmp_path: 
         h3_image_records_from_datasource(datasource, "t2va")
 
 
+def test_h3_records_carry_the_optional_teacher_caption(tmp_path: Path):
+    target = _touch(tmp_path / "target.png")
+    face = _touch(tmp_path / "face.png")
+    video = _touch(tmp_path / "clip.mp4")
+    jsonl = tmp_path / "items.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {"image_path": str(target), "caption": "c", "references": [{"type": "image", "path": "face.png"}]},
+            {
+                "image_path": str(face),
+                "caption": "c",
+                "teacher_caption": "subject_definitions:\n<Subject 1> ...",
+                "references": [{"type": "image", "path": "target.png"}],
+            },
+        ],
+    )
+
+    records = h3_image_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
+
+    assert records[str(target)].teacher_caption is None
+    assert records[str(face)].teacher_caption == "subject_definitions:\n<Subject 1> ..."
+
+    video_jsonl = tmp_path / "videos.jsonl"
+    _write_jsonl(
+        video_jsonl,
+        [{"video_path": "clip.mp4", "caption": "c", "teacher_caption": "t", "references": [{"type": "image", "path": "face.png"}]}],
+    )
+    (video_record,) = load_h3_jsonl_records(video_jsonl, "ref2va", lambda path: H3MediaInfo(has_audio=False, duration_seconds=6.0))
+    assert video_record.teacher_caption == "t"
+    assert video_record.video_path == video
+
+    _write_jsonl(
+        jsonl,
+        [{"image_path": str(target), "caption": "c", "teacher_caption": "", "references": [{"type": "image", "path": "face.png"}]}],
+    )
+    with pytest.raises(ValueError, match="teacher_caption must be a non-empty string"):
+        h3_image_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
+
+
 def test_h3_image_records_require_a_jsonl_for_ref2va_and_reject_duplicates(tmp_path: Path):
     directory = tmp_path / "images"
     directory.mkdir()

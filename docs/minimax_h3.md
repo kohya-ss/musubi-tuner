@@ -277,6 +277,39 @@ Caveats:
 - A complete-information teacher leaves almost no guided-space wedge inside the teaching band, so the de-distillation pressure there returns to roughly flow-matching levels; the protection moves to the anchor band, the decomposed loss, and monitoring. Starting recipe relative to the endpoint teacher: keep `--h3_teacher_condition_sigma_max 0.75`, lower `--h3_teacher_loss_mag_weight` (the remaining distillation wedge inside the band is mostly a magnitude effect), consider raising `--h3_teacher_preservation_weight`, and watch the sigma-binned `teacher/*_norm_ratio` — a student norm ratio shrinking toward 1.0 in the upper teaching band (base 0.65-0.75, where the text-only base still over-commits) is the early de-amplification signature.
 - Because the teacher is complete-information at every sigma, the learning signal is no longer tied to the high-sigma attribution window; shifting the focus band lower (e.g. `--h3_timestep_focus_min 0.3 --h3_timestep_focus_max 0.6`) becomes a meaningful A/B, at the cost of thinning the composition-commitment band 0.6-0.75.
 
+#### Subject-reference teacher (`--h3_teacher_conditions subject_ref`)
+
+> [!WARNING]
+> Experimental. The teacher sees *other* pictures of the training subject, not the training item itself.
+
+`--h3_teacher_conditions subject_ref` runs the teacher on the Ref2VA layout with the item's own JSONL `references` (image references only in this version) as the condition, while the student stays text-only. Compared with the two teachers above, the reference carries the concept (who the subject is) but not the answer (the exact target latent), so the teacher's prediction keeps the base's own guidance amplification instead of degenerating toward the raw velocity — the reason a complete-information teacher cannot be used for image targets. This is the reference-conditioned counterpart of the guidance loss: the concept and the amplification arrive in one prediction, without an uncond probe or a hand-picked scale. It works for video targets and for one-frame (image) targets; it is the only teacher available with `--one_frame`.
+
+Data contract: each JSONL record carries its references (`{"type": "image", "path": ...}`, 1-9 pictures of the same subject, ideally *not* the target itself), and `caption` is the student's plain caption (for identity training: a trigger word, appearance left out). The teacher's caption is either
+
+- the optional `teacher_caption` field of the record (used verbatim), or
+- `caption` wrapped automatically in the official full-reference declaration (`subject_definitions` / `summary` / `retention_analysis` naming one `<Subject i>` per `<Picture i>` with `attribute_transfer`, and a "pose, framing, outfit and setting follow the description" clause so the picture is not read as a copy source).
+
+When you write `teacher_caption` yourself, keep the scene, pose, and outfit description identical to `caption` and change only the reference declaration and the appearance: whatever the teacher's caption states about the composition ends up in the teacher's prediction, and the student is matched to that prediction with its own caption. What the teacher extracts from picture and caption is exactly what the student has to learn into the LoRA.
+
+Caches: the latent cache is a `--task ref2va` cache (target plus the numbered reference latents; `--one_frame` for image datasets), the text cache is written with `--task t2va --teacher_conditions subject_ref` (student rows plain, teacher rows under their own keys), and training runs `--task t2va --h3_teacher_matching --h3_teacher_conditions subject_ref`:
+
+```bash
+python minimax_h3_cache_latents.py --dataset_config items.toml --task ref2va --one_frame ...
+python minimax_h3_cache_text_encoder_outputs.py --dataset_config items.toml --task t2va --one_frame --teacher_conditions subject_ref ...
+accelerate launch ... minimax_h3_train_network.py --dataset_config items.toml --task t2va --one_frame --video_only \
+  --h3_teacher_matching --h3_teacher_conditions subject_ref \
+  --h3_teacher_condition_sigma_min 0.15 --h3_teacher_loss_mag_weight 0.5 --h3_teacher_loss_dc_weight 0.3 --h3_timestep_focus_prob 0.5 ...
+```
+
+Recipe and what to watch:
+
+- `--h3_teacher_condition_sigma_max` keeps its default 0.75 (the FL2VA weights align a reference against a footing-less `x_t` only below base sigma ~0.85).
+- `--h3_teacher_condition_sigma_min` (new, default 0 = off) is the mirror gate at the low end: near sigma 0 the noised target itself reveals the clean latent, so every teacher's prediction collapses toward the raw velocity and stops carrying the amplification. Below the gate the step is a base-preservation anchor, like the band above `sigma_max`; 0.15 is the starting value for image targets (the guidance loss uses the same gate).
+- Lower `--h3_teacher_loss_mag_weight` (0.25-0.5) and `--h3_teacher_loss_dc_weight` (0.3) as for the reference teacher; the identity signal is directional.
+- The sigma-binned `teacher/video_flow_gap_rms` should sit between the text-only gap and the self-reference floor inside the teaching band, and `teacher/*_norm_ratio` must not sink toward 1.0 there — that would mean the references act as a copy source (for instance when a reference *is* the target). The first few dozen steps of a run are a usable probe of this before any learning happens (a zero learning rate works).
+
+The reference pictures are canvas-capped to the target's bucket area, exactly as in Ref2VA training; captions and references are re-cached when they change.
+
 ### Training-time joint AV samples
 
 H3 overrides the shared `prepare_sampling` hook (whose default covers single-VAE architectures) and returns both VAEs as its sampling resources. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`.

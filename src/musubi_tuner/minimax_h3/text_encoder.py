@@ -572,6 +572,7 @@ TEXT_CACHE_FORMAT = "minimax-h3-text-v2"
 # interfaces.
 TEACHER_CONDITIONS_FIRST_LAST = "first,last"
 TEACHER_CONDITIONS_REF = "ref"
+TEACHER_CONDITIONS_SUBJECT_REF = "subject_ref"
 
 
 def normalize_teacher_conditions(value: str) -> str:
@@ -580,9 +581,49 @@ def normalize_teacher_conditions(value: str) -> str:
         return TEACHER_CONDITIONS_FIRST_LAST
     if parts == [TEACHER_CONDITIONS_REF]:
         return TEACHER_CONDITIONS_REF
+    if parts == [TEACHER_CONDITIONS_SUBJECT_REF]:
+        return TEACHER_CONDITIONS_SUBJECT_REF
     raise ValueError(
         f"MiniMax-H3 teacher matching supports only teacher conditions "
-        f"'{TEACHER_CONDITIONS_FIRST_LAST}' or '{TEACHER_CONDITIONS_REF}', got {value!r}"
+        f"'{TEACHER_CONDITIONS_FIRST_LAST}', '{TEACHER_CONDITIONS_REF}' or '{TEACHER_CONDITIONS_SUBJECT_REF}', got {value!r}"
+    )
+
+
+# The subject-reference teacher caption wrap: the official full-reference declaration blocks
+# that make the base read each picture as a *subject* (identity/appearance) reference rather
+# than a frame of the target. Modeled on the presentation that extracted a character's
+# identity on the released FL2VA weights (probe A, 2026-09-02) with the appearance clauses
+# removed, so it is content-independent boilerplate around the user caption like the
+# ref-teacher wrap; `attribute_transfer` is the empirically validated marker and the
+# "pose, framing, outfit and setting follow the description" clause is what keeps the
+# picture from acting as a copy source.
+SUBJECT_REF_SUMMARY_IMAGE = "The target is a single still image with no motion, a static shot of {subjects} as described below."
+SUBJECT_REF_SUMMARY_VIDEO = "The target video shows {subjects} as described below."
+
+
+def wrap_subject_reference_caption(caption: str, image_count: int, *, still_image: bool) -> str:
+    if image_count < 1:
+        raise ValueError("MiniMax-H3 subject-reference caption requires at least one picture")
+    labels = [f"<Subject {index}>" for index in range(1, image_count + 1)]
+    if len(labels) == 1:
+        subjects = labels[0]
+    else:
+        subjects = ", ".join(labels[:-1]) + f" and {labels[-1]}"
+    definitions = "\n".join(
+        f"<Subject {index}> is the subject whose appearance comes from <Picture {index}> (face and hair style)."
+        for index in range(1, image_count + 1)
+    )
+    summary = (SUBJECT_REF_SUMMARY_IMAGE if still_image else SUBJECT_REF_SUMMARY_VIDEO).format(subjects=subjects)
+    retention = "\n".join(
+        f"<Subject {index}> (appears in [Shot 1]): attribute_transfer - the appearance of <Subject {index}> in"
+        f" <Picture {index}> is referenced; pose, framing, outfit and setting follow the description."
+        for index in range(1, image_count + 1)
+    )
+    return (
+        f"subject_definitions:\n{definitions}\n\n"
+        f"summary:\n[reference generation] {summary}\n\n"
+        f"retention_analysis:\n{retention}\n\n"
+        f"detailed_description:\n{caption}"
     )
 
 
