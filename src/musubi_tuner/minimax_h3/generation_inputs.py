@@ -10,6 +10,7 @@ import torch
 
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode
 from musubi_tuner.minimax_h3.media import (
+    ONE_FRAME_REFERENCE_FRAME_CAP,
     TARGET_FPS,
     H3Record,
     audio_latent_frames,
@@ -24,9 +25,6 @@ from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 
 
 VIDEO_VAE_SPATIAL_RATIO = 16
-# with a one-frame target, reference videos keep their full released span instead of
-# being capped by the target duration
-ONE_FRAME_REFERENCE_FRAME_CAP = 15 * TARGET_FPS
 
 
 def parse_one_frame_options(spec: str) -> tuple[int, tuple[int, ...] | None]:
