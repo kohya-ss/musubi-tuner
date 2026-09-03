@@ -8,6 +8,8 @@ from einops import rearrange
 from diffusers.utils.torch_utils import randn_tensor
 
 from musubi_tuner.flux_2 import flux2_models, flux2_utils
+from musubi_tuner.modules.nvfp4_utils import nvfp4_scaled_mm_available
+from musubi_tuner.modules.quantization_utils import validate_quantization_scheme_args
 from musubi_tuner.hv_train_network import (
     DiTOutput,
     NetworkTrainer,
@@ -46,6 +48,20 @@ class Flux2NetworkTrainer(NetworkTrainer):
         self._control_training = False  # this means video training, not control image training
         self.default_guidance_scale = 4.0  # CFG scale for inference for base models
         self.default_discrete_flow_shift = None  # Use FLUX.2 shift as default
+        device_capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+        validate_quantization_scheme_args(
+            fp8_scaled=args.fp8_scaled,
+            convrot_int8=args.convrot_int8,
+            convrot_int8_bwd=args.convrot_int8_bwd,
+            nvfp4=args.nvfp4,
+            nvfp4_columnwise_chunk_rows=getattr(args, "nvfp4_columnwise_chunk_rows", 1024),
+            scaled_mm_available=nvfp4_scaled_mm_available(),
+            cuda_available=torch.cuda.is_available(),
+            device_capability=device_capability,
+            blocks_to_swap=args.blocks_to_swap,
+            block_swap_h2d_only=getattr(args, "block_swap_h2d_only", False),
+            require_block_swap_h2d_only_with_nvfp4=True,
+        )
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         device = accelerator.device
@@ -243,14 +259,20 @@ class Flux2NetworkTrainer(NetworkTrainer):
             loading_device=loading_device,
             dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
+            convrot_int8=args.convrot_int8,
+            convrot_int8_bwd=args.convrot_int8_bwd,
+            nvfp4=args.nvfp4,
+            nvfp4_columnwise_chunk_rows=args.nvfp4_columnwise_chunk_rows,
+            training=True,
             disable_numpy_memmap=args.disable_numpy_memmap,
         )
         return model
 
     def compile_transformer(self, args, transformer):
         transformer: flux2_models.Flux2 = transformer
+        disable_linear = self.blocks_to_swap > 0 or args.convrot_int8 or args.nvfp4
         return model_utils.compile_transformer(
-            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=self.blocks_to_swap > 0
+            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=disable_linear
         )
 
     def scale_shift_latents(self, latents):
@@ -340,6 +362,41 @@ class Flux2NetworkTrainer(NetworkTrainer):
 def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Flux.2-dev specific parser setup"""
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
+    parser.add_argument(
+        "--convrot_int8",
+        action="store_true",
+        help="use ConvRot int8 for the DiT base weights (alternative to fp8; cannot be combined with "
+        "--fp8_base/--fp8_scaled). Quantizes per-block Linears at load time with Hadamard rotation + int8; "
+        "forward runs fused Triton int8 GEMM (requires triton / triton-windows; falls back to slower "
+        "dequantized bf16 matmul without it). Combine with --nvfp4 to load a checkpoint whose Linears mix "
+        "both formats (each module's format is declared in the checkpoint).",
+    )
+    parser.add_argument(
+        "--convrot_int8_bwd",
+        type=str,
+        default="bf16",
+        choices=["bf16", "int8"],
+        help="backward mode for --convrot_int8. bf16 (default): transient dequantized matmul, most accurate. "
+        "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton).",
+    )
+    parser.add_argument(
+        "--nvfp4",
+        action="store_true",
+        help="load a ComfyUI pre-quantized NVFP4 DiT checkpoint and train against it with true "
+        "FP4x4 tensor-core forward/backward (requires PyTorch 2.10+ scaled_mm and a Blackwell GPU). "
+        "Cannot be combined with --fp8_base/--fp8_scaled. Combine with --convrot_int8 to load a "
+        "checkpoint whose Linears mix both formats (each module's format is declared in the checkpoint).",
+    )
+    parser.add_argument(
+        "--nvfp4_columnwise_chunk_rows",
+        type=int,
+        default=1024,
+        help="Row-chunk size for --nvfp4's columnwise (N-grouped) backward-weight requantization at "
+        "load time. Must be a positive multiple of 128. Smaller values bound the transient GPU memory "
+        "peak more tightly at the cost of more quantization passes at load time (a one-time cost); the "
+        "default (1024) is a comfortable fixed value, not a computed bound -- lower this (e.g. 256-512) "
+        "if NVFP4 loading OOMs on an unusually large model.",
+    )
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
     parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
     flux2_utils.add_model_version_args(parser)
