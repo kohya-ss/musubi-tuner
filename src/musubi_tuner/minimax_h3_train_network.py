@@ -62,6 +62,7 @@ from musubi_tuner.minimax_h3.sampling import (
 )
 from musubi_tuner.minimax_h3.text_encoder import (
     TEACHER_CONDITIONS_REF,
+    TEACHER_CONDITIONS_SUBJECT_REF,
     build_presentation,
     encode_h3_presentation,
     load_h3_processor,
@@ -82,6 +83,10 @@ logger = logging.getLogger(__name__)
 
 
 _RUNTIME_REF_KEY = re.compile(r"^latents_ref_(\d{3})_(image|video|audio)$")
+# validated --h3_teacher_condition_sigma_max for the endpoint (first,last) and clip (ref) teachers:
+# above it the conditioned content is unpredictable from the text (and the FL2VA weights stop
+# aligning a reference near ~0.85), so the band is better spent as a base-preservation anchor
+SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION = 0.75
 
 
 def _require_sampling_path(value: str | None, label: str) -> Path:
@@ -146,6 +151,11 @@ def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str
         raise ValueError("MiniMax-H3 sample_steps must be positive")
 
     prompt = sample.get("prompt")
+    if isinstance(prompt, str):
+        # same rule as minimax_h3_generate_video.py: the literal "\n" becomes a newline so a
+        # one-line prompt file can carry the multi-line official caption format
+        prompt = prompt.replace("\\n", "\n")
+        sample["prompt"] = prompt
     first_frame = sample.get("first_frame") or sample.get("image_path")
     last_frame = sample.get("last_frame") or sample.get("end_image_path")
     reference_jsonl = sample.get("reference_jsonl")
@@ -309,6 +319,51 @@ def _collect_fl_conditions(
     return roles
 
 
+def _collect_reference_conditions(
+    reference_roles: dict[int, dict[str, torch.Tensor]], batch_size: int
+) -> tuple[list[H3ReferenceGeometry], list[torch.Tensor], list[torch.Tensor]]:
+    """Turns the numbered ``latents_ref_{i}_{image|video|audio}`` batch entries into ordered
+    reference geometries plus the visual/audio condition tensors in layout order."""
+    references: list[H3ReferenceGeometry] = []
+    visual_conditions: list[torch.Tensor] = []
+    audio_conditions: list[torch.Tensor] = []
+    if set(reference_roles) != set(range(len(reference_roles))):
+        raise ValueError("MiniMax-H3 reference indices must be contiguous from 000")
+    for index in range(len(reference_roles)):
+        roles = reference_roles[index]
+        image = roles.get("image")
+        video = roles.get("video")
+        audio = roles.get("audio")
+        if image is not None:
+            if video is not None or audio is not None:
+                raise ValueError(f"MiniMax-H3 reference {index:03d} image cannot share video/audio roles")
+            if image.ndim != 5 or image.shape[1] != 24 or image.shape[0] != batch_size:
+                raise ValueError(f"MiniMax-H3 reference {index:03d} image must be [B,24,1,H,W]")
+            geometry = H3VideoGeometry(*image.shape[2:])
+            references.append(H3ReferenceGeometry("image", video=geometry))
+            visual_conditions.append(image)
+        elif video is not None:
+            if video.ndim != 5 or video.shape[1] != 24 or video.shape[0] != batch_size:
+                raise ValueError(f"MiniMax-H3 reference {index:03d} video must be [B,24,F,H,W]")
+            geometry = H3VideoGeometry(*video.shape[2:])
+            audio_frames = 0
+            if audio is not None:
+                if audio.ndim != 4 or tuple(audio.shape[1:3]) != (32, 2) or audio.shape[0] != batch_size:
+                    raise ValueError(f"MiniMax-H3 reference {index:03d} audio must be [B,32,2,A]")
+                audio_frames = audio.shape[-1]
+                audio_conditions.append(audio)
+            references.append(H3ReferenceGeometry("video", video=geometry, audio_frames=audio_frames))
+            visual_conditions.append(video)
+        elif audio is not None:
+            if audio.ndim != 4 or tuple(audio.shape[1:3]) != (32, 2) or audio.shape[0] != batch_size:
+                raise ValueError(f"MiniMax-H3 reference {index:03d} audio must be [B,32,2,A]")
+            references.append(H3ReferenceGeometry("audio", audio_frames=audio.shape[-1]))
+            audio_conditions.append(audio)
+        else:
+            raise ValueError(f"MiniMax-H3 reference {index:03d} has no supported role")
+    return references, visual_conditions, audio_conditions
+
+
 def _validate_teacher_text_rows(
     teacher_hidden_states: torch.Tensor, teacher_token_tags: torch.Tensor, hidden_states: torch.Tensor
 ) -> None:
@@ -356,11 +411,32 @@ def _runtime_batch_plan(
     has_fl_condition = "latents_first" in batch or "latents_last" in batch
     has_fl_teacher_text = "mmh3_teacher_hidden_states" in batch or "mmh3_teacher_token_tags" in batch
     has_ref_teacher_text = "mmh3_teacher_ref_hidden_states" in batch or "mmh3_teacher_ref_token_tags" in batch
-    if (has_fl_teacher_text or has_ref_teacher_text) and teacher_conditions is None:
+    has_subject_ref_teacher_text = (
+        "mmh3_teacher_subject_ref_hidden_states" in batch or "mmh3_teacher_subject_ref_token_tags" in batch
+    )
+    if (has_fl_teacher_text or has_ref_teacher_text or has_subject_ref_teacher_text) and teacher_conditions is None:
         raise ValueError(
             "MiniMax-H3 text cache contains teacher rows (--teacher_conditions); pass --h3_teacher_matching"
             " or rebuild the text cache without --teacher_conditions"
         )
+    # the text cache kind must match the configured teacher: distinct keys per kind
+    present_teacher_kinds = {
+        kind
+        for kind, present in (
+            ("first,last", has_fl_teacher_text),
+            (TEACHER_CONDITIONS_REF, has_ref_teacher_text),
+            (TEACHER_CONDITIONS_SUBJECT_REF, has_subject_ref_teacher_text),
+        )
+        if present
+    }
+    if teacher_conditions is not None:
+        foreign = present_teacher_kinds - {teacher_conditions}
+        if foreign:
+            raise ValueError(
+                f"MiniMax-H3 text cache contains {sorted(foreign)[0]} teacher rows but training runs"
+                f" --h3_teacher_conditions {teacher_conditions};"
+                f" re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions {teacher_conditions}"
+            )
     reference_roles = {}
     for key, value in batch.items():
         match = _RUNTIME_REF_KEY.fullmatch(key)
@@ -378,8 +454,10 @@ def _runtime_batch_plan(
     if is_one_frame_batch:
         if not one_frame:
             raise ValueError("MiniMax-H3 batch carries a one-frame latent cache; pass --one_frame to train on image targets")
-        if teacher_conditions is not None:
-            raise ValueError("MiniMax-H3 one-frame training does not support teacher matching yet")
+        if teacher_conditions is not None and teacher_conditions != TEACHER_CONDITIONS_SUBJECT_REF:
+            raise ValueError(
+                "MiniMax-H3 one-frame training supports teacher matching with --h3_teacher_conditions subject_ref only"
+            )
         if (
             not isinstance(one_frame_index_value, torch.Tensor)
             or one_frame_index_value.shape != (batch_size,)
@@ -433,12 +511,6 @@ def _runtime_batch_plan(
         # caches, are simply unused in this mode.
         if reference_roles:
             raise ValueError("MiniMax-H3 teacher matching does not accept Ref2VA condition roles")
-        if has_fl_teacher_text:
-            raise ValueError(
-                "MiniMax-H3 text cache contains first,last teacher rows but training runs"
-                " --h3_teacher_conditions ref;"
-                " re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions ref"
-            )
         if not has_ref_teacher_text:
             raise ValueError(
                 "MiniMax-H3 ref teacher matching requires reference teacher text rows;"
@@ -458,17 +530,50 @@ def _runtime_batch_plan(
             target_audio_frames=audio_latents.shape[-1],
             references=(H3ReferenceGeometry("video", video=target_geometry, audio_frames=audio_latents.shape[-1]),),
         )
+    elif teacher_conditions == TEACHER_CONDITIONS_SUBJECT_REF:
+        # the student trains as T2VA; the item's own reference latents (Ref2VA cache) and the
+        # subject-declaration text rows feed only the no-grad Ref2VA teacher forward. The
+        # references are other pictures of the subject, so the teacher supplies the concept
+        # without the complete-information degeneration of the self-reference teacher.
+        if has_fl_condition:
+            raise ValueError("MiniMax-H3 subject-reference teacher matching does not accept FL2VA condition latents")
+        if not reference_roles:
+            raise ValueError(
+                "MiniMax-H3 subject-reference teacher matching requires the item's reference latents;"
+                " re-run minimax_h3_cache_latents.py --task ref2va (with --one_frame for image datasets)"
+            )
+        if not has_subject_ref_teacher_text:
+            raise ValueError(
+                "MiniMax-H3 subject-reference teacher matching requires subject_ref teacher text rows;"
+                " re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions subject_ref"
+            )
+        task = "t2va"
+        teacher_references, teacher_visual_conditions, teacher_audio_conditions = _collect_reference_conditions(
+            reference_roles, batch_size
+        )
+        if any(reference.kind != "image" for reference in teacher_references):
+            raise ValueError("MiniMax-H3 subject-reference teacher matching supports image references only (v1)")
+        teacher_hidden_states = _stack_single_text_rows(
+            batch.get("mmh3_teacher_subject_ref_hidden_states"), "teacher text hidden states"
+        )
+        teacher_token_tags = _stack_single_text_rows(batch.get("mmh3_teacher_subject_ref_token_tags"), "teacher text token tags")
+        _validate_teacher_text_rows(teacher_hidden_states, teacher_token_tags, hidden_states)
+        # a one-frame teacher layout must carry the one-frame flag and the target-time override
+        # (the same rebuild trap as the guidance-loss uncond layout); references are untimed
+        teacher_layout = build_h3_layout(
+            task="ref2va",
+            text_length=teacher_hidden_states.shape[1],
+            target_video=H3VideoGeometry(*video_latents.shape[2:]),
+            target_audio_frames=audio_latents.shape[-1],
+            references=tuple(teacher_references),
+            one_frame=is_one_frame_batch,
+            time_overrides=time_overrides,
+        )
     elif teacher_conditions is not None:
         # the student trains as T2VA; the first/last latents and the Picture-prefixed text rows
         # feed only the no-grad FL2VA teacher forward
         if reference_roles:
             raise ValueError("MiniMax-H3 teacher matching does not accept Ref2VA condition roles")
-        if has_ref_teacher_text:
-            raise ValueError(
-                "MiniMax-H3 text cache contains ref teacher rows but training runs"
-                " --h3_teacher_conditions first,last;"
-                " re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions first,last"
-            )
         if not has_fl_condition:
             raise ValueError(
                 "MiniMax-H3 teacher matching requires FL2VA-style latent caches with first/last conditions;"
@@ -499,40 +604,7 @@ def _runtime_batch_plan(
         )
     elif reference_roles:
         task = "ref2va"
-        if set(reference_roles) != set(range(len(reference_roles))):
-            raise ValueError("MiniMax-H3 reference indices must be contiguous from 000")
-        for index in range(len(reference_roles)):
-            roles = reference_roles[index]
-            image = roles.get("image")
-            video = roles.get("video")
-            audio = roles.get("audio")
-            if image is not None:
-                if video is not None or audio is not None:
-                    raise ValueError(f"MiniMax-H3 reference {index:03d} image cannot share video/audio roles")
-                if image.ndim != 5 or image.shape[1] != 24 or image.shape[0] != batch_size:
-                    raise ValueError(f"MiniMax-H3 reference {index:03d} image must be [B,24,1,H,W]")
-                geometry = H3VideoGeometry(*image.shape[2:])
-                references.append(H3ReferenceGeometry("image", video=geometry))
-                visual_conditions.append(image)
-            elif video is not None:
-                if video.ndim != 5 or video.shape[1] != 24 or video.shape[0] != batch_size:
-                    raise ValueError(f"MiniMax-H3 reference {index:03d} video must be [B,24,F,H,W]")
-                geometry = H3VideoGeometry(*video.shape[2:])
-                audio_frames = 0
-                if audio is not None:
-                    if audio.ndim != 4 or tuple(audio.shape[1:3]) != (32, 2) or audio.shape[0] != batch_size:
-                        raise ValueError(f"MiniMax-H3 reference {index:03d} audio must be [B,32,2,A]")
-                    audio_frames = audio.shape[-1]
-                    audio_conditions.append(audio)
-                references.append(H3ReferenceGeometry("video", video=geometry, audio_frames=audio_frames))
-                visual_conditions.append(video)
-            elif audio is not None:
-                if audio.ndim != 4 or tuple(audio.shape[1:3]) != (32, 2) or audio.shape[0] != batch_size:
-                    raise ValueError(f"MiniMax-H3 reference {index:03d} audio must be [B,32,2,A]")
-                references.append(H3ReferenceGeometry("audio", audio_frames=audio.shape[-1]))
-                audio_conditions.append(audio)
-            else:
-                raise ValueError(f"MiniMax-H3 reference {index:03d} has no supported role")
+        references, visual_conditions, audio_conditions = _collect_reference_conditions(reference_roles, batch_size)
     else:
         task = "t2va"
 
@@ -621,20 +693,22 @@ def _decomposed_flow_loss(pred: torch.Tensor, target: torch.Tensor, mag_weight: 
     return (mag_weight * magnitude_term + dir_weight * direction_term) / pred_flat.numel()
 
 
-def _preservation_density_compensation(sigma_max: float, focus_min: float, focus_max: float, focus_prob: float) -> float:
+def _preservation_density_compensation(
+    sigma_max: float, focus_min: float, focus_max: float, focus_prob: float, sigma_min: float = 0.0
+) -> float:
     """Loss-weight correction that keeps the preservation anchor's expected gradient share
     invariant under timestep focus.
 
-    Focus concentrates the base-sigma draw on the teaching band and thins the anchor band
-    (base sigma > sigma_max) from its uniform share ``1 - sigma_max`` to
-    ``(1-p)*(1-sigma_max) + p*overlap/(max-min)``; multiplying each anchor step's loss by
-    uniform/focused restores the anchor's per-unit-time pull, so raising the focus does not
-    silently weaken the drift protection.
+    Focus concentrates the base-sigma draw on the teaching band and thins the anchor bands
+    (base sigma > sigma_max, and < sigma_min when a lower gate is set) from their uniform
+    share ``(1 - sigma_max) + sigma_min`` to ``(1-p)*uniform + p*overlap/(max-min)``;
+    multiplying each anchor step's loss by uniform/focused restores the anchor's per-unit-time
+    pull, so raising the focus does not silently weaken the drift protection.
     """
-    anchor_width = 1.0 - sigma_max
+    anchor_width = (1.0 - sigma_max) + max(0.0, sigma_min)
     if anchor_width <= 0.0 or focus_prob <= 0.0:
         return 1.0
-    overlap = max(0.0, focus_max - max(focus_min, sigma_max))
+    overlap = max(0.0, focus_max - max(focus_min, sigma_max)) + max(0.0, min(focus_max, sigma_min) - focus_min)
     focused_share = (1.0 - focus_prob) * anchor_width + focus_prob * overlap / (focus_max - focus_min)
     if focused_share <= 0.0:
         # the anchor band is never sampled, so the multiplier is never applied
@@ -725,8 +799,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if getattr(args, "task", None) not in {"t2va", "fl2va", "ref2va"}:
             raise ValueError("MiniMax-H3 requires --task t2va, fl2va, or ref2va")
         if getattr(args, "one_frame", False):
-            if getattr(args, "h3_teacher_matching", False):
-                raise ValueError("--h3_teacher_matching does not support --one_frame yet")
+            if (
+                getattr(args, "h3_teacher_matching", False)
+                and normalize_teacher_conditions(args.h3_teacher_conditions) != TEACHER_CONDITIONS_SUBJECT_REF
+            ):
+                raise ValueError("--h3_teacher_matching supports --one_frame with --h3_teacher_conditions subject_ref only")
             logger.info(
                 "MiniMax-H3 one-frame training: image batches carry a silence audio placeholder that presence"
                 " gating excludes from the audio loss; pass --video_only for image-only runs to skip the"
@@ -803,7 +880,39 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             sigma_max = float(args.h3_teacher_condition_sigma_max)
             if not 0.0 <= sigma_max <= 1.0:
                 raise ValueError(f"--h3_teacher_condition_sigma_max must be in [0.0,1.0], got {sigma_max}")
-            if conditions == TEACHER_CONDITIONS_REF:
+            sigma_min = float(getattr(args, "h3_teacher_condition_sigma_min", 0.0))
+            if not 0.0 <= sigma_min <= sigma_max:
+                raise ValueError(
+                    f"--h3_teacher_condition_sigma_min must be in [0.0, --h3_teacher_condition_sigma_max], got {sigma_min}"
+                )
+            if conditions == TEACHER_CONDITIONS_SUBJECT_REF:
+                logger.info(
+                    "MiniMax-H3 teacher matching: Ref2VA teacher conditioned on the item's own subject-reference"
+                    " pictures for base sigma in [%s, %s] (base-preservation anchor outside)",
+                    sigma_min,
+                    sigma_max,
+                )
+                if sigma_max < 1.0:
+                    logger.warning(
+                        "MiniMax-H3 subject_ref teacher: --h3_teacher_condition_sigma_max %s anchors base sigma > %s to"
+                        " the text-only base, but the identity decisions (hair shape, eye color) are made at base sigma"
+                        " 0.92-1.0 and this teacher keeps its amplification there; the validated recipe is 1.0 (the"
+                        " default). Expect the student to learn composition but not identity below ~0.95",
+                        sigma_max,
+                        sigma_max,
+                    )
+            elif sigma_max > SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION:
+                logger.warning(
+                    "MiniMax-H3 %s teacher: --h3_teacher_condition_sigma_max %s teaches above base sigma %s, where the"
+                    " conditioned content is unpredictable from the text and the teaching overwrites the base"
+                    " composition prior (for ref the FL2VA weights also fail to align the reference above ~0.85);"
+                    " the validated recipe for this teacher is %s",
+                    conditions,
+                    sigma_max,
+                    SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION,
+                    SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION,
+                )
+            elif conditions == TEACHER_CONDITIONS_REF:
                 logger.info(
                     "MiniMax-H3 teacher matching: Ref2VA teacher conditioned on the training clip itself (video+audio)"
                     " up to base sigma %s (base-preservation anchor above)",
@@ -1249,6 +1358,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             metadata["ss_minimax_h3_teacher_matching"] = True
             metadata["ss_minimax_h3_teacher_conditions"] = normalize_teacher_conditions(args.h3_teacher_conditions)
             metadata["ss_minimax_h3_teacher_condition_sigma_max"] = args.h3_teacher_condition_sigma_max
+            metadata["ss_minimax_h3_teacher_condition_sigma_min"] = getattr(args, "h3_teacher_condition_sigma_min", 0.0)
             metadata["ss_minimax_h3_teacher_loss"] = "decomposed_mag_dir"
             metadata["ss_minimax_h3_teacher_loss_mag_weight"] = args.h3_teacher_loss_mag_weight
             metadata["ss_minimax_h3_teacher_loss_dc_weight"] = args.h3_teacher_loss_dc_weight
@@ -1573,7 +1683,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise RuntimeError(
                 "MiniMax-H3 teacher matching requires a network exposing set_enabled (e.g. networks.lora_minimax_h3)"
             )
-        conditioned = float(base_sigma) <= float(args.h3_teacher_condition_sigma_max)
+        # the lower gate is the mirror of the upper one: near sigma 0 the noised target itself
+        # reveals x_0, so every teacher's prediction collapses toward the raw velocity (the
+        # complete-information de-amplification channel entering from below)
+        sigma_min = float(getattr(args, "h3_teacher_condition_sigma_min", 0.0))
+        conditioned = sigma_min <= float(base_sigma) <= float(args.h3_teacher_condition_sigma_max)
         if conditioned:
             teacher_text = runtime.teacher_text_hidden_states
             teacher_tags = runtime.teacher_text_token_tags
@@ -1770,6 +1884,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 float(getattr(args, "h3_timestep_focus_min", 0.4)),
                 float(getattr(args, "h3_timestep_focus_max", 0.8)),
                 float(getattr(args, "h3_timestep_focus_prob", 0.0)),
+                float(getattr(args, "h3_teacher_condition_sigma_min", 0.0)),
             )
             if multiplier != 1.0:
                 total_loss = total_loss * multiplier
@@ -1886,7 +2001,8 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         " with the same --teacher_conditions value. The teacher targets live in the distilled guided space, so this"
         " replaces (and is mutually exclusive with) --h3_guidance_loss_scale. With 'first,last' conditions audio"
         " degenerates to a base-preservation anchor (real audio content is not learned); with 'ref' the reference"
-        " audio is a real teaching target.",
+        " audio is a real teaching target; with 'subject_ref' the teacher sees other pictures of the subject"
+        " (partial information) and image targets (--one_frame) are supported.",
     )
     parser.add_argument(
         "--h3_teacher_conditions",
@@ -1896,19 +2012,33 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         " frames, requires FL2VA-style latent caches and a text cache written with --teacher_conditions first,last."
         " 'ref': Ref2VA teacher on the training clip itself (cached target video+audio latents as the reference),"
         " complete information at every sigma; requires a text cache written with --teacher_conditions ref, works"
-        " with FL2VA or T2VA latent caches (first/last latents are unused)",
+        " with FL2VA or T2VA latent caches (first/last latents are unused)."
+        " 'subject_ref': Ref2VA teacher on the item's own JSONL image references (other pictures of the subject),"
+        " partial information: the concept plus the base's own amplification without the complete-information"
+        " degeneration; requires --task ref2va latent caches (image datasets with --one_frame) and a text cache"
+        " written with --teacher_conditions subject_ref; the only teacher available with --one_frame",
+    )
+    parser.add_argument(
+        "--h3_teacher_condition_sigma_min",
+        type=float,
+        default=0.0,
+        help="teacher matching only: below this drawn base sigma the teacher likewise drops its conditions and the"
+        " step becomes a base-preservation anchor (0 = off). Near sigma 0 the noised target itself reveals the"
+        " clean latent, so any teacher's prediction collapses toward the raw velocity target and stops carrying the"
+        " base's amplification; the mirror of --h3_guidance_loss_sigma_min. Recommended 0.15 for image targets"
+        " with the subject_ref teacher",
     )
     parser.add_argument(
         "--h3_teacher_condition_sigma_max",
         type=float,
-        default=0.75,
+        default=1.0,
         help="teacher matching only: above this drawn base sigma (pre-shift, 1 = pure noise) the teacher drops its"
         " conditions and runs on the student's own text, turning the target into a pure base-preservation"
-        " anchor. Near pure noise the conditioned content is unpredictable from the text, so unrestricted teaching"
-        " there rapidly overwrites the base composition prior; for the ref teacher the same band is also where the"
-        " FL2VA weights fail to align the reference against a footing-less x_t. The identity-decision band was"
-        " measured at base sigma 0.6-0.75 on diverse character data, so the default keeps it in the teaching band;"
-        " lower toward 0.4-0.5 for low-diversity data (1.0 = always conditioned, unprotected)",
+        " anchor (1.0 = always conditioned). Recommended per teacher: 1.0 (the default) for subject_ref, whose"
+        " teacher keeps the base's amplification at every sigma and whose identity decisions live at base sigma"
+        " 0.92-1.0; 0.75 for first,last and ref, where near pure noise the conditioned content is unpredictable"
+        " from the text and unrestricted teaching overwrites the base composition prior (for ref the FL2VA weights"
+        " also fail to align the reference above base sigma ~0.85). Lower toward 0.4-0.5 for low-diversity data",
     )
     parser.add_argument(
         "--h3_teacher_loss_dc_weight",

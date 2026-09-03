@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -25,17 +26,20 @@ from musubi_tuner.minimax_h3.text_encoder import (
     normalize_teacher_conditions,
     validate_text_rows,
     wrap_ref_teacher_caption,
+    wrap_subject_reference_caption,
 )
 
 try:
     from musubi_tuner.minimax_h3_cache_text_encoder_outputs import (
         _ref_teacher_presentation,
         _reference_visuals,
+        _subject_ref_teacher_presentation,
         _text_cache_metadata,
     )
 except ImportError as error:
     _ref_teacher_presentation = None
     _reference_visuals = None
+    _subject_ref_teacher_presentation = None
     _text_cache_metadata = None
     _text_cache_import_error = str(error)
 else:
@@ -132,12 +136,95 @@ def test_ref2va_presentation_preserves_jsonl_order_and_timestamp_format(tmp_path
     ]
 
 
-def test_normalize_teacher_conditions_accepts_both_kinds_and_rejects_everything_else():
+def test_normalize_teacher_conditions_accepts_the_three_kinds_and_rejects_everything_else():
     assert normalize_teacher_conditions(" first , last ") == "first,last"
     assert normalize_teacher_conditions(" ref ") == "ref"
-    for invalid in ("first", "last,first", "ref,first", "reference", ""):
+    assert normalize_teacher_conditions(" subject_ref ") == "subject_ref"
+    for invalid in ("first", "last,first", "ref,first", "reference", "references", "subject_ref,ref", ""):
         with pytest.raises(ValueError, match="teacher conditions"):
             normalize_teacher_conditions(invalid)
+
+
+def test_wrap_subject_reference_caption_declares_one_subject_per_picture():
+    caption = "A waist-up still frame of the girl in a red kimono."
+
+    single = wrap_subject_reference_caption(caption, 1, still_image=True)
+    double = wrap_subject_reference_caption(caption, 2, still_image=False)
+
+    assert single.startswith("subject_definitions:\n<Subject 1> is the subject whose appearance comes from <Picture 1>")
+    assert "[reference generation] The target is a single still image with no motion, a static shot of <Subject 1>" in single
+    assert "<Subject 1> (appears in [Shot 1]): attribute_transfer" in single
+    assert "pose, framing, outfit and setting follow the description" in single
+    assert single.endswith(f"detailed_description:\n{caption}")
+    assert "<Subject 2> is the subject whose appearance comes from <Picture 2>" in double
+    assert "The target video shows <Subject 1> and <Subject 2> as described below." in double
+    assert "<Subject 2> (appears in [Shot 1]): attribute_transfer" in double
+    with pytest.raises(ValueError, match="at least one picture"):
+        wrap_subject_reference_caption(caption, 0, still_image=True)
+
+
+class _FakeReferenceDecoder:
+    def __init__(self):
+        self.calls = []
+
+    def decode_reference_visual(self, reference, *, target_frame_count, target_size):
+        self.calls.append((reference.path, target_frame_count, target_size))
+        return torch.zeros(1, 32, 32, 3)
+
+
+@pytest.mark.skipif(_subject_ref_teacher_presentation is None, reason="cache script import failed")
+def test_subject_ref_teacher_presentation_wraps_or_uses_the_teacher_caption(tmp_path: Path):
+    face = tmp_path / "face.png"
+    record = _record(tmp_path, (H3Reference(type="image", path=face),))
+    decoder = _FakeReferenceDecoder()
+
+    wrapped = _subject_ref_teacher_presentation(
+        record, reference_frame_cap=360, target_size=(64, 96), still_image=True, decoder=decoder, decoded_reference_cache={}
+    )
+    explicit = _subject_ref_teacher_presentation(
+        replace(
+            record,
+            teacher_caption="subject_definitions:\n<Subject 1> is the girl in <Picture 1>.\n\ndetailed_description:\nA still.",
+        ),
+        reference_frame_cap=360,
+        target_size=(64, 96),
+        still_image=True,
+        decoder=decoder,
+        decoded_reference_cache={},
+    )
+
+    expected_wrap = wrap_subject_reference_caption(record.caption, 1, still_image=True)
+    assert wrapped.text == f"<Picture 1>: {IMAGE_PLACEHOLDER}{expected_wrap}"
+    assert len(wrapped.images) == 1 and wrapped.videos == ()
+    assert (
+        explicit.text
+        == f"<Picture 1>: {IMAGE_PLACEHOLDER}subject_definitions:\n<Subject 1> is the girl in <Picture 1>.\n\ndetailed_description:\nA still."
+    )
+    assert decoder.calls == [(face, 360, (64, 96))] * 2
+    # the student presentation of the same record minus references is the plain caption
+    assert build_presentation(replace(record, references=()), "t2va").text == record.caption
+
+
+@pytest.mark.skipif(_subject_ref_teacher_presentation is None, reason="cache script import failed")
+@pytest.mark.parametrize(
+    ("references", "message"),
+    [
+        ((), "at least one image reference"),
+        ((H3Reference(type="video", path=Path("motion.mp4"), audio=None, duration_seconds=2.0),), "image references only"),
+    ],
+)
+def test_subject_ref_teacher_presentation_rejects_unsupported_references(tmp_path: Path, references, message):
+    record = _record(tmp_path, references)
+
+    with pytest.raises(ValueError, match=message):
+        _subject_ref_teacher_presentation(
+            record,
+            reference_frame_cap=360,
+            target_size=(64, 96),
+            still_image=True,
+            decoder=_FakeReferenceDecoder(),
+            decoded_reference_cache={},
+        )
 
 
 def test_wrap_ref_teacher_caption_prepends_the_copy_declaration_boilerplate():
