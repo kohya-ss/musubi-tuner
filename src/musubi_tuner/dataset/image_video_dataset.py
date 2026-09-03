@@ -133,6 +133,7 @@ class BaseDataset(torch.utils.data.Dataset):
         debug_dataset: bool = False,
         architecture: str = "no_default",
         caption_dropout_rate: float = 0.0,
+        skip_corrupted_cache: bool = False,
     ):
         self.resolution = resolution
         self.caption_extension = caption_extension
@@ -144,6 +145,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.debug_dataset = debug_dataset
         self.architecture = architecture
         self.caption_dropout_rate = caption_dropout_rate
+        self.skip_corrupted_cache = skip_corrupted_cache
         self.seed = None
         self.current_epoch = 0
         self.shared_epoch = None
@@ -161,6 +163,15 @@ class BaseDataset(torch.utils.data.Dataset):
             "bucket_no_upscale": bool(self.bucket_no_upscale),
         }
         return metadata
+
+    @staticmethod
+    def _is_cache_file_loadable(path: str) -> bool:
+        try:
+            BucketBatchManager._load_cache_file(path)
+            return True
+        except Exception as e:  # noqa: BLE001 - any load failure means the cache file is corrupted/unreadable
+            logger.warning(f"Skipping corrupted cache file: {e}")
+            return False
 
     def get_all_latent_cache_files(self):
         return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
@@ -316,6 +327,7 @@ class ImageDataset(BaseDataset):
         debug_dataset: bool = False,
         architecture: str = "no_default",
         caption_dropout_rate: float = 0.0,
+        skip_corrupted_cache: bool = False,
     ):
         super(ImageDataset, self).__init__(
             resolution,
@@ -328,6 +340,7 @@ class ImageDataset(BaseDataset):
             debug_dataset,
             architecture,
             caption_dropout_rate,
+            skip_corrupted_cache,
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
@@ -626,7 +639,13 @@ class ImageDataset(BaseDataset):
             # resized to the bucket resolution share that resolution but can still differ in *count*.
             # find_keys returns the keys sorted, so the per-control order (and the index<->shape pairing,
             # which remove_dtype_suffix keeps in each element) is deterministic across cache files.
-            control_keys = safetensors_utils.find_keys(cache_file, starts_with="latents_control_")
+            try:
+                control_keys = safetensors_utils.find_keys(cache_file, starts_with="latents_control_")
+            except Exception as e:  # noqa: BLE001 - any read failure means the cache file is corrupted/unreadable
+                if self.skip_corrupted_cache:
+                    logger.warning(f"Skipping corrupted cache file: {cache_file}: {e}")
+                    continue
+                raise RuntimeError(f"Failed to read cache file, it may be corrupted: {cache_file}: {e}") from None
             if control_keys:
                 # key: latents_control_{i}_FxHxW_dtype -> "latents_control_{i}_FxHxW" (index + shape)
                 control_shapes = [remove_dtype_suffix(key) for key in control_keys]
@@ -637,6 +656,12 @@ class ImageDataset(BaseDataset):
             if empty_te_cache_path is not None:
                 item_info.caption_dropout_rate = self.caption_dropout_rate
                 item_info.empty_text_encoder_output_cache_path = empty_te_cache_path
+
+            if self.skip_corrupted_cache and (
+                not self._is_cache_file_loadable(item_info.latent_cache_path)
+                or not self._is_cache_file_loadable(item_info.text_encoder_output_cache_path)
+            ):
+                continue
 
             bucket = bucketed_item_info.get(bucket_reso, [])
             for _ in range(self.num_repeats):
@@ -695,6 +720,7 @@ class VideoDataset(BaseDataset):
         architecture: str = "no_default",
         audio_spec: Optional["AudioSpec"] = None,
         caption_dropout_rate: float = 0.0,
+        skip_corrupted_cache: bool = False,
     ):
         super(VideoDataset, self).__init__(
             resolution,
@@ -707,6 +733,7 @@ class VideoDataset(BaseDataset):
             debug_dataset,
             architecture,
             caption_dropout_rate,
+            skip_corrupted_cache,
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
@@ -1046,6 +1073,12 @@ class VideoDataset(BaseDataset):
             if empty_te_cache_path is not None:
                 item_info.caption_dropout_rate = self.caption_dropout_rate
                 item_info.empty_text_encoder_output_cache_path = empty_te_cache_path
+
+            if self.skip_corrupted_cache and (
+                not self._is_cache_file_loadable(item_info.latent_cache_path)
+                or not self._is_cache_file_loadable(item_info.text_encoder_output_cache_path)
+            ):
+                continue
 
             bucket = bucketed_item_info.get(bucket_reso, [])
             for _ in range(self.num_repeats):

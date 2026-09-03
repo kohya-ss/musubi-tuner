@@ -43,6 +43,7 @@ class BaseDatasetParams:
     debug_dataset: bool = False
     architecture: str = "no_default"  # short style like "hv" or "wan"
     caption_dropout_rate: float = 0.0
+    skip_corrupted_cache: bool = False
 
 
 @dataclass
@@ -120,6 +121,7 @@ class ConfigSanitizer:
         "enable_bucket": bool,
         "bucket_no_upscale": bool,
         "caption_dropout_rate": float,
+        "skip_corrupted_cache": bool,
     }
     IMAGE_DATASET_DISTINCT_SCHEMA = {
         "image_directory": str,

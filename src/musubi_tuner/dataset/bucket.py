@@ -239,6 +239,16 @@ class BucketBatchManager:
     def __len__(self):
         return len(self.bucket_batch_indices)
 
+    @staticmethod
+    def _load_cache_file(path: str) -> dict[str, torch.Tensor]:
+        try:
+            return load_file(path)
+        except Exception as e:  # noqa: BLE001 - any load failure means the cache file is corrupted/unreadable
+            # safetensors raises safetensors_rust.SafetensorError, a Rust-extension exception that fails to
+            # pickle when a DataLoader worker sends it back to the main process, silently killing the worker's
+            # feeder thread and hanging training with no visible error. Re-raise as a plain, picklable exception.
+            raise RuntimeError(f"Failed to load cache file, it may be corrupted: {path}: {e}") from None
+
     def __getitem__(self, idx):
         bucket_reso, batch_idx = self.bucket_batch_indices[idx]
         bucket = self.buckets[bucket_reso]
@@ -248,11 +258,11 @@ class BucketBatchManager:
         batch_tensor_data = {}
         varlen_keys = set()
         for item_info in bucket[start:end]:
-            sd_latent = load_file(item_info.latent_cache_path)
+            sd_latent = self._load_cache_file(item_info.latent_cache_path)
             te_cache_path = item_info.text_encoder_output_cache_path
             if item_info.caption_dropout_rate > 0 and random.random() < item_info.caption_dropout_rate:
                 te_cache_path = item_info.empty_text_encoder_output_cache_path
-            sd_te = load_file(te_cache_path)
+            sd_te = self._load_cache_file(te_cache_path)
             sd = {**sd_latent, **sd_te}
 
             # TODO refactor this
