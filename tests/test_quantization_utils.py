@@ -5,6 +5,7 @@ import pytest
 from musubi_tuner.modules.quantization_utils import (
     validate_nvfp4_requirements,
     validate_quantization_scheme,
+    validate_quantization_scheme_args,
 )
 
 
@@ -62,3 +63,104 @@ def test_validate_nvfp4_requirements_allows_blackwell_gpu():
 def test_validate_nvfp4_requirements_allows_when_cuda_not_yet_available():
     # CLI validation can run before accelerate has placed the process on a GPU.
     validate_nvfp4_requirements(True, scaled_mm_available=True, cuda_available=False, device_capability=None)  # must not raise
+
+
+def test_validate_quantization_scheme_args_delegates_scheme_check():
+    with pytest.raises(ValueError, match="exclusive"):
+        validate_quantization_scheme_args(
+            fp8_scaled=True,
+            convrot_int8=True,
+            convrot_int8_bwd="bf16",
+            nvfp4=False,
+            nvfp4_columnwise_chunk_rows=1024,
+            scaled_mm_available=True,
+            cuda_available=True,
+            device_capability=(10, 0),
+        )
+
+
+def test_validate_quantization_scheme_args_rejects_int8_bwd_without_convrot():
+    with pytest.raises(ValueError, match="convrot_int8_bwd"):
+        validate_quantization_scheme_args(
+            fp8_scaled=False,
+            convrot_int8=False,
+            convrot_int8_bwd="int8",
+            nvfp4=False,
+            nvfp4_columnwise_chunk_rows=1024,
+            scaled_mm_available=True,
+            cuda_available=True,
+            device_capability=None,
+        )
+
+
+def test_validate_quantization_scheme_args_rejects_nvfp4_block_swap_without_h2d_only():
+    with pytest.raises(ValueError, match="block_swap_h2d_only"):
+        validate_quantization_scheme_args(
+            fp8_scaled=False,
+            convrot_int8=False,
+            convrot_int8_bwd="bf16",
+            nvfp4=True,
+            nvfp4_columnwise_chunk_rows=1024,
+            scaled_mm_available=True,
+            cuda_available=True,
+            device_capability=(10, 0),
+            blocks_to_swap=4,
+            block_swap_h2d_only=False,
+        )
+
+
+def test_validate_quantization_scheme_args_allows_nvfp4_block_swap_when_not_required():
+    validate_quantization_scheme_args(
+        fp8_scaled=False,
+        convrot_int8=False,
+        convrot_int8_bwd="bf16",
+        nvfp4=True,
+        nvfp4_columnwise_chunk_rows=1024,
+        scaled_mm_available=True,
+        cuda_available=True,
+        device_capability=(10, 0),
+        blocks_to_swap=4,
+        block_swap_h2d_only=False,
+        require_block_swap_h2d_only_with_nvfp4=False,
+    )  # must not raise
+
+
+def test_validate_quantization_scheme_args_rejects_non_128_multiple_chunk_rows():
+    with pytest.raises(ValueError, match="nvfp4_columnwise_chunk_rows"):
+        validate_quantization_scheme_args(
+            fp8_scaled=False,
+            convrot_int8=False,
+            convrot_int8_bwd="bf16",
+            nvfp4=True,
+            nvfp4_columnwise_chunk_rows=1000,
+            scaled_mm_available=True,
+            cuda_available=True,
+            device_capability=(10, 0),
+        )
+
+
+def test_validate_quantization_scheme_args_rejects_non_positive_chunk_rows():
+    with pytest.raises(ValueError, match="nvfp4_columnwise_chunk_rows"):
+        validate_quantization_scheme_args(
+            fp8_scaled=False,
+            convrot_int8=False,
+            convrot_int8_bwd="bf16",
+            nvfp4=True,
+            nvfp4_columnwise_chunk_rows=0,
+            scaled_mm_available=True,
+            cuda_available=True,
+            device_capability=(10, 0),
+        )
+
+
+def test_validate_quantization_scheme_args_allows_valid_convrot_and_nvfp4_combo():
+    validate_quantization_scheme_args(
+        fp8_scaled=False,
+        convrot_int8=True,
+        convrot_int8_bwd="int8",
+        nvfp4=True,
+        nvfp4_columnwise_chunk_rows=1024,
+        scaled_mm_available=True,
+        cuda_available=True,
+        device_capability=(10, 0),
+    )  # must not raise

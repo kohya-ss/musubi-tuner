@@ -53,3 +53,50 @@ def validate_nvfp4_requirements(
             f" tensor-core scaled_mm; detected compute capability {major}.{minor}. Use"
             f" --convrot_int8 or --fp8_scaled instead on this GPU."
         )
+
+
+def validate_quantization_scheme_args(
+    fp8_scaled: bool,
+    convrot_int8: bool,
+    convrot_int8_bwd: str,
+    nvfp4: bool,
+    nvfp4_columnwise_chunk_rows: int,
+    scaled_mm_available: bool,
+    cuda_available: bool,
+    device_capability: tuple[int, int] | None,
+    blocks_to_swap: int = 0,
+    block_swap_h2d_only: bool = False,
+    require_block_swap_h2d_only_with_nvfp4: bool = True,
+) -> None:
+    """Validate the full quantization-scheme CLI arg set shared by every architecture wiring
+    fp8_scaled/convrot_int8/nvfp4 (Krea2, Flux.2, ...).
+
+    Composes ``validate_quantization_scheme`` (mutual exclusivity) and
+    ``validate_nvfp4_requirements`` (NVFP4 runtime requirements) with the two checks that are
+    common to every architecture but don't live in either of those: ``convrot_int8_bwd``
+    requiring ``convrot_int8``, and the NVFP4 + block-swap + chunk-rows rules. Architecture-specific
+    checks (e.g. Krea2's ``--turbo_dit`` incompatibility) are the caller's responsibility --
+    see ``krea2_utils.validate_krea2_quantization_args`` for an example wrapper.
+
+    ``require_block_swap_h2d_only_with_nvfp4`` defaults to True (the trainer's requirement:
+    the default block-swap offloader doesn't know about NVFP4's training-only columnwise
+    backward buffers). Standalone inference should pass False -- under ``training=False`` those
+    buffers are never built, so the default offloader has nothing to be unaware of.
+    """
+    validate_quantization_scheme(fp8_scaled, convrot_int8, nvfp4)
+    if convrot_int8_bwd == "int8" and not convrot_int8:
+        raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
+    validate_nvfp4_requirements(nvfp4, scaled_mm_available, cuda_available, device_capability)
+    if nvfp4 and blocks_to_swap and require_block_swap_h2d_only_with_nvfp4 and not block_swap_h2d_only:
+        raise ValueError(
+            "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. The default block-swap"
+            " offloader (ModelOffloader) does not know about NVFP4's extra columnwise backward buffers"
+            " (nvfp4_weight_t/nvfp4_block_scale_t/nvfp4_scale_t) and would leave them GPU-resident for"
+            " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
+            " or omit --blocks_to_swap if the model fits without it."
+        )
+    if nvfp4 and (nvfp4_columnwise_chunk_rows <= 0 or nvfp4_columnwise_chunk_rows % 128 != 0):
+        raise ValueError(
+            f"--nvfp4_columnwise_chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile"
+            f" height), got {nvfp4_columnwise_chunk_rows}"
+        )
