@@ -31,6 +31,10 @@ from musubi_tuner.dataset.image_video_dataset import (
     BucketSelector,
 )
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+from musubi_tuner.modules.comfy_quant_utils import FORMAT_CONVROT_INT8, FORMAT_INT8_TENSORWISE, FORMAT_NVFP4
+from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
+from musubi_tuner.modules.mixed_quant_utils import MixedQuantizer
+from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer, apply_nvfp4_monkey_patch
 from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.zimage.zimage_utils import load_qwen3
@@ -447,12 +451,39 @@ def load_flow_model(
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype] = None,
     fp8_scaled: bool = False,
+    convrot_int8: bool = False,
+    convrot_int8_bwd: str = "bf16",
+    nvfp4: bool = False,
+    nvfp4_columnwise_chunk_rows: int = 1024,
+    training: bool = True,
     lora_weights_list: Optional[dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[list[float]] = None,
     disable_numpy_memmap: bool = False,
 ) -> flux2_models.Flux2:
-    # dit_weight_dtype is None for fp8_scaled
-    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+    """Build the Flux.2 DiT on meta and load weights (assign=True).
+
+    ``convrot_int8`` dynamically quantizes the per-block (double_blocks/single_blocks)
+    Linear weights to ConvRot INT8 (Hadamard rotation + int8, fused Triton forward) at load
+    time -- an alternative to ``fp8_scaled``, mutually exclusive with it.
+
+    ``nvfp4`` loads a ComfyUI pre-quantized NVFP4 DiT checkpoint and, when ``training=True``
+    (the default), trains against it with true FP4x4 tensor-core forward/backward. Mutually
+    exclusive with ``fp8_scaled``. Cannot be combined with ``lora_weights_list``.
+
+    ``convrot_int8`` and ``nvfp4`` may be passed together: this loads a checkpoint whose
+    Linears mix both formats (each module's format declared in its own ``.comfy_quant`` spec)
+    via ``MixedQuantizer``.
+
+    See ``krea2_utils.load_krea2_dit`` for the identical branching this mirrors.
+    """
+    assert not (fp8_scaled and (convrot_int8 or nvfp4)), "fp8_scaled is exclusive of convrot_int8 and nvfp4"
+    assert not (nvfp4 and lora_weights_list), (
+        "nvfp4 cannot be combined with lora_weights_list: pre-quantized NVFP4 weights cannot be "
+        "merged at load time. Use the original BF16 weights with LoRA instead."
+    )
+    quantized = fp8_scaled or convrot_int8 or nvfp4
+    # dit_weight_dtype is None for any quantized load (quantized weights ignore dtype)
+    assert (not quantized and dit_weight_dtype is not None) or (quantized and dit_weight_dtype is None)
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
@@ -464,8 +495,34 @@ def load_flow_model(
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
 
-    # load model weights with dynamic fp8 optimization and LoRA merging if needed
-    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+    logger.info(
+        f"Loading DiT model from {dit_path}, device={loading_device}"
+        + (" (fp8 scaled)" if fp8_scaled else "")
+        + (" (nvfp4 + convrot int8, mixed)" if (nvfp4 and convrot_int8) else "")
+        + (" (convrot int8)" if (convrot_int8 and not nvfp4) else "")
+        + (" (nvfp4)" if (nvfp4 and not convrot_int8) else "")
+    )
+
+    mixed = nvfp4 and convrot_int8
+    quantizer = None
+    if mixed:
+        # One dict entry per co-resident format; MixedQuantizer itself has no NVFP4/ConvRot-
+        # specific knowledge (see mixed_quant_utils.py).
+        quantizer = MixedQuantizer(
+            {
+                "nvfp4": NvFp4Quantizer(foreign_formats={FORMAT_CONVROT_INT8}),
+                "convrot_int8": ConvRotInt8Quantizer(
+                    target_layer_keys=[],  # prequantized-only: no dynamic quantization in mixed mode
+                    foreign_formats={FORMAT_NVFP4, FORMAT_INT8_TENSORWISE},
+                ),
+            }
+        )
+    elif convrot_int8:
+        quantizer = ConvRotInt8Quantizer(flux2_models.FP8_OPTIMIZATION_TARGET_KEYS, flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS)
+    elif nvfp4:
+        quantizer = NvFp4Quantizer()
+
+    # load model weights with dynamic fp8/convrot/nvfp4 optimization and LoRA merging if needed
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
@@ -474,19 +531,56 @@ def load_flow_model(
         calc_device=device,
         move_to_device=(loading_device == device),
         dit_weight_dtype=dit_weight_dtype,
-        target_keys=flux2_models.FP8_OPTIMIZATION_TARGET_KEYS,
-        exclude_keys=flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        target_keys=flux2_models.FP8_OPTIMIZATION_TARGET_KEYS if fp8_scaled else None,
+        exclude_keys=flux2_models.FP8_OPTIMIZATION_EXCLUDE_KEYS if fp8_scaled else None,
         disable_numpy_memmap=disable_numpy_memmap,
+        quantizer=quantizer,
     )
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+    elif mixed:
+        # NVFP4 and ConvRot INT8 modules are disjoint by construction (each Linear's format
+        # is declared once, in the checkpoint's .comfy_quant specs), so applying both patches
+        # in sequence never double-patches a module.
+        nvfp4_quantizer = quantizer.quantizers["nvfp4"]
+        convrot_quantizer = quantizer.quantizers["convrot_int8"]
+        apply_nvfp4_monkey_patch(
+            model,
+            sd,
+            nvfp4_quantizer.nvfp4_module_shapes,
+            nvfp4_quantizer.int8_embedding_modules,
+            use_scaled_mm=True,
+            training=training,
+            calc_device=device,
+            columnwise_chunk_rows=nvfp4_columnwise_chunk_rows,
+        )
+        apply_convrot_int8_monkey_patch(model, sd, bwd_mode=convrot_int8_bwd, groupsize_map=convrot_quantizer.module_groupsizes)
+        # int8/uint8 tensors cannot be wrapped as Parameters with requires_grad=True, and
+        # load_state_dict(assign=True) re-wraps incoming tensors with the meta params'
+        # requires_grad (default True). The base is frozen right after load anyway.
+        model.requires_grad_(False)
+    elif convrot_int8:
+        apply_convrot_int8_monkey_patch(model, sd, bwd_mode=convrot_int8_bwd, groupsize_map=quantizer.module_groupsizes)
+        model.requires_grad_(False)
+    elif nvfp4:
+        apply_nvfp4_monkey_patch(
+            model,
+            sd,
+            quantizer.nvfp4_module_shapes,
+            quantizer.int8_embedding_modules,
+            use_scaled_mm=True,
+            training=training,
+            calc_device=device,
+            columnwise_chunk_rows=nvfp4_columnwise_chunk_rows,
+        )
+        model.requires_grad_(False)
 
-        if loading_device.type != "cpu":
-            # make sure all the model weights are on the loading_device
-            logger.info(f"Moving weights to {loading_device}")
-            for key in sd.keys():
-                sd[key] = sd[key].to(loading_device)
+    if quantized and loading_device.type != "cpu":
+        # make sure all the model weights are on the loading_device
+        logger.info(f"Moving weights to {loading_device}")
+        for key in sd.keys():
+            sd[key] = sd[key].to(loading_device)
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded Flux 2: {info}")
