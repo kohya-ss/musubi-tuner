@@ -156,6 +156,10 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             raise ValueError("dataset_config is required / dataset_configが必要です")
         if args.dit is None:
             raise ValueError("path to DiT model is required / DiTモデルのパスが必要です")
+        if args.output_dir is None:
+            raise ValueError("output_dir is required / output_dirが必要です")
+        if args.output_name is None:
+            raise ValueError("output_name is required / output_nameが必要です")
         assert not args.fp8_scaled or args.fp8_base, "fp8_scaled requires fp8_base / fp8_scaledはfp8_baseが必要です"
 
         if args.sage_attn:
