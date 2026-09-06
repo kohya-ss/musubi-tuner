@@ -533,6 +533,12 @@ class ModelOffloader(Offloader):
                     handle = block.register_full_backward_hook(hook)
                     self.remove_handles.append(handle)
 
+            # ...and a residency guard on each block's forward, which also fires on gradient-checkpoint
+            # recompute. See _ensure_resident_for_backward for why the backward hooks alone are not enough.
+            for i, block in enumerate(blocks):
+                handle = block.register_forward_pre_hook(self._create_residency_guard(blocks, i))
+                self.remove_handles.append(handle)
+
     def set_forward_only(self, forward_only: bool):
         # switching must wait for all pending transfers
         for block_idx in list(self.futures.keys()):
@@ -570,6 +576,61 @@ class ModelOffloader(Offloader):
             return None
 
         return backward_hook
+
+    def _is_resident(self, block: nn.Module) -> bool:
+        """True if the block's swapped tensors are on the offload device.
+
+        Probes the first tracked tensor only: the swap machinery always moves a block's tensors as a
+        group, so they never disagree, and this runs on every block forward.
+        """
+        for module, attr in self.swap_tensor_selector(block):
+            return getattr(module, attr).data.device.type == self.device.type
+        return True  # nothing tracked on this block
+
+    def _ensure_resident_for_backward(self, blocks: list[nn.Module], block_index: int):
+        """Re-seat the swap ring when a backward pass traverses the stack more than once.
+
+        The backward hooks assume one backward traversal per forward traversal: each hook hands the
+        next block down to the GPU, and once the traversal reaches the bottom the ring is parked back
+        at its start-of-forward layout with no hook left to fire. That holds for a loss built from a
+        single forward pass.
+
+        It breaks when one backward walks *several* forward graphs -- e.g. a loss summing terms that
+        each ran their own forward through these blocks. Autograd finishes the first graph's traversal,
+        then starts the next one at the top of the stack, where the ring has already moved the blocks
+        back to host. With gradient checkpointing the failure lands inside the recompute, as a kernel
+        being handed a host pointer, far from the actual cause.
+
+        The blocks a traversal at `block_index` needs resident are the non-swapped window starting
+        there, clipped to the top of the stack. Re-establishing that window (and draining in-flight
+        swaps first, so nothing lands on top of it afterwards) puts the ring in exactly the state the
+        hooks below `block_index` expect, so the rest of the traversal proceeds normally.
+        """
+        for pending in list(self.futures.keys()):
+            self._wait_blocks_move(pending)
+
+        resident_count = self.num_blocks - self.blocks_to_swap
+        start = min(block_index, self.blocks_to_swap)
+        resident = range(start, start + resident_count)
+
+        if self.debug:
+            print(f"[{self.block_type}] Re-seating ring for backward traversal at block {block_index}: resident {resident}")
+
+        cpu_device = torch.device("cpu")
+        for i, b in enumerate(blocks):
+            weighs_to_device(b, self.device if i in resident else cpu_device, self.swap_tensor_selector)
+        _synchronize_device(self.device)
+
+    def _create_residency_guard(self, blocks: list[nn.Module], block_index: int):
+        def residency_guard(module, args):
+            del args
+            # On a normal forward the model's loop has already called wait_for_block, so this is a
+            # cheap no-op. It only bites during a backward's recompute -- see _ensure_resident_for_backward.
+            if self.blocks_to_swap and not self._is_resident(module):
+                self._ensure_resident_for_backward(blocks, block_index)
+            return None
+
+        return residency_guard
 
     def prepare_block_devices_before_forward(self, blocks: list[nn.Module]):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
