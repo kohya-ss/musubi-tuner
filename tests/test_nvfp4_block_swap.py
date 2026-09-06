@@ -118,15 +118,12 @@ def test_quantized_linear_swap_tensor_selector_keeps_non_resident_columnwise_buf
 
 
 @requires_cuda
-def test_model_offloader_ignores_swap_tensor_selector_h2d_only_false(tmp_path):
-    """Documents the gap issue 1 in the NVFP4 punch list left open: create_offloader only
-    forwards swap_tensor_selector on the h2d_only branch (LoRAStreamOffloader). The default
-    ModelOffloader path (h2d_only=False) silently drops it, so even a caller that supplies
-    quantized_linear_swap_tensor_selector still leaks the full columnwise buffer GPU-resident for every
-    block. Krea2NetworkTrainer.handle_model_specific_args now rejects this combination at the
-    CLI level (see tests/test_krea2_nvfp4.py), but ModelOffloader/create_offloader remain
-    reachable directly, so this guards the underlying limitation until punch-list option (a)
-    (teaching ModelOffloader to honor the selector) is implemented."""
+def test_model_offloader_honors_swap_tensor_selector_h2d_only_false(tmp_path):
+    """Fix verification (was test_model_offloader_ignores_swap_tensor_selector_h2d_only_false):
+    ModelOffloader now forwards swap_tensor_selector through create_offloader and uses it in
+    prepare_block_devices_before_forward / swap_weight_devices_cuda. A quantization scheme's
+    extra buffer (here NVFP4's nvfp4_weight_t) now moves to CPU along with .weight for the
+    blocks placed there at prepare time, instead of staying GPU-resident forever."""
     blocks = _build_patched_blocks(tmp_path, num_blocks=4)
     device = torch.device("cuda")
     config = BlockSwapConfig(
@@ -139,12 +136,14 @@ def test_model_offloader_ignores_swap_tensor_selector_h2d_only_false(tmp_path):
     offloader = create_offloader("test", list(blocks), 4, 2, config)
     offloader.prepare_block_devices_before_forward(list(blocks))
 
-    assert all(b.proj.nvfp4_weight_t.device.type == "cuda" for b in blocks), (
-        "expected the still-unfixed ModelOffloader path to leave every block's columnwise buffer"
-        " GPU-resident (swap_tensor_selector ignored) -- if this now fails, ModelOffloader has"
-        " started honoring swap_tensor_selector and this test (and its docstring) should be updated"
-        " to assert the fixed behavior instead."
-    )
+    # blocks[0:2] are the always-GPU-resident pool (num_blocks - blocks_to_swap = 4 - 2 = 2);
+    # blocks[2:4] are placed on CPU. Both .weight and nvfp4_weight_t must move together.
+    assert blocks[0].proj.nvfp4_weight_t.device.type == "cuda"
+    assert blocks[1].proj.nvfp4_weight_t.device.type == "cuda"
+    assert blocks[2].proj.weight.device.type == "cpu"
+    assert blocks[2].proj.nvfp4_weight_t.device.type == "cpu"
+    assert blocks[3].proj.weight.device.type == "cpu"
+    assert blocks[3].proj.nvfp4_weight_t.device.type == "cpu"
 
 
 def _build_mixed_blocks(tmp_path: Path, num_plain=2, num_quantized=4, n=64, k=64):

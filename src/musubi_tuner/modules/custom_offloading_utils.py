@@ -59,10 +59,15 @@ def swap_weight_devices_no_cuda(device: torch.device, layer_to_cpu: nn.Module, l
     _synchronize_device(device)
 
 
-def weighs_to_device(layer: nn.Module, device: torch.device):
-    for module in layer.modules():
-        if hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear"):
-            module.weight.data = module.weight.data.to(device, non_blocking=device.type != "cpu")
+def weighs_to_device(
+    layer: nn.Module,
+    device: torch.device,
+    selector: Optional[Callable[[nn.Module], List[Tuple[nn.Module, str]]]] = None,
+):
+    selector = selector if selector is not None else default_swap_tensor_selector
+    for module, attr in selector(layer):
+        tensor = getattr(module, attr)
+        tensor.data = tensor.data.to(device, non_blocking=device.type != "cpu")
 
 
 def default_swap_tensor_selector(block: nn.Module) -> list[tuple[nn.Module, str]]:
@@ -210,6 +215,7 @@ def create_offloader(block_type: str, blocks: list[nn.Module], num_blocks: int, 
         config.device,
         config.use_pinned_memory,
         debug=config.debug,
+        swap_tensor_selector=config.swap_tensor_selector,
     )
 
 
@@ -291,21 +297,23 @@ class Offloader:
         #         weight_swap_jobs.append((module_to_cpu, module_to_cuda, module_to_cpu.weight.data, module_to_cuda.weight.data))
 
         with T.section("find modules"):
-            modules_to_cpu = {k: v for k, v in layer_to_cpu.named_modules()}
-            for module_to_cuda_name, module_to_cuda in layer_to_cuda.named_modules():
-                if (
-                    hasattr(module_to_cuda, "weight")
-                    and module_to_cuda.weight is not None
-                    and module_to_cuda.__class__.__name__.endswith("Linear")
-                ):
-                    module_to_cpu = modules_to_cpu.get(module_to_cuda_name, None)
-                    if module_to_cpu is not None and module_to_cpu.weight.shape == module_to_cuda.weight.shape:
-                        weight_swap_jobs.append(
-                            (module_to_cpu, module_to_cuda, module_to_cpu.weight.data, module_to_cuda.weight.data)
-                        )
-                    else:
-                        if module_to_cuda.weight.data.device.type != device.type:
-                            module_to_cuda.weight.data = module_to_cuda.weight.data.to(device)
+            cuda_jobs = self.swap_tensor_selector(layer_to_cuda)
+            cpu_jobs = self.swap_tensor_selector(layer_to_cpu)
+            assert len(cuda_jobs) == len(cpu_jobs), (
+                f"[{self.block_type}] swap_tensor_selector returned {len(cuda_jobs)} tensors for one block and"
+                f" {len(cpu_jobs)} for the other -- blocks are not structurally identical"
+            )
+            for (module_to_cpu, attr), (module_to_cuda, attr_cuda) in zip(cpu_jobs, cuda_jobs):
+                assert attr == attr_cuda, (
+                    f"[{self.block_type}] swap_tensor_selector attribute order mismatch: {attr} vs {attr_cuda}"
+                )
+                cpu_tensor = getattr(module_to_cpu, attr)
+                cuda_tensor = getattr(module_to_cuda, attr)
+                if cpu_tensor.shape == cuda_tensor.shape:
+                    weight_swap_jobs.append((module_to_cpu, module_to_cuda, attr, cpu_tensor.data, cuda_tensor.data))
+                else:
+                    if cuda_tensor.data.device.type != device.type:
+                        getattr(module_to_cuda, attr).data = cuda_tensor.data.to(device)
 
         with T.section("synchronize before swap"):
             torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value by ensuring offloading layer's calculation is done
@@ -318,16 +326,16 @@ class Offloader:
                     # Create staging buffer as pinned memory (as shared GPU ram). We specify device for correct pinning on multi-GPU systems
                     self.staging_buffer_a = [
                         torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
-                        for _, _, cuda_data_view, _ in weight_swap_jobs
+                        for _, _, _, cuda_data_view, _ in weight_swap_jobs
                     ]
                     self.staging_buffer_b = [
                         torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
-                        for _, _, cuda_data_view, _ in weight_swap_jobs
+                        for _, _, _, cuda_data_view, _ in weight_swap_jobs
                     ]
 
                 # Copy weights to staging buffers and record events
                 event_b = None
-                for sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+                for sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, attr, cuda_data_view, cpu_data_view) in zip(
                     self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
                 ):
                     # CUDA to staging buffer A, non-blocking copy
@@ -344,7 +352,7 @@ class Offloader:
                     # CPU to staging buffer B, CPU to pinned CPU, synchronous copy. Can overlap with CUDA to staging buffer A
                     with T.section("cpu to staging B"):
                         # Making this multithreaded does not help, and 'non_blocking=True' does not help either.
-                        sbuf_b.copy_(module_to_cuda.weight.data)  # BOTTLENECK
+                        sbuf_b.copy_(getattr(module_to_cuda, attr).data)  # BOTTLENECK
 
                     # Wait for staging buffer A to be ready, and CUDA data view can be reused
                     with T.section("wait staging A"):
@@ -360,12 +368,12 @@ class Offloader:
                     with T.section("staging A to CPU"):
                         cpu_data_view.copy_(sbuf_a)  # BOTTLENECK
 
-            for sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+            for sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, attr, cuda_data_view, cpu_data_view) in zip(
                 self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
             ):
                 # Update references
-                module_to_cuda.weight.data = cuda_data_view
-                module_to_cpu.weight.data = cpu_data_view
+                getattr(module_to_cuda, attr).data = cuda_data_view
+                getattr(module_to_cpu, attr).data = cpu_data_view
 
             sync_event = event_b  # final sync event for CPU to CUDA copy
 
@@ -376,7 +384,7 @@ class Offloader:
                     # Create pinned buffer as pinned memory (as shared GPU ram). We specify device for correct pinning on multi-GPU systems
                     self.pinned_buffer = [
                         torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
-                        for _, _, cuda_data_view, _ in weight_swap_jobs
+                        for _, _, _, cuda_data_view, _ in weight_swap_jobs
                     ]
                 self.stream.synchronize()
             released_pinned_buffer = []
@@ -384,7 +392,7 @@ class Offloader:
             events = [torch.cuda.Event() for _ in weight_swap_jobs]  # Waiting events for GPU to CPU non-blocking copy
 
             # Copy weights to CPU
-            for event, module_pin_buf, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+            for event, module_pin_buf, (module_to_cpu, module_to_cuda, attr, cuda_data_view, cpu_data_view) in zip(
                 events, self.pinned_buffer, weight_swap_jobs
             ):
                 # CUDA to CPU, non-blocking copy
@@ -394,7 +402,7 @@ class Offloader:
                         event.record(self.stream)
 
             # CPU to CUDA
-            for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
+            for event, (module_to_cpu, module_to_cuda, attr, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
                 with torch.cuda.stream(self.stream):
                     # Wait for cuda_data_view to be ready
                     with T.section("wait cpu"):
@@ -405,11 +413,11 @@ class Offloader:
                         cuda_data_view.copy_(cpu_data_view, non_blocking=True)
 
             # Update references
-            for module_pin_buf, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+            for module_pin_buf, (module_to_cpu, module_to_cuda, attr, cuda_data_view, cpu_data_view) in zip(
                 self.pinned_buffer, weight_swap_jobs
             ):
-                module_to_cuda.weight.data = cuda_data_view
-                module_to_cpu.weight.data = module_pin_buf
+                getattr(module_to_cuda, attr).data = cuda_data_view
+                getattr(module_to_cpu, attr).data = module_pin_buf
                 released_pinned_buffer.append(cpu_data_view)  # CPU data view can be reused as pinned buffer
 
             # Reuse released pinned buffers
@@ -418,7 +426,7 @@ class Offloader:
                 with torch.cuda.stream(self.stream):
                     released_pinned_buffer = [
                         torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
-                        for _, _, cuda_data_view, _ in weight_swap_jobs
+                        for _, _, _, cuda_data_view, _ in weight_swap_jobs
                     ]
             self.pinned_buffer = released_pinned_buffer
 
@@ -507,9 +515,11 @@ class ModelOffloader(Offloader):
         device: torch.device,
         use_pinned_memory: bool = False,
         debug: bool = False,
+        swap_tensor_selector: Optional[Callable[[nn.Module], List[Tuple[nn.Module, str]]]] = None,
     ):
         super().__init__(block_type, num_blocks, blocks_to_swap, device, use_pinned_memory, debug)
 
+        self.swap_tensor_selector = swap_tensor_selector if swap_tensor_selector is not None else default_swap_tensor_selector
         self.supports_backward = supports_backward
         self.forward_only = not supports_backward  # forward only offloading: can be changed to True for inference
 
@@ -569,12 +579,12 @@ class ModelOffloader(Offloader):
 
         for b in blocks[0 : self.num_blocks - self.blocks_to_swap]:
             b.to(self.device)
-            weighs_to_device(b, self.device)  # make sure weights are on device
+            weighs_to_device(b, self.device, self.swap_tensor_selector)  # make sure weights are on device
 
         cpu_device = torch.device("cpu")
         for b in blocks[self.num_blocks - self.blocks_to_swap :]:
             b.to(self.device)  # move block to device first. this makes sure that buffers (non weights) are on the device
-            weighs_to_device(b, cpu_device)  # make sure weights are on cpu
+            weighs_to_device(b, cpu_device, self.swap_tensor_selector)  # make sure weights are on cpu
 
         _synchronize_device(self.device)
         _clean_memory_on_device(self.device)
