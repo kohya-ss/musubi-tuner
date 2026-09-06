@@ -127,6 +127,8 @@ def attention(
     q, k, v = q_or_qkv_list if type(q_or_qkv_list) == list else (q_or_qkv_list, k, v)
     if type(q_or_qkv_list) == list:
         q_or_qkv_list.clear()
+    if mode == "sdpa":
+        mode = "torch"
     split_attn = total_len is not None
     if (split_attn or cu_seqlens_q is None) and mode == "sageattn":
         mode = "sageattn_fixlen"
