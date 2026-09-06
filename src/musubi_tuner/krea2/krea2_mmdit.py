@@ -19,6 +19,7 @@ from torch import Tensor
 
 from musubi_tuner.modules.attention import AttentionParams, attention as common_attention
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
+from musubi_tuner.modules.convrot_int8_utils import block_has_convrot_patched_linear
 from musubi_tuner.modules.nvfp4_utils import block_has_nvfp4_patched_linear, quantized_linear_swap_tensor_selector
 
 
@@ -362,10 +363,13 @@ class SingleStreamDiT(nn.Module):
         self.blocks_to_swap = num_blocks
         num_main_blocks = len(self.blocks)
         assert num_blocks <= num_main_blocks - 2, f"Cannot swap more than {num_main_blocks - 2} blocks. Requested {num_blocks}."
-        if config.swap_tensor_selector is None and any(block_has_nvfp4_patched_linear(b) for b in self.blocks):
-            # NVFP4 training patches a full second (columnwise) weight copy onto each Linear;
-            # the default selector only tracks `.weight` and would leave that copy permanently
-            # GPU-resident on every block instead of swapped -- see quantized_linear_swap_tensor_selector.
+        if config.swap_tensor_selector is None and any(
+            block_has_nvfp4_patched_linear(b) or block_has_convrot_patched_linear(b) for b in self.blocks
+        ):
+            # NVFP4 patches a full second (columnwise) weight copy onto each Linear, and ConvRot
+            # INT8 patches a per-channel scale_weight buffer; the default selector only tracks
+            # `.weight` and would leave those permanently GPU-resident (NVFP4) or stale after a
+            # swap (ConvRot) instead of tracked -- see quantized_linear_swap_tensor_selector.
             config = replace(config, swap_tensor_selector=quantized_linear_swap_tensor_selector)
         self.offloader = create_offloader("single", self.blocks, num_main_blocks, num_blocks, config)
         print(

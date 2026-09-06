@@ -48,8 +48,13 @@ from musubi_tuner.minimax_h3.packing import (
     unpack_targets,
 )
 from musubi_tuner.modules.attention import AttentionParams, attention
-from musubi_tuner.modules.convrot_int8_utils import canonicalize_convrot_int8_key, has_comfy_quant_tensors
+from musubi_tuner.modules.convrot_int8_utils import (
+    block_has_convrot_patched_linear,
+    canonicalize_convrot_int8_key,
+    has_comfy_quant_tensors,
+)
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
+from musubi_tuner.modules.nvfp4_utils import block_has_nvfp4_patched_linear, quantized_linear_swap_tensor_selector
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, WeightTransformHooks
 
@@ -761,6 +766,14 @@ class MiniMaxH3Model(nn.Module):
             raise ValueError(f"MiniMax-H3 cannot swap more than {len(self.blocks) - 2} of {len(self.blocks)} blocks")
         self.blocks_to_swap = num_blocks
         self._execution_device = torch.device(config.device)
+        if config.swap_tensor_selector is None and any(
+            block_has_nvfp4_patched_linear(b) or block_has_convrot_patched_linear(b) for b in self.blocks
+        ):
+            # NVFP4 patches a full second (columnwise) weight copy onto each Linear, and ConvRot
+            # INT8 patches a per-channel scale_weight buffer; the default selector only tracks
+            # `.weight` and would leave those permanently GPU-resident (NVFP4) or stale after a
+            # swap (ConvRot) instead of tracked -- see quantized_linear_swap_tensor_selector.
+            config = replace(config, swap_tensor_selector=quantized_linear_swap_tensor_selector)
         self.offloader = create_offloader(
             "minimax-h3",
             self.blocks,
