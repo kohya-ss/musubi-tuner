@@ -354,7 +354,7 @@ def test_lora_gradient_reaches_adapter_over_checkpointed_int8_base(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for real block swap")
 @pytest.mark.parametrize("use_pinned_memory", [False, True])
-def test_cuda_block_swap_keeps_convrot_scales_resident_during_lora_backward(monkeypatch, use_pinned_memory):
+def test_convrot_scale_weight_tracks_weight_device_during_lora_backward_block_swap(monkeypatch, use_pinned_memory):
     generate = _load_generation_module(monkeypatch)
     device = torch.device("cuda")
     model = _tiny_model(num_layers=3)
@@ -393,9 +393,18 @@ def test_cuda_block_swap_keeps_convrot_scales_resident_during_lora_backward(monk
     torch.cuda.synchronize(device)
 
     assert any(parameter.grad is not None and torch.count_nonzero(parameter.grad) for parameter in network.parameters())
+
+    # blocks_to_swap=1 out of 3 blocks means exactly one block legitimately stays CPU-resident
+    # at rest while the others are CUDA-resident; scale_weight must track weight's device on
+    # both sides of that split, not just when everything happens to be on CUDA.
+    weight_device_types = set()
     for path in target_paths:
         module = model.get_submodule(path)
         assert module.weight.dtype is torch.int8
         assert module.weight.grad is None
         assert module.scale_weight.dtype is torch.float32
-        assert module.scale_weight.device.type == "cuda"
+        assert module.scale_weight.device == module.weight.device
+        weight_device_types.add(module.weight.device.type)
+
+    assert "cpu" in weight_device_types
+    assert "cuda" in weight_device_types
