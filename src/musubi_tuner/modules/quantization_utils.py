@@ -79,9 +79,10 @@ def validate_quantization_scheme_args(
     see ``krea2_utils.validate_krea2_quantization_args`` for an example wrapper.
 
     ``require_block_swap_h2d_only_with_nvfp4`` defaults to True (the trainer's requirement:
-    the default block-swap offloader doesn't know about NVFP4's training-only columnwise
-    backward buffers). Standalone inference should pass False -- under ``training=False`` those
-    buffers are never built, so the default offloader has nothing to be unaware of.
+    --block_swap_h2d_only + LoRA/LoHa/LoKr's ring-buffer streaming is the only combination
+    validated end-to-end for NVFP4 training's columnwise backward buffers). Standalone inference
+    should pass False -- under ``training=False`` those buffers are never built, so there is
+    nothing block-swap-specific left to validate.
     """
     validate_quantization_scheme(fp8_scaled, convrot_int8, nvfp4)
     if convrot_int8_bwd == "int8" and not convrot_int8:
@@ -89,10 +90,11 @@ def validate_quantization_scheme_args(
     validate_nvfp4_requirements(nvfp4, scaled_mm_available, cuda_available, device_capability)
     if nvfp4 and blocks_to_swap and require_block_swap_h2d_only_with_nvfp4 and not block_swap_h2d_only:
         raise ValueError(
-            "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. The default block-swap"
-            " offloader (ModelOffloader) does not know about NVFP4's extra columnwise backward buffers"
-            " (nvfp4_weight_t/nvfp4_block_scale_t/nvfp4_scale_t) and would leave them GPU-resident for"
-            " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
+            "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. ModelOffloader (the"
+            " non-h2d_only path) now tracks NVFP4's extra columnwise backward buffers"
+            " (nvfp4_weight_t/nvfp4_block_scale_t/nvfp4_scale_t) via its swap_tensor_selector, but"
+            " --block_swap_h2d_only + LoRA/LoHa/LoKr's ring-buffer streaming is the only combination"
+            " validated end-to-end for NVFP4 training memory savings. Pass --block_swap_h2d_only,"
             " or omit --blocks_to_swap if the model fits without it."
         )
     if nvfp4 and (nvfp4_columnwise_chunk_rows <= 0 or nvfp4_columnwise_chunk_rows % 128 != 0):

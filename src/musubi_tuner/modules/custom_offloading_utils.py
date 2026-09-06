@@ -73,10 +73,10 @@ def weighs_to_device(
 def default_swap_tensor_selector(block: nn.Module) -> list[tuple[nn.Module, str]]:
     """Default streaming selection rule: the ``weight`` of every ``*Linear`` module.
 
-    Same rule as ``ModelOffloader.swap_weight_devices_cuda``. An offloader can be given a
-    different selector to also stream tensors that a quantization scheme hangs off the same
-    modules (per-group scales etc.); each entry is ``(module, attribute_name)`` where the
-    attribute is a parameter or a registered buffer of the module.
+    Used by every offloader unless constructed with an explicit ``swap_tensor_selector``. An
+    offloader can be given a different selector to also stream tensors that a quantization scheme
+    hangs off the same modules (per-group scales etc.); each entry is ``(module, attribute_name)``
+    where the attribute is a parameter or a registered buffer of the module.
     """
     jobs = []
     for _, module in block.named_modules():
@@ -146,7 +146,8 @@ class BlockSwapConfig:
     h2d_only: bool = False  # frozen-base (LoRA / LoHa / LoKr) only: H2D-only streaming, no device->host copy
     ring_size: int = 2  # (h2d_only) number of GPU ring buffers for streamed blocks; 2 = double buffering
     debug: bool = False
-    # (h2d_only) overrides default_swap_tensor_selector -- required whenever a quantization scheme hangs
+    # Overrides default_swap_tensor_selector for both offloader types (ModelOffloader and the
+    # h2d_only LoRAStreamOffloader) -- required whenever a quantization scheme hangs
     # a *second full-size* tensor off the module (e.g. NVFP4's columnwise backward copy): the default
     # selector only tracks `.weight`, so any such extra buffer is dragged onto the device once (by the
     # per-block `.to(device)` call the offloader itself issues) and never swapped back, silently pinning

@@ -9,8 +9,6 @@ went stale/wrong-device once blocks started physically swapping between CPU and 
 positions. Mirrors tests/test_nvfp4_block_swap.py's structure for the analogous NVFP4 bug.
 """
 
-from pathlib import Path
-
 import pytest
 import torch
 import torch.nn as nn
