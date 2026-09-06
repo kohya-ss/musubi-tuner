@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 
 from musubi_tuner.modules.attention import AttentionParams
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
-from musubi_tuner.modules.nvfp4_utils import block_has_nvfp4_patched_linear, nvfp4_swap_tensor_selector
+from musubi_tuner.modules.nvfp4_utils import block_has_nvfp4_patched_linear, quantized_linear_swap_tensor_selector
 from musubi_tuner.modules.attention import attention as unified_attention
 
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
@@ -541,8 +541,8 @@ class Flux2(nn.Module):
         ):
             # NVFP4 training patches a full second (columnwise) weight copy onto each Linear;
             # the default selector only tracks `.weight` and would leave that copy permanently
-            # GPU-resident on every block instead of swapped -- see nvfp4_swap_tensor_selector.
-            config = replace(config, swap_tensor_selector=nvfp4_swap_tensor_selector)
+            # GPU-resident on every block instead of swapped -- see quantized_linear_swap_tensor_selector.
+            config = replace(config, swap_tensor_selector=quantized_linear_swap_tensor_selector)
 
         self.offloader_double = create_offloader(
             "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, config

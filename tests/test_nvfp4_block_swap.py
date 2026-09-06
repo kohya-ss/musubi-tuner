@@ -6,7 +6,7 @@ also carries a full second (columnwise) weight copy in ``nvfp4_weight_t`` for th
 GEMM -- leaving it out of the selector doesn't just skip a small scale vector, it means the
 offloader's per-block ``.to(device)`` call drags that full-size buffer onto the GPU once and
 never streams it back off, silently pinning every block's columnwise copy resident and
-defeating block swap's memory savings. ``nvfp4_swap_tensor_selector`` (nvfp4_utils.py) fixes
+defeating block swap's memory savings. ``quantized_linear_swap_tensor_selector`` (nvfp4_utils.py) fixes
 this by routing it through the same ring/master swap machinery as ``.weight``.
 """
 
@@ -22,7 +22,7 @@ from musubi_tuner.modules.nvfp4_utils import (
     _quantize_nvfp4_2d,
     apply_nvfp4_monkey_patch,
     block_has_nvfp4_patched_linear,
-    nvfp4_swap_tensor_selector,
+    quantized_linear_swap_tensor_selector,
 )
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="block swap requires CUDA")
@@ -96,8 +96,8 @@ def test_default_selector_leaves_nvfp4_weight_t_gpu_resident_for_every_block(tmp
 
 
 @requires_cuda
-def test_nvfp4_swap_tensor_selector_keeps_non_resident_columnwise_buffers_on_cpu(tmp_path):
-    """The fix: with nvfp4_swap_tensor_selector, nvfp4_weight_t streams through the same
+def test_quantized_linear_swap_tensor_selector_keeps_non_resident_columnwise_buffers_on_cpu(tmp_path):
+    """The fix: with quantized_linear_swap_tensor_selector, nvfp4_weight_t streams through the same
     ring/master machinery as .weight -- only ring_size streaming blocks are ever GPU-resident
     at once, so with ring_size=1 and 2 streaming blocks, at least one must stay on CPU."""
     blocks = _build_patched_blocks(tmp_path, num_blocks=4)
@@ -108,7 +108,7 @@ def test_nvfp4_swap_tensor_selector_keeps_non_resident_columnwise_buffers_on_cpu
         use_pinned_memory=True,
         h2d_only=True,
         ring_size=1,
-        swap_tensor_selector=nvfp4_swap_tensor_selector,
+        swap_tensor_selector=quantized_linear_swap_tensor_selector,
     )
     offloader = create_offloader("test", list(blocks), 4, 2, config)
     offloader.prepare_block_devices_before_forward(list(blocks))
@@ -122,7 +122,7 @@ def test_model_offloader_ignores_swap_tensor_selector_h2d_only_false(tmp_path):
     """Documents the gap issue 1 in the NVFP4 punch list left open: create_offloader only
     forwards swap_tensor_selector on the h2d_only branch (LoRAStreamOffloader). The default
     ModelOffloader path (h2d_only=False) silently drops it, so even a caller that supplies
-    nvfp4_swap_tensor_selector still leaks the full columnwise buffer GPU-resident for every
+    quantized_linear_swap_tensor_selector still leaks the full columnwise buffer GPU-resident for every
     block. Krea2NetworkTrainer.handle_model_specific_args now rejects this combination at the
     CLI level (see tests/test_krea2_nvfp4.py), but ModelOffloader/create_offloader remain
     reachable directly, so this guards the underlying limitation until punch-list option (a)
@@ -134,7 +134,7 @@ def test_model_offloader_ignores_swap_tensor_selector_h2d_only_false(tmp_path):
         supports_backward=True,
         use_pinned_memory=True,
         h2d_only=False,
-        swap_tensor_selector=nvfp4_swap_tensor_selector,
+        swap_tensor_selector=quantized_linear_swap_tensor_selector,
     )
     offloader = create_offloader("test", list(blocks), 4, 2, config)
     offloader.prepare_block_devices_before_forward(list(blocks))
@@ -170,7 +170,7 @@ def test_lora_stream_offloader_excludes_structurally_different_leading_blocks(tm
         use_pinned_memory=True,
         h2d_only=True,
         ring_size=2,
-        swap_tensor_selector=nvfp4_swap_tensor_selector,
+        swap_tensor_selector=quantized_linear_swap_tensor_selector,
     )
     with pytest.raises(ValueError, match="eligible") as exc_info:
         create_offloader("test", blocks, 6, 5, config)
@@ -206,7 +206,7 @@ def test_lora_stream_offloader_streams_only_eligible_blocks_when_request_fits(tm
         use_pinned_memory=True,
         h2d_only=True,
         ring_size=2,
-        swap_tensor_selector=nvfp4_swap_tensor_selector,
+        swap_tensor_selector=quantized_linear_swap_tensor_selector,
     )
     offloader = create_offloader("test", blocks, 6, 4, config)
     assert all(idx >= 2 for idx in offloader.stream_idx), (

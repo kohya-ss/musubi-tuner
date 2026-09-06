@@ -23,7 +23,7 @@ from musubi_tuner.modules.nvfp4_utils import (
     nvfp4_linear_forward_patch_autograd,
     nvfp4_scaled_mm_available,
     nvfp4_scaled_mm_linear,
-    nvfp4_swap_tensor_selector,
+    quantized_linear_swap_tensor_selector,
     quantize_nvfp4_activation,
     quantize_nvfp4_weight_columnwise,
 )
@@ -732,8 +732,8 @@ def test_lora_gradient_flows_through_nvfp4_linear_end_to_end():
     assert model.proj.weight.grad is None
 
 
-def test_nvfp4_swap_tensor_selector_follows_only_forward_buffers_under_training_false():
-    """Covers block_has_nvfp4_patched_linear and nvfp4_swap_tensor_selector directly (not
+def test_quantized_linear_swap_tensor_selector_follows_only_forward_buffers_under_training_false():
+    """Covers block_has_nvfp4_patched_linear and quantized_linear_swap_tensor_selector directly (not
     krea2_mmdit.SingleStreamDiT.enable_block_swap's substitution wiring) against a model built
     with training=False. Under training=False the selector must follow only the forward buffers
     (nvfp4_block_scale/nvfp4_scale) -- the training-only columnwise ones were never registered,
@@ -746,7 +746,7 @@ def test_nvfp4_swap_tensor_selector_follows_only_forward_buffers_under_training_
 
     assert block_has_nvfp4_patched_linear(model) is True
 
-    jobs = nvfp4_swap_tensor_selector(model)
+    jobs = quantized_linear_swap_tensor_selector(model)
     job_names = {name for _module, name in jobs}
     assert "weight" in job_names
     assert "nvfp4_block_scale" in job_names

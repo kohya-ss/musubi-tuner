@@ -572,18 +572,20 @@ NVFP4_STREAM_QUANT_BUFFER_NAMES = (
 )
 
 
-def nvfp4_swap_tensor_selector(block: nn.Module) -> List[Tuple[nn.Module, str]]:
-    """Block-swap tensor selector for blocks containing NVFP4-patched Linears.
+def quantized_linear_swap_tensor_selector(block: nn.Module) -> List[Tuple[nn.Module, str]]:
+    """Block-swap tensor selector for blocks containing quantization-patched Linears.
 
-    The offloader's default selector only tracks each Linear's ``weight``. An NVFP4-patched
-    Linear also carries ``nvfp4_block_scale``/``nvfp4_scale`` (forward) and, under
-    ``training=True``, ``nvfp4_weight_t``/``nvfp4_block_scale_t``/``nvfp4_scale_t`` (backward) --
-    the columnwise copy is a second full-size weight matrix, so leaving it out of the selector
-    does not just skip a small scale vector: the offloader's per-block ``.to(device)`` call still
-    drags it onto the device once and, since it is never part of the ring/master swap machinery,
-    it never comes back off -- every block ends up pinning its full columnwise copy resident,
-    silently defeating block swap's memory savings. Pass this selector (instead of the default)
-    whenever any Linear in the block list has been NVFP4-patched.
+    The offloader's default selector only tracks each Linear's ``weight``. Quantization schemes
+    that hang extra tensors off a patched Linear -- NVFP4's columnwise backward copy
+    (``nvfp4_weight_t``/``nvfp4_block_scale_t``/``nvfp4_scale_t``, under ``training=True``),
+    ConvRot INT8's per-channel dequant scale (``scale_weight``), MiniMax-H3's forward-only TE
+    streaming buffers, or AWQ-style pre-quant scales (``pre_quant_scale``) -- need those tensors
+    swapped in lockstep with ``weight``, or the offloader's per-block ``.to(device)`` call drags
+    them onto the device once and (since they're never part of the ring/master swap machinery)
+    they never come back off, silently pinning them resident on every block instead of only the
+    streaming ring's worth (or, for `ModelOffloader`, leaving a swapped-in block's weight paired
+    with the wrong block's stale scale). Pass this selector (instead of the default) whenever any
+    Linear in the block list has been patched by one of these schemes.
     """
     jobs = []
     for _, module in block.named_modules():
