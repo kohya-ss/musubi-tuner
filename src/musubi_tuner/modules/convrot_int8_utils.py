@@ -413,6 +413,17 @@ def _patch_convrot_int8_linear(module: nn.Linear, groupsize: int, bwd_mode: str)
     module.forward = convrot_int8_linear_forward_patch.__get__(module, type(module))
 
 
+def block_has_convrot_patched_linear(block: nn.Module) -> bool:
+    """True if any Linear in ``block`` was patched by ``apply_convrot_int8_monkey_patch``.
+
+    Keys on ``_convrot_groupsize`` (set by ``_patch_convrot_int8_linear``) rather than the
+    presence of a ``scale_weight`` buffer alone, because FP8 quantization
+    (``fp8_optimization_utils.py``) also registers a buffer named ``scale_weight`` for an
+    unrelated purpose -- keying on the buffer name would misfire on FP8-patched blocks.
+    """
+    return any(hasattr(module, "_convrot_groupsize") for module in block.modules())
+
+
 def apply_convrot_int8_monkey_patch(
     model,
     optimized_state_dict,

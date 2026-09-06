@@ -355,3 +355,17 @@ def test_trainer_rejects_int8_bwd_without_convrot():
 def test_trainer_accepts_convrot_alone():
     _handle_args(_trainer_args(convrot_int8=True))
     _handle_args(_trainer_args(convrot_int8=True, convrot_int8_bwd="int8", blocks_to_swap=16))
+
+
+def test_block_has_convrot_patched_linear():
+    from musubi_tuner.modules.convrot_int8_utils import block_has_convrot_patched_linear
+
+    linear = nn.Linear(K, N, bias=False)
+    wq, ws, _, _ = _make_quantized_linear("cpu", torch.float32)
+    state_dict = {"proj.weight": wq, "proj.scale_weight": ws}
+    block = nn.Module()
+    block.proj = linear
+    apply_convrot_int8_monkey_patch(block, state_dict, bwd_mode="bf16", groupsize=GS)
+
+    assert block_has_convrot_patched_linear(block)
+    assert not block_has_convrot_patched_linear(nn.Linear(4, 4))
