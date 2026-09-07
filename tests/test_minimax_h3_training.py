@@ -1126,7 +1126,65 @@ def test_one_frame_t2va_batch_rejects_stray_control_indices():
     batch = _one_frame_batch()
     batch["one_frame_control_indices"] = torch.tensor([[0]], dtype=torch.int64)
 
-    with pytest.raises(ValueError, match="T2VA batch cannot carry one_frame_control_indices"):
+    with pytest.raises(ValueError, match="T2VA/Ref2VA batch cannot carry one_frame_control_indices"):
+        _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
+
+
+def _one_frame_ref_batch(target_index: int = 24, *, with_video_reference: bool = False):
+    batch = _one_frame_batch(target_index=target_index)
+    batch["latents_ref_000_image"] = torch.ones(1, 24, 1, 4, 4)
+    if with_video_reference:
+        batch["latents_ref_001_video"] = torch.ones(1, 24, 2, 4, 4)
+        batch["latents_ref_001_audio"] = torch.ones(1, 32, 2, 8)
+    return batch
+
+
+@pytest.mark.parametrize("with_video_reference", [False, True])
+def test_one_frame_ref2va_batch_builds_the_reference_layout(monkeypatch, with_video_reference):
+    # references are untimed condition blocks before the target; only the target index enters
+    # the time overrides, exactly like one-frame Ref2VA generation
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(task="ref2va", one_frame=True)
+    trainer.handle_model_specific_args(args)
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    transformer = _RecordingTransformer()
+
+    _one_frame_process_batch(trainer, args, _one_frame_ref_batch(with_video_reference=with_video_reference), transformer)
+
+    call = transformer.calls[0]
+    layout = call["layout"]
+    assert layout.task == "ref2va"
+    assert layout.target_video.frames == 1
+    assert layout.target_audio_frames == 2
+    expected_kinds = ["image", "video"] if with_video_reference else ["image"]
+    assert [reference.kind for reference in layout.references] == expected_kinds
+    assert layout.time_overrides.condition_times == ()
+    assert layout.time_overrides.target_time == FRAME_RESCALE * 24
+    assert len(call["visual_condition_latents"]) == (2 if with_video_reference else 1)
+    assert len(call["audio_condition_latents"]) == (1 if with_video_reference else 0)
+    # the silence placeholder stays excluded from audio supervision
+    assert trainer._audio_supervised_seen == 0
+
+
+def test_one_frame_ref2va_batch_rejects_stray_control_indices():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(task="ref2va", one_frame=True)
+    trainer.handle_model_specific_args(args)
+    batch = _one_frame_ref_batch()
+    batch["one_frame_control_indices"] = torch.tensor([[0]], dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="T2VA/Ref2VA batch cannot carry one_frame_control_indices"):
+        _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
+
+
+def test_one_frame_ref2va_batch_rejects_mixed_fl_conditions():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(task="ref2va", one_frame=True)
+    trainer.handle_model_specific_args(args)
+    batch = _one_frame_ref_batch()
+    batch["latents_first"] = torch.zeros(1, 24, 1, 4, 4)
+
+    with pytest.raises(ValueError, match="cannot mix FL2VA and Ref2VA"):
         _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
 
 
@@ -1183,7 +1241,6 @@ def test_video_batch_rejects_stray_one_frame_index_tensors(extra_key, message):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"one_frame": True, "task": "ref2va"}, "requires --task t2va or fl2va"),
         ({"one_frame": True, "h3_teacher_matching": True}, "does not support --one_frame"),
     ],
 )
@@ -1192,8 +1249,9 @@ def test_one_frame_training_flag_validations(overrides, message):
         MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(**overrides))
 
 
-def test_one_frame_training_accepts_the_fl2va_task():
-    MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(one_frame=True, task="fl2va"))
+@pytest.mark.parametrize("task", ["fl2va", "ref2va"])
+def test_one_frame_training_accepts_every_task(task):
+    MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(one_frame=True, task=task))
 
 
 def test_one_frame_training_records_provenance_metadata():
@@ -1219,8 +1277,12 @@ def test_one_frame_sample_normalization_parses_the_of_option():
 @pytest.mark.parametrize(
     ("args_overrides", "sample", "message"),
     [
-        ({"task": "ref2va"}, {"prompt": "x", "frame_count": 1}, "t2va and fl2va only"),
         ({}, {"prompt": "x", "frame_count": 1, "one_frame": "target_index=0,control_index=0"}, "control_index"),
+        (
+            {"task": "ref2va", "sample_prompts": "prompts.txt"},
+            {"prompt": "x", "frame_count": 1, "ref": ["face.png"], "one_frame": "target_index=0,control_index=0"},
+            "REF2VA one-frame training sample does not accept control_index",
+        ),
         ({}, {"prompt": "x", "frame_count": 124, "one_frame": "target_index=24"}, r"require --f 1"),
         # fl2va one-frame: control_index is mandatory, one entry per provided frame
         (
@@ -1263,6 +1325,30 @@ def test_one_frame_fl2va_sample_normalization_parses_control_indices(tmp_path):
     assert sample["frame_count"] == 1
     assert sample["one_frame_target_index"] == 24
     assert sample["one_frame_control_indices"] == (0,)
+
+
+def test_one_frame_ref2va_sample_normalization_accepts_inline_refs(tmp_path):
+    prompt_file = tmp_path / "prompts.txt"
+    prompt_file.touch()
+    (tmp_path / "face.png").touch()
+    args = _trainer_args(task="ref2va", one_frame=True, sample_prompts=str(prompt_file))
+
+    sample = _normalize_h3_sample_parameter(
+        args,
+        {
+            "prompt": "a novel view",
+            "frame_count": 1,
+            "ref": ["face.png"],
+            "one_frame": "target_index=24",
+            "width": 64,
+            "height": 64,
+        },
+    )
+
+    assert sample["frame_count"] == 1
+    assert sample["one_frame_target_index"] == 24
+    assert sample["one_frame_control_indices"] is None
+    assert sample["ref"] == ["face.png"]
 
 
 def test_t2va_draws_no_condition_noise(monkeypatch):
@@ -1720,6 +1806,34 @@ def test_guidance_loss_uncond_layout_carries_one_frame_fl_condition_roles(tmp_pa
         assert tuple(segment.role for segment in call["layout"].segments if segment.kind == "visual_condition") == ("first",)
     assert uncond_call["layout"].time_overrides == cond_call["layout"].time_overrides
     assert uncond_call["layout"].time_overrides.condition_times == (0.0,)
+    assert metrics["guidance/applied"] == 1.0
+
+
+def test_guidance_loss_uncond_layout_carries_one_frame_references(tmp_path, monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        task="ref2va",
+        one_frame=True,
+        h3_guidance_loss_scale=3.0,
+        h3_guidance_loss_uncond_cache=_uncond_cache(tmp_path),
+    )
+    trainer.handle_model_specific_args(args)
+    transformer = _RecordingTransformer()
+    monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
+    monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
+
+    _, metrics = _one_frame_process_batch(trainer, args, _one_frame_ref_batch(with_video_reference=True), transformer)
+
+    assert len(transformer.calls) == 2
+    uncond_call, cond_call = transformer.calls
+    for call in (uncond_call, cond_call):
+        assert call["layout"].task == "ref2va"
+        assert [reference.kind for reference in call["layout"].references] == ["image", "video"]
+    assert uncond_call["layout"].references == cond_call["layout"].references
+    assert uncond_call["layout"].time_overrides == cond_call["layout"].time_overrides
+    # the probe swaps only the text rows; the reference conditions are shared
+    assert len(uncond_call["visual_condition_latents"]) == 2
+    assert len(uncond_call["audio_condition_latents"]) == 1
     assert metrics["guidance/applied"] == 1.0
 
 

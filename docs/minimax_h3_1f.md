@@ -14,7 +14,7 @@
 - Standalone `audio` references are rejected in one-frame mode (their window is defined by the target duration, which a single frame does not have); video references keep their embedded audio.
 - The released 5-15 s duration gate does not apply; `--allow_experimental_duration` is not needed.
 
-Training on one-frame targets is available for plain image LoRA (T2VA) and for editing/inbetween LoRA with 1-2 control images (FL2VA); see [One-frame training](#one-frame-training-t2va-image-lora) and [One-frame editing training](#one-frame-editing-training-fl2va-control-images) below. Ref2VA one-frame training (reference-driven image LoRA) is not implemented yet.
+Training on one-frame targets is available for plain image LoRA (T2VA), for editing/inbetween LoRA with 1-2 control images (FL2VA), and for reference-conditioned image LoRA (Ref2VA); see [One-frame training](#one-frame-training-t2va-image-lora), [One-frame editing training](#one-frame-editing-training-fl2va-control-images), and [One-frame reference training](#one-frame-reference-training-ref2va-image-references) below.
 
 ## Time semantics: `--one_frame`
 
@@ -191,3 +191,49 @@ Official-format caption... --w 1024 --h 1024 --f 1 --s 30 --i source.png --of ta
 ```
 
 (`--i` is the first/only condition, `--ei` the last; `control_index` takes one `;`-separated entry per provided image, and is required.)
+
+## One-frame reference training (Ref2VA, image references)
+
+> [!WARNING]
+> Experimental. This is the training counterpart of one-frame Ref2VA generation: each image target is conditioned on its own ordered references, presented exactly as at inference (numbered reference blocks before the target, `<Picture i>`/`<Video i>` visuals in the text).
+
+With `--task ref2va`, an image dataset pairs each target image with **untimed references** (the same reference schema as video Ref2VA: images, videos with or without audio). Typical uses are identity/character LoRAs trained on (reference image → target image) pairs of the same subject, where the reference is a *different* picture than the target, and view-synthesis or restyling pairs.
+
+Both released transformer families respond to the reference presentation with a one-frame target: the Ref2VA checkpoint by design, and the FL2VA checkpoint extracts a referenced subject's identity about as well (measured with the generation CLI). Training `--task ref2va` on the FL2VA base is therefore a legitimate choice when the LoRA should be deployed with the FL2VA/T2VA weights; note that the LoRA metadata records `ss_minimax_h3_base_family=ref2va` from the task in that case.
+
+### Dataset configuration
+
+References require `image_jsonl_file`; each line carries the target, its caption, and its ordered `references` (relative reference paths resolve from the JSONL directory, as in the video Ref2VA JSONL; `image_path` follows the usual image JSONL rules):
+
+```toml
+[[datasets]]
+image_jsonl_file = "/data/h3/char/items.jsonl"
+cache_directory = "/data/h3/cache-char-ref"
+# fp_1f_target_index is optional (default 0); references carry no time index
+```
+
+```json
+{"image_path": "/data/h3/char/targets/pose_01.png", "caption": "...", "references": [{"type": "image", "path": "refs/front.png"}]}
+{"image_path": "/data/h3/char/targets/pose_02.png", "caption": "...", "references": [{"type": "image", "path": "refs/front.png"}, {"type": "video", "path": "refs/turnaround.mp4"}]}
+```
+
+- Every record needs at least one image or video reference (the video Ref2VA limits apply: at most 9 images, 3 videos, 3 audio-bearing references). Standalone `audio` references are rejected, as in one-frame generation; video references keep their embedded audio (or an explicit `audio_path`, or `"audio_path": null` for visual-only).
+- Control images (`control_path`, `fp_1f_clean_indices`) cannot be combined with references; `image_directory` datasets cannot carry references.
+- Image references are canvas-capped to the target's bucket area (downscale only); video references keep their full released span (15 s cap at 24 fps, 2 fps text sampling), exactly like one-frame generation.
+- Captions should follow the official full-reference caption format (the reference-declaration lines from the prompt-writing guide), which is what makes single-image references yield novel views at inference; the same captions are used for training-time samples.
+
+### Caching and training
+
+Same commands as plain image training with `--task ref2va` on both cache scripts and the trainer. The latent cache holds the target token, the silence placeholder, the target index, and the reference condition latents under the numbered `latents_ref_{i:03d}_{image|video|audio}` keys of video Ref2VA caches; the text cache holds the Ref2VA presentation with the reference visuals embedded. Changing a reference file re-caches both.
+
+```bash
+python minimax_h3_cache_latents.py --dataset_config items.toml --task ref2va --one_frame ...
+python minimax_h3_cache_text_encoder_outputs.py --dataset_config items.toml --task ref2va --one_frame ...
+accelerate launch ... minimax_h3_train_network.py --dataset_config items.toml --task ref2va --one_frame --video_only ...
+```
+
+The guidance-loss recommendation from plain image training applies unchanged (the uncond probe keeps the reference conditions and swaps only the text rows). `--h3_teacher_matching` is not supported with `--one_frame`. Training-time samples use the inline `--ref` syntax with `--f 1`:
+
+```text
+Full-reference caption... --w 1024 --h 1024 --f 1 --s 30 --ref refs/front.png --of target_index=0
+```

@@ -27,7 +27,15 @@ from musubi_tuner.minimax_h3.text_encoder import (
     save_h3_uncond_cache,
     wrap_ref_teacher_caption,
 )
-from musubi_tuner.minimax_h3.media import H3AudioSource, H3Record, H3Reference, h3_records_from_datasource
+from musubi_tuner.minimax_h3.media import (
+    ONE_FRAME_REFERENCE_FRAME_CAP,
+    H3AudioSource,
+    H3Record,
+    H3Reference,
+    h3_image_records_from_datasource,
+    h3_records_from_datasource,
+    reject_one_frame_audio_references,
+)
 from musubi_tuner.minimax_h3_cache_latents import (
     PyAVH3MediaDecoder,
     _adapt_canvas,
@@ -38,6 +46,7 @@ from musubi_tuner.minimax_h3_cache_latents import (
     fingerprint_file,
     item_record_inputs,
     validate_h3_dataset,
+    validate_h3_image_dataset_task,
 )
 from musubi_tuner.utils.model_utils import dtype_to_str
 
@@ -74,29 +83,43 @@ def _build_visuals(
         }
 
     target_size = (int(target_frames.shape[2]), int(target_frames.shape[1]))
+    return _reference_visuals(record, item.frame_count, target_size, decoder, decoded_reference_cache)
+
+
+def _reference_visuals(
+    record,
+    reference_frame_cap: int,
+    target_size: tuple[int, int],
+    decoder: PyAVH3MediaDecoder,
+    decoded_reference_cache: dict[tuple, torch.Tensor],
+) -> dict[object, H3TextVisual]:
+    """Text visuals of the record's references: image references as single frames, video
+    references sampled at 2 fps, decoded through the same reference canvas policy as the
+    latent cache (target_size caps images, reference_frame_cap caps videos)."""
     visuals = {}
     for reference in record.references:
         if reference.type not in {"image", "video"}:
             continue
-        cache_key = (reference.path, reference.type, item.frame_count, target_size)
+        cache_key = (reference.path, reference.type, reference_frame_cap, target_size)
         frames = decoded_reference_cache.get(cache_key)
         if frames is None:
             frames = decoder.decode_reference_visual(
                 reference,
-                target_frame_count=item.frame_count,
+                target_frame_count=reference_frame_cap,
                 target_size=target_size,
             )
             decoded_reference_cache[cache_key] = frames
         if reference.type == "image":
             visuals[reference.path] = H3TextVisual(frames)
         else:
-            sampled = frames[::12]
+            sampled = frames[::REF_TEACHER_TEXT_FRAME_STRIDE]
             timestamps = tuple(index / 2.0 for index in range(sampled.shape[0]))
             visuals[reference.path] = H3TextVisual(sampled, timestamps)
     return visuals
 
 
-# the same 2 fps text-visual sampling as the Ref2VA reference path (decode_generation_visuals)
+# the 2 fps text-visual sampling of the Ref2VA reference path (decode_generation_visuals),
+# shared by the ref teacher presentation
 REF_TEACHER_TEXT_FRAME_STRIDE = 12
 
 
@@ -203,7 +226,8 @@ def setup_parser() -> argparse.ArgumentParser:
         "--one_frame",
         action="store_true",
         help="experimental one-frame (image) training caches: accept image datasets. --task t2va encodes plain"
-        " caption presentations; --task fl2va embeds the bucket-resized control images as <Picture i> visuals",
+        " caption presentations; --task fl2va embeds the bucket-resized control images as <Picture i> visuals;"
+        " --task ref2va embeds the per-item references of an image_jsonl_file dataset in the Ref2VA presentation",
     )
     parser.add_argument(
         "--teacher_conditions",
@@ -242,8 +266,6 @@ def main() -> None:
         if args.one_frame:
             raise ValueError("--teacher_conditions does not support --one_frame yet")
         teacher_conditions = normalize_teacher_conditions(args.teacher_conditions)
-    if args.one_frame and args.task == "ref2va":
-        raise ValueError("MiniMax-H3 one-frame caching supports --task t2va and fl2va only")
 
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info("Loading dataset config from %s", args.dataset_config)
@@ -255,22 +277,16 @@ def main() -> None:
     decoder = PyAVH3MediaDecoder()
     records_by_dir = {}
     image_dirs: set[str] = set()
+    image_records_by_dir: dict[str, dict[str, H3Record]] = {}
     control_paths_by_dir: dict[str, dict[str, list[str]]] = {}
     for dataset in datasets:
         validate_h3_dataset(dataset)
         if isinstance(dataset, ImageDataset):
-            if not args.one_frame:
-                raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
-            if dataset.has_control and args.task != "fl2va":
-                raise ValueError("MiniMax-H3 image datasets with control images require --task fl2va")
-            if not dataset.has_control and args.task != "t2va":
-                raise ValueError(
-                    "MiniMax-H3 --task fl2va requires image datasets with control images"
-                    " (plain image datasets cache with --task t2va)"
-                )
+            validate_h3_image_dataset_task(dataset, args.task, args.one_frame)
             key = dataset_cache_dir_key(dataset.cache_directory)
             image_dirs.add(key)
             control_paths_by_dir[key] = dataset.datasource.get_control_paths()
+            image_records_by_dir[key] = h3_image_records_from_datasource(dataset.datasource, args.task)
             continue
         if not isinstance(dataset, VideoDataset):
             raise ValueError("MiniMax-H3 text caching accepts only image and video datasets")
@@ -292,6 +308,13 @@ def main() -> None:
         for control_paths in control_paths_by_dir.values()
         for paths in control_paths.values()
         for path in paths
+    )
+    # ... and one-frame ref2va presentations embed the reference visuals
+    text_paths.update(
+        path
+        for image_records in image_records_by_dir.values()
+        for record in image_records.values()
+        for path in _text_media_paths(record, args.task)
     )
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
@@ -338,9 +361,10 @@ def main() -> None:
         for item in batch:
             cache_dir_key = dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))
             if cache_dir_key in image_dirs:
-                # one-frame image item: the caption as a T2VA presentation, or an FL2VA
-                # presentation embedding the bucket-resized control images; all time indices
-                # live in the latent cache, never in the text rows
+                # one-frame image item: the caption as a T2VA presentation, an FL2VA
+                # presentation embedding the bucket-resized control images, or a Ref2VA
+                # presentation embedding the item's references; all time indices live in the
+                # latent cache, never in the text rows
                 record = H3Record(
                     video_path=Path(item.item_key).resolve(),
                     caption=item.caption,
@@ -351,7 +375,25 @@ def main() -> None:
                 frame_count = 1
                 visuals = {}
                 record_media_fingerprints = {}
-                if args.task == "fl2va":
+                if args.task == "ref2va":
+                    record = image_records_by_dir.get(cache_dir_key, {}).get(item.item_key)
+                    if record is None:
+                        raise ValueError(f"MiniMax-H3 ref2va one-frame item has no JSONL record: {item.item_key}")
+                    reject_one_frame_audio_references(record)
+                    target = torch.as_tensor(item.content)
+                    if target.ndim != 3:
+                        raise ValueError(f"MiniMax-H3 one-frame target must be [H,W,C], got {tuple(target.shape)}")
+                    # the same canvas policy as the latent cache: images capped to the target
+                    # area, videos to the released 15 s span with 2 fps text sampling
+                    visuals = _reference_visuals(
+                        record,
+                        ONE_FRAME_REFERENCE_FRAME_CAP,
+                        (int(target.shape[1]), int(target.shape[0])),
+                        decoder,
+                        decoded_reference_cache,
+                    )
+                    record_media_fingerprints = {path: media_fingerprints[path] for path in _text_media_paths(record, args.task)}
+                elif args.task == "fl2va":
                     controls = item.control_content
                     control_indices = item.fp_1f_clean_indices
                     if not control_indices or controls is None or len(controls) != len(control_indices):

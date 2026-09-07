@@ -31,6 +31,7 @@ from musubi_tuner.minimax_h3.media import (
     TARGET_FPS,
     H3Record,
     audio_latent_frames,
+    reject_one_frame_audio_references,
     video_latent_frames,
 )
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
@@ -651,11 +652,8 @@ def _acquire_transformer(
 
 
 def _reject_one_frame_audio_references(args: argparse.Namespace, record: H3Record) -> None:
-    if args.frame_count == 1 and any(reference.type == "audio" for reference in record.references):
-        raise ValueError(
-            "MiniMax-H3 one-frame generation does not accept standalone audio references"
-            " (their window is defined by the target duration); video references keep their embedded audio"
-        )
+    if args.frame_count == 1:
+        reject_one_frame_audio_references(record)
 
 
 def _encode_conditions(
