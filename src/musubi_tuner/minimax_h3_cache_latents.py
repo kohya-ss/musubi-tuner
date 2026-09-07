@@ -46,7 +46,6 @@ from musubi_tuner.minimax_h3.media import (
     H3Task,
     TARGET_FPS,
     audio_latent_frames,
-    h3_image_records_from_datasource,
     h3_records_from_datasource,
     reject_one_frame_audio_references,
     video_latent_frames,
@@ -613,7 +612,7 @@ def validate_h3_dataset(dataset: VideoDataset | ImageDataset) -> None:
 def validate_h3_image_dataset_task(dataset: ImageDataset, task: H3Task, one_frame: bool) -> None:
     """The one-frame task matrix, shared by both cache scripts: plain images cache as t2va,
     control images (time-annotated) require fl2va, and ref2va takes a control-free image
-    JSONL dataset whose records carry references (checked when the records are built)."""
+    dataset whose records carry references (checked when the records are built)."""
     if not one_frame:
         raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
     if dataset.has_control and task != "fl2va":
@@ -632,11 +631,18 @@ def item_cache_dir_key(item: ItemInfo) -> str:
     return dataset_cache_dir_key(os.path.dirname(item.latent_cache_path))
 
 
-def item_record_inputs(item: ItemInfo) -> tuple[int, int]:
-    """Returns (datasource_index, crop_start_frame) with presence validation."""
-    if item.datasource_index is None or item.frame_pos is None:
+def item_datasource_index(item: ItemInfo) -> int:
+    """The index of the item's record in its datasource (and in the H3 records built from it)."""
+    if item.datasource_index is None:
         raise ValueError(f"MiniMax-H3 cache item is missing datasource provenance: {item.item_key}")
-    return item.datasource_index, item.frame_pos
+    return item.datasource_index
+
+
+def item_record_inputs(item: ItemInfo) -> tuple[int, int]:
+    """Returns (datasource_index, crop_start_frame) of a video item with presence validation."""
+    if item.frame_pos is None:
+        raise ValueError(f"MiniMax-H3 cache item is missing its crop provenance: {item.item_key}")
+    return item_datasource_index(item), item.frame_pos
 
 
 def log_audio_presence_summary(presence_counts: Mapping[bool, int]) -> None:
@@ -668,7 +674,7 @@ def setup_parser() -> argparse.ArgumentParser:
         help="experimental one-frame (image) training caches: accept image datasets whose items become single-token"
         " video targets with a silence audio placeholder. --task t2va caches plain image targets; --task fl2va"
         " additionally encodes 1-2 control images as time-annotated conditions (fp_1f_clean_indices); --task ref2va"
-        " encodes the per-item references of an image_jsonl_file dataset as untimed Ref2VA conditions",
+        " encodes the per-item references of the image records (image_jsonl_file) as untimed Ref2VA conditions",
     )
     parser.add_argument("--cache_seed", type=int, default=0, help="seed used for reproducible target-video posterior samples")
     parser.add_argument(
@@ -693,10 +699,10 @@ def main() -> None:
     dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, audio_spec=H3_AUDIO_SPEC)
     datasets = dataset_group.datasets
 
+    # H3 records per cache directory (image and video datasets alike), aligned with the datasource indices
     records_by_dir: dict[str, list[H3Record]] = {}
     audio_sources_by_dir: dict[str, list] = {}
     image_dirs: set[str] = set()
-    image_records_by_dir: dict[str, dict[str, H3Record]] = {}
     control_paths_by_dir: dict[str, dict[str, list[str]]] = {}
     for dataset_index, dataset in enumerate(datasets):
         validate_h3_dataset(dataset)
@@ -708,19 +714,17 @@ def main() -> None:
                 int(dataset.batch_size),
             )
         key = dataset_cache_dir_key(dataset.cache_directory)
+        if key in records_by_dir:
+            raise ValueError(f"MiniMax-H3 datasets cannot share a cache_directory: {key}")
         if isinstance(dataset, ImageDataset):
             validate_h3_image_dataset_task(dataset, args.task, args.one_frame)
             image_dirs.add(key)
             control_paths_by_dir[key] = dataset.datasource.get_control_paths()
-            image_records_by_dir[key] = h3_image_records_from_datasource(dataset.datasource, args.task)
-            continue
-        if not isinstance(dataset, VideoDataset):
+        elif isinstance(dataset, VideoDataset):
+            audio_sources_by_dir[key] = dataset.datasource.audio_sources
+        else:
             raise ValueError("MiniMax-H3 latent caching accepts only image and video datasets")
         records_by_dir[key] = h3_records_from_datasource(dataset.datasource, args.task)
-        audio_sources_by_dir[key] = dataset.datasource.audio_sources
-    colliding = image_dirs & set(records_by_dir)
-    if colliding:
-        raise ValueError(f"MiniMax-H3 image and video datasets cannot share a cache_directory: {sorted(colliding)}")
 
     if args.debug_mode is not None:
         cache_latents.show_datasets(
@@ -740,13 +744,9 @@ def main() -> None:
         for record in records:
             for path in record_media_paths(record):
                 media_fingerprints[path] = fingerprint_file(path)
-        for source in audio_sources_by_dir[key]:
+        for source in audio_sources_by_dir.get(key, ()):
             if source is not None:
                 media_fingerprints[source.path] = fingerprint_file(source.path)
-    for image_records in image_records_by_dir.values():
-        for record in image_records.values():
-            for path in record_media_paths(record):
-                media_fingerprints[path] = fingerprint_file(path)
 
     logger.info("Loading MiniMax-H3 video VAE from %s", args.video_vae)
     video_vae = load_video_vae(
@@ -772,19 +772,12 @@ def main() -> None:
     def encode_one_frame(item: ItemInfo, cache_dir_key: str) -> None:
         nonlocal one_frame_item_count
         one_frame_item_count += 1
-        image_path = Path(item.item_key).resolve()
-        image_fingerprints = {image_path: media_fingerprints.setdefault(image_path, fingerprint_file(image_path))}
+        record = records_by_dir[cache_dir_key][item_datasource_index(item)]
+        # the target image and, for ref2va, the references the cache encodes form the identity
+        image_fingerprints = {path: media_fingerprints[path] for path in record_media_paths(record)}
         control_frames = None
         control_indices = None
-        record = None
-        if args.task == "ref2va":
-            record = image_records_by_dir.get(cache_dir_key, {}).get(item.item_key)
-            if record is None:
-                raise ValueError(f"MiniMax-H3 ref2va one-frame item has no JSONL record: {item.item_key}")
-            # the references are what the cache encodes, so their files join the identity
-            for path in record_media_paths(record):
-                image_fingerprints[path] = media_fingerprints[path]
-        elif args.task == "fl2va":
+        if args.task == "fl2va":
             control_frames = item.control_content
             control_indices = item.fp_1f_clean_indices
             if not control_indices or control_frames is None or len(control_frames) != len(control_indices):
@@ -818,7 +811,7 @@ def main() -> None:
             video_vae=video_vae,
             silence_audio_latent=silence_audio_latent,
             cache_seed=args.cache_seed,
-            item_key=str(image_path),
+            item_key=str(record.video_path),
             video_vae_fingerprint=video_vae_fingerprint,
             audio_vae_fingerprint=audio_vae_fingerprint,
             media_fingerprints=image_fingerprints,

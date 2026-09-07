@@ -61,12 +61,7 @@ def parse_one_frame_options(spec: str) -> tuple[int, tuple[int, ...] | None]:
 
 
 def dummy_record(prompt: str) -> H3Record:
-    return H3Record(
-        video_path=Path("."),
-        caption=prompt,
-        references=(),
-        jsonl_line=0,
-    )
+    return H3Record(video_path=Path("."), caption=prompt, references=(), label="--prompt")
 
 
 def load_image_frames(path: str | Path, *, width: int, height: int) -> torch.Tensor:
@@ -94,7 +89,7 @@ def load_generation_record(args) -> H3Record:
     if ref_specs:
         base_directory = Path(getattr(args, "ref_base_directory", None) or Path.cwd())
         references = parse_inline_references(ref_specs, base_directory)
-        return H3Record(video_path=Path("."), caption=args.prompt or "", references=references, jsonl_line=0)
+        return H3Record(video_path=Path("."), caption=args.prompt or "", references=references, label="--ref")
 
     records = load_h3_jsonl_records(args.reference_jsonl, "ref2va")
     if args.reference_index >= len(records):

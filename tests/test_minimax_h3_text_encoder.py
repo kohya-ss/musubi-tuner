@@ -51,7 +51,7 @@ def _record(tmp_path: Path, references=()) -> H3Record:
         video_path=tmp_path / "target.mp4",
         caption="A bright scene with clear sound.",
         references=tuple(references),
-        jsonl_line=1,
+        label="items.jsonl line 1",
     )
 
 

@@ -122,12 +122,16 @@ For Qwen-Image-Layered training, set `multiple_target = true`. Also, in the meta
 {"image_path_0": "/path/to/image2_base.png", "image_path_1": "/path/to/image2_layer1.png", "image_path_2": "/path/to/image2_layer2.png", "caption": "A caption for image2"}
 ```
 
+Keys outside the shared schema (`image_path`, `caption`, `control_path` and their numbered variants) are passed through to the architecture-specific cache scripts as per-item extras; for example, MiniMax-H3 reads its `references` and `teacher_caption` from them. Architectures that do not define such fields ignore them. Directory-based datasets cannot carry per-item extras.
+
 <details>
 <summary>日本語</summary>
 
 resolution, batch_size, num_repeats, enable_bucket, bucket_no_upscale は general または datasets のどちらかに設定してください。省略時は各項目のデフォルト値が使用されます。
 
 metadata jsonl ファイルを使用する場合、caption_extension は必要ありません。また、cache_directory は必須です。
+
+共通スキーマ以外のキー（`image_path`、`caption`、`control_path` と、それらの番号付きの派生キー以外）は、アーキテクチャ固有のキャッシュスクリプトに項目ごとの追加フィールドとして渡されます。たとえば MiniMax-H3 は `references` と `teacher_caption` をここから読みます。該当フィールドを定義しないアーキテクチャでは無視されます。ディレクトリ指定のデータセットは項目ごとの追加フィールドを持てません。
 
 キャプションによるデータセットと同様に、複数のデータセットを追加できます。各データセットには異なる設定を持てます。
 
@@ -244,6 +248,8 @@ Relative paths in the JSONL (`video_path`, `control_path`, `audio_path`) are res
 
 For audio-capable architectures, each record may also have an optional `audio_path` field pointing to the audio file for the video. If `audio_path` is omitted, the audio source is resolved automatically: a same-stem audio sidecar file (e.g. `video1.wav` next to `video1.mp4`; `.aac`/`.flac`/`.m4a`/`.mp3`/`.ogg`/`.opus`/`.wav`) is used if present (multiple candidates are an error), otherwise the audio track embedded in the video container is used. If none is found, the item is cached as audio-less (a silence placeholder with `audio_present=0`, excluded from audio supervision during training). Architectures without audio support ignore `audio_path`.
 
+Keys outside the shared schema (`video_path`, `caption`, `control_path`, `audio_path`) are passed through to the architecture-specific cache scripts as per-item extras; for example, MiniMax-H3 reads its `references` and `teacher_caption` from them (relative paths inside such fields resolve from the JSONL directory). Architectures that do not define such fields ignore them. Directory-based datasets cannot carry per-item extras.
+
 <details>
 <summary>日本語</summary>
 metadata jsonl ファイルを使用する場合、caption_extension は必要ありません。また、cache_directory は必須です。
@@ -253,6 +259,8 @@ metadata jsonl ファイルを使用する場合、caption_extension は必要�
 JSONL 内の相対パス（`video_path`、`control_path`、`audio_path`）は、まず作業ディレクトリ基準で解決されます（従来どおりの挙動）。そこにファイルが存在しない場合は、JSONL ファイルのあるディレクトリ基準で解決されます。両方に存在する場合は作業ディレクトリ側が使用され、warning が出力されます。
 
 audio 対応アーキテクチャでは、各レコードに任意の `audio_path` フィールドを指定できます。省略した場合は、同名の音声サイドカーファイル（例: `video1.mp4` と同じ場所の `video1.wav`。複数候補がある場合はエラー）、次に動画コンテナ内の音声トラックの順で自動解決されます。どちらも無い場合は音声なしとしてキャッシュされ（無音プレースホルダ、`audio_present=0`）、学習時の audio 教師からは除外されます。audio 非対応のアーキテクチャでは `audio_path` は無視されます。
+
+共通スキーマ以外のキー（`video_path`、`caption`、`control_path`、`audio_path` 以外）は、アーキテクチャ固有のキャッシュスクリプトに項目ごとの追加フィールドとして渡されます。たとえば MiniMax-H3 は `references` と `teacher_caption` をここから読みます（こうしたフィールド内の相対パスは JSONL のディレクトリ基準で解決されます）。該当フィールドを定義しないアーキテクチャでは無視されます。ディレクトリ指定のデータセットは項目ごとの追加フィールドを持てません。
 
 他の注意事項は今までのデータセットと同様です。
 </details>
