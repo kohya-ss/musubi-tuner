@@ -394,6 +394,19 @@ def _apply_rope_split_half(hidden_states: torch.Tensor, rotation_table: torch.Te
     return torch.cat((rotary, hidden_states[..., 2 * pairs :]), dim=-1)
 
 
+def _element_extent(tensor: torch.Tensor) -> int:
+    """Highest storage element index addressable through the view, plus one."""
+    return tensor.storage_offset() + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())) + 1
+
+
+# torch SDPA's memory-efficient backend computes block base addresses in int32, so a view
+# whose element offsets pass 2^31 silently reads wrapped memory (verified: with the fused-qkv
+# value view, every row from the first 128-aligned block past the line is corrupt, turning
+# the whole sample into noise). The released 15 s maximum at 1344x768 packs ~109k rows and
+# crosses the line at row 99,968.
+_INT32_SAFE_EXTENT = 2**31
+
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -424,6 +437,11 @@ class Attention(nn.Module):
         query = self.q_norm(query.reshape(batch_size, sequence_length, self.num_heads, self.head_dim))
         key = self.k_norm(key.reshape(batch_size, sequence_length, self.num_heads, self.head_dim))
         value = value.reshape(batch_size, sequence_length, self.num_heads, self.head_dim)
+        # query/key leave the RMSNorms as fresh contiguous tensors, but value is still a view
+        # into the fused qkv buffer (sequence stride 3 * inner_dim): materialize it before its
+        # offsets outgrow int32 address math in the SDPA backends
+        if _element_extent(value) > _INT32_SAFE_EXTENT:
+            value = value.contiguous()
         if rotation_table is not None:
             query = _apply_rope_split_half(query, rotation_table)
             key = _apply_rope_split_half(key, rotation_table)
