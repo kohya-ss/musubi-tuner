@@ -214,8 +214,8 @@ def test_records_from_directory_datasource_use_captions_and_resolved_paths(tmp_p
 
     assert records == [H3Record(video_path=video, caption="caption", references=(), label=str(video))]
 
-    # a directory item has no place for references, so Ref2VA needs a record-based dataset
-    with pytest.raises(ValueError, match="only video_jsonl_file / image_jsonl_file records can carry"):
+    # a video directory item has no place for references, so Ref2VA needs a record-based dataset
+    with pytest.raises(ValueError, match="Ref2VA requires per-item references"):
         h3_records_from_datasource(datasource, "ref2va")
 
 
@@ -1428,6 +1428,108 @@ def test_h3_records_carry_the_optional_teacher_caption(tmp_path: Path):
         h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
 
 
+def _image_with_controls_datasource(tmp_path: Path, control_count: int) -> ImageDirectoryDatasource:
+    """An image_directory / control_directory pair: target.png with target_{i}.png controls in order."""
+    images = tmp_path / "images"
+    controls = tmp_path / "controls"
+    _touch(images / "target.png")
+    (images / "target.txt").write_text("a character in a pose on a background", encoding="utf-8")
+    for index in range(control_count):
+        _touch(controls / f"target_{index}.png")
+    return ImageDirectoryDatasource(str(images), ".txt", str(controls), None, False)
+
+
+def test_h3_control_images_become_ordered_image_references_for_ref2va(tmp_path: Path):
+    datasource = _image_with_controls_datasource(tmp_path, 3)  # character, pose, background
+
+    (record,) = h3_records_from_datasource(datasource, "ref2va", control_images_as_references=True)
+
+    assert record.video_path == (tmp_path / "images" / "target.png").resolve()
+    assert [(reference.type, reference.path.name) for reference in record.references] == [
+        ("image", "target_0.png"),
+        ("image", "target_1.png"),
+        ("image", "target_2.png"),
+    ]
+    assert record.teacher_caption is None
+
+    # the same control images are timed FL2VA controls (not references) for the other tasks
+    (fl_record,) = h3_records_from_datasource(datasource, "fl2va", control_images_as_references=True)
+    assert fl_record.references == ()
+    # ... and without the opt-in the directory dataset still cannot provide references
+    with pytest.raises(ValueError, match="control images as untimed references"):
+        h3_records_from_datasource(datasource, "ref2va")
+
+
+def test_h3_jsonl_control_paths_become_references_unless_the_record_has_its_own(tmp_path: Path):
+    target = _touch(tmp_path / "target.png")
+    char = _touch(tmp_path / "char.png")
+    pose = _touch(tmp_path / "pose.png")
+    face = _touch(tmp_path / "refs" / "face.png")
+    jsonl = tmp_path / "items.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {"image_path": str(target), "caption": "c", "control_path_0": str(char), "control_path_1": str(pose)},
+            {"image_path": str(char), "caption": "c", "references": [{"type": "image", "path": "refs/face.png"}]},
+        ],
+    )
+
+    records = h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), None), "ref2va", control_images_as_references=True)
+
+    assert [reference.path for reference in records[0].references] == [char, pose]
+    assert [reference.path for reference in records[1].references] == [face]
+
+    # a record cannot carry both control images and references
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "image_path": str(target),
+                "caption": "c",
+                "control_path": str(char),
+                "references": [{"type": "image", "path": "refs/face.png"}],
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="items.jsonl line 1: cannot combine control images with references"):
+        h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), None), "ref2va", control_images_as_references=True)
+
+    # the Ref2VA limits apply to control-derived references too
+    _write_jsonl(jsonl, [{"image_path": str(target), "caption": "c", **{f"control_path_{i}": str(char) for i in range(10)}}])
+    with pytest.raises(ValueError, match="at most 9 image references"):
+        h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), None), "ref2va", control_images_as_references=True)
+
+
+@pytest.mark.parametrize(
+    ("has_control", "indices", "task", "record_task", "message"),
+    [
+        (False, None, "t2va", None, None),
+        (False, None, "fl2va", None, "requires image datasets with control images"),
+        (False, None, "ref2va", None, None),  # references come from the JSONL records (checked at record building)
+        (True, [0], "fl2va", None, None),
+        (True, [0], "t2va", None, "time-annotated control images .* require --task fl2va"),
+        (True, [0], "ref2va", None, "time-annotated control images .* require --task fl2va"),
+        (True, None, "ref2va", None, None),
+        (True, None, "t2va", "ref2va", None),  # subject-reference teacher: the records are built as ref2va
+        (True, None, "t2va", None, "untimed references"),
+        (True, None, "fl2va", None, "untimed references"),
+    ],
+)
+def test_h3_image_dataset_task_matrix(has_control, indices, task, record_task, message):
+    from types import SimpleNamespace
+
+    from musubi_tuner.minimax_h3_cache_latents import validate_h3_image_dataset_task
+
+    dataset = SimpleNamespace(has_control=has_control, fp_1f_clean_indices=indices)
+    if message is None:
+        validate_h3_image_dataset_task(dataset, task, True, record_task)
+    else:
+        with pytest.raises(ValueError, match=message):
+            validate_h3_image_dataset_task(dataset, task, True, record_task)
+    with pytest.raises(ValueError, match="require --one_frame"):
+        validate_h3_image_dataset_task(dataset, task, False, record_task)
+
+
 def test_h3_image_records_require_references_for_ref2va_and_reject_duplicates(tmp_path: Path):
     directory = tmp_path / "images"
     image = _touch(directory / "plain.png")
@@ -1438,7 +1540,7 @@ def test_h3_image_records_require_references_for_ref2va_and_reject_duplicates(tm
     assert h3_records_from_datasource(directory_datasource, "t2va") == [
         H3Record(video_path=image, caption="plain caption", references=(), label=str(image))
     ]
-    with pytest.raises(ValueError, match="only video_jsonl_file / image_jsonl_file records can carry"):
+    with pytest.raises(ValueError, match="Ref2VA requires per-item references"):
         h3_records_from_datasource(directory_datasource, "ref2va")
 
     target = _touch(tmp_path / "target.png")

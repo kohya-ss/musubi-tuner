@@ -609,15 +609,26 @@ def validate_h3_dataset(dataset: VideoDataset | ImageDataset) -> None:
         raise ValueError("MiniMax-H3 does not use the shared control-video fields")
 
 
-def validate_h3_image_dataset_task(dataset: ImageDataset, task: H3Task, one_frame: bool) -> None:
-    """The one-frame task matrix, shared by both cache scripts: plain images cache as t2va,
-    control images (time-annotated) require fl2va, and ref2va takes a control-free image
-    dataset whose records carry references (checked when the records are built)."""
+def validate_h3_image_dataset_task(dataset: ImageDataset, task: H3Task, one_frame: bool, record_task: H3Task | None = None) -> None:
+    """The one-frame task matrix, shared by both cache scripts: plain images cache as t2va;
+    time-annotated control images (fp_1f_clean_indices) require fl2va; control images without
+    indices are untimed references and require the records to be built as ref2va (``record_task``,
+    the cache task itself or the subject-reference teacher's), like JSONL ``references``."""
+    record_task = task if record_task is None else record_task
     if not one_frame:
         raise ValueError("MiniMax-H3 image datasets require --one_frame (experimental one-frame training)")
-    if dataset.has_control and task != "fl2va":
-        raise ValueError("MiniMax-H3 image datasets with control images require --task fl2va")
-    if not dataset.has_control and task == "fl2va":
+    if dataset.fp_1f_clean_indices is not None:
+        if task != "fl2va":
+            raise ValueError(
+                "MiniMax-H3 image datasets with time-annotated control images (fp_1f_clean_indices) require --task fl2va"
+            )
+    elif dataset.has_control:
+        if record_task != "ref2va":
+            raise ValueError(
+                "MiniMax-H3 image datasets with control images and no fp_1f_clean_indices use them as untimed references:"
+                " cache with --task ref2va (or --teacher_conditions subject_ref), or add fp_1f_clean_indices for --task fl2va"
+            )
+    elif task == "fl2va":
         raise ValueError(
             "MiniMax-H3 --task fl2va requires image datasets with control images (plain image datasets cache with --task t2va)"
         )
@@ -674,7 +685,8 @@ def setup_parser() -> argparse.ArgumentParser:
         help="experimental one-frame (image) training caches: accept image datasets whose items become single-token"
         " video targets with a silence audio placeholder. --task t2va caches plain image targets; --task fl2va"
         " additionally encodes 1-2 control images as time-annotated conditions (fp_1f_clean_indices); --task ref2va"
-        " encodes the per-item references of the image records (image_jsonl_file) as untimed Ref2VA conditions",
+        " encodes the per-item references (image_jsonl_file references, or control images without"
+        " fp_1f_clean_indices) as untimed Ref2VA conditions",
     )
     parser.add_argument("--cache_seed", type=int, default=0, help="seed used for reproducible target-video posterior samples")
     parser.add_argument(
@@ -716,15 +728,19 @@ def main() -> None:
         key = dataset_cache_dir_key(dataset.cache_directory)
         if key in records_by_dir:
             raise ValueError(f"MiniMax-H3 datasets cannot share a cache_directory: {key}")
+        controls_as_references = False
         if isinstance(dataset, ImageDataset):
             validate_h3_image_dataset_task(dataset, args.task, args.one_frame)
             image_dirs.add(key)
             control_paths_by_dir[key] = dataset.datasource.get_control_paths()
+            controls_as_references = dataset.fp_1f_clean_indices is None
         elif isinstance(dataset, VideoDataset):
             audio_sources_by_dir[key] = dataset.datasource.audio_sources
         else:
             raise ValueError("MiniMax-H3 latent caching accepts only image and video datasets")
-        records_by_dir[key] = h3_records_from_datasource(dataset.datasource, args.task)
+        records_by_dir[key] = h3_records_from_datasource(
+            dataset.datasource, args.task, control_images_as_references=controls_as_references
+        )
 
     if args.debug_mode is not None:
         cache_latents.show_datasets(

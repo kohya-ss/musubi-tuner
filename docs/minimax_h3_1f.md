@@ -168,7 +168,7 @@ fp_1f_clean_indices = [0]     # control image positions (24 fps pixel-frame indi
 fp_1f_target_index = 24       # target position — REQUIRED when controls are present
 ```
 
-- `control_directory` matches controls to targets by filename (`image.png` ↔ `image.png` / `image_0.png`), or use `image_jsonl_file` with `control_path` (or `control_path_0`/`control_path_1`) per line.
+- `control_directory` matches controls to targets by filename (`image.png` ↔ `image.png` / `image_0.png`), or use `image_jsonl_file` with `control_path` (or `control_path_0`/`control_path_1`) per line. `fp_1f_clean_indices` is what makes the controls timed FL2VA anchors; the same control images without indices are untimed Ref2VA references instead (see the reference training section below).
 - `fp_1f_clean_indices` gives one index per control image, in packed (first, last) order: control 0 is the "first" slot, control 1 the "last" slot. With one control only the "first" slot is used; the slot name carries no time meaning of its own — only the indices do.
 - Both `fp_1f_clean_indices` and an explicit `fp_1f_target_index` are required when controls are present; there are no defaults. Controls are resized to the target's bucket resolution.
 - The alpha channel of RGBA control images is ignored (dropped before both VAE and text-encoder processing) — unlike FramePack one-frame training, it does not act as a mask.
@@ -197,13 +197,15 @@ Official-format caption... --w 1024 --h 1024 --f 1 --s 30 --i source.png --of ta
 > [!WARNING]
 > Experimental. This is the training counterpart of one-frame Ref2VA generation: each image target is conditioned on its own ordered references, presented exactly as at inference (numbered reference blocks before the target, `<Picture i>`/`<Video i>` visuals in the text).
 
-With `--task ref2va`, an image dataset pairs each target image with **untimed references** (the same reference schema as video Ref2VA: images, videos with or without audio). Typical uses are identity/character LoRAs trained on (reference image → target image) pairs of the same subject, where the reference is a *different* picture than the target, and view-synthesis or restyling pairs.
+With `--task ref2va`, an image dataset pairs each target image with **untimed references** (the same reference schema as video Ref2VA: images, videos with or without audio). Typical uses are identity/character LoRAs trained on (reference image → target image) pairs of the same subject, where the reference is a *different* picture than the target, view-synthesis or restyling pairs, and composition tasks that assemble a target from several pictures (a character, a pose, a background).
 
 Both released transformer families respond to the reference presentation with a one-frame target: the Ref2VA checkpoint by design, and the FL2VA checkpoint extracts a referenced subject's identity about as well (measured with the generation CLI). Training `--task ref2va` on the FL2VA base is therefore a legitimate choice when the LoRA should be deployed with the FL2VA/T2VA weights; note that the LoRA metadata records `ss_minimax_h3_base_family=ref2va` from the task in that case.
 
 ### Dataset configuration
 
-References require `image_jsonl_file`; each line carries the target, its caption, and its ordered `references` (relative reference paths resolve from the JSONL directory, as in the video Ref2VA JSONL; `image_path` follows the usual image JSONL rules):
+References come from one of two places:
+
+**Per-record `references` in `image_jsonl_file`** (images, videos, audio-bearing videos; relative reference paths resolve from the JSONL directory, as in the video Ref2VA JSONL; `image_path` follows the usual image JSONL rules):
 
 ```toml
 [[datasets]]
@@ -217,8 +219,20 @@ cache_directory = "/data/h3/cache-char-ref"
 {"image_path": "/data/h3/char/targets/pose_02.png", "caption": "...", "references": [{"type": "image", "path": "refs/front.png"}, {"type": "video", "path": "refs/turnaround.mp4"}]}
 ```
 
+**Control images without `fp_1f_clean_indices`**, the ordinary "target + n control images" dataset shape: `control_directory` (`target.png` ↔ `target_0.png`, `target_1.png`, ...) or `control_path` / `control_path_0`, `control_path_1`, ... in `image_jsonl_file`. Each control image becomes one image reference, in index order (`<Picture 1>` = control 0). This suits composition datasets such as (character picture, pose picture, background picture → composed target):
+
+```toml
+[[datasets]]
+image_directory = "/data/h3/compose/targets"
+control_directory = "/data/h3/compose/parts"   # target.png <- target_0.png (character), target_1.png (pose), target_2.png (background)
+cache_directory = "/data/h3/cache-compose"
+caption_extension = ".txt"
+# no fp_1f_clean_indices: the controls are untimed references, not FL2VA anchors
+```
+
 - Every record needs at least one image or video reference (the video Ref2VA limits apply: at most 9 images, 3 videos, 3 audio-bearing references). Standalone `audio` references are rejected, as in one-frame generation; video references keep their embedded audio (or an explicit `audio_path`, or `"audio_path": null` for visual-only).
-- Control images (`control_path`, `fp_1f_clean_indices`) cannot be combined with references; `image_directory` datasets cannot carry references.
+- A record cannot have both `references` and control images; a dataset with `fp_1f_clean_indices` is an FL2VA dataset and cannot be cached with `--task ref2va`.
+- Whether a picture is a reference or an FL2VA control is a real difference for the model, not just a data-layout choice: references are untimed subject/appearance conditions presented in the reference format (the base's prior is to transfer what the picture shows), while FL2VA controls are timed anchors on the target timeline (the base's prior is to copy the anchor at its time). For "edit this source image" tasks the FL2VA route matches the official editing pathway; for "assemble the target from these parts" tasks use references.
 - Image references are canvas-capped to the target's bucket area (downscale only); video references keep their full released span (15 s cap at 24 fps, 2 fps text sampling), exactly like one-frame generation.
 - Captions should follow the official full-reference caption format (the reference-declaration lines from the prompt-writing guide), which is what makes single-image references yield novel views at inference; the same captions are used for training-time samples.
 

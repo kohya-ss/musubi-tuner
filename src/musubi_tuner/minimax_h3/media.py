@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 import json
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Optional
+from typing import Callable, Literal, Mapping, Optional, Sequence
 
 import av
 
@@ -315,15 +315,25 @@ def _record_from_fields(
     label: str,
     task: H3Task,
     probe: H3MediaProbe,
+    control_images: Sequence[str] | None = None,
 ) -> H3Record:
     """Builds a record from a validated target path plus the item's H3-specific fields
-    (``references``, ``teacher_caption``); relative reference paths resolve from base_directory."""
+    (``references``, ``teacher_caption``); relative reference paths resolve from base_directory.
+
+    With ``control_images`` (the item's control image paths, as the dataset layer opens them,
+    i.e. relative to the working directory) and task ref2va, a record without a ``references``
+    field takes those images as its ordered image references; a record cannot have both.
+    """
     context = f"H3 {label}"
     if not isinstance(caption, str):
         raise ValueError(f"{context}: caption must be a string")
 
     raw_references = fields.get("references", [])
     if task == "ref2va":
+        if control_images and "references" in fields:
+            raise ValueError(f"{context}: cannot combine control images with references")
+        if control_images:
+            raw_references = [{"type": "image", "path": str(Path(path).expanduser().resolve())} for path in control_images]
         references = _parse_references(raw_references, base_directory, context, probe)
     else:
         if raw_references:
@@ -387,24 +397,34 @@ def h3_records_from_datasource(
     datasource: ContentDatasource,
     task: H3Task,
     probe: H3MediaProbe = probe_h3_media,
+    *,
+    control_images_as_references: bool = False,
 ) -> list[H3Record]:
     """Builds the H3 records of a dataset's datasource (image or video), aligned with the
     datasource indices so cache items find theirs through ItemInfo.datasource_index.
 
     The target path and caption come from the shared accessor; the H3-specific fields
     (``references``, ``teacher_caption``) come from the item extras, which only record-based
-    datasources (``video_jsonl_file`` / ``image_jsonl_file``) can carry, so Ref2VA requires one
-    of those. The target path is resolved the way the dataset layer opens it.
+    datasources (``video_jsonl_file`` / ``image_jsonl_file``) can carry. With
+    ``control_images_as_references`` (image datasets), an item's control images
+    (``control_directory`` / ``control_path``) become its ordered image references for Ref2VA
+    instead, so Ref2VA requires one of the two. The target path is resolved the way the
+    dataset layer opens it.
     """
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
     if len(datasource) == 0:
         raise ValueError("MiniMax-H3 dataset contains no items")
 
-    if task == "ref2va" and not any("references" in datasource.get_item_extras(index).fields for index in range(len(datasource))):
-        raise ValueError(
-            "MiniMax-H3 Ref2VA requires per-item references, which only video_jsonl_file / image_jsonl_file records can carry"
-        )
+    control_paths: Mapping[str, Sequence[str]] = {}
+    if control_images_as_references and task == "ref2va":
+        control_paths = datasource.get_control_paths()
+    if task == "ref2va" and not control_paths:
+        if not any("references" in datasource.get_item_extras(index).fields for index in range(len(datasource))):
+            raise ValueError(
+                "MiniMax-H3 Ref2VA requires per-item references: video_jsonl_file / image_jsonl_file records with"
+                " a references field, or (image datasets) control images as untimed references"
+            )
 
     records = []
     seen_targets: dict[Path, str] = {}
@@ -429,6 +449,7 @@ def h3_records_from_datasource(
                 label=extras.label,
                 task=task,
                 probe=probe,
+                control_images=control_paths.get(target_path),
             )
         )
     return records
