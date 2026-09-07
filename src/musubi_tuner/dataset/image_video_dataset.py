@@ -324,10 +324,11 @@ class ImageDataset(BaseDataset):
         self.control_resolution = control_resolution
 
         if self.architecture == ARCHITECTURE_MINIMAX_H3:
-            # one-frame (image) training: t2va targets (K=0), or fl2va editing/inbetween targets
-            # with 1..2 time-annotated control images. All times are 24 fps pixel-frame indices;
-            # whether control data is present is only known after datasource construction (JSONL
-            # control_path), so control<->indices agreement is validated there.
+            # one-frame (image) training: t2va targets (K=0), fl2va editing/inbetween targets with
+            # 1..2 time-annotated control images (fp_1f_clean_indices, 24 fps pixel-frame indices),
+            # or ref2va targets whose control images are untimed references (no indices, any
+            # count within the Ref2VA limits). Whether control data is present is only known after
+            # datasource construction (JSONL control_path), so indices<->controls is validated there.
             if multiple_target:
                 raise ValueError("MiniMax-H3 image datasets do not support multiple targets")
             if no_resize_control or control_resolution is not None:
@@ -348,16 +349,16 @@ class ImageDataset(BaseDataset):
                 raise ValueError(f"MiniMax-H3 fp_1f_target_index must be nonnegative, got {fp_1f_target_index}")
 
         control_count_per_image: Optional[int] = 1
-        if (
-            self.architecture == ARCHITECTURE_FRAMEPACK
-            or self.architecture == ARCHITECTURE_WAN
-            or self.architecture == ARCHITECTURE_MINIMAX_H3
-        ):
-            # time-annotated control datasets: the indices define the control count
+        if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
             if fp_1f_clean_indices is not None:
                 control_count_per_image = len(fp_1f_clean_indices)
             else:
                 control_count_per_image = 1
+        elif self.architecture == ARCHITECTURE_MINIMAX_H3:
+            if fp_1f_clean_indices is not None:
+                control_count_per_image = len(fp_1f_clean_indices)  # time-annotated: the indices define the count
+            else:
+                control_count_per_image = None  # untimed references: any count (the Ref2VA limits apply at caching)
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             control_count_per_image = 1
         elif (
@@ -387,12 +388,8 @@ class ImageDataset(BaseDataset):
         self.num_train_items = 0
         self.has_control = self.datasource.has_control
         if self.architecture == ARCHITECTURE_MINIMAX_H3:
-            # JSONL control_path entries surface only after datasource construction
-            if self.has_control and self.fp_1f_clean_indices is None:
-                raise ValueError(
-                    "MiniMax-H3 image datasets with control images require fp_1f_clean_indices"
-                    " (24 fps pixel-frame indices, one per control image)"
-                )
+            # JSONL control_path entries surface only after datasource construction; control images
+            # without indices are untimed references, whose task fit the cache scripts check
             if self.fp_1f_clean_indices is not None and not self.has_control:
                 raise ValueError("MiniMax-H3 fp_1f_clean_indices requires control images (control_directory or control_path)")
 

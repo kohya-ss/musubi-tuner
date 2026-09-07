@@ -258,7 +258,8 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="experimental one-frame (image) training caches: accept image datasets. --task t2va encodes plain"
         " caption presentations; --task fl2va embeds the bucket-resized control images as <Picture i> visuals;"
-        " --task ref2va embeds the per-item references of the image records (image_jsonl_file) in the Ref2VA presentation",
+        " --task ref2va embeds the per-item references (image_jsonl_file references, or control images without"
+        " fp_1f_clean_indices) in the Ref2VA presentation",
     )
     parser.add_argument(
         "--teacher_conditions",
@@ -267,8 +268,9 @@ def setup_parser() -> argparse.ArgumentParser:
         help="also cache a teacher presentation for --h3_teacher_matching training (--task t2va only)."
         " 'first,last' stores the FL2VA presentation with the crop endpoints; 'ref' stores the Ref2VA"
         " presentation with the training crop itself (video + audio copy declaration) as the reference;"
-        " 'subject_ref' stores the Ref2VA presentation with the item's own image references (subject"
-        " declaration wrapped around the caption, or the item's teacher_caption), for image or video targets",
+        " 'subject_ref' stores the Ref2VA presentation with the item's own image references (JSONL references, or"
+        " control images without fp_1f_clean_indices; subject declaration wrapped around the caption, or the item's"
+        " teacher_caption), for image or video targets",
     )
     parser.add_argument("--text_cache_dtype", choices=("bf16", "float32"), default="bf16")
     parser.add_argument("--disable_mmap", action="store_true", help="disable memory-mapped safetensors loading")
@@ -320,13 +322,17 @@ def main() -> None:
         key = dataset_cache_dir_key(dataset.cache_directory)
         if key in records_by_dir:
             raise ValueError(f"MiniMax-H3 datasets cannot share a cache_directory: {key}")
+        controls_as_references = False
         if isinstance(dataset, ImageDataset):
-            validate_h3_image_dataset_task(dataset, args.task, args.one_frame)
+            validate_h3_image_dataset_task(dataset, args.task, args.one_frame, record_task)
             image_dirs.add(key)
             control_paths_by_dir[key] = dataset.datasource.get_control_paths()
+            controls_as_references = dataset.fp_1f_clean_indices is None
         elif not isinstance(dataset, VideoDataset):
             raise ValueError("MiniMax-H3 text caching accepts only image and video datasets")
-        records_by_dir[key] = h3_records_from_datasource(dataset.datasource, record_task)
+        records_by_dir[key] = h3_records_from_datasource(
+            dataset.datasource, record_task, control_images_as_references=controls_as_references
+        )
     if teacher_conditions == TEACHER_CONDITIONS_SUBJECT_REF:
         # fail on the data contract before any model is loaded
         for records in records_by_dir.values():
