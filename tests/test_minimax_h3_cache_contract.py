@@ -10,7 +10,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from musubi_tuner.dataset.datasources import ImageDirectoryDatasource, ImageJsonlDatasource
+from musubi_tuner.dataset.datasources import ImageDirectoryDatasource, ImageJsonlDatasource, ItemExtras, VideoDirectoryDatasource
 from musubi_tuner.minimax_h3.media import (
     ONE_FRAME_REFERENCE_FRAME_CAP,
     H3AudioSource,
@@ -18,7 +18,6 @@ from musubi_tuner.minimax_h3.media import (
     H3Record,
     H3Reference,
     audio_latent_frames,
-    h3_image_records_from_datasource,
     h3_records_from_datasource,
     load_h3_jsonl_records,
     parse_inline_references,
@@ -199,28 +198,57 @@ def test_records_from_jsonl_datasource_share_the_parsed_data(tmp_path: Path):
     datasource = VideoJsonlDatasource(str(jsonl))
     records = h3_records_from_datasource(datasource, "t2va", lambda path: H3MediaInfo(has_audio=False, duration_seconds=5.0))
 
-    assert len(records) == len(datasource.data) == 1
+    assert len(records) == len(datasource) == 1
     assert records[0].video_path == video
     assert records[0].caption == "caption"
     assert records[0].references == ()
+    assert records[0].label == "data.jsonl line 1"
 
 
 def test_records_from_directory_datasource_use_captions_and_resolved_paths(tmp_path: Path):
     video = _touch(tmp_path / "clip.mp4")
+    (tmp_path / "clip.txt").write_text("caption", encoding="utf-8")
 
-    class FakeDirectoryDatasource:
+    datasource = VideoDirectoryDatasource(str(tmp_path), ".txt")
+    records = h3_records_from_datasource(datasource, "t2va")
+
+    assert records == [H3Record(video_path=video, caption="caption", references=(), label=str(video))]
+
+    # a directory item has no place for references, so Ref2VA needs a record-based dataset
+    with pytest.raises(ValueError, match="only video_jsonl_file / image_jsonl_file records can carry"):
+        h3_records_from_datasource(datasource, "ref2va")
+
+
+def test_records_read_only_the_shared_accessors_of_the_datasource(tmp_path: Path):
+    """The H3 record builder must not depend on the datasource implementation (no isinstance,
+    no JSONL internals): a minimal datasource exposing the shared accessors is enough."""
+    video = _touch(tmp_path / "clip.mp4")
+    face = _touch(tmp_path / "refs" / "face.png")
+
+    class MinimalDatasource:
         def __len__(self):
             return 1
 
         def get_caption(self, idx):
             return str(video), "caption"
 
-    records = h3_records_from_datasource(FakeDirectoryDatasource(), "t2va")
+        def get_item_extras(self, idx):
+            return ItemExtras(
+                fields={"references": [{"type": "image", "path": "refs/face.png"}], "teacher_caption": "teacher"},
+                base_directory=str(tmp_path),
+                label="custom item 1",
+            )
 
-    assert records == [H3Record(video_path=video, caption="caption", references=(), jsonl_line=0)]
+    (record,) = h3_records_from_datasource(MinimalDatasource(), "ref2va")
 
-    with pytest.raises(ValueError, match="Ref2VA requires video_jsonl_file"):
-        h3_records_from_datasource(FakeDirectoryDatasource(), "ref2va")
+    assert record.video_path == video
+    assert [(reference.type, reference.path) for reference in record.references] == [("image", face)]
+    assert record.teacher_caption == "teacher"
+    assert record.label == "custom item 1"
+    assert record.context == "H3 custom item 1"
+
+    with pytest.raises(ValueError, match="H3 custom item 1: references require task ref2va"):
+        h3_records_from_datasource(MinimalDatasource(), "t2va")
 
 
 def test_ref2va_reference_audio_resolution_and_media_paths(tmp_path: Path):
@@ -705,7 +733,7 @@ def _cache_record(tmp_path: Path, references=()) -> H3Record:
         video_path=video,
         caption="scene and sound",
         references=tuple(references),
-        jsonl_line=1,
+        label="items.jsonl line 1",
     )
 
 
@@ -1209,7 +1237,7 @@ def _one_frame_reference_record(tmp_path: Path, *, with_video: bool = True, with
         video_path=_touch(tmp_path / "target.png"),
         caption="a novel view of the character",
         references=tuple(references),
-        jsonl_line=1,
+        label="items.jsonl line 1",
     )
 
 
@@ -1330,7 +1358,7 @@ def test_one_frame_reference_cache_keys_round_trip_through_the_bucket_collator(t
     torch.testing.assert_close(batch["one_frame_target_index"], torch.tensor([24], dtype=torch.int64))
 
 
-def test_h3_image_records_come_from_the_image_jsonl_keyed_by_item_key(tmp_path: Path):
+def test_h3_image_records_come_from_the_image_jsonl_aligned_with_datasource_indices(tmp_path: Path):
     target = _touch(tmp_path / "data" / "target.png")
     face = _touch(tmp_path / "data" / "refs" / "face.png")
     jsonl = tmp_path / "data" / "items.jsonl"
@@ -1346,18 +1374,18 @@ def test_h3_image_records_come_from_the_image_jsonl_keyed_by_item_key(tmp_path: 
     )
     datasource = ImageJsonlDatasource(str(jsonl), control_count_per_image=1)
 
-    records = h3_image_records_from_datasource(datasource, "ref2va")
+    records = h3_records_from_datasource(datasource, "ref2va")
 
-    # keyed by the JSONL image_path string (ItemInfo.item_key), references resolved from the JSONL directory
-    assert list(records) == [str(target)]
-    record = records[str(target)]
+    # one record per datasource index (ItemInfo.datasource_index), references resolved from the JSONL directory
+    assert len(records) == 1
+    record = records[0]
     assert record.video_path == target
     assert record.caption == "a novel view"
     assert [(reference.type, reference.path) for reference in record.references] == [("image", face)]
-    assert record.jsonl_line == 1
+    assert record.label == "items.jsonl line 1"
 
-    with pytest.raises(ValueError, match="references require task ref2va"):
-        h3_image_records_from_datasource(datasource, "t2va")
+    with pytest.raises(ValueError, match="H3 items.jsonl line 1: references require task ref2va"):
+        h3_records_from_datasource(datasource, "t2va")
 
 
 def test_h3_records_carry_the_optional_teacher_caption(tmp_path: Path):
@@ -1378,10 +1406,10 @@ def test_h3_records_carry_the_optional_teacher_caption(tmp_path: Path):
         ],
     )
 
-    records = h3_image_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
+    records = h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
 
-    assert records[str(target)].teacher_caption is None
-    assert records[str(face)].teacher_caption == "subject_definitions:\n<Subject 1> ..."
+    assert records[0].teacher_caption is None
+    assert records[1].teacher_caption == "subject_definitions:\n<Subject 1> ..."
 
     video_jsonl = tmp_path / "videos.jsonl"
     _write_jsonl(
@@ -1397,17 +1425,21 @@ def test_h3_records_carry_the_optional_teacher_caption(tmp_path: Path):
         [{"image_path": str(target), "caption": "c", "teacher_caption": "", "references": [{"type": "image", "path": "face.png"}]}],
     )
     with pytest.raises(ValueError, match="teacher_caption must be a non-empty string"):
-        h3_image_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
+        h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
 
 
-def test_h3_image_records_require_a_jsonl_for_ref2va_and_reject_duplicates(tmp_path: Path):
+def test_h3_image_records_require_references_for_ref2va_and_reject_duplicates(tmp_path: Path):
     directory = tmp_path / "images"
-    directory.mkdir()
+    image = _touch(directory / "plain.png")
+    (directory / "plain.txt").write_text("plain caption", encoding="utf-8")
     directory_datasource = ImageDirectoryDatasource(str(directory), ".txt", None, 1, False)
 
-    assert h3_image_records_from_datasource(directory_datasource, "t2va") == {}
-    with pytest.raises(ValueError, match="requires image_jsonl_file"):
-        h3_image_records_from_datasource(directory_datasource, "ref2va")
+    # image directories build plain records (t2va / fl2va) but cannot carry references
+    assert h3_records_from_datasource(directory_datasource, "t2va") == [
+        H3Record(video_path=image, caption="plain caption", references=(), label=str(image))
+    ]
+    with pytest.raises(ValueError, match="only video_jsonl_file / image_jsonl_file records can carry"):
+        h3_records_from_datasource(directory_datasource, "ref2va")
 
     target = _touch(tmp_path / "target.png")
     face = _touch(tmp_path / "face.png")
@@ -1415,12 +1447,13 @@ def test_h3_image_records_require_a_jsonl_for_ref2va_and_reject_duplicates(tmp_p
     line = {"image_path": str(target), "caption": "c", "references": [{"type": "image", "path": str(face)}]}
     _write_jsonl(jsonl, [line, line])
 
-    with pytest.raises(ValueError, match="duplicate image_path"):
-        h3_image_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
+    with pytest.raises(ValueError, match="items.jsonl line 2: duplicate target"):
+        h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
 
-    _write_jsonl(jsonl, [{"image_path": str(target), "caption": "c"}])
-    with pytest.raises(ValueError, match="at least one visual reference"):
-        h3_image_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
+    # a record without references among records that have them fails on its own line
+    _write_jsonl(jsonl, [line, {"image_path": str(face), "caption": "c"}])
+    with pytest.raises(ValueError, match="items.jsonl line 2: Ref2VA requires at least one visual reference"):
+        h3_records_from_datasource(ImageJsonlDatasource(str(jsonl), control_count_per_image=1), "ref2va")
 
 
 def test_h3_latent_writer_rejects_invalid_one_frame_control_indices(tmp_path: Path):

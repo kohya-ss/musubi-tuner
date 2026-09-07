@@ -67,8 +67,8 @@ class ItemInfo:
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
 
-        # crop provenance (video datasets): start frame of the crop in target-fps space and
-        # the index of the originating datasource record
+        # provenance: the index of the originating datasource record (image and video datasets)
+        # and, for video crops, the start frame of the crop in target-fps space
         self.frame_pos: Optional[int] = None
         self.datasource_index: Optional[int] = None
 
@@ -429,7 +429,7 @@ class ImageDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_size, item_key, images, caption, controls = future.result()
+                    original_size, item_key, images, caption, controls, datasource_index = future.result()
                     image = images[0]  # use the first image as the main content
                     bucket_height, bucket_width = image.shape[:2]
                     bucket_reso = (bucket_width, bucket_height)
@@ -437,6 +437,7 @@ class ImageDataset(BaseDataset):
                     item_info = ItemInfo(
                         item_key, caption, original_size, bucket_reso, content=image if len(images) == 1 else images
                     )
+                    item_info.datasource_index = datasource_index
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
 
                     # for VLM, which require image in addition to text, like Qwen-Image-Edit
@@ -490,7 +491,7 @@ class ImageDataset(BaseDataset):
 
         for fetch_op in self.datasource:
             # fetch and resize image in a separate thread
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image]]:
+            def fetch_and_resize(op: callable) -> tuple:
                 image_key, images, caption, controls = op()
                 images: list[Image.Image]
                 image: Image.Image = images[0]  # use the first image as the main content
@@ -532,7 +533,7 @@ class ImageDataset(BaseDataset):
                             resized_control = resize_image_to_bucket(control, bucket_reso)
                             resized_controls.append(resized_control)
 
-                return image_size, image_key, images, caption, resized_controls
+                return image_size, image_key, images, caption, resized_controls, getattr(op, "datasource_index", None)
 
             future = executor.submit(fetch_and_resize, fetch_op)
             futures.append(future)

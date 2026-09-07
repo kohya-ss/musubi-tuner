@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from fractions import Fraction
 import json
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Callable, Literal, Mapping, Optional
 
 import av
 
 from musubi_tuner.dataset.audio_utils import AudioSource as H3AudioSource
 from musubi_tuner.dataset.audio_utils import AudioSpec
-from musubi_tuner.dataset.datasources import ImageDatasource, ImageJsonlDatasource, VideoDatasource, VideoJsonlDatasource
+from musubi_tuner.dataset.datasources import ContentDatasource
 
 
 H3Task = Literal["t2va", "fl2va", "ref2va"]
@@ -44,16 +44,21 @@ class H3Record:
     video_path: Path
     caption: str
     references: tuple[H3Reference, ...]
-    jsonl_line: int
-    # optional JSONL `teacher_caption`: the caption of the subject-reference teacher presentation
+    # where the record came from (e.g. "items.jsonl line 3"), for error messages only
+    label: str = ""
+    # optional per-item `teacher_caption`: the caption of the subject-reference teacher presentation
     # (text cache only); None means the teacher wraps `caption` with the boilerplate declaration
     teacher_caption: Optional[str] = None
 
+    @property
+    def context(self) -> str:
+        return f"H3 {self.label}" if self.label else "H3 record"
 
-def _parse_teacher_caption(data: dict, line_number: int) -> Optional[str]:
-    teacher_caption = data.get("teacher_caption")
+
+def _parse_teacher_caption(fields: Mapping[str, object], context: str) -> Optional[str]:
+    teacher_caption = fields.get("teacher_caption")
     if teacher_caption is not None and (not isinstance(teacher_caption, str) or not teacher_caption.strip()):
-        raise ValueError(f"H3 JSONL line {line_number}: teacher_caption must be a non-empty string when present")
+        raise ValueError(f"{context}: teacher_caption must be a non-empty string when present")
     return teacher_caption
 
 
@@ -301,35 +306,36 @@ def reject_one_frame_audio_references(record: H3Record) -> None:
         )
 
 
-def _record_from_jsonl_data(
-    data: object,
+def _record_from_fields(
+    *,
+    target_path: Path,
+    caption: object,
+    fields: Mapping[str, object],
     base_directory: Path,
-    line_number: int,
+    label: str,
     task: H3Task,
     probe: H3MediaProbe,
 ) -> H3Record:
-    if not isinstance(data, dict):
-        raise ValueError(f"H3 JSONL line {line_number}: each record must be an object")
-
-    video_path = _resolve_existing_path(data.get("video_path"), base_directory, "video_path", line_number)
-    caption = data.get("caption")
+    """Builds a record from a validated target path plus the item's H3-specific fields
+    (``references``, ``teacher_caption``); relative reference paths resolve from base_directory."""
+    context = f"H3 {label}"
     if not isinstance(caption, str):
-        raise ValueError(f"H3 JSONL line {line_number}: caption must be a string")
+        raise ValueError(f"{context}: caption must be a string")
 
-    raw_references = data.get("references", [])
+    raw_references = fields.get("references", [])
     if task == "ref2va":
-        references = _parse_references(raw_references, base_directory, line_number, probe)
+        references = _parse_references(raw_references, base_directory, context, probe)
     else:
         if raw_references:
-            raise ValueError(f"H3 JSONL line {line_number}: references require task ref2va")
+            raise ValueError(f"{context}: references require task ref2va")
         references = ()
 
     return H3Record(
-        video_path=video_path,
+        video_path=target_path,
         caption=caption,
         references=references,
-        jsonl_line=line_number,
-        teacher_caption=_parse_teacher_caption(data, line_number),
+        label=label,
+        teacher_caption=_parse_teacher_caption(fields, context),
     )
 
 
@@ -338,6 +344,7 @@ def load_h3_jsonl_records(
     task: H3Task,
     probe: H3MediaProbe = probe_h3_media,
 ) -> list[H3Record]:
+    """Reads a standalone Ref2VA JSONL (generation --reference_jsonl); relative paths resolve from its directory."""
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
 
@@ -351,11 +358,25 @@ def load_h3_jsonl_records(
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
+            label = f"{jsonl_path.name} line {line_number}"
+            context = f"H3 {label}"
             try:
                 data = json.loads(line)
             except json.JSONDecodeError as error:
-                raise ValueError(f"H3 JSONL line {line_number}: invalid JSON: {error.msg}") from error
-            records.append(_record_from_jsonl_data(data, base_directory, line_number, task, probe))
+                raise ValueError(f"{context}: invalid JSON: {error.msg}") from error
+            if not isinstance(data, dict):
+                raise ValueError(f"{context}: each record must be an object")
+            records.append(
+                _record_from_fields(
+                    target_path=_resolve_existing_path(data.get("video_path"), base_directory, "video_path", context),
+                    caption=data.get("caption"),
+                    fields=data,
+                    base_directory=base_directory,
+                    label=label,
+                    task=task,
+                    probe=probe,
+                )
+            )
 
     if not records:
         raise ValueError(f"MiniMax-H3 JSONL contains no records: {jsonl_path}")
@@ -363,93 +384,51 @@ def load_h3_jsonl_records(
 
 
 def h3_records_from_datasource(
-    datasource: VideoDatasource,
+    datasource: ContentDatasource,
     task: H3Task,
     probe: H3MediaProbe = probe_h3_media,
 ) -> list[H3Record]:
-    """Builds H3 records from the datasource's already-parsed data (no JSONL re-read).
+    """Builds the H3 records of a dataset's datasource (image or video), aligned with the
+    datasource indices so cache items find theirs through ItemInfo.datasource_index.
 
-    Records align with datasource indices, so cache items reference them through
-    ItemInfo.datasource_index.
+    The target path and caption come from the shared accessor; the H3-specific fields
+    (``references``, ``teacher_caption``) come from the item extras, which only record-based
+    datasources (``video_jsonl_file`` / ``image_jsonl_file``) can carry, so Ref2VA requires one
+    of those. The target path is resolved the way the dataset layer opens it.
     """
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
+    if len(datasource) == 0:
+        raise ValueError("MiniMax-H3 dataset contains no items")
 
-    if isinstance(datasource, VideoJsonlDatasource):
-        base_directory = Path(datasource.video_jsonl_file).resolve().parent
-        records = [
-            _record_from_jsonl_data(data, base_directory, index + 1, task, probe) for index, data in enumerate(datasource.data)
-        ]
-        if not records:
-            raise ValueError(f"MiniMax-H3 JSONL contains no records: {datasource.video_jsonl_file}")
-        return records
-
-    if task == "ref2va":
-        raise ValueError("MiniMax-H3 Ref2VA requires video_jsonl_file")
+    if task == "ref2va" and not any("references" in datasource.get_item_extras(index).fields for index in range(len(datasource))):
+        raise ValueError(
+            "MiniMax-H3 Ref2VA requires per-item references, which only video_jsonl_file / image_jsonl_file records can carry"
+        )
 
     records = []
+    seen_targets: dict[Path, str] = {}
     for index in range(len(datasource)):
-        video_path, caption = datasource.get_caption(index)
-        video_path = Path(video_path).resolve()
-        if not video_path.is_file():
-            raise ValueError(f"MiniMax-H3 target video does not exist: {video_path}")
-        if not isinstance(caption, str):
-            raise ValueError("MiniMax-H3 directory caption must be a string")
-        records.append(H3Record(video_path=video_path, caption=caption, references=(), jsonl_line=0))
-    return records
-
-
-def h3_image_records_from_datasource(
-    datasource: ImageDatasource,
-    task: H3Task,
-    probe: H3MediaProbe = probe_h3_media,
-) -> dict[str, H3Record]:
-    """Builds one-frame (image target) Ref2VA records from an image datasource's parsed data.
-
-    Only ``image_jsonl_file`` datasets can carry ``references`` (the same schema as the
-    Ref2VA video JSONL, resolved from the JSONL directory), so Ref2VA requires one. The result
-    is keyed by the JSONL ``image_path`` string exactly as the dataset layer stores it in
-    ``ItemInfo.item_key`` (image items carry no datasource index); the record's target path
-    is that image path resolved the way the dataset layer opens it. For the other tasks the
-    JSONL is only checked for stray ``references`` and no records are built.
-    """
-    if task not in {"t2va", "fl2va", "ref2va"}:
-        raise ValueError(f"Unsupported MiniMax-H3 task: {task}")
-    if not isinstance(datasource, ImageJsonlDatasource):
-        if task == "ref2va":
-            raise ValueError("MiniMax-H3 one-frame Ref2VA requires image_jsonl_file with per-item references")
-        return {}
-
-    base_directory = Path(datasource.image_jsonl_file).resolve().parent
-    records: dict[str, H3Record] = {}
-    for index, data in enumerate(datasource.data):
-        line_number = index + 1
-        if not isinstance(data, dict):
-            raise ValueError(f"H3 JSONL line {line_number}: each record must be an object")
-        raw_references = data.get("references", [])
-        if task != "ref2va":
-            if raw_references:
-                raise ValueError(f"H3 JSONL line {line_number}: references require task ref2va")
-            continue
-        item_key = data.get("image_path")
-        if not isinstance(item_key, str) or not item_key.strip():
-            raise ValueError(f"H3 JSONL line {line_number}: image_path must be a non-empty path")
-        target = Path(item_key).expanduser().resolve()
+        target_path, caption = datasource.get_caption(index)
+        extras = datasource.get_item_extras(index)
+        context = f"H3 {extras.label}"
+        if not isinstance(target_path, str) or not target_path.strip():
+            raise ValueError(f"{context}: target path must be a non-empty path")
+        target = Path(target_path).expanduser().resolve()
         if not target.is_file():
-            raise ValueError(f"H3 JSONL line {line_number}: image_path does not exist: {target}")
-        caption = data.get("caption")
-        if not isinstance(caption, str):
-            raise ValueError(f"H3 JSONL line {line_number}: caption must be a string")
-        if item_key in records:
-            raise ValueError(f"H3 JSONL line {line_number}: duplicate image_path {item_key!r}")
-        references = _parse_references(raw_references, base_directory, line_number, probe)
-        records[item_key] = H3Record(
-            video_path=target,
-            caption=caption,
-            references=references,
-            jsonl_line=line_number,
-            teacher_caption=_parse_teacher_caption(data, line_number),
+            raise ValueError(f"{context}: target does not exist: {target}")
+        if target in seen_targets:
+            raise ValueError(f"{context}: duplicate target {target} (also {seen_targets[target]})")
+        seen_targets[target] = extras.label
+        records.append(
+            _record_from_fields(
+                target_path=target,
+                caption=caption,
+                fields=extras.fields,
+                base_directory=Path(extras.base_directory),
+                label=extras.label,
+                task=task,
+                probe=probe,
+            )
         )
-    if task == "ref2va" and not records:
-        raise ValueError(f"MiniMax-H3 JSONL contains no records: {datasource.image_jsonl_file}")
     return records

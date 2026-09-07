@@ -35,7 +35,6 @@ from musubi_tuner.minimax_h3.media import (
     H3AudioSource,
     H3Record,
     H3Reference,
-    h3_image_records_from_datasource,
     h3_records_from_datasource,
     reject_one_frame_audio_references,
     validate_subject_reference_record,
@@ -48,6 +47,7 @@ from musubi_tuner.minimax_h3_cache_latents import (
     dataset_cache_dir_key,
     fingerprint_checkpoint,
     fingerprint_file,
+    item_datasource_index,
     item_record_inputs,
     validate_h3_dataset,
     validate_h3_image_dataset_task,
@@ -150,7 +150,7 @@ def _ref_teacher_presentation(record, item: ItemInfo) -> H3Presentation:
         video_path=record.video_path,
         caption=wrap_ref_teacher_caption(record.caption),
         references=(reference,),
-        jsonl_line=record.jsonl_line,
+        label=record.label,
     )
     sampled = target_frames[::REF_TEACHER_TEXT_FRAME_STRIDE]
     # the same downscale-only canvas cap that decode_reference_visual applies to reference
@@ -179,7 +179,7 @@ def _subject_ref_teacher_presentation(
     in the subject-reference declaration boilerplate. The student rows never see the
     references: the same record minus references is the plain T2VA presentation.
     """
-    validate_subject_reference_record(record, f"H3 JSONL line {record.jsonl_line}")
+    validate_subject_reference_record(record, record.context)
     if record.teacher_caption is not None:
         caption = record.teacher_caption
     else:
@@ -258,7 +258,7 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="experimental one-frame (image) training caches: accept image datasets. --task t2va encodes plain"
         " caption presentations; --task fl2va embeds the bucket-resized control images as <Picture i> visuals;"
-        " --task ref2va embeds the per-item references of an image_jsonl_file dataset in the Ref2VA presentation",
+        " --task ref2va embeds the per-item references of the image records (image_jsonl_file) in the Ref2VA presentation",
     )
     parser.add_argument(
         "--teacher_conditions",
@@ -267,7 +267,7 @@ def setup_parser() -> argparse.ArgumentParser:
         help="also cache a teacher presentation for --h3_teacher_matching training (--task t2va only)."
         " 'first,last' stores the FL2VA presentation with the crop endpoints; 'ref' stores the Ref2VA"
         " presentation with the training crop itself (video + audio copy declaration) as the reference;"
-        " 'subject_ref' stores the Ref2VA presentation with the item's own JSONL image references (subject"
+        " 'subject_ref' stores the Ref2VA presentation with the item's own image references (subject"
         " declaration wrapped around the caption, or the item's teacher_caption), for image or video targets",
     )
     parser.add_argument("--text_cache_dtype", choices=("bf16", "float32"), default="bf16")
@@ -311,53 +311,43 @@ def main() -> None:
     datasets = dataset_group.datasets
 
     decoder = PyAVH3MediaDecoder()
-    records_by_dir = {}
+    # H3 records per cache directory (image and video datasets alike), aligned with the datasource indices
+    records_by_dir: dict[str, list[H3Record]] = {}
     image_dirs: set[str] = set()
-    image_records_by_dir: dict[str, dict[str, H3Record]] = {}
     control_paths_by_dir: dict[str, dict[str, list[str]]] = {}
     for dataset in datasets:
         validate_h3_dataset(dataset)
+        key = dataset_cache_dir_key(dataset.cache_directory)
+        if key in records_by_dir:
+            raise ValueError(f"MiniMax-H3 datasets cannot share a cache_directory: {key}")
         if isinstance(dataset, ImageDataset):
             validate_h3_image_dataset_task(dataset, args.task, args.one_frame)
-            key = dataset_cache_dir_key(dataset.cache_directory)
             image_dirs.add(key)
             control_paths_by_dir[key] = dataset.datasource.get_control_paths()
-            image_records_by_dir[key] = h3_image_records_from_datasource(dataset.datasource, record_task)
-            continue
-        if not isinstance(dataset, VideoDataset):
+        elif not isinstance(dataset, VideoDataset):
             raise ValueError("MiniMax-H3 text caching accepts only image and video datasets")
-        records_by_dir[dataset_cache_dir_key(dataset.cache_directory)] = h3_records_from_datasource(dataset.datasource, record_task)
-    colliding = image_dirs & set(records_by_dir)
-    if colliding:
-        raise ValueError(f"MiniMax-H3 image and video datasets cannot share a cache_directory: {sorted(colliding)}")
+        records_by_dir[key] = h3_records_from_datasource(dataset.datasource, record_task)
     if teacher_conditions == TEACHER_CONDITIONS_SUBJECT_REF:
         # fail on the data contract before any model is loaded
-        for record in (
-            *(r for records in records_by_dir.values() for r in records),
-            *(r for m in image_records_by_dir.values() for r in m.values()),
-        ):
-            validate_subject_reference_record(record, f"H3 JSONL line {record.jsonl_line}")
+        for records in records_by_dir.values():
+            for record in records:
+                validate_subject_reference_record(record, record.context)
 
     all_cache_files, all_cache_paths = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
+    # the presentations embed the FL2VA endpoints / the reference visuals (video and one-frame
+    # ref2va or subject-reference teacher alike), so those files join the identity
     text_paths = {
         path
         for records in records_by_dir.values()
         for record in records
         for path in _text_media_paths(record, args.task, teacher_conditions)
     }
-    # one-frame fl2va presentations embed the control images, so their files join the identity
+    # ... and one-frame fl2va presentations embed the control images
     text_paths.update(
         Path(path).resolve()
         for control_paths in control_paths_by_dir.values()
         for paths in control_paths.values()
         for path in paths
-    )
-    # ... and one-frame ref2va (or subject-reference teacher) presentations embed the reference visuals
-    text_paths.update(
-        path
-        for image_records in image_records_by_dir.values()
-        for record in image_records.values()
-        for path in _text_media_paths(record, args.task, teacher_conditions)
     )
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
@@ -403,17 +393,13 @@ def main() -> None:
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:
             cache_dir_key = dataset_cache_dir_key(str(Path(item.text_encoder_output_cache_path).parent))
+            records = records_by_dir[cache_dir_key]
             if cache_dir_key in image_dirs:
                 # one-frame image item: the caption as a T2VA presentation, an FL2VA
                 # presentation embedding the bucket-resized control images, or a Ref2VA
                 # presentation embedding the item's references; all time indices live in the
                 # latent cache, never in the text rows
-                record = H3Record(
-                    video_path=Path(item.item_key).resolve(),
-                    caption=item.caption,
-                    references=(),
-                    jsonl_line=0,
-                )
+                record = records[item_datasource_index(item)]
                 crop_start = 0
                 frame_count = 1
                 visuals = {}
@@ -422,10 +408,8 @@ def main() -> None:
                 if target.ndim != 3:
                     raise ValueError(f"MiniMax-H3 one-frame target must be [H,W,C], got {tuple(target.shape)}")
                 target_size = (int(target.shape[1]), int(target.shape[0]))
-                if args.task == "ref2va" or teacher_conditions == TEACHER_CONDITIONS_SUBJECT_REF:
-                    record = image_records_by_dir.get(cache_dir_key, {}).get(item.item_key)
-                    if record is None:
-                        raise ValueError(f"MiniMax-H3 {record_task} one-frame item has no JSONL record: {item.item_key}")
+                if record.references:
+                    # ref2va targets or subject-reference teachers (the records are parsed as Ref2VA)
                     reject_one_frame_audio_references(record)
                 if args.task == "ref2va":
                     # the same canvas policy as the latent cache: images capped to the target
@@ -459,7 +443,6 @@ def main() -> None:
                 presentation = build_presentation(student_record, args.task, visuals)
                 reference_frame_cap = ONE_FRAME_REFERENCE_FRAME_CAP
             else:
-                records = records_by_dir[cache_dir_key]
                 datasource_index, crop_start = item_record_inputs(item)
                 record = records[datasource_index]
                 frame_count = item.frame_count
