@@ -8,7 +8,7 @@ prefix per sample — this lets the shared varlen / cu_seqlens machinery handle 
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,7 @@ from torch import Tensor
 
 from musubi_tuner.modules.attention import AttentionParams, attention as common_attention
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
+from musubi_tuner.modules.nvfp4_utils import block_has_nvfp4_patched_linear, nvfp4_swap_tensor_selector
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
@@ -361,6 +362,11 @@ class SingleStreamDiT(nn.Module):
         self.blocks_to_swap = num_blocks
         num_main_blocks = len(self.blocks)
         assert num_blocks <= num_main_blocks - 2, f"Cannot swap more than {num_main_blocks - 2} blocks. Requested {num_blocks}."
+        if config.swap_tensor_selector is None and any(block_has_nvfp4_patched_linear(b) for b in self.blocks):
+            # NVFP4 training patches a full second (columnwise) weight copy onto each Linear;
+            # the default selector only tracks `.weight` and would leave that copy permanently
+            # GPU-resident on every block instead of swapped -- see nvfp4_swap_tensor_selector.
+            config = replace(config, swap_tensor_selector=nvfp4_swap_tensor_selector)
         self.offloader = create_offloader("single", self.blocks, num_main_blocks, num_blocks, config)
         print(
             f"Krea 2: Block swap enabled. Swapping {num_blocks} of {num_main_blocks} blocks "

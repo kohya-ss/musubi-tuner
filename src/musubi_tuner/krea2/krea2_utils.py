@@ -14,6 +14,8 @@ from musubi_tuner.krea2.krea2_encoder import (
 from musubi_tuner.krea2.krea2_mmdit import SingleMMDiTConfig, SingleStreamDiT
 from musubi_tuner.modules.convrot_int8_utils import ConvRotInt8Quantizer, apply_convrot_int8_monkey_patch
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+from musubi_tuner.modules.nvfp4_utils import NvFp4Quantizer, apply_nvfp4_monkey_patch
+from musubi_tuner.modules.quantization_utils import validate_nvfp4_requirements, validate_quantization_scheme
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.safetensors_utils import load_safetensors
 
@@ -60,6 +62,9 @@ def load_krea2_dit(
     lora_multipliers: Optional[list] = None,
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
+    nvfp4: bool = False,
+    nvfp4_columnwise_chunk_rows: int = 1024,
+    training: bool = True,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights (assign=True).
 
@@ -72,6 +77,26 @@ def load_krea2_dit(
     fused Triton forward, custom backward for LoRA training) instead of fp8; the same
     target/exclude scope applies. Mutually exclusive with ``fp8_scaled``.
 
+    ``nvfp4`` loads a ComfyUI pre-quantized NVFP4 DiT checkpoint (per-block Linears already
+    stored as packed FP4 + block/tensor scales) and, when ``training=True`` (the default),
+    trains against it with true FP4x4 tensor-core forward/backward (``NvFp4LinearFn``) --
+    no dynamic quantization, the file dictates which layers are NVFP4. Mutually exclusive
+    with ``fp8_scaled``/``convrot_int8``. Cannot be combined with ``lora_weights``
+    (pre-quantized NVFP4 cannot be merged at load time). ``dtype`` is ignored for
+    NVFP4-quantized layers, same as ``fp8_scaled``/``convrot_int8`` -- non-target weights
+    keep their checkpoint dtype.
+
+    ``training`` (only meaningful when ``nvfp4`` is set) selects between the autograd
+    training forward (default, ``True`` -- also builds the extra columnwise backward
+    buffers ``nvfp4_weight_t``/``nvfp4_block_scale_t``/``nvfp4_scale_t``) and the
+    non-autograd inference forward (``False`` -- no backward buffers built, pure memory
+    savings since there is no backward pass to feed). Generic name (not NVFP4-specific):
+    ``fp8_scaled``/``convrot_int8`` don't have this distinction today, but a future scheme
+    that does can reuse this same parameter instead of adding another one-off flag.
+
+    ``nvfp4_columnwise_chunk_rows`` (only used when ``nvfp4`` is set) is forwarded to
+    ``apply_nvfp4_monkey_patch``'s ``columnwise_chunk_rows`` -- see there for what it controls.
+
     ``lora_weights`` (a list of loaded LoRA state dicts, with optional ``lora_multipliers``)
     are merged into the base weights at load time. This is the only correct route under fp8
     (fp8-quantized weights cannot be post-hoc merged), and it also keeps loading uniform for
@@ -82,7 +107,12 @@ def load_krea2_dit(
     is then False) and the caller's ``enable_block_swap`` / ``move_to_device_except_swap_blocks``
     places the resident blocks on ``device`` and keeps the swap blocks on CPU.
     """
-    assert not (fp8_scaled and convrot_int8), "fp8_scaled and convrot_int8 are mutually exclusive"
+    assert sum([fp8_scaled, convrot_int8, nvfp4]) <= 1, "fp8_scaled, convrot_int8, and nvfp4 are mutually exclusive"
+    assert not (nvfp4 and lora_weights), (
+        "nvfp4 cannot be combined with lora_weights: pre-quantized NVFP4 weights cannot be "
+        "merged at load time. Requantizing after a merge is possible in principle but is not "
+        "implemented; use the original BF16 weights with LoRA instead."
+    )
     device = torch.device(device)
     loading_device = device if loading_device is None else torch.device(loading_device)
     has_lora = lora_weights is not None and len(lora_weights) > 0
@@ -91,20 +121,23 @@ def load_krea2_dit(
         f"Loading Krea 2 DiT weights from {dit_path}"
         + (" (fp8 scaled)" if fp8_scaled else "")
         + (" (convrot int8)" if convrot_int8 else "")
+        + (" (nvfp4)" if nvfp4 else "")
         + (f" (+{len(lora_weights)} LoRA merged)" if has_lora else "")
     )
     with torch.device("meta"):
         dit = SingleStreamDiT(config, attn_mode=attn_mode, split_attn=split_attn)
 
-    quantized = fp8_scaled or convrot_int8
+    quantized = fp8_scaled or convrot_int8 or nvfp4
     if quantized or has_lora:
         # Single load path that merges LoRA (if any) into the base weights and optionally
         # quantizes the per-block Linears (scaled fp8 or ConvRot int8). Targets/excludes only
         # apply when quantizing; without quantization the weights are merged and cast to
         # ``dtype`` as-is.
-        quantizer = (
-            ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS) if convrot_int8 else None
-        )
+        quantizer = None
+        if convrot_int8:
+            quantizer = ConvRotInt8Quantizer(KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS)
+        elif nvfp4:
+            quantizer = NvFp4Quantizer()
         sd = load_safetensors_with_lora_and_fp8(
             model_files=dit_path,
             lora_weights_list=lora_weights,
@@ -126,6 +159,20 @@ def load_krea2_dit(
             # incoming tensors with the meta params' requires_grad (default True). The base
             # is frozen right after load anyway, so drop requires_grad first.
             dit.requires_grad_(False)
+        elif nvfp4:
+            apply_nvfp4_monkey_patch(
+                dit,
+                sd,
+                quantizer.nvfp4_module_shapes,
+                quantizer.int8_embedding_modules,
+                use_scaled_mm=True,
+                training=training,
+                calc_device=device,
+                columnwise_chunk_rows=nvfp4_columnwise_chunk_rows,
+            )
+            # Same requires_grad concern as ConvRot above: NVFP4 weights are uint8 (packed
+            # nibbles), not a floating dtype.
+            dit.requires_grad_(False)
         if loading_device.type != "cpu":
             for key in sd.keys():
                 sd[key] = sd[key].to(loading_device)
@@ -138,6 +185,61 @@ def load_krea2_dit(
         dit.load_state_dict(sd, strict=True, assign=True)
 
     return dit
+
+
+def validate_krea2_quantization_args(
+    fp8_scaled: bool,
+    convrot_int8: bool,
+    convrot_int8_bwd: str,
+    nvfp4: bool,
+    nvfp4_columnwise_chunk_rows: int,
+    turbo_dit: Optional[str],
+    scaled_mm_available: bool,
+    cuda_available: bool,
+    device_capability: Optional[tuple],
+    blocks_to_swap: int = 0,
+    block_swap_h2d_only: bool = False,
+    require_block_swap_h2d_only_with_nvfp4: bool = True,
+) -> None:
+    """Validate Krea2's quantization-scheme CLI args; shared by the trainer and standalone
+    inference so there is exactly one copy of this logic.
+
+    Composes the generic checks in ``modules.quantization_utils`` (mutual exclusivity,
+    NVFP4 runtime requirements) with the Krea2-specific ones (``turbo_dit`` incompatibility,
+    ``convrot_int8_bwd`` requiring ``convrot_int8``, the chunk-rows multiple-of-128 rule).
+
+    ``require_block_swap_h2d_only_with_nvfp4`` defaults to True (the trainer's requirement:
+    the default block-swap offloader doesn't know about NVFP4's training-only columnwise
+    backward buffers). Standalone inference passes False -- under ``training=False`` those
+    buffers are never built (see ``apply_nvfp4_monkey_patch``), so the default offloader has
+    nothing to be unaware of.
+
+    Callers (not this function) compute ``scaled_mm_available``/``cuda_available``/
+    ``device_capability`` via ``nvfp4_scaled_mm_available()``/``torch.cuda.*`` themselves --
+    keeps this function pure and keeps existing tests' monkeypatching of the *caller's*
+    module-level references working.
+    """
+    validate_quantization_scheme(fp8_scaled, convrot_int8, nvfp4)
+    if convrot_int8 and turbo_dit:
+        raise ValueError("--convrot_int8 is not supported together with --turbo_dit yet; omit one of them.")
+    if convrot_int8_bwd == "int8" and not convrot_int8:
+        raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
+    if nvfp4 and turbo_dit:
+        raise ValueError("--nvfp4 is not supported together with --turbo_dit yet; omit one of them.")
+    validate_nvfp4_requirements(nvfp4, scaled_mm_available, cuda_available, device_capability)
+    if nvfp4 and blocks_to_swap and require_block_swap_h2d_only_with_nvfp4 and not block_swap_h2d_only:
+        raise ValueError(
+            "--nvfp4 with --blocks_to_swap requires --block_swap_h2d_only. The default block-swap"
+            " offloader (ModelOffloader) does not know about NVFP4's extra columnwise backward buffers"
+            " (nvfp4_weight_t/nvfp4_block_scale_t/nvfp4_scale_t) and would leave them GPU-resident for"
+            " every block, defeating most of block swap's memory savings. Pass --block_swap_h2d_only,"
+            " or omit --blocks_to_swap if the model fits without it."
+        )
+    if nvfp4 and (nvfp4_columnwise_chunk_rows <= 0 or nvfp4_columnwise_chunk_rows % 128 != 0):
+        raise ValueError(
+            f"--nvfp4_columnwise_chunk_rows must be a positive multiple of 128 (cuBLAS block-scale tile"
+            f" height), got {nvfp4_columnwise_chunk_rows}"
+        )
 
 
 def load_krea2_dit_state_dict(

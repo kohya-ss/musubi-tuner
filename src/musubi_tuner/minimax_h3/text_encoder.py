@@ -33,6 +33,7 @@ import torch.nn as nn
 
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.minimax_h3.media import H3Record, H3Task
+from musubi_tuner.modules.nvfp4_utils import NVFP4_STREAM_QUANT_BUFFER_NAMES as _TE_STREAM_QUANT_BUFFER_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -367,12 +368,6 @@ def load_h3_text_encoder(
         model.to(device)
     model.eval()
     return model
-
-
-# quantization tensors that the ConvRot INT8 / NVFP4 monkey patches hang off the patched Linear
-# modules; streamed together with the weight. An explicit allowlist keeps unrelated (tiny)
-# buffers resident instead of silently streaming whatever a future patch registers.
-_TE_STREAM_QUANT_BUFFER_NAMES = ("scale_weight", "nvfp4_block_scale", "nvfp4_scale", "pre_quant_scale")
 
 
 def _te_swap_tensor_selector(block: nn.Module) -> list[tuple[nn.Module, str]]:
