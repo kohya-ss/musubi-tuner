@@ -168,6 +168,14 @@ def test_sample_prompt_line_parses_inline_refs_and_reference_jsonl():
     assert line_to_prompt_dict("a cat sings --rj refs/all.jsonl")["reference_jsonl"] == "refs/all.jsonl"
 
 
+def test_h3_sample_normalization_unescapes_newlines_like_the_generation_script(tmp_path):
+    args = _trainer_args(task="t2va", sample_prompts=str(tmp_path / "prompts.txt"))
+
+    sample = _normalize_h3_sample_parameter(args, {"prompt": "summary:\\n[Shot 1] a cat\\n\\ndetail"})
+
+    assert sample["prompt"] == "summary:\n[Shot 1] a cat\n\ndetail"
+
+
 def test_h3_ref2va_sample_normalization_resolves_inline_refs_from_the_prompt_file_directory(tmp_path):
     prompt_file = tmp_path / "prompts.txt"
     prompt_file.touch()
@@ -1241,7 +1249,8 @@ def test_video_batch_rejects_stray_one_frame_index_tensors(extra_key, message):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"one_frame": True, "h3_teacher_matching": True}, "does not support --one_frame"),
+        ({"one_frame": True, "h3_teacher_matching": True}, "subject_ref only"),
+        ({"one_frame": True, "h3_teacher_matching": True, "h3_teacher_conditions": "ref"}, "subject_ref only"),
     ],
 )
 def test_one_frame_training_flag_validations(overrides, message):
@@ -2011,8 +2020,27 @@ def test_h3_parser_defaults_leave_teacher_matching_off():
 
     assert args.h3_teacher_matching is False
     assert args.h3_teacher_conditions == "first,last"
-    # the identity-decision band was measured at base sigma 0.6-0.75, so the default anchor starts at 0.75
-    assert args.h3_teacher_condition_sigma_max == 0.75
+    # 1.0 = the subject_ref recipe (identity decisions at base sigma 0.92-1.0); the endpoint and
+    # clip teachers want 0.75 and get a warning otherwise
+    assert args.h3_teacher_condition_sigma_max == 1.0
+
+
+@pytest.mark.parametrize(
+    "overrides, warns",
+    [
+        ({"h3_teacher_conditions": "first,last", "h3_teacher_condition_sigma_max": 1.0}, True),
+        ({"h3_teacher_conditions": "first,last", "h3_teacher_condition_sigma_max": 0.75}, False),
+        ({"h3_teacher_conditions": "ref", "h3_teacher_condition_sigma_max": 0.85}, True),
+        ({"h3_teacher_conditions": "subject_ref", "h3_teacher_condition_sigma_max": 0.75}, True),
+        ({"h3_teacher_conditions": "subject_ref", "h3_teacher_condition_sigma_max": 1.0}, False),
+    ],
+)
+def test_h3_teacher_condition_sigma_max_warns_when_off_the_teacher_recipe(overrides, warns, caplog):
+    with caplog.at_level(logging.WARNING, logger="musubi_tuner.minimax_h3_train_network"):
+        MiniMaxH3NetworkTrainer().handle_model_specific_args(_trainer_args(h3_teacher_matching=True, **overrides))
+
+    messages = [record.getMessage() for record in caplog.records if "h3_teacher_condition_sigma_max" in record.getMessage()]
+    assert bool(messages) is warns
 
 
 @pytest.mark.parametrize(
@@ -2525,6 +2553,179 @@ def test_ref_teacher_text_rows_are_rejected_without_the_teacher_matching_flag():
 
     with pytest.raises(ValueError, match="--h3_teacher_matching"):
         _teacher_matching_process_batch(trainer, args, _ref_teacher_batch(), network=None)
+
+
+def _subject_ref_teacher_batch(
+    *,
+    one_frame: bool = False,
+    reference_count: int = 1,
+    teacher_text_length: int = 5,
+    teacher_width: int = 12,
+    include_video_reference: bool = False,
+):
+    # the subject-reference teacher consumes a --task ref2va latent cache (target + the item's
+    # reference latents) and subject_ref teacher text rows; the student rows stay plain t2va
+    batch = _one_frame_batch(target_index=24) if one_frame else _training_batch()
+    for index in range(reference_count):
+        batch[f"latents_ref_{index:03d}_image"] = torch.full((1, 24, 1, 4, 4), float(index + 1))
+    if include_video_reference:
+        batch[f"latents_ref_{reference_count:03d}_video"] = torch.ones(1, 24, 2, 4, 4)
+    batch["mmh3_teacher_subject_ref_hidden_states"] = [torch.zeros(teacher_text_length, teacher_width)]
+    batch["mmh3_teacher_subject_ref_token_tags"] = [torch.tensor([1, 0, 0, 1, 1][:teacher_text_length], dtype=torch.int64)]
+    return batch
+
+
+@pytest.mark.parametrize("one_frame", [False, True])
+def test_subject_ref_teacher_runs_the_teacher_on_the_item_references(monkeypatch, one_frame):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="subject_ref", one_frame=one_frame)
+    trainer.handle_model_specific_args(args)
+    network = _ToggleNetwork()
+    transformer = _TeacherAwareTransformer(
+        network, teacher_video=3.0, teacher_audio=0.5, video_prediction=2.0, audio_prediction=-1.0
+    )
+    batch = _subject_ref_teacher_batch(one_frame=one_frame, reference_count=2)
+    video_latents = torch.full((1, 24, 1 if one_frame else 2, 4, 4), 2.0)
+    _patch_deterministic_noise(monkeypatch)
+
+    loss, metrics = trainer.process_batch(
+        args,
+        _Accelerator(),
+        transformer,
+        network,
+        batch,
+        video_latents,
+        torch.zeros_like(video_latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    teacher_call, student_call = transformer.calls
+    teacher_layout = teacher_call["layout"]
+    assert teacher_layout.task == "ref2va"
+    assert teacher_layout.text_length == 5
+    assert [reference.kind for reference in teacher_layout.references] == ["image", "image"]
+    # the reference conditions are the cached reference latents with the standard clean augmentation
+    assert len(teacher_call["visual_condition_latents"]) == 2
+    torch.testing.assert_close(teacher_call["visual_condition_latents"][0], torch.full((1, 24, 1, 4, 4), 0.999))
+    assert len(teacher_call["audio_condition_latents"]) == 0
+    # the student never sees the references
+    assert student_call["layout"].task == "t2va"
+    assert len(student_call["visual_condition_latents"]) == 0
+    assert network.calls == [False, True]
+    if one_frame:
+        # one-frame teacher layout carries the one-frame flag and the target-time override, references untimed
+        assert teacher_layout.target_video.frames == 1
+        assert teacher_layout.time_overrides.condition_times == ()
+        assert teacher_layout.time_overrides.target_time == FRAME_RESCALE * 24
+        assert student_call["layout"].time_overrides == teacher_layout.time_overrides
+    else:
+        assert teacher_layout.time_overrides is None
+    assert metrics["teacher/conditioned"] == 1.0
+    assert metrics["loss/video"] == pytest.approx(1.0, rel=1e-4)
+    assert torch.isfinite(loss)
+
+
+def test_subject_ref_teacher_switches_to_the_preservation_anchor_below_sigma_min(monkeypatch):
+    trainer = MiniMaxH3NetworkTrainer()
+    # the drawn base sigma (0.25) lies below the lower gate: the low-sigma complete-information
+    # asymptote is anchored to the base exactly like the band above sigma_max
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="subject_ref", h3_teacher_condition_sigma_min=0.3)
+    trainer.handle_model_specific_args(args)
+    network = _ToggleNetwork()
+    transformer = _TeacherAwareTransformer(network)
+    _patch_deterministic_noise(monkeypatch)
+
+    _, metrics = _teacher_matching_process_batch(
+        trainer, args, _subject_ref_teacher_batch(), network=network, transformer=transformer
+    )
+
+    teacher_call, student_call = transformer.calls
+    assert teacher_call["layout"] is student_call["layout"]
+    assert len(teacher_call["visual_condition_latents"]) == 0
+    assert metrics["teacher/conditioned"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("batch_factory", "message"),
+    [
+        (lambda: _subject_ref_teacher_batch(reference_count=0), "requires the item's reference latents"),
+        (lambda: _subject_ref_teacher_batch(include_video_reference=True), "image references only"),
+        (lambda: {**_subject_ref_teacher_batch(), "latents_first": torch.zeros(1, 24, 1, 4, 4)}, "cannot mix FL2VA and Ref2VA"),
+        (_ref_teacher_batch, "ref teacher rows"),
+        (_teacher_batch, "first,last teacher rows"),
+    ],
+)
+def test_subject_ref_teacher_guards(batch_factory, message):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="subject_ref")
+    trainer.handle_model_specific_args(args)
+
+    with pytest.raises(ValueError, match=message):
+        _teacher_matching_process_batch(trainer, args, batch_factory(), network=_ToggleNetwork())
+
+
+def test_subject_ref_teacher_batch_requires_the_matching_teacher_rows():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="subject_ref")
+    trainer.handle_model_specific_args(args)
+    batch = _subject_ref_teacher_batch()
+    del batch["mmh3_teacher_subject_ref_hidden_states"]
+    del batch["mmh3_teacher_subject_ref_token_tags"]
+
+    with pytest.raises(ValueError, match="subject_ref teacher text rows"):
+        _teacher_matching_process_batch(trainer, args, batch, network=_ToggleNetwork())
+
+
+def test_subject_ref_teacher_rows_are_rejected_by_the_other_teacher_modes():
+    for conditions in ("ref", "first,last"):
+        trainer = MiniMaxH3NetworkTrainer()
+        args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions=conditions)
+        trainer.handle_model_specific_args(args)
+        with pytest.raises(ValueError, match="subject_ref teacher rows"):
+            _teacher_matching_process_batch(trainer, args, _subject_ref_teacher_batch(), network=_ToggleNetwork())
+
+
+def test_one_frame_subject_ref_batch_rejects_stray_control_indices():
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="subject_ref", one_frame=True)
+    trainer.handle_model_specific_args(args)
+    batch = _subject_ref_teacher_batch(one_frame=True)
+    batch["one_frame_control_indices"] = torch.tensor([[0]], dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="cannot carry one_frame_control_indices"):
+        _one_frame_process_batch(trainer, args, batch, _TeacherAwareTransformer(_ToggleNetwork()))
+
+
+def test_teacher_condition_sigma_min_validation_and_metadata():
+    args = _trainer_args(h3_teacher_matching=True, h3_teacher_conditions="subject_ref", h3_teacher_condition_sigma_min=0.15)
+    MiniMaxH3NetworkTrainer().handle_model_specific_args(args)
+    metadata = MiniMaxH3NetworkTrainer().extra_metadata(args)
+    assert metadata["ss_minimax_h3_teacher_conditions"] == "subject_ref"
+    assert metadata["ss_minimax_h3_teacher_condition_sigma_min"] == 0.15
+
+    for sigma_min in (-0.1, 0.8):
+        with pytest.raises(ValueError, match="h3_teacher_condition_sigma_min"):
+            MiniMaxH3NetworkTrainer().handle_model_specific_args(
+                _trainer_args(
+                    h3_teacher_matching=True, h3_teacher_condition_sigma_max=0.75, h3_teacher_condition_sigma_min=sigma_min
+                )
+            )
+
+
+def test_preservation_density_compensation_counts_the_lower_anchor_band():
+    from musubi_tuner.minimax_h3_train_network import _preservation_density_compensation
+
+    # anchor bands [0,0.15) and (0.75,1]: uniform share 0.4; focus 0.5 on [0.4,0.8] keeps
+    # (1-0.5)*0.4 + 0.5*0.05/0.4 = 0.2625 of the draws in the anchor bands
+    assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.5, 0.15) == pytest.approx(0.4 / 0.2625)
+    # a focus band overlapping the lower anchor band counts that overlap too
+    assert _preservation_density_compensation(0.75, 0.1, 0.8, 0.5, 0.15) == pytest.approx(0.4 / ((0.5 * 0.4) + 0.5 * 0.1 / 0.7))
+    # sigma_min 0 reproduces the previous single-band value
+    assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.5, 0.0) == pytest.approx(0.25 / 0.1875)
 
 
 def test_teacher_matching_requires_the_lora_network(monkeypatch):

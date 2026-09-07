@@ -232,7 +232,7 @@ python minimax_h3_cache_text_encoder_outputs.py --dataset_config items.toml --ta
 accelerate launch ... minimax_h3_train_network.py --dataset_config items.toml --task ref2va --one_frame --video_only ...
 ```
 
-The guidance-loss recommendation from plain image training applies unchanged (the uncond probe keeps the reference conditions and swaps only the text rows). `--h3_teacher_matching` is not supported with `--one_frame`. Training-time samples use the inline `--ref` syntax with `--f 1`:
+The guidance-loss recommendation from plain image training applies unchanged (the uncond probe keeps the reference conditions and swaps only the text rows). The same `--task ref2va` latent caches also feed the subject-reference teacher for a text-only student (`--task t2va --h3_teacher_matching --h3_teacher_conditions subject_ref`, the only teacher-matching mode available with `--one_frame`; see the teacher-matching section of `docs/minimax_h3.md`). Training-time samples use the inline `--ref` syntax with `--f 1`:
 
 ```text
 Full-reference caption... --w 1024 --h 1024 --f 1 --s 30 --ref refs/front.png --of target_index=0

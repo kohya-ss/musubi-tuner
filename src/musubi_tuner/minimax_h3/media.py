@@ -45,6 +45,29 @@ class H3Record:
     caption: str
     references: tuple[H3Reference, ...]
     jsonl_line: int
+    # optional JSONL `teacher_caption`: the caption of the subject-reference teacher presentation
+    # (text cache only); None means the teacher wraps `caption` with the boilerplate declaration
+    teacher_caption: Optional[str] = None
+
+
+def _parse_teacher_caption(data: dict, line_number: int) -> Optional[str]:
+    teacher_caption = data.get("teacher_caption")
+    if teacher_caption is not None and (not isinstance(teacher_caption, str) or not teacher_caption.strip()):
+        raise ValueError(f"H3 JSONL line {line_number}: teacher_caption must be a non-empty string when present")
+    return teacher_caption
+
+
+def validate_subject_reference_record(record: H3Record, context: str) -> None:
+    """The subject-reference teacher (v1) takes 1..9 image references; video/audio references
+    need per-item role declarations (motion? voice?) and are deferred."""
+    if not record.references:
+        raise ValueError(f"{context}: the subject-reference teacher requires at least one image reference")
+    unsupported = [reference.type for reference in record.references if reference.type != "image"]
+    if unsupported:
+        raise ValueError(
+            f"{context}: the subject-reference teacher supports image references only (got {unsupported[0]!r};"
+            " video/audio references are not supported yet)"
+        )
 
 
 def _validate_frame_count(frame_count: int) -> None:
@@ -301,7 +324,13 @@ def _record_from_jsonl_data(
             raise ValueError(f"H3 JSONL line {line_number}: references require task ref2va")
         references = ()
 
-    return H3Record(video_path=video_path, caption=caption, references=references, jsonl_line=line_number)
+    return H3Record(
+        video_path=video_path,
+        caption=caption,
+        references=references,
+        jsonl_line=line_number,
+        teacher_caption=_parse_teacher_caption(data, line_number),
+    )
 
 
 def load_h3_jsonl_records(
@@ -414,7 +443,13 @@ def h3_image_records_from_datasource(
         if item_key in records:
             raise ValueError(f"H3 JSONL line {line_number}: duplicate image_path {item_key!r}")
         references = _parse_references(raw_references, base_directory, line_number, probe)
-        records[item_key] = H3Record(video_path=target, caption=caption, references=references, jsonl_line=line_number)
+        records[item_key] = H3Record(
+            video_path=target,
+            caption=caption,
+            references=references,
+            jsonl_line=line_number,
+            teacher_caption=_parse_teacher_caption(data, line_number),
+        )
     if task == "ref2va" and not records:
         raise ValueError(f"MiniMax-H3 JSONL contains no records: {datasource.image_jsonl_file}")
     return records
