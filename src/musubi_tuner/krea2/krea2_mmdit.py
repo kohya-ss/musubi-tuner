@@ -454,6 +454,9 @@ class SingleStreamDiT(nn.Module):
             if self.gradient_checkpointing and self.training:
                 forward_fn = block
                 if self.activation_cpu_offloading:
+                    # create_cpu_offloading_wrapper only recurses into tensors/list/tuple/dict; attn_params (a
+                    # dataclass) passes through untouched -- if AttentionParams ever becomes a NamedTuple this
+                    # would silently break.
                     forward_fn = create_cpu_offloading_wrapper(forward_fn, img.device)
                 combined = torch.utils.checkpoint.checkpoint(forward_fn, combined, tvec, freqs, attn_params, use_reentrant=False)
             else:
