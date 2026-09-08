@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+from PIL import Image
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -12,6 +14,7 @@ from safetensors.torch import save_file
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from musubi_tuner.dataset.media_utils import resize_image_to_bucket
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
@@ -22,7 +25,7 @@ from musubi_tuner.minimax_h3.sampling import (
     sample_joint_av,
     write_joint_av,
 )
-from musubi_tuner.minimax_h3.generation_inputs import load_generation_record, parse_one_frame_options
+from musubi_tuner.minimax_h3.generation_inputs import load_generation_record, load_image_frames, parse_one_frame_options
 from musubi_tuner.minimax_h3.packing import FRAME_RESCALE, H3TimeOverrides
 from musubi_tuner.minimax_h3.sampling import write_image
 from musubi_tuner.minimax_h3_generate_video import (
@@ -386,6 +389,22 @@ def test_generation_validation_accepts_inline_refs_exclusively_with_reference_js
         validate_generation_args(
             _generation_args(tmp_path, task="fl2va", first_frame=str(first), last_frame=str(last), ref=["face.png"])
         )
+
+
+def test_condition_images_are_cover_cropped_to_the_canvas_like_training_controls(tmp_path):
+    # a 200x100 picture with a green stripe on its left edge, onto a square 100x100 canvas:
+    # training fits controls with resize_image_to_bucket (scale to cover, center crop), so the
+    # stripe falls outside the crop; a stretch would keep it, squeezed
+    pixels = np.zeros((100, 200, 3), dtype=np.uint8)
+    pixels[:, :20, 1] = 255
+    path = tmp_path / "condition.png"
+    Image.fromarray(pixels).save(path)
+
+    frames = load_image_frames(path, width=100, height=100)
+
+    assert frames.shape == (1, 100, 100, 3) and frames.dtype == torch.uint8
+    assert int(frames[..., 1].max()) == 0
+    assert torch.equal(frames[0], torch.from_numpy(resize_image_to_bucket(pixels, (100, 100))))
 
 
 def test_load_generation_record_builds_inline_ref_records_without_a_jsonl(tmp_path):

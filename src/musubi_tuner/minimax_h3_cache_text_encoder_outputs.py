@@ -33,21 +33,24 @@ from musubi_tuner.minimax_h3.text_encoder import (
 from musubi_tuner.minimax_h3.packing import one_frame_condition_role
 from musubi_tuner.minimax_h3.media import (
     ONE_FRAME_REFERENCE_FRAME_CAP,
+    TEXT_VISUAL_FPS,
+    TEXT_VISUAL_FRAME_STRIDE,
     H3AudioSource,
+    H3MediaDecoder,
     H3Record,
     H3Reference,
+    PyAVH3MediaDecoder,
+    adapt_reference_canvas,
+    fingerprint_file,
     h3_records_from_datasource,
     reject_one_frame_audio_references,
+    resize_frames,
     validate_subject_reference_record,
 )
+from musubi_tuner.minimax_h3.checkpoint import fingerprint_checkpoint
 from musubi_tuner.minimax_h3_cache_latents import (
-    PyAVH3MediaDecoder,
-    _adapt_canvas,
-    _resize_frames,
     cache_metadata_matches,
     dataset_cache_dir_key,
-    fingerprint_checkpoint,
-    fingerprint_file,
     item_datasource_index,
     item_record_inputs,
     validate_h3_dataset,
@@ -76,7 +79,7 @@ def _build_visuals(
     record,
     task: str,
     item: ItemInfo,
-    decoder: PyAVH3MediaDecoder,
+    decoder: H3MediaDecoder,
     decoded_reference_cache: dict[tuple, torch.Tensor],
 ) -> dict[object, H3TextVisual]:
     if task == "t2va":
@@ -98,7 +101,7 @@ def _reference_visuals(
     record,
     reference_frame_cap: int,
     target_size: tuple[int, int],
-    decoder: PyAVH3MediaDecoder,
+    decoder: H3MediaDecoder,
     decoded_reference_cache: dict[tuple, torch.Tensor],
 ) -> dict[object, H3TextVisual]:
     """Text visuals of the record's references: image references as single frames, video
@@ -120,15 +123,10 @@ def _reference_visuals(
         if reference.type == "image":
             visuals[reference.path] = H3TextVisual(frames)
         else:
-            sampled = frames[::REF_TEACHER_TEXT_FRAME_STRIDE]
-            timestamps = tuple(index / 2.0 for index in range(sampled.shape[0]))
+            sampled = frames[::TEXT_VISUAL_FRAME_STRIDE]
+            timestamps = tuple(index / TEXT_VISUAL_FPS for index in range(sampled.shape[0]))
             visuals[reference.path] = H3TextVisual(sampled, timestamps)
     return visuals
-
-
-# the 2 fps text-visual sampling of the Ref2VA reference path (decode_generation_visuals),
-# shared by the ref teacher presentation
-REF_TEACHER_TEXT_FRAME_STRIDE = 12
 
 
 def _ref_teacher_presentation(record, item: ItemInfo) -> H3Presentation:
@@ -153,15 +151,15 @@ def _ref_teacher_presentation(record, item: ItemInfo) -> H3Presentation:
         references=(reference,),
         label=record.label,
     )
-    sampled = target_frames[::REF_TEACHER_TEXT_FRAME_STRIDE]
+    sampled = target_frames[::TEXT_VISUAL_FRAME_STRIDE]
     # the same downscale-only canvas cap that decode_reference_visual applies to reference
     # videos: identity for targets within the released canvas (typical buckets), so only
     # oversized targets are resized and normal cache fingerprints are unaffected
     source_height, source_width = int(sampled.shape[1]), int(sampled.shape[2])
-    width, height = _adapt_canvas(source_width, source_height)
+    width, height = adapt_reference_canvas(source_width, source_height)
     if source_width * source_height > width * height:
-        sampled = _resize_frames(sampled.numpy(), (width, height))
-    timestamps = tuple(index / 2.0 for index in range(sampled.shape[0]))
+        sampled = resize_frames(sampled.numpy(), (width, height))
+    timestamps = tuple(index / TEXT_VISUAL_FPS for index in range(sampled.shape[0]))
     return build_presentation(teacher_record, "ref2va", {reference.path: H3TextVisual(sampled, timestamps)})
 
 
@@ -171,7 +169,7 @@ def _subject_ref_teacher_presentation(
     reference_frame_cap: int,
     target_size: tuple[int, int],
     still_image: bool,
-    decoder: PyAVH3MediaDecoder,
+    decoder: H3MediaDecoder,
     decoded_reference_cache: dict[tuple, torch.Tensor],
 ) -> H3Presentation:
     """Ref2VA teacher presentation of the item's own reference pictures (subject references).
@@ -437,7 +435,7 @@ def main() -> None:
                         raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control images: {item.item_key}")
                     for index, control in enumerate(controls):
                         # the dataset keeps RGBA controls as-is; drop alpha the same way the
-                        # latent path does (_prepare_pixels), the processor accepts only RGB
+                        # latent path does (prepare_pixels), the processor accepts only RGB
                         visuals[one_frame_condition_role(index)] = H3TextVisual(torch.as_tensor(control)[..., :3].unsqueeze(0))
                     control_paths = control_paths_by_dir.get(cache_dir_key, {}).get(item.item_key)
                     if control_paths is None or len(control_paths) != len(control_indices):
